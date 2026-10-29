@@ -75,7 +75,7 @@ impl S3Service {
 
             // Handle If-Match: check existing object etag
             if let Some(ref if_match_val) = if_match {
-                match b.objects.get(key) {
+                match b.objects.get(key).filter(|o| !o.is_delete_marker) {
                     Some(existing) => {
                         let existing_etag = format!("\"{}\"", existing.etag);
                         if !etag_matches(if_match_val, &existing_etag) {
@@ -90,7 +90,7 @@ impl S3Service {
 
             // Handle If-None-Match: if "*", fail if object already exists
             if let Some(ref inm) = if_none_match {
-                if inm.trim() == "*" && b.objects.contains_key(key) {
+                if inm.trim() == "*" && b.objects.get(key).is_some_and(|o| !o.is_delete_marker) {
                     return Err(precondition_failed("If-None-Match"));
                 }
             }
@@ -311,7 +311,7 @@ impl S3Service {
 
             // Recheck conditional headers under write lock to prevent TOCTOU race
             if let Some(ref if_match_val) = if_match {
-                match b.objects.get(key) {
+                match b.objects.get(key).filter(|o| !o.is_delete_marker) {
                     Some(existing) => {
                         let existing_etag = format!("\"{}\"", existing.etag);
                         if !etag_matches(if_match_val, &existing_etag) {
@@ -324,7 +324,7 @@ impl S3Service {
                 }
             }
             if let Some(ref inm) = if_none_match {
-                if inm.trim() == "*" && b.objects.contains_key(key) {
+                if inm.trim() == "*" && b.objects.get(key).is_some_and(|o| !o.is_delete_marker) {
                     return Err(precondition_failed("If-None-Match"));
                 }
             }

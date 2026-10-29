@@ -79,3 +79,130 @@ async fn list_object_versions_honors_encoding_type_url() {
         "key should be url-encoded: {v:?}"
     );
 }
+
+#[tokio::test]
+async fn conditional_writes_treat_delete_marker_as_missing_key() {
+    use aws_sdk_s3::types::{
+        BucketVersioningStatus, CompletedMultipartUpload, CompletedPart, VersioningConfiguration,
+    };
+
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    s3.create_bucket()
+        .bucket("cond-writes")
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_versioning()
+        .bucket("cond-writes")
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let put = s3
+        .put_object()
+        .bucket("cond-writes")
+        .key("lock")
+        .if_none_match("*")
+        .body(ByteStream::from_static(b"v1"))
+        .send()
+        .await
+        .unwrap();
+    let etag = put.e_tag().unwrap().to_string();
+    let err = s3
+        .put_object()
+        .bucket("cond-writes")
+        .key("lock")
+        .if_none_match("*")
+        .body(ByteStream::from_static(b"v2"))
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.raw_response().unwrap().status().as_u16(), 412);
+
+    // Deleting leaves a delete marker as the current version; the key reads
+    // as missing, so a create-only write succeeds again.
+    s3.delete_object()
+        .bucket("cond-writes")
+        .key("lock")
+        .send()
+        .await
+        .unwrap();
+    let err = s3
+        .put_object()
+        .bucket("cond-writes")
+        .key("lock")
+        .if_match(&etag)
+        .body(ByteStream::from_static(b"v2"))
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.raw_response().unwrap().status().as_u16(), 404);
+    s3.put_object()
+        .bucket("cond-writes")
+        .key("lock")
+        .if_none_match("*")
+        .body(ByteStream::from_static(b"v2"))
+        .send()
+        .await
+        .unwrap();
+
+    // CompleteMultipartUpload honors the same conditions.
+    s3.delete_object()
+        .bucket("cond-writes")
+        .key("lock")
+        .send()
+        .await
+        .unwrap();
+    let upload = s3
+        .create_multipart_upload()
+        .bucket("cond-writes")
+        .key("lock")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = upload.upload_id().unwrap();
+    let part = s3
+        .upload_part()
+        .bucket("cond-writes")
+        .key("lock")
+        .upload_id(upload_id)
+        .part_number(1)
+        .body(ByteStream::from_static(b"v3"))
+        .send()
+        .await
+        .unwrap();
+    let parts = CompletedMultipartUpload::builder()
+        .parts(
+            CompletedPart::builder()
+                .part_number(1)
+                .e_tag(part.e_tag().unwrap())
+                .build(),
+        )
+        .build();
+    let err = s3
+        .complete_multipart_upload()
+        .bucket("cond-writes")
+        .key("lock")
+        .upload_id(upload_id)
+        .if_match(&etag)
+        .multipart_upload(parts.clone())
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.raw_response().unwrap().status().as_u16(), 404);
+    s3.complete_multipart_upload()
+        .bucket("cond-writes")
+        .key("lock")
+        .upload_id(upload_id)
+        .if_none_match("*")
+        .multipart_upload(parts)
+        .send()
+        .await
+        .unwrap();
+}

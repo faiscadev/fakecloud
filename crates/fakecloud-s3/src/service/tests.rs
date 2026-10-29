@@ -3681,6 +3681,245 @@ async fn put_object_if_none_match_prevents_overwrite() {
     );
 }
 
+#[tokio::test]
+async fn put_object_if_none_match_on_nonexistent_key() {
+    let svc = make_service();
+    seed_bucket(&svc, "cnm2");
+
+    let mut req = make_request(Method::PUT, "/cnm2/fresh.txt", &[], b"data");
+    req.headers.insert("if-none-match", "*".parse().unwrap());
+    svc.put_object("123456789012", &req, "cnm2", "fresh.txt")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn put_object_if_none_match_succeeds_after_versioned_delete() {
+    let svc = make_service();
+    seed_bucket(&svc, "cnm3");
+
+    let req = make_request(
+        Method::PUT,
+        "/cnm3",
+        &[("versioning", "")],
+        b"<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+    );
+    svc.put_bucket_versioning("123456789012", &req, "cnm3")
+        .unwrap();
+
+    let req = make_request(Method::PUT, "/cnm3/lock.txt", &[], b"v1");
+    svc.put_object("123456789012", &req, "cnm3", "lock.txt")
+        .await
+        .unwrap();
+
+    let req = make_request(Method::DELETE, "/cnm3/lock.txt", &[], b"");
+    let resp = svc
+        .delete_object("123456789012", &req, "cnm3", "lock.txt")
+        .unwrap();
+    assert_eq!(resp.headers.get("x-amz-delete-marker").unwrap(), "true");
+
+    let mut req = make_request(Method::PUT, "/cnm3/lock.txt", &[], b"v2");
+    req.headers.insert("if-none-match", "*".parse().unwrap());
+    svc.put_object("123456789012", &req, "cnm3", "lock.txt")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn put_object_if_match_returns_no_such_key_for_delete_marker() {
+    let svc = make_service();
+    seed_bucket(&svc, "cnm4");
+
+    let req = make_request(
+        Method::PUT,
+        "/cnm4",
+        &[("versioning", "")],
+        b"<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+    );
+    svc.put_bucket_versioning("123456789012", &req, "cnm4")
+        .unwrap();
+
+    let req = make_request(Method::PUT, "/cnm4/obj.txt", &[], b"data");
+    let resp = svc
+        .put_object("123456789012", &req, "cnm4", "obj.txt")
+        .await
+        .unwrap();
+    let etag = resp
+        .headers
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let req = make_request(Method::DELETE, "/cnm4/obj.txt", &[], b"");
+    svc.delete_object("123456789012", &req, "cnm4", "obj.txt")
+        .unwrap();
+
+    let mut req = make_request(Method::PUT, "/cnm4/obj.txt", &[], b"update");
+    req.headers.insert("if-match", etag.parse().unwrap());
+    assert_aws_err(
+        svc.put_object("123456789012", &req, "cnm4", "obj.txt")
+            .await,
+        "NoSuchKey",
+    );
+}
+
+/// Start a one-part multipart upload of `bucket/key` and return the request
+/// that completes it.
+async fn single_part_completion(svc: &S3Service, bucket: &str, key: &str) -> (String, AwsRequest) {
+    let path = format!("/{bucket}/{key}");
+    let init_req = make_request(Method::POST, &path, &[("uploads", "")], b"");
+    let resp = svc
+        .create_multipart_upload("123456789012", &init_req, bucket, key)
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    let start = body.find("<UploadId>").unwrap() + "<UploadId>".len();
+    let end = body.find("</UploadId>").unwrap();
+    let upload_id = body[start..end].to_string();
+    let req = make_request(Method::PUT, &path, &[("partNumber", "1")], b"part");
+    let part = svc
+        .upload_part("123456789012", &req, bucket, key, &upload_id, 1)
+        .await
+        .unwrap();
+    let etag = part
+        .headers
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{etag}</ETag></Part></CompleteMultipartUpload>"
+    );
+    let complete = make_request(
+        Method::POST,
+        &path,
+        &[("uploadId", upload_id.as_str())],
+        xml.as_bytes(),
+    );
+    (upload_id, complete)
+}
+
+fn enable_versioning(svc: &S3Service, bucket: &str) {
+    let req = make_request(
+        Method::PUT,
+        &format!("/{bucket}"),
+        &[("versioning", "")],
+        b"<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+    );
+    svc.put_bucket_versioning("123456789012", &req, bucket)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn complete_multipart_if_none_match_succeeds_after_versioned_delete() {
+    let svc = make_service();
+    seed_bucket(&svc, "mpu-inm");
+    enable_versioning(&svc, "mpu-inm");
+    let req = make_request(Method::PUT, "/mpu-inm/k", &[], b"v1");
+    svc.put_object("123456789012", &req, "mpu-inm", "k")
+        .await
+        .unwrap();
+
+    let (upload_id, mut complete) = single_part_completion(&svc, "mpu-inm", "k").await;
+    complete
+        .headers
+        .insert("if-none-match", "*".parse().unwrap());
+    assert_aws_err(
+        svc.complete_multipart_upload("123456789012", &complete, "mpu-inm", "k", &upload_id),
+        "PreconditionFailed",
+    );
+
+    let req = make_request(Method::DELETE, "/mpu-inm/k", &[], b"");
+    svc.delete_object("123456789012", &req, "mpu-inm", "k")
+        .unwrap();
+    svc.complete_multipart_upload("123456789012", &complete, "mpu-inm", "k", &upload_id)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn complete_multipart_honors_if_match() {
+    let svc = make_service();
+    seed_bucket(&svc, "mpu-im");
+    enable_versioning(&svc, "mpu-im");
+
+    // Missing key -> NoSuchKey.
+    let (upload_id, mut complete) = single_part_completion(&svc, "mpu-im", "k").await;
+    complete.headers.insert(
+        "if-match",
+        "\"0123456789abcdef0123456789abcdef\"".parse().unwrap(),
+    );
+    assert_aws_err(
+        svc.complete_multipart_upload("123456789012", &complete, "mpu-im", "k", &upload_id),
+        "NoSuchKey",
+    );
+
+    let req = make_request(Method::PUT, "/mpu-im/k", &[], b"v1");
+    let put = svc
+        .put_object("123456789012", &req, "mpu-im", "k")
+        .await
+        .unwrap();
+    let etag = put
+        .headers
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // ETag mismatch -> 412, upload left intact.
+    assert_aws_err(
+        svc.complete_multipart_upload("123456789012", &complete, "mpu-im", "k", &upload_id),
+        "PreconditionFailed",
+    );
+
+    // Matching ETag completes.
+    complete.headers.insert("if-match", etag.parse().unwrap());
+    svc.complete_multipart_upload("123456789012", &complete, "mpu-im", "k", &upload_id)
+        .unwrap();
+
+    // A delete marker as current version reads as a missing key.
+    let req = make_request(Method::DELETE, "/mpu-im/k", &[], b"");
+    svc.delete_object("123456789012", &req, "mpu-im", "k")
+        .unwrap();
+    let (upload_id, mut complete) = single_part_completion(&svc, "mpu-im", "k").await;
+    complete.headers.insert("if-match", etag.parse().unwrap());
+    assert_aws_err(
+        svc.complete_multipart_upload("123456789012", &complete, "mpu-im", "k", &upload_id),
+        "NoSuchKey",
+    );
+}
+
+#[tokio::test]
+async fn delete_object_if_match_returns_no_such_key_for_delete_marker() {
+    let svc = make_service();
+    seed_bucket(&svc, "del-im");
+    enable_versioning(&svc, "del-im");
+    let req = make_request(Method::PUT, "/del-im/k", &[], b"v1");
+    let put = svc
+        .put_object("123456789012", &req, "del-im", "k")
+        .await
+        .unwrap();
+    let etag = put
+        .headers
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let req = make_request(Method::DELETE, "/del-im/k", &[], b"");
+    svc.delete_object("123456789012", &req, "del-im", "k")
+        .unwrap();
+
+    let mut req = make_request(Method::DELETE, "/del-im/k", &[], b"");
+    req.headers.insert("if-match", etag.parse().unwrap());
+    assert_aws_err(
+        svc.delete_object("123456789012", &req, "del-im", "k"),
+        "NoSuchKey",
+    );
+}
+
 // ── Storage class ──
 
 #[tokio::test]

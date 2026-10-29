@@ -55,7 +55,7 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
 
         if let Some(ref if_match_val) = if_match {
-            match b.objects.get(key) {
+            match b.objects.get(key).filter(|o| !o.is_delete_marker) {
                 Some(existing) => {
                     let existing_etag = format!("\"{}\"", existing.etag);
                     if !etag_matches(if_match_val, &existing_etag) {
