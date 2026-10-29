@@ -5680,6 +5680,95 @@ async fn cognito_oauth2_token_invalid_client_secret() {
 }
 
 #[tokio::test]
+async fn cognito_create_user_pool_client_with_custom_secret() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("custom-secret-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let secret = "local_dev_client_secret+0123456789";
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("custom-secret-client")
+        .client_secret(secret)
+        .send()
+        .await
+        .expect("create client");
+    let app_client = app.user_pool_client().unwrap();
+    assert_eq!(app_client.client_secret(), Some(secret));
+    let client_id = app_client.client_id().unwrap().to_string();
+
+    let described = client
+        .describe_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .expect("describe client");
+    assert_eq!(
+        described.user_pool_client().unwrap().client_secret(),
+        Some(secret)
+    );
+
+    // The token endpoint authenticates the client with the chosen secret.
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!("{}/oauth2/token", server.endpoint()))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(
+            serde_urlencoded::to_string([
+                ("grant_type", "client_credentials"),
+                ("client_id", client_id.as_str()),
+                ("client_secret", secret),
+                ("scope", "api/read"),
+            ])
+            .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let error = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("both-secrets-client")
+        .client_secret(secret)
+        .generate_secret(true)
+        .send()
+        .await
+        .expect_err("GenerateSecret and ClientSecret are exclusive");
+    assert!(
+        error
+            .as_service_error()
+            .is_some_and(|error| error.is_invalid_parameter_exception()),
+        "{error:?}"
+    );
+
+    let error = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("short-secret-client")
+        .client_secret("too-short")
+        .send()
+        .await
+        .expect_err("a secret shorter than 24 characters is invalid");
+    assert!(
+        error
+            .as_service_error()
+            .is_some_and(|error| error.is_invalid_parameter_exception()),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn cognito_oauth2_token_unsupported_grant_type() {
     let server = TestServer::start().await;
     let client = server.cognito_client().await;

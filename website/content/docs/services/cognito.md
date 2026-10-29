@@ -9,7 +9,7 @@ fakecloud implements **132 of 132** Cognito User Pools operations at 100% Smithy
 ## Supported features
 
 - **User pools** — CRUD, password policies, attribute configuration, account recovery, email/SMS configuration
-- **App clients** — CRUD, OAuth flows, token validity, supported identity providers
+- **App clients** — CRUD, OAuth flows, token validity, supported identity providers, client secrets generated (`GenerateSecret`) or chosen by the caller (`ClientSecret` on `CreateUserPoolClient`, 24-64 characters of letters, digits, `_` and `+`), so a local setup can use a secret known in advance
 - **Fixed ids**: a `_custom_id_` user pool tag (`<region>_<alphanumeric id>`, in the request's region) sets the id of a new user pool, and a `_custom_id_:<id>` client name sets the id of a new app client, so local setups can use ids known in advance (the same convention as LocalStack). The same convention works in CloudFormation templates (`UserPoolTags` on `AWS::Cognito::UserPool`, `ClientName` on `AWS::Cognito::UserPoolClient`). An id already in use is rejected with `InvalidParameterException` (a provisioning failure in CloudFormation)
 - **Users** — admin create/delete/update, self-signup, group membership
 - **Groups** — CRUD, user membership, precedence

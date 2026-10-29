@@ -7230,7 +7230,7 @@ fn user_pool_client_secret_crud() {
     let body = json!({
         "UserPoolId": pool_id,
         "ClientId": client_id,
-        "ClientSecret": "super-secret"
+        "ClientSecret": "super_secret_0123456789abcdef"
     });
     let req = make_req("AddUserPoolClientSecret", &body.to_string());
     let resp = svc.add_user_pool_client_secret(&req).unwrap();
@@ -7241,7 +7241,7 @@ fn user_pool_client_secret_crud() {
         .to_string();
     assert_eq!(
         b["ClientSecretDescriptor"]["ClientSecretValue"],
-        "super-secret"
+        "super_secret_0123456789abcdef"
     );
 
     let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
@@ -7278,6 +7278,31 @@ fn add_user_pool_client_secret_generates_secret_when_missing() {
         .as_str()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn add_user_pool_client_secret_rejects_secret_outside_client_secret_type() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    for secret in ["too_short", "has-a-dash-0123456789abcdef"] {
+        let body = json!({
+            "UserPoolId": pool_id,
+            "ClientId": client_id,
+            "ClientSecret": secret
+        });
+        let req = make_req("AddUserPoolClientSecret", &body.to_string());
+        let err = match svc.add_user_pool_client_secret(&req) {
+            Ok(_) => panic!("{secret} must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code(), "InvalidParameterException");
+        assert!(!err.message().contains(secret));
+    }
+    let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
+    let req = make_req("ListUserPoolClientSecrets", &body.to_string());
+    let b = resp_json(&svc.list_user_pool_client_secrets(&req).unwrap());
+    assert!(b["ClientSecrets"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -10880,6 +10905,60 @@ fn custom_client_id_on_missing_pool_is_resource_not_found() {
         svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string())),
     );
     assert_eq!(err.code(), "ResourceNotFoundException");
+}
+
+#[test]
+fn custom_client_secret_is_the_clients_secret() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let secret = "local_dev_client_secret+0123456789";
+    let body = json!({"UserPoolId": pool_id, "ClientName": "app", "ClientSecret": secret});
+    let resp = svc
+        .create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+        .unwrap();
+    let created = resp_json(&resp);
+    assert_eq!(created["UserPoolClient"]["ClientSecret"], secret);
+    let client_id = created["UserPoolClient"]["ClientId"].as_str().unwrap();
+    assert_eq!(
+        state.read().default_ref().user_pool_clients[client_id]
+            .client_secret
+            .as_deref(),
+        Some(secret)
+    );
+}
+
+#[test]
+fn custom_client_secret_is_validated() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    for (secret, generate, constraint) in [
+        ("a".repeat(23), false, "length greater than or equal to 24"),
+        ("a".repeat(65), false, "length less than or equal to 64"),
+        (
+            "has-a-dash-0123456789abcdef".to_string(),
+            false,
+            "regular expression pattern",
+        ),
+        ("a".repeat(24), true, "GenerateSecret"),
+    ] {
+        let body = json!({
+            "UserPoolId": pool_id,
+            "ClientName": "app",
+            "ClientSecret": secret,
+            "GenerateSecret": generate,
+        });
+        let err = expect_err(
+            svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string())),
+        );
+        assert_eq!(err.code(), "InvalidParameterException");
+        assert!(err.message().contains(constraint), "{}", err.message());
+        assert!(!err.message().contains(&secret), "{}", err.message());
+    }
+    for secret in ["a".repeat(24), "a".repeat(64)] {
+        let body = json!({"UserPoolId": pool_id, "ClientName": "app", "ClientSecret": secret});
+        svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+            .unwrap();
+    }
 }
 
 #[test]
