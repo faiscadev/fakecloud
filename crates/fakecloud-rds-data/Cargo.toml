@@ -22,7 +22,7 @@ tokio-postgres = { workspace = true, features = [
     "with-uuid-1",
     "with-serde_json-1",
 ] }
-mysql_async = "0.34"
+mysql_async = "0.37"
 rand = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
