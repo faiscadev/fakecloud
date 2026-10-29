@@ -47,7 +47,7 @@ pub(crate) fn create_customer_gateway(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -71,7 +71,7 @@ pub(crate) fn delete_customer_gateway(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "CustomerGatewayId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     state.customer_gateways.remove(&id);
     state.tags.remove(&id);
     Ok(Ec2Service::respond(
@@ -88,7 +88,9 @@ pub(crate) fn describe_customer_gateways(
     let wanted = indexed_list(&req.query_params, "CustomerGatewayId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .customer_gateways
         .values()
@@ -146,7 +148,7 @@ pub(crate) fn create_vpn_gateway(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -170,7 +172,7 @@ pub(crate) fn delete_vpn_gateway(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "VpnGatewayId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     state.vpn_gateways.remove(&id);
     state.tags.remove(&id);
     Ok(Ec2Service::respond(
@@ -187,7 +189,9 @@ pub(crate) fn describe_vpn_gateways(
     let wanted = indexed_list(&req.query_params, "VpnGatewayId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .vpn_gateways
         .values()
@@ -211,7 +215,7 @@ pub(crate) fn attach_vpn_gateway(
     {
         let mut accounts = svc.state.write();
         if let Some(g) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .vpn_gateways
             .get_mut(&gw)
         {
@@ -239,7 +243,7 @@ pub(crate) fn detach_vpn_gateway(
     {
         let mut accounts = svc.state.write();
         if let Some(g) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .vpn_gateways
             .get_mut(&gw)
         {
@@ -312,7 +316,7 @@ pub(crate) fn create_vpn_connection(
         svc.enforced_count_quota(&req.account_id, &req.region, rq::VPN_CONNECTIONS_PER_REGION);
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         rq::check(
             limit,
             rq::vpn_connections(state),
@@ -343,7 +347,7 @@ pub(crate) fn delete_vpn_connection(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "VpnConnectionId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     state.vpn_connections.remove(&id);
     state.tags.remove(&id);
     Ok(Ec2Service::respond(
@@ -360,7 +364,9 @@ pub(crate) fn describe_vpn_connections(
     let wanted = indexed_list(&req.query_params, "VpnConnectionId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .vpn_connections
         .values()
@@ -378,7 +384,7 @@ pub(crate) fn describe_vpn_connections(
 fn vpn_conn_lookup(svc: &Ec2Service, req: &AwsRequest, id: &str) -> (VpnConnection, Vec<Tag>) {
     let accounts = svc.state.read();
     let c = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.vpn_connections.get(id).cloned())
         .unwrap_or(VpnConnection {
             id: id.to_string(),
@@ -390,7 +396,7 @@ fn vpn_conn_lookup(svc: &Ec2Service, req: &AwsRequest, id: &str) -> (VpnConnecti
             routes: Vec::new(),
         });
     let tags = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .map(|s| s.tags_for(id).to_vec())
         .unwrap_or_default();
     (c, tags)
@@ -421,7 +427,7 @@ pub(crate) fn modify_vpn_connection(
     {
         let mut accounts = svc.state.write();
         if let Some(c) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .vpn_connections
             .get_mut(&id)
         {
@@ -464,7 +470,7 @@ pub(crate) fn create_vpn_connection_route(
     {
         let mut accounts = svc.state.write();
         if let Some(c) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .vpn_connections
             .get_mut(&id)
         {
@@ -489,7 +495,7 @@ pub(crate) fn delete_vpn_connection_route(
     {
         let mut accounts = svc.state.write();
         if let Some(c) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .vpn_connections
             .get_mut(&id)
         {
@@ -626,7 +632,7 @@ pub(crate) fn create_vpn_concentrator(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -653,7 +659,7 @@ pub(crate) fn delete_vpn_concentrator(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "VpnConcentratorId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     state.vpn_concentrators.remove(&id);
     state.tags.remove(&id);
     Ok(Ec2Service::respond(
@@ -670,7 +676,9 @@ pub(crate) fn describe_vpn_concentrators(
     validate_max_results(&req.query_params, 200, 1000)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .vpn_concentrators
         .values()

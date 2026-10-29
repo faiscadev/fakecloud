@@ -140,9 +140,12 @@ impl ResourceProvisioner {
     /// Resolve a subnet's VPC id from EC2 state (same lookup the service's
     /// `resolve_subnet_vpc` uses), or `None` when the subnet is not present.
     fn r53r_subnet_vpc(&self, subnet_id: &str) -> Option<String> {
-        fakecloud_ec2::vpc_lookup::with_account(&self.ec2_state, &self.account_id, |s| {
-            s.subnets.get(subnet_id).map(|sub| sub.vpc_id.clone())
-        })
+        fakecloud_ec2::vpc_lookup::with_account(
+            &self.ec2_state,
+            &self.account_id,
+            &self.region,
+            |s| s.subnets.get(subnet_id).map(|sub| sub.vpc_id.clone()),
+        )
     }
 
     fn r53r_tags(&self, props: &serde_json::Value) -> Vec<Tag> {

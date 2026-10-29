@@ -503,7 +503,9 @@ impl ResetState {
     /// instance's container and data volume by instance id (see
     /// [`Self::reset_rds`]).
     fn reset_ec2(&self, account: Option<&str>, teardown: &mut Teardown) {
-        let gone = take_and_reset(&mut self.ec2.write(), account, ec2_instances);
+        let gone = take_and_reset(&mut self.ec2.write(), account, |rs| {
+            rs.regions().flat_map(|(_, s)| ec2_instances(s)).collect()
+        });
         if let Some(rt) = self.ec2_runtime.clone() {
             teardown.push(async move { rt.remove_instances(gone).await });
         }
@@ -1304,7 +1306,7 @@ mod tests {
             state
                 .ec2
                 .write()
-                .get_or_create(account)
+                .regional_mut(account, "us-east-1")
                 .tags
                 .insert("i-1".into(), Vec::new());
         }
@@ -1312,8 +1314,14 @@ mod tests {
         let entry = EXPLICIT.iter().find(|e| e.names.contains(&"ec2")).unwrap();
         (entry.reset_account.unwrap())(&state, "222222222222", &mut teardown);
         let ec2 = state.ec2.read();
-        assert!(!ec2.get("222222222222").unwrap().tags.contains_key("i-1"));
-        assert!(ec2.get("123456789012").unwrap().tags.contains_key("i-1"));
+        assert!(ec2
+            .regional("222222222222", "us-east-1")
+            .is_none_or(|s| !s.tags.contains_key("i-1")));
+        assert!(ec2
+            .regional("123456789012", "us-east-1")
+            .unwrap()
+            .tags
+            .contains_key("i-1"));
     }
 
     #[test]

@@ -124,6 +124,7 @@ pub fn synthesize_subnets(id: &str, deployment_mode: &str) -> Vec<Value> {
 pub fn resolve_broker_network(
     ec2: &fakecloud_ec2::SharedEc2State,
     account: &str,
+    region: &str,
     b: &Value,
 ) -> Result<Value, String> {
     use fakecloud_ec2::vpc_lookup;
@@ -148,12 +149,12 @@ pub fn resolve_broker_network(
         } else {
             2
         };
-        vpc_lookup::default_vpc_subnets(ec2, account)
+        vpc_lookup::default_vpc_subnets(ec2, account, region)
             .into_iter()
             .take(wanted)
             .collect::<Vec<_>>()
     } else {
-        vpc_lookup::resolve_subnets(ec2, account, &requested_subnets)
+        vpc_lookup::resolve_subnets(ec2, account, region, &requested_subnets)
             .map_err(|id| format!("The subnet '{id}' does not exist."))?
     };
     let vpc_id = subnets
@@ -165,11 +166,11 @@ pub fn resolve_broker_network(
     }
     let requested_groups = list("securityGroups");
     let groups = if requested_groups.is_empty() {
-        vpc_lookup::default_security_group_id(ec2, account, &vpc_id)
+        vpc_lookup::default_security_group_id(ec2, account, region, &vpc_id)
             .into_iter()
             .collect::<Vec<_>>()
     } else {
-        let resolved = vpc_lookup::security_group_vpcs(ec2, account, &requested_groups)
+        let resolved = vpc_lookup::security_group_vpcs(ec2, account, region, &requested_groups)
             .map_err(|id| format!("The security group '{id}' does not exist."))?;
         if let Some((id, _)) = resolved.iter().find(|(_, v)| *v != vpc_id) {
             return Err(format!(

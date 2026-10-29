@@ -33,12 +33,13 @@ pub struct ClusterNetwork {
 pub fn create_cluster_security_group(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     cluster_name: &str,
     subnet_ids: &[String],
     fallback_vpc_id: &str,
 ) -> ClusterNetwork {
     let mut accounts = ec2.write();
-    let state = accounts.get_or_create(account_id);
+    let state = accounts.regional_mut(account_id, region);
     let vpc_id = subnet_ids
         .iter()
         .find_map(|id| state.subnets.get(id).map(|s| s.vpc_id.clone()))
@@ -131,7 +132,12 @@ pub fn restore_cluster_security_groups(eks: &crate::SharedEksState, ec2: &Shared
             ) else {
                 continue;
             };
-            let state = accounts.get_or_create(account_id);
+            // A cluster ARN names its region; a record without one belongs to
+            // the server's configured region.
+            let region = fakecloud_aws::arn::region_of(&cluster.arn)
+                .map(str::to_string)
+                .unwrap_or_else(|| accounts.region().to_string());
+            let state = accounts.regional_mut(account_id, &region);
             if state.security_groups.contains_key(group_id) {
                 continue;
             }
@@ -148,11 +154,12 @@ pub fn restore_cluster_security_groups(eks: &crate::SharedEksState, ec2: &Shared
 pub fn delete_cluster_security_group(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     cluster_name: &str,
     group_id: &str,
 ) {
     let mut accounts = ec2.write();
-    let state = accounts.get_or_create(account_id);
+    let state = accounts.regional_mut(account_id, region);
     let owned = state.tags.get(group_id).is_some_and(|tags| {
         tags.iter()
             .any(|t| t.key == "aws:eks:cluster-name" && t.value == cluster_name)

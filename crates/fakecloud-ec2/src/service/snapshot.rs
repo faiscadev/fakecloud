@@ -69,7 +69,7 @@ pub(crate) fn create_snapshot(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // The source volume must exist — AWS rejects a snapshot of a phantom id.
         let vol = state
             .volumes
@@ -107,7 +107,7 @@ pub(crate) fn create_snapshots(
         .unwrap_or_default();
     let items: Vec<String> = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if !state.instances.contains_key(&instance_id) {
             return Err(not_found("InvalidInstanceID.NotFound", &instance_id));
         }
@@ -167,7 +167,7 @@ pub(crate) fn delete_snapshot(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "SnapshotId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     if state.snapshots.remove(&id).is_none() {
         return Err(not_found("InvalidSnapshot.NotFound", &id));
     }
@@ -189,13 +189,15 @@ pub(crate) fn describe_snapshots(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
 
     // An explicitly-requested SnapshotId that does not exist (or is in the
     // recycle bin) is a hard error on AWS (InvalidSnapshot.NotFound), not a
     // silently-empty result. Matches the sibling Describe ops.
     for id in &wanted {
-        if !state.snapshots.get(id).is_some_and(|s| !s.in_recycle_bin) {
+        if state.snapshots.get(id).is_none_or(|s| s.in_recycle_bin) {
             return Err(not_found("InvalidSnapshot.NotFound", id));
         }
     }
@@ -279,10 +281,12 @@ pub(crate) fn copy_snapshot(
             .cloned()
             .unwrap_or_default(),
     );
+    // The source snapshot lives in `SourceRegion`, which differs from the
+    // request's (destination) region for a cross-region copy.
     let source = {
         let accounts = svc.state.read();
         accounts
-            .get(&req.account_id)
+            .regional(&req.account_id, &source_region)
             .and_then(|s| s.snapshots.get(&src))
             .map(|s| (s.volume_size, s.encrypted, s.kms_key_id.clone()))
     };
@@ -320,7 +324,7 @@ pub(crate) fn copy_snapshot(
     let id = snap.snapshot_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &id, "snapshot");
         state.snapshots.insert(id.clone(), snap);
         state.tags_for(&id).to_vec()
@@ -352,7 +356,7 @@ pub(crate) fn describe_snapshot_attribute(
         _ => {
             let accounts = svc.state.read();
             let perms = accounts
-                .get(&req.account_id)
+                .regional(&req.account_id, &req.region)
                 .and_then(|s| s.snapshots.get(&id))
                 .map(|s| s.create_volume_permissions.clone())
                 .unwrap_or_default();
@@ -444,7 +448,7 @@ pub(crate) fn modify_snapshot_attribute(
     {
         let mut accounts = svc.state.write();
         let s = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .snapshots
             .get_mut(&id)
             .ok_or_else(|| {
@@ -482,7 +486,7 @@ pub(crate) fn reset_snapshot_attribute(
     if attr == "createVolumePermission" {
         let mut accounts = svc.state.write();
         if let Some(s) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .snapshots
             .get_mut(&id)
         {
@@ -505,7 +509,7 @@ pub(crate) fn modify_snapshot_tier(
     {
         let mut accounts = svc.state.write();
         if let Some(s) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .snapshots
             .get_mut(&id)
         {
@@ -530,7 +534,9 @@ pub(crate) fn describe_snapshot_tier_status(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .snapshots
         .values()
@@ -558,7 +564,7 @@ pub(crate) fn restore_snapshot_tier(
     {
         let mut accounts = svc.state.write();
         if let Some(s) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .snapshots
             .get_mut(&id)
         {
@@ -583,7 +589,9 @@ pub(crate) fn list_snapshots_in_recycle_bin(
     validate_max_results(&req.query_params, 5, 1000)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .snapshots
         .values()
@@ -611,7 +619,7 @@ pub(crate) fn restore_snapshot_from_recycle_bin(
     {
         let mut accounts = svc.state.write();
         if let Some(s) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .snapshots
             .get_mut(&id)
         {
@@ -637,7 +645,7 @@ pub(crate) fn lock_snapshot(
     {
         let mut accounts = svc.state.write();
         if let Some(s) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .snapshots
             .get_mut(&id)
         {
@@ -669,7 +677,7 @@ pub(crate) fn unlock_snapshot(
     {
         let mut accounts = svc.state.write();
         if let Some(s) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .snapshots
             .get_mut(&id)
         {
@@ -692,7 +700,9 @@ pub(crate) fn describe_locked_snapshots(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .snapshots
         .values()
@@ -722,7 +732,7 @@ pub(crate) fn get_snapshot_block_public_access_state(
     let state = {
         let accounts = svc.state.read();
         accounts
-            .get(&req.account_id)
+            .regional(&req.account_id, &req.region)
             .map(|s| s.snapshot_block_public_access.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "unblocked".to_string())
@@ -747,7 +757,7 @@ pub(crate) fn enable_snapshot_block_public_access(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .snapshot_block_public_access = val.clone();
     }
     Ok(Ec2Service::respond(
@@ -764,7 +774,7 @@ pub(crate) fn disable_snapshot_block_public_access(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .snapshot_block_public_access = "unblocked".to_string();
     }
     Ok(Ec2Service::respond(
@@ -857,10 +867,13 @@ mod modify_tests {
 
     fn seed_snapshot(svc: &Ec2Service) {
         let mut accounts = svc.state.write();
-        accounts.get_or_create("000000000000").snapshots.insert(
-            "snap-1".to_string(),
-            build_snapshot("vol-1".into(), "d".into()),
-        );
+        accounts
+            .regional_mut("000000000000", "us-east-1")
+            .snapshots
+            .insert(
+                "snap-1".to_string(),
+                build_snapshot("vol-1".into(), "d".into()),
+            );
     }
 
     fn describe_perms(svc: &Ec2Service) -> String {
@@ -920,7 +933,7 @@ mod modify_tests {
         seed_snapshot(&svc);
         svc.state
             .write()
-            .get_or_create("000000000000")
+            .regional_mut("000000000000", "us-east-1")
             .snapshots
             .get_mut("snap-1")
             .unwrap()
@@ -936,11 +949,14 @@ mod modify_tests {
             ),
         )
         .unwrap();
-        assert!(
-            svc.state.read().get("000000000000").unwrap().snapshots["snap-1"]
-                .create_volume_permissions
-                .is_empty()
-        );
+        assert!(svc
+            .state
+            .read()
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .snapshots["snap-1"]
+            .create_volume_permissions
+            .is_empty());
     }
 
     fn expect_err(svc: &Ec2Service, query: &[(&str, &str)]) -> AwsServiceError {
@@ -997,7 +1013,7 @@ mod modify_tests {
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             let mut v = crate::state::Volume {
                 volume_id: "vol-1".into(),
                 size: 42,
@@ -1028,7 +1044,7 @@ mod modify_tests {
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.instances.insert(
                 "i-1".into(),
                 crate::state::Instance {
@@ -1112,7 +1128,7 @@ mod modify_tests {
         assert_eq!(
             svc.state
                 .read()
-                .get("000000000000")
+                .regional("000000000000", "us-east-1")
                 .unwrap()
                 .snapshots
                 .len(),
@@ -1167,7 +1183,7 @@ mod modify_tests {
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             for i in 0..8 {
                 let mut s = build_snapshot("vol-x".into(), format!("d{i}"));
                 s.snapshot_id = format!("snap-{i:02}");
@@ -1195,7 +1211,7 @@ mod modify_tests {
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             let mut s = build_snapshot("vol-9".into(), "backup-nightly".into());
             s.snapshot_id = "snap-9".into();
             s.encrypted = true;
@@ -1290,7 +1306,7 @@ mod tag_tests {
             .unwrap()
             .to_string();
         let mut accounts = svc.state.write();
-        let st = accounts.get_or_create("000000000000");
+        let st = accounts.regional_mut("000000000000", "us-east-1");
         st.volumes
             .get_mut(&vol_id)
             .unwrap()
@@ -1362,15 +1378,66 @@ mod tag_tests {
         assert!(!describe(&svc, &ids[0]).contains("<key>team</key>"));
     }
 
+    /// A cross-region copy reads its source from `SourceRegion`, not from the
+    /// destination region the request is sent to: the copy carries the
+    /// source's size and stays encrypted.
+    #[test]
+    fn copy_snapshot_reads_source_from_source_region() {
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let mut src = build_snapshot("vol-west".into(), "d".into());
+            src.volume_size = 77;
+            src.encrypted = true;
+            accounts
+                .regional_mut("000000000000", "eu-west-1")
+                .snapshots
+                .insert("snap-west".to_string(), src);
+        }
+        // Sent to us-east-1 (the destination region).
+        let out = body_of(
+            copy_snapshot(
+                &svc,
+                &req(
+                    "CopySnapshot",
+                    &[
+                        ("SourceRegion", "eu-west-1"),
+                        ("SourceSnapshotId", "snap-west"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        let id = snap_ids(&out).remove(0);
+        let d = describe(&svc, &id);
+        assert!(d.contains("<volumeSize>77</volumeSize>"), "{d}");
+        assert!(d.contains("<encrypted>true</encrypted>"), "{d}");
+        // The copy lands in the destination region only.
+        let accounts = svc.state.read();
+        assert!(accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .snapshots
+            .contains_key(&id));
+        assert!(!accounts
+            .regional("000000000000", "eu-west-1")
+            .unwrap()
+            .snapshots
+            .contains_key(&id));
+    }
+
     #[test]
     fn copy_snapshot_applies_tag_specifications() {
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
-            accounts.get_or_create("000000000000").snapshots.insert(
-                "snap-src".to_string(),
-                build_snapshot("vol-1".into(), "d".into()),
-            );
+            accounts
+                .regional_mut("000000000000", "us-east-1")
+                .snapshots
+                .insert(
+                    "snap-src".to_string(),
+                    build_snapshot("vol-1".into(), "d".into()),
+                );
         }
         let out = body_of(
             copy_snapshot(

@@ -153,7 +153,7 @@ pub(crate) fn create_tags(
 
     if !resource_ids.is_empty() && !tags.is_empty() {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         ensure_resources_exist(state, &resource_ids)?;
         for id in &resource_ids {
             state.upsert_tags(id, &tags);
@@ -177,7 +177,7 @@ pub(crate) fn delete_tags(
 
     if !resource_ids.is_empty() {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         ensure_resources_exist(state, &resource_ids)?;
         for id in &resource_ids {
             if to_remove.is_empty() {
@@ -211,7 +211,9 @@ pub(crate) fn describe_tags(
 
     let accounts = svc.state.read();
     let empty = crate::state::Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
 
     let mut items = Vec::new();
     for (resource_id, tags) in &state.tags {
@@ -334,7 +336,7 @@ mod tests {
         let svc = Ec2Service::new();
         let vpc_id = {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.vpcs.keys().next().unwrap().clone()
         };
         create_tags(
@@ -350,7 +352,10 @@ mod tests {
         )
         .unwrap();
         let accounts = svc.state.read();
-        let tags = accounts.get("000000000000").unwrap().tags_for(&vpc_id);
+        let tags = accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .tags_for(&vpc_id);
         assert!(tags.iter().any(|t| t.key == "Name" && t.value == "prod"));
     }
 }

@@ -73,7 +73,7 @@ pub(crate) fn describe_availability_zones(
     let optin = {
         let accounts = svc.state.read();
         accounts
-            .get(&req.account_id)
+            .regional(&req.account_id, &req.region)
             .and_then(|s| s.az_group_optin.get(region).cloned())
     };
     let opt_in_status = optin.as_deref().unwrap_or("opt-in-not-required");

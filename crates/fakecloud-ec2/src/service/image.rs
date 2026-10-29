@@ -157,7 +157,7 @@ pub(crate) fn create_image(
     let id = img.image_id.clone();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &id, "image");
         state.images.insert(id.clone(), img);
     }
@@ -211,7 +211,7 @@ pub(crate) fn register_image(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .images
             .insert(id.clone(), img);
     }
@@ -244,7 +244,7 @@ pub(crate) fn deregister_image(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "ImageId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Reject deregistering a public AMI owned by amazon/Canonical (the seeded
     // catalogue) — AWS returns AuthFailure, and removing a seed would silently
     // break `data.aws_ami { owners=["amazon"] }` for this account.
@@ -285,7 +285,7 @@ pub(crate) fn describe_images(
     // the common existing-account path doesn't construct-and-discard a fresh
     // (default-network + AMI-catalogue) state on every DescribeImages.
     let empty;
-    let state = match accounts.get(&req.account_id) {
+    let state = match accounts.regional(&req.account_id, &req.region) {
         Some(s) => s,
         None => {
             empty = Ec2State::new(&req.account_id, &req.region);
@@ -297,7 +297,7 @@ pub(crate) fn describe_images(
     // silently-empty result. A `disabled` image is still present and returns
     // normally; only genuinely-absent (or recycle-binned) ids error.
     for id in &wanted {
-        if !state.images.get(id).is_some_and(|i| !i.in_recycle_bin) {
+        if state.images.get(id).is_none_or(|i| i.in_recycle_bin) {
             return Err(crate::service_helpers::not_found(
                 "InvalidAMIID.NotFound",
                 id,
@@ -446,7 +446,7 @@ pub(crate) fn copy_image(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .images
             .insert(id.clone(), img);
     }
@@ -530,7 +530,9 @@ pub(crate) fn describe_image_attribute(
 
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let img = state
         .images
         .get(&id)
@@ -586,7 +588,7 @@ pub(crate) fn modify_image_attribute(
     let id = require(&req.query_params, "ImageId")?;
 
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let img = state
         .images
         .get_mut(&id)
@@ -682,7 +684,11 @@ pub(crate) fn reset_image_attribute(
     validate_enum(&req.query_params, "Attribute", &["launchPermission"])?;
     {
         let mut accounts = svc.state.write();
-        if let Some(img) = accounts.get_or_create(&req.account_id).images.get_mut(&id) {
+        if let Some(img) = accounts
+            .regional_mut(&req.account_id, &req.region)
+            .images
+            .get_mut(&id)
+        {
             img.launch_permission_users.clear();
             img.launch_permission_groups.clear();
             img.public = false;
@@ -705,7 +711,7 @@ pub(crate) fn attach_image_watermark(
     validate_length(&req.query_params, "WatermarkName", 1, 255)?;
 
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     if !state.images.contains_key(&image_id) {
         return Err(AwsServiceError::aws_error(
             http::StatusCode::BAD_REQUEST,
@@ -734,7 +740,7 @@ pub(crate) fn detach_image_watermark(
     let watermark_key = require(&req.query_params, "WatermarkKey")?;
 
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     if !state.images.contains_key(&image_id) {
         return Err(AwsServiceError::aws_error(
             http::StatusCode::BAD_REQUEST,
@@ -763,7 +769,7 @@ fn image_ack(
     for k in extra_required {
         require(&req.query_params, k)?;
     }
-    mutate_image(svc, &req.account_id, &id, |img| {
+    mutate_image(svc, &req.account_id, &req.region, &id, |img| {
         if let Some(p) = protect {
             img.deregistration_protection = p;
         }
@@ -788,12 +794,13 @@ fn image_not_found(id: &str) -> AwsServiceError {
 fn mutate_image(
     svc: &Ec2Service,
     account_id: &str,
+    region: &str,
     id: &str,
     f: impl FnOnce(&mut Image),
 ) -> Result<(), AwsServiceError> {
     let mut accounts = svc.state.write();
     let img = accounts
-        .get_or_create(account_id)
+        .regional_mut(account_id, region)
         .images
         .get_mut(id)
         .ok_or_else(|| image_not_found(id))?;
@@ -806,7 +813,7 @@ pub(crate) fn enable_image(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "ImageId")?;
-    mutate_image(svc, &req.account_id, &id, |img| {
+    mutate_image(svc, &req.account_id, &req.region, &id, |img| {
         img.state = "available".to_string();
     })?;
     Ok(Ec2Service::respond(
@@ -820,7 +827,7 @@ pub(crate) fn disable_image(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "ImageId")?;
-    mutate_image(svc, &req.account_id, &id, |img| {
+    mutate_image(svc, &req.account_id, &req.region, &id, |img| {
         img.state = "disabled".to_string();
     })?;
     Ok(Ec2Service::respond(
@@ -835,7 +842,7 @@ pub(crate) fn enable_image_deprecation(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "ImageId")?;
     let deprecate_at = require(&req.query_params, "DeprecateAt")?;
-    mutate_image(svc, &req.account_id, &id, |img| {
+    mutate_image(svc, &req.account_id, &req.region, &id, |img| {
         img.deprecation_time = Some(deprecate_at.clone());
     })?;
     Ok(Ec2Service::respond(
@@ -849,7 +856,7 @@ pub(crate) fn disable_image_deprecation(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "ImageId")?;
-    mutate_image(svc, &req.account_id, &id, |img| {
+    mutate_image(svc, &req.account_id, &req.region, &id, |img| {
         img.deprecation_time = None;
     })?;
     Ok(Ec2Service::respond(
@@ -895,7 +902,11 @@ pub(crate) fn restore_image_from_recycle_bin(
     let id = require(&req.query_params, "ImageId")?;
     {
         let mut accounts = svc.state.write();
-        if let Some(img) = accounts.get_or_create(&req.account_id).images.get_mut(&id) {
+        if let Some(img) = accounts
+            .regional_mut(&req.account_id, &req.region)
+            .images
+            .get_mut(&id)
+        {
             img.in_recycle_bin = false;
         }
     }
@@ -921,7 +932,7 @@ pub(crate) fn enable_image_block_public_access(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .image_block_public_access = st.clone();
     }
     Ok(Ec2Service::respond(
@@ -938,7 +949,7 @@ pub(crate) fn disable_image_block_public_access(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .image_block_public_access = "unblocked".to_string();
     }
     Ok(Ec2Service::respond(
@@ -955,7 +966,7 @@ pub(crate) fn get_image_block_public_access_state(
     let st = {
         let accounts = svc.state.read();
         accounts
-            .get(&req.account_id)
+            .regional(&req.account_id, &req.region)
             .map(|s| s.image_block_public_access.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "unblocked".to_string())
@@ -982,7 +993,7 @@ pub(crate) fn enable_allowed_images_settings(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .allowed_images_settings = st.clone();
     }
     Ok(Ec2Service::respond(
@@ -999,7 +1010,7 @@ pub(crate) fn disable_allowed_images_settings(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .allowed_images_settings = "disabled".to_string();
     }
     Ok(Ec2Service::respond(
@@ -1016,7 +1027,7 @@ pub(crate) fn get_allowed_images_settings(
     let st = {
         let accounts = svc.state.read();
         accounts
-            .get(&req.account_id)
+            .regional(&req.account_id, &req.region)
             .map(|s| s.allowed_images_settings.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "disabled".to_string())
@@ -1024,7 +1035,7 @@ pub(crate) fn get_allowed_images_settings(
     let criteria = {
         let accounts = svc.state.read();
         accounts
-            .get(&req.account_id)
+            .regional(&req.account_id, &req.region)
             .map(|s| s.allowed_image_criteria.clone())
             .unwrap_or_default()
     };
@@ -1075,7 +1086,7 @@ pub(crate) fn replace_image_criteria_in_allowed_images_settings(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .allowed_image_criteria = criteria;
     }
     Ok(Ec2Service::respond(
@@ -1094,7 +1105,9 @@ pub(crate) fn list_images_in_recycle_bin(
     validate_max_results(&req.query_params, 1, 1000)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .images
         .values()
@@ -1156,7 +1169,7 @@ pub(crate) fn create_restore_image_task(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .images
             .insert(id.clone(), img);
     }
@@ -1211,7 +1224,7 @@ mod tests {
 
     fn seed_image(svc: &crate::service::Ec2Service, id: &str) {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("000000000000");
+        let state = accounts.regional_mut("000000000000", "us-east-1");
         let mut i = img(None, None);
         i.image_id = id.to_string();
         state.images.insert(id.to_string(), i);
@@ -1258,7 +1271,10 @@ mod tests {
             .unwrap()
             .to_string();
         let accounts = svc.state.read();
-        let img = &accounts.get("000000000000").unwrap().images[&id];
+        let img = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .images[&id];
         assert_eq!(img.boot_mode.as_deref(), Some("uefi"));
     }
 
@@ -1314,7 +1330,11 @@ mod tests {
         {
             let accounts = svc.state.read();
             assert_eq!(
-                accounts.get("000000000000").unwrap().images["ami-x"].state,
+                accounts
+                    .regional("000000000000", "us-east-1")
+                    .unwrap()
+                    .images["ami-x"]
+                    .state,
                 "disabled"
             );
         }
@@ -1342,7 +1362,11 @@ mod tests {
         super::enable_image(&svc, &req("EnableImage", &[("ImageId", "ami-x")])).unwrap();
         let accounts = svc.state.read();
         assert_eq!(
-            accounts.get("000000000000").unwrap().images["ami-x"].state,
+            accounts
+                .regional("000000000000", "us-east-1")
+                .unwrap()
+                .images["ami-x"]
+                .state,
             "available"
         );
     }
@@ -1366,7 +1390,10 @@ mod tests {
         {
             let accounts = svc.state.read();
             assert_eq!(
-                accounts.get("000000000000").unwrap().images["ami-x"]
+                accounts
+                    .regional("000000000000", "us-east-1")
+                    .unwrap()
+                    .images["ami-x"]
                     .deprecation_time
                     .as_deref(),
                 Some("2030-01-01T00:00:00Z")
@@ -1378,7 +1405,10 @@ mod tests {
         )
         .unwrap();
         let accounts = svc.state.read();
-        assert!(accounts.get("000000000000").unwrap().images["ami-x"]
+        assert!(accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .images["ami-x"]
             .deprecation_time
             .is_none());
     }
@@ -1473,7 +1503,7 @@ mod tests {
         seed_image(&svc, "ami-x");
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.tags.insert(
                 "ami-x".to_string(),
                 vec![crate::state::Tag {
@@ -1621,7 +1651,7 @@ pub(crate) fn replace_image_instance_type_specification(
         .is_some_and(|v| v.eq_ignore_ascii_case("true"));
 
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let img = state
         .images
         .get_mut(&id)

@@ -7,7 +7,7 @@ impl LambdaService {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         let mut input = CreateFunctionInput::from_body(&body)?;
         if let Some(cfg) = input.vpc_config.take() {
-            input.vpc_config = Some(self.resolve_vpc_config(&req.account_id, cfg)?);
+            input.vpc_config = Some(self.resolve_vpc_config(&req.account_id, &req.region, cfg)?);
         }
 
         // Enforce the Smithy length bounds on `FunctionName` (1..=140

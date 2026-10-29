@@ -82,10 +82,10 @@ impl ResourceProvisioner {
             let ec2 = self.ec2_state.read();
             for vpc in &vpcs {
                 let id = vpc.vpc_id.as_deref().unwrap_or_default();
-                if let Some((owner, _)) = ec2
-                    .iter()
-                    .find(|(_, st)| st.vpcs.contains_key(id))
-                    .filter(|(owner, _)| *owner != self.account_id)
+                if let Some((owner, _, _)) = ec2
+                    .iter_regional()
+                    .find(|(_, _, st)| st.vpcs.contains_key(id))
+                    .filter(|(owner, _, _)| *owner != self.account_id)
                 {
                     return Err(format!(
                         "InvalidVPCId: The VPC {id} belongs to account {owner}, not {}",

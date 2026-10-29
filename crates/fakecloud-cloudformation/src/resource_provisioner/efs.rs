@@ -321,12 +321,17 @@ impl ResourceProvisioner {
                     .collect()
             })
             .unwrap_or_default();
-        let subnet =
-            fakecloud_efs::network::resolve_subnet(&self.ec2_state, &self.account_id, &subnet_id)
-                .map_err(|e| e.message())?;
+        let subnet = fakecloud_efs::network::resolve_subnet(
+            &self.ec2_state,
+            &self.account_id,
+            &self.region,
+            &subnet_id,
+        )
+        .map_err(|e| e.message())?;
         let groups = fakecloud_efs::network::resolve_security_groups(
             &self.ec2_state,
             &self.account_id,
+            &self.region,
             &subnet.vpc_id,
             &requested_groups,
         )
@@ -367,6 +372,7 @@ impl ResourceProvisioner {
         let net = fakecloud_efs::network::create_mount_target_eni(
             &self.ec2_state,
             &self.account_id,
+            &self.region,
             &fsid,
             &mtid,
             &subnet,
@@ -446,13 +452,19 @@ impl ResourceProvisioner {
                 .and_then(|m| m.get("NetworkInterfaceId").and_then(Value::as_str))
                 .map(str::to_string);
             let sgs = match eni_id.as_deref().and_then(|eni| {
-                fakecloud_efs::network::eni_vpc_id(&self.ec2_state, &self.account_id, eni)
-                    .map(|vpc| (eni, vpc))
+                fakecloud_efs::network::eni_vpc_id(
+                    &self.ec2_state,
+                    &self.account_id,
+                    &self.region,
+                    eni,
+                )
+                .map(|vpc| (eni, vpc))
             }) {
                 Some((eni, vpc_id)) => {
                     let sgs = fakecloud_efs::network::resolve_security_groups(
                         &self.ec2_state,
                         &self.account_id,
+                        &self.region,
                         &vpc_id,
                         &sgs,
                     )
@@ -460,6 +472,7 @@ impl ResourceProvisioner {
                     fakecloud_efs::network::set_mount_target_eni_groups(
                         &self.ec2_state,
                         &self.account_id,
+                        &self.region,
                         eni,
                         &sgs,
                     );
@@ -502,7 +515,12 @@ impl ResourceProvisioner {
             .as_ref()
             .and_then(|m| m.get("NetworkInterfaceId").and_then(Value::as_str))
         {
-            fakecloud_efs::network::delete_mount_target_eni(&self.ec2_state, &self.account_id, eni);
+            fakecloud_efs::network::delete_mount_target_eni(
+                &self.ec2_state,
+                &self.account_id,
+                &self.region,
+                eni,
+            );
         }
     }
 

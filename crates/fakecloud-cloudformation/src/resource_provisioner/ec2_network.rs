@@ -98,6 +98,7 @@ impl ResourceProvisioner {
                 fakecloud_ec2::vpc_lookup::with_account(
                     &self.ec2_state,
                     &self.account_id,
+                    &self.region,
                     |state| {
                         let default_vpc = fakecloud_ec2::vpc_lookup::default_vpc_id_in(state)?;
                         state
@@ -160,12 +161,14 @@ impl ResourceProvisioner {
     fn delete_ec2_sg_rule(&self, rule_id: &str, egress: bool) {
         let group_id = {
             let accounts = self.ec2_state.read();
-            accounts.get(&self.account_id).and_then(|s| {
-                s.security_groups
-                    .values()
-                    .find(|g| g.rules.iter().any(|r| r.rule_id == rule_id))
-                    .map(|g| g.group_id.clone())
-            })
+            accounts
+                .regional(&self.account_id, &self.region)
+                .and_then(|s| {
+                    s.security_groups
+                        .values()
+                        .find(|g| g.rules.iter().any(|r| r.rule_id == rule_id))
+                        .map(|g| g.group_id.clone())
+                })
         };
         let Some(group_id) = group_id else {
             return;
@@ -214,18 +217,20 @@ impl ResourceProvisioner {
         };
         let gateway = {
             let accounts = self.ec2_state.read();
-            accounts.get(&self.account_id).and_then(|s| match kind {
-                "IGW" => s
-                    .internet_gateways
-                    .values()
-                    .find(|g| g.attachments.iter().any(|(v, _)| v == vpc_id))
-                    .map(|g| g.internet_gateway_id.clone()),
-                _ => s
-                    .vpn_gateways
-                    .values()
-                    .find(|g| g.attachments.iter().any(|v| v == vpc_id))
-                    .map(|g| g.id.clone()),
-            })
+            accounts
+                .regional(&self.account_id, &self.region)
+                .and_then(|s| match kind {
+                    "IGW" => s
+                        .internet_gateways
+                        .values()
+                        .find(|g| g.attachments.iter().any(|(v, _)| v == vpc_id))
+                        .map(|g| g.internet_gateway_id.clone()),
+                    _ => s
+                        .vpn_gateways
+                        .values()
+                        .find(|g| g.attachments.iter().any(|v| v == vpc_id))
+                        .map(|g| g.id.clone()),
+                })
         };
         let Some(gateway) = gateway else {
             return;
@@ -341,12 +346,14 @@ impl ResourceProvisioner {
     fn delete_ec2_eip(&self, public_ip: &str) -> Result<(), String> {
         let found = {
             let accounts = self.ec2_state.read();
-            accounts.get(&self.account_id).and_then(|s| {
-                s.elastic_ips
-                    .values()
-                    .find(|e| e.public_ip == public_ip || e.allocation_id == public_ip)
-                    .map(|e| (e.allocation_id.clone(), e.association_id.clone()))
-            })
+            accounts
+                .regional(&self.account_id, &self.region)
+                .and_then(|s| {
+                    s.elastic_ips
+                        .values()
+                        .find(|e| e.public_ip == public_ip || e.allocation_id == public_ip)
+                        .map(|e| (e.allocation_id.clone(), e.association_id.clone()))
+                })
         };
         let Some((allocation_id, association_id)) = found else {
             return Ok(());
@@ -362,12 +369,14 @@ impl ResourceProvisioner {
     /// The allocation behind a stack's EIP (physical id = public IP).
     fn eip_record(&self, public_ip: &str) -> Option<fakecloud_ec2::state::ElasticIp> {
         let accounts = self.ec2_state.read();
-        accounts.get(&self.account_id).and_then(|s| {
-            s.elastic_ips
-                .values()
-                .find(|e| e.public_ip == public_ip || e.allocation_id == public_ip)
-                .cloned()
-        })
+        accounts
+            .regional(&self.account_id, &self.region)
+            .and_then(|s| {
+                s.elastic_ips
+                    .values()
+                    .find(|e| e.public_ip == public_ip || e.allocation_id == public_ip)
+                    .cloned()
+            })
     }
 
     /// Whether an `AWS::EC2::EIP` update changes a property that requires
@@ -433,7 +442,7 @@ impl ResourceProvisioner {
         let nat = {
             let accounts = self.ec2_state.read();
             accounts
-                .get(&self.account_id)
+                .regional(&self.account_id, &self.region)
                 .and_then(|s| s.nat_gateways.get(&existing.physical_id).cloned())
         };
         let Some(nat) = nat else {
@@ -527,7 +536,7 @@ impl ResourceProvisioner {
                 let exists = self
                     .ec2_state
                     .read()
-                    .get(&self.account_id)
+                    .regional(&self.account_id, &self.region)
                     .is_some_and(|s| s.nat_gateways.contains_key(id));
                 if exists {
                     let mut params = HashMap::new();

@@ -47,6 +47,7 @@ fn usage(svc: &Ec2Service, q: CountQuota) -> usize {
 
 /// Touch the account so its default resources exist before counting.
 fn seeded(svc: Ec2Service) -> Ec2Service {
+    svc.state.write().regional_mut(ACCT, "us-east-1");
     body(vpc::describe_vpcs(&svc, &req("DescribeVpcs", &[])));
     svc
 }
@@ -103,6 +104,23 @@ fn vpcs_per_region() {
     let r = vpc::create_vpc(&svc, &req("CreateVpc", &[("CidrBlock", "10.1.0.0/16")]));
     assert_eq!(code(r), "VpcLimitExceeded");
     assert_eq!(usage(&svc, VPCS_PER_REGION), current + 1);
+
+    // Exhausting one region must not consume another region's allowance.
+    let mut west = req("CreateVpc", &[("CidrBlock", "10.1.0.0/16")]);
+    west.region = "us-west-2".into();
+    body(vpc::create_vpc(&svc, &west));
+    let usage_source = Ec2QuotaUsage::new(svc.state.clone());
+    assert_eq!(
+        usage_source.usage(
+            ACCT,
+            "us-west-2",
+            VPCS_PER_REGION.service,
+            VPCS_PER_REGION.code
+        ),
+        Some((current + 1) as f64)
+    );
+    assert_eq!(usage(&svc, VPCS_PER_REGION), current + 1);
+    assert_eq!(code(vpc::create_vpc(&svc, &west)), "VpcLimitExceeded");
 }
 
 #[test]
@@ -149,7 +167,7 @@ fn a_new_default_subnet_counts_toward_the_default_vpc() {
     // The default VPC has default subnets in its first zones only.
     let unseeded = {
         let accounts = svc.state.read();
-        let state = accounts.get(ACCT).unwrap();
+        let state = accounts.regional(ACCT, "us-east-1").unwrap();
         let zones: Vec<String> = state
             .subnets
             .values()
@@ -709,7 +727,11 @@ fn route_table(svc: &Ec2Service) -> String {
 }
 
 fn routes_of(svc: &Ec2Service, rtb: &str) -> Vec<crate::state::Route> {
-    svc.state.read().get(ACCT).unwrap().route_tables[rtb]
+    svc.state
+        .read()
+        .regional(ACCT, "us-east-1")
+        .unwrap()
+        .route_tables[rtb]
         .routes
         .clone()
 }
@@ -1064,7 +1086,7 @@ fn a_replaced_local_route_stays_uncounted() {
     assert_eq!(replaced[0].origin, "CreateRouteTable");
     {
         let accounts = svc.state.read();
-        let state = accounts.get(ACCT).unwrap();
+        let state = accounts.regional(ACCT, "us-east-1").unwrap();
         let rt = &state.route_tables[&rtb];
         assert_eq!(
             route_counts(rt, &state.managed_prefix_lists, "us-east-1"),

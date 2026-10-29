@@ -177,6 +177,7 @@ impl ResourceProvisioner {
         let network = create_cluster_security_group(
             &self.ec2_state,
             &self.account_id,
+            &self.region,
             &name,
             &subnet_ids,
             &format!("vpc-{sid}"),
@@ -252,7 +253,13 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         if let Some(cluster) = state.clusters.remove(physical_id) {
             if let Some(sg) = cluster.resources_vpc_config["clusterSecurityGroupId"].as_str() {
-                delete_cluster_security_group(&self.ec2_state, &self.account_id, physical_id, sg);
+                delete_cluster_security_group(
+                    &self.ec2_state,
+                    &self.account_id,
+                    &self.region,
+                    physical_id,
+                    sg,
+                );
             }
         }
         Ok(())

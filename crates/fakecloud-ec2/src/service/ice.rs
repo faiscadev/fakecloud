@@ -39,7 +39,7 @@ pub(crate) fn create_instance_connect_endpoint(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -75,7 +75,7 @@ pub(crate) fn delete_instance_connect_endpoint(
     let id = require(&req.query_params, "InstanceConnectEndpointId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let e = state
         .instance_connect_endpoints
         .remove(&id)
@@ -103,7 +103,9 @@ pub(crate) fn describe_instance_connect_endpoints(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .instance_connect_endpoints
         .values()
@@ -150,7 +152,7 @@ pub(crate) fn enable_fast_launch(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .fast_launch_images
             .insert(image.clone());
     }
@@ -169,7 +171,7 @@ pub(crate) fn disable_fast_launch(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .fast_launch_images
             .remove(&image);
     }
@@ -189,7 +191,7 @@ pub(crate) fn enable_serial_console_access(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .serial_console_access = true;
     }
     Ok(Ec2Service::respond(
@@ -206,7 +208,7 @@ pub(crate) fn disable_serial_console_access(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .serial_console_access = false;
     }
     Ok(Ec2Service::respond(
@@ -223,7 +225,7 @@ pub(crate) fn get_serial_console_access_status(
     let enabled = {
         let accounts = svc.state.read();
         accounts
-            .get(&req.account_id)
+            .regional(&req.account_id, &req.region)
             .map(|s| s.serial_console_access)
             .unwrap_or(false)
     };

@@ -578,7 +578,11 @@ async fn main() {
     // EC2 state, created up-front so it can join `ResetState` and be cleared by
     // `/_fakecloud/reset/ec2` (which also tears down the backing containers).
     let ec2_state: SharedEc2State = Arc::new(parking_lot::RwLock::new(
-        fakecloud_core::multi_account::MultiAccountState::new("000000000000", "us-east-1", ""),
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
     ));
     let route53_state: fakecloud_route53::SharedRoute53State = Arc::new(parking_lot::RwLock::new(
         fakecloud_route53::Route53Accounts::new(),
@@ -2538,42 +2542,39 @@ async fn main() {
             let path = reset::snapshot_store_path(&data_path, "ec2");
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
-                Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_ec2::Ec2Snapshot>(&bytes) {
-                        Ok(snapshot) => {
-                            if snapshot.schema_version > fakecloud_ec2::EC2_SNAPSHOT_SCHEMA_VERSION
-                            {
-                                fatal_exit(format_args!(
-                                    "ec2 persistence schema too new: on-disk={}, max supported={}",
-                                    snapshot.schema_version,
-                                    fakecloud_ec2::EC2_SNAPSHOT_SCHEMA_VERSION,
-                                ));
-                            }
-                            if let Some(accounts) = snapshot.accounts {
-                                let account_count = accounts.account_count();
-                                *ec2_state.write() = accounts;
-                                // Backfill the public AMI catalogue into any
-                                // restored account that predates it (legacy
-                                // snapshot from before #1964). Idempotent —
-                                // seeds have deterministic ids, so already-seeded
-                                // accounts are unchanged.
-                                {
-                                    let mut guard = ec2_state.write();
-                                    for (_, st) in guard.iter_mut() {
-                                        st.ensure_public_images_seeded();
-                                    }
-                                }
-                                tracing::info!(
-                                    accounts = account_count,
-                                    "loaded ec2 persistence snapshot"
-                                );
-                            }
+                Ok(Some(bytes)) => match fakecloud_ec2::parse_ec2_snapshot(
+                    &bytes,
+                    &cli.account_id,
+                    &cli.region,
+                    &endpoint_url,
+                ) {
+                    Ok(snapshot) => {
+                        if snapshot.schema_version > fakecloud_ec2::EC2_SNAPSHOT_SCHEMA_VERSION {
+                            fatal_exit(format_args!(
+                                "ec2 persistence schema too new: on-disk={}, max supported={}",
+                                snapshot.schema_version,
+                                fakecloud_ec2::EC2_SNAPSHOT_SCHEMA_VERSION,
+                            ));
                         }
-                        Err(err) => fatal_exit(format_args!(
-                            "failed to parse ec2 persistence snapshot: {err}"
-                        )),
+                        if let Some(accounts) = snapshot.accounts {
+                            let account_count = accounts.account_count();
+                            *ec2_state.write() = accounts;
+                            {
+                                let mut guard = ec2_state.write();
+                                for (_, _, st) in guard.iter_regional_mut() {
+                                    st.ensure_public_images_seeded();
+                                }
+                            }
+                            tracing::info!(
+                                accounts = account_count,
+                                "loaded ec2 persistence snapshot"
+                            );
+                        }
                     }
-                }
+                    Err(err) => fatal_exit(format_args!(
+                        "failed to parse ec2 persistence snapshot: {err}"
+                    )),
+                },
                 Ok(None) => {
                     tracing::info!("no ec2 persistence snapshot found; starting empty");
                 }
@@ -3876,14 +3877,10 @@ async fn main() {
         .with_cloudfront(cloudfront_state.clone())
         .with_s3(s3_state.clone())
         .with_vpc_owner_lookup({
-            // The account whose EC2 state holds the VPC. VPC ids are unique,
-            // so the id alone identifies it.
+            // The account whose EC2 state holds the VPC in the given region.
             let ec2 = ec2_state.clone();
-            Arc::new(move |vpc_id: &str, _region: &str| {
-                ec2.read()
-                    .iter()
-                    .find(|(_, st)| st.vpcs.contains_key(vpc_id))
-                    .map(|(account, _)| account.to_string())
+            Arc::new(move |vpc_id: &str, region: &str| {
+                fakecloud_ec2::vpc_lookup::vpc_owner_account(&ec2, vpc_id, region)
             })
         });
     if let Some(store) = route53_snapshot_store.clone() {
@@ -7808,7 +7805,6 @@ async fn main() {
         ec2: ec2_state.clone(),
         iam: iam_state.clone(),
         cache: credentials_cache.clone(),
-        region: cli.region.clone(),
     });
     let dispatch_config = Arc::new(config);
     let app = Router::new()
@@ -10354,8 +10350,8 @@ async fn main() {
                         // real callers land under their derived account id, not
                         // the default partition.
                         let mut instances: Vec<types::Ec2Instance> = accounts
-                            .iter()
-                            .flat_map(|(_, state)| state.instances.values())
+                            .iter_regional()
+                            .flat_map(|(_, _, state)| state.instances.values())
                             .map(ec2_instance_response)
                             .collect();
                         instances.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
@@ -10376,8 +10372,8 @@ async fn main() {
                         let summary = rt.as_ref().map(|r| r.network_isolation_summary());
                         let accounts = es.read();
                         let mut instance_networks: Vec<types::Ec2InstanceNetwork> = accounts
-                            .iter()
-                            .flat_map(|(_, state)| state.instances.values())
+                            .iter_regional()
+                            .flat_map(|(_, _, state)| state.instances.values())
                             .map(|inst| {
                                 introspection::ec2_instance_network_response(inst, summary.as_ref())
                             })

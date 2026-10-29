@@ -245,7 +245,7 @@ pub(crate) fn create_client_vpn_endpoint(
     };
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -277,7 +277,7 @@ pub(crate) fn delete_client_vpn_endpoint(
     let id = require(&req.query_params, "ClientVpnEndpointId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.client_vpn_endpoints.remove(&id);
         state.tags.remove(&id);
     }
@@ -296,7 +296,9 @@ pub(crate) fn describe_client_vpn_endpoints(
     let wanted = crate::service_helpers::indexed_list(&req.query_params, "ClientVpnEndpointId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .client_vpn_endpoints
         .values()
@@ -326,7 +328,7 @@ pub(crate) fn modify_client_vpn_endpoint(
     {
         let mut accounts = svc.state.write();
         let e = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .client_vpn_endpoints
             .get_mut(&id)
             .ok_or_else(|| endpoint_not_found(&id))?;
@@ -380,7 +382,7 @@ pub(crate) fn modify_client_vpn_endpoint_authorization_policy(
 
     let mut accounts = svc.state.write();
     let e = accounts
-        .get_or_create(&req.account_id)
+        .regional_mut(&req.account_id, &req.region)
         .client_vpn_endpoints
         .get_mut(&id)
         .ok_or_else(|| endpoint_not_found(&id))?;
@@ -465,7 +467,7 @@ pub(crate) fn get_client_vpn_endpoint_authorization_policy(
     let id = require(&req.query_params, "ClientVpnEndpointId")?;
     let accounts = svc.state.read();
     let e = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.client_vpn_endpoints.get(&id))
         .ok_or_else(|| endpoint_not_found(&id))?;
     let body = if dry_run(req) {
@@ -493,7 +495,7 @@ pub(crate) fn delete_client_vpn_endpoint_authorization_policy(
     let id = require(&req.query_params, "ClientVpnEndpointId")?;
     let mut accounts = svc.state.write();
     let e = accounts
-        .get_or_create(&req.account_id)
+        .regional_mut(&req.account_id, &req.region)
         .client_vpn_endpoints
         .get_mut(&id)
         .ok_or_else(|| endpoint_not_found(&id))?;
@@ -522,7 +524,7 @@ pub(crate) fn create_client_vpn_route(
     {
         let mut accounts = svc.state.write();
         if let Some(e) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .client_vpn_endpoints
             .get_mut(&id)
         {
@@ -547,7 +549,7 @@ pub(crate) fn delete_client_vpn_route(
     {
         let mut accounts = svc.state.write();
         if let Some(e) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .client_vpn_endpoints
             .get_mut(&id)
         {
@@ -569,7 +571,7 @@ pub(crate) fn describe_client_vpn_routes(
     mr(req)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.client_vpn_endpoints.get(&id))
         .map(|e| {
             e.routes
@@ -601,7 +603,7 @@ pub(crate) fn authorize_client_vpn_ingress(
     {
         let mut accounts = svc.state.write();
         if let Some(e) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .client_vpn_endpoints
             .get_mut(&id)
         {
@@ -626,7 +628,7 @@ pub(crate) fn revoke_client_vpn_ingress(
     {
         let mut accounts = svc.state.write();
         if let Some(e) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .client_vpn_endpoints
             .get_mut(&id)
         {
@@ -648,7 +650,7 @@ pub(crate) fn describe_client_vpn_authorization_rules(
     mr(req)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.client_vpn_endpoints.get(&id))
         .map(|e| {
             e.auth_rules
@@ -689,7 +691,7 @@ pub(crate) fn associate_client_vpn_target_network(
     {
         let mut accounts = svc.state.write();
         if let Some(e) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .client_vpn_endpoints
             .get_mut(&id)
         {
@@ -717,7 +719,7 @@ pub(crate) fn disassociate_client_vpn_target_network(
     {
         let mut accounts = svc.state.write();
         if let Some(e) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .client_vpn_endpoints
             .get_mut(&id)
         {
@@ -744,7 +746,7 @@ pub(crate) fn describe_client_vpn_target_networks(
     mr(req)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.client_vpn_endpoints.get(&id))
         .map(|e| {
             e.target_networks
@@ -1208,7 +1210,7 @@ mod tests {
         {
             let mut accounts = svc.state.write();
             let policy = accounts
-                .get_or_create("000000000000")
+                .regional_mut("000000000000", "us-east-1")
                 .client_vpn_endpoints
                 .get_mut(&id)
                 .unwrap()
@@ -1236,7 +1238,10 @@ mod tests {
             modify_policy(&svc, &id, &[("ClientToken", token.as_str())]).unwrap();
         }
         let accounts = svc.state.read();
-        let kept = accounts.get("000000000000").unwrap().client_vpn_endpoints[&id]
+        let kept = accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .client_vpn_endpoints[&id]
             .authorization_policy
             .as_ref()
             .unwrap()

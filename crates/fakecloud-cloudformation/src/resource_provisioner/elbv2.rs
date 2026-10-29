@@ -48,6 +48,7 @@ impl ResourceProvisioner {
         let network = fakecloud_elbv2::network::resolve_subnets(
             &self.ec2_state,
             &self.account_id,
+            &self.region,
             &subnets,
             None,
         )
@@ -55,6 +56,7 @@ impl ResourceProvisioner {
         let security_groups = fakecloud_elbv2::network::resolve_security_groups(
             &self.ec2_state,
             &self.account_id,
+            &self.region,
             &network.vpc_id,
             &lb_type,
             &requested_groups,
@@ -589,6 +591,7 @@ impl ResourceProvisioner {
         let lb_vpc = fakecloud_elbv2::network::effective_vpc(
             &self.ec2_state,
             &self.account_id,
+            &self.region,
             &stored_vpc,
             &lb_subnets,
         );
@@ -603,6 +606,7 @@ impl ResourceProvisioner {
                 fakecloud_elbv2::network::resolve_subnets(
                     &self.ec2_state,
                     &self.account_id,
+                    &self.region,
                     &subnets,
                     expected_vpc,
                 )
@@ -624,6 +628,7 @@ impl ResourceProvisioner {
                     fakecloud_elbv2::network::resolve_security_groups(
                         &self.ec2_state,
                         &self.account_id,
+                        &self.region,
                         &lb_vpc,
                         &lb_type,
                         &requested,

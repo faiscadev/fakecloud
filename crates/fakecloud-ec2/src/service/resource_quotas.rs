@@ -589,7 +589,7 @@ pub(crate) fn usage(state: &Ec2State, quota: CountQuota) -> Option<usize> {
             state
                 .vpcs
                 .values()
-                .map(|v| usize::from(v.ipv6_cidr_block.is_some())),
+                .map(|v| usize::from(v.ipv6_cidr_block.is_some()) + v.ipv6_cidr_associations.len()),
         ),
         EGRESS_ONLY_IGWS_PER_REGION => state.egress_only_igws.len(),
         TRANSIT_GATEWAYS => state

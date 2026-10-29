@@ -372,7 +372,7 @@ pub(crate) fn create_launch_template(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // Checked under the same write lock as the insert, so two concurrent
         // creates of one name cannot both succeed.
         if state
@@ -420,7 +420,7 @@ pub(crate) fn create_launch_template_version(
     let data = collect_lt_data(&req.query_params);
     let (t, version, data) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // AWS answers an unknown template (by id or name) with its not-found
         // error rather than inventing a version.
         let key = super::launch_template::find_template(state, id.as_deref(), name.as_deref())?
@@ -486,7 +486,7 @@ pub(crate) fn delete_launch_template(
     validate_lt_strings(req)?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let t = resolve_lt(state, req);
     let tags = t
         .as_ref()
@@ -531,7 +531,7 @@ pub(crate) fn delete_launch_template_versions(
     };
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let key = resolve_lt(state, req).map(|t| t.id);
         match key.and_then(|k| state.launch_templates.get_mut(&k)) {
             None => {
@@ -608,7 +608,9 @@ pub(crate) fn describe_launch_templates(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .launch_templates
         .values()
@@ -641,7 +643,9 @@ pub(crate) fn describe_launch_template_versions(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let empty_data = BTreeMap::new();
     let selectors = indexed_list(&req.query_params, "LaunchTemplateVersion");
     let bound = |key: &str| {
@@ -877,7 +881,9 @@ pub(crate) fn get_launch_template_data(
     let id = require(&req.query_params, "InstanceId")?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let data = instance_launch_template_data(state, &id)
         .ok_or_else(|| crate::service_helpers::instance_not_found(&id))?;
     Ok(Ec2Service::respond(
@@ -894,7 +900,7 @@ pub(crate) fn modify_launch_template(
     validate_lt_strings(req)?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // `DefaultVersion` is serialized as `SetDefaultVersion` on the wire.
     let new_default = req
         .query_params
@@ -982,7 +988,7 @@ pub(crate) fn request_spot_instances(
     let mut rendered = Vec::new();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let (Some(quota), Some(t)) = (spot_quota, instance_type.as_deref()) {
             let adding = count
                 .max(1)
@@ -1016,7 +1022,9 @@ pub(crate) fn describe_spot_instance_requests(
     let wanted = indexed_list(&req.query_params, "SpotInstanceRequestId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .spot_requests
         .values()
@@ -1038,7 +1046,7 @@ pub(crate) fn cancel_spot_instance_requests(
     let ids = indexed_list(&req.query_params, "SpotInstanceRequestId");
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for id in &ids {
             if let Some(r) = state.spot_requests.get_mut(id) {
                 r.state = "cancelled".to_string();
@@ -1077,14 +1085,17 @@ pub(crate) fn request_spot_fleet(
         .unwrap_or(0);
     {
         let mut accounts = svc.state.write();
-        accounts.get_or_create(&req.account_id).spot_fleets.insert(
-            id.clone(),
-            SpotFleet {
-                id: id.clone(),
-                state: "active".to_string(),
-                target_capacity,
-            },
-        );
+        accounts
+            .regional_mut(&req.account_id, &req.region)
+            .spot_fleets
+            .insert(
+                id.clone(),
+                SpotFleet {
+                    id: id.clone(),
+                    state: "active".to_string(),
+                    target_capacity,
+                },
+            );
     }
     Ok(Ec2Service::respond(
         "RequestSpotFleet",
@@ -1100,7 +1111,9 @@ pub(crate) fn describe_spot_fleet_requests(
     let wanted = indexed_list(&req.query_params, "SpotFleetRequestId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .spot_fleets
         .values()
@@ -1139,7 +1152,7 @@ pub(crate) fn cancel_spot_fleet_requests(
     let mut items = Vec::new();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for id in &ids {
             let prev = state
                 .spot_fleets
@@ -1179,7 +1192,7 @@ pub(crate) fn modify_spot_fleet_request(
     )?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let fleet = state.spot_fleets.get_mut(&id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 http::StatusCode::BAD_REQUEST,
@@ -1335,8 +1348,9 @@ pub(crate) fn create_spot_datafeed_subscription(
     let prefix = req.query_params.get("Prefix").cloned().unwrap_or_default();
     {
         let mut accounts = svc.state.write();
-        accounts.get_or_create(&req.account_id).spot_datafeed =
-            Some((bucket.clone(), prefix.clone()));
+        accounts
+            .regional_mut(&req.account_id, &req.region)
+            .spot_datafeed = Some((bucket.clone(), prefix.clone()));
     }
     Ok(Ec2Service::respond(
         "CreateSpotDatafeedSubscription",
@@ -1354,7 +1368,9 @@ pub(crate) fn delete_spot_datafeed_subscription(
 ) -> Result<AwsResponse, AwsServiceError> {
     {
         let mut accounts = svc.state.write();
-        accounts.get_or_create(&req.account_id).spot_datafeed = None;
+        accounts
+            .regional_mut(&req.account_id, &req.region)
+            .spot_datafeed = None;
     }
     Ok(Ec2Service::respond(
         "DeleteSpotDatafeedSubscription",
@@ -1370,7 +1386,7 @@ pub(crate) fn describe_spot_datafeed_subscription(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let sub = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.spot_datafeed.clone());
     // Only emit the subscription element when one actually exists; don't
     // fabricate a phantom subscription for an account that never created one.
@@ -1418,15 +1434,18 @@ pub(crate) fn create_fleet(
         .unwrap_or(0);
     {
         let mut accounts = svc.state.write();
-        accounts.get_or_create(&req.account_id).fleets.insert(
-            id.clone(),
-            Fleet {
-                id: id.clone(),
-                state: "active".to_string(),
-                fleet_type: ftype,
-                target_capacity,
-            },
-        );
+        accounts
+            .regional_mut(&req.account_id, &req.region)
+            .fleets
+            .insert(
+                id.clone(),
+                Fleet {
+                    id: id.clone(),
+                    state: "active".to_string(),
+                    fleet_type: ftype,
+                    target_capacity,
+                },
+            );
     }
     let body = format!(
         "{}{}{}",
@@ -1460,7 +1479,7 @@ pub(crate) fn delete_fleets(
     let mut unsuccessful = Vec::new();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for id in &ids {
             let Some(fleet) = state.fleets.get(id).cloned() else {
                 // Unknown fleet id -> unsuccessful, not a phantom success.
@@ -1508,7 +1527,9 @@ pub(crate) fn describe_fleets(
     let wanted = indexed_list(&req.query_params, "FleetId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .fleets
         .values()
@@ -1543,7 +1564,7 @@ pub(crate) fn modify_fleet(
     )?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let fleet = state.fleets.get_mut(&id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 http::StatusCode::BAD_REQUEST,

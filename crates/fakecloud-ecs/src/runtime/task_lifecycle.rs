@@ -237,7 +237,7 @@ impl EcsRuntime {
         // the task's subnet (see `eni`), reported by DescribeTasks and
         // registered with the service's target groups.
         let eni_ip = if network_created {
-            Some(self.attach_task_eni(state, account_id, task_id))
+            Some(self.attach_task_eni(state, account_id, &region, task_id))
         } else {
             None
         };
@@ -419,7 +419,7 @@ impl EcsRuntime {
                 "UserInitiated",
                 Some("Task stopped during launch".into()),
             );
-            self.deregister_lb_targets(state, account_id, task_id);
+            self.deregister_lb_targets(state, account_id, &region, task_id);
             self.emit_state_change(
                 state,
                 account_id,
@@ -572,7 +572,7 @@ impl EcsRuntime {
             wait_outcome.stop_code,
             None,
         );
-        self.deregister_lb_targets(state, account_id, task_id);
+        self.deregister_lb_targets(state, account_id, &region, task_id);
         self.emit_state_change(
             state,
             account_id,

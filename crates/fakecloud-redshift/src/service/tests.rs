@@ -368,10 +368,15 @@ fn endpoint_access_creates_vpc_endpoint_in_subnet_group_subnets() {
     let ec2: fakecloud_ec2::SharedEc2State = Arc::new(RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
     ));
-    let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012");
+    let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012", "us-east-1");
     let vpc = subnets[0].vpc_id.clone();
-    let default_sg =
-        fakecloud_ec2::vpc_lookup::default_security_group_id(&ec2, "123456789012", &vpc).unwrap();
+    let default_sg = fakecloud_ec2::vpc_lookup::default_security_group_id(
+        &ec2,
+        "123456789012",
+        "us-east-1",
+        &vpc,
+    )
+    .unwrap();
     let svc = service().with_ec2_state(ec2.clone());
     let group = ok(
         &svc,
@@ -420,7 +425,7 @@ fn endpoint_access_creates_vpc_endpoint_in_subnet_group_subnets() {
     assert!(created.contains(&format!("<VpcId>{vpc}</VpcId>")));
     {
         let accounts = ec2.read();
-        let state = accounts.get("123456789012").unwrap();
+        let state = accounts.regional("123456789012", "us-east-1").unwrap();
         assert!(state.vpc_endpoints.contains_key(&vpce));
         let enis: Vec<_> = state
             .network_interfaces
@@ -439,7 +444,7 @@ fn endpoint_access_creates_vpc_endpoint_in_subnet_group_subnets() {
     // Deleting the endpoint removes its EC2 resources.
     ok(&svc, "DeleteEndpointAccess", &[("EndpointName", "ep")]);
     let accounts = ec2.read();
-    let state = accounts.get("123456789012").unwrap();
+    let state = accounts.regional("123456789012", "us-east-1").unwrap();
     assert!(!state.vpc_endpoints.contains_key(&vpce));
     assert!(state
         .network_interfaces
@@ -1526,11 +1531,11 @@ fn modify_cluster_subnet_group_cannot_move_vpc() {
     let ec2: fakecloud_ec2::SharedEc2State = Arc::new(RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
     ));
-    let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012");
+    let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012", "us-east-1");
     // A second VPC with one subnet.
     {
         let mut accounts = ec2.write();
-        let state = accounts.get_or_create("123456789012");
+        let state = accounts.regional_mut("123456789012", "us-east-1");
         let mut vpc = state.vpcs.values().next().unwrap().clone();
         vpc.vpc_id = "vpc-0other".into();
         vpc.is_default = false;

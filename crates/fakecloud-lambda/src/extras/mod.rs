@@ -477,7 +477,11 @@ impl LambdaService {
             )?;
         }
         let vpc_config = if body["VpcConfig"].is_object() {
-            Some(self.resolve_vpc_config(&req.account_id, body["VpcConfig"].clone())?)
+            Some(self.resolve_vpc_config(
+                &req.account_id,
+                &req.region,
+                body["VpcConfig"].clone(),
+            )?)
         } else {
             None
         };

@@ -669,7 +669,7 @@ impl MqService {
         let resolved;
         let b = match &self.ec2_state {
             Some(ec2) => {
-                resolved = shared::resolve_broker_network(ec2, &ctx.account, b)
+                resolved = shared::resolve_broker_network(ec2, &ctx.account, &ctx.region, b)
                     .map_err(|m| bad_request(&m))?;
                 &resolved
             }

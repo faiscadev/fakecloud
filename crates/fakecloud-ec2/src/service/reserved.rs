@@ -64,7 +64,9 @@ pub(crate) fn describe_reserved_instances(
     let wanted = indexed_list(&req.query_params, "ReservedInstancesId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .reserved_instances
         .values()
@@ -173,7 +175,7 @@ pub(crate) fn purchase_reserved_instances_offering(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .reserved_instances
             .insert(
                 id.clone(),
@@ -240,7 +242,7 @@ pub(crate) fn create_reserved_instances_listing(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .reserved_instances_listings
             .insert(listing.listing_id.clone(), listing);
     }
@@ -257,7 +259,7 @@ pub(crate) fn cancel_reserved_instances_listing(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "ReservedInstancesListingId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Cancel the persisted listing if present; AWS returns the (now cancelled)
     // listing either way, so synthesize one for ids we never created.
     let listing = match state.reserved_instances_listings.get_mut(&id) {
@@ -299,7 +301,9 @@ pub(crate) fn describe_reserved_instances_listings(
         .filter(|v| !v.is_empty());
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .reserved_instances_listings
         .values()
@@ -347,7 +351,9 @@ pub(crate) fn describe_reserved_instances_modifications(
     let want = indexed_list(&req.query_params, "ReservedInstancesModificationId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .reserved_instances_modifications
         .values()
@@ -382,7 +388,7 @@ pub(crate) fn modify_reserved_instances(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .reserved_instances_modifications
             .insert(mod_id.clone(), modification);
     }
@@ -498,7 +504,7 @@ pub(crate) fn allocate_hosts(
     let mut ids = Vec::new();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for _ in 0..quantity.max(1) {
             let id = gen_id("h");
             crate::service::tags::apply_tag_specifications(
@@ -549,7 +555,9 @@ pub(crate) fn describe_hosts(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .dedicated_hosts
         .values()
@@ -575,7 +583,7 @@ pub(crate) fn modify_hosts(
     let ids = indexed_list(&req.query_params, "HostId");
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for id in &ids {
             if let Some(h) = state.dedicated_hosts.get_mut(id) {
                 if let Some(v) = req.query_params.get("AutoPlacement") {
@@ -605,7 +613,7 @@ pub(crate) fn release_hosts(
     let ids = indexed_list(&req.query_params, "HostId");
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for id in &ids {
             state.dedicated_hosts.remove(id);
             state.tags.remove(id);

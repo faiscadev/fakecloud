@@ -144,11 +144,12 @@ pub fn restore_canonical_hosted_zone_ids(accounts: &mut crate::state::Elbv2Accou
 pub fn effective_vpc(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     stored_vpc: &str,
     subnet_ids: &[String],
 ) -> Option<String> {
     let mut accounts = ec2.write();
-    let state = accounts.get_or_create(account_id);
+    let state = accounts.regional_mut(account_id, region);
     if !stored_vpc.is_empty() && state.vpcs.contains_key(stored_vpc) {
         return Some(stored_vpc.to_string());
     }
@@ -162,6 +163,9 @@ pub fn effective_vpc(
 /// Returns how many were fixed.
 pub fn restore_vpc_ids(accounts: &mut crate::state::Elbv2Accounts, ec2: &SharedEc2State) -> usize {
     let mut fixed = 0;
+    // An LB ARN always names its region; the server's configured region
+    // only covers a record persisted without one.
+    let server_region = ec2.read().region().to_string();
     for (account_id, st) in accounts.iter_mut() {
         for lb in st.load_balancers.values_mut() {
             let subnets: Vec<String> = lb
@@ -169,7 +173,8 @@ pub fn restore_vpc_ids(accounts: &mut crate::state::Elbv2Accounts, ec2: &SharedE
                 .iter()
                 .map(|z| z.subnet_id.clone())
                 .collect();
-            if let Some(vpc) = effective_vpc(ec2, account_id, &lb.vpc_id, &subnets) {
+            let region = fakecloud_aws::arn::region_of(&lb.arn).unwrap_or(&server_region);
+            if let Some(vpc) = effective_vpc(ec2, account_id, region, &lb.vpc_id, &subnets) {
                 if vpc != lb.vpc_id {
                     lb.vpc_id = vpc;
                     fixed += 1;
@@ -273,11 +278,12 @@ pub struct LoadBalancerNetwork {
 pub fn resolve_subnets(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     subnets: &[SubnetRequest],
     expected_vpc: Option<&str>,
 ) -> Result<LoadBalancerNetwork, NetworkError> {
     let mut accounts = ec2.write();
-    let state = accounts.get_or_create(account_id);
+    let state = accounts.regional_mut(account_id, region);
     let ids: Vec<String> = subnets.iter().map(|s| s.subnet_id.clone()).collect();
     let resolved =
         vpc_lookup::resolve_subnets_in(state, &ids).map_err(NetworkError::SubnetNotFound)?;
@@ -364,6 +370,7 @@ pub fn resolve_subnets(
 pub fn resolve_security_groups(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     vpc_id: &str,
     lb_type: &str,
     groups: &[String],
@@ -373,12 +380,12 @@ pub fn resolve_security_groups(
             return Ok(Vec::new());
         }
         return Ok(
-            vpc_lookup::default_security_group_id(ec2, account_id, vpc_id)
+            vpc_lookup::default_security_group_id(ec2, account_id, region, vpc_id)
                 .into_iter()
                 .collect(),
         );
     }
-    let resolved = vpc_lookup::security_group_vpcs(ec2, account_id, groups)
+    let resolved = vpc_lookup::security_group_vpcs(ec2, account_id, region, groups)
         .map_err(NetworkError::SecurityGroupNotFound)?;
     if let Some((group_id, _)) = resolved.iter().find(|(_, v)| v != vpc_id) {
         return Err(NetworkError::SecurityGroupNotInVpc {

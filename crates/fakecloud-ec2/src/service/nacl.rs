@@ -100,7 +100,7 @@ pub(crate) fn create_network_acl(
     let limit = svc.enforced_count_quota(&req.account_id, &req.region, rq::NETWORK_ACLS_PER_VPC);
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         rq::check(
             limit,
             rq::network_acls_in_vpc(state, &acl.vpc_id),
@@ -136,7 +136,7 @@ pub(crate) fn delete_network_acl(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "NetworkAclId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // The default NACL of a VPC cannot be deleted — AWS returns
     // `CannotDeleteDefaultNetworkAcl` (delete-protection finding).
     if state.network_acls.get(&id).is_some_and(|a| a.is_default) {
@@ -165,7 +165,9 @@ pub(crate) fn describe_network_acls(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .network_acls
         .values()
@@ -274,7 +276,7 @@ pub(crate) fn create_network_acl_entry(
     {
         let mut accounts = svc.state.write();
         if let Some(acl) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .network_acls
             .get_mut(&id)
         {
@@ -307,7 +309,7 @@ pub(crate) fn replace_network_acl_entry(
     {
         let mut accounts = svc.state.write();
         if let Some(acl) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .network_acls
             .get_mut(&id)
         {
@@ -362,7 +364,7 @@ pub(crate) fn delete_network_acl_entry(
     {
         let mut accounts = svc.state.write();
         if let Some(acl) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .network_acls
             .get_mut(&id)
         {
@@ -387,7 +389,7 @@ pub(crate) fn replace_network_acl_association(
     let new_id = gen_id("aclassoc");
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // Resolve the source association's subnet read-only BEFORE mutating.
         // Only move the association when both the source association and the
         // destination ACL actually exist — otherwise leave state untouched
@@ -489,7 +491,7 @@ pub(crate) fn create_vpc_peering_connection(
     );
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         rq::check(
             limit,
             rq::outstanding_peering_requests(state),
@@ -528,7 +530,7 @@ pub(crate) fn delete_vpc_peering_connection(
     let id = require(&req.query_params, "VpcPeeringConnectionId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.vpc_peerings.remove(&id);
         state.tags.remove(&id);
     }
@@ -548,7 +550,9 @@ pub(crate) fn describe_vpc_peering_connections(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .vpc_peerings
         .values()
@@ -572,7 +576,7 @@ pub(crate) fn accept_vpc_peering_connection(
     let limit = svc.enforced_count_quota(&req.account_id, &req.region, rq::ACTIVE_PEERINGS_PER_VPC);
     let (p, tags) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(current) = state.vpc_peerings.get(&id) {
             if current.status != "pending-acceptance" {
                 return Err(AwsServiceError::aws_error(
@@ -641,7 +645,7 @@ pub(crate) fn reject_vpc_peering_connection(
     {
         let mut accounts = svc.state.write();
         if let Some(p) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .vpc_peerings
             .get_mut(&id)
         {
@@ -671,7 +675,7 @@ pub(crate) fn modify_vpc_peering_connection_options(
     // Persist whichever side was supplied; echo back the resulting options.
     let (requester, accepter) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(p) = state.vpc_peerings.get_mut(&id) {
             if let Some(v) = req_dns {
                 p.requester_allow_dns = v;

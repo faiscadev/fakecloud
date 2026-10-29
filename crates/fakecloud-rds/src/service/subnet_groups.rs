@@ -18,6 +18,7 @@ impl RdsService {
                 let placed = fakecloud_ec2::vpc_lookup::resolve_subnet_group(
                     ec2,
                     &request.account_id,
+                    &request.region,
                     subnet_ids,
                 )
                 .map_err(|e| {
@@ -244,6 +245,7 @@ impl RdsService {
             if !fakecloud_ec2::vpc_lookup::subnet_group_vpc_change_allowed(
                 ec2,
                 &request.account_id,
+                &request.region,
                 &subnet_group.vpc_id,
                 &vpc_id,
             ) {

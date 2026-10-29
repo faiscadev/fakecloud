@@ -62,7 +62,7 @@ pub(crate) fn delete_carrier_gateway(
     let id = require(&req.query_params, "CarrierGatewayId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let c = state
         .carrier_gateways
         .remove(&id)
@@ -90,7 +90,9 @@ pub(crate) fn describe_carrier_gateways(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .carrier_gateways
         .values()
@@ -113,7 +115,7 @@ fn ins(
     f: impl FnOnce(&mut Ec2State),
 ) -> Vec<Tag> {
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     crate::service::tags::apply_tag_specifications(state, &req.query_params, id, resource);
     f(state);
     state.tags_for(id).to_vec()
@@ -175,7 +177,7 @@ pub(crate) fn delete_coip_pool(
     let id = require(&req.query_params, "CoipPoolId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let p = state.coip_pools.remove(&id).unwrap_or(CoipPool {
         id: id.clone(),
         route_table_id: "lgw-rtb-0".to_string(),
@@ -201,7 +203,9 @@ pub(crate) fn describe_coip_pools(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .coip_pools
         .values()
@@ -239,7 +243,7 @@ pub(crate) fn create_coip_cidr(
     let pool = require(&req.query_params, "CoipPoolId")?;
     let rt = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state
             .coip_pool_cidrs
             .entry(pool.clone())
@@ -266,7 +270,7 @@ pub(crate) fn delete_coip_cidr(
     let pool = require(&req.query_params, "CoipPoolId")?;
     let rt = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(cs) = state.coip_pool_cidrs.get_mut(&pool) {
             cs.retain(|c| c != &cidr);
         }
@@ -356,7 +360,7 @@ pub(crate) fn delete_local_gateway_route_table(
     let id = require(&req.query_params, "LocalGatewayRouteTableId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let rt = state
         .lg_route_tables
         .remove(&id)
@@ -386,7 +390,9 @@ pub(crate) fn describe_local_gateway_route_tables(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .lg_route_tables
         .values()
@@ -428,7 +434,7 @@ pub(crate) fn create_local_gateway_route(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .lg_routes
             .entry(rt.clone())
             .or_default()
@@ -457,7 +463,7 @@ pub(crate) fn delete_local_gateway_route(
     {
         let mut accounts = svc.state.write();
         if let Some(rs) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .lg_routes
             .get_mut(&rt)
         {
@@ -502,7 +508,7 @@ pub(crate) fn search_local_gateway_routes(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.lg_routes.get(&rt))
         .map(|rs| {
             rs.iter()
@@ -569,7 +575,7 @@ pub(crate) fn delete_local_gateway_route_table_vpc_association(
     let id = require(&req.query_params, "LocalGatewayRouteTableVpcAssociationId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let a = state
         .lg_rt_vpc_assocs
         .remove(&id)
@@ -598,7 +604,9 @@ pub(crate) fn describe_local_gateway_route_table_vpc_associations(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .lg_rt_vpc_assocs
         .values()
@@ -665,7 +673,7 @@ pub(crate) fn delete_local_gateway_virtual_interface(
     let id = require(&req.query_params, "LocalGatewayVirtualInterfaceId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let v = state
         .lg_virtual_interfaces
         .remove(&id)
@@ -696,7 +704,9 @@ pub(crate) fn describe_local_gateway_virtual_interfaces(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .lg_virtual_interfaces
         .values()
@@ -757,7 +767,7 @@ pub(crate) fn delete_local_gateway_virtual_interface_group(
     let id = require(&req.query_params, "LocalGatewayVirtualInterfaceGroupId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let g = state
         .lg_vif_groups
         .remove(&id)
@@ -785,7 +795,9 @@ pub(crate) fn describe_local_gateway_virtual_interface_groups(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .lg_vif_groups
         .values()
@@ -850,7 +862,7 @@ pub(crate) fn delete_local_gateway_route_table_virtual_interface_group_associati
     )?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let a = state
         .lg_rt_vifg_assocs
         .remove(&id)
@@ -872,7 +884,9 @@ pub(crate) fn describe_local_gateway_route_table_virtual_interface_group_associa
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .lg_rt_vifg_assocs
         .values()

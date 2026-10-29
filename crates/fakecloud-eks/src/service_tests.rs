@@ -3306,7 +3306,7 @@ fn make_ec2_state() -> fakecloud_ec2::SharedEc2State {
 /// A subnet EC2 knows about (from the seeded default VPC) and its VPC.
 fn ec2_subnet(ec2: &fakecloud_ec2::SharedEc2State) -> (String, String) {
     let mut accounts = ec2.write();
-    let state = accounts.get_or_create("111122223333");
+    let state = accounts.regional_mut("111122223333", "us-east-1");
     let subnet = state.subnets.values().next().expect("default subnet");
     (subnet.subnet_id.clone(), subnet.vpc_id.clone())
 }
@@ -3332,7 +3332,7 @@ async fn create_cluster_creates_cluster_security_group_in_ec2() {
 
     {
         let accounts = ec2.read();
-        let state = accounts.get("111122223333").unwrap();
+        let state = accounts.regional("111122223333", "us-east-1").unwrap();
         let sg = state.security_groups.get(&sg_id).expect("SG exists in EC2");
         assert!(sg.group_name.starts_with("eks-cluster-sg-demo-"));
         assert_eq!(sg.vpc_id, vpc_id);
@@ -3385,7 +3385,7 @@ async fn create_cluster_creates_cluster_security_group_in_ec2() {
         .await
         .unwrap();
     let accounts = ec2.read();
-    let state = accounts.get("111122223333").unwrap();
+    let state = accounts.regional("111122223333", "us-east-1").unwrap();
     assert!(!state.security_groups.contains_key(&sg_id));
     assert!(state.tags_for(&sg_id).is_empty());
 }
@@ -3402,8 +3402,49 @@ async fn create_cluster_with_unknown_subnets_still_creates_security_group() {
     let cfg = &v["cluster"]["resourcesVpcConfig"];
     let sg_id = cfg["clusterSecurityGroupId"].as_str().unwrap();
     let accounts = ec2.read();
-    let sg = &accounts.get("111122223333").unwrap().security_groups[sg_id];
+    let sg = &accounts
+        .regional("111122223333", "us-east-1")
+        .unwrap()
+        .security_groups[sg_id];
     assert_eq!(cfg["vpcId"], sg.vpc_id.as_str());
+}
+
+/// A restored cluster whose ARN names no region gets its group in the
+/// server's configured region, not a hardcoded one.
+#[tokio::test]
+async fn restore_places_region_less_cluster_group_in_server_region() {
+    let eks = make_state();
+    let svc = EksService::new(eks.clone());
+    let resp = svc
+        .handle(make_request(
+            Method::POST,
+            "/clusters",
+            &create_body("noregion"),
+        ))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let sg_id = v["cluster"]["resourcesVpcConfig"]["clusterSecurityGroupId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    {
+        let mut accounts = eks.write();
+        let st = accounts.get_mut("111122223333").unwrap();
+        let cluster = st.clusters.values_mut().next().unwrap();
+        cluster.arn = "arn:aws:eks::111122223333:cluster/noregion".to_string();
+    }
+    let ec2: fakecloud_ec2::SharedEc2State = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("111122223333", "eu-west-1", ""),
+    ));
+    assert_eq!(crate::restore_cluster_security_groups(&eks, &ec2), 1);
+    let accounts = ec2.read();
+    assert!(accounts
+        .regional("111122223333", "eu-west-1")
+        .unwrap()
+        .security_groups
+        .contains_key(&sg_id));
+    assert!(accounts.regional("111122223333", "us-east-1").is_none());
 }
 
 #[tokio::test]
@@ -3429,7 +3470,7 @@ async fn restore_recreates_security_group_for_clusters_saved_without_one() {
     assert_eq!(crate::restore_cluster_security_groups(&eks, &ec2), 1);
     {
         let accounts = ec2.read();
-        let state = accounts.get("111122223333").unwrap();
+        let state = accounts.regional("111122223333", "us-east-1").unwrap();
         let sg = state.security_groups.get(&sg_id).expect("group recreated");
         assert_eq!(sg.vpc_id, vpc_id);
         assert!(sg.group_name.starts_with("eks-cluster-sg-legacy-"));
@@ -3451,7 +3492,7 @@ async fn restore_recreates_security_group_for_clusters_saved_without_one() {
         .await
         .unwrap();
     let accounts = ec2.read();
-    let state = accounts.get("111122223333").unwrap();
+    let state = accounts.regional("111122223333", "us-east-1").unwrap();
     assert!(!state.security_groups.contains_key(&sg_id));
 }
 

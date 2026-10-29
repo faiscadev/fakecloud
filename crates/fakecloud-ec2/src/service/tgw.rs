@@ -96,7 +96,7 @@ pub(crate) fn create_transit_gateway(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -124,7 +124,7 @@ pub(crate) fn delete_transit_gateway(
     let id = require(&req.query_params, "TransitGatewayId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let t = state
         .transit_gateways
         .remove(&id)
@@ -155,7 +155,9 @@ pub(crate) fn describe_transit_gateways(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .transit_gateways
         .values()
@@ -177,7 +179,7 @@ pub(crate) fn modify_transit_gateway(
     let id = require(&req.query_params, "TransitGatewayId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     if let Some(d) = req.query_params.get("Description") {
         if let Some(t) = state.transit_gateways.get_mut(&id) {
             t.description = d.clone();
@@ -237,7 +239,7 @@ pub(crate) fn create_transit_gateway_vpc_attachment(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -261,7 +263,7 @@ pub(crate) fn create_transit_gateway_vpc_attachment(
 fn att_lookup(svc: &Ec2Service, req: &AwsRequest, id: &str) -> TgwAttachment {
     svc.state
         .read()
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.tgw_attachments.get(id).cloned())
         .unwrap_or(TgwAttachment {
             id: id.to_string(),
@@ -283,7 +285,7 @@ pub(crate) fn delete_transit_gateway_vpc_attachment(
     a.state = "deleting".to_string();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.tgw_attachments.remove(&id);
         state.tags.remove(&id);
     }
@@ -311,7 +313,7 @@ fn modify_accept_reject_vpc_att(
         // Persist the state transition so a later Describe* reflects it.
         let mut accounts = svc.state.write();
         if let Some(stored) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_attachments
             .get_mut(&id)
         {
@@ -339,7 +341,7 @@ pub(crate) fn modify_transit_gateway_vpc_attachment(
     {
         let mut accounts = svc.state.write();
         let stored = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_attachments
             .get_mut(&id)
             .ok_or_else(|| {
@@ -388,7 +390,9 @@ pub(crate) fn describe_transit_gateway_vpc_attachments(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .tgw_attachments
         .values()
@@ -411,7 +415,9 @@ pub(crate) fn describe_transit_gateway_attachments(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .tgw_attachments
         .values()
@@ -462,7 +468,7 @@ pub(crate) fn create_transit_gateway_route_table(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -489,7 +495,7 @@ pub(crate) fn delete_transit_gateway_route_table(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "TransitGatewayRouteTableId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let r = state.tgw_route_tables.remove(&id).unwrap_or(TgwRouteTable {
         id: id.clone(),
         tgw_id: "tgw-0".to_string(),
@@ -518,7 +524,9 @@ pub(crate) fn describe_transit_gateway_route_tables(
     let wanted = indexed_list(&req.query_params, "TransitGatewayRouteTableId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .tgw_route_tables
         .values()
@@ -550,7 +558,7 @@ pub(crate) fn associate_transit_gateway_route_table(
     {
         let mut accounts = svc.state.write();
         let assocs = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_rt_associations
             .entry(rt.clone())
             .or_default();
@@ -574,7 +582,7 @@ pub(crate) fn disassociate_transit_gateway_route_table(
     {
         let mut accounts = svc.state.write();
         if let Some(assocs) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_rt_associations
             .get_mut(&rt)
         {
@@ -615,7 +623,7 @@ pub(crate) fn enable_transit_gateway_route_table_propagation(
     {
         let mut accounts = svc.state.write();
         let props = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_rt_propagations
             .entry(rt.clone())
             .or_default();
@@ -646,7 +654,7 @@ pub(crate) fn disable_transit_gateway_route_table_propagation(
     {
         let mut accounts = svc.state.write();
         if let Some(props) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_rt_propagations
             .get_mut(&rt)
         {
@@ -697,7 +705,7 @@ pub(crate) fn create_transit_gateway_route(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_routes
             .entry(rt)
             .or_default()
@@ -724,7 +732,7 @@ pub(crate) fn delete_transit_gateway_route(
     {
         let mut accounts = svc.state.write();
         if let Some(routes) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_routes
             .get_mut(&rt)
         {
@@ -760,7 +768,7 @@ pub(crate) fn replace_transit_gateway_route(
     {
         let mut accounts = svc.state.write();
         let routes = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_routes
             .entry(rt)
             .or_default();
@@ -782,7 +790,7 @@ pub(crate) fn search_transit_gateway_routes(
     mr(req)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.tgw_routes.get(&rt))
         .map(|routes| routes.iter().map(route_xml).collect())
         .unwrap_or_default();
@@ -818,7 +826,7 @@ pub(crate) fn get_transit_gateway_route_table_associations(
     mr(req)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.tgw_rt_associations.get(&rt))
         .map(|atts| atts.iter().map(|att| association_xml(&rt, att)).collect())
         .unwrap_or_default();
@@ -837,7 +845,7 @@ pub(crate) fn get_transit_gateway_route_table_propagations(
     mr(req)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.tgw_rt_propagations.get(&rt))
         .map(|atts| {
             atts.iter()
@@ -862,7 +870,7 @@ pub(crate) fn get_transit_gateway_attachment_propagations(
     // for deterministic output (the backing map iterates in arbitrary order).
     let accounts = svc.state.read();
     let mut items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .map(|s| {
             s.tgw_rt_propagations
                 .iter()
@@ -921,7 +929,7 @@ fn plr_cud(
     {
         let mut accounts = svc.state.write();
         let refs = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_prefix_list_refs
             .entry(rt.clone())
             .or_default();
@@ -952,7 +960,7 @@ pub(crate) fn get_transit_gateway_prefix_list_references(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.tgw_prefix_list_refs.get(&rt))
         .map(|pls| pls.iter().map(|pl| plr_xml(&rt, pl, &owner)).collect())
         .unwrap_or_default();
@@ -1054,7 +1062,7 @@ mod modify_tests {
         {
             let mut accounts = svc.state.write();
             accounts
-                .get_or_create("000000000000")
+                .regional_mut("000000000000", "us-east-1")
                 .tgw_attachments
                 .insert(
                     "tgw-attach-1".to_string(),
@@ -1082,7 +1090,10 @@ mod modify_tests {
         .unwrap();
 
         let accounts = svc.state.read();
-        let a = &accounts.get("000000000000").unwrap().tgw_attachments["tgw-attach-1"];
+        let a = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .tgw_attachments["tgw-attach-1"];
         assert_eq!(a.subnet_ids, vec!["subnet-b".to_string()]);
     }
 

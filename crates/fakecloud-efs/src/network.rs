@@ -98,9 +98,10 @@ pub struct MountTargetNetwork {
 pub fn resolve_subnet(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     subnet_id: &str,
 ) -> Result<SubnetInfo, NetworkError> {
-    vpc_lookup::resolve_subnets(ec2, account_id, &[subnet_id.to_string()])
+    vpc_lookup::resolve_subnets(ec2, account_id, region, &[subnet_id.to_string()])
         .map(|mut v| v.remove(0))
         .map_err(NetworkError::SubnetNotFound)
 }
@@ -110,6 +111,7 @@ pub fn resolve_subnet(
 pub fn resolve_security_groups(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     vpc_id: &str,
     groups: &[String],
 ) -> Result<Vec<String>, NetworkError> {
@@ -118,12 +120,12 @@ pub fn resolve_security_groups(
     }
     if groups.is_empty() {
         return Ok(
-            vpc_lookup::default_security_group_id(ec2, account_id, vpc_id)
+            vpc_lookup::default_security_group_id(ec2, account_id, region, vpc_id)
                 .into_iter()
                 .collect(),
         );
     }
-    let resolved = vpc_lookup::security_group_vpcs(ec2, account_id, groups)
+    let resolved = vpc_lookup::security_group_vpcs(ec2, account_id, region, groups)
         .map_err(NetworkError::SecurityGroupNotFound)?;
     if let Some((group_id, _)) = resolved.iter().find(|(_, v)| v != vpc_id) {
         return Err(NetworkError::SecurityGroupNotInVpc {
@@ -136,9 +138,11 @@ pub fn resolve_security_groups(
 
 /// Create the mount target's network interface in `subnet` with `groups`
 /// (already validated by [`resolve_security_groups`]).
+#[allow(clippy::too_many_arguments)]
 pub fn create_mount_target_eni(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     file_system_id: &str,
     mount_target_id: &str,
     subnet: &SubnetInfo,
@@ -146,7 +150,7 @@ pub fn create_mount_target_eni(
     ip_address: Option<&str>,
 ) -> Result<MountTargetNetwork, NetworkError> {
     let mut accounts = ec2.write();
-    let state = accounts.get_or_create(account_id);
+    let state = accounts.regional_mut(account_id, region);
     let (eni_id, ip) = vpc_lookup::create_service_eni(
         state,
         ServiceEni {
@@ -181,28 +185,34 @@ pub fn create_mount_target_eni(
 pub fn set_mount_target_eni_groups(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     eni_id: &str,
     groups: &[String],
 ) {
     let mut accounts = ec2.write();
-    let state = accounts.get_or_create(account_id);
+    let state = accounts.regional_mut(account_id, region);
     if let Some(eni) = state.network_interfaces.get_mut(eni_id) {
         eni.group_ids = groups.to_vec();
     }
 }
 
 /// Delete a mount target's network interface.
-pub fn delete_mount_target_eni(ec2: &SharedEc2State, account_id: &str, eni_id: &str) {
+pub fn delete_mount_target_eni(ec2: &SharedEc2State, account_id: &str, region: &str, eni_id: &str) {
     let mut accounts = ec2.write();
-    let state = accounts.get_or_create(account_id);
+    let state = accounts.regional_mut(account_id, region);
     vpc_lookup::delete_service_eni(state, eni_id);
 }
 
 /// The VPC id of an existing mount target's network interface, for validating
 /// replacement security groups.
-pub fn eni_vpc_id(ec2: &SharedEc2State, account_id: &str, eni_id: &str) -> Option<String> {
+pub fn eni_vpc_id(
+    ec2: &SharedEc2State,
+    account_id: &str,
+    region: &str,
+    eni_id: &str,
+) -> Option<String> {
     let mut accounts = ec2.write();
-    let state = accounts.get_or_create(account_id);
+    let state = accounts.regional_mut(account_id, region);
     state
         .network_interfaces
         .get(eni_id)

@@ -114,9 +114,13 @@ impl MemoryDbService {
         let Some(ec2) = &self.ec2_state else {
             return Ok(("vpc-00000000".to_string(), Vec::new()));
         };
-        let placed =
-            fakecloud_ec2::vpc_lookup::resolve_subnet_group(ec2, &req.account_id, subnet_ids)
-                .map_err(|e| fault("InvalidSubnet", &e.message()))?;
+        let placed = fakecloud_ec2::vpc_lookup::resolve_subnet_group(
+            ec2,
+            &req.account_id,
+            &req.region,
+            subnet_ids,
+        )
+        .map_err(|e| fault("InvalidSubnet", &e.message()))?;
         let zones = placed.availability_zones();
         Ok((placed.vpc_id, zones))
     }
@@ -1396,6 +1400,7 @@ impl MemoryDbService {
                 if !fakecloud_ec2::vpc_lookup::subnet_group_vpc_change_allowed(
                     ec2,
                     &req.account_id,
+                    &req.region,
                     &g.vpc_id,
                     &vpc_id,
                 ) {
@@ -1436,10 +1441,9 @@ impl MemoryDbService {
         let cluster_name = req_str(&b, "ClusterName")?.to_string();
         let snap_name = req_str(&b, "SnapshotName")?.to_string();
         // A cluster without its own subnet group lives in the default VPC.
-        let default_vpc = self
-            .ec2_state
-            .as_ref()
-            .and_then(|ec2| fakecloud_ec2::vpc_lookup::default_vpc_id(ec2, &req.account_id));
+        let default_vpc = self.ec2_state.as_ref().and_then(|ec2| {
+            fakecloud_ec2::vpc_lookup::default_vpc_id(ec2, &req.account_id, &req.region)
+        });
         let mut accounts = self.state.write();
         let st = accounts.region_state_mut(&req.account_id, &req.region);
         if st.snapshots.contains_key(&snap_name) {

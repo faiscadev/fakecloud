@@ -17,7 +17,7 @@ fn byoip_cidr_xml(c: &ByoipCidr) -> String {
 /// render it. Shared by advertise/withdraw so each op round-trips.
 fn set_byoip_state(svc: &Ec2Service, req: &AwsRequest, cidr: &str, state: &str) -> ByoipCidr {
     let mut accounts = svc.state.write();
-    let account = accounts.get_or_create(&req.account_id);
+    let account = accounts.regional_mut(&req.account_id, &req.region);
     let entry = account
         .byoip_cidrs
         .entry(cidr.to_string())
@@ -53,7 +53,7 @@ pub(crate) fn deprovision_byoip_cidr(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .byoip_cidrs
             .remove(&cidr);
     }
@@ -73,7 +73,9 @@ pub(crate) fn describe_byoip_cidrs(
     validate_max_results(&req.query_params, 1, 100)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state.byoip_cidrs.values().map(byoip_cidr_xml).collect();
     Ok(Ec2Service::respond(
         "DescribeByoipCidrs",
@@ -99,7 +101,7 @@ pub(crate) fn provision_byoip_cidr(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .byoip_cidrs
             .insert(cidr, c.clone());
     }

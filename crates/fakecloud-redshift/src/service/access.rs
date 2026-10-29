@@ -401,6 +401,7 @@ impl RedshiftService {
                 let subnets = fakecloud_ec2::vpc_lookup::resolve_subnets(
                     ec2,
                     &req.account_id,
+                    &req.region,
                     &subnet_ids,
                 )
                 .map_err(|id| {
@@ -415,12 +416,13 @@ impl RedshiftService {
                         fakecloud_ec2::vpc_lookup::default_security_group_id(
                             ec2,
                             &req.account_id,
+                            &req.region,
                             &group_vpc,
                         ),
                     );
                 }
                 let mut accounts = ec2.write();
-                let state = accounts.get_or_create(&req.account_id);
+                let state = accounts.regional_mut(&req.account_id, &req.region);
                 let created = fakecloud_ec2::vpc_lookup::create_service_endpoint(
                     state,
                     &group_vpc,
@@ -445,7 +447,7 @@ impl RedshiftService {
             if let (Some(ec2), Some(v)) = (&self.ec2_state, &vpc_endpoint) {
                 let mut accounts = ec2.write();
                 fakecloud_ec2::vpc_lookup::delete_service_endpoint(
-                    accounts.get_or_create(&req.account_id),
+                    accounts.regional_mut(&req.account_id, &req.region),
                     v,
                 );
             }
@@ -551,7 +553,7 @@ impl RedshiftService {
         if let (Some(ec2), Some(v)) = (&self.ec2_state, &e.vpc_endpoint) {
             let mut accounts = ec2.write();
             fakecloud_ec2::vpc_lookup::delete_service_endpoint(
-                accounts.get_or_create(&req.account_id),
+                accounts.regional_mut(&req.account_id, &req.region),
                 v,
             );
         }

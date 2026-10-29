@@ -2052,7 +2052,8 @@ mod tests {
         // Two real EC2 instances were launched and are running.
         let running: Vec<String> = ec2_state
             .read()
-            .default_ref()
+            .regional(account, "us-east-1")
+            .unwrap()
             .instances
             .iter()
             .filter(|(_, i)| i.state_name != "terminated")
@@ -2070,7 +2071,12 @@ mod tests {
         let ec2 = ec2_state.read();
         for id in &running {
             assert_eq!(
-                ec2.default_ref().instances.get(id).unwrap().state_name,
+                ec2.regional(account, "us-east-1")
+                    .unwrap()
+                    .instances
+                    .get(id)
+                    .unwrap()
+                    .state_name,
                 "terminated",
                 "instance {id} must be terminated by ForceDelete"
             );
@@ -2360,7 +2366,7 @@ mod tests {
 
     fn ec2_view(state: &fakecloud_ec2::SharedEc2State, ids: &[String]) -> Ec2View {
         let accounts = state.read();
-        let st = accounts.get("123456789012").unwrap();
+        let st = accounts.regional("123456789012", "us-east-1").unwrap();
         ids.iter()
             .map(|id| {
                 let i = &st.instances[id];
@@ -2514,7 +2520,7 @@ mod tests {
         assert_eq!(vols, vec![(16, true), (100, false)]);
         let accounts = ec2.read();
         assert!(accounts
-            .get("123456789012")
+            .regional("123456789012", "us-east-1")
             .unwrap()
             .iam_instance_profile_associations
             .values()
@@ -2812,7 +2818,7 @@ mod tests {
         .unwrap();
         let ids = group_instance_ids(&s, "g");
         let accounts = ec2.read();
-        let st = accounts.get("123456789012").unwrap();
+        let st = accounts.regional("123456789012", "us-east-1").unwrap();
         let mut got: Vec<(String, Option<String>)> = ids
             .iter()
             .map(|id| {

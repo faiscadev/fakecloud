@@ -1312,16 +1312,19 @@ impl LambdaService {
     pub(crate) fn resolve_vpc_config(
         &self,
         account_id: &str,
+        region: &str,
         cfg: Value,
     ) -> Result<Value, AwsServiceError> {
         match &self.ec2_state {
-            Some(ec2) => crate::vpc::resolve_vpc_config(ec2, account_id, &cfg).map_err(|m| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterValueException",
-                    m,
-                )
-            }),
+            Some(ec2) => {
+                crate::vpc::resolve_vpc_config(ec2, account_id, region, &cfg).map_err(|m| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValueException",
+                        m,
+                    )
+                })
+            }
             None => Ok(cfg),
         }
     }

@@ -186,10 +186,15 @@ impl DmsService {
                 .collect();
             return Ok((String::new(), subnets));
         };
-        let placed = fakecloud_ec2::vpc_lookup::resolve_subnet_group(ec2, &ctx.account, subnet_ids)
-            .map_err(|e| {
-                AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidSubnet", e.message())
-            })?;
+        let placed = fakecloud_ec2::vpc_lookup::resolve_subnet_group(
+            ec2,
+            &ctx.account,
+            &ctx.region,
+            subnet_ids,
+        )
+        .map_err(|e| {
+            AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidSubnet", e.message())
+        })?;
         if placed.distinct_availability_zones() < 2 {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -205,7 +210,8 @@ impl DmsService {
     fn default_subnet_group(&self, ctx: &Ctx) -> Value {
         let (vpc_id, subnets) = match &self.ec2_state {
             Some(ec2) => {
-                let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(ec2, &ctx.account);
+                let subnets =
+                    fakecloud_ec2::vpc_lookup::default_vpc_subnets(ec2, &ctx.account, &ctx.region);
                 (
                     subnets
                         .first()
@@ -1824,6 +1830,7 @@ impl DmsService {
             if !fakecloud_ec2::vpc_lookup::subnet_group_vpc_change_allowed(
                 ec2,
                 &ctx.account,
+                &ctx.region,
                 existing,
                 &vpc_id,
             ) {

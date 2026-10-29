@@ -233,10 +233,19 @@ mod tests {
         let ec2_bytes = ec2_cell.lock().clone().expect("ec2 snapshot written");
         let ec2_snap: fakecloud_ec2::Ec2Snapshot = serde_json::from_slice(&ec2_bytes).unwrap();
         let ec2_accounts = ec2_snap.accounts.expect("ec2 multi-account snapshot");
-        let in_memory = ec2_state.read().default_ref().instances.len();
+        let in_memory = ec2_state
+            .read()
+            .regional(account, "us-east-1")
+            .unwrap()
+            .instances
+            .len();
         assert_eq!(in_memory, 2, "reconcile must create 2 EC2 records");
         assert_eq!(
-            ec2_accounts.default_ref().instances.len(),
+            ec2_accounts
+                .regional(account, "us-east-1")
+                .unwrap()
+                .instances
+                .len(),
             in_memory,
             "ASG-launched EC2 records must be persisted (bug #2)"
         );
@@ -270,7 +279,8 @@ mod tests {
         .await;
         let ids: Vec<String> = ec2_state
             .read()
-            .default_ref()
+            .regional(account, "us-east-1")
+            .unwrap()
             .instances
             .keys()
             .cloned()
@@ -298,14 +308,19 @@ mod tests {
         let ec2_snap: fakecloud_ec2::Ec2Snapshot = serde_json::from_slice(&ec2_bytes).unwrap();
         let persisted = ec2_snap.accounts.expect("ec2 multi-account snapshot");
         for id in &ids {
-            let live = ec2_state.read().default_ref().instances[id].clone();
+            let live = ec2_state
+                .read()
+                .regional(account, "us-east-1")
+                .unwrap()
+                .instances[id]
+                .clone();
             assert!(
                 live.state_code >= 32,
                 "{id} must be shutting down or terminated, got {}",
                 live.state_name
             );
             assert_eq!(
-                persisted.default_ref().instances[id].state_name,
+                persisted.regional(account, "us-east-1").unwrap().instances[id].state_name,
                 live.state_name,
                 "terminated state of {id} must be persisted"
             );

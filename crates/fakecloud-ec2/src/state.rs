@@ -11,26 +11,103 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-/// Shared, account-partitioned EC2 state handle.
-pub type SharedEc2State = Arc<RwLock<fakecloud_core::multi_account::MultiAccountState<Ec2State>>>;
+/// Shared, (account, region)-partitioned EC2 state handle.
+pub type SharedEc2State = Arc<RwLock<fakecloud_core::multi_account::MultiRegionState<Ec2State>>>;
 
-/// On-disk snapshot envelope for EC2 state. Versioned so format changes fail
-/// loudly on upgrade rather than silently mis-parsing. Backing containers are
-/// not serialized -- on restore the server reconciles them via
-/// `Ec2Service::recover_persisted_containers`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Ec2Snapshot {
-    pub schema_version: u32,
-    #[serde(default)]
-    pub accounts: Option<fakecloud_core::multi_account::MultiAccountState<Ec2State>>,
-}
+/// On-disk snapshot envelope for EC2 state.
+pub type Ec2Snapshot = fakecloud_core::multi_account::RegionalSnapshot<Ec2State>;
 
-pub const EC2_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const EC2_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 impl fakecloud_core::multi_account::AccountState for Ec2State {
     fn new_for_account(account_id: &str, region: &str, _endpoint: &str) -> Self {
         Self::new(account_id, region)
     }
+}
+
+impl fakecloud_core::multi_account::SplitByRegion for Ec2State {
+    /// A pre-regional state is the account's whole EC2 world, which every
+    /// region saw, so it moves unchanged into the server's configured region
+    /// (lossless: nothing is split or dropped). Other regions start fresh,
+    /// each with its own default network.
+    fn split_by_region(mut self, into: &mut fakecloud_core::multi_account::RegionalState<Self>) {
+        let home = into.default_region().to_string();
+        self.region = home.clone();
+        into.insert_region(&home, self);
+    }
+}
+
+/// The shape a v1 snapshot stored: one account-wide state per account.
+#[derive(Deserialize)]
+struct LegacyEc2Snapshot {
+    #[serde(default)]
+    accounts: Option<fakecloud_core::multi_account::MultiAccountState<Ec2State>>,
+    #[serde(default)]
+    state: Option<Ec2State>,
+}
+
+#[derive(Deserialize)]
+struct Ec2SnapshotVersion {
+    schema_version: u32,
+}
+
+/// Parse a persisted EC2 snapshot. A v1 snapshot (one account-wide state per
+/// account) is migrated into a container routed with the server's
+/// `default_account_id`, `region` and `endpoint`: each account's whole legacy
+/// state moves unchanged into the configured `region`, since before regional
+/// partitioning every region was served from that one state. Other regions
+/// start fresh.
+pub fn parse_ec2_snapshot(
+    bytes: &[u8],
+    default_account_id: &str,
+    region: &str,
+    endpoint: &str,
+) -> Result<Ec2Snapshot, serde_json::Error> {
+    use fakecloud_core::multi_account::{MultiRegionState, RegionalState};
+    let Ec2SnapshotVersion { schema_version } = serde_json::from_slice(bytes)?;
+    if schema_version > EC2_SNAPSHOT_SCHEMA_VERSION {
+        return Ok(Ec2Snapshot {
+            schema_version,
+            accounts: None,
+            state: None,
+        });
+    }
+    if schema_version == EC2_SNAPSHOT_SCHEMA_VERSION {
+        return serde_json::from_slice(bytes);
+    }
+    let legacy: LegacyEc2Snapshot = serde_json::from_slice(bytes)?;
+    if legacy.accounts.is_none() && legacy.state.is_none() {
+        return Ok(Ec2Snapshot {
+            schema_version: EC2_SNAPSHOT_SCHEMA_VERSION,
+            accounts: None,
+            state: None,
+        });
+    }
+    let mut out: MultiRegionState<Ec2State> =
+        MultiRegionState::new(default_account_id, region, endpoint);
+    let mut add = |account: String, state: Ec2State| {
+        let regional = RegionalState::from_legacy(&account, region, endpoint, state);
+        *out.get_or_create(&account) = regional;
+    };
+    if let Some(mut accounts) = legacy.accounts {
+        let ids: Vec<String> = accounts.iter().map(|(id, _)| id.to_string()).collect();
+        for id in ids {
+            if let Some(state) = accounts.get_mut(&id) {
+                add(id, std::mem::take(state));
+            }
+        }
+    }
+    if let Some(state) = legacy.state {
+        let account = Some(state.account_id.clone())
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| default_account_id.to_string());
+        add(account, state);
+    }
+    Ok(Ec2Snapshot {
+        schema_version: EC2_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(out),
+        state: None,
+    })
 }
 
 /// Recycle Bin retention rules in effect for an account, per resource type.
@@ -86,6 +163,26 @@ pub struct Vpc {
     /// `ipv6_cidr_block` / `assign_generated_ipv6_cidr_block` from it.
     #[serde(default)]
     pub ipv6_cidr_block: Option<String>,
+    /// IPv6 CIDR blocks associated after the first: a VPC holds up to five
+    /// (AssociateVpcCidrBlock with `AmazonProvidedIpv6CidrBlock=true`).
+    #[serde(default)]
+    pub ipv6_cidr_associations: Vec<VpcCidrAssoc>,
+    /// How many Amazon-provided IPv6 blocks this VPC has ever been assigned
+    /// (see [`Vpc::ipv6_blocks_issued`]). Each association gets a fresh id
+    /// and /56, so a block released by DisassociateVpcCidrBlock is never
+    /// handed out again under the same association id.
+    #[serde(default)]
+    pub ipv6_blocks_minted: u32,
+}
+
+impl Vpc {
+    /// Amazon-provided IPv6 blocks issued to this VPC so far: the recorded
+    /// count, or (for state saved before it was kept) the blocks it holds.
+    pub fn ipv6_blocks_issued(&self) -> u32 {
+        let held = u32::from(self.ipv6_cidr_block.is_some())
+            + u32::try_from(self.ipv6_cidr_associations.len()).unwrap_or(u32::MAX);
+        self.ipv6_blocks_minted.max(held)
+    }
 }
 
 /// One `key -> values` entry in a DHCP options set.
@@ -2553,6 +2650,93 @@ mod tests {
         assert_eq!(back.bandwidth_weighting.as_deref(), Some("vpc-1"));
         assert_eq!(back.placement_tenancy.as_deref(), Some("dedicated"));
         assert_eq!(back.placement_group_name.as_deref(), Some("cluster-1"));
+    }
+
+    /// A v1 (pre-regional) snapshot loads each account's whole state,
+    /// unchanged, into the server's configured region: before regional
+    /// partitioning every region saw that one state. Nothing is dropped, even
+    /// resources whose zone names another region.
+    #[test]
+    fn v1_snapshot_loads_whole_state_into_configured_region() {
+        use fakecloud_core::multi_account::MultiAccountState;
+        const ACCOUNT: &str = "123456789012";
+        let mut legacy = Ec2State::new(ACCOUNT, "us-east-1");
+        let legacy_default_vpc = legacy
+            .vpcs
+            .values()
+            .find(|v| v.is_default)
+            .unwrap()
+            .vpc_id
+            .clone();
+        let vpc: Vpc = serde_json::from_value(serde_json::json!({
+            "vpc_id": "vpc-west", "cidr_block": "10.0.0.0/16", "state": "available",
+            "dhcp_options_id": "default", "instance_tenancy": "default",
+            "is_default": false, "enable_dns_support": true,
+            "enable_dns_hostnames": false,
+        }))
+        .unwrap();
+        legacy.vpcs.insert("vpc-west".into(), vpc);
+        for (id, az) in [("subnet-w1", "eu-west-1a"), ("subnet-w2", "eu-west-1b")] {
+            let subnet: Subnet = serde_json::from_value(serde_json::json!({
+                "subnet_id": id, "vpc_id": "vpc-west", "cidr_block": "10.0.1.0/24",
+                "availability_zone": az, "availability_zone_id": "x", "state": "available",
+                "available_ip_address_count": 251, "default_for_az": false,
+                "map_public_ip_on_launch": false, "assign_ipv6_address_on_creation": false,
+                "map_customer_owned_ip_on_launch": false, "enable_dns64": false,
+                "private_dns_hostname_type": "ip-name",
+            }))
+            .unwrap();
+            legacy.subnets.insert(id.into(), subnet);
+        }
+        crate::defaults::create_vpc_default_resources(&mut legacy, "vpc-west", "10.0.0.0/16");
+        legacy.iam_instance_profile_associations.insert(
+            "iip-assoc-1".into(),
+            IamInstanceProfileAssociation {
+                association_id: "iip-assoc-1".into(),
+                instance_id: "i-1".into(),
+                iam_instance_profile_arn: format!("arn:aws:iam::{ACCOUNT}:instance-profile/p"),
+                iam_instance_profile_id: "AIPA1".into(),
+                state: "associated".into(),
+            },
+        );
+        legacy.ebs_encryption_default = true;
+        legacy.region = "us-east-1".into();
+        let expected = serde_json::to_value({
+            let mut s = legacy.clone();
+            s.region = "ap-south-1".into();
+            s
+        })
+        .unwrap();
+
+        let mut accounts: MultiAccountState<Ec2State> =
+            MultiAccountState::new("000000000000", "us-east-1", "");
+        *accounts.get_or_create(ACCOUNT) = legacy;
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "accounts": accounts,
+        }))
+        .unwrap();
+        let snap = parse_ec2_snapshot(&bytes, ACCOUNT, "ap-south-1", "").unwrap();
+        assert_eq!(snap.schema_version, EC2_SNAPSHOT_SCHEMA_VERSION);
+        let migrated = snap.accounts.unwrap();
+        assert_eq!(migrated.region(), "ap-south-1");
+        assert_eq!(migrated.default_account_id(), ACCOUNT);
+        let home = migrated.regional(ACCOUNT, "ap-south-1").unwrap();
+        assert_eq!(home.region, "ap-south-1");
+        // Byte-for-byte the legacy state, apart from its region.
+        assert_eq!(serde_json::to_value(home).unwrap(), expected);
+        assert!(home.vpcs.contains_key(&legacy_default_vpc));
+        assert!(home.vpcs.contains_key("vpc-west"));
+        assert!(home.subnets.contains_key("subnet-w1") && home.subnets.contains_key("subnet-w2"));
+        assert!(home
+            .iam_instance_profile_associations
+            .contains_key("iip-assoc-1"));
+        assert!(home.ebs_encryption_by_default("ap-south-1"));
+        // No other region was materialized from the legacy state.
+        assert!(migrated.regional(ACCOUNT, "eu-west-1").is_none());
+        assert!(migrated.regional(ACCOUNT, "us-east-1").is_none());
+        // The legacy container's other account is kept too.
+        assert!(migrated.get("000000000000").is_some());
     }
 
     #[test]

@@ -204,6 +204,7 @@ impl RedshiftService {
     pub(crate) fn cluster_vpc_id(
         &self,
         account_id: &str,
+        region: &str,
         subnet_group: Option<&str>,
     ) -> Option<String> {
         match subnet_group {
@@ -219,7 +220,7 @@ impl RedshiftService {
             None => self
                 .ec2_state
                 .as_ref()
-                .and_then(|ec2| fakecloud_ec2::vpc_lookup::default_vpc_id(ec2, account_id)),
+                .and_then(|ec2| fakecloud_ec2::vpc_lookup::default_vpc_id(ec2, account_id, region)),
         }
     }
 

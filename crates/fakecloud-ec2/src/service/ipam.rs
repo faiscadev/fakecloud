@@ -86,7 +86,7 @@ pub(crate) fn create_ipam(
     let region = region_of(req);
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &id, "ipam");
         let t = state.tags_for(&id).to_vec();
         state.ipams.insert(id.clone(), i.clone());
@@ -107,7 +107,7 @@ pub(crate) fn delete_ipam(
     let owner = req.account_id.clone();
     let region = region_of(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let i = state.ipams.remove(&id).unwrap_or(Ipam {
         id: id.clone(),
         public_scope_id: gen_id("ipam-scope"),
@@ -134,7 +134,9 @@ pub(crate) fn describe_ipams(
     let region = region_of(req);
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ipams
         .values()
@@ -163,7 +165,7 @@ pub(crate) fn modify_ipam(
     let owner = req.account_id.clone();
     let region = region_of(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Mutate in place when the IPAM exists; otherwise synthesize a response
     // without polluting state (EC2 has no error shape, so unknown IDs still
     // return 200, but we must not invent a persistent resource).
@@ -241,7 +243,7 @@ pub(crate) fn create_ipam_scope(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &id, "ipam-scope");
         let t = state.tags_for(&id).to_vec();
         state.ipam_scopes.insert(id.clone(), sc.clone());
@@ -264,7 +266,7 @@ pub(crate) fn delete_ipam_scope(
     let id = require(&req.query_params, "IpamScopeId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let sc = state.ipam_scopes.remove(&id).unwrap_or(IpamScope {
         id: id.clone(),
         ipam_id: "ipam-0".to_string(),
@@ -291,7 +293,9 @@ pub(crate) fn describe_ipam_scopes(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ipam_scopes
         .values()
@@ -312,7 +316,7 @@ pub(crate) fn modify_ipam_scope(
     let id = require(&req.query_params, "IpamScopeId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let sc = match state.ipam_scopes.get_mut(&id) {
         Some(entry) => {
             if let Some(d) = req.query_params.get("Description") {
@@ -380,7 +384,7 @@ pub(crate) fn create_ipam_pool(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &id, "ipam-pool");
         let t = state.tags_for(&id).to_vec();
         state.ipam_pools.insert(id.clone(), p.clone());
@@ -403,7 +407,7 @@ pub(crate) fn delete_ipam_pool(
     let id = require(&req.query_params, "IpamPoolId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let p = state.ipam_pools.remove(&id).unwrap_or(IpamPool {
         id: id.clone(),
         scope_id: "ipam-scope-0".to_string(),
@@ -432,7 +436,9 @@ pub(crate) fn describe_ipam_pools(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ipam_pools
         .values()
@@ -454,7 +460,7 @@ pub(crate) fn modify_ipam_pool(
     validate_pool_netmasks(req)?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let p = match state.ipam_pools.get_mut(&id) {
         Some(entry) => {
             if let Some(d) = req.query_params.get("Description") {
@@ -514,7 +520,7 @@ pub(crate) fn provision_ipam_pool_cidr(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .ipam_pool_cidrs
             .entry(pool)
             .or_default()
@@ -540,7 +546,7 @@ pub(crate) fn deprovision_ipam_pool_cidr(
     {
         let mut accounts = svc.state.write();
         if let Some(cidrs) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .ipam_pool_cidrs
             .get_mut(&pool)
         {
@@ -568,7 +574,7 @@ pub(crate) fn get_ipam_pool_cidrs(
     validate_max_results(&req.query_params, 5, 1000)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.ipam_pool_cidrs.get(&pool))
         .map(|cidrs| {
             cidrs
@@ -608,7 +614,7 @@ pub(crate) fn allocate_ipam_pool_cidr(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .ipam_pool_allocations
             .entry(pool)
             .or_default()
@@ -634,7 +640,7 @@ pub(crate) fn release_ipam_pool_allocation(
     {
         let mut accounts = svc.state.write();
         if let Some(allocs) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .ipam_pool_allocations
             .get_mut(&pool)
         {
@@ -656,7 +662,7 @@ pub(crate) fn get_ipam_pool_allocations(
     validate_max_results(&req.query_params, 1000, 100000)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.ipam_pool_allocations.get(&pool))
         .map(|allocs| allocs.iter().map(|(c, a)| allocation_xml(c, a)).collect())
         .unwrap_or_default();

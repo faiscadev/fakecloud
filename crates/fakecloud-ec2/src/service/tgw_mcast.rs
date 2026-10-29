@@ -43,7 +43,7 @@ pub(crate) fn create_transit_gateway_multicast_domain(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_multicast_domains
             .insert(id.clone(), d.clone());
     }
@@ -65,7 +65,7 @@ pub(crate) fn delete_transit_gateway_multicast_domain(
     let d = {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_multicast_domains
             .remove(&id)
             .unwrap_or(TgwMulticastDomain {
@@ -91,7 +91,9 @@ pub(crate) fn describe_transit_gateway_multicast_domains(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .tgw_multicast_domains
         .values()
@@ -145,7 +147,7 @@ pub(crate) fn associate_transit_gateway_multicast_domain(
     let subnet_ids = indexed_list(&req.query_params, "SubnetIds");
     let new_assocs: Vec<TgwMcastAssociation> = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // Resolve the attachment's backing resource (VPC) so describes are real.
         let (resource_id, resource_type) = state
             .tgw_attachments
@@ -195,7 +197,7 @@ pub(crate) fn disassociate_transit_gateway_multicast_domain(
     let subnet_ids = indexed_list(&req.query_params, "SubnetIds");
     let removed: Vec<TgwMcastAssociation> = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mut removed = Vec::new();
         if let Some(entries) = state.tgw_mcast_associations.get_mut(&domain) {
             entries.retain(|e| {
@@ -226,7 +228,7 @@ pub(crate) fn disassociate_transit_gateway_multicast_domain(
 fn assoc_response(svc: &Ec2Service, req: &AwsRequest, domain: &str, att: &str) -> String {
     let accounts = svc.state.read();
     let assocs: Vec<TgwMcastAssociation> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.tgw_mcast_associations.get(domain))
         .map(|v| {
             v.iter()
@@ -277,7 +279,7 @@ pub(crate) fn get_transit_gateway_multicast_domain_associations(
     mr(req)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.tgw_mcast_associations.get(&domain))
         .map(|v| {
             v.iter()
@@ -327,7 +329,7 @@ fn register_group(svc: &Ec2Service, req: &AwsRequest, is_member: bool) -> (Strin
     let enis = indexed_list(&req.query_params, "NetworkInterfaceIds");
     let mut accounts = svc.state.write();
     let groups = accounts
-        .get_or_create(&req.account_id)
+        .regional_mut(&req.account_id, &req.region)
         .tgw_mcast_groups
         .entry(domain)
         .or_default();
@@ -361,7 +363,7 @@ fn deregister_group(svc: &Ec2Service, req: &AwsRequest, is_member: bool) -> (Str
     let enis = indexed_list(&req.query_params, "NetworkInterfaceIds");
     let mut accounts = svc.state.write();
     if let Some(groups) = accounts
-        .get_or_create(&req.account_id)
+        .regional_mut(&req.account_id, &req.region)
         .tgw_mcast_groups
         .get_mut(&domain)
     {
@@ -446,7 +448,7 @@ pub(crate) fn search_transit_gateway_multicast_groups(
     mr(req)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.tgw_mcast_groups.get(&domain))
         .map(|v| {
             v.iter()
@@ -494,7 +496,7 @@ pub(crate) fn create_transit_gateway_metering_policy(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_metering_policies
             .insert(id.clone(), p.clone());
     }
@@ -516,7 +518,7 @@ pub(crate) fn delete_transit_gateway_metering_policy(
     let p = {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_metering_policies
             .remove(&id)
             .unwrap_or(TgwMeteringPolicy {
@@ -541,7 +543,9 @@ pub(crate) fn describe_transit_gateway_metering_policies(
     mr(req)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .tgw_metering_policies
         .values()
@@ -563,7 +567,7 @@ pub(crate) fn modify_transit_gateway_metering_policy(
     let p = {
         let accounts = svc.state.read();
         accounts
-            .get(&req.account_id)
+            .regional(&req.account_id, &req.region)
             .and_then(|s| s.tgw_metering_policies.get(&id).cloned())
             .unwrap_or(TgwMeteringPolicy {
                 id: id.clone(),

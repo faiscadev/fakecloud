@@ -100,7 +100,7 @@ pub(crate) fn create_network_interface(
     // `aws_network_interface` resource asserts `security_groups.# == 1`).
     let (resolved_vpc_id, default_groups, subnet_az) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let vpc_id = state
             .subnets
             .get(&subnet_id)
@@ -169,7 +169,7 @@ pub(crate) fn create_network_interface(
     );
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let in_az = rq::network_interfaces_by_az(state)
             .get(eni.availability_zone.as_str())
             .copied()
@@ -221,7 +221,7 @@ pub(crate) fn delete_network_interface(
     let id = require(&req.query_params, "NetworkInterfaceId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         match state.network_interfaces.get(&id) {
             None => return Err(eni_not_found(&id)),
             // An interface another service placed in the subnet (an EFS
@@ -256,7 +256,9 @@ pub(crate) fn describe_network_interfaces(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
 
     // An explicitly-requested NetworkInterfaceId that does not exist is a hard
     // error on AWS (InvalidNetworkInterfaceID.NotFound), not a silently-empty
@@ -370,7 +372,7 @@ pub(crate) fn attach_network_interface(
     let attachment_id = gen_id("eni-attach");
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let eni = state
             .network_interfaces
             .get_mut(&eni_id)
@@ -402,7 +404,7 @@ pub(crate) fn detach_network_interface(
     let attachment_id = require(&req.query_params, "AttachmentId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for eni in state.network_interfaces.values_mut() {
             if eni.attachment.as_ref().map(|a| a.attachment_id.as_str())
                 == Some(attachment_id.as_str())
@@ -435,7 +437,7 @@ pub(crate) fn modify_network_interface_attribute(
     // attribute present in the request.
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(eni) = state.network_interfaces.get_mut(&eni_id) {
             if let Some(v) = req.query_params.get("SourceDestCheck.Value") {
                 eni.source_dest_check = v == "true";
@@ -472,7 +474,7 @@ pub(crate) fn reset_network_interface_attribute(
     // true). Previously this validated then persisted nothing.
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(eni) = state.network_interfaces.get_mut(&eni_id) {
             eni.source_dest_check = true;
         }
@@ -510,7 +512,7 @@ pub(crate) fn describe_network_interface_attribute(
     // groupSet, sourceDestCheck=true) regardless of stored state.
     let accounts = svc.state.read();
     let eni = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|a| a.network_interfaces.get(&id));
     let attr_xml = match attribute.as_str() {
         "description" => format!(
@@ -574,7 +576,7 @@ pub(crate) fn create_network_interface_permission(
     let pid = perm.permission_id.clone();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.eni_permissions.insert(pid, perm.clone());
     }
     let body = format!(
@@ -605,7 +607,7 @@ pub(crate) fn delete_network_interface_permission(
     let id = require(&req.query_params, "NetworkInterfacePermissionId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.eni_permissions.remove(&id);
     }
     Ok(Ec2Service::respond(
@@ -623,7 +625,9 @@ pub(crate) fn describe_network_interface_permissions(
     let wanted = indexed_list(&req.query_params, "NetworkInterfacePermissionId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .eni_permissions
         .values()
@@ -681,7 +685,7 @@ pub(crate) fn assign_private_ip_addresses(
         .and_then(|v| v.parse::<usize>().ok());
     let assigned: Vec<String> = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let eni = state
             .network_interfaces
             .get_mut(&id)
@@ -727,7 +731,7 @@ pub(crate) fn unassign_private_ip_addresses(
     let remove = indexed_list(&req.query_params, "PrivateIpAddress");
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let eni = state
             .network_interfaces
             .get_mut(&id)
@@ -754,7 +758,7 @@ pub(crate) fn assign_ipv6_addresses(
         .unwrap_or(1);
     let assigned: Vec<String> = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let eni = state
             .network_interfaces
             .get_mut(&id)
@@ -793,7 +797,7 @@ pub(crate) fn unassign_ipv6_addresses(
     let addrs: Vec<String> = indexed_list(&req.query_params, "Ipv6Addresses");
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let eni = state
             .network_interfaces
             .get_mut(&id)
@@ -848,7 +852,7 @@ mod tests {
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.network_interfaces.insert(
                 "eni-1".to_string(),
                 NetworkInterface {
@@ -885,7 +889,10 @@ mod tests {
         .unwrap();
 
         let accounts = svc.state.read();
-        let eni = &accounts.get("000000000000").unwrap().network_interfaces["eni-1"];
+        let eni = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .network_interfaces["eni-1"];
         assert!(!eni.source_dest_check, "SourceDestCheck must persist");
         assert_eq!(eni.description, "new-desc");
         assert_eq!(eni.group_ids, vec!["sg-a".to_string(), "sg-b".to_string()]);
@@ -893,7 +900,7 @@ mod tests {
 
     fn seed_eni(svc: &Ec2Service) {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("000000000000");
+        let state = accounts.regional_mut("000000000000", "us-east-1");
         state.network_interfaces.insert(
             "eni-1".to_string(),
             NetworkInterface {
@@ -983,7 +990,10 @@ mod tests {
         .unwrap();
         {
             let accounts = svc.state.read();
-            let eni = &accounts.get("000000000000").unwrap().network_interfaces["eni-1"];
+            let eni = &accounts
+                .regional("000000000000", "us-east-1")
+                .unwrap()
+                .network_interfaces["eni-1"];
             assert_eq!(eni.private_ips, vec!["10.0.0.30", "10.0.0.31"]);
         }
         // Unassign one and confirm removal.
@@ -996,7 +1006,10 @@ mod tests {
         )
         .unwrap();
         let accounts = svc.state.read();
-        let eni = &accounts.get("000000000000").unwrap().network_interfaces["eni-1"];
+        let eni = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .network_interfaces["eni-1"];
         assert_eq!(eni.private_ips, vec!["10.0.0.31"]);
     }
 
@@ -1026,7 +1039,10 @@ mod tests {
         )
         .unwrap();
         let accounts = svc.state.read();
-        let eni = &accounts.get("000000000000").unwrap().network_interfaces["eni-1"];
+        let eni = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .network_interfaces["eni-1"];
         assert_eq!(eni.ipv6_addresses, vec!["2600:1f00::a"]);
     }
 
@@ -1045,7 +1061,11 @@ mod tests {
         reset_network_interface_attribute(&svc, &req(&[("NetworkInterfaceId", "eni-1")])).unwrap();
         let accounts = svc.state.read();
         assert!(
-            accounts.get("000000000000").unwrap().network_interfaces["eni-1"].source_dest_check
+            accounts
+                .regional("000000000000", "us-east-1")
+                .unwrap()
+                .network_interfaces["eni-1"]
+                .source_dest_check
         );
     }
 
@@ -1081,7 +1101,7 @@ mod tests {
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.network_interfaces.insert(
                 "eni-1".to_string(),
                 NetworkInterface {

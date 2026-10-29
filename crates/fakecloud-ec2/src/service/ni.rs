@@ -67,7 +67,7 @@ pub(crate) fn create_network_insights_path(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -95,7 +95,7 @@ pub(crate) fn delete_network_insights_path(
     let id = require(&req.query_params, "NetworkInsightsPathId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.ni_paths.remove(&id);
         state.tags.remove(&id);
     }
@@ -114,7 +114,9 @@ pub(crate) fn describe_network_insights_paths(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ni_paths
         .values()
@@ -155,7 +157,7 @@ pub(crate) fn start_network_insights_analysis(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -183,7 +185,7 @@ pub(crate) fn delete_network_insights_analysis(
     let id = require(&req.query_params, "NetworkInsightsAnalysisId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.ni_analyses.remove(&id);
         state.tags.remove(&id);
     }
@@ -202,7 +204,9 @@ pub(crate) fn describe_network_insights_analyses(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ni_analyses
         .values()
@@ -252,7 +256,7 @@ pub(crate) fn create_network_insights_access_scope(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -281,7 +285,7 @@ pub(crate) fn delete_network_insights_access_scope(
     let id = require(&req.query_params, "NetworkInsightsAccessScopeId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.ni_access_scopes.remove(&id);
         state.tags.remove(&id);
     }
@@ -300,7 +304,9 @@ pub(crate) fn describe_network_insights_access_scopes(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ni_access_scopes
         .values()
@@ -358,7 +364,7 @@ pub(crate) fn start_network_insights_access_scope_analysis(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -386,7 +392,7 @@ pub(crate) fn delete_network_insights_access_scope_analysis(
     let id = require(&req.query_params, "NetworkInsightsAccessScopeAnalysisId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.ni_scope_analyses.remove(&id);
         state.tags.remove(&id);
     }
@@ -405,7 +411,9 @@ pub(crate) fn describe_network_insights_access_scope_analyses(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ni_scope_analyses
         .values()

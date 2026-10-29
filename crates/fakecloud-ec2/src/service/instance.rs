@@ -334,7 +334,7 @@ pub(crate) async fn run_instances(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let launched = launch_instances(svc, &req.account_id, &req.region, &req.query_params)?;
-    boot_launched(svc, &req.account_id, &launched);
+    boot_launched(svc, &req.account_id, &req.region, &launched);
     let body = reservation_xml(
         &launched.reservation_id,
         &req.account_id,
@@ -351,10 +351,11 @@ pub(crate) async fn run_instances(
 /// image pull / k8s Pod readiness never blocks the client (mirrors RDS
 /// CreateDBInstance). With no runtime configured the instance is flipped to
 /// `running` in the spawned task.
-fn boot_launched(svc: &Ec2Service, account_id: &str, launched: &Launched) {
+fn boot_launched(svc: &Ec2Service, account_id: &str, region: &str, launched: &Launched) {
     let svc_state = svc.state.clone();
     let runtime = svc.runtime.clone();
     let account_id = account_id.to_string();
+    let region = region.to_string();
     let ids = launched.ids.clone();
     let user_data = launched.user_data.clone();
     let instance_tags = launched.instance_tags.clone();
@@ -372,7 +373,7 @@ fn boot_launched(svc: &Ec2Service, account_id: &str, launched: &Launched) {
             // what the boot created reaped (`settle_started`).
             let _lifecycle = lock_lifecycle(runtime.as_ref(), id).await;
             let running = match &runtime {
-                Some(rt) if wants_container(&svc_state, &account_id, id) => match rt
+                Some(rt) if wants_container(&svc_state, &account_id, &region, id) => match rt
                     .run_instance(
                         &account_id,
                         id,
@@ -390,7 +391,7 @@ fn boot_launched(svc: &Ec2Service, account_id: &str, launched: &Launched) {
                 },
                 _ => None,
             };
-            let post = reconcile_started(&svc_state, &account_id, id, running);
+            let post = reconcile_started(&svc_state, &account_id, &region, id, running);
             settle_started(runtime.as_ref(), &account_id, id, post).await;
         }
         // Persist the reconciled (`running`) state so a restart restores
@@ -457,7 +458,7 @@ pub(crate) fn launch_instances(
     let (params, _template) = {
         let accounts = svc.state.read();
         let empty = Ec2State::new(account_id, region);
-        let state = accounts.get(account_id).unwrap_or(&empty);
+        let state = accounts.regional(account_id, region).unwrap_or(&empty);
         super::launch_template::effective_launch_params(state, request)?
     };
     let params = &params;
@@ -543,7 +544,7 @@ pub(crate) fn launch_instances(
         }
         let accounts = svc.state.read();
         let eni = accounts
-            .get(account_id)
+            .regional(account_id, region)
             .and_then(|st| st.network_interfaces.get(eni_id))
             .ok_or_else(|| super::eni::eni_not_found(eni_id))?;
         subnet_id = Some(eni.subnet_id.clone());
@@ -592,7 +593,7 @@ pub(crate) fn launch_instances(
     let (vpc_id, subnet_auto_public, instance_network, ip_prefix, az) = {
         let accounts = svc.state.read();
         let empty = Ec2State::new(account_id, region);
-        let state = accounts.get(account_id).unwrap_or(&empty);
+        let state = accounts.regional(account_id, region).unwrap_or(&empty);
         // The instance lands in its subnet's AZ; without a subnet, in the
         // requested `Placement.AvailabilityZone` (else the region's first AZ).
         let wanted_az = placement_az.clone().unwrap_or_else(|| format!("{region}a"));
@@ -619,13 +620,20 @@ pub(crate) fn launch_instances(
         // When the caller named no security group, AWS attaches the VPC's
         // `default` group. Resolve it from the subnet's VPC (or the default VPC).
         let resolved_vpc = subnet.map(|s| s.vpc_id.clone());
+        // The account's default VPC as recorded in state: a state migrated
+        // from a pre-regional snapshot keeps its original default VPC id,
+        // which is not the region-derived one.
+        let default_vpc = state
+            .vpcs
+            .values()
+            .find(|v| v.is_default)
+            .map(|v| v.vpc_id.clone())
+            .unwrap_or_else(|| crate::defaults::default_vpc_id(account_id, region));
         // Honor `SecurityGroup.N` (group *names*, EC2-Classic/default-VPC form)
         // by resolving each to its id, alongside the modern `SecurityGroupId.N`.
         let sg_names = indexed_list(params, "SecurityGroup");
         if !sg_names.is_empty() {
-            let target_vpc = resolved_vpc
-                .clone()
-                .unwrap_or_else(|| crate::defaults::default_vpc_id(account_id));
+            let target_vpc = resolved_vpc.clone().unwrap_or_else(|| default_vpc.clone());
             for name in &sg_names {
                 if let Some(sg) = state
                     .security_groups
@@ -639,9 +647,7 @@ pub(crate) fn launch_instances(
             }
         }
         if sg_ids.is_empty() {
-            let vpc = resolved_vpc
-                .clone()
-                .unwrap_or_else(|| crate::defaults::default_vpc_id(account_id));
+            let vpc = resolved_vpc.clone().unwrap_or_else(|| default_vpc.clone());
             if let Some(sg) = state
                 .security_groups
                 .values()
@@ -669,7 +675,7 @@ pub(crate) fn launch_instances(
                 .unwrap_or((None, false)),
             // No subnet (and no default subnet found): still a default-VPC
             // launch, which assigns public IPs by default.
-            None => (Some(crate::defaults::default_vpc_id(account_id)), true),
+            None => (Some(default_vpc), true),
         };
         // Metadata-only private IP base, derived from the resolved subnet's
         // CIDR so DescribeInstances reports an IP inside the subnet (was a
@@ -757,7 +763,7 @@ pub(crate) fn launch_instances(
     let mut rendered = Vec::new();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(account_id);
+        let state = accounts.regional_mut(account_id, region);
         // Within the quotas, launch as many instances as fit, down to
         // MinCount; when not even MinCount fits, launch none.
         let instance_enis = secondary_nis.iter().filter(|n| n.eni_id.is_none()).count();
@@ -1219,13 +1225,14 @@ fn attach_secondary_network_interfaces(
 fn reconcile_started(
     state: &crate::state::SharedEc2State,
     account_id: &str,
+    region: &str,
     id: &str,
     running: Option<crate::runtime::RunningInstance>,
 ) -> PostStart {
     let started = running.is_some();
     let mut accounts = state.write();
     let Some(inst) = accounts
-        .get_mut(account_id)
+        .regional_get_mut(account_id, region)
         .and_then(|s| s.instances.get_mut(id))
     else {
         return PostStart::Reap;
@@ -1296,11 +1303,12 @@ pub(crate) async fn lock_lifecycle(
 fn current_state_code(
     state: &crate::state::SharedEc2State,
     account_id: &str,
+    region: &str,
     id: &str,
 ) -> Option<i64> {
     state
         .read()
-        .get(account_id)
+        .regional(account_id, region)
         .and_then(|s| s.instances.get(id))
         .map(|i| i.state_code)
 }
@@ -1308,8 +1316,16 @@ fn current_state_code(
 /// Whether the instance still wants a running container (`pending` or
 /// `running`): a boot or start for one that was stopped, terminated or
 /// deleted before the task got its lock does not start one.
-fn wants_container(state: &crate::state::SharedEc2State, account_id: &str, id: &str) -> bool {
-    matches!(current_state_code(state, account_id, id), Some(0 | 16))
+fn wants_container(
+    state: &crate::state::SharedEc2State,
+    account_id: &str,
+    region: &str,
+    id: &str,
+) -> bool {
+    matches!(
+        current_state_code(state, account_id, region, id),
+        Some(0 | 16)
+    )
 }
 
 /// The inputs [`crate::runtime::Ec2Runtime::run_instance`] needs to boot a
@@ -1333,10 +1349,11 @@ type RunInstanceInputs = (
 fn run_instance_inputs(
     state: &crate::state::SharedEc2State,
     account_id: &str,
+    region: &str,
     id: &str,
 ) -> Option<RunInstanceInputs> {
     let accounts = state.read();
-    let s = accounts.get(account_id)?;
+    let s = accounts.regional(account_id, region)?;
     let inst = s.instances.get(id)?;
     let user_data = inst.user_data.clone();
     // A subnet with no `0.0.0.0/0 -> igw` route is private -> `internal`
@@ -1556,7 +1573,7 @@ pub(crate) fn cfn_create_instance(
         .ok_or_else(|| invalid_parameter_value("no instance launched"))?;
     let accounts = svc.state.read();
     let inst = accounts
-        .get(account_id)
+        .regional(account_id, region)
         .and_then(|s| s.instances.get(&id))
         .ok_or_else(|| invalid_parameter_value("no instance launched"))?;
     Ok(CfnInstanceAttrs {
@@ -1572,17 +1589,18 @@ pub(crate) fn cfn_create_instance(
 /// background-boot half of [`run_instances`]. Intended to be `tokio::spawn`ed by
 /// the CloudFormation create drain so stack creation never blocks on a cold
 /// image pull / Pod readiness.
-pub(crate) async fn cfn_boot_instance(svc: &Ec2Service, account_id: &str, id: &str) {
+pub(crate) async fn cfn_boot_instance(svc: &Ec2Service, account_id: &str, region: &str, id: &str) {
     // The same boot inputs a direct launch passes (user data, the tag map that
     // carries `fakecloud-k8s/*` scheduling tags, the subnet network).
-    let Some((user_data, tags, instance_network)) = run_instance_inputs(&svc.state, account_id, id)
+    let Some((user_data, tags, instance_network)) =
+        run_instance_inputs(&svc.state, account_id, region, id)
     else {
         return;
     };
 
     let lifecycle = lock_lifecycle(svc.runtime.as_ref(), id).await;
     let running = match &svc.runtime {
-        Some(rt) if wants_container(&svc.state, account_id, id) => match rt
+        Some(rt) if wants_container(&svc.state, account_id, region, id) => match rt
             .run_instance(
                 account_id,
                 id,
@@ -1600,7 +1618,7 @@ pub(crate) async fn cfn_boot_instance(svc: &Ec2Service, account_id: &str, id: &s
         },
         _ => None,
     };
-    let post = reconcile_started(&svc.state, account_id, id, running);
+    let post = reconcile_started(&svc.state, account_id, region, id, running);
     settle_started(svc.runtime.as_ref(), account_id, id, post).await;
     drop(lifecycle);
 
@@ -1719,7 +1737,9 @@ async fn change_state(
     {
         let accounts = svc.state.read();
         let empty = Ec2State::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         for id in &ids {
             let inst = state
                 .instances
@@ -1735,7 +1755,7 @@ async fn change_state(
         let quotas: std::collections::BTreeSet<&'static str> = {
             let accounts = svc.state.read();
             accounts
-                .get(&req.account_id)
+                .regional(&req.account_id, &req.region)
                 .map(|state| {
                     ids.iter()
                         .filter_map(|id| state.instances.get(id))
@@ -1766,7 +1786,7 @@ async fn change_state(
     let mut affected: Vec<String> = Vec::new();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // Re-run existence + transition/protection checks against the freshly
         // re-read state INSIDE the write lock before mutating anything. The
         // read-phase check above ran under a different (dropped) lock, so a
@@ -1875,6 +1895,7 @@ async fn change_state(
         let svc_state = svc.state.clone();
         let runtime = svc.runtime.clone();
         let account_id = req.account_id.clone();
+        let region = req.region.clone();
         tokio::spawn(async move {
             for id in &affected {
                 // Serialized per instance, and each arm converges to the state
@@ -1887,7 +1908,9 @@ async fn change_state(
                         let running = match &runtime {
                             // Stopped, terminated or deleted again before this
                             // task got the lock: start nothing.
-                            Some(_) if !wants_container(&svc_state, &account_id, id) => None,
+                            Some(_) if !wants_container(&svc_state, &account_id, &region, id) => {
+                                None
+                            }
                             // The runtime holds a backing record for this
                             // instance: reattach/restart the existing container.
                             Some(rt) if rt.is_registered(id) => rt.start_instance(id).await,
@@ -1902,35 +1925,37 @@ async fn change_state(
                             // analogue of the RDS restart-recovery bug). Boot a
                             // fresh container from the persisted metadata instead,
                             // mirroring `recover_persisted_containers`.
-                            Some(rt) => match run_instance_inputs(&svc_state, &account_id, id) {
-                                Some((user_data, tags, network)) => match rt
-                                    .run_instance(
-                                        &account_id,
-                                        id,
-                                        user_data.as_deref(),
-                                        &tags,
-                                        network.as_ref(),
-                                    )
-                                    .await
-                                {
-                                    Ok(r) => Some(r),
-                                    Err(e) => {
-                                        tracing::warn!(instance_id = %id, error = %e, "EC2 instance container failed to start after restart; serving metadata-only");
-                                        None
-                                    }
-                                },
-                                None => None,
-                            },
+                            Some(rt) => {
+                                match run_instance_inputs(&svc_state, &account_id, &region, id) {
+                                    Some((user_data, tags, network)) => match rt
+                                        .run_instance(
+                                            &account_id,
+                                            id,
+                                            user_data.as_deref(),
+                                            &tags,
+                                            network.as_ref(),
+                                        )
+                                        .await
+                                    {
+                                        Ok(r) => Some(r),
+                                        Err(e) => {
+                                            tracing::warn!(instance_id = %id, error = %e, "EC2 instance container failed to start after restart; serving metadata-only");
+                                            None
+                                        }
+                                    },
+                                    None => None,
+                                }
+                            }
                             None => None,
                         };
-                        let post = reconcile_started(&svc_state, &account_id, id, running);
+                        let post = reconcile_started(&svc_state, &account_id, &region, id, running);
                         settle_started(runtime.as_ref(), &account_id, id, post).await;
                     }
                     80 => {
                         // Started again before this task got the lock: the
                         // later StartInstances owns the container now.
                         let still_stopped = matches!(
-                            current_state_code(&svc_state, &account_id, id),
+                            current_state_code(&svc_state, &account_id, &region, id),
                             Some(64 | 80)
                         );
                         if let (Some(rt), true) = (&runtime, still_stopped) {
@@ -1991,7 +2016,9 @@ pub(crate) async fn reboot_instances(
     let backed: Vec<String> = {
         let accounts = svc.state.read();
         let empty = Ec2State::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let mut backed = Vec::new();
         for id in &ids {
             let inst = state
@@ -2016,6 +2043,7 @@ pub(crate) async fn reboot_instances(
         let svc_state = svc.state.clone();
         let runtime = svc.runtime.clone();
         let account_id = req.account_id.clone();
+        let region = req.region.clone();
         tokio::spawn(async move {
             let Some(rt) = runtime else {
                 return;
@@ -2024,7 +2052,7 @@ pub(crate) async fn reboot_instances(
                 let _lifecycle = rt.lock_lifecycle(id).await;
                 // Stopped or terminated before this task got the lock: there
                 // is no running container to reboot.
-                if current_state_code(&svc_state, &account_id, id) != Some(16) {
+                if current_state_code(&svc_state, &account_id, &region, id) != Some(16) {
                     continue;
                 }
                 // k8s reboot recreates the Pod under a new name/IP; persist them
@@ -2033,7 +2061,7 @@ pub(crate) async fn reboot_instances(
                     let gone = {
                         let mut accounts = svc_state.write();
                         match accounts
-                            .get_mut(&account_id)
+                            .regional_get_mut(&account_id, &region)
                             .and_then(|state| state.instances.get_mut(id))
                         {
                             // Don't clobber an instance a concurrent op
@@ -2091,7 +2119,7 @@ fn monitor(
     let ids = indexed_list(&req.query_params, "InstanceId");
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // A nonexistent instance id is a hard error, not a silent no-op.
         for id in &ids {
             if !state.instances.contains_key(id) {
@@ -2133,7 +2161,9 @@ pub(crate) fn describe_instances(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
 
     // An explicitly-listed InstanceId that does not exist is a hard error on
     // AWS (`InvalidInstanceID.NotFound`), not an empty result set.
@@ -2362,7 +2392,9 @@ pub(crate) fn describe_instance_status(
         .unwrap_or(false);
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let sg_names = sg_name_map(state);
     let mut bdm_by_instance: HashMap<String, Vec<&crate::state::VolumeAttachment>> = HashMap::new();
     for vol in state.volumes.values() {
@@ -2478,7 +2510,7 @@ pub(crate) fn describe_instance_attribute(
     let attribute = require(&req.query_params, "Attribute")?;
     validate_enum(&req.query_params, "Attribute", ATTRIBUTE_VALUES)?;
     let accounts = svc.state.read();
-    let acct_state = accounts.get(&req.account_id);
+    let acct_state = accounts.regional(&req.account_id, &req.region);
     let inst = acct_state
         .and_then(|s| s.instances.get(&id))
         .ok_or_else(|| crate::service_helpers::instance_not_found(&id))?;
@@ -2587,7 +2619,7 @@ pub(crate) fn modify_instance_attribute(
         crate::service::quota::distinct_count(&indexed_list(p, "GroupId")),
     )?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let inst = state
         .instances
         .get_mut(&id)
@@ -2659,7 +2691,7 @@ pub(crate) fn reset_instance_attribute(
     let attribute = require(&req.query_params, "Attribute")?;
     validate_enum(&req.query_params, "Attribute", ATTRIBUTE_VALUES)?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let inst = state
         .instances
         .get_mut(&id)
@@ -2691,11 +2723,12 @@ pub(crate) fn reset_instance_attribute(
 fn with_instance_mut<R>(
     svc: &Ec2Service,
     account_id: &str,
+    region: &str,
     id: &str,
     f: impl FnOnce(&mut Instance) -> R,
 ) -> Result<R, AwsServiceError> {
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(account_id);
+    let state = accounts.regional_mut(account_id, region);
     let inst = state
         .instances
         .get_mut(id)
@@ -2715,7 +2748,7 @@ pub(crate) fn modify_instance_placement(
     )?;
     validate_enum(&req.query_params, "Affinity", &["default", "host"])?;
     let p = req.query_params.clone();
-    with_instance_mut(svc, &req.account_id, &id, |inst| {
+    with_instance_mut(svc, &req.account_id, &req.region, &id, |inst| {
         if let Some(t) = p.get("Tenancy").filter(|v| !v.is_empty()) {
             inst.placement_tenancy = Some(t.clone());
         }
@@ -2751,7 +2784,7 @@ pub(crate) fn modify_instance_metadata_options(
         &["disabled", "enabled"],
     )?;
     let p = req.query_params.clone();
-    let opts = with_instance_mut(svc, &req.account_id, &id, |inst| {
+    let opts = with_instance_mut(svc, &req.account_id, &req.region, &id, |inst| {
         let m = &mut inst.metadata_options;
         if let Some(v) = p.get("HttpTokens").filter(|v| !v.is_empty()) {
             m.http_tokens = v.clone();
@@ -2803,7 +2836,7 @@ pub(crate) fn modify_instance_maintenance_options(
         &["disabled", "default"],
     )?;
     let p = req.query_params.clone();
-    let opts = with_instance_mut(svc, &req.account_id, &id, |inst| {
+    let opts = with_instance_mut(svc, &req.account_id, &req.region, &id, |inst| {
         let m = &mut inst.maintenance_options;
         if let Some(v) = p.get("AutoRecovery").filter(|v| !v.is_empty()) {
             m.auto_recovery = v.clone();
@@ -2846,7 +2879,7 @@ pub(crate) fn modify_instance_cpu_options(
         .get("ThreadsPerCore")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(1);
-    with_instance_mut(svc, &req.account_id, &id, |inst| {
+    with_instance_mut(svc, &req.account_id, &req.region, &id, |inst| {
         inst.cpu_options = Some(crate::state::CpuOptions {
             core_count,
             threads_per_core,
@@ -2874,7 +2907,7 @@ pub(crate) fn modify_instance_network_performance_options(
         "BandwidthWeighting",
         &["default", "vpc-1", "ebs-1"],
     )?;
-    with_instance_mut(svc, &req.account_id, &id, |inst| {
+    with_instance_mut(svc, &req.account_id, &req.region, &id, |inst| {
         inst.bandwidth_weighting = Some(weighting.clone());
     })?;
     let body = format!(
@@ -2914,7 +2947,9 @@ pub(crate) fn describe_instance_credit_specifications(
     let wanted = indexed_list(&req.query_params, "InstanceId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .instances
         .values()
@@ -2951,7 +2986,7 @@ pub(crate) fn modify_instance_credit_specification(
     let mut unsuccessful = Vec::new();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mut n = 1usize;
         loop {
             let id_key = format!("InstanceCreditSpecification.{n}.InstanceId");
@@ -2994,7 +3029,7 @@ pub(crate) fn get_instance_metadata_defaults(
 ) -> Result<AwsResponse, AwsServiceError> {
     let accounts = svc.state.read();
     let d = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.instance_metadata_defaults.clone())
         .unwrap_or_default();
     let mut inner = String::new();
@@ -3049,7 +3084,7 @@ pub(crate) fn modify_instance_metadata_defaults(
     };
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let d = state
             .instance_metadata_defaults
             .get_or_insert_with(Default::default);
@@ -3083,7 +3118,7 @@ pub(crate) fn register_event_notification_attributes(
         .map(|v| v == "true");
     let xml = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for k in keys {
             if !state.event_notification_tag_keys.contains(&k) {
                 state.event_notification_tag_keys.push(k);
@@ -3112,7 +3147,7 @@ pub(crate) fn deregister_event_notification_attributes(
         .map(|v| v == "true");
     let xml = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state
             .event_notification_tag_keys
             .retain(|k| !keys.contains(k));
@@ -3135,7 +3170,9 @@ pub(crate) fn describe_event_notification_attributes(
 ) -> Result<AwsResponse, AwsServiceError> {
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     Ok(Ec2Service::respond(
         "DescribeInstanceEventNotificationAttributes",
         &req.request_id,
@@ -3310,7 +3347,7 @@ mod modify_tests {
         seed_instance(&svc, "i-esc");
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.instances.get_mut("i-esc").unwrap().user_data = Some("echo a && b <c>".into());
         }
         let resp = describe_instance_attribute(
@@ -3342,7 +3379,7 @@ mod modify_tests {
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             let inst = crate::state::Instance {
                 instance_id: "i-1".into(),
                 image_id: "ami-1".into(),
@@ -3390,7 +3427,8 @@ mod modify_tests {
         }
 
         let (user_data, tags, network) =
-            run_instance_inputs(&svc.state, "000000000000", "i-1").expect("instance exists");
+            run_instance_inputs(&svc.state, "000000000000", "us-east-1", "i-1")
+                .expect("instance exists");
         assert_eq!(user_data.as_deref(), Some("Zm9v"), "user-data is threaded");
         assert_eq!(
             tags.get("Name").map(String::as_str),
@@ -3401,7 +3439,9 @@ mod modify_tests {
         assert_eq!(net.subnet_id, "subnet-1", "rejoins the same subnet");
 
         // A missing instance yields None (mirrors a concurrent terminate).
-        assert!(run_instance_inputs(&svc.state, "000000000000", "i-missing").is_none());
+        assert!(
+            run_instance_inputs(&svc.state, "000000000000", "us-east-1", "i-missing").is_none()
+        );
     }
 
     #[test]
@@ -3436,7 +3476,7 @@ mod modify_tests {
         );
 
         let accounts = svc.state.read();
-        let state = accounts.get("000000000000").unwrap();
+        let state = accounts.regional("000000000000", "us-east-1").unwrap();
         let inst = state.instances.get(&attrs.instance_id).unwrap();
         assert_eq!(inst.metadata_options.http_tokens, "required");
         assert_eq!(inst.metadata_options.http_put_response_hop_limit, 3);
@@ -3618,7 +3658,7 @@ mod modify_tests {
         seed_instance(&svc, "i-old");
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             let mut assoc = super::super::rest::new_iam_profile_association(
                 "i-old".into(),
                 "arn:aws:iam::000000000000:instance-profile/legacy".into(),
@@ -3712,6 +3752,66 @@ mod modify_tests {
             "got: {out}"
         );
         assert!(!out.contains("instance-profile/web-profile"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn run_instances_uses_state_default_vpc_and_sg_over_derived_ids() {
+        // A state migrated from a pre-regional snapshot keeps its original
+        // default VPC / default SG ids, which are not the region-derived
+        // ones. A launch with no resolvable subnet must still land in that
+        // VPC with its `default` group.
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let st = accounts.regional_mut("000000000000", "us-east-1");
+            let old_vpc = st
+                .vpcs
+                .values()
+                .find(|v| v.is_default)
+                .unwrap()
+                .vpc_id
+                .clone();
+            let mut vpc = st.vpcs.remove(&old_vpc).unwrap();
+            vpc.vpc_id = "vpc-0legacy000000001".into();
+            st.vpcs.insert(vpc.vpc_id.clone(), vpc);
+            let mut sg = st
+                .security_groups
+                .values()
+                .find(|g| g.vpc_id == old_vpc && g.group_name == "default")
+                .unwrap()
+                .clone();
+            st.security_groups.retain(|_, g| g.vpc_id != old_vpc);
+            sg.group_id = "sg-0legacy000000001".into();
+            sg.vpc_id = "vpc-0legacy000000001".into();
+            st.security_groups.insert(sg.group_id.clone(), sg);
+            // No default subnet to resolve.
+            st.subnets.clear();
+            assert_ne!(
+                "vpc-0legacy000000001",
+                crate::defaults::default_vpc_id("000000000000", "us-east-1")
+            );
+        }
+        run_instances(
+            &svc,
+            &req(
+                "RunInstances",
+                &[
+                    ("ImageId", "ami-12345678"),
+                    ("MinCount", "1"),
+                    ("MaxCount", "1"),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+        let accounts = svc.state.read();
+        let st = accounts.regional("000000000000", "us-east-1").unwrap();
+        let inst = st.instances.values().next().unwrap();
+        assert_eq!(inst.vpc_id.as_deref(), Some("vpc-0legacy000000001"));
+        assert_eq!(
+            inst.security_group_ids,
+            vec!["sg-0legacy000000001".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -3858,7 +3958,7 @@ mod modify_tests {
         seed_instance(&svc, "i-1");
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.instances.get_mut("i-1").unwrap().security_group_ids = vec!["sg-web".into()];
             // A security group so `group-name` can resolve.
             state.security_groups.insert(
@@ -3954,7 +4054,7 @@ mod modify_tests {
         {
             let mut accounts = svc.state.write();
             let inst = accounts
-                .get_mut("000000000000")
+                .regional_get_mut("000000000000", "us-east-1")
                 .unwrap()
                 .instances
                 .get_mut("i-1")
@@ -4019,7 +4119,7 @@ mod modify_tests {
         {
             let mut accounts = svc.state.write();
             let inst = accounts
-                .get_mut("000000000000")
+                .regional_get_mut("000000000000", "us-east-1")
                 .unwrap()
                 .instances
                 .get_mut("i-1")
@@ -4029,14 +4129,20 @@ mod modify_tests {
         }
         svc.reconcile_pending_metadata_only().await;
         let accounts = svc.state.read();
-        let inst = &accounts.get("000000000000").unwrap().instances["i-1"];
+        let inst = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .instances["i-1"];
         assert_eq!(inst.state_code, 16);
         assert_eq!(inst.state_name, "running");
     }
 
     fn state_of(svc: &Ec2Service, id: &str) -> (i64, Option<String>) {
         let accounts = svc.state.read();
-        let inst = &accounts.get("000000000000").unwrap().instances[id];
+        let inst = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .instances[id];
         (inst.state_code, inst.container_id.clone())
     }
 
@@ -4047,7 +4153,7 @@ mod modify_tests {
         let svc = Ec2Service::new();
         seed_instance(&svc, "i-1");
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("000000000000");
+        let state = accounts.regional_mut("000000000000", "us-east-1");
         let inst = state.instances.get_mut("i-1").unwrap();
 
         // Running -> start/stop/terminate all legal.
@@ -4236,7 +4342,7 @@ mod modify_tests {
         let id = launched_id(&out);
         {
             let accounts = svc.state.read();
-            let state = accounts.get("000000000000").unwrap();
+            let state = accounts.regional("000000000000", "us-east-1").unwrap();
             let inst = &state.instances[&id];
             assert_eq!(inst.image_id, "ami-v1");
             assert_eq!(inst.instance_type, "c5.large", "request wins");
@@ -4288,7 +4394,11 @@ mod modify_tests {
             let id = launched_id(&out);
             let accounts = svc.state.read();
             assert_eq!(
-                accounts.get("000000000000").unwrap().instances[&id].image_id,
+                accounts
+                    .regional("000000000000", "us-east-1")
+                    .unwrap()
+                    .instances[&id]
+                    .image_id,
                 image,
                 "version {version}"
             );
@@ -4371,7 +4481,10 @@ mod modify_tests {
         );
         let id = launched_id(&out);
         let accounts = svc.state.read();
-        let inst = &accounts.get("000000000000").unwrap().instances[&id];
+        let inst = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .instances[&id];
         assert_eq!(inst.subnet_id.as_deref(), Some("subnet-tmpl"));
         assert_eq!(inst.private_ip, "10.9.9.9");
         assert_eq!(inst.security_group_ids, vec!["sg-tmpl".to_string()]);
@@ -4407,7 +4520,10 @@ mod modify_tests {
         };
         let attrs = cfn_create_instance(&svc, "000000000000", "us-east-1", &spec).unwrap();
         let accounts = svc.state.read();
-        let inst = &accounts.get("000000000000").unwrap().instances[&attrs.instance_id];
+        let inst = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .instances[&attrs.instance_id];
         assert_eq!(inst.metadata_options.http_tokens, "required");
         assert_eq!(
             inst.metadata_options.http_put_response_hop_limit, 2,
@@ -4468,7 +4584,7 @@ mod modify_tests {
         let id = launched_id(&out);
         let eni_id = {
             let accounts = svc.state.read();
-            let st = accounts.get("000000000000").unwrap();
+            let st = accounts.regional("000000000000", "us-east-1").unwrap();
             let (eni_id, eni) = st
                 .network_interfaces
                 .iter()
@@ -4490,7 +4606,7 @@ mod modify_tests {
         assert!(!svc
             .state
             .read()
-            .get("000000000000")
+            .regional("000000000000", "us-east-1")
             .unwrap()
             .network_interfaces
             .contains_key(&eni_id));
@@ -4519,7 +4635,7 @@ mod modify_tests {
         assert_eq!(out.matches("<instanceId>").count(), 2);
         {
             let accounts = svc.state.read();
-            let st = accounts.get("000000000000").unwrap();
+            let st = accounts.regional("000000000000", "us-east-1").unwrap();
             let ips: std::collections::BTreeSet<&String> = st
                 .network_interfaces
                 .values()
@@ -4599,7 +4715,7 @@ mod modify_tests {
         {
             let accounts = svc.state.read();
             let ips: std::collections::BTreeSet<String> = accounts
-                .get("000000000000")
+                .regional("000000000000", "us-east-1")
                 .unwrap()
                 .network_interfaces
                 .values()
@@ -4635,7 +4751,7 @@ mod modify_tests {
         let id = launched_id(&out);
         {
             let accounts = svc.state.read();
-            let st = accounts.get("000000000000").unwrap();
+            let st = accounts.regional("000000000000", "us-east-1").unwrap();
             assert_eq!(st.instances[&id].private_ip, "10.7.7.7");
             assert_eq!(st.instances[&id].subnet_id.as_deref(), Some("subnet-x"));
             let a = st.network_interfaces[&eni_id].attachment.as_ref().unwrap();
@@ -4656,7 +4772,7 @@ mod modify_tests {
         );
         let id = launched_id(&out);
         let accounts = svc.state.read();
-        let st = accounts.get("000000000000").unwrap();
+        let st = accounts.regional("000000000000", "us-east-1").unwrap();
         let mut ips: Vec<String> = st
             .network_interfaces
             .values()
@@ -4728,7 +4844,7 @@ mod modify_tests {
         };
         let attrs = cfn_create_instance(&svc, "000000000000", "us-east-1", &spec).unwrap();
         let accounts = svc.state.read();
-        let state = accounts.get("000000000000").unwrap();
+        let state = accounts.regional("000000000000", "us-east-1").unwrap();
         let inst = &state.instances[&attrs.instance_id];
         assert_eq!(inst.image_id, "ami-tmpl");
         assert_eq!(inst.instance_type, "m5.xlarge");
@@ -4776,7 +4892,7 @@ mod post_start_tests {
     fn set_state(svc: &Ec2Service, id: &str, code: i64) {
         let mut accounts = svc.state.write();
         let inst = accounts
-            .get_or_create("000000000000")
+            .regional_mut("000000000000", "us-east-1")
             .instances
             .get_mut(id)
             .unwrap();
@@ -4791,15 +4907,25 @@ mod post_start_tests {
         seed_instance(&svc, "i-1");
         set_state(&svc, "i-1", 80);
         // A Start decided earlier finds the row stopped again: start nothing.
-        assert!(!wants_container(&svc.state, "000000000000", "i-1"));
+        assert!(!wants_container(
+            &svc.state,
+            "000000000000",
+            "us-east-1",
+            "i-1"
+        ));
         set_state(&svc, "i-1", 0);
-        assert!(wants_container(&svc.state, "000000000000", "i-1"));
+        assert!(wants_container(
+            &svc.state,
+            "000000000000",
+            "us-east-1",
+            "i-1"
+        ));
         assert_eq!(
-            current_state_code(&svc.state, "000000000000", "i-1"),
+            current_state_code(&svc.state, "000000000000", "us-east-1", "i-1"),
             Some(0)
         );
         assert_eq!(
-            current_state_code(&svc.state, "000000000000", "i-gone"),
+            current_state_code(&svc.state, "000000000000", "us-east-1", "i-gone"),
             None
         );
         // The lock serializes: a second holder waits for the first.
@@ -4822,35 +4948,35 @@ mod post_start_tests {
         let svc = Ec2Service::new();
         // Gone (deleted / reset while booting).
         assert_eq!(
-            reconcile_started(&svc.state, "000000000000", "i-gone", started()),
+            reconcile_started(&svc.state, "000000000000", "us-east-1", "i-gone", started()),
             PostStart::Reap
         );
         seed_instance(&svc, "i-1");
         set_state(&svc, "i-1", 48);
         assert_eq!(
-            reconcile_started(&svc.state, "000000000000", "i-1", started()),
+            reconcile_started(&svc.state, "000000000000", "us-east-1", "i-1", started()),
             PostStart::Reap
         );
         set_state(&svc, "i-1", 80);
         assert_eq!(
-            reconcile_started(&svc.state, "000000000000", "i-1", started()),
+            reconcile_started(&svc.state, "000000000000", "us-east-1", "i-1", started()),
             PostStart::Stop
         );
         set_state(&svc, "i-1", 0);
         assert_eq!(
-            reconcile_started(&svc.state, "000000000000", "i-1", started()),
+            reconcile_started(&svc.state, "000000000000", "us-east-1", "i-1", started()),
             PostStart::Keep
         );
         // No container started, instance gone: still reaped, since the
         // failed boot may have created the volume.
         assert_eq!(
-            reconcile_started(&svc.state, "000000000000", "i-gone", None),
+            reconcile_started(&svc.state, "000000000000", "us-east-1", "i-gone", None),
             PostStart::Reap
         );
         // No container started, instance stopped: nothing to stop.
         set_state(&svc, "i-1", 80);
         assert_eq!(
-            reconcile_started(&svc.state, "000000000000", "i-1", None),
+            reconcile_started(&svc.state, "000000000000", "us-east-1", "i-1", None),
             PostStart::Keep
         );
     }

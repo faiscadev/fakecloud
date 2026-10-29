@@ -2179,7 +2179,9 @@ async fn rds_db_instance_reports_its_subnet_group() {
         .filter_map(|s| s.subnet_identifier())
         .collect();
     subnets.sort_unstable();
-    assert_eq!(subnets, [vpc_subnets[0].as_str(), vpc_subnets[1].as_str()]);
+    let mut expected = [vpc_subnets[0].as_str(), vpc_subnets[1].as_str()];
+    expected.sort_unstable();
+    assert_eq!(subnets, expected);
 
     // The group is resolved from state at render time, so a later
     // ModifyDBSubnetGroup shows up on the instance.

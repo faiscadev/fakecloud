@@ -70,6 +70,7 @@ impl ResourceProvisioner {
                 fakecloud_opensearch::vpc::derive_vpc_options(
                     &self.ec2_state,
                     &self.account_id,
+                    &self.region,
                     &v,
                 )?,
             );
@@ -174,6 +175,7 @@ impl ResourceProvisioner {
                 fakecloud_opensearch::vpc::derive_vpc_options(
                     &self.ec2_state,
                     &self.account_id,
+                    &self.region,
                     &v,
                 )?,
             );

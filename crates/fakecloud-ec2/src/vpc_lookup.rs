@@ -21,16 +21,17 @@ use crate::SharedEc2State;
 pub fn with_account<R>(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     f: impl FnOnce(&Ec2State) -> R,
 ) -> R {
     {
         let accounts = ec2.read();
-        if let Some(state) = accounts.get(account_id) {
+        if let Some(state) = accounts.regional(account_id, region) {
             return f(state);
         }
     }
     let mut accounts = ec2.write();
-    f(accounts.get_or_create(account_id))
+    f(accounts.regional_mut(account_id, region))
 }
 
 /// The facts about a subnet other services report back.
@@ -60,9 +61,10 @@ impl From<&Subnet> for SubnetInfo {
 pub fn resolve_subnets(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     subnet_ids: &[String],
 ) -> Result<Vec<SubnetInfo>, String> {
-    with_account(ec2, account_id, |state| {
+    with_account(ec2, account_id, region, |state| {
         resolve_subnets_in(state, subnet_ids)
     })
 }
@@ -140,9 +142,10 @@ impl SubnetGroupPlacement {
 pub fn resolve_subnet_group(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     subnet_ids: &[String],
 ) -> Result<SubnetGroupPlacement, SubnetGroupError> {
-    with_account(ec2, account_id, |state| {
+    with_account(ec2, account_id, region, |state| {
         let missing: Vec<String> = subnet_ids
             .iter()
             .filter(|id| !state.subnets.contains_key(*id))
@@ -178,13 +181,14 @@ pub const SUBNET_GROUP_VPC_CHANGE_MESSAGE: &str =
 pub fn subnet_group_vpc_change_allowed(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     existing_vpc: &str,
     new_vpc: &str,
 ) -> bool {
     if existing_vpc.is_empty() || existing_vpc == new_vpc {
         return true;
     }
-    with_account(ec2, account_id, |state| {
+    with_account(ec2, account_id, region, |state| {
         !state.vpcs.contains_key(existing_vpc)
     })
 }
@@ -199,14 +203,18 @@ pub fn default_vpc_id_in(state: &Ec2State) -> Option<String> {
 }
 
 /// The default VPC of the account, when it still exists.
-pub fn default_vpc_id(ec2: &SharedEc2State, account_id: &str) -> Option<String> {
-    with_account(ec2, account_id, default_vpc_id_in)
+pub fn default_vpc_id(ec2: &SharedEc2State, account_id: &str, region: &str) -> Option<String> {
+    with_account(ec2, account_id, region, default_vpc_id_in)
 }
 
 /// The default VPC's default subnets (one per Availability Zone), ordered by
 /// zone. This is where AWS places resources that take no subnets.
-pub fn default_vpc_subnets(ec2: &SharedEc2State, account_id: &str) -> Vec<SubnetInfo> {
-    with_account(ec2, account_id, |state| {
+pub fn default_vpc_subnets(
+    ec2: &SharedEc2State,
+    account_id: &str,
+    region: &str,
+) -> Vec<SubnetInfo> {
+    with_account(ec2, account_id, region, |state| {
         let Some(vpc_id) = default_vpc_id_in(state) else {
             return Vec::new();
         };
@@ -225,9 +233,10 @@ pub fn default_vpc_subnets(ec2: &SharedEc2State, account_id: &str) -> Vec<Subnet
 pub fn default_security_group_id(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     vpc_id: &str,
 ) -> Option<String> {
-    with_account(ec2, account_id, |state| {
+    with_account(ec2, account_id, region, |state| {
         default_security_group_id_in(state, vpc_id)
     })
 }
@@ -246,9 +255,10 @@ pub fn default_security_group_id_in(state: &Ec2State, vpc_id: &str) -> Option<St
 pub fn security_group_vpcs(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     group_ids: &[String],
 ) -> Result<Vec<(String, String)>, String> {
-    with_account(ec2, account_id, |state| {
+    with_account(ec2, account_id, region, |state| {
         security_group_vpcs_in(state, group_ids)
     })
 }
@@ -280,6 +290,18 @@ fn parse_ipv4_cidr(cidr: &str) -> Option<(u32, u32)> {
     }
     let mask = if len == 0 { 0 } else { u32::MAX << (32 - len) };
     Some((u32::from(addr) & mask, len))
+}
+
+/// Whether two IPv4 CIDR blocks share any address (one contains or equals
+/// the other). `false` when either does not parse.
+pub fn ipv4_cidrs_overlap(a: &str, b: &str) -> bool {
+    let (Some((na, la)), Some((nb, lb))) = (parse_ipv4_cidr(a), parse_ipv4_cidr(b)) else {
+        return false;
+    };
+    // The shorter prefix decides: both networks agree on its bits.
+    let len = la.min(lb);
+    let mask = if len == 0 { 0 } else { u32::MAX << (32 - len) };
+    na & mask == nb & mask
 }
 
 /// Whether `ip` is an address inside `cidr`.
@@ -519,6 +541,17 @@ pub fn create_service_endpoint(
     })
 }
 
+/// The account owning VPC `vpc_id` in `region`. VPCs are regional: a VPC
+/// id only names a VPC in the region it was created in, so the lookup is
+/// confined to that region's state of every account. An empty `region` (a
+/// caller that named none) matches the VPC in any region.
+pub fn vpc_owner_account(ec2: &SharedEc2State, vpc_id: &str, region: &str) -> Option<String> {
+    ec2.read()
+        .iter_regional()
+        .find(|(_, r, st)| (region.is_empty() || *r == region) && st.vpcs.contains_key(vpc_id))
+        .map(|(account, _, _)| account.to_string())
+}
+
 /// Delete an endpoint created with [`create_service_endpoint`] and its
 /// network interfaces.
 pub fn delete_service_endpoint(state: &mut Ec2State, endpoint: &ServiceEndpoint) {
@@ -532,54 +565,78 @@ pub fn delete_service_endpoint(state: &mut Ec2State, endpoint: &ServiceEndpoint)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::multi_account::MultiRegionState;
     use parking_lot::RwLock;
     use std::sync::Arc;
 
     const ACCOUNT: &str = "111122223333";
 
     fn ec2() -> SharedEc2State {
-        Arc::new(RwLock::new(MultiAccountState::new(
-            ACCOUNT,
-            "us-east-1",
-            "",
-        )))
+        Arc::new(RwLock::new(MultiRegionState::new(ACCOUNT, "us-east-1", "")))
+    }
+
+    #[test]
+    fn ipv4_cidrs_overlap_on_containment_and_equality() {
+        assert!(ipv4_cidrs_overlap("10.0.0.0/16", "10.0.0.0/16"));
+        assert!(ipv4_cidrs_overlap("10.0.0.0/16", "10.0.128.0/24"));
+        assert!(ipv4_cidrs_overlap("10.0.128.0/24", "10.0.0.0/16"));
+        assert!(!ipv4_cidrs_overlap("10.0.0.0/16", "10.1.0.0/16"));
+        assert!(!ipv4_cidrs_overlap("10.0.0.0/24", "10.0.1.0/24"));
+        assert!(!ipv4_cidrs_overlap("garbage", "10.0.0.0/16"));
+    }
+
+    #[test]
+    fn vpc_owner_account_is_confined_to_the_given_region() {
+        let ec2 = ec2();
+        let west_vpc = with_account(&ec2, "444455556666", "eu-west-1", default_vpc_id_in)
+            .expect("default VPC");
+        assert_eq!(
+            vpc_owner_account(&ec2, &west_vpc, "eu-west-1").as_deref(),
+            Some("444455556666")
+        );
+        // The same id names no VPC in another region.
+        assert_eq!(vpc_owner_account(&ec2, &west_vpc, "us-east-1"), None);
+        assert_eq!(vpc_owner_account(&ec2, "vpc-missing", "eu-west-1"), None);
     }
 
     #[test]
     fn with_account_creates_an_unseen_account_with_its_default_vpc() {
         let ec2 = ec2();
-        assert!(ec2.read().get("444455556666").is_none());
-        let vpc = with_account(&ec2, "444455556666", default_vpc_id_in).expect("default VPC");
-        let sg = with_account(&ec2, "444455556666", |s| {
+        assert!(ec2.read().regional("444455556666", "us-east-1").is_none());
+        let vpc = with_account(&ec2, "444455556666", "us-east-1", default_vpc_id_in)
+            .expect("default VPC");
+        let sg = with_account(&ec2, "444455556666", "us-east-1", |s| {
             default_security_group_id_in(s, &vpc)
         });
         assert!(sg.is_some());
-        assert!(ec2.read().get("444455556666").is_some());
+        assert!(ec2.read().regional("444455556666", "us-east-1").is_some());
     }
 
     #[test]
     fn resolves_default_subnets_and_reports_unknown_ids() {
         let ec2 = ec2();
-        let defaults = default_vpc_subnets(&ec2, ACCOUNT);
+        let defaults = default_vpc_subnets(&ec2, ACCOUNT, "us-east-1");
         assert_eq!(defaults.len(), 3);
-        let vpc = default_vpc_id(&ec2, ACCOUNT).unwrap();
+        let vpc = default_vpc_id(&ec2, ACCOUNT, "us-east-1").unwrap();
         assert!(defaults.iter().all(|s| s.vpc_id == vpc));
         let ids: Vec<String> = defaults.iter().map(|s| s.subnet_id.clone()).collect();
-        assert_eq!(resolve_subnets(&ec2, ACCOUNT, &ids).unwrap(), defaults);
+        assert_eq!(
+            resolve_subnets(&ec2, ACCOUNT, "us-east-1", &ids).unwrap(),
+            defaults
+        );
         let mut bad = ids.clone();
         bad.push("subnet-0000dead".into());
         assert_eq!(
-            resolve_subnets(&ec2, ACCOUNT, &bad).unwrap_err(),
+            resolve_subnets(&ec2, ACCOUNT, "us-east-1", &bad).unwrap_err(),
             "subnet-0000dead"
         );
-        let sg = default_security_group_id(&ec2, ACCOUNT, &vpc).unwrap();
+        let sg = default_security_group_id(&ec2, ACCOUNT, "us-east-1", &vpc).unwrap();
         assert_eq!(
-            security_group_vpcs(&ec2, ACCOUNT, std::slice::from_ref(&sg)).unwrap(),
+            security_group_vpcs(&ec2, ACCOUNT, "us-east-1", std::slice::from_ref(&sg)).unwrap(),
             vec![(sg, vpc)]
         );
         assert_eq!(
-            security_group_vpcs(&ec2, ACCOUNT, &["sg-nope".to_string()]).unwrap_err(),
+            security_group_vpcs(&ec2, ACCOUNT, "us-east-1", &["sg-nope".to_string()]).unwrap_err(),
             "sg-nope"
         );
     }
@@ -587,26 +644,37 @@ mod tests {
     #[test]
     fn subnet_group_requires_existing_subnets_in_one_vpc() {
         let ec2 = ec2();
-        let defaults = default_vpc_subnets(&ec2, ACCOUNT);
+        let defaults = default_vpc_subnets(&ec2, ACCOUNT, "us-east-1");
         let ids: Vec<String> = defaults.iter().map(|s| s.subnet_id.clone()).collect();
-        let placed = resolve_subnet_group(&ec2, ACCOUNT, &ids).unwrap();
+        let placed = resolve_subnet_group(&ec2, ACCOUNT, "us-east-1", &ids).unwrap();
         assert_eq!(placed.vpc_id, defaults[0].vpc_id);
         assert_eq!(placed.distinct_availability_zones(), 3);
         assert_eq!(
-            resolve_subnet_group(&ec2, ACCOUNT, &["subnet-x".into(), ids[0].clone()]).unwrap_err(),
+            resolve_subnet_group(
+                &ec2,
+                ACCOUNT,
+                "us-east-1",
+                &["subnet-x".into(), ids[0].clone()]
+            )
+            .unwrap_err(),
             SubnetGroupError::NotFound(vec!["subnet-x".into()])
         );
         // A subnet in another VPC.
         {
             let mut accounts = ec2.write();
-            let state = accounts.get_or_create(ACCOUNT);
+            let state = accounts.regional_mut(ACCOUNT, "us-east-1");
             let mut other = state.subnets[&ids[0]].clone();
             other.subnet_id = "subnet-other".into();
             other.vpc_id = "vpc-other".into();
             state.subnets.insert(other.subnet_id.clone(), other);
         }
         assert!(matches!(
-            resolve_subnet_group(&ec2, ACCOUNT, &[ids[0].clone(), "subnet-other".into()]),
+            resolve_subnet_group(
+                &ec2,
+                ACCOUNT,
+                "us-east-1",
+                &[ids[0].clone(), "subnet-other".into()]
+            ),
             Err(SubnetGroupError::DifferentVpcs(_))
         ));
     }
@@ -626,9 +694,9 @@ mod tests {
     #[test]
     fn service_eni_allocates_distinct_ips_inside_the_subnet() {
         let ec2 = ec2();
-        let subnet = default_vpc_subnets(&ec2, ACCOUNT).remove(0);
+        let subnet = default_vpc_subnets(&ec2, ACCOUNT, "us-east-1").remove(0);
         let mut accounts = ec2.write();
-        let state = accounts.get_or_create(ACCOUNT);
+        let state = accounts.regional_mut(ACCOUNT, "us-east-1");
         let spec = |ip| ServiceEni {
             subnet_id: &subnet.subnet_id,
             group_ids: vec!["sg-1".into()],

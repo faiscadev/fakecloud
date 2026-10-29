@@ -359,12 +359,13 @@ pub trait Ec2NetworkLookup: Send + Sync {
     fn create_task_eni(
         &self,
         account_id: &str,
+        region: &str,
         subnet_id: &str,
         group_ids: Vec<String>,
         description: String,
     ) -> Result<TaskEni, String>;
     /// Delete an ENI [`Self::create_task_eni`] created (no-op otherwise).
-    fn delete_task_eni(&self, account_id: &str, eni_id: &str);
+    fn delete_task_eni(&self, account_id: &str, region: &str, eni_id: &str);
 }
 
 /// Publish CloudWatch metric data points from outside the cloudwatch
@@ -772,19 +773,20 @@ impl DeliveryBus {
     pub fn create_task_eni(
         &self,
         account_id: &str,
+        region: &str,
         subnet_id: &str,
         group_ids: Vec<String>,
         description: String,
     ) -> Option<Result<TaskEni, String>> {
         self.ec2_network_lookup
             .as_ref()
-            .map(|l| l.create_task_eni(account_id, subnet_id, group_ids, description))
+            .map(|l| l.create_task_eni(account_id, region, subnet_id, group_ids, description))
     }
 
     /// Delete a task ENI created with [`Self::create_task_eni`].
-    pub fn delete_task_eni(&self, account_id: &str, eni_id: &str) {
+    pub fn delete_task_eni(&self, account_id: &str, region: &str, eni_id: &str) {
         if let Some(l) = &self.ec2_network_lookup {
-            l.delete_task_eni(account_id, eni_id);
+            l.delete_task_eni(account_id, region, eni_id);
         }
     }
 

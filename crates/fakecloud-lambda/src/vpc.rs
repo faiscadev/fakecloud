@@ -26,6 +26,7 @@ fn string_list(v: &Value) -> Vec<String> {
 pub fn resolve_vpc_config(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     cfg: &Value,
 ) -> Result<Value, String> {
     let subnet_ids = string_list(&cfg["SubnetIds"]);
@@ -40,18 +41,20 @@ pub fn resolve_vpc_config(
         out["VpcId"] = Value::String(String::new());
         return Ok(out);
     }
-    let subnets = vpc_lookup::resolve_subnets(ec2, account_id, &subnet_ids).map_err(|id| {
-        format!(
-            "Error occurred while DescribeSubnets. EC2 Error Code: InvalidSubnetID.NotFound. \
+    let subnets =
+        vpc_lookup::resolve_subnets(ec2, account_id, region, &subnet_ids).map_err(|id| {
+            format!(
+                "Error occurred while DescribeSubnets. EC2 Error Code: InvalidSubnetID.NotFound. \
              EC2 Error Message: The subnet ID '{id}' does not exist"
-        )
-    })?;
-    let groups = vpc_lookup::security_group_vpcs(ec2, account_id, &group_ids).map_err(|id| {
-        format!(
+            )
+        })?;
+    let groups =
+        vpc_lookup::security_group_vpcs(ec2, account_id, region, &group_ids).map_err(|id| {
+            format!(
             "Error occurred while DescribeSecurityGroups. EC2 Error Code: InvalidGroup.NotFound. \
              EC2 Error Message: The security group '{id}' does not exist"
         )
-    })?;
+        })?;
     let vpc_id = subnets
         .first()
         .map(|s| s.vpc_id.clone())
@@ -67,24 +70,30 @@ pub fn resolve_vpc_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::multi_account::MultiRegionState;
     use parking_lot::RwLock;
     use serde_json::json;
     use std::sync::Arc;
 
     #[test]
     fn vpc_config_reports_the_subnets_vpc_and_rejects_unknown_ids() {
-        let ec2: SharedEc2State = Arc::new(RwLock::new(MultiAccountState::new(
+        let ec2: SharedEc2State = Arc::new(RwLock::new(MultiRegionState::new(
             "123456789012",
             "us-east-1",
             "",
         )));
-        let subnet = vpc_lookup::default_vpc_subnets(&ec2, "123456789012").remove(0);
-        let sg =
-            vpc_lookup::default_security_group_id(&ec2, "123456789012", &subnet.vpc_id).unwrap();
+        let subnet = vpc_lookup::default_vpc_subnets(&ec2, "123456789012", "us-east-1").remove(0);
+        let sg = vpc_lookup::default_security_group_id(
+            &ec2,
+            "123456789012",
+            "us-east-1",
+            &subnet.vpc_id,
+        )
+        .unwrap();
         let out = resolve_vpc_config(
             &ec2,
             "123456789012",
+            "us-east-1",
             &json!({ "SubnetIds": [subnet.subnet_id], "SecurityGroupIds": [sg] }),
         )
         .unwrap();
@@ -93,6 +102,7 @@ mod tests {
         let err = resolve_vpc_config(
             &ec2,
             "123456789012",
+            "us-east-1",
             &json!({ "SubnetIds": ["subnet-0000dead"], "SecurityGroupIds": [] }),
         )
         .unwrap_err();
@@ -100,6 +110,7 @@ mod tests {
         let err = resolve_vpc_config(
             &ec2,
             "123456789012",
+            "us-east-1",
             &json!({ "SubnetIds": [subnet.subnet_id], "SecurityGroupIds": ["sg-0000dead"] }),
         )
         .unwrap_err();
@@ -109,6 +120,7 @@ mod tests {
         let out = resolve_vpc_config(
             &ec2,
             "123456789012",
+            "us-east-1",
             &json!({ "SubnetIds": [], "SecurityGroupIds": [] }),
         )
         .unwrap();

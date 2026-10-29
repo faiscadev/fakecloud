@@ -56,7 +56,7 @@ pub(crate) fn create_ipam_policy(
     let region = region_of(req);
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -85,7 +85,7 @@ pub(crate) fn delete_ipam_policy(
     let owner = req.account_id.clone();
     let region = region_of(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let p = state.ipam_policies.remove(&id).unwrap_or(IpamPolicy {
         id: id.clone(),
         ipam_id: "ipam-0".to_string(),
@@ -115,7 +115,9 @@ pub(crate) fn describe_ipam_policies(
     let region = region_of(req);
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ipam_policies
         .values()
@@ -145,7 +147,9 @@ pub(crate) fn enable_ipam_policy(
     let id = require(&req.query_params, "IpamPolicyId")?;
     {
         let mut accounts = svc.state.write();
-        accounts.get_or_create(&req.account_id).ipam_enabled_policy = Some(id.clone());
+        accounts
+            .regional_mut(&req.account_id, &req.region)
+            .ipam_enabled_policy = Some(id.clone());
     }
     Ok(Ec2Service::respond(
         "EnableIpamPolicy",
@@ -161,7 +165,9 @@ pub(crate) fn disable_ipam_policy(
     let id = require(&req.query_params, "IpamPolicyId")?;
     {
         let mut accounts = svc.state.write();
-        let enabled = &mut accounts.get_or_create(&req.account_id).ipam_enabled_policy;
+        let enabled = &mut accounts
+            .regional_mut(&req.account_id, &req.region)
+            .ipam_enabled_policy;
         if enabled.as_deref() == Some(id.as_str()) {
             *enabled = None;
         }
@@ -179,7 +185,7 @@ pub(crate) fn get_enabled_ipam_policy(
 ) -> Result<AwsResponse, AwsServiceError> {
     let accounts = svc.state.read();
     let enabled = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.ipam_enabled_policy.clone());
     let body = match enabled {
         Some(id) => format!(
@@ -204,7 +210,7 @@ pub(crate) fn get_ipam_policy_allocation_rules(
     mr(req)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.ipam_policy_alloc_rules.get(&id))
         .map(|rules| {
             rules
@@ -231,7 +237,7 @@ pub(crate) fn modify_ipam_policy_allocation_rules(
     {
         let mut accounts = svc.state.write();
         let rules = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .ipam_policy_alloc_rules
             .entry(id.clone())
             .or_default();
@@ -310,7 +316,7 @@ pub(crate) fn create_ipam_prefix_list_resolver(
     let region = region_of(req);
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -339,7 +345,7 @@ pub(crate) fn delete_ipam_prefix_list_resolver(
     let owner = req.account_id.clone();
     let region = region_of(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let r = state
         .ipam_pl_resolvers
         .remove(&id)
@@ -370,7 +376,9 @@ pub(crate) fn describe_ipam_prefix_list_resolvers(
     let region = region_of(req);
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ipam_pl_resolvers
         .values()
@@ -392,7 +400,7 @@ pub(crate) fn modify_ipam_prefix_list_resolver(
     let owner = req.account_id.clone();
     let region = region_of(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let r = match state.ipam_pl_resolvers.get_mut(&id) {
         Some(e) => {
             if let Some(d) = req.query_params.get("Description") {
@@ -461,7 +469,7 @@ pub(crate) fn create_ipam_prefix_list_resolver_target(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -489,7 +497,7 @@ pub(crate) fn delete_ipam_prefix_list_resolver_target(
     let id = require(&req.query_params, "IpamPrefixListResolverTargetId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let t = state
         .ipam_pl_resolver_targets
         .remove(&id)
@@ -520,7 +528,9 @@ pub(crate) fn describe_ipam_prefix_list_resolver_targets(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ipam_pl_resolver_targets
         .values()
@@ -542,7 +552,7 @@ pub(crate) fn modify_ipam_prefix_list_resolver_target(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let t = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.ipam_pl_resolver_targets.get(&id).cloned())
         .unwrap_or(IpamPrefixListResolverTarget {
             id: id.clone(),
@@ -552,7 +562,7 @@ pub(crate) fn modify_ipam_prefix_list_resolver_target(
             track_latest_version: true,
         });
     let tags = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .map(|s| s.tags_for(&id).to_vec())
         .unwrap_or_default();
     Ok(Ec2Service::respond(

@@ -47,7 +47,7 @@ pub(crate) fn create_capacity_manager_data_export(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .capacity_manager_data_exports
             .insert(id.clone(), export);
     }
@@ -66,7 +66,7 @@ pub(crate) fn delete_capacity_manager_data_export(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .capacity_manager_data_exports
             .remove(&id);
     }
@@ -84,7 +84,9 @@ pub(crate) fn describe_capacity_manager_data_exports(
     validate_max_results(&req.query_params, 1, 1000)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .capacity_manager_data_exports
         .values()
@@ -123,7 +125,7 @@ pub(crate) fn disable_capacity_manager(
 ) -> Result<AwsResponse, AwsServiceError> {
     let org_access = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.capacity_manager_enabled = false;
         state
             .capacity_manager_org_access
@@ -143,7 +145,7 @@ pub(crate) fn enable_capacity_manager(
 ) -> Result<AwsResponse, AwsServiceError> {
     let org_access = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.capacity_manager_enabled = true;
         state
             .capacity_manager_org_access
@@ -163,7 +165,9 @@ pub(crate) fn get_capacity_manager_attributes(
 ) -> Result<AwsResponse, AwsServiceError> {
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let org_access = state
         .capacity_manager_org_access
         .clone()
@@ -218,7 +222,9 @@ pub(crate) fn get_capacity_manager_monitored_tag_keys(
     validate_max_results(&req.query_params, 1, 1000)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items = state.capacity_manager_monitored_tag_keys.clone();
     Ok(Ec2Service::respond(
         "GetCapacityManagerMonitoredTagKeys",
@@ -235,7 +241,7 @@ pub(crate) fn update_capacity_manager_monitored_tag_keys(
     let deactivate = indexed_list(&req.query_params, "DeactivateTagKey");
     let keys = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for k in &activate {
             if !state.capacity_manager_monitored_tag_keys.contains(k) {
                 state.capacity_manager_monitored_tag_keys.push(k.clone());
@@ -260,7 +266,7 @@ pub(crate) fn update_capacity_manager_organizations_access(
     let org_access = require(&req.query_params, "OrganizationsAccess")?;
     let enabled = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.capacity_manager_org_access = Some(org_access.clone());
         state.capacity_manager_enabled
     };

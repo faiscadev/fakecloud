@@ -144,110 +144,115 @@ fn discover_ec2(
     let Some(ec2) = &states.ec2 else { return };
     // An account EC2 has not seen yet still has its default VPC, subnets and
     // security group, so it is discovered with them.
-    fakecloud_ec2::vpc_lookup::with_account(ec2, account_id, |st| {
-        let tags_for = |id: &str| -> std::collections::BTreeMap<String, String> {
-            st.tags
-                .get(id)
-                .map(|v| v.iter().map(|t| (t.key.clone(), t.value.clone())).collect())
-                .unwrap_or_default()
-        };
-        for (id, inst) in &st.instances {
-            if inst.state_name == "terminated" {
-                continue;
+    fakecloud_ec2::vpc_lookup::with_account(
+        ec2,
+        account_id,
+        region,
+        |st: &fakecloud_ec2::state::Ec2State| {
+            let tags_for = |id: &str| -> std::collections::BTreeMap<String, String> {
+                st.tags
+                    .get(id)
+                    .map(|v| v.iter().map(|t| (t.key.clone(), t.value.clone())).collect())
+                    .unwrap_or_default()
+            };
+            for (id, inst) in &st.instances {
+                if inst.state_name == "terminated" {
+                    continue;
+                }
+                let config = json!({
+                    "instanceId": id,
+                    "imageId": inst.image_id,
+                    "instanceType": inst.instance_type,
+                    "state": { "name": inst.state_name, "code": inst.state_code },
+                    "privateIpAddress": inst.private_ip,
+                    "publicIpAddress": inst.public_ip,
+                    "subnetId": inst.subnet_id,
+                    "vpcId": inst.vpc_id,
+                    "securityGroups": inst.security_group_ids,
+                    "keyName": inst.key_name,
+                });
+                let name = tags_for(id).get("Name").cloned();
+                out.push(DiscoveredResource {
+                    resource_type: "AWS::EC2::Instance".into(),
+                    resource_id: id.clone(),
+                    resource_name: name,
+                    region: region.to_string(),
+                    availability_zone: inst.az.clone(),
+                    arn: fakecloud_aws::arn::Arn::regional(
+                        "ec2",
+                        region,
+                        account_id,
+                        &format!("instance/{id}"),
+                    )
+                    .to_string(),
+                    tags: tags_for(id),
+                    configuration: config,
+                });
             }
-            let config = json!({
-                "instanceId": id,
-                "imageId": inst.image_id,
-                "instanceType": inst.instance_type,
-                "state": { "name": inst.state_name, "code": inst.state_code },
-                "privateIpAddress": inst.private_ip,
-                "publicIpAddress": inst.public_ip,
-                "subnetId": inst.subnet_id,
-                "vpcId": inst.vpc_id,
-                "securityGroups": inst.security_group_ids,
-                "keyName": inst.key_name,
-            });
-            let name = tags_for(id).get("Name").cloned();
-            out.push(DiscoveredResource {
-                resource_type: "AWS::EC2::Instance".into(),
-                resource_id: id.clone(),
-                resource_name: name,
-                region: region.to_string(),
-                availability_zone: inst.az.clone(),
-                arn: fakecloud_aws::arn::Arn::regional(
-                    "ec2",
-                    region,
-                    account_id,
-                    &format!("instance/{id}"),
-                )
-                .to_string(),
-                tags: tags_for(id),
-                configuration: config,
-            });
-        }
-        for (id, sg) in &st.security_groups {
-            let ingress: Vec<Value> = sg
-                .rules
-                .iter()
-                .filter(|r| !r.is_egress)
-                .map(security_group_rule_json)
-                .collect();
-            let egress: Vec<Value> = sg
-                .rules
-                .iter()
-                .filter(|r| r.is_egress)
-                .map(security_group_rule_json)
-                .collect();
-            let config = json!({
-                "groupId": sg.group_id,
-                "groupName": sg.group_name,
-                "description": sg.description,
-                "vpcId": sg.vpc_id,
-                "ipPermissions": ingress,
-                "ipPermissionsEgress": egress,
-            });
-            out.push(DiscoveredResource {
-                resource_type: "AWS::EC2::SecurityGroup".into(),
-                resource_id: id.clone(),
-                resource_name: Some(sg.group_name.clone()),
-                region: region.to_string(),
-                availability_zone: "Regional".into(),
-                arn: fakecloud_aws::arn::Arn::regional(
-                    "ec2",
-                    region,
-                    account_id,
-                    &format!("security-group/{id}"),
-                )
-                .to_string(),
-                tags: tags_for(id),
-                configuration: config,
-            });
-        }
-        for (id, vpc) in &st.vpcs {
-            let config = json!({
-                "vpcId": id,
-                "cidrBlock": vpc.cidr_block,
-                "state": vpc.state,
-                "isDefault": vpc.is_default,
-            });
-            out.push(DiscoveredResource {
-                resource_type: "AWS::EC2::VPC".into(),
-                resource_id: id.clone(),
-                resource_name: tags_for(id).get("Name").cloned(),
-                region: region.to_string(),
-                availability_zone: "Regional".into(),
-                arn: fakecloud_aws::arn::Arn::regional(
-                    "ec2",
-                    region,
-                    account_id,
-                    &format!("vpc/{id}"),
-                )
-                .to_string(),
-                tags: tags_for(id),
-                configuration: config,
-            });
-        }
-    });
+            for (id, sg) in &st.security_groups {
+                let ingress: Vec<Value> = sg
+                    .rules
+                    .iter()
+                    .filter(|r| !r.is_egress)
+                    .map(security_group_rule_json)
+                    .collect();
+                let egress: Vec<Value> = sg
+                    .rules
+                    .iter()
+                    .filter(|r| r.is_egress)
+                    .map(security_group_rule_json)
+                    .collect();
+                let config = json!({
+                    "groupId": sg.group_id,
+                    "groupName": sg.group_name,
+                    "description": sg.description,
+                    "vpcId": sg.vpc_id,
+                    "ipPermissions": ingress,
+                    "ipPermissionsEgress": egress,
+                });
+                out.push(DiscoveredResource {
+                    resource_type: "AWS::EC2::SecurityGroup".into(),
+                    resource_id: id.clone(),
+                    resource_name: Some(sg.group_name.clone()),
+                    region: region.to_string(),
+                    availability_zone: "Regional".into(),
+                    arn: fakecloud_aws::arn::Arn::regional(
+                        "ec2",
+                        region,
+                        account_id,
+                        &format!("security-group/{id}"),
+                    )
+                    .to_string(),
+                    tags: tags_for(id),
+                    configuration: config,
+                });
+            }
+            for (id, vpc) in &st.vpcs {
+                let config = json!({
+                    "vpcId": id,
+                    "cidrBlock": vpc.cidr_block,
+                    "state": vpc.state,
+                    "isDefault": vpc.is_default,
+                });
+                out.push(DiscoveredResource {
+                    resource_type: "AWS::EC2::VPC".into(),
+                    resource_id: id.clone(),
+                    resource_name: tags_for(id).get("Name").cloned(),
+                    region: region.to_string(),
+                    availability_zone: "Regional".into(),
+                    arn: fakecloud_aws::arn::Arn::regional(
+                        "ec2",
+                        region,
+                        account_id,
+                        &format!("vpc/{id}"),
+                    )
+                    .to_string(),
+                    tags: tags_for(id),
+                    configuration: config,
+                });
+            }
+        },
+    );
 }
 
 fn security_group_rule_json(r: &fakecloud_ec2::state::SecurityGroupRule) -> Value {
