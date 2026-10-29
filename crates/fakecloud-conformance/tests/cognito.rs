@@ -3305,6 +3305,7 @@ async fn cognito_client_secrets() {
         .create_user_pool_client()
         .user_pool_id(&pool_id)
         .client_name("secrets-client")
+        .generate_secret(true)
         .send()
         .await
         .unwrap();
@@ -3334,7 +3335,8 @@ async fn cognito_client_secrets() {
         .send()
         .await
         .unwrap();
-    assert_eq!(list.client_secrets().len(), 1);
+    // The primary and the added secret.
+    assert_eq!(list.client_secrets().len(), 2);
 
     // Delete secret
     client
@@ -3353,7 +3355,11 @@ async fn cognito_client_secrets() {
         .send()
         .await
         .unwrap();
-    assert!(list.client_secrets().is_empty());
+    assert_eq!(list.client_secrets().len(), 1);
+    assert_ne!(
+        list.client_secrets()[0].client_secret_id(),
+        Some(secret_id.as_str())
+    );
 }
 
 // ---------------------------------------------------------------------------

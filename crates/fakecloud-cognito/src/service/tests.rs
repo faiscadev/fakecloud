@@ -7232,7 +7232,7 @@ fn add_custom_attributes_unknown_pool_errors() {
 fn user_pool_client_secret_crud() {
     let (svc, _) = make_svc();
     let pool_id = create_pool(&svc);
-    let client_id = create_client(&svc, &pool_id);
+    let (client_id, _) = create_m2m_client(&svc, &pool_id, &[]);
 
     let body = json!({
         "UserPoolId": pool_id,
@@ -7246,30 +7246,233 @@ fn user_pool_client_secret_crud() {
         .as_str()
         .unwrap()
         .to_string();
+    // A caller-supplied secret is never echoed back.
+    assert!(b["ClientSecretDescriptor"]
+        .get("ClientSecretValue")
+        .is_none());
+    assert!(b["ClientSecretDescriptor"]["ClientSecretCreateDate"].is_f64());
+
+    assert_eq!(list_client_secrets(&svc, &pool_id, &client_id).len(), 2);
+
+    delete_client_secret(&svc, &pool_id, &client_id, &secret_id).unwrap();
+    let listed = list_client_secrets(&svc, &pool_id, &client_id);
+    assert_eq!(listed.len(), 1);
+    assert_ne!(listed[0]["ClientSecretId"], secret_id.as_str());
+}
+
+/// `ListUserPoolClientSecrets` entries for `client_id`.
+fn list_client_secrets(svc: &CognitoService, pool_id: &str, client_id: &str) -> Vec<Value> {
+    let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
+    let req = make_req("ListUserPoolClientSecrets", &body.to_string());
+    let b = resp_json(&svc.list_user_pool_client_secrets(&req).unwrap());
+    b["ClientSecrets"].as_array().unwrap().clone()
+}
+
+/// The primary is a first-class member of the secret set: it lists first,
+/// with an id whose epoch matches its create date, and no value is ever
+/// listed.
+#[test]
+fn list_client_secrets_includes_primary_first_without_values() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, _) = create_m2m_client(&svc, &pool_id, &[]);
+    let listed = list_client_secrets(&svc, &pool_id, &client_id);
+    assert_eq!(listed.len(), 1);
+    let primary_id = listed[0]["ClientSecretId"].as_str().unwrap().to_string();
+
+    let (added_id, _) = add_client_secret(&svc, &pool_id, &client_id);
+    let listed = list_client_secrets(&svc, &pool_id, &client_id);
+    let ids: Vec<&str> = listed
+        .iter()
+        .map(|e| e["ClientSecretId"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [primary_id.as_str(), added_id.as_str()]);
+    for entry in &listed {
+        assert!(entry.get("ClientSecretValue").is_none(), "{entry}");
+        let id = entry["ClientSecretId"].as_str().unwrap();
+        let epoch_ms: i64 = id
+            .strip_prefix(&format!("{client_id}--"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let date = entry["ClientSecretCreateDate"].as_f64().unwrap();
+        assert_eq!((date * 1000.0).round() as i64, epoch_ms, "{entry}");
+    }
+}
+
+#[test]
+fn add_client_secret_caps_the_set_at_two() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, _) = create_m2m_client(&svc, &pool_id, &[]);
+    add_client_secret(&svc, &pool_id, &client_id);
+    let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
+    let err = expect_err(
+        svc.add_user_pool_client_secret(&make_req("AddUserPoolClientSecret", &body.to_string())),
+    );
+    assert_eq!(err.code(), "LimitExceededException");
+    assert_eq!(list_client_secrets(&svc, &pool_id, &client_id).len(), 2);
+}
+
+/// Deleting the primary promotes the remaining secret, so
+/// DescribeUserPoolClient keeps reporting a valid ClientSecret, and the old
+/// primary stops authenticating.
+#[test]
+fn delete_primary_client_secret_promotes_the_added_one() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, primary) = create_m2m_client(&svc, &pool_id, &[]);
+    let primary_id = list_client_secrets(&svc, &pool_id, &client_id)[0]["ClientSecretId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (added_id, added) = add_client_secret(&svc, &pool_id, &client_id);
+
+    delete_client_secret(&svc, &pool_id, &client_id, &primary_id).unwrap();
+
+    let listed = list_client_secrets(&svc, &pool_id, &client_id);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["ClientSecretId"], added_id.as_str());
+    let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
+    let b = resp_json(
+        &svc.describe_user_pool_client(&make_req("DescribeUserPoolClient", &body.to_string()))
+            .unwrap(),
+    );
+    assert_eq!(b["UserPoolClient"]["ClientSecret"], added.as_str());
+
+    let client_token = |secret: &str| {
+        let body = json!({ "ClientId": client_id, "Secret": secret });
+        block_on(svc.get_client_token(&make_req("GetClientToken", &body.to_string())))
+    };
+    client_token(&added).unwrap();
     assert_eq!(
-        b["ClientSecretDescriptor"]["ClientSecretValue"],
-        "super_secret_0123456789abcdef"
+        expect_err(client_token(&primary)).code(),
+        "NotAuthorizedException"
+    );
+    // The deleted primary's id is gone for good.
+    let err = expect_err(delete_client_secret(
+        &svc,
+        &pool_id,
+        &client_id,
+        &primary_id,
+    ));
+    assert_eq!(err.code(), "ResourceNotFoundException");
+}
+
+#[test]
+fn delete_last_client_secret_is_rejected() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, primary) = create_m2m_client(&svc, &pool_id, &[]);
+    let primary_id = list_client_secrets(&svc, &pool_id, &client_id)[0]["ClientSecretId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let err = expect_err(delete_client_secret(
+        &svc,
+        &pool_id,
+        &client_id,
+        &primary_id,
+    ));
+    assert_eq!(err.code(), "InvalidParameterException");
+
+    // After rotating, the survivor is the last one and is protected too.
+    let (added_id, _) = add_client_secret(&svc, &pool_id, &client_id);
+    delete_client_secret(&svc, &pool_id, &client_id, &added_id).unwrap();
+    let err = expect_err(delete_client_secret(
+        &svc,
+        &pool_id,
+        &client_id,
+        &primary_id,
+    ));
+    assert_eq!(err.code(), "InvalidParameterException");
+    let body = json!({ "ClientId": client_id, "Secret": primary });
+    block_on(svc.get_client_token(&make_req("GetClientToken", &body.to_string()))).unwrap();
+}
+
+/// A delete and re-add in the same instant never reuses an id, and each id
+/// stays consistent with its create date.
+#[test]
+fn client_secret_ids_are_never_reused() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, _) = create_m2m_client(&svc, &pool_id, &[]);
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(
+        list_client_secrets(&svc, &pool_id, &client_id)[0]["ClientSecretId"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    );
+    for _ in 0..20 {
+        let (id, _) = add_client_secret(&svc, &pool_id, &client_id);
+        assert!(seen.insert(id.clone()), "id {id} reused");
+        delete_client_secret(&svc, &pool_id, &client_id, &id).unwrap();
+    }
+
+    // Same `now` for every issue: still strictly increasing.
+    let mut accounts = state.write();
+    let client = accounts
+        .get_or_create("123456789012")
+        .user_pool_clients
+        .get_mut(&client_id)
+        .unwrap();
+    let now = chrono::Utc::now() - chrono::Duration::seconds(5);
+    let a = client.issue_secret_meta(now);
+    let b = client.issue_secret_meta(now);
+    assert_ne!(a.client_secret_id, b.client_secret_id);
+    assert!(b.client_secret_create_date > a.client_secret_create_date);
+    assert_eq!(
+        b.client_secret_id,
+        format!(
+            "{client_id}--{}",
+            b.client_secret_create_date.timestamp_millis()
+        )
+    );
+}
+
+/// A client persisted before the primary had an id loads with a
+/// deterministic id derived from the client's creation date, lists it, and
+/// rotates normally.
+#[test]
+fn legacy_client_without_primary_secret_id_loads_and_rotates() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, primary) = create_m2m_client(&svc, &pool_id, &[]);
+    let creation_ms = {
+        let mut accounts = state.write();
+        let clients = &mut accounts.get_or_create("123456789012").user_pool_clients;
+        let mut legacy = serde_json::to_value(&clients[&client_id]).unwrap();
+        let obj = legacy.as_object_mut().unwrap();
+        obj.remove("primary_secret");
+        obj.remove("last_secret_epoch_ms");
+        let loaded: crate::state::UserPoolClient = serde_json::from_value(legacy).unwrap();
+        assert!(loaded.primary_secret.is_none());
+        let ms = loaded.creation_date.timestamp_millis();
+        clients.insert(client_id.clone(), loaded);
+        ms
+    };
+
+    let derived = format!("{client_id}--{creation_ms}");
+    let listed = list_client_secrets(&svc, &pool_id, &client_id);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["ClientSecretId"], derived.as_str());
+    // Deterministic across reads.
+    assert_eq!(
+        list_client_secrets(&svc, &pool_id, &client_id)[0]["ClientSecretId"],
+        derived.as_str()
     );
 
+    let (added_id, added) = add_client_secret(&svc, &pool_id, &client_id);
+    assert_ne!(added_id, derived);
+    delete_client_secret(&svc, &pool_id, &client_id, &derived).unwrap();
     let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
-    let req = make_req("ListUserPoolClientSecrets", &body.to_string());
-    let resp = svc.list_user_pool_client_secrets(&req).unwrap();
-    let b = resp_json(&resp);
-    assert_eq!(b["ClientSecrets"].as_array().unwrap().len(), 1);
-
-    let body = json!({
-        "UserPoolId": pool_id,
-        "ClientId": client_id,
-        "ClientSecretId": secret_id
-    });
-    let req = make_req("DeleteUserPoolClientSecret", &body.to_string());
-    svc.delete_user_pool_client_secret(&req).unwrap();
-
-    let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
-    let req = make_req("ListUserPoolClientSecrets", &body.to_string());
-    let resp = svc.list_user_pool_client_secrets(&req).unwrap();
-    let b = resp_json(&resp);
-    assert_eq!(b["ClientSecrets"].as_array().unwrap().len(), 0);
+    let b = resp_json(
+        &svc.describe_user_pool_client(&make_req("DescribeUserPoolClient", &body.to_string()))
+            .unwrap(),
+    );
+    assert_eq!(b["UserPoolClient"]["ClientSecret"], added.as_str());
+    assert_ne!(added, primary);
 }
 
 /// Add a secret to `client_id` and return its (id, value).
@@ -7542,7 +7745,7 @@ fn added_client_secret_authenticates_oauth_client_until_deleted() {
 fn add_user_pool_client_secret_generates_secret_when_missing() {
     let (svc, _) = make_svc();
     let pool_id = create_pool(&svc);
-    let client_id = create_client(&svc, &pool_id);
+    let (client_id, _) = create_m2m_client(&svc, &pool_id, &[]);
     let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
     let req = make_req("AddUserPoolClientSecret", &body.to_string());
     let resp = svc.add_user_pool_client_secret(&req).unwrap();
@@ -7557,7 +7760,7 @@ fn add_user_pool_client_secret_generates_secret_when_missing() {
 fn add_user_pool_client_secret_rejects_secret_outside_client_secret_type() {
     let (svc, _) = make_svc();
     let pool_id = create_pool(&svc);
-    let client_id = create_client(&svc, &pool_id);
+    let (client_id, _) = create_m2m_client(&svc, &pool_id, &[]);
     for secret in ["too_short", "has-a-dash-0123456789abcdef"] {
         let body = json!({
             "UserPoolId": pool_id,
@@ -7572,10 +7775,8 @@ fn add_user_pool_client_secret_rejects_secret_outside_client_secret_type() {
         assert_eq!(err.code(), "InvalidParameterException");
         assert!(!err.message().contains(secret));
     }
-    let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
-    let req = make_req("ListUserPoolClientSecrets", &body.to_string());
-    let b = resp_json(&svc.list_user_pool_client_secrets(&req).unwrap());
-    assert!(b["ClientSecrets"].as_array().unwrap().is_empty());
+    // Only the primary remains.
+    assert_eq!(list_client_secrets(&svc, &pool_id, &client_id).len(), 1);
 }
 
 #[test]
@@ -7720,18 +7921,37 @@ fn revoke_token_requires_one_of_the_clients_secrets() {
     assert!(!has_token("rt-3"));
 }
 
-/// A secret added to a public client does not make it confidential: no
-/// SECRET_HASH or ClientSecret is demanded and the stray secret
-/// authenticates nothing.
+/// A public client cannot gain a secret: Add is refused and stores nothing.
+/// A stray added secret left on a public client by an older snapshot does
+/// not make it confidential: no SECRET_HASH or ClientSecret is demanded and
+/// the stray secret authenticates nothing.
 #[test]
 fn public_client_with_added_secret_stays_public() {
     let (svc, state) = make_svc();
     let pool_id = create_pool(&svc);
     let client_id = create_client(&svc, &pool_id);
-    let (_, added) = add_client_secret(&svc, &pool_id, &client_id);
+    let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
+    let err = expect_err(
+        svc.add_user_pool_client_secret(&make_req("AddUserPoolClientSecret", &body.to_string())),
+    );
+    assert_eq!(err.code(), "InvalidParameterException");
+    assert!(list_client_secrets(&svc, &pool_id, &client_id).is_empty());
+
+    let added = "stray_secret_0123456789abcdef".to_string();
     {
-        let accounts = state.read();
-        let client = &accounts.default_ref().user_pool_clients[&client_id];
+        let mut accounts = state.write();
+        let client = accounts
+            .get_or_create("123456789012")
+            .user_pool_clients
+            .get_mut(&client_id)
+            .unwrap();
+        client
+            .client_secrets
+            .push(crate::state::ClientSecretDescriptor {
+                client_secret_id: format!("{client_id}--1"),
+                client_secret_value: added.clone(),
+                client_secret_create_date: chrono::Utc::now(),
+            });
         assert!(!client.is_confidential());
         assert!(!client.secret_matches(&added));
         assert_eq!(client.secret_values().count(), 0);
