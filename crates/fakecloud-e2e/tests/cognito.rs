@@ -7471,6 +7471,13 @@ async fn cognito_added_client_secret_authenticates_until_deleted() {
         .admin_create_user()
         .user_pool_id(&pool_id)
         .username("rotator")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("rotator@example.com")
+                .build()
+                .unwrap(),
+        )
         .send()
         .await
         .expect("create user");
@@ -7531,6 +7538,28 @@ async fn cognito_added_client_secret_authenticates_until_deleted() {
     let result = ok.authentication_result().unwrap();
     assert!(result.access_token().is_some());
     let refresh_token = result.refresh_token().unwrap().to_string();
+
+    // ForgotPassword demands a SecretHash, which the added secret satisfies.
+    let err = client
+        .forgot_password()
+        .client_id(&client_id)
+        .username("rotator")
+        .send()
+        .await
+        .expect_err("SecretHash required");
+    assert!(
+        err.as_service_error()
+            .is_some_and(|e| e.is_invalid_parameter_exception()),
+        "{err:?}"
+    );
+    client
+        .forgot_password()
+        .client_id(&client_id)
+        .username("rotator")
+        .secret_hash(secret_hash("rotator", &client_id, new_secret))
+        .send()
+        .await
+        .expect("forgot password with the added secret");
 
     // Refreshing and revoking also take ClientSecret on a confidential client.
     let err = client

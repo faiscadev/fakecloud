@@ -7374,6 +7374,111 @@ fn added_client_secret_authenticates_secret_hash_until_deleted() {
     initiate(&primary).unwrap();
 }
 
+/// Invokes one operation with a request body.
+type OpCall<'a> = dyn Fn(&Value) -> Result<AwsResponse, AwsServiceError> + 'a;
+
+/// Run the code-delivery flows a user goes through after SignUp:
+/// ResendConfirmationCode, ConfirmSignUp, ForgotPassword and
+/// ConfirmForgotPassword. For each, `check` gets the op name and the request
+/// body without a SecretHash, and must make the call succeed.
+fn run_confirmation_flows(
+    svc: &CognitoService,
+    state: &crate::state::SharedCognitoState,
+    pool_id: &str,
+    client_id: &str,
+    username: &str,
+    check: &dyn Fn(&str, &Value, &OpCall),
+) {
+    let code = || {
+        state.read().default_ref().users[pool_id][username]
+            .confirmation_code
+            .clone()
+            .unwrap()
+    };
+    let base = json!({"ClientId": client_id, "Username": username});
+    check("ResendConfirmationCode", &base, &|b| {
+        svc.resend_confirmation_code(&make_req("ResendConfirmationCode", &b.to_string()))
+    });
+    let mut body = base.clone();
+    body["ConfirmationCode"] = json!(code());
+    check("ConfirmSignUp", &body, &|b| {
+        block_on(svc.confirm_sign_up(&make_req("ConfirmSignUp", &b.to_string())))
+    });
+    check("ForgotPassword", &base, &|b| {
+        block_on(svc.forgot_password(&make_req("ForgotPassword", &b.to_string())))
+    });
+    let mut body = base.clone();
+    body["ConfirmationCode"] = json!(code());
+    body["Password"] = json!("N3wP@ssw0rd!");
+    check("ConfirmForgotPassword", &body, &|b| {
+        svc.confirm_forgot_password(&make_req("ConfirmForgotPassword", &b.to_string()))
+    });
+}
+
+/// ConfirmSignUp, ForgotPassword, ConfirmForgotPassword and
+/// ResendConfirmationCode demand a valid SecretHash from a confidential
+/// client (any of its active secrets), and nothing from a public one.
+#[test]
+fn confirmation_flows_enforce_secret_hash() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, _) = create_m2m_client(&svc, &pool_id, &[]);
+    let (_, added) = add_client_secret(&svc, &pool_id, &client_id);
+    let sign_up = |client_id: &str, username: &str, hash: Option<String>| {
+        let mut su = json!({
+            "ClientId": client_id, "Username": username, "Password": "P@ssw0rd!",
+            "UserAttributes": [{"Name": "email", "Value": format!("{username}@example.com")}],
+        });
+        if let Some(hash) = hash {
+            su["SecretHash"] = json!(hash);
+        }
+        block_on(svc.sign_up(&make_req("SignUp", &su.to_string()))).unwrap();
+    };
+    sign_up(
+        &client_id,
+        "u1",
+        Some(crate::service::compute_secret_hash(
+            "u1", &client_id, &added,
+        )),
+    );
+
+    run_confirmation_flows(
+        &svc,
+        &state,
+        &pool_id,
+        &client_id,
+        "u1",
+        &|op, body, call| {
+            let err = expect_err(call(body));
+            assert_eq!(
+                err.code(),
+                "InvalidParameterException",
+                "{op} without SecretHash"
+            );
+            let mut wrong = body.clone();
+            wrong["SecretHash"] = json!("definitely-wrong");
+            let err = expect_err(call(&wrong));
+            assert_eq!(
+                err.code(),
+                "NotAuthorizedException",
+                "{op} with a wrong SecretHash"
+            );
+            let mut ok = body.clone();
+            ok["SecretHash"] = json!(crate::service::compute_secret_hash(
+                "u1", &client_id, &added
+            ));
+            call(&ok).unwrap_or_else(|e| panic!("{op} with the added secret: {e:?}"));
+        },
+    );
+
+    // A public client sends no SecretHash.
+    let public = create_client(&svc, &pool_id);
+    sign_up(&public, "u2", None);
+    run_confirmation_flows(&svc, &state, &pool_id, &public, "u2", &|op, body, call| {
+        call(body).unwrap_or_else(|e| panic!("{op} on a public client: {e:?}"));
+    });
+}
+
 /// GetClientToken and the OAuth `/token` + `/revoke` endpoints accept a
 /// secret added for rotation, and reject it once deleted.
 #[test]

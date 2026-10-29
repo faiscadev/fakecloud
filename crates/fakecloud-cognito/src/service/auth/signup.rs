@@ -216,6 +216,9 @@ impl CognitoService {
                 format!("User pool client {client_id} does not exist."),
             )
         })?;
+        // When the app client has a secret, ConfirmSignUp must present a valid
+        // SECRET_HASH (matches the SignUp + InitiateAuth checks).
+        crate::service::validate_secret_hash(client, body["SecretHash"].as_str(), username)?;
         let pool_id = client.user_pool_id.clone();
         let masks_existence = client.prevent_user_existence_errors.as_deref() == Some("ENABLED");
 
