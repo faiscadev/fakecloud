@@ -13,9 +13,9 @@ use crate::state::{MultipartUpload, S3Object, UploadPart};
 use md5::{Digest, Md5};
 
 use super::{
-    canned_acl_grants, compute_md5, extract_user_metadata, no_such_bucket, no_such_key,
-    no_such_upload, parse_complete_multipart_xml, parse_url_encoded_tags, precondition_failed,
-    resolve_object, s3_xml, xml_escape, ObjectLockSettings, S3Service,
+    canned_acl_grants, compute_md5, etag_matches, extract_user_metadata, no_such_bucket,
+    no_such_key, no_such_upload, parse_complete_multipart_xml, parse_url_encoded_tags,
+    precondition_failed, resolve_object, s3_xml, xml_escape, ObjectLockSettings, S3Service,
 };
 
 /// The `Location` of a completed multipart object: its URL on the bucket's
@@ -63,6 +63,39 @@ fn completion_xml_response(
 }
 
 use crate::checksum::invalid_request;
+
+/// The ETag of the key's current live version, or `None` when the key is
+/// absent or its current version is a delete marker (which conditional writes
+/// treat as a missing object).
+fn live_etag(objects: &std::collections::BTreeMap<String, S3Object>, key: &str) -> Option<String> {
+    objects
+        .get(key)
+        .filter(|o| !o.is_delete_marker)
+        .map(|o| o.etag.clone())
+}
+
+/// Enforce CompleteMultipartUpload's `If-Match` / `If-None-Match: *` write
+/// conditions against the key's current live version: `If-Match` on a missing
+/// key is `NoSuchKey`, an ETag mismatch or an existing key under
+/// `If-None-Match: *` is `412 PreconditionFailed`.
+fn check_complete_conditions(
+    key: &str,
+    if_match: Option<&str>,
+    if_none_match: Option<&str>,
+    current_etag: Option<&str>,
+) -> Result<(), AwsServiceError> {
+    if let Some(im) = if_match {
+        match current_etag {
+            Some(etag) if etag_matches(im, &format!("\"{etag}\"")) => {}
+            Some(_) => return Err(precondition_failed("If-Match")),
+            None => return Err(no_such_key(key)),
+        }
+    }
+    if if_none_match == Some("*") && current_etag.is_some() {
+        return Err(precondition_failed("If-None-Match"));
+    }
+    Ok(())
+}
 
 fn invalid_part() -> AwsServiceError {
     AwsServiceError::aws_error(
@@ -908,13 +941,18 @@ impl S3Service {
             .or_else(|| req.headers.get("if-none-match"))
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+        let if_match = req
+            .headers
+            .get("if-match")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
 
         // Capture the upload + the bucket facts we need under a brief read
         // lock, then release it so the (potentially multi-GB) part assembly +
         // disk persist below runs OFF-LOCK instead of holding the global S3
         // write lock and serializing every other S3 operation server-wide
         // while it runs (bug-audit 2026-05-28, 4.7).
-        let (upload, already_has_object, bucket_region, acl_owner_id) = {
+        let (upload, current_etag, bucket_region, acl_owner_id) = {
             let accts = self.state.read();
             let empty = crate::state::S3State::new(account_id, "us-east-1");
             let state = accts.get(account_id).unwrap_or(&empty);
@@ -927,7 +965,7 @@ impl S3Service {
                 None => {
                     // Upload already completed - return existing object if it
                     // exists. IfNoneMatch does NOT apply to re-completions.
-                    if let Some(obj) = b.objects.get(key) {
+                    if let Some(obj) = b.objects.get(key).filter(|o| !o.is_delete_marker) {
                         return Ok(completion_xml_response(
                             bucket,
                             &b.region,
@@ -941,7 +979,7 @@ impl S3Service {
             };
             (
                 upload,
-                b.objects.get(key).is_some_and(|o| !o.is_delete_marker),
+                live_etag(&b.objects, key),
                 b.region.clone(),
                 b.acl_owner_id.clone(),
             )
@@ -951,12 +989,13 @@ impl S3Service {
             return Err(no_such_upload(upload_id));
         }
 
-        // IfNoneMatch: if "*" and object already exists, reject (only for real completions)
-        if let Some(ref inm) = if_none_match {
-            if inm == "*" && already_has_object {
-                return Err(precondition_failed("If-None-Match"));
-            }
-        }
+        // Write conditions apply only to real completions, not re-completions.
+        check_complete_conditions(
+            key,
+            if_match.as_deref(),
+            if_none_match.as_deref(),
+            current_etag.as_deref(),
+        )?;
 
         // Validate parts are in ascending order
         for window in submitted_parts.windows(2) {
@@ -1232,7 +1271,7 @@ impl S3Service {
                 .get_mut(bucket)
                 .ok_or_else(|| no_such_bucket(bucket))?;
             if !b.multipart_uploads.contains_key(upload_id) {
-                if let Some(existing) = b.objects.get(key) {
+                if let Some(existing) = b.objects.get(key).filter(|o| !o.is_delete_marker) {
                     return Ok(completion_xml_response(
                         bucket,
                         &b.region,
@@ -1244,14 +1283,15 @@ impl S3Service {
                 return Err(no_such_upload(upload_id));
             }
             // The object may have been created concurrently after the
-            // phase-1 snapshot, so revalidate `If-None-Match: *` here rather
-            // than trusting the stale `already_has_object`. Leave the upload
-            // intact for retry/abort; nothing has been persisted yet.
-            if if_none_match.as_deref() == Some("*")
-                && b.objects.get(key).is_some_and(|o| !o.is_delete_marker)
-            {
-                return Err(precondition_failed("If-None-Match"));
-            }
+            // phase-1 snapshot, so revalidate the write conditions here rather
+            // than trusting the stale `current_etag`. Leave the upload intact
+            // for retry/abort; nothing has been persisted yet.
+            check_complete_conditions(
+                key,
+                if_match.as_deref(),
+                if_none_match.as_deref(),
+                live_etag(&b.objects, key).as_deref(),
+            )?;
             // Checks passed -- persist, then commit to memory, all under the
             // lock, recording the completed upload as a new version the way
             // every write does (a pre-versioning object is preserved as the
