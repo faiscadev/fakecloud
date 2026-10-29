@@ -42,6 +42,7 @@ impl CognitoService {
         // an email/phone alias, since the client computed the hash from the
         // identifier it sent.
         self.require_secret_hash(
+            &req.account_id,
             &input.client_id,
             &input.username,
             body["AuthParameters"].get("SECRET_HASH"),
@@ -216,32 +217,28 @@ impl CognitoService {
         }
     }
 
-    /// Look up the app client's secret and, if it has one, require a
-    /// valid `SECRET_HASH` on the request. `secret_hash` is the value from
-    /// AuthParameters / the request body (may be absent).
+    /// Look up the app client in the caller's account and, if it has a
+    /// secret, require a valid `SECRET_HASH` on the request. `secret_hash`
+    /// is the value from AuthParameters / the request body (may be absent).
     pub(super) fn require_secret_hash(
         &self,
+        account_id: &str,
         client_id: &str,
         username: &str,
         secret_hash: Option<&Value>,
     ) -> Result<(), AwsServiceError> {
-        let client_secret = {
-            let accounts = self.state.read();
-            let mut found = None;
-            for (_, account) in accounts.iter() {
-                if let Some(client) = account.user_pool_clients.get(client_id) {
-                    found = client.client_secret.clone();
-                    break;
-                }
-            }
-            found
-        };
-        crate::service::validate_secret_hash(
-            client_secret.as_deref(),
-            secret_hash.and_then(|v| v.as_str()),
-            username,
-            client_id,
-        )
+        let accounts = self.state.read();
+        match accounts
+            .get(account_id)
+            .and_then(|account| account.user_pool_clients.get(client_id))
+        {
+            Some(client) => crate::service::validate_secret_hash(
+                client,
+                secret_hash.and_then(|v| v.as_str()),
+                username,
+            ),
+            None => Ok(()),
+        }
     }
 
     /// `InitiateAuth(AuthFlow=USER_SRP_AUTH)`: return the `PASSWORD_VERIFIER`
@@ -296,7 +293,12 @@ impl CognitoService {
                     "SRP_A is required in AuthParameters",
                 )
             })?;
-        self.require_secret_hash(client_id, username, auth_params.get("SECRET_HASH"))?;
+        self.require_secret_hash(
+            &req.account_id,
+            client_id,
+            username,
+            auth_params.get("SECRET_HASH"),
+        )?;
         self.build_srp_challenge(pool_id, client_id, username, srp_a, req, None)
     }
 
@@ -336,7 +338,12 @@ impl CognitoService {
                     "USERNAME is required in AuthParameters",
                 )
             })?;
-        self.require_secret_hash(client_id, username, auth_params.get("SECRET_HASH"))?;
+        self.require_secret_hash(
+            &req.account_id,
+            client_id,
+            username,
+            auth_params.get("SECRET_HASH"),
+        )?;
 
         // Resolve an email/phone alias to the stored username BEFORE stashing
         // the SELECT_CHALLENGE session, so every downstream challenge
@@ -776,7 +783,12 @@ impl CognitoService {
         // valid SECRET_HASH (matches the OAuth /token enforcement). This is
         // computed against the username the client actually sent, so it must
         // run BEFORE we resolve an email/phone alias to the stored username.
-        self.require_secret_hash(client_id, username, auth_params.get("SECRET_HASH"))?;
+        self.require_secret_hash(
+            &req.account_id,
+            client_id,
+            username,
+            auth_params.get("SECRET_HASH"),
+        )?;
 
         // Pools with UsernameAttributes / AliasAttributes let users sign in
         // with their email/phone while the stored username is a UUID. Resolve
@@ -1103,7 +1115,12 @@ impl CognitoService {
             })?;
 
         // SECRET_HASH enforcement for clients with a secret.
-        self.require_secret_hash(client_id, username, auth_params.get("SECRET_HASH"))?;
+        self.require_secret_hash(
+            &req.account_id,
+            client_id,
+            username,
+            auth_params.get("SECRET_HASH"),
+        )?;
 
         // Resolve aliases after validating the hash against the supplied identifier.
         let resolved_username = {

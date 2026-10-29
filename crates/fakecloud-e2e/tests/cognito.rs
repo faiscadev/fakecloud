@@ -7425,3 +7425,185 @@ async fn cognito_custom_ids_and_seeded_software_token() {
         .and_then(|r| r.access_token())
         .is_some());
 }
+
+#[tokio::test]
+async fn cognito_added_client_secret_authenticates_until_deleted() {
+    use aws_sdk_cognitoidentityprovider::types::AuthFlowType;
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+
+    fn secret_hash(username: &str, client_id: &str, secret: &str) -> String {
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(username.as_bytes());
+        mac.update(client_id.as_bytes());
+        base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+    }
+
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("rotating-secret-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("rotating-secret-client")
+        .generate_secret(true)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = app
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("rotator")
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value("rotator@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create user");
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("rotator")
+        .password("P@ssw0rd!123")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    let new_secret = "rotated_client_secret_0123456789";
+    let added = client
+        .add_user_pool_client_secret()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .client_secret(new_secret)
+        .send()
+        .await
+        .expect("add secret");
+    let new_secret_id = added
+        .client_secret_descriptor()
+        .unwrap()
+        .client_secret_id()
+        .unwrap()
+        .to_string();
+
+    let listed = client
+        .list_user_pool_client_secrets()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .expect("list secrets");
+    assert!(listed
+        .client_secrets()
+        .iter()
+        .any(|s| s.client_secret_id() == Some(new_secret_id.as_str())));
+
+    let auth = || {
+        client
+            .admin_initiate_auth()
+            .user_pool_id(&pool_id)
+            .client_id(&client_id)
+            .auth_flow(AuthFlowType::AdminUserPasswordAuth)
+            .auth_parameters("USERNAME", "rotator")
+            .auth_parameters("PASSWORD", "P@ssw0rd!123")
+            .auth_parameters(
+                "SECRET_HASH",
+                secret_hash("rotator", &client_id, new_secret),
+            )
+            .send()
+    };
+
+    let ok = auth().await.expect("auth with the added secret");
+    let result = ok.authentication_result().unwrap();
+    assert!(result.access_token().is_some());
+    let refresh_token = result.refresh_token().unwrap().to_string();
+
+    // ForgotPassword demands a SecretHash, which the added secret satisfies.
+    let err = client
+        .forgot_password()
+        .client_id(&client_id)
+        .username("rotator")
+        .send()
+        .await
+        .expect_err("SecretHash required");
+    assert!(
+        err.as_service_error()
+            .is_some_and(|e| e.is_not_authorized_exception()),
+        "{err:?}"
+    );
+    client
+        .forgot_password()
+        .client_id(&client_id)
+        .username("rotator")
+        .secret_hash(secret_hash("rotator", &client_id, new_secret))
+        .send()
+        .await
+        .expect("forgot password with the added secret");
+
+    // Refreshing and revoking also take ClientSecret on a confidential client.
+    let err = client
+        .get_tokens_from_refresh_token()
+        .client_id(&client_id)
+        .refresh_token(&refresh_token)
+        .send()
+        .await
+        .expect_err("ClientSecret required");
+    assert!(
+        err.as_service_error()
+            .is_some_and(|e| e.is_not_authorized_exception()),
+        "{err:?}"
+    );
+    client
+        .get_tokens_from_refresh_token()
+        .client_id(&client_id)
+        .client_secret(new_secret)
+        .refresh_token(&refresh_token)
+        .send()
+        .await
+        .expect("refresh with the added secret");
+    client
+        .revoke_token()
+        .client_id(&client_id)
+        .client_secret(new_secret)
+        .token(&refresh_token)
+        .send()
+        .await
+        .expect("revoke with the added secret");
+
+    client
+        .delete_user_pool_client_secret()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .client_secret_id(&new_secret_id)
+        .send()
+        .await
+        .expect("delete secret");
+
+    let err = auth().await.expect_err("deleted secret must stop working");
+    assert!(
+        err.as_service_error()
+            .is_some_and(|e| e.is_not_authorized_exception()),
+        "{err:?}"
+    );
+}

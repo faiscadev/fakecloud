@@ -1176,13 +1176,7 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
-        let upc = state.user_pool_clients.get_mut(client_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("Client {client_id} does not exist."),
-            )
-        })?;
+        let upc = pool_client_mut(state, pool_id, client_id)?;
 
         let now = Utc::now();
         let secret_value = custom_secret
@@ -1223,13 +1217,7 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
-        let upc = state.user_pool_clients.get_mut(client_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("Client {client_id} does not exist."),
-            )
-        })?;
+        let upc = pool_client_mut(state, pool_id, client_id)?;
 
         let idx = upc
             .client_secrets
@@ -1263,13 +1251,7 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
-        let upc = state.user_pool_clients.get(client_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("Client {client_id} does not exist."),
-            )
-        })?;
+        let upc = pool_client(state, pool_id, client_id)?;
 
         let secrets: Vec<Value> = upc
             .client_secrets
@@ -1351,4 +1333,39 @@ fn build_signing_cert_der(pool_id: &str, signing_key_pem: &str) -> Option<Vec<u8
 
     let cert = params.self_signed(&key_pair).ok()?;
     Some(cert.der().to_vec())
+}
+
+/// The app client `client_id` of pool `pool_id`. A client of another pool is
+/// as missing as an unknown one.
+fn pool_client<'a>(
+    state: &'a CognitoState,
+    pool_id: &str,
+    client_id: &str,
+) -> Result<&'a UserPoolClient, AwsServiceError> {
+    state
+        .user_pool_clients
+        .get(client_id)
+        .filter(|c| c.user_pool_id == pool_id)
+        .ok_or_else(|| client_not_found(client_id))
+}
+
+/// Mutable [`pool_client`].
+fn pool_client_mut<'a>(
+    state: &'a mut CognitoState,
+    pool_id: &str,
+    client_id: &str,
+) -> Result<&'a mut UserPoolClient, AwsServiceError> {
+    state
+        .user_pool_clients
+        .get_mut(client_id)
+        .filter(|c| c.user_pool_id == pool_id)
+        .ok_or_else(|| client_not_found(client_id))
+}
+
+fn client_not_found(client_id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ResourceNotFoundException",
+        format!("Client {client_id} does not exist."),
+    )
 }

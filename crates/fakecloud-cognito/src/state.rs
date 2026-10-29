@@ -654,6 +654,48 @@ pub struct UserPoolClient {
     pub analytics_configuration: Option<serde_json::Value>,
 }
 
+impl UserPoolClient {
+    /// Whether this is a confidential client, i.e. it was created with a
+    /// secret. Secrets added to a public client do not make it confidential.
+    pub fn is_confidential(&self) -> bool {
+        self.client_secret.is_some()
+    }
+
+    /// Every secret currently valid for a confidential client: the primary
+    /// first, then any added through `AddUserPoolClientSecret`. Any of them
+    /// authenticates a `SECRET_HASH` or an OAuth client credential, which is
+    /// what makes zero-downtime rotation work. Empty for a public client.
+    pub fn secret_values(&self) -> impl Iterator<Item = &str> {
+        let added = self
+            .client_secrets
+            .iter()
+            .filter(|_| self.is_confidential())
+            .map(|s| s.client_secret_value.as_str());
+        self.client_secret.as_deref().into_iter().chain(added)
+    }
+
+    /// Whether `supplied` matches any of the client's secrets.
+    pub fn secret_matches(&self, supplied: &str) -> bool {
+        self.any_secret(|secret| crate::srp::ct_eq(supplied.as_bytes(), secret.as_bytes()))
+    }
+
+    /// Whether `supplied` is the `SECRET_HASH` of `username` under any of
+    /// the client's secrets.
+    pub fn secret_hash_matches(&self, username: &str, supplied: &str) -> bool {
+        self.any_secret(|secret| {
+            let expected = crate::service::compute_secret_hash(username, &self.client_id, secret);
+            crate::srp::ct_eq(supplied.as_bytes(), expected.as_bytes())
+        })
+    }
+
+    /// Evaluate `check` against every secret without short-circuiting, so
+    /// the position of a match is not leaked through timing.
+    fn any_secret(&self, check: impl Fn(&str) -> bool) -> bool {
+        self.secret_values()
+            .fold(false, |acc, secret| check(secret) | acc)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RefreshTokenRotationConfig {
     /// "ENABLED" or "DISABLED"

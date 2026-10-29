@@ -815,31 +815,29 @@ pub(crate) fn compute_secret_hash(username: &str, client_id: &str, client_secret
 }
 
 /// Validate a request's `SECRET_HASH` for a client that has a secret.
-/// Returns the AWS error when the hash is missing or wrong; a no-op when
-/// the client has no secret (mirrors the OAuth `/token` enforcement but
-/// for the JSON InitiateAuth / SignUp / Confirm* surface). AWS uses
-/// InvalidParameterException when the hash is absent and
-/// NotAuthorizedException when it's present but wrong.
+/// The hash may be computed from any of the client's current secrets (the
+/// primary or one added for rotation). A no-op when the client has no
+/// secret (mirrors the OAuth `/token` enforcement but for the JSON
+/// InitiateAuth / SignUp / Confirm* surface). AWS answers a missing hash and
+/// a wrong one alike with NotAuthorizedException, differing only in the
+/// message.
 pub(crate) fn validate_secret_hash(
-    client_secret: Option<&str>,
+    client: &UserPoolClient,
     supplied_secret_hash: Option<&str>,
     username: &str,
-    client_id: &str,
 ) -> Result<(), AwsServiceError> {
-    let Some(secret) = client_secret else {
+    if !client.is_confidential() {
         return Ok(());
-    };
+    }
+    let client_id = client.client_id.as_str();
     let Some(supplied) = supplied_secret_hash else {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "InvalidParameterException",
-            format!(
-                "Client {client_id} is configured with secret but SECRET_HASH was not received"
-            ),
+            "NotAuthorizedException",
+            format!("Client {client_id} is configured for secret but secret was not received"),
         ));
     };
-    let expected = compute_secret_hash(username, client_id, secret);
-    if !crate::srp::ct_eq(supplied.as_bytes(), expected.as_bytes()) {
+    if !client.secret_hash_matches(username, supplied) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "NotAuthorizedException",
@@ -2698,6 +2696,31 @@ async fn oauth_pre_token_overrides(
     raw_response
 }
 
+/// Resolve the `(client_id, client_secret)` an OAuth endpoint request
+/// authenticates with, from the `Authorization: Basic` header and/or the
+/// form fields. Per RFC 6749 §2.3.1 a single client MUST NOT use more than
+/// one authentication mechanism in the same request: when both are
+/// supplied they must name the same client and secret, else `None`
+/// (`invalid_client`).
+fn oauth_client_credentials<'a>(
+    params: &'a BTreeMap<String, String>,
+    basic_auth: Option<(&'a str, &'a str)>,
+) -> Option<(Option<&'a str>, Option<&'a str>)> {
+    let form_client_id = params.get("client_id").map(String::as_str);
+    let form_client_secret = params.get("client_secret").map(String::as_str);
+    let client_id = match (basic_auth, form_client_id) {
+        (Some((b_id, _)), Some(f_id)) if b_id != f_id => return None,
+        (Some((b_id, _)), _) => Some(b_id),
+        (None, f_id) => f_id,
+    };
+    let secret = match (basic_auth, form_client_secret) {
+        (Some((_, b_sec)), Some(f_sec)) if b_sec != f_sec => return None,
+        (Some((_, b_sec)), _) => Some(b_sec),
+        (None, f_sec) => f_sec,
+    };
+    Some((client_id, secret))
+}
+
 pub async fn handle_oauth2_token(
     state: &SharedCognitoState,
     params: &BTreeMap<String, String>,
@@ -2710,40 +2733,22 @@ pub async fn handle_oauth2_token(
         .map(String::as_str)
         .ok_or(OAuthTokenError::InvalidRequest("grant_type is required"))?;
 
-    // Per RFC 6749 §2.3.1 a single client MUST NOT use more than one
-    // authentication mechanism in the same request. When a Basic
-    // header is supplied AND a form `client_id`/`client_secret`, both
-    // must point to the same client and same secret — anything else
-    // is an `invalid_client`.
-    let form_client_id = params.get("client_id").map(String::as_str);
-    let form_client_secret = params.get("client_secret").map(String::as_str);
-    let client_id = match (basic_auth, form_client_id) {
-        (Some((b_id, _)), Some(f_id)) if b_id != f_id => {
-            return Err(OAuthTokenError::InvalidClient);
-        }
-        (Some((b_id, _)), _) => b_id,
-        (None, Some(f_id)) => f_id,
-        (None, None) => {
-            return Err(OAuthTokenError::InvalidRequest("client_id is required"));
-        }
-    };
-    let supplied_secret = match (basic_auth, form_client_secret) {
-        (Some((_, b_sec)), Some(f_sec)) if b_sec != f_sec => {
-            return Err(OAuthTokenError::InvalidClient);
-        }
-        (Some((_, b_sec)), _) => Some(b_sec),
-        (None, Some(f_sec)) => Some(f_sec),
-        (None, None) => None,
-    };
+    let (client_id, supplied_secret) =
+        oauth_client_credentials(params, basic_auth).ok_or(OAuthTokenError::InvalidClient)?;
+    let client_id = client_id.ok_or(OAuthTokenError::InvalidRequest("client_id is required"))?;
 
-    let (pool_id, stored_secret, allowed_flows, allowed_scopes, oauth_flows_enabled) = {
+    // `secret_ok` is `None` for a public client, else whether the supplied
+    // secret matched any of the client's current secrets.
+    let (pool_id, secret_ok, allowed_flows, allowed_scopes, oauth_flows_enabled) = {
         let mas = state.read();
         let mut found = None;
         for (_, account) in mas.iter() {
             if let Some(client) = account.user_pool_clients.get(client_id) {
                 found = Some((
                     client.user_pool_id.clone(),
-                    client.client_secret.clone(),
+                    client
+                        .is_confidential()
+                        .then(|| supplied_secret.is_some_and(|s| client.secret_matches(s))),
                     client.allowed_o_auth_flows.clone(),
                     client.allowed_o_auth_scopes.clone(),
                     client.allowed_o_auth_flows_user_pool_client,
@@ -2756,14 +2761,10 @@ pub async fn handle_oauth2_token(
 
     // SECRET_HASH equivalence: when an app client has a secret the
     // request MUST present it (Basic header or `client_secret` form
-    // field). RFC 6749 §2.3.1.
-    if let Some(secret) = stored_secret.as_ref() {
-        let matches = supplied_secret
-            .map(|s| crate::srp::ct_eq(s.as_bytes(), secret.as_bytes()))
-            .unwrap_or(false);
-        if !matches {
-            return Err(OAuthTokenError::InvalidClient);
-        }
+    // field). RFC 6749 §2.3.1. Any of the client's current secrets is
+    // accepted.
+    if secret_ok == Some(false) {
+        return Err(OAuthTokenError::InvalidClient);
     }
 
     match grant_type {
@@ -2790,7 +2791,7 @@ pub async fn handle_oauth2_token(
                 params,
                 client_id,
                 &pool_id,
-                stored_secret.as_deref(),
+                secret_ok.is_some(),
                 &allowed_flows,
                 &allowed_scopes,
                 oauth_flows_enabled,
@@ -3071,7 +3072,7 @@ async fn handle_client_credentials_grant(
     params: &BTreeMap<String, String>,
     client_id: &str,
     pool_id: &str,
-    stored_secret: Option<&str>,
+    confidential: bool,
     allowed_flows: &[String],
     allowed_scopes: &[String],
     oauth_flows_enabled: bool,
@@ -3079,7 +3080,7 @@ async fn handle_client_credentials_grant(
 ) -> Result<OAuthTokenResponse, OAuthTokenError> {
     // client_credentials demands a confidential client (always has a
     // secret) and an explicit `client_credentials` flow allowance.
-    if stored_secret.is_none() {
+    if !confidential {
         return Err(OAuthTokenError::InvalidClient);
     }
     if oauth_flows_enabled
@@ -3205,14 +3206,14 @@ impl CognitoService {
             )
         };
 
-        let (pool_id, stored_secret, allowed_flows, allowed_scopes) = {
+        let (pool_id, secret_ok, allowed_flows, allowed_scopes) = {
             let mas = self.state.read();
             let mut found = None;
             for (_, account) in mas.iter() {
                 if let Some(c) = account.user_pool_clients.get(&client_id) {
                     found = Some((
                         c.user_pool_id.clone(),
-                        c.client_secret.clone(),
+                        c.secret_matches(&secret),
                         c.allowed_o_auth_flows.clone(),
                         c.allowed_o_auth_scopes.clone(),
                     ));
@@ -3229,10 +3230,10 @@ impl CognitoService {
         };
 
         // A confidential client only: a public client (no secret) cannot use
-        // the client-credentials grant at all.
-        match stored_secret.as_deref() {
-            Some(stored) if stored == secret => {}
-            _ => return Err(unauthorized()),
+        // the client-credentials grant at all. Any of the client's current
+        // secrets is accepted.
+        if !secret_ok {
+            return Err(unauthorized());
         }
         if !allowed_flows
             .iter()
@@ -3397,73 +3398,106 @@ pub fn handle_oauth2_userinfo(
 #[derive(Debug, Clone)]
 pub enum OAuthRevokeError {
     InvalidClient,
+    InvalidRequest,
     UnsupportedTokenType,
 }
 
-/// RFC 7009 token revocation. Cognito accepts refresh tokens; revoking a
-/// refresh token also invalidates every access token issued from it
-/// (matched by client_id + username + issued_at >= refresh issued_at).
-/// Per RFC 7009 §2.2, revoking an unknown token is a 200, not an error.
+/// The token being revoked was issued to a different app client.
+pub(crate) struct TokenClientMismatch;
+
+/// Revoke refresh token `token` from one account's state on behalf of
+/// `client_id`, also invalidating every access token issued from it (matched
+/// by client_id + username + issued_at >= refresh issued_at). Returns whether
+/// the refresh token was found; one issued to another client is left
+/// untouched and reported as a mismatch.
+pub(crate) fn revoke_refresh_token(
+    account: &mut crate::state::CognitoState,
+    token: &str,
+    client_id: &str,
+) -> Result<bool, TokenClientMismatch> {
+    if let Some(rt) = account.refresh_tokens.get(token).cloned() {
+        if rt.client_id != client_id {
+            return Err(TokenClientMismatch);
+        }
+        account.refresh_tokens.remove(token);
+        account.access_tokens.retain(|_, at| {
+            !(at.client_id == rt.client_id
+                && at.username == rt.username
+                && at.user_pool_id == rt.user_pool_id
+                && at.issued_at >= rt.issued_at)
+        });
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Revoke `token` as [`revoke_refresh_token`] does or, failing that, as a
+/// bare access token issued to `client_id` (the `/oauth2/revoke` surface).
+fn revoke_client_token(
+    account: &mut crate::state::CognitoState,
+    token: &str,
+    client_id: &str,
+) -> Result<bool, TokenClientMismatch> {
+    if revoke_refresh_token(account, token, client_id)? {
+        return Ok(true);
+    }
+    if let Some(at) = account.access_tokens.get(token) {
+        if at.client_id != client_id {
+            return Err(TokenClientMismatch);
+        }
+        account.access_tokens.remove(token);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// RFC 7009 token revocation. Cognito accepts refresh tokens; see
+/// [`revoke_client_token`] for what a revoke invalidates. The client is
+/// authenticated first, so an unauthenticated request learns nothing about
+/// the token. Per RFC 7009 §2.2, revoking an unknown token is a 200, not an
+/// error.
 pub fn handle_oauth2_revoke(
     state: &SharedCognitoState,
     params: &BTreeMap<String, String>,
+    basic_auth: Option<(&str, &str)>,
 ) -> Result<(), OAuthRevokeError> {
-    let token = match params.get("token") {
-        Some(t) => t.clone(),
-        None => return Ok(()),
-    };
-    if let Some(hint) = params.get("token_type_hint") {
-        if hint != "refresh_token" {
-            return Err(OAuthRevokeError::UnsupportedTokenType);
-        }
-    }
-    let client_id = params
-        .get("client_id")
-        .map(String::as_str)
-        .ok_or(OAuthRevokeError::InvalidClient)?;
-
-    let stored_secret = {
+    // Client authentication follows `/oauth2/token`: the Basic header or the
+    // form fields, consistent when both are sent.
+    let (client_id, supplied) =
+        oauth_client_credentials(params, basic_auth).ok_or(OAuthRevokeError::InvalidClient)?;
+    let client_id = client_id.ok_or(OAuthRevokeError::InvalidClient)?;
+    let authenticated = {
         let mas = state.read();
         let mut found = None;
         for (_, account) in mas.iter() {
             if let Some(client) = account.user_pool_clients.get(client_id) {
-                found = Some(client.client_secret.clone());
+                found = Some(
+                    !client.is_confidential() || supplied.is_some_and(|s| client.secret_matches(s)),
+                );
                 break;
             }
         }
         found.ok_or(OAuthRevokeError::InvalidClient)?
     };
-    if let Some(secret) = stored_secret.as_ref() {
-        let supplied = params.get("client_secret").map(String::as_str);
-        let matches = supplied
-            .map(|s| crate::srp::ct_eq(s.as_bytes(), secret.as_bytes()))
-            .unwrap_or(false);
-        if !matches {
-            return Err(OAuthRevokeError::InvalidClient);
+    if !authenticated {
+        return Err(OAuthRevokeError::InvalidClient);
+    }
+
+    let token = params
+        .get("token")
+        .ok_or(OAuthRevokeError::InvalidRequest)?;
+    if let Some(hint) = params.get("token_type_hint") {
+        if hint != "refresh_token" {
+            return Err(OAuthRevokeError::UnsupportedTokenType);
         }
     }
 
     let mut mas = state.write();
     for (_, account) in mas.iter_mut() {
-        if let Some(rt) = account.refresh_tokens.get(&token).cloned() {
-            if rt.client_id != client_id {
-                return Err(OAuthRevokeError::InvalidClient);
-            }
-            account.refresh_tokens.remove(&token);
-            account.access_tokens.retain(|_, at| {
-                !(at.client_id == rt.client_id
-                    && at.username == rt.username
-                    && at.user_pool_id == rt.user_pool_id
-                    && at.issued_at >= rt.issued_at)
-            });
-            return Ok(());
-        }
-        if let Some(at) = account.access_tokens.get(&token).cloned() {
-            if at.client_id != client_id {
-                return Err(OAuthRevokeError::InvalidClient);
-            }
-            account.access_tokens.remove(&token);
-            return Ok(());
+        match revoke_client_token(account, token, client_id) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(TokenClientMismatch) => return Err(OAuthRevokeError::InvalidClient),
         }
     }
     Ok(())

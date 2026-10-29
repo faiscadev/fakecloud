@@ -322,6 +322,7 @@ impl CognitoService {
         // AdminInitiateAuth's enforcement).
         if let Some(username) = body["ChallengeResponses"]["USERNAME"].as_str() {
             self.require_secret_hash(
+                &req.account_id,
                 client_id,
                 username,
                 body["ChallengeResponses"].get("SECRET_HASH"),
