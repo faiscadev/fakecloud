@@ -37,7 +37,6 @@ pub struct Ec2ImdsState {
     pub ec2: SharedEc2State,
     pub iam: SharedIamState,
     pub cache: Arc<ContainerCredentialCache>,
-    pub region: String,
 }
 
 /// The instance facts IMDS reports.
@@ -48,6 +47,8 @@ struct InstanceFacts {
     image_id: String,
     instance_type: String,
     private_ip: String,
+    /// The region the instance runs in (the regional state it was found in).
+    region: String,
     az: String,
     launch_time: String,
     /// Role ARN of the associated instance profile, if any.
@@ -74,7 +75,7 @@ async fn handle(
     let path = format!("/latest/{rest}");
     let method = req.method().clone();
     if method == axum::http::Method::GET {
-        if let Some(resp) = instance_specific(&facts, &state.region, &path) {
+        if let Some(resp) = instance_specific(&facts, &path) {
             return resp;
         }
     }
@@ -85,7 +86,7 @@ async fn handle(
         iam: state.iam.clone(),
         cache: state.cache.clone(),
         account_id: facts.account_id.clone(),
-        region: state.region.clone(),
+        region: facts.region.clone(),
         role_arn: facts.role_arn.clone().unwrap_or_default(),
         instance_id: facts.instance_id.clone(),
     };
@@ -101,7 +102,8 @@ async fn handle(
 
 /// Paths whose answer is a property of this instance rather than of the
 /// server-wide IMDS context.
-fn instance_specific(facts: &InstanceFacts, region: &str, path: &str) -> Option<Response> {
+fn instance_specific(facts: &InstanceFacts, path: &str) -> Option<Response> {
+    let region = facts.region.as_str();
     let text = |v: &str| imds::text(v.to_string());
     Some(match path {
         "/latest/meta-data/ami-id" => text(&facts.image_id),
@@ -131,28 +133,31 @@ fn instance_specific(facts: &InstanceFacts, region: &str, path: &str) -> Option<
 fn instance_facts(state: &Ec2ImdsState, instance_id: &str) -> Option<InstanceFacts> {
     let (account_id, mut facts, profile_arn) = {
         let accounts = state.ec2.read();
-        let found = accounts.iter_regional().find_map(|(account_id, _, st)| {
-            let inst = st.instances.get(instance_id)?;
-            let profile_arn = st
-                .iam_instance_profile_associations
-                .values()
-                .find(|a| a.instance_id == instance_id && a.state == "associated")
-                .map(|a| a.iam_instance_profile_arn.clone());
-            Some((
-                account_id.to_string(),
-                InstanceFacts {
-                    account_id: account_id.to_string(),
-                    instance_id: inst.instance_id.clone(),
-                    image_id: inst.image_id.clone(),
-                    instance_type: inst.instance_type.clone(),
-                    private_ip: inst.private_ip.clone(),
-                    az: inst.az.clone(),
-                    launch_time: inst.launch_time.clone(),
-                    role_arn: None,
-                },
-                profile_arn,
-            ))
-        });
+        let found = accounts
+            .iter_regional()
+            .find_map(|(account_id, region, st)| {
+                let inst = st.instances.get(instance_id)?;
+                let profile_arn = st
+                    .iam_instance_profile_associations
+                    .values()
+                    .find(|a| a.instance_id == instance_id && a.state == "associated")
+                    .map(|a| a.iam_instance_profile_arn.clone());
+                Some((
+                    account_id.to_string(),
+                    InstanceFacts {
+                        account_id: account_id.to_string(),
+                        instance_id: inst.instance_id.clone(),
+                        image_id: inst.image_id.clone(),
+                        instance_type: inst.instance_type.clone(),
+                        private_ip: inst.private_ip.clone(),
+                        region: region.to_string(),
+                        az: inst.az.clone(),
+                        launch_time: inst.launch_time.clone(),
+                        role_arn: None,
+                    },
+                    profile_arn,
+                ))
+            });
         found?
     };
     facts.role_arn = profile_arn.and_then(|arn| role_of_profile(&state.iam, &account_id, &arn));
@@ -185,12 +190,13 @@ mod tests {
             image_id: "ami-1234".into(),
             instance_type: "t3.small".into(),
             private_ip: "10.0.1.20".into(),
+            region: "us-east-1".into(),
             az: "us-east-1b".into(),
             launch_time: "2026-01-01T00:00:00Z".into(),
             role_arn: None,
         };
-        assert!(instance_specific(&facts, "us-east-1", "/latest/meta-data/local-ipv4").is_some());
-        assert!(instance_specific(&facts, "us-east-1", "/latest/meta-data/instance-id").is_none());
+        assert!(instance_specific(&facts, "/latest/meta-data/local-ipv4").is_some());
+        assert!(instance_specific(&facts, "/latest/meta-data/instance-id").is_none());
     }
 
     #[test]
@@ -207,8 +213,60 @@ mod tests {
                 "",
             ))),
             cache: Arc::new(ContainerCredentialCache::new()),
-            region: "us-east-1".into(),
         };
         assert!(instance_facts(&state, "i-missing").is_none());
+    }
+
+    /// An instance in a region other than the server's reports its own
+    /// region from `placement/region` and the identity document.
+    #[tokio::test]
+    async fn instance_reports_its_own_region() {
+        let ec2: SharedEc2State = Arc::new(RwLock::new(MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "",
+        )));
+        {
+            let mut accounts = ec2.write();
+            let st = accounts.regional_mut("123456789012", "eu-west-1");
+            let inst: fakecloud_ec2::state::Instance = serde_json::from_value(serde_json::json!({
+                "instance_id": "i-0west",
+                "image_id": "ami-1234",
+                "instance_type": "t3.small",
+                "state_code": 16,
+                "state_name": "running",
+                "private_ip": "10.0.1.20",
+                "reservation_id": "r-1",
+                "ami_launch_index": 0,
+                "monitoring": false,
+                "az": "eu-west-1b",
+                "launch_time": "2026-01-01T00:00:00Z",
+            }))
+            .unwrap();
+            st.instances.insert("i-0west".into(), inst);
+        }
+        let state = Ec2ImdsState {
+            ec2,
+            iam: Arc::new(RwLock::new(MultiAccountState::new(
+                "123456789012",
+                "us-east-1",
+                "",
+            ))),
+            cache: Arc::new(ContainerCredentialCache::new()),
+        };
+        let facts = instance_facts(&state, "i-0west").expect("found across regions");
+        assert_eq!(facts.region, "eu-west-1");
+        let body = |resp: Response| async move {
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        };
+        let region = instance_specific(&facts, "/latest/meta-data/placement/region").unwrap();
+        assert_eq!(body(region).await, "eu-west-1");
+        let doc = instance_specific(&facts, "/latest/dynamic/instance-identity/document").unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&body(doc).await).unwrap();
+        assert_eq!(doc["region"], "eu-west-1");
+        assert_eq!(doc["availabilityZone"], "eu-west-1b");
     }
 }

@@ -1316,7 +1316,7 @@ mod tests {
         let ec2 = state.ec2.read();
         assert!(ec2
             .regional("222222222222", "us-east-1")
-            .map_or(true, |s| !s.tags.contains_key("i-1")));
+            .is_none_or(|s| !s.tags.contains_key("i-1")));
         assert!(ec2
             .regional("123456789012", "us-east-1")
             .unwrap()

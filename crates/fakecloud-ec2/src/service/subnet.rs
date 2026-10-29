@@ -248,7 +248,7 @@ pub(crate) fn create_default_subnet(
             .values()
             .find(|v| v.is_default)
             .map(|v| v.vpc_id.clone())
-            .unwrap_or_else(|| crate::defaults::default_vpc_id(&req.account_id));
+            .unwrap_or_else(|| crate::defaults::default_vpc_id(&req.account_id, &req.region));
         let subnet = if let Some(existing) = state
             .subnets
             .values()

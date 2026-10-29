@@ -3409,6 +3409,44 @@ async fn create_cluster_with_unknown_subnets_still_creates_security_group() {
     assert_eq!(cfg["vpcId"], sg.vpc_id.as_str());
 }
 
+/// A restored cluster whose ARN names no region gets its group in the
+/// server's configured region, not a hardcoded one.
+#[tokio::test]
+async fn restore_places_region_less_cluster_group_in_server_region() {
+    let eks = make_state();
+    let svc = EksService::new(eks.clone());
+    let resp = svc
+        .handle(make_request(
+            Method::POST,
+            "/clusters",
+            &create_body("noregion"),
+        ))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let sg_id = v["cluster"]["resourcesVpcConfig"]["clusterSecurityGroupId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    {
+        let mut accounts = eks.write();
+        let st = accounts.get_mut("111122223333").unwrap();
+        let cluster = st.clusters.values_mut().next().unwrap();
+        cluster.arn = "arn:aws:eks::111122223333:cluster/noregion".to_string();
+    }
+    let ec2: fakecloud_ec2::SharedEc2State = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("111122223333", "eu-west-1", ""),
+    ));
+    assert_eq!(crate::restore_cluster_security_groups(&eks, &ec2), 1);
+    let accounts = ec2.read();
+    assert!(accounts
+        .regional("111122223333", "eu-west-1")
+        .unwrap()
+        .security_groups
+        .contains_key(&sg_id));
+    assert!(accounts.regional("111122223333", "us-east-1").is_none());
+}
+
 #[tokio::test]
 async fn restore_recreates_security_group_for_clusters_saved_without_one() {
     // A cluster created without EC2 wiring carries a group id with no EC2

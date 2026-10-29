@@ -66,19 +66,40 @@ pub(crate) fn create_transit_gateway_peering_attachment(
     ))
 }
 
-fn peering_lookup(svc: &Ec2Service, req: &AwsRequest, id: &str) -> TgwPeering {
-    svc.state
-        .read()
+/// Where a peering attachment is stored: the requester's account and region.
+/// AWS shows one attachment, under one id, to both sides: the requester sees
+/// it in its own region, the accepter in the peer region (`PeerRegion`) of the
+/// peer account (`PeerAccountId`), which is where it is accepted or rejected.
+struct PeeringHome {
+    account: String,
+    region: String,
+    peering: TgwPeering,
+}
+
+/// Find attachment `id` as seen from the caller's account and region: the
+/// requester side (stored in the caller's own state) or the accepter side
+/// (stored with the requester, naming the caller as its peer).
+fn locate_peering(svc: &Ec2Service, req: &AwsRequest, id: &str) -> Option<PeeringHome> {
+    let accounts = svc.state.read();
+    if let Some(p) = accounts
         .regional(&req.account_id, &req.region)
-        .and_then(|s| s.tgw_peerings.get(id).cloned())
-        .unwrap_or(TgwPeering {
-            id: id.to_string(),
-            tgw_id: "tgw-0".to_string(),
-            peer_tgw_id: "tgw-1".to_string(),
-            peer_account: "000000000000".to_string(),
-            peer_region: "us-east-1".to_string(),
-            state: "available".to_string(),
+        .and_then(|s| s.tgw_peerings.get(id))
+    {
+        return Some(PeeringHome {
+            account: req.account_id.clone(),
+            region: req.region.clone(),
+            peering: p.clone(),
+        });
+    }
+    let found = accounts.iter_regional().find_map(|(account, region, st)| {
+        let p = st.tgw_peerings.get(id)?;
+        (p.peer_account == req.account_id && p.peer_region == req.region).then(|| PeeringHome {
+            account: account.to_string(),
+            region: region.to_string(),
+            peering: p.clone(),
         })
+    });
+    found
 }
 
 fn peering_state_change(
@@ -88,17 +109,37 @@ fn peering_state_change(
     new_state: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "TransitGatewayAttachmentId")?;
-    let mut p = peering_lookup(svc, req, &id);
+    let home = locate_peering(svc, req, &id);
+    let (owner, owner_region, mut p) = match home {
+        Some(PeeringHome {
+            account,
+            region,
+            peering,
+        }) => (account, region, peering),
+        None => (
+            req.account_id.clone(),
+            req.region.clone(),
+            TgwPeering {
+                id: id.to_string(),
+                tgw_id: "tgw-0".to_string(),
+                peer_tgw_id: "tgw-1".to_string(),
+                peer_account: "000000000000".to_string(),
+                peer_region: "us-east-1".to_string(),
+                state: "available".to_string(),
+            },
+        ),
+    };
     if !new_state.is_empty() {
         p.state = new_state.to_string();
     }
     {
         let mut accounts = svc.state.write();
-        let state = accounts.regional_mut(&req.account_id, &req.region);
-        if action == "DeleteTransitGatewayPeeringAttachment" {
-            state.tgw_peerings.remove(&id);
-        } else if let Some(stored) = state.tgw_peerings.get_mut(&id) {
-            stored.state = p.state.clone();
+        if let Some(state) = accounts.regional_get_mut(&owner, &owner_region) {
+            if action == "DeleteTransitGatewayPeeringAttachment" {
+                state.tgw_peerings.remove(&id);
+            } else if let Some(stored) = state.tgw_peerings.get_mut(&id) {
+                stored.state = p.state.clone();
+            }
         }
     }
     Ok(Ec2Service::respond(
@@ -106,7 +147,7 @@ fn peering_state_change(
         &req.request_id,
         &format!(
             "<transitGatewayPeeringAttachment>{}</transitGatewayPeeringAttachment>",
-            peering_xml(&p, &req.account_id, &req.region)
+            peering_xml(&p, &owner, &owner_region)
         ),
     ))
 }
@@ -150,16 +191,20 @@ pub(crate) fn describe_transit_gateway_peering_attachments(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     mr(req)?;
-    let owner = req.account_id.clone();
     let accounts = svc.state.read();
-    let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts
-        .regional(&req.account_id, &req.region)
-        .unwrap_or(&empty);
-    let mut items: Vec<String> = state
-        .tgw_peerings
-        .values()
-        .map(|p| peering_xml(p, &owner, &req.region))
+    // The caller's own attachments (requester side) plus the ones other
+    // regions or accounts requested with the caller as peer (accepter side).
+    let mut items: Vec<String> = accounts
+        .iter_regional()
+        .flat_map(|(account, region, st)| {
+            let own = account == req.account_id && region == req.region;
+            st.tgw_peerings
+                .values()
+                .filter(move |p| {
+                    own || (p.peer_account == req.account_id && p.peer_region == req.region)
+                })
+                .map(move |p| peering_xml(p, account, region))
+        })
         .collect();
     items.sort();
     Ok(Ec2Service::respond(
@@ -826,6 +871,93 @@ mod tests {
         assert!(
             desc.contains("<region>eu-west-1</region></requesterTgwInfo>"),
             "describe requester region not request-scoped: {desc}"
+        );
+    }
+
+    /// The accepter accepts in the peer region and account: it sees the
+    /// requester's attachment there, accepting it moves the one shared
+    /// attachment to `available` for both sides, and its requester info
+    /// names the requester's account and region.
+    #[test]
+    fn accepter_accepts_in_peer_region() {
+        let svc = Ec2Service::new();
+        let mut create = ec2_request(
+            "CreateTransitGatewayPeeringAttachment",
+            &[
+                ("TransitGatewayId", "tgw-req"),
+                ("PeerTransitGatewayId", "tgw-peer"),
+                ("PeerAccountId", "999999999999"),
+                ("PeerRegion", "ap-south-1"),
+            ],
+        );
+        create.region = "eu-west-1".to_string();
+        let created = body(create_transit_gateway_peering_attachment(&svc, &create).unwrap());
+        let id = created
+            .split("<transitGatewayAttachmentId>")
+            .nth(1)
+            .and_then(|s| s.split("</transitGatewayAttachmentId>").next())
+            .unwrap()
+            .to_string();
+
+        let accepter = |action: &str, q: &[(&str, &str)]| {
+            let mut r = ec2_request(action, q);
+            r.region = "ap-south-1".to_string();
+            r.account_id = "999999999999".to_string();
+            r
+        };
+        // The accepter's view lists it, pending, with the requester's info.
+        let seen = body(
+            describe_transit_gateway_peering_attachments(
+                &svc,
+                &accepter("DescribeTransitGatewayPeeringAttachments", &[]),
+            )
+            .unwrap(),
+        );
+        assert!(seen.contains(&id), "{seen}");
+        assert!(seen.contains("<state>pendingAcceptance</state>"), "{seen}");
+        assert!(
+            seen.contains(
+                "<ownerId>000000000000</ownerId><region>eu-west-1</region></requesterTgwInfo>"
+            ),
+            "{seen}"
+        );
+        // A third region of the accepter account does not see it.
+        let mut other = accepter("DescribeTransitGatewayPeeringAttachments", &[]);
+        other.region = "us-west-2".to_string();
+        let none = body(describe_transit_gateway_peering_attachments(&svc, &other).unwrap());
+        assert!(!none.contains(&id), "{none}");
+
+        let accepted = body(
+            accept_transit_gateway_peering_attachment(
+                &svc,
+                &accepter(
+                    "AcceptTransitGatewayPeeringAttachment",
+                    &[("TransitGatewayAttachmentId", &id)],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(accepted.contains("<state>available</state>"), "{accepted}");
+        assert!(
+            accepted.contains("<region>eu-west-1</region></requesterTgwInfo>"),
+            "{accepted}"
+        );
+        // The requester's stored attachment changed state.
+        assert_eq!(
+            svc.state
+                .read()
+                .regional("000000000000", "eu-west-1")
+                .unwrap()
+                .tgw_peerings[&id]
+                .state,
+            "available"
+        );
+        let mut d = ec2_request("DescribeTransitGatewayPeeringAttachments", &[]);
+        d.region = "eu-west-1".to_string();
+        let requester_view = body(describe_transit_gateway_peering_attachments(&svc, &d).unwrap());
+        assert!(
+            requester_view.contains("<state>available</state>"),
+            "{requester_view}"
         );
     }
 }

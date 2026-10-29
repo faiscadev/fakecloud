@@ -626,7 +626,7 @@ pub(crate) fn launch_instances(
         if !sg_names.is_empty() {
             let target_vpc = resolved_vpc
                 .clone()
-                .unwrap_or_else(|| crate::defaults::default_vpc_id(account_id));
+                .unwrap_or_else(|| crate::defaults::default_vpc_id(account_id, region));
             for name in &sg_names {
                 if let Some(sg) = state
                     .security_groups
@@ -642,7 +642,7 @@ pub(crate) fn launch_instances(
         if sg_ids.is_empty() {
             let vpc = resolved_vpc
                 .clone()
-                .unwrap_or_else(|| crate::defaults::default_vpc_id(account_id));
+                .unwrap_or_else(|| crate::defaults::default_vpc_id(account_id, region));
             if let Some(sg) = state
                 .security_groups
                 .values()
@@ -670,7 +670,10 @@ pub(crate) fn launch_instances(
                 .unwrap_or((None, false)),
             // No subnet (and no default subnet found): still a default-VPC
             // launch, which assigns public IPs by default.
-            None => (Some(crate::defaults::default_vpc_id(account_id)), true),
+            None => (
+                Some(crate::defaults::default_vpc_id(account_id, region)),
+                true,
+            ),
         };
         // Metadata-only private IP base, derived from the resolved subnet's
         // CIDR so DescribeInstances reports an IP inside the subnet (was a

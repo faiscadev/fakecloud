@@ -578,7 +578,11 @@ async fn main() {
     // EC2 state, created up-front so it can join `ResetState` and be cleared by
     // `/_fakecloud/reset/ec2` (which also tears down the backing containers).
     let ec2_state: SharedEc2State = Arc::new(parking_lot::RwLock::new(
-        fakecloud_core::multi_account::MultiAccountState::new("000000000000", "us-east-1", ""),
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
     ));
     let route53_state: fakecloud_route53::SharedRoute53State = Arc::new(parking_lot::RwLock::new(
         fakecloud_route53::Route53Accounts::new(),
@@ -2537,7 +2541,12 @@ async fn main() {
             let path = reset::snapshot_store_path(&data_path, "ec2");
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
-                Ok(Some(bytes)) => match fakecloud_ec2::parse_ec2_snapshot(&bytes) {
+                Ok(Some(bytes)) => match fakecloud_ec2::parse_ec2_snapshot(
+                    &bytes,
+                    &cli.account_id,
+                    &cli.region,
+                    &endpoint_url,
+                ) {
                     Ok(snapshot) => {
                         if snapshot.schema_version > fakecloud_ec2::EC2_SNAPSHOT_SCHEMA_VERSION {
                             fatal_exit(format_args!(
@@ -3867,14 +3876,10 @@ async fn main() {
         .with_cloudfront(cloudfront_state.clone())
         .with_s3(s3_state.clone())
         .with_vpc_owner_lookup({
-            // The account whose EC2 state holds the VPC. VPC ids are unique,
-            // so the id alone identifies it.
+            // The account whose EC2 state holds the VPC in the given region.
             let ec2 = ec2_state.clone();
-            Arc::new(move |vpc_id: &str, _region: &str| {
-                ec2.read()
-                    .iter_regional()
-                    .find(|(_, _, st)| st.vpcs.contains_key(vpc_id))
-                    .map(|(account, _, _)| account.to_string())
+            Arc::new(move |vpc_id: &str, region: &str| {
+                fakecloud_ec2::vpc_lookup::vpc_owner_account(&ec2, vpc_id, region)
             })
         });
     if let Some(store) = route53_snapshot_store.clone() {
@@ -7799,7 +7804,6 @@ async fn main() {
         ec2: ec2_state.clone(),
         iam: iam_state.clone(),
         cache: credentials_cache.clone(),
-        region: cli.region.clone(),
     });
     let dispatch_config = Arc::new(config);
     let app = Router::new()

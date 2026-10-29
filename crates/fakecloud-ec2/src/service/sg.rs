@@ -1734,7 +1734,11 @@ mod modify_tests {
         )
         .unwrap();
 
-        let resp = describe_security_groups(&svc, &req("DescribeSecurityGroups", &[])).unwrap();
+        let resp = describe_security_groups(
+            &svc,
+            &req("DescribeSecurityGroups", &[("GroupId.1", "sg-1")]),
+        )
+        .unwrap();
         let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
 
         // Isolate the egress permission set.
@@ -1786,7 +1790,7 @@ mod modify_tests {
         )
         .unwrap();
 
-        let body = sg_describe_body(&svc, &[]);
+        let body = sg_describe_body(&svc, &[("GroupId.1", "sg-1")]);
         let ingress = body
             .split("<ipPermissions>")
             .nth(1)
@@ -1970,7 +1974,11 @@ mod modify_tests {
         )
         .unwrap();
 
-        let resp = describe_security_groups(&svc, &req("DescribeSecurityGroups", &[])).unwrap();
+        let resp = describe_security_groups(
+            &svc,
+            &req("DescribeSecurityGroups", &[("GroupId.1", "sg-1")]),
+        )
+        .unwrap();
         let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
         let ingress = body
             .split("<ipPermissions>")

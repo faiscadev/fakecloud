@@ -27,29 +27,81 @@ impl fakecloud_core::multi_account::AccountState for Ec2State {
 
 impl fakecloud_core::multi_account::SplitByRegion for Ec2State {
     fn split_by_region(self, into: &mut fakecloud_core::multi_account::RegionalState<Self>) {
-        let target =
-            into.region_or_default_mut(Some(self.region.as_str()).filter(|r| !r.is_empty()));
-        *target = self;
+        crate::legacy_snapshot::split_legacy(self, into);
     }
 }
 
-/// Parse a persisted EC2 snapshot, migrating older schemas (v1: one
-/// account-wide state per account) by splitting each account by region.
-pub fn parse_ec2_snapshot(bytes: &[u8]) -> Result<Ec2Snapshot, serde_json::Error> {
-    fakecloud_core::multi_account::parse_regional_snapshot(
-        bytes,
-        EC2_SNAPSHOT_SCHEMA_VERSION,
-        |state: Ec2State| {
-            let account_id = state.account_id.clone();
-            let region = state.region.clone();
-            fakecloud_core::multi_account::RegionalState::from_legacy(
-                &account_id,
-                &region,
-                "",
-                state,
-            )
-        },
-    )
+/// The shape a v1 snapshot stored: one account-wide state per account.
+#[derive(Deserialize)]
+struct LegacyEc2Snapshot {
+    #[serde(default)]
+    accounts: Option<fakecloud_core::multi_account::MultiAccountState<Ec2State>>,
+    #[serde(default)]
+    state: Option<Ec2State>,
+}
+
+#[derive(Deserialize)]
+struct Ec2SnapshotVersion {
+    schema_version: u32,
+}
+
+/// Parse a persisted EC2 snapshot. A v1 snapshot (one account-wide state per
+/// account) is migrated by splitting every account by region (see
+/// [`crate::legacy_snapshot`]) into a container routed with the server's
+/// `default_account_id`, `region` and `endpoint`: v1 containers were saved
+/// with fixed routing, so resources that name no region land in the server's
+/// configured region.
+pub fn parse_ec2_snapshot(
+    bytes: &[u8],
+    default_account_id: &str,
+    region: &str,
+    endpoint: &str,
+) -> Result<Ec2Snapshot, serde_json::Error> {
+    use fakecloud_core::multi_account::{MultiRegionState, RegionalState};
+    let Ec2SnapshotVersion { schema_version } = serde_json::from_slice(bytes)?;
+    if schema_version > EC2_SNAPSHOT_SCHEMA_VERSION {
+        return Ok(Ec2Snapshot {
+            schema_version,
+            accounts: None,
+            state: None,
+        });
+    }
+    if schema_version == EC2_SNAPSHOT_SCHEMA_VERSION {
+        return serde_json::from_slice(bytes);
+    }
+    let legacy: LegacyEc2Snapshot = serde_json::from_slice(bytes)?;
+    if legacy.accounts.is_none() && legacy.state.is_none() {
+        return Ok(Ec2Snapshot {
+            schema_version: EC2_SNAPSHOT_SCHEMA_VERSION,
+            accounts: None,
+            state: None,
+        });
+    }
+    let mut out: MultiRegionState<Ec2State> =
+        MultiRegionState::new(default_account_id, region, endpoint);
+    let mut add = |account: String, state: Ec2State| {
+        let regional = RegionalState::from_legacy(&account, region, endpoint, state);
+        *out.get_or_create(&account) = regional;
+    };
+    if let Some(mut accounts) = legacy.accounts {
+        let ids: Vec<String> = accounts.iter().map(|(id, _)| id.to_string()).collect();
+        for id in ids {
+            if let Some(state) = accounts.get_mut(&id) {
+                add(id, std::mem::take(state));
+            }
+        }
+    }
+    if let Some(state) = legacy.state {
+        let account = Some(state.account_id.clone())
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| default_account_id.to_string());
+        add(account, state);
+    }
+    Ok(Ec2Snapshot {
+        schema_version: EC2_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(out),
+        state: None,
+    })
 }
 
 /// Recycle Bin retention rules in effect for an account, per resource type.
@@ -105,6 +157,10 @@ pub struct Vpc {
     /// `ipv6_cidr_block` / `assign_generated_ipv6_cidr_block` from it.
     #[serde(default)]
     pub ipv6_cidr_block: Option<String>,
+    /// IPv6 CIDR blocks associated after the first: a VPC holds up to five
+    /// (AssociateVpcCidrBlock with `AmazonProvidedIpv6CidrBlock=true`).
+    #[serde(default)]
+    pub ipv6_cidr_associations: Vec<VpcCidrAssoc>,
 }
 
 /// One `key -> values` entry in a DHCP options set.

@@ -132,8 +132,12 @@ pub fn restore_cluster_security_groups(eks: &crate::SharedEksState, ec2: &Shared
             ) else {
                 continue;
             };
-            let region = fakecloud_aws::arn::region_of(&cluster.arn).unwrap_or("us-east-1");
-            let state = accounts.regional_mut(account_id, region);
+            // A cluster ARN names its region; a record without one belongs to
+            // the server's configured region.
+            let region = fakecloud_aws::arn::region_of(&cluster.arn)
+                .map(str::to_string)
+                .unwrap_or_else(|| accounts.region().to_string());
+            let state = accounts.regional_mut(account_id, &region);
             if state.security_groups.contains_key(group_id) {
                 continue;
             }

@@ -281,10 +281,12 @@ pub(crate) fn copy_snapshot(
             .cloned()
             .unwrap_or_default(),
     );
+    // The source snapshot lives in `SourceRegion`, which differs from the
+    // request's (destination) region for a cross-region copy.
     let source = {
         let accounts = svc.state.read();
         accounts
-            .regional(&req.account_id, &req.region)
+            .regional(&req.account_id, &source_region)
             .and_then(|s| s.snapshots.get(&src))
             .map(|s| (s.volume_size, s.encrypted, s.kms_key_id.clone()))
     };
@@ -1374,6 +1376,54 @@ mod tag_tests {
         );
         let ids = snap_ids(&out);
         assert!(!describe(&svc, &ids[0]).contains("<key>team</key>"));
+    }
+
+    /// A cross-region copy reads its source from `SourceRegion`, not from the
+    /// destination region the request is sent to: the copy carries the
+    /// source's size and stays encrypted.
+    #[test]
+    fn copy_snapshot_reads_source_from_source_region() {
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let mut src = build_snapshot("vol-west".into(), "d".into());
+            src.volume_size = 77;
+            src.encrypted = true;
+            accounts
+                .regional_mut("000000000000", "eu-west-1")
+                .snapshots
+                .insert("snap-west".to_string(), src);
+        }
+        // Sent to us-east-1 (the destination region).
+        let out = body_of(
+            copy_snapshot(
+                &svc,
+                &req(
+                    "CopySnapshot",
+                    &[
+                        ("SourceRegion", "eu-west-1"),
+                        ("SourceSnapshotId", "snap-west"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        let id = snap_ids(&out).remove(0);
+        let d = describe(&svc, &id);
+        assert!(d.contains("<volumeSize>77</volumeSize>"), "{d}");
+        assert!(d.contains("<encrypted>true</encrypted>"), "{d}");
+        // The copy lands in the destination region only.
+        let accounts = svc.state.read();
+        assert!(accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .snapshots
+            .contains_key(&id));
+        assert!(!accounts
+            .regional("000000000000", "eu-west-1")
+            .unwrap()
+            .snapshots
+            .contains_key(&id));
     }
 
     #[test]

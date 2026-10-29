@@ -292,6 +292,18 @@ fn parse_ipv4_cidr(cidr: &str) -> Option<(u32, u32)> {
     Some((u32::from(addr) & mask, len))
 }
 
+/// Whether two IPv4 CIDR blocks share any address (one contains or equals
+/// the other). `false` when either does not parse.
+pub fn ipv4_cidrs_overlap(a: &str, b: &str) -> bool {
+    let (Some((na, la)), Some((nb, lb))) = (parse_ipv4_cidr(a), parse_ipv4_cidr(b)) else {
+        return false;
+    };
+    // The shorter prefix decides: both networks agree on its bits.
+    let len = la.min(lb);
+    let mask = if len == 0 { 0 } else { u32::MAX << (32 - len) };
+    na & mask == nb & mask
+}
+
 /// Whether `ip` is an address inside `cidr`.
 pub fn ip_in_cidr(ip: &str, cidr: &str) -> bool {
     let (Some((net, len)), Ok(addr)) = (parse_ipv4_cidr(cidr), ip.parse::<Ipv4Addr>()) else {
@@ -529,6 +541,17 @@ pub fn create_service_endpoint(
     })
 }
 
+/// The account owning VPC `vpc_id` in `region`. VPCs are regional: a VPC
+/// id only names a VPC in the region it was created in, so the lookup is
+/// confined to that region's state of every account. An empty `region` (a
+/// caller that named none) matches the VPC in any region.
+pub fn vpc_owner_account(ec2: &SharedEc2State, vpc_id: &str, region: &str) -> Option<String> {
+    ec2.read()
+        .iter_regional()
+        .find(|(_, r, st)| (region.is_empty() || *r == region) && st.vpcs.contains_key(vpc_id))
+        .map(|(account, _, _)| account.to_string())
+}
+
 /// Delete an endpoint created with [`create_service_endpoint`] and its
 /// network interfaces.
 pub fn delete_service_endpoint(state: &mut Ec2State, endpoint: &ServiceEndpoint) {
@@ -550,6 +573,30 @@ mod tests {
 
     fn ec2() -> SharedEc2State {
         Arc::new(RwLock::new(MultiRegionState::new(ACCOUNT, "us-east-1", "")))
+    }
+
+    #[test]
+    fn ipv4_cidrs_overlap_on_containment_and_equality() {
+        assert!(ipv4_cidrs_overlap("10.0.0.0/16", "10.0.0.0/16"));
+        assert!(ipv4_cidrs_overlap("10.0.0.0/16", "10.0.128.0/24"));
+        assert!(ipv4_cidrs_overlap("10.0.128.0/24", "10.0.0.0/16"));
+        assert!(!ipv4_cidrs_overlap("10.0.0.0/16", "10.1.0.0/16"));
+        assert!(!ipv4_cidrs_overlap("10.0.0.0/24", "10.0.1.0/24"));
+        assert!(!ipv4_cidrs_overlap("garbage", "10.0.0.0/16"));
+    }
+
+    #[test]
+    fn vpc_owner_account_is_confined_to_the_given_region() {
+        let ec2 = ec2();
+        let west_vpc = with_account(&ec2, "444455556666", "eu-west-1", default_vpc_id_in)
+            .expect("default VPC");
+        assert_eq!(
+            vpc_owner_account(&ec2, &west_vpc, "eu-west-1").as_deref(),
+            Some("444455556666")
+        );
+        // The same id names no VPC in another region.
+        assert_eq!(vpc_owner_account(&ec2, &west_vpc, "us-east-1"), None);
+        assert_eq!(vpc_owner_account(&ec2, "vpc-missing", "eu-west-1"), None);
     }
 
     #[test]

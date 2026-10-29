@@ -66,6 +66,106 @@ async fn secondary_ipv4_cidr_is_readable_by_terraform_filter() {
         .is_empty());
 }
 
+/// AssociateVpcCidrBlock refuses an IPv4 block that overlaps any block of
+/// the VPC (`InvalidVpc.Range`) and accepts further Amazon-provided IPv6
+/// blocks, each with its own association.
+#[tokio::test]
+async fn vpc_cidr_associations_reject_overlap_and_allow_several_ipv6() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+    let vpc = c
+        .create_vpc()
+        .cidr_block("10.50.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    let vpc_id = vpc.vpc().unwrap().vpc_id().unwrap();
+    c.associate_vpc_cidr_block()
+        .vpc_id(vpc_id)
+        .cidr_block("10.51.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    for cidr in ["10.50.0.0/16", "10.50.4.0/24", "10.51.0.0/16"] {
+        let err = c
+            .associate_vpc_cidr_block()
+            .vpc_id(vpc_id)
+            .cidr_block(cidr)
+            .send()
+            .await
+            .expect_err("overlapping block must be refused");
+        assert_eq!(
+            err.into_service_error().meta().code(),
+            Some("InvalidVpc.Range"),
+            "{cidr}"
+        );
+    }
+
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let out = c
+            .associate_vpc_cidr_block()
+            .vpc_id(vpc_id)
+            .amazon_provided_ipv6_cidr_block(true)
+            .send()
+            .await
+            .unwrap();
+        ids.push(
+            out.ipv6_cidr_block_association()
+                .unwrap()
+                .association_id()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    assert_ne!(ids[0], ids[1]);
+    let described = c.describe_vpcs().vpc_ids(vpc_id).send().await.unwrap();
+    let set = described.vpcs()[0].ipv6_cidr_block_association_set();
+    assert_eq!(set.len(), 2);
+    assert_ne!(set[0].ipv6_cidr_block(), set[1].ipv6_cidr_block());
+}
+
+/// Each region has its own default VPC and default subnets: no id is shared
+/// between two regions of one account.
+#[tokio::test]
+async fn default_vpcs_are_distinct_per_region() {
+    let server = TestServer::start().await;
+    let mut seen = std::collections::BTreeSet::new();
+    for region in ["us-east-1", "eu-west-1"] {
+        let rc = aws_sdk_ec2::Client::new(&server.aws_config_in(region).await);
+        let vpcs = rc
+            .describe_vpcs()
+            .filters(
+                aws_sdk_ec2::types::Filter::builder()
+                    .name("is-default")
+                    .values("true")
+                    .build(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(vpcs.vpcs().len(), 1, "{region}");
+        let vpc_id = vpcs.vpcs()[0].vpc_id().unwrap().to_string();
+        let subnets = rc
+            .describe_subnets()
+            .filters(
+                aws_sdk_ec2::types::Filter::builder()
+                    .name("vpc-id")
+                    .values(&vpc_id)
+                    .build(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert!(!subnets.subnets().is_empty());
+        for subnet in subnets.subnets() {
+            assert!(subnet.availability_zone().unwrap().starts_with(region));
+            assert!(seen.insert(subnet.subnet_id().unwrap().to_string()));
+        }
+        assert!(seen.insert(vpc_id), "{region} default VPC id reused");
+    }
+}
+
 #[tokio::test]
 async fn create_vpc_provisions_default_resources() {
     let server = TestServer::start().await;

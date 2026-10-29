@@ -1210,6 +1210,46 @@ async fn restore_vpc_ids_re_derives_from_subnets() {
     assert_eq!(crate::network::restore_vpc_ids(&mut accounts, &ec2), 0);
 }
 
+/// A restored load balancer whose ARN names no region resolves its subnets
+/// in the server's configured region (the EC2 container's), not us-east-1.
+#[tokio::test]
+async fn restore_vpc_ids_falls_back_to_server_region() {
+    let ec2: fakecloud_ec2::SharedEc2State = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "eu-west-1", ""),
+    ));
+    let subnet =
+        fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012", "eu-west-1").remove(0);
+    let svc = Elbv2Service::new_without_dataplane(Arc::new(RwLock::new(
+        crate::state::Elbv2Accounts::new(),
+    )));
+    let body = body_string(
+        &svc.handle(req(
+            "CreateLoadBalancer",
+            &[("Name", "west"), ("Subnets.member.1", &subnet.subnet_id)],
+        ))
+        .await
+        .unwrap(),
+    );
+    let arn = xml_field(&body, "LoadBalancerArn");
+    let mut accounts = svc.state.write();
+    {
+        let lb = accounts
+            .get_or_create("123456789012")
+            .load_balancers
+            .get_mut(&arn)
+            .unwrap();
+        lb.vpc_id = "vpc-0000invented".to_string();
+        let mut parts: Vec<&str> = arn.split(':').collect();
+        parts[3] = "";
+        lb.arn = parts.join(":");
+    }
+    assert_eq!(crate::network::restore_vpc_ids(&mut accounts, &ec2), 1);
+    assert_eq!(
+        accounts.get("123456789012").unwrap().load_balancers[&arn].vpc_id,
+        subnet.vpc_id
+    );
+}
+
 /// `PageSize` bounds a `Describe*` page and `NextMarker` walks the rest,
 /// appearing only while items remain; a marker this server never handed out
 /// is rejected.

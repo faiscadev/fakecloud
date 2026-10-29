@@ -163,6 +163,9 @@ pub fn effective_vpc(
 /// Returns how many were fixed.
 pub fn restore_vpc_ids(accounts: &mut crate::state::Elbv2Accounts, ec2: &SharedEc2State) -> usize {
     let mut fixed = 0;
+    // An LB ARN always names its region; the server's configured region
+    // only covers a record persisted without one.
+    let server_region = ec2.read().region().to_string();
     for (account_id, st) in accounts.iter_mut() {
         for lb in st.load_balancers.values_mut() {
             let subnets: Vec<String> = lb
@@ -170,7 +173,7 @@ pub fn restore_vpc_ids(accounts: &mut crate::state::Elbv2Accounts, ec2: &SharedE
                 .iter()
                 .map(|z| z.subnet_id.clone())
                 .collect();
-            let region = lb.arn.split(':').nth(3).unwrap_or("us-east-1");
+            let region = fakecloud_aws::arn::region_of(&lb.arn).unwrap_or(&server_region);
             if let Some(vpc) = effective_vpc(ec2, account_id, region, &lb.vpc_id, &subnets) {
                 if vpc != lb.vpc_id {
                     lb.vpc_id = vpc;
