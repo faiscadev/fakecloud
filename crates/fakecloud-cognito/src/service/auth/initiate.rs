@@ -299,7 +299,23 @@ impl CognitoService {
             username,
             auth_params.get("SECRET_HASH"),
         )?;
-        self.build_srp_challenge(pool_id, client_id, username, srp_a, req, None)
+        // Resolve an email/phone alias to the stored (possibly UUID) username
+        // so SRP handshakes work for UsernameAttributes pools too.
+        let resolved_username = {
+            let accounts = self.state.read();
+            let empty = CognitoState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            crate::service::resolve_alias_username(state, pool_id, username)
+        };
+        self.build_srp_challenge(
+            pool_id,
+            client_id,
+            &resolved_username,
+            username,
+            srp_a,
+            req,
+            None,
+        )
     }
 
     /// `InitiateAuth(AuthFlow=USER_AUTH)` — the choice-based flow Amplify Gen2
@@ -392,8 +408,8 @@ impl CognitoService {
                         "SRP_A is required for the PASSWORD_SRP challenge",
                     )
                 })?;
-            // The builder resolves the alias itself and records `sign_in`.
-            return self.build_srp_challenge(pool_id, client_id, sign_in, srp_a, req, step_up);
+            return self
+                .build_srp_challenge(pool_id, client_id, username, sign_in, srp_a, req, step_up);
         }
 
         // No preferred challenge resolvable inline: present the menu, filtered
@@ -612,12 +628,17 @@ impl CognitoService {
     /// Build the `PASSWORD_VERIFIER` challenge for an SRP handshake: derive the
     /// user's verifier, pick the server keys, and stash the handshake in the
     /// session. Shared by `USER_SRP_AUTH` and the `USER_AUTH` `PASSWORD_SRP`
-    /// path. Does not check the auth flow (callers gate that).
+    /// path. Does not check the auth flow (callers gate that). `username` is
+    /// the stored (alias-resolved) username; `sign_in` is the identifier the
+    /// sign-in started with, recorded on the session because a confidential
+    /// client's challenge-response SECRET_HASH is computed over it.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_srp_challenge(
         &self,
         pool_id: &str,
         client_id: &str,
         username: &str,
+        sign_in: &str,
         srp_a: &str,
         req: &AwsRequest,
         step_up: Option<StepUpContext>,
@@ -636,19 +657,6 @@ impl CognitoService {
                 "SRP_A is malformed.",
             ));
         }
-
-        // Resolve an email/phone alias to the stored (possibly UUID) username
-        // so SRP handshakes work for UsernameAttributes pools too. The session
-        // records the supplied identifier, which a confidential client's
-        // challenge-response SECRET_HASH is computed over.
-        let sign_in = username;
-        let resolved_username = {
-            let accounts = self.state.read();
-            let empty = CognitoState::new(&req.account_id, &req.region);
-            let state = accounts.get(&req.account_id).unwrap_or(&empty);
-            crate::service::resolve_alias_username(state, pool_id, username)
-        };
-        let username = resolved_username.as_str();
 
         let password = {
             let accounts = self.state.read();

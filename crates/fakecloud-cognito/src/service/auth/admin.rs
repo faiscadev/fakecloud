@@ -319,8 +319,8 @@ impl CognitoService {
             // If session doesn't exist, handle_auth_challenge_response will return the error
         }
 
-        // The per-challenge handlers validate the session and then require a
-        // confidential client's SECRET_HASH.
+        // The shared dispatch checks USERNAME and a confidential client's
+        // SECRET_HASH once the session is known to be valid.
         self.handle_auth_challenge_response(client_id, challenge_name, session, &body, req)
             .await
     }

@@ -11899,9 +11899,21 @@ fn new_password_challenge_secret_hash_over_email_alias() {
         let stored = fx.create_user(email);
         assert_ne!(stored, email, "email pools store a generated username");
 
-        // USERNAME omitted: the hash is over the email the sign-in used.
+        // USERNAME omitted: the hash is over the email the sign-in used, not
+        // the stored username.
         let ch = fx.initiate(op, email, "TempPass1!");
         let session = ch["Session"].as_str().unwrap();
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({"NEW_PASSWORD": "NewPass1!", "SECRET_HASH": fx.hash(&stored)}),
+            ),
+            "NotAuthorizedException",
+            &fx.wrong_message(),
+            &format!("{op:?} hash over stored username"),
+        );
         assert_challenge_err(
             fx.respond(
                 op,
@@ -12034,8 +12046,21 @@ fn public_client_challenge_needs_no_secret_hash() {
     for op in CHALLENGE_OPS {
         let fx = SecretClientFixture::new(json!({"PoolName": "p"}), false);
         fx.create_user("alice");
+        fx.create_user("bob");
         let ch = fx.initiate(op, "alice", "TempPass1!");
         let session = ch["Session"].as_str().unwrap();
+        // USERNAME must still name the session's user.
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({"USERNAME": "bob", "NEW_PASSWORD": "NewPass1!"}),
+            ),
+            "NotAuthorizedException",
+            "Invalid session for the user.",
+            &format!("{op:?} public client, other user"),
+        );
         assert_tokens(
             fx.respond(
                 op,
@@ -12044,6 +12069,34 @@ fn public_client_challenge_needs_no_secret_hash() {
                 json!({"USERNAME": "alice", "NEW_PASSWORD": "NewPass1!"}),
             ),
             &format!("{op:?} public client"),
+        );
+    }
+}
+
+#[test]
+fn new_password_policy_failure_still_consumes_the_session() {
+    for op in CHALLENGE_OPS {
+        let fx = SecretClientFixture::new(json!({"PoolName": "p"}), true);
+        fx.create_user("alice");
+        let ch = fx.initiate(op, "alice", "TempPass1!");
+        let session = ch["Session"].as_str().unwrap();
+        let err = expect_err(fx.respond(
+            op,
+            "NEW_PASSWORD_REQUIRED",
+            session,
+            json!({"NEW_PASSWORD": "weak", "SECRET_HASH": fx.hash("alice")}),
+        ));
+        assert_eq!(err.code(), "InvalidPasswordException", "{op:?}: {err}");
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({"NEW_PASSWORD": "NewPass1!", "SECRET_HASH": fx.hash("alice")}),
+            ),
+            "NotAuthorizedException",
+            "Invalid session.",
+            &format!("{op:?} consumed session"),
         );
     }
 }

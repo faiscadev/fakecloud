@@ -829,22 +829,31 @@ pub(crate) fn validate_secret_hash(
     if !client.is_confidential() {
         return Ok(());
     }
-    let client_id = client.client_id.as_str();
     let Some(supplied) = supplied_secret_hash else {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "NotAuthorizedException",
-            format!("Client {client_id} is configured for secret but secret was not received"),
-        ));
+        return Err(secret_hash_missing(&client.client_id));
     };
     if !client.secret_hash_matches(username, supplied) {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "NotAuthorizedException",
-            "Unable to verify secret hash for client ".to_string() + client_id,
-        ));
+        return Err(secret_hash_mismatch(&client.client_id));
     }
     Ok(())
+}
+
+/// A confidential client's request that carries no `SECRET_HASH`.
+pub(crate) fn secret_hash_missing(client_id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "NotAuthorizedException",
+        format!("Client {client_id} is configured for secret but secret was not received"),
+    )
+}
+
+/// A `SECRET_HASH` that matches none of the client's secrets.
+pub(crate) fn secret_hash_mismatch(client_id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "NotAuthorizedException",
+        format!("Unable to verify secret hash for client {client_id}"),
+    )
 }
 
 fn parse_token_validity_units(val: &Value) -> Option<TokenValidityUnits> {

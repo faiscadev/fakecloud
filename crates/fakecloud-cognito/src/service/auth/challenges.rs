@@ -2,26 +2,27 @@
 
 use super::*;
 
-/// Require a confidential app client's `SECRET_HASH` on a challenge response,
-/// which AWS demands on every challenge response to a client with a secret.
-/// Callers run this after validating `sess` (it exists and matches the
-/// request's ClientId and ChallengeName) and under the same state lock, so an
-/// invalid session still reports its own error and the client checked is the
-/// session's. A `USERNAME` in the responses must name the session's user,
-/// directly or through an alias; the hash may be computed over it, over the
-/// identifier the sign-in started with, or over the stored username.
-fn require_challenge_secret_hash(
+/// Challenge names `handle_auth_challenge_response` dispatches.
+const SUPPORTED_CHALLENGES: &[&str] = &[
+    "NEW_PASSWORD_REQUIRED",
+    "PASSWORD_VERIFIER",
+    "SELECT_CHALLENGE",
+    "SOFTWARE_TOKEN_MFA",
+    "SMS_MFA",
+    "MFA_SETUP",
+    "CUSTOM_CHALLENGE",
+];
+
+/// Check who is answering a valid challenge session. A `USERNAME` in the
+/// responses must name the session's user, directly or through an alias.
+/// A confidential app client must also send a `SECRET_HASH` (AWS requires
+/// it on every challenge response), computed over that `USERNAME` or over
+/// the identifier the sign-in started with.
+fn check_challenge_identity(
     state: &CognitoState,
     sess: &SessionData,
     responses: &serde_json::Map<String, Value>,
 ) -> Result<(), AwsServiceError> {
-    let Some(client) = state
-        .user_pool_clients
-        .get(&sess.client_id)
-        .filter(|c| c.is_confidential())
-    else {
-        return Ok(());
-    };
     let supplied_username = responses.get("USERNAME").and_then(Value::as_str);
     if let Some(supplied) = supplied_username {
         let resolved = crate::service::resolve_alias_username(state, &sess.user_pool_id, supplied);
@@ -33,18 +34,29 @@ fn require_challenge_secret_hash(
             ));
         }
     }
-    let secret_hash = responses.get("SECRET_HASH").and_then(Value::as_str);
-    let mut candidates = supplied_username
-        .into_iter()
-        .chain([sess.signed_in_as(), sess.username.as_str()]);
-    let first = candidates.next().unwrap_or(sess.username.as_str());
-    let hashed_over = match secret_hash {
-        Some(hash) if !client.secret_hash_matches(first, hash) => candidates
-            .find(|c| client.secret_hash_matches(c, hash))
-            .unwrap_or(first),
-        _ => first,
+    let Some(client) = state
+        .user_pool_clients
+        .get(&sess.client_id)
+        .filter(|c| c.is_confidential())
+    else {
+        return Ok(());
     };
-    crate::service::validate_secret_hash(client, secret_hash, hashed_over)
+    let Some(secret_hash) = responses.get("SECRET_HASH").and_then(Value::as_str) else {
+        return Err(crate::service::secret_hash_missing(&client.client_id));
+    };
+    let signed_in_as = sess.signed_in_as();
+    let mut candidates = supplied_username.into_iter().collect::<Vec<_>>();
+    if !candidates.contains(&signed_in_as) {
+        candidates.push(signed_in_as);
+    }
+    if candidates
+        .iter()
+        .any(|name| client.secret_hash_matches(name, secret_hash))
+    {
+        Ok(())
+    } else {
+        Err(crate::service::secret_hash_mismatch(&client.client_id))
+    }
 }
 
 impl CognitoService {
@@ -222,6 +234,21 @@ impl CognitoService {
         body: &Value,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // Peek at the session: when it is valid for this request, check who
+        // is answering it once here. An invalid one falls through so each
+        // handler reports its own session error.
+        if let Some(responses) = body["ChallengeResponses"].as_object() {
+            let accounts = self.state.read();
+            if let Some(state) = accounts.get(&req.account_id) {
+                if let Some(sess) = state.sessions.get(session).filter(|sess| {
+                    sess.client_id == client_id
+                        && sess.challenge_name == challenge_name
+                        && SUPPORTED_CHALLENGES.contains(&challenge_name)
+                }) {
+                    check_challenge_identity(state, sess, responses)?;
+                }
+            }
+        }
         match challenge_name {
             "NEW_PASSWORD_REQUIRED" => {
                 self.respond_new_password_required(client_id, session, body, req)
@@ -406,7 +433,6 @@ impl CognitoService {
                     "Invalid session.",
                 ));
             }
-            require_challenge_secret_hash(state, sess, responses)?;
             let pool_id = sess.user_pool_id.clone();
             let username = sess.username.clone();
             let stored_sms_code = sess.challenge_metadata.clone();
@@ -615,7 +641,6 @@ impl CognitoService {
             if sess.challenge_name != "PASSWORD_VERIFIER" || sess.client_id != client_id {
                 return Err(bad_creds());
             }
-            require_challenge_secret_hash(state, sess, responses)?;
             let stash = sess.challenge_metadata.clone().ok_or_else(bad_creds)?;
             (
                 sess.user_pool_id.clone(),
@@ -770,7 +795,6 @@ impl CognitoService {
             if sess.challenge_name != "SELECT_CHALLENGE" || sess.client_id != client_id {
                 return Err(bad_creds());
             }
-            require_challenge_secret_hash(state, sess, responses)?;
             (
                 sess.user_pool_id.clone(),
                 sess.username.clone(),
@@ -800,9 +824,9 @@ impl CognitoService {
                             "SRP_A is required for the PASSWORD_SRP challenge",
                         )
                     })?;
-                // The builder resolves the sign-in identifier back to
-                // `username` and records it on the verifier session.
-                self.build_srp_challenge(&pool_id, client_id, &sign_in, srp_a, req, step_up)
+                self.build_srp_challenge(
+                    &pool_id, client_id, &username, &sign_in, srp_a, req, step_up,
+                )
             }
             "PASSWORD" => {
                 let password = responses
@@ -912,13 +936,6 @@ impl CognitoService {
                     "NotAuthorizedException",
                     "Invalid session.",
                 ));
-            }
-            // A rejected client secret leaves the session usable for a retry.
-            if let Err(err) =
-                require_challenge_secret_hash(state, &session_data, challenge_responses)
-            {
-                state.sessions.insert(session.to_string(), session_data);
-                return Err(err);
             }
 
             let password_policy = state
@@ -1129,13 +1146,6 @@ impl CognitoService {
                     "NotAuthorizedException",
                     "Invalid session.",
                 ));
-            }
-            // A rejected client secret leaves the session usable for a retry.
-            if let Err(err) =
-                require_challenge_secret_hash(state, &session_data, challenge_responses)
-            {
-                state.sessions.insert(session.to_string(), session_data);
-                return Err(err);
             }
 
             (
