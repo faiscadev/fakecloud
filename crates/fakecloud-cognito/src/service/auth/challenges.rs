@@ -2,31 +2,27 @@
 
 use super::*;
 
-/// Challenge names `handle_auth_challenge_response` dispatches.
-const SUPPORTED_CHALLENGES: &[&str] = &[
-    "NEW_PASSWORD_REQUIRED",
-    "PASSWORD_VERIFIER",
-    "SELECT_CHALLENGE",
-    "SOFTWARE_TOKEN_MFA",
-    "SMS_MFA",
-    "MFA_SETUP",
-    "CUSTOM_CHALLENGE",
-];
-
 /// Check who is answering a valid challenge session. A `USERNAME` in the
-/// responses must name the session's user, directly or through an alias.
-/// A confidential app client must also send a `SECRET_HASH` (AWS requires
-/// it on every challenge response), computed over that `USERNAME` or over
-/// the identifier the sign-in started with.
+/// responses must name the session's user: its stored username, the
+/// identifier the sign-in started with, or an alias resolving to it. A
+/// confidential app client must also send a `SECRET_HASH` (AWS requires it
+/// on every challenge response, so missing or malformed `ChallengeResponses`
+/// fail closed), computed over that `USERNAME`, the sign-in identifier, or
+/// the stored username (`USER_ID_FOR_SRP`, which alias sign-ins hash over).
 fn check_challenge_identity(
     state: &CognitoState,
     sess: &SessionData,
-    responses: &serde_json::Map<String, Value>,
+    responses: Option<&serde_json::Map<String, Value>>,
 ) -> Result<(), AwsServiceError> {
-    let supplied_username = responses.get("USERNAME").and_then(Value::as_str);
+    let supplied_username = responses
+        .and_then(|r| r.get("USERNAME"))
+        .and_then(Value::as_str);
     if let Some(supplied) = supplied_username {
-        let resolved = crate::service::resolve_alias_username(state, &sess.user_pool_id, supplied);
-        if resolved != sess.username {
+        let names_session_user = supplied == sess.username
+            || supplied == sess.signed_in_as()
+            || crate::service::resolve_alias_username(state, &sess.user_pool_id, supplied)
+                == sess.username;
+        if !names_session_user {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "NotAuthorizedException",
@@ -41,18 +37,24 @@ fn check_challenge_identity(
     else {
         return Ok(());
     };
-    let Some(secret_hash) = responses.get("SECRET_HASH").and_then(Value::as_str) else {
+    let Some(secret_hash) = responses
+        .and_then(|r| r.get("SECRET_HASH"))
+        .and_then(Value::as_str)
+    else {
         return Err(crate::service::secret_hash_missing(&client.client_id));
     };
-    let signed_in_as = sess.signed_in_as();
     let mut candidates = supplied_username.into_iter().collect::<Vec<_>>();
-    if !candidates.contains(&signed_in_as) {
-        candidates.push(signed_in_as);
+    for name in [sess.signed_in_as(), sess.username.as_str()] {
+        if !candidates.contains(&name) {
+            candidates.push(name);
+        }
     }
-    if candidates
-        .iter()
-        .any(|name| client.secret_hash_matches(name, secret_hash))
-    {
+    // Fold without short-circuiting so timing does not reveal which
+    // candidate matched.
+    let matched = candidates.iter().fold(false, |acc, name| {
+        client.secret_hash_matches(name, secret_hash) | acc
+    });
+    if matched {
         Ok(())
     } else {
         Err(crate::service::secret_hash_mismatch(&client.client_id))
@@ -237,15 +239,13 @@ impl CognitoService {
         // Peek at the session: when it is valid for this request, check who
         // is answering it once here. An invalid one falls through so each
         // handler reports its own session error.
-        if let Some(responses) = body["ChallengeResponses"].as_object() {
+        {
             let accounts = self.state.read();
             if let Some(state) = accounts.get(&req.account_id) {
                 if let Some(sess) = state.sessions.get(session).filter(|sess| {
-                    sess.client_id == client_id
-                        && sess.challenge_name == challenge_name
-                        && SUPPORTED_CHALLENGES.contains(&challenge_name)
+                    sess.client_id == client_id && sess.challenge_name == challenge_name
                 }) {
-                    check_challenge_identity(state, sess, responses)?;
+                    check_challenge_identity(state, sess, body["ChallengeResponses"].as_object())?;
                 }
             }
         }

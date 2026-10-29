@@ -11899,21 +11899,9 @@ fn new_password_challenge_secret_hash_over_email_alias() {
         let stored = fx.create_user(email);
         assert_ne!(stored, email, "email pools store a generated username");
 
-        // USERNAME omitted: the hash is over the email the sign-in used, not
-        // the stored username.
+        // USERNAME omitted: the hash is over the email the sign-in used.
         let ch = fx.initiate(op, email, "TempPass1!");
         let session = ch["Session"].as_str().unwrap();
-        assert_challenge_err(
-            fx.respond(
-                op,
-                "NEW_PASSWORD_REQUIRED",
-                session,
-                json!({"NEW_PASSWORD": "NewPass1!", "SECRET_HASH": fx.hash(&stored)}),
-            ),
-            "NotAuthorizedException",
-            &fx.wrong_message(),
-            &format!("{op:?} hash over stored username"),
-        );
         assert_challenge_err(
             fx.respond(
                 op,
@@ -11933,6 +11921,21 @@ fn new_password_challenge_secret_hash_over_email_alias() {
                 json!({"NEW_PASSWORD": "NewPass1!", "SECRET_HASH": fx.hash(email)}),
             ),
             &format!("{op:?} hash over email"),
+        );
+
+        // A hash over the stored username (USER_ID_FOR_SRP) is accepted too.
+        let email = "dora@example.com";
+        let stored = fx.create_user(email);
+        let ch = fx.initiate(op, email, "TempPass1!");
+        let session = ch["Session"].as_str().unwrap();
+        assert_tokens(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({"NEW_PASSWORD": "NewPass1!", "SECRET_HASH": fx.hash(&stored)}),
+            ),
+            &format!("{op:?} hash over stored username"),
         );
 
         // USERNAME may name the user by the email alias, with the hash over it;
@@ -12201,5 +12204,65 @@ fn mfa_challenge_secret_hash_over_email_alias() {
             ),
             &format!("{op:?} hash over email"),
         );
+    }
+}
+
+#[test]
+fn challenge_username_may_repeat_a_shared_unverified_alias() {
+    for op in CHALLENGE_OPS {
+        let fx =
+            SecretClientFixture::new(json!({"PoolName": "p", "AliasAttributes": ["email"]}), true);
+        let shared = "shared@example.com";
+        for username in ["ann", "amy"] {
+            block_on(
+                fx.svc.admin_create_user(&make_req(
+                    "AdminCreateUser",
+                    &json!({
+                        "UserPoolId": fx.pool_id,
+                        "Username": username,
+                        "TemporaryPassword": "TempPass1!",
+                        "UserAttributes": [{"Name": "email", "Value": shared}],
+                    })
+                    .to_string(),
+                )),
+            )
+            .unwrap();
+        }
+        // The alias may resolve to either user; answering with the email the
+        // sign-in used names the session's user whichever it picked.
+        let ch = fx.initiate(op, shared, "TempPass1!");
+        assert_eq!(ch["ChallengeName"], "NEW_PASSWORD_REQUIRED", "{op:?}: {ch}");
+        let session = ch["Session"].as_str().unwrap();
+        assert_tokens(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({
+                    "USERNAME": shared,
+                    "NEW_PASSWORD": "NewPass1!",
+                    "SECRET_HASH": fx.hash(shared),
+                }),
+            ),
+            &format!("{op:?} shared alias"),
+        );
+    }
+}
+
+#[test]
+fn confidential_client_challenge_without_responses_fails_closed() {
+    for op in CHALLENGE_OPS {
+        let fx = SecretClientFixture::new(json!({"PoolName": "p"}), true);
+        fx.create_user("alice");
+        let ch = fx.initiate(op, "alice", "TempPass1!");
+        let session = ch["Session"].as_str().unwrap();
+        for responses in [Value::Null, json!("not-an-object")] {
+            assert_challenge_err(
+                fx.respond(op, "NEW_PASSWORD_REQUIRED", session, responses.clone()),
+                "NotAuthorizedException",
+                &fx.missing_message(),
+                &format!("{op:?} responses {responses}"),
+            );
+        }
     }
 }
