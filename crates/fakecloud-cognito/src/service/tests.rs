@@ -7265,6 +7265,179 @@ fn user_pool_client_secret_crud() {
     assert_eq!(b["ClientSecrets"].as_array().unwrap().len(), 0);
 }
 
+/// Add a secret to `client_id` and return its (id, value).
+fn add_client_secret(svc: &CognitoService, pool_id: &str, client_id: &str) -> (String, String) {
+    let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
+    let req = make_req("AddUserPoolClientSecret", &body.to_string());
+    let b = resp_json(&svc.add_user_pool_client_secret(&req).unwrap());
+    let d = &b["ClientSecretDescriptor"];
+    (
+        d["ClientSecretId"].as_str().unwrap().to_string(),
+        d["ClientSecretValue"].as_str().unwrap().to_string(),
+    )
+}
+
+fn delete_client_secret(
+    svc: &CognitoService,
+    pool_id: &str,
+    client_id: &str,
+    secret_id: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    let body = json!({"UserPoolId": pool_id, "ClientId": client_id, "ClientSecretId": secret_id});
+    svc.delete_user_pool_client_secret(&make_req("DeleteUserPoolClientSecret", &body.to_string()))
+}
+
+#[test]
+fn add_user_pool_client_secret_caps_at_two_secrets() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, _) = create_m2m_client(&svc, &pool_id, &[]);
+    add_client_secret(&svc, &pool_id, &client_id);
+    let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
+    let req = make_req("AddUserPoolClientSecret", &body.to_string());
+    let err = expect_err(svc.add_user_pool_client_secret(&req));
+    assert_eq!(err.code(), "LimitExceededException");
+}
+
+/// A secret added for rotation authenticates SECRET_HASH flows (SignUp,
+/// InitiateAuth, AdminInitiateAuth) alongside the primary, and stops working
+/// once deleted.
+#[test]
+fn added_client_secret_authenticates_secret_hash_until_deleted() {
+    let (svc, pool_id) = setup_svc_with_pool();
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientName": "rotating",
+        "GenerateSecret": true,
+        "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+    });
+    let rb = resp_json(
+        &svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+            .unwrap(),
+    );
+    let client_id = rb["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let primary = rb["UserPoolClient"]["ClientSecret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (added_id, added) = add_client_secret(&svc, &pool_id, &client_id);
+
+    let su = json!({
+        "ClientId": client_id, "Username": "u1", "Password": "P@ssw0rd!",
+        "SecretHash": crate::service::compute_secret_hash("u1", &client_id, &added),
+    });
+    block_on(svc.sign_up(&make_req("SignUp", &su.to_string()))).unwrap();
+    svc.admin_set_user_password(&make_req(
+        "AdminSetUserPassword",
+        &json!({"UserPoolId": pool_id, "Username": "u1", "Password": "P@ssw0rd!", "Permanent": true})
+            .to_string(),
+    ))
+    .unwrap();
+
+    let initiate = |secret: &str| {
+        let ia = json!({
+            "ClientId": client_id,
+            "AuthFlow": "USER_PASSWORD_AUTH",
+            "AuthParameters": {
+                "USERNAME": "u1", "PASSWORD": "P@ssw0rd!",
+                "SECRET_HASH": crate::service::compute_secret_hash("u1", &client_id, secret),
+            },
+        });
+        block_on(svc.initiate_auth(&make_req("InitiateAuth", &ia.to_string())))
+    };
+    let admin_initiate = |secret: &str| {
+        let ia = json!({
+            "UserPoolId": pool_id,
+            "ClientId": client_id,
+            "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+            "AuthParameters": {
+                "USERNAME": "u1", "PASSWORD": "P@ssw0rd!",
+                "SECRET_HASH": crate::service::compute_secret_hash("u1", &client_id, secret),
+            },
+        });
+        block_on(svc.admin_initiate_auth(&make_req("AdminInitiateAuth", &ia.to_string())))
+    };
+
+    // Both secrets are valid while both are active.
+    initiate(&primary).unwrap();
+    initiate(&added).unwrap();
+    admin_initiate(&added).unwrap();
+
+    delete_client_secret(&svc, &pool_id, &client_id, &added_id).unwrap();
+    let err = expect_err(initiate(&added));
+    assert_eq!(err.code(), "NotAuthorizedException");
+    let err = expect_err(admin_initiate(&added));
+    assert_eq!(err.code(), "NotAuthorizedException");
+    initiate(&primary).unwrap();
+}
+
+/// GetClientToken and the OAuth `/token` + `/revoke` endpoints accept a
+/// secret added for rotation, and reject it once deleted.
+#[test]
+fn added_client_secret_authenticates_oauth_client_until_deleted() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, primary) = create_m2m_client(&svc, &pool_id, &["api/read"]);
+    let (added_id, added) = add_client_secret(&svc, &pool_id, &client_id);
+
+    let client_token = |secret: &str| {
+        let body = json!({ "ClientId": client_id, "Secret": secret });
+        block_on(svc.get_client_token(&make_req("GetClientToken", &body.to_string())))
+    };
+    let oauth_token = |basic: Option<(&str, &str)>, form_secret: Option<&str>| {
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("grant_type".to_string(), "client_credentials".to_string());
+        if let Some(secret) = form_secret {
+            params.insert("client_id".to_string(), client_id.clone());
+            params.insert("client_secret".to_string(), secret.to_string());
+        }
+        block_on(handle_oauth2_token(
+            &state,
+            &params,
+            basic,
+            "us-east-1",
+            None,
+        ))
+    };
+    let revoke = |secret: &str| {
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("token".to_string(), "unknown-token".to_string());
+        params.insert("client_id".to_string(), client_id.clone());
+        params.insert("client_secret".to_string(), secret.to_string());
+        handle_oauth2_revoke(&state, &params, None)
+    };
+
+    client_token(&primary).unwrap();
+    client_token(&added).unwrap();
+    oauth_token(Some((&client_id, &added)), None).unwrap();
+    oauth_token(None, Some(&added)).unwrap();
+    oauth_token(None, Some(&primary)).unwrap();
+    revoke(&added).unwrap();
+
+    delete_client_secret(&svc, &pool_id, &client_id, &added_id).unwrap();
+    assert_eq!(
+        expect_err(client_token(&added)).code(),
+        "NotAuthorizedException"
+    );
+    assert!(matches!(
+        oauth_token(Some((&client_id, &added)), None),
+        Err(OAuthTokenError::InvalidClient)
+    ));
+    assert!(matches!(
+        oauth_token(None, Some(&added)),
+        Err(OAuthTokenError::InvalidClient)
+    ));
+    assert!(matches!(
+        revoke(&added),
+        Err(OAuthRevokeError::InvalidClient)
+    ));
+    client_token(&primary).unwrap();
+    oauth_token(None, Some(&primary)).unwrap();
+}
+
 #[test]
 fn add_user_pool_client_secret_generates_secret_when_missing() {
     let (svc, _) = make_svc();
@@ -7378,6 +7551,331 @@ fn revoke_token_removes_refresh_token() {
         .default_ref()
         .refresh_tokens
         .contains_key(&token));
+}
+
+fn seed_refresh_token(
+    state: &crate::state::SharedCognitoState,
+    pool_id: &str,
+    client_id: &str,
+    username: &str,
+    token: &str,
+) {
+    let mut st = state.write();
+    st.get_or_create("123456789012").refresh_tokens.insert(
+        token.to_string(),
+        crate::state::RefreshTokenData {
+            user_pool_id: pool_id.to_string(),
+            username: username.to_string(),
+            client_id: client_id.to_string(),
+            issued_at: chrono::Utc::now(),
+            auth_context: None,
+        },
+    );
+}
+
+#[test]
+fn revoke_token_requires_one_of_the_clients_secrets() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, primary) = create_m2m_client(&svc, &pool_id, &[]);
+    let (_, added) = add_client_secret(&svc, &pool_id, &client_id);
+    let has_token = |token: &str| {
+        state
+            .read()
+            .default_ref()
+            .refresh_tokens
+            .contains_key(token)
+    };
+    let revoke = |token: &str, secret: Option<&str>| {
+        let mut body = json!({"Token": token, "ClientId": client_id});
+        if let Some(secret) = secret {
+            body["ClientSecret"] = json!(secret);
+        }
+        svc.revoke_token(&make_req("RevokeToken", &body.to_string()))
+    };
+    seed_refresh_token(&state, &pool_id, &client_id, "alice", "rt-1");
+
+    let err = expect_err(revoke("rt-1", None));
+    assert_eq!(err.code(), "UnauthorizedException");
+    let err = expect_err(revoke("rt-1", Some("wrong_secret_0123456789abcdef")));
+    assert_eq!(err.code(), "UnauthorizedException");
+    assert!(has_token("rt-1"), "a rejected revoke must keep the token");
+
+    revoke("rt-1", Some(&added)).unwrap();
+    assert!(!has_token("rt-1"));
+    seed_refresh_token(&state, &pool_id, &client_id, "alice", "rt-2");
+    revoke("rt-2", Some(&primary)).unwrap();
+    assert!(!has_token("rt-2"));
+
+    // A public client needs no secret.
+    let public = create_client(&svc, &pool_id);
+    seed_refresh_token(&state, &pool_id, &public, "alice", "rt-3");
+    let body = json!({"Token": "rt-3", "ClientId": public});
+    svc.revoke_token(&make_req("RevokeToken", &body.to_string()))
+        .unwrap();
+    assert!(!has_token("rt-3"));
+}
+
+/// A secret added to a public client does not make it confidential: no
+/// SECRET_HASH or ClientSecret is demanded and the stray secret
+/// authenticates nothing.
+#[test]
+fn public_client_with_added_secret_stays_public() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    let (_, added) = add_client_secret(&svc, &pool_id, &client_id);
+    {
+        let accounts = state.read();
+        let client = &accounts.default_ref().user_pool_clients[&client_id];
+        assert!(!client.is_confidential());
+        assert!(!client.secret_matches(&added));
+        assert_eq!(client.secret_values().count(), 0);
+    }
+
+    let su = json!({"ClientId": client_id, "Username": "pub", "Password": "P@ssw0rd!"});
+    block_on(svc.sign_up(&make_req("SignUp", &su.to_string()))).unwrap();
+
+    seed_refresh_token(&state, &pool_id, &client_id, "pub", "rt-pub");
+    let body = json!({"Token": "rt-pub", "ClientId": client_id});
+    svc.revoke_token(&make_req("RevokeToken", &body.to_string()))
+        .unwrap();
+
+    let body = json!({ "ClientId": client_id, "Secret": added });
+    let err = expect_err(block_on(
+        svc.get_client_token(&make_req("GetClientToken", &body.to_string())),
+    ));
+    assert_eq!(err.code(), "NotAuthorizedException");
+}
+
+#[test]
+fn client_secret_ops_reject_a_client_of_another_pool() {
+    let (svc, _) = make_svc();
+    let pool_a = create_pool(&svc);
+    let pool_b = create_pool(&svc);
+    let (client_id, _) = create_m2m_client(&svc, &pool_a, &[]);
+    let (secret_id, _) = add_client_secret(&svc, &pool_a, &client_id);
+
+    let body = json!({"UserPoolId": pool_b, "ClientId": client_id});
+    let err = expect_err(
+        svc.add_user_pool_client_secret(&make_req("AddUserPoolClientSecret", &body.to_string())),
+    );
+    assert_eq!(err.code(), "ResourceNotFoundException");
+    let err =
+        expect_err(svc.list_user_pool_client_secrets(&make_req(
+            "ListUserPoolClientSecrets",
+            &body.to_string(),
+        )));
+    assert_eq!(err.code(), "ResourceNotFoundException");
+    let err = expect_err(delete_client_secret(&svc, &pool_b, &client_id, &secret_id));
+    assert_eq!(err.code(), "ResourceNotFoundException");
+    // The secret survived the cross-pool delete.
+    delete_client_secret(&svc, &pool_a, &client_id, &secret_id).unwrap();
+}
+
+#[test]
+fn revoke_token_rejects_another_clients_token_and_drops_derived_access_tokens() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let owner = create_client(&svc, &pool_id);
+    let other = create_client(&svc, &pool_id);
+    seed_refresh_token(&state, &pool_id, &owner, "alice", "rt-own");
+    {
+        let mut st = state.write();
+        st.get_or_create("123456789012").access_tokens.insert(
+            "at-own".to_string(),
+            crate::state::AccessTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "alice".to_string(),
+                client_id: owner.clone(),
+                issued_at: chrono::Utc::now(),
+                expires_at: None,
+                auth_context: None,
+            },
+        );
+    }
+    let revoke = |client_id: &str| {
+        let body = json!({"Token": "rt-own", "ClientId": client_id});
+        svc.revoke_token(&make_req("RevokeToken", &body.to_string()))
+    };
+
+    let err = expect_err(revoke(&other));
+    assert_eq!(err.code(), "UnauthorizedException");
+    assert!(state
+        .read()
+        .default_ref()
+        .refresh_tokens
+        .contains_key("rt-own"));
+
+    revoke(&owner).unwrap();
+    let accounts = state.read();
+    let acct = accounts.default_ref();
+    assert!(!acct.refresh_tokens.contains_key("rt-own"));
+    assert!(
+        !acct.access_tokens.contains_key("at-own"),
+        "access tokens issued from the refresh token are revoked with it"
+    );
+}
+
+#[test]
+fn revoke_token_honors_disabled_token_revocation() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientName": "no-revoke",
+        "EnableTokenRevocation": false,
+    });
+    let b = resp_json(
+        &svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+            .unwrap(),
+    );
+    let client_id = b["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    seed_refresh_token(&state, &pool_id, &client_id, "alice", "rt-keep");
+    let body = json!({"Token": "rt-keep", "ClientId": client_id});
+    let err = expect_err(svc.revoke_token(&make_req("RevokeToken", &body.to_string())));
+    assert_eq!(err.code(), "UnsupportedOperationException");
+    assert!(state
+        .read()
+        .default_ref()
+        .refresh_tokens
+        .contains_key("rt-keep"));
+}
+
+/// `/oauth2/revoke` authenticates the client before looking at the token, so
+/// a request with no token and bad credentials is `invalid_client`, and a
+/// properly authenticated one is `invalid_request`.
+#[test]
+fn oauth_revoke_authenticates_before_requiring_a_token() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, secret) = create_m2m_client(&svc, &pool_id, &[]);
+    let no_token = std::collections::BTreeMap::new();
+    assert!(matches!(
+        handle_oauth2_revoke(&state, &no_token, Some((&client_id, "wrong"))),
+        Err(OAuthRevokeError::InvalidClient)
+    ));
+    assert!(matches!(
+        handle_oauth2_revoke(&state, &no_token, None),
+        Err(OAuthRevokeError::InvalidClient)
+    ));
+    assert!(matches!(
+        handle_oauth2_revoke(&state, &no_token, Some((&client_id, &secret))),
+        Err(OAuthRevokeError::InvalidRequest)
+    ));
+}
+
+#[test]
+fn get_tokens_from_refresh_token_requires_one_of_the_clients_secrets() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    admin_create_user_helper(&svc, &pool_id, "alice");
+    let (client_id, primary) = create_m2m_client(&svc, &pool_id, &[]);
+    let (added_id, added) = add_client_secret(&svc, &pool_id, &client_id);
+    seed_refresh_token(&state, &pool_id, &client_id, "alice", "rt-s");
+    let refresh = |client_id: &str, secret: Option<&str>| {
+        let mut body = json!({"RefreshToken": "rt-s", "ClientId": client_id});
+        if let Some(secret) = secret {
+            body["ClientSecret"] = json!(secret);
+        }
+        block_on(svc.get_tokens_from_refresh_token(&make_req(
+            "GetTokensFromRefreshToken",
+            &body.to_string(),
+        )))
+    };
+
+    let err = expect_err(refresh(&client_id, None));
+    assert_eq!(err.code(), "NotAuthorizedException");
+    let err = expect_err(refresh(&client_id, Some("wrong_secret_0123456789abcdef")));
+    assert_eq!(err.code(), "NotAuthorizedException");
+    let b = resp_json(&refresh(&client_id, Some(&added)).unwrap());
+    assert!(b["AuthenticationResult"]["AccessToken"].is_string());
+    refresh(&client_id, Some(&primary)).unwrap();
+
+    delete_client_secret(&svc, &pool_id, &client_id, &added_id).unwrap();
+    let err = expect_err(refresh(&client_id, Some(&added)));
+    assert_eq!(err.code(), "NotAuthorizedException");
+
+    // A public client needs no secret.
+    let public = create_client(&svc, &pool_id);
+    seed_refresh_token(&state, &pool_id, &public, "alice", "rt-p");
+    let body = json!({"RefreshToken": "rt-p", "ClientId": public});
+    block_on(
+        svc.get_tokens_from_refresh_token(&make_req(
+            "GetTokensFromRefreshToken",
+            &body.to_string(),
+        )),
+    )
+    .unwrap();
+}
+
+/// `/oauth2/revoke` authenticates the client from the Basic header as well
+/// as the form fields, and rejects the two disagreeing.
+#[test]
+fn oauth_revoke_accepts_basic_auth_client_credentials() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, primary) = create_m2m_client(&svc, &pool_id, &[]);
+    let (_, added) = add_client_secret(&svc, &pool_id, &client_id);
+    let has_token = |token: &str| {
+        state
+            .read()
+            .default_ref()
+            .refresh_tokens
+            .contains_key(token)
+    };
+    let params = |token: &str, form: &[(&str, &str)]| {
+        let mut p = std::collections::BTreeMap::new();
+        p.insert("token".to_string(), token.to_string());
+        for (k, v) in form {
+            p.insert(k.to_string(), v.to_string());
+        }
+        p
+    };
+
+    seed_refresh_token(&state, &pool_id, &client_id, "alice", "rt-b");
+    // Wrong secret in the header, or no credentials at all.
+    assert!(matches!(
+        handle_oauth2_revoke(&state, &params("rt-b", &[]), Some((&client_id, "wrong"))),
+        Err(OAuthRevokeError::InvalidClient)
+    ));
+    assert!(matches!(
+        handle_oauth2_revoke(&state, &params("rt-b", &[]), None),
+        Err(OAuthRevokeError::InvalidClient)
+    ));
+    // Header and form naming different secrets.
+    assert!(matches!(
+        handle_oauth2_revoke(
+            &state,
+            &params(
+                "rt-b",
+                &[("client_id", &client_id), ("client_secret", &primary)]
+            ),
+            Some((&client_id, &added)),
+        ),
+        Err(OAuthRevokeError::InvalidClient)
+    ));
+    assert!(has_token("rt-b"));
+
+    // The header alone, with the added secret, authenticates.
+    handle_oauth2_revoke(&state, &params("rt-b", &[]), Some((&client_id, &added))).unwrap();
+    assert!(!has_token("rt-b"));
+
+    // Header and form agreeing is fine too.
+    seed_refresh_token(&state, &pool_id, &client_id, "alice", "rt-c");
+    handle_oauth2_revoke(
+        &state,
+        &params(
+            "rt-c",
+            &[("client_id", &client_id), ("client_secret", &primary)],
+        ),
+        Some((&client_id, &primary)),
+    )
+    .unwrap();
+    assert!(!has_token("rt-c"));
 }
 
 #[test]

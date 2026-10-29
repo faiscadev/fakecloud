@@ -225,23 +225,17 @@ impl CognitoService {
         username: &str,
         secret_hash: Option<&Value>,
     ) -> Result<(), AwsServiceError> {
-        let client_secret = {
-            let accounts = self.state.read();
-            let mut found = None;
-            for (_, account) in accounts.iter() {
-                if let Some(client) = account.user_pool_clients.get(client_id) {
-                    found = client.client_secret.clone();
-                    break;
-                }
+        let accounts = self.state.read();
+        for (_, account) in accounts.iter() {
+            if let Some(client) = account.user_pool_clients.get(client_id) {
+                return crate::service::validate_secret_hash(
+                    client,
+                    secret_hash.and_then(|v| v.as_str()),
+                    username,
+                );
             }
-            found
-        };
-        crate::service::validate_secret_hash(
-            client_secret.as_deref(),
-            secret_hash.and_then(|v| v.as_str()),
-            username,
-            client_id,
-        )
+        }
+        Ok(())
     }
 
     /// `InitiateAuth(AuthFlow=USER_SRP_AUTH)`: return the `PASSWORD_VERIFIER`

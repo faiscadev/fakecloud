@@ -654,6 +654,43 @@ pub struct UserPoolClient {
     pub analytics_configuration: Option<serde_json::Value>,
 }
 
+/// AWS keeps at most two active secrets per app client for rotation.
+pub const MAX_CLIENT_SECRETS: usize = 2;
+
+impl UserPoolClient {
+    /// Whether this is a confidential client, i.e. it was created with a
+    /// secret. Secrets added to a public client do not make it confidential.
+    pub fn is_confidential(&self) -> bool {
+        self.client_secret.is_some()
+    }
+
+    /// Every secret currently valid for a confidential client: the primary
+    /// first, then any added through `AddUserPoolClientSecret`. Any of them
+    /// authenticates a `SECRET_HASH` or an OAuth client credential, which is
+    /// what makes zero-downtime rotation work. Empty for a public client.
+    pub fn secret_values(&self) -> impl Iterator<Item = &str> {
+        let added = self
+            .client_secrets
+            .iter()
+            .filter(|_| self.is_confidential())
+            .map(|s| s.client_secret_value.as_str());
+        self.client_secret.as_deref().into_iter().chain(added)
+    }
+
+    /// Whether `supplied` matches any of the client's secrets. Every secret
+    /// is compared in constant time so the match position is not leaked.
+    pub fn secret_matches(&self, supplied: &str) -> bool {
+        self.secret_values().fold(false, |acc, secret| {
+            crate::srp::ct_eq(supplied.as_bytes(), secret.as_bytes()) | acc
+        })
+    }
+
+    /// Number of active secrets, the primary included.
+    pub fn secret_count(&self) -> usize {
+        usize::from(self.is_confidential()) + self.client_secrets.len()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RefreshTokenRotationConfig {
     /// "ENABLED" or "DISABLED"

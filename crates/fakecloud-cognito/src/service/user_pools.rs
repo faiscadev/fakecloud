@@ -6,7 +6,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
     default_schema_attributes, ClientSecretDescriptor, CognitoState, PoolPolicies, UserPool,
-    UserPoolClient,
+    UserPoolClient, MAX_CLIENT_SECRETS,
 };
 
 use super::{
@@ -1176,13 +1176,30 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
-        let upc = state.user_pool_clients.get_mut(client_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
+        // A client of another pool is as missing as an unknown one.
+        let upc = state
+            .user_pool_clients
+            .get_mut(client_id)
+            .filter(|c| c.user_pool_id == pool_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Client {client_id} does not exist."),
+                )
+            })?;
+
+        // AWS keeps at most two active secrets per app client, the primary
+        // included.
+        if upc.secret_count() >= MAX_CLIENT_SECRETS {
+            return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("Client {client_id} does not exist."),
-            )
-        })?;
+                "LimitExceededException",
+                format!(
+                    "App client {client_id} already has the maximum of {MAX_CLIENT_SECRETS} client secrets."
+                ),
+            ));
+        }
 
         let now = Utc::now();
         let secret_value = custom_secret
@@ -1223,13 +1240,18 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
-        let upc = state.user_pool_clients.get_mut(client_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("Client {client_id} does not exist."),
-            )
-        })?;
+        // A client of another pool is as missing as an unknown one.
+        let upc = state
+            .user_pool_clients
+            .get_mut(client_id)
+            .filter(|c| c.user_pool_id == pool_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Client {client_id} does not exist."),
+                )
+            })?;
 
         let idx = upc
             .client_secrets
@@ -1263,13 +1285,18 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
-        let upc = state.user_pool_clients.get(client_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("Client {client_id} does not exist."),
-            )
-        })?;
+        // A client of another pool is as missing as an unknown one.
+        let upc = state
+            .user_pool_clients
+            .get(client_id)
+            .filter(|c| c.user_pool_id == pool_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Client {client_id} does not exist."),
+                )
+            })?;
 
         let secrets: Vec<Value> = upc
             .client_secrets

@@ -633,23 +633,43 @@ impl CognitoService {
         let body = req.json_body();
         let token = require_str(&body, "Token")?;
         let client_id = require_str(&body, "ClientId")?;
-        // ClientSecret is optional
-        let _client_secret = body["ClientSecret"].as_str();
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
         // Validate client exists
-        if !state.user_pool_clients.contains_key(client_id) {
+        let Some(client) = state.user_pool_clients.get(client_id) else {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterException",
                 format!("Client {client_id} does not exist."),
             ));
+        };
+        // A confidential client must authenticate with one of its secrets.
+        // RevokeToken models UnauthorizedException (not NotAuthorized) for an
+        // unauthorized request.
+        require_client_secret(
+            client,
+            body["ClientSecret"].as_str(),
+            "UnauthorizedException",
+        )?;
+        if !client.enable_token_revocation {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UnsupportedOperationException",
+                format!("Token revocation is not enabled for client {client_id}."),
+            ));
         }
 
-        // Remove the refresh token if it exists
-        state.refresh_tokens.remove(token);
+        // Revoke the token and the access tokens issued from it, refusing a
+        // token another client was issued (as `/oauth2/revoke` does).
+        super::revoke_client_token(state, token, client_id).map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UnauthorizedException",
+                format!("The token was not issued to client {client_id}."),
+            )
+        })?;
 
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -662,7 +682,6 @@ impl CognitoService {
         let refresh_token = require_str(&body, "RefreshToken")?;
         let client_id = require_str(&body, "ClientId")?;
         // Optional fields
-        let _client_secret = body["ClientSecret"].as_str();
         let _device_key = body["DeviceKey"].as_str();
 
         // Resolve everything under the state lock, then release the guard (it is
@@ -690,13 +709,19 @@ impl CognitoService {
             let state = accounts.get_or_create(&req.account_id);
 
             // Validate client exists
-            if !state.user_pool_clients.contains_key(client_id) {
+            let Some(client) = state.user_pool_clients.get(client_id) else {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "InvalidParameterException",
                     format!("Client {client_id} does not exist."),
                 ));
-            }
+            };
+            // A confidential client must authenticate with one of its secrets.
+            require_client_secret(
+                client,
+                body["ClientSecret"].as_str(),
+                "NotAuthorizedException",
+            )?;
 
             let token_data = state.refresh_tokens.get(refresh_token).ok_or_else(|| {
                 AwsServiceError::aws_error(
@@ -1189,5 +1214,35 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(json!({
             "UserImportJob": resp
         })))
+    }
+}
+
+/// Require `supplied` to match one of a confidential client's secrets (the
+/// primary or one added for rotation), compared in constant time. A no-op
+/// for a client without a secret. `code` is the operation's modeled
+/// authorization error.
+fn require_client_secret(
+    client: &crate::state::UserPoolClient,
+    supplied: Option<&str>,
+    code: &str,
+) -> Result<(), AwsServiceError> {
+    if !client.is_confidential() {
+        return Ok(());
+    }
+    let client_id = &client.client_id;
+    match supplied {
+        None => Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            code,
+            format!(
+                "Client {client_id} is configured with secret but ClientSecret was not received"
+            ),
+        )),
+        Some(secret) if !client.secret_matches(secret) => Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            code,
+            format!("Unable to verify secret for client {client_id}"),
+        )),
+        Some(_) => Ok(()),
     }
 }

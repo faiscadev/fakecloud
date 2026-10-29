@@ -10091,7 +10091,7 @@ async fn main() {
                 let cs = cognito_revoke_state;
                 let store = cognito_oauth2_snapshot_store.clone();
                 let lock = cognito_oauth2_snapshot_lock.clone();
-                move |body: String| {
+                move |headers: axum::http::HeaderMap, body: String| {
                     let cs = cs.clone();
                     let store = store.clone();
                     let lock = lock.clone();
@@ -10101,7 +10101,11 @@ async fn main() {
                                 Ok(pairs) => pairs.into_iter().collect(),
                                 Err(_) => std::collections::BTreeMap::new(),
                             };
-                        match fakecloud_cognito::handle_oauth2_revoke(&cs, &params) {
+                        // Client credentials may come in the Authorization
+                        // header, as on `/oauth2/token`.
+                        let basic = parse_basic_auth(&headers);
+                        let basic_ref = basic.as_ref().map(|(i, s)| (i.as_str(), s.as_str()));
+                        match fakecloud_cognito::handle_oauth2_revoke(&cs, &params, basic_ref) {
                             Ok(()) => {
                                 // A successful revoke deleted the token from
                                 // state; write that deletion through (0.A4).
@@ -10121,6 +10125,10 @@ async fn main() {
                                     fakecloud_cognito::OAuthRevokeError::InvalidClient => (
                                         "invalid_client",
                                         axum::http::StatusCode::UNAUTHORIZED,
+                                    ),
+                                    fakecloud_cognito::OAuthRevokeError::InvalidRequest => (
+                                        "invalid_request",
+                                        axum::http::StatusCode::BAD_REQUEST,
                                     ),
                                     fakecloud_cognito::OAuthRevokeError::UnsupportedTokenType => (
                                         "unsupported_token_type",
