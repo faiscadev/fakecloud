@@ -7828,7 +7828,6 @@ async fn cognito_respond_to_auth_challenge_requires_secret_hash() {
         .is_some());
 }
 
-
 /// Full zero-downtime rotation: a confidential client gets a second secret,
 /// both are listed, the original is deleted, the new one (promoted to
 /// primary) authenticates while the old one is rejected, and the last
