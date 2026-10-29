@@ -299,7 +299,23 @@ impl CognitoService {
             username,
             auth_params.get("SECRET_HASH"),
         )?;
-        self.build_srp_challenge(pool_id, client_id, username, srp_a, req, None)
+        // Resolve an email/phone alias to the stored (possibly UUID) username
+        // so SRP handshakes work for UsernameAttributes pools too.
+        let resolved_username = {
+            let accounts = self.state.read();
+            let empty = CognitoState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            crate::service::resolve_alias_username(state, pool_id, username)
+        };
+        self.build_srp_challenge(
+            pool_id,
+            client_id,
+            &resolved_username,
+            username,
+            srp_a,
+            req,
+            None,
+        )
     }
 
     /// `InitiateAuth(AuthFlow=USER_AUTH)` — the choice-based flow Amplify Gen2
@@ -349,6 +365,7 @@ impl CognitoService {
         // the SELECT_CHALLENGE session, so every downstream challenge
         // (PASSWORD, PASSWORD_SRP, ...) resolves the right user. SECRET_HASH is
         // already validated against the client-supplied identifier above.
+        let sign_in = username;
         let resolved_username = {
             let accounts = self.state.read();
             let empty = CognitoState::new(&req.account_id, &req.region);
@@ -366,7 +383,7 @@ impl CognitoService {
             // the factor the target still needs.
             if su.completed.iter().any(|f| f == AMR_PWD) {
                 return self
-                    .maybe_mfa_challenge(pool_id, client_id, username, req, Some(su))
+                    .maybe_mfa_challenge(pool_id, client_id, username, sign_in, req, Some(su))
                     .ok_or_else(|| {
                         AwsServiceError::aws_error(
                             StatusCode::BAD_REQUEST,
@@ -391,7 +408,8 @@ impl CognitoService {
                         "SRP_A is required for the PASSWORD_SRP challenge",
                     )
                 })?;
-            return self.build_srp_challenge(pool_id, client_id, username, srp_a, req, step_up);
+            return self
+                .build_srp_challenge(pool_id, client_id, username, sign_in, srp_a, req, step_up);
         }
 
         // No preferred challenge resolvable inline: present the menu, filtered
@@ -430,6 +448,7 @@ impl CognitoService {
                     challenge_results: vec![],
                     challenge_metadata: None,
                     step_up,
+                    sign_in_identifier: Some(sign_in.to_string()),
                 },
             );
         }
@@ -609,12 +628,17 @@ impl CognitoService {
     /// Build the `PASSWORD_VERIFIER` challenge for an SRP handshake: derive the
     /// user's verifier, pick the server keys, and stash the handshake in the
     /// session. Shared by `USER_SRP_AUTH` and the `USER_AUTH` `PASSWORD_SRP`
-    /// path. Does not check the auth flow (callers gate that).
+    /// path. Does not check the auth flow (callers gate that). `username` is
+    /// the stored (alias-resolved) username; `sign_in` is the identifier the
+    /// sign-in started with, recorded on the session because a confidential
+    /// client's challenge-response SECRET_HASH is computed over it.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_srp_challenge(
         &self,
         pool_id: &str,
         client_id: &str,
         username: &str,
+        sign_in: &str,
         srp_a: &str,
         req: &AwsRequest,
         step_up: Option<StepUpContext>,
@@ -633,16 +657,6 @@ impl CognitoService {
                 "SRP_A is malformed.",
             ));
         }
-
-        // Resolve an email/phone alias to the stored (possibly UUID) username
-        // so SRP handshakes work for UsernameAttributes pools too.
-        let resolved_username = {
-            let accounts = self.state.read();
-            let empty = CognitoState::new(&req.account_id, &req.region);
-            let state = accounts.get(&req.account_id).unwrap_or(&empty);
-            crate::service::resolve_alias_username(state, pool_id, username)
-        };
-        let username = resolved_username.as_str();
 
         let password = {
             let accounts = self.state.read();
@@ -713,6 +727,7 @@ impl CognitoService {
                     challenge_results: vec![],
                     challenge_metadata: Some(stash),
                     step_up,
+                    sign_in_identifier: Some(sign_in.to_string()),
                 },
             );
         }
@@ -793,6 +808,7 @@ impl CognitoService {
         // Pools with UsernameAttributes / AliasAttributes let users sign in
         // with their email/phone while the stored username is a UUID. Resolve
         // the supplied identifier to the real username for all lookups below.
+        let sign_in = username;
         let resolved_username = {
             let accounts = self.state.read();
             let empty = CognitoState::new(&req.account_id, &req.region);
@@ -920,6 +936,7 @@ impl CognitoService {
                         challenge_results: vec![],
                         challenge_metadata: None,
                         step_up: None,
+                        sign_in_identifier: Some(sign_in.to_string()),
                     },
                 );
                 return Ok(AwsResponse::ok_json(json!({
@@ -948,7 +965,9 @@ impl CognitoService {
         // second factor the pool/user configuration demands (fixes the sign-in
         // MFA bypass — tokens were previously issued straight after the
         // password check).
-        if let Some(resp) = self.maybe_mfa_challenge(pool_id, client_id, username, req, None) {
+        if let Some(resp) =
+            self.maybe_mfa_challenge(pool_id, client_id, username, sign_in, req, None)
+        {
             return Ok(resp);
         }
 
@@ -1123,6 +1142,7 @@ impl CognitoService {
         )?;
 
         // Resolve aliases after validating the hash against the supplied identifier.
+        let sign_in = username;
         let resolved_username = {
             let accounts = self.state.read();
             let empty = CognitoState::new(&req.account_id, &req.region);
@@ -1295,6 +1315,7 @@ impl CognitoService {
                     challenge_results,
                     challenge_metadata,
                     step_up: None,
+                    sign_in_identifier: Some(sign_in.to_string()),
                 },
             );
         }

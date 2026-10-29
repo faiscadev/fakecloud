@@ -7607,3 +7607,223 @@ async fn cognito_added_client_secret_authenticates_until_deleted() {
         "{err:?}"
     );
 }
+
+#[tokio::test]
+async fn cognito_respond_to_auth_challenge_requires_secret_hash() {
+    use aws_sdk_cognitoidentityprovider::types::AuthFlowType;
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+
+    fn secret_hash(username: &str, client_id: &str, secret: &str) -> String {
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(username.as_bytes());
+        mac.update(client_id.as_bytes());
+        base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+    }
+
+    fn assert_missing_secret<E>(
+        err: &aws_sdk_cognitoidentityprovider::error::SdkError<E>,
+        client_id: &str,
+    ) where
+        E: aws_sdk_cognitoidentityprovider::error::ProvideErrorMetadata + std::fmt::Debug,
+        aws_sdk_cognitoidentityprovider::error::SdkError<E>: std::fmt::Debug,
+    {
+        let service_err = err.as_service_error().expect("service error");
+        assert_eq!(
+            service_err.code(),
+            Some("NotAuthorizedException"),
+            "{err:?}"
+        );
+        assert_eq!(
+            service_err.message(),
+            Some(
+                format!("Client {client_id} is configured for secret but secret was not received")
+                    .as_str()
+            )
+        );
+    }
+
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("challenge-secret-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("challenge-secret-client")
+        .generate_secret(true)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .send()
+        .await
+        .expect("create client");
+    let app = app.user_pool_client().unwrap();
+    let client_id = app.client_id().unwrap().to_string();
+    let client_secret = app.client_secret().unwrap().to_string();
+
+    for username in ["newcomer", "admin-newcomer"] {
+        client
+            .admin_create_user()
+            .user_pool_id(&pool_id)
+            .username(username)
+            .temporary_password("TempPass1!")
+            .send()
+            .await
+            .expect("create user");
+    }
+
+    // RespondToAuthChallenge: NEW_PASSWORD_REQUIRED.
+    let hash = secret_hash("newcomer", &client_id, &client_secret);
+    let challenge = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "newcomer")
+        .auth_parameters("PASSWORD", "TempPass1!")
+        .auth_parameters("SECRET_HASH", &hash)
+        .send()
+        .await
+        .expect("initiate auth");
+    assert_eq!(
+        challenge.challenge_name(),
+        Some(&ChallengeNameType::NewPasswordRequired)
+    );
+    let session = challenge.session().unwrap().to_string();
+    let respond = || {
+        client
+            .respond_to_auth_challenge()
+            .client_id(&client_id)
+            .challenge_name(ChallengeNameType::NewPasswordRequired)
+            .session(&session)
+            .challenge_responses("USERNAME", "newcomer")
+            .challenge_responses("NEW_PASSWORD", "NewPass1!")
+    };
+    let err = respond().send().await.expect_err("SECRET_HASH required");
+    assert_missing_secret(&err, &client_id);
+    let done = respond()
+        .challenge_responses("SECRET_HASH", &hash)
+        .send()
+        .await
+        .expect("challenge completes with SECRET_HASH");
+    assert!(done
+        .authentication_result()
+        .and_then(|r| r.access_token())
+        .is_some());
+
+    // AdminRespondToAuthChallenge: NEW_PASSWORD_REQUIRED.
+    let admin_hash = secret_hash("admin-newcomer", &client_id, &client_secret);
+    let challenge = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "admin-newcomer")
+        .auth_parameters("PASSWORD", "TempPass1!")
+        .auth_parameters("SECRET_HASH", &admin_hash)
+        .send()
+        .await
+        .expect("admin initiate auth");
+    assert_eq!(
+        challenge.challenge_name(),
+        Some(&ChallengeNameType::NewPasswordRequired)
+    );
+    let session = challenge.session().unwrap().to_string();
+    let admin_respond = || {
+        client
+            .admin_respond_to_auth_challenge()
+            .user_pool_id(&pool_id)
+            .client_id(&client_id)
+            .challenge_name(ChallengeNameType::NewPasswordRequired)
+            .session(&session)
+            .challenge_responses("NEW_PASSWORD", "NewPass1!")
+    };
+    let err = admin_respond()
+        .send()
+        .await
+        .expect_err("SECRET_HASH required without USERNAME too");
+    assert_missing_secret(&err, &client_id);
+    let done = admin_respond()
+        .challenge_responses("SECRET_HASH", &admin_hash)
+        .send()
+        .await
+        .expect("admin challenge completes with SECRET_HASH");
+    assert!(done
+        .authentication_result()
+        .and_then(|r| r.access_token())
+        .is_some());
+
+    // SOFTWARE_TOKEN_MFA: the second factor needs the hash as well.
+    client
+        .set_user_pool_mfa_config()
+        .user_pool_id(&pool_id)
+        .mfa_configuration(UserPoolMfaType::On)
+        .software_token_mfa_configuration(
+            SoftwareTokenMfaConfigType::builder().enabled(true).build(),
+        )
+        .send()
+        .await
+        .expect("set pool mfa config");
+    let totp_secret = "JBSWY3DPEHPK3PXP";
+    let seeded = reqwest::Client::new()
+        .post(format!(
+            "{}/_fakecloud/cognito/software-token",
+            server.endpoint()
+        ))
+        .json(&serde_json::json!({
+            "userPoolId": pool_id,
+            "username": "newcomer",
+            "secretCode": totp_secret,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(seeded.status(), 200);
+    let challenge = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "newcomer")
+        .auth_parameters("PASSWORD", "NewPass1!")
+        .auth_parameters("SECRET_HASH", &hash)
+        .send()
+        .await
+        .expect("initiate auth with mfa");
+    assert_eq!(
+        challenge.challenge_name(),
+        Some(&ChallengeNameType::SoftwareTokenMfa)
+    );
+    let session = challenge.session().unwrap().to_string();
+    let respond_mfa = || {
+        client
+            .respond_to_auth_challenge()
+            .client_id(&client_id)
+            .challenge_name(ChallengeNameType::SoftwareTokenMfa)
+            .session(&session)
+            .challenge_responses("USERNAME", "newcomer")
+            .challenge_responses(
+                "SOFTWARE_TOKEN_MFA_CODE",
+                fakecloud_cognito::totp::compute_totp_now(totp_secret).unwrap(),
+            )
+    };
+    let err = respond_mfa()
+        .send()
+        .await
+        .expect_err("SECRET_HASH required on MFA");
+    assert_missing_secret(&err, &client_id);
+    let done = respond_mfa()
+        .challenge_responses("SECRET_HASH", &hash)
+        .send()
+        .await
+        .expect("mfa challenge completes with SECRET_HASH");
+    assert!(done
+        .authentication_result()
+        .and_then(|r| r.access_token())
+        .is_some());
+}

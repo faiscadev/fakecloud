@@ -3297,6 +3297,7 @@ fn custom_challenge_response_fails_without_delivery_context() {
                 challenge_results: vec![],
                 challenge_metadata: None,
                 step_up: None,
+                sign_in_identifier: None,
             },
         );
     }
@@ -3365,6 +3366,7 @@ fn custom_challenge_response_requires_answer() {
                 challenge_results: vec![],
                 challenge_metadata: None,
                 step_up: None,
+                sign_in_identifier: None,
             },
         );
     }
@@ -3403,6 +3405,7 @@ fn session_data_stores_challenge_results() {
         challenge_results: vec![cr.clone()],
         challenge_metadata: Some("meta".to_string()),
         step_up: None,
+        sign_in_identifier: None,
     };
     assert_eq!(session.challenge_results.len(), 1);
     assert!(session.challenge_results[0].challenge_result);
@@ -9004,6 +9007,7 @@ fn custom_challenge_completion_applies_pretoken_overrides_to_access_token() {
                 challenge_results: vec![],
                 challenge_metadata: None,
                 step_up: None,
+                sign_in_identifier: None,
             },
         );
     }
@@ -9061,6 +9065,7 @@ fn custom_auth_issue_tokens_applies_pretoken_overrides_on_current_thread_runtime
                 challenge_results: vec![],
                 challenge_metadata: None,
                 step_up: None,
+                sign_in_identifier: None,
             },
         );
     }
@@ -11619,4 +11624,645 @@ fn delete_user_pool_refuses_while_deletion_protection_is_active() {
     svc.delete_user_pool(&make_req("DeleteUserPool", &delete))
         .unwrap();
     assert!(!state.read().default_ref().user_pools.contains_key(&pool_id));
+}
+
+// ---------------------------------------------------------------------
+// SECRET_HASH on (Admin)RespondToAuthChallenge
+// ---------------------------------------------------------------------
+
+/// Which challenge-response operation a test drives.
+#[derive(Clone, Copy, Debug)]
+enum ChallengeOp {
+    Public,
+    Admin,
+}
+
+const CHALLENGE_OPS: [ChallengeOp; 2] = [ChallengeOp::Public, ChallengeOp::Admin];
+
+struct SecretClientFixture {
+    svc: CognitoService,
+    pool_id: String,
+    client_id: String,
+    secret: String,
+}
+
+impl SecretClientFixture {
+    /// A pool (optionally signing in by email) with an app client that has a
+    /// secret when `confidential`.
+    fn new(pool: Value, confidential: bool) -> Self {
+        let (svc, _) = make_svc();
+        let pool_id = resp_json(
+            &block_on(svc.create_user_pool(&make_req("CreateUserPool", &pool.to_string())))
+                .unwrap(),
+        )["UserPool"]["Id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let client = resp_json(
+            &svc.create_user_pool_client(&make_req(
+                "CreateUserPoolClient",
+                &json!({
+                    "UserPoolId": pool_id,
+                    "ClientName": "challenge-secret",
+                    "GenerateSecret": confidential,
+                    "ExplicitAuthFlows": [
+                        "ALLOW_USER_PASSWORD_AUTH",
+                        "ALLOW_ADMIN_USER_PASSWORD_AUTH",
+                    ],
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        );
+        let client_id = client["UserPoolClient"]["ClientId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let secret = client["UserPoolClient"]["ClientSecret"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        Self {
+            svc,
+            pool_id,
+            client_id,
+            secret,
+        }
+    }
+
+    /// Create a user still owing a password reset; returns its stored
+    /// username (a UUID in an email pool).
+    fn create_user(&self, username: &str) -> String {
+        let resp = block_on(
+            self.svc.admin_create_user(&make_req(
+                "AdminCreateUser",
+                &json!({
+                    "UserPoolId": self.pool_id,
+                    "Username": username,
+                    "TemporaryPassword": "TempPass1!",
+                })
+                .to_string(),
+            )),
+        )
+        .unwrap();
+        resp_json(&resp)["User"]["Username"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn hash(&self, username: &str) -> String {
+        crate::service::compute_secret_hash(username, &self.client_id, &self.secret)
+    }
+
+    /// Sign in through the op's InitiateAuth flavour and return the
+    /// challenge response body.
+    fn initiate(&self, op: ChallengeOp, username: &str, password: &str) -> Value {
+        let mut params = json!({"USERNAME": username, "PASSWORD": password});
+        if !self.secret.is_empty() {
+            params["SECRET_HASH"] = json!(self.hash(username));
+        }
+        let resp = match op {
+            ChallengeOp::Public => block_on(
+                self.svc.initiate_auth(&make_req(
+                    "InitiateAuth",
+                    &json!({
+                        "ClientId": self.client_id,
+                        "AuthFlow": "USER_PASSWORD_AUTH",
+                        "AuthParameters": params,
+                    })
+                    .to_string(),
+                )),
+            ),
+            ChallengeOp::Admin => block_on(
+                self.svc.admin_initiate_auth(&make_req(
+                    "AdminInitiateAuth",
+                    &json!({
+                        "UserPoolId": self.pool_id,
+                        "ClientId": self.client_id,
+                        "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+                        "AuthParameters": params,
+                    })
+                    .to_string(),
+                )),
+            ),
+        };
+        resp_json(&resp.unwrap())
+    }
+
+    fn respond(
+        &self,
+        op: ChallengeOp,
+        challenge: &str,
+        session: &str,
+        responses: Value,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        self.respond_as(op, &self.pool_id, challenge, session, responses)
+    }
+
+    fn respond_as(
+        &self,
+        op: ChallengeOp,
+        pool_id: &str,
+        challenge: &str,
+        session: &str,
+        responses: Value,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut body = json!({
+            "ClientId": self.client_id,
+            "ChallengeName": challenge,
+            "Session": session,
+            "ChallengeResponses": responses,
+        });
+        match op {
+            ChallengeOp::Public => {
+                block_on(self.svc.respond_to_auth_challenge(&make_req(
+                    "RespondToAuthChallenge",
+                    &body.to_string(),
+                )))
+            }
+            ChallengeOp::Admin => {
+                body["UserPoolId"] = json!(pool_id);
+                block_on(self.svc.admin_respond_to_auth_challenge(&make_req(
+                    "AdminRespondToAuthChallenge",
+                    &body.to_string(),
+                )))
+            }
+        }
+    }
+
+    fn missing_message(&self) -> String {
+        format!(
+            "Client {} is configured for secret but secret was not received",
+            self.client_id
+        )
+    }
+
+    fn wrong_message(&self) -> String {
+        format!("Unable to verify secret hash for client {}", self.client_id)
+    }
+}
+
+fn assert_challenge_err(
+    result: Result<AwsResponse, AwsServiceError>,
+    code: &str,
+    message: &str,
+    context: &str,
+) {
+    let err = expect_err(result);
+    assert_eq!(err.code(), code, "{context}: {err}");
+    assert_eq!(err.message(), message, "{context}");
+}
+
+fn assert_tokens(result: Result<AwsResponse, AwsServiceError>, context: &str) {
+    let out = resp_json(&result.unwrap_or_else(|e| panic!("{context}: {e}")));
+    assert!(
+        out["AuthenticationResult"]["AccessToken"].is_string(),
+        "{context}: {out}"
+    );
+}
+
+#[test]
+fn new_password_challenge_requires_secret_hash_for_confidential_client() {
+    for op in CHALLENGE_OPS {
+        let fx = SecretClientFixture::new(json!({"PoolName": "p"}), true);
+        fx.create_user("alice");
+        fx.create_user("bob");
+        let ch = fx.initiate(op, "alice", "TempPass1!");
+        assert_eq!(ch["ChallengeName"], "NEW_PASSWORD_REQUIRED", "{op:?}: {ch}");
+        let session = ch["Session"].as_str().unwrap();
+        let respond =
+            |responses: Value| fx.respond(op, "NEW_PASSWORD_REQUIRED", session, responses);
+
+        assert_challenge_err(
+            respond(json!({"USERNAME": "alice", "NEW_PASSWORD": "NewPass1!"})),
+            "NotAuthorizedException",
+            &fx.missing_message(),
+            &format!("{op:?} missing hash"),
+        );
+        assert_challenge_err(
+            respond(
+                json!({"USERNAME": "alice", "NEW_PASSWORD": "NewPass1!", "SECRET_HASH": "bad"}),
+            ),
+            "NotAuthorizedException",
+            &fx.wrong_message(),
+            &format!("{op:?} wrong hash"),
+        );
+        assert_challenge_err(
+            respond(json!({"NEW_PASSWORD": "NewPass1!"})),
+            "NotAuthorizedException",
+            &fx.missing_message(),
+            &format!("{op:?} USERNAME omitted"),
+        );
+        // Another user's name, even with a hash valid for that name, does not
+        // answer alice's session.
+        assert_challenge_err(
+            respond(json!({
+                "USERNAME": "bob",
+                "NEW_PASSWORD": "NewPass1!",
+                "SECRET_HASH": fx.hash("bob"),
+            })),
+            "NotAuthorizedException",
+            "Invalid session for the user.",
+            &format!("{op:?} other user"),
+        );
+
+        // A secret added for rotation authenticates the response too, and the
+        // rejections above left the session usable.
+        let added = resp_json(
+            &fx.svc
+                .add_user_pool_client_secret(&make_req(
+                    "AddUserPoolClientSecret",
+                    &json!({"UserPoolId": fx.pool_id, "ClientId": fx.client_id}).to_string(),
+                ))
+                .unwrap(),
+        )["ClientSecretDescriptor"]["ClientSecretValue"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let hash = crate::service::compute_secret_hash("alice", &fx.client_id, &added);
+        assert_tokens(
+            respond(json!({"NEW_PASSWORD": "NewPass1!", "SECRET_HASH": hash})),
+            &format!("{op:?} added secret"),
+        );
+    }
+}
+
+#[test]
+fn new_password_challenge_secret_hash_over_email_alias() {
+    for op in CHALLENGE_OPS {
+        let fx = SecretClientFixture::new(
+            json!({"PoolName": "p", "UsernameAttributes": ["email"]}),
+            true,
+        );
+        let email = "dana@example.com";
+        let stored = fx.create_user(email);
+        assert_ne!(stored, email, "email pools store a generated username");
+
+        // USERNAME omitted: the hash is over the email the sign-in used.
+        let ch = fx.initiate(op, email, "TempPass1!");
+        let session = ch["Session"].as_str().unwrap();
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({"NEW_PASSWORD": "NewPass1!", "SECRET_HASH": "bad"}),
+            ),
+            "NotAuthorizedException",
+            &fx.wrong_message(),
+            &format!("{op:?} wrong hash"),
+        );
+        assert_tokens(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({"NEW_PASSWORD": "NewPass1!", "SECRET_HASH": fx.hash(email)}),
+            ),
+            &format!("{op:?} hash over email"),
+        );
+
+        // A hash over the stored username (USER_ID_FOR_SRP) is accepted too.
+        let email = "dora@example.com";
+        let stored = fx.create_user(email);
+        let ch = fx.initiate(op, email, "TempPass1!");
+        let session = ch["Session"].as_str().unwrap();
+        assert_tokens(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({"NEW_PASSWORD": "NewPass1!", "SECRET_HASH": fx.hash(&stored)}),
+            ),
+            &format!("{op:?} hash over stored username"),
+        );
+
+        // USERNAME may name the user by the email alias, with the hash over it;
+        // an alias of nobody does not answer the session.
+        let email = "eve@example.com";
+        fx.create_user(email);
+        let ch = fx.initiate(op, email, "TempPass1!");
+        let session = ch["Session"].as_str().unwrap();
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({
+                    "USERNAME": "nobody@example.com",
+                    "NEW_PASSWORD": "NewPass1!",
+                    "SECRET_HASH": fx.hash("nobody@example.com"),
+                }),
+            ),
+            "NotAuthorizedException",
+            "Invalid session for the user.",
+            &format!("{op:?} unknown alias"),
+        );
+        assert_tokens(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({
+                    "USERNAME": email,
+                    "NEW_PASSWORD": "NewPass1!",
+                    "SECRET_HASH": fx.hash(email),
+                }),
+            ),
+            &format!("{op:?} USERNAME alias"),
+        );
+    }
+}
+
+#[test]
+fn challenge_session_errors_win_over_missing_secret_hash() {
+    for op in CHALLENGE_OPS {
+        let fx = SecretClientFixture::new(json!({"PoolName": "p"}), true);
+        fx.create_user("alice");
+        let responses = json!({"USERNAME": "alice", "NEW_PASSWORD": "NewPass1!"});
+
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                "no-such-session",
+                responses.clone(),
+            ),
+            "NotAuthorizedException",
+            "Invalid session.",
+            &format!("{op:?} unknown session"),
+        );
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "SOFTWARE_TOKEN_MFA",
+                "no-such-session",
+                json!({"SOFTWARE_TOKEN_MFA_CODE": "123456"}),
+            ),
+            "NotAuthorizedException",
+            "Invalid session for the user, session is expired.",
+            &format!("{op:?} unknown MFA session"),
+        );
+
+        let ch = fx.initiate(op, "alice", "TempPass1!");
+        let session = ch["Session"].as_str().unwrap();
+        // A session answered as the wrong challenge is reported as such.
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "SOFTWARE_TOKEN_MFA",
+                session,
+                json!({"SOFTWARE_TOKEN_MFA_CODE": "123456"}),
+            ),
+            "NotAuthorizedException",
+            "Invalid session.",
+            &format!("{op:?} challenge mismatch"),
+        );
+        if let ChallengeOp::Admin = op {
+            assert_challenge_err(
+                fx.respond_as(
+                    op,
+                    "us-east-1_other",
+                    "NEW_PASSWORD_REQUIRED",
+                    session,
+                    responses.clone(),
+                ),
+                "NotAuthorizedException",
+                "Invalid session.",
+                "admin pool mismatch",
+            );
+        }
+        // The same session, answered as its own challenge, reaches the
+        // secret check.
+        assert_challenge_err(
+            fx.respond(op, "NEW_PASSWORD_REQUIRED", session, responses.clone()),
+            "NotAuthorizedException",
+            &fx.missing_message(),
+            &format!("{op:?} valid session"),
+        );
+    }
+}
+
+#[test]
+fn public_client_challenge_needs_no_secret_hash() {
+    for op in CHALLENGE_OPS {
+        let fx = SecretClientFixture::new(json!({"PoolName": "p"}), false);
+        fx.create_user("alice");
+        fx.create_user("bob");
+        let ch = fx.initiate(op, "alice", "TempPass1!");
+        let session = ch["Session"].as_str().unwrap();
+        // USERNAME must still name the session's user.
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({"USERNAME": "bob", "NEW_PASSWORD": "NewPass1!"}),
+            ),
+            "NotAuthorizedException",
+            "Invalid session for the user.",
+            &format!("{op:?} public client, other user"),
+        );
+        assert_tokens(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({"USERNAME": "alice", "NEW_PASSWORD": "NewPass1!"}),
+            ),
+            &format!("{op:?} public client"),
+        );
+    }
+}
+
+#[test]
+fn new_password_policy_failure_still_consumes_the_session() {
+    for op in CHALLENGE_OPS {
+        let fx = SecretClientFixture::new(json!({"PoolName": "p"}), true);
+        fx.create_user("alice");
+        let ch = fx.initiate(op, "alice", "TempPass1!");
+        let session = ch["Session"].as_str().unwrap();
+        let err = expect_err(fx.respond(
+            op,
+            "NEW_PASSWORD_REQUIRED",
+            session,
+            json!({"NEW_PASSWORD": "weak", "SECRET_HASH": fx.hash("alice")}),
+        ));
+        assert_eq!(err.code(), "InvalidPasswordException", "{op:?}: {err}");
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({"NEW_PASSWORD": "NewPass1!", "SECRET_HASH": fx.hash("alice")}),
+            ),
+            "NotAuthorizedException",
+            "Invalid session.",
+            &format!("{op:?} consumed session"),
+        );
+    }
+}
+
+#[test]
+fn mfa_challenge_requires_secret_hash_for_confidential_client() {
+    for op in CHALLENGE_OPS {
+        let fx = SecretClientFixture::new(json!({"PoolName": "p", "MfaConfiguration": "ON"}), true);
+        enroll_totp_user(&fx, "erin");
+        let ch = fx.initiate(op, "erin", "P@ssw0rd!");
+        assert_eq!(ch["ChallengeName"], "SOFTWARE_TOKEN_MFA", "{op:?}: {ch}");
+        let session = ch["Session"].as_str().unwrap();
+        let code = crate::totp::compute_totp_now(TEST_TOTP_SECRET).unwrap();
+
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "SOFTWARE_TOKEN_MFA",
+                session,
+                json!({"SOFTWARE_TOKEN_MFA_CODE": code}),
+            ),
+            "NotAuthorizedException",
+            &fx.missing_message(),
+            &format!("{op:?} missing hash"),
+        );
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "SOFTWARE_TOKEN_MFA",
+                session,
+                json!({"USERNAME": "erin", "SOFTWARE_TOKEN_MFA_CODE": code, "SECRET_HASH": "bad"}),
+            ),
+            "NotAuthorizedException",
+            &fx.wrong_message(),
+            &format!("{op:?} wrong hash"),
+        );
+        assert_tokens(
+            fx.respond(
+                op,
+                "SOFTWARE_TOKEN_MFA",
+                session,
+                json!({
+                    "USERNAME": "erin",
+                    "SOFTWARE_TOKEN_MFA_CODE": code,
+                    "SECRET_HASH": fx.hash("erin"),
+                }),
+            ),
+            &format!("{op:?} valid hash"),
+        );
+    }
+}
+
+/// Give `username` a permanent password and a verified software token.
+fn enroll_totp_user(fx: &SecretClientFixture, username: &str) -> String {
+    let stored = fx.create_user(username);
+    fx.svc
+        .admin_set_user_password(&make_req(
+            "AdminSetUserPassword",
+            &json!({
+                "UserPoolId": fx.pool_id,
+                "Username": stored,
+                "Password": "P@ssw0rd!",
+                "Permanent": true,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let mut accounts = fx.svc.state.write();
+    let user = accounts
+        .get_or_create("123456789012")
+        .users
+        .get_mut(&fx.pool_id)
+        .and_then(|u| u.get_mut(&stored))
+        .unwrap();
+    user.totp_secret = Some(TEST_TOTP_SECRET.to_string());
+    user.totp_verified = true;
+    stored
+}
+
+#[test]
+fn mfa_challenge_secret_hash_over_email_alias() {
+    for op in CHALLENGE_OPS {
+        let fx = SecretClientFixture::new(
+            json!({"PoolName": "p", "UsernameAttributes": ["email"], "MfaConfiguration": "ON"}),
+            true,
+        );
+        let email = "fay@example.com";
+        let stored = enroll_totp_user(&fx, email);
+        let ch = fx.initiate(op, email, "P@ssw0rd!");
+        assert_eq!(ch["ChallengeName"], "SOFTWARE_TOKEN_MFA", "{op:?}: {ch}");
+        let session = ch["Session"].as_str().unwrap();
+        let code = crate::totp::compute_totp_now(TEST_TOTP_SECRET).unwrap();
+        assert_ne!(stored, email, "email pools store a generated username");
+        // The MFA session carries the email the sign-in used, so a hash over
+        // it verifies with no USERNAME.
+        assert_tokens(
+            fx.respond(
+                op,
+                "SOFTWARE_TOKEN_MFA",
+                session,
+                json!({"SOFTWARE_TOKEN_MFA_CODE": code, "SECRET_HASH": fx.hash(email)}),
+            ),
+            &format!("{op:?} hash over email"),
+        );
+    }
+}
+
+#[test]
+fn challenge_username_may_repeat_a_shared_unverified_alias() {
+    for op in CHALLENGE_OPS {
+        let fx =
+            SecretClientFixture::new(json!({"PoolName": "p", "AliasAttributes": ["email"]}), true);
+        let shared = "shared@example.com";
+        for username in ["ann", "amy"] {
+            block_on(
+                fx.svc.admin_create_user(&make_req(
+                    "AdminCreateUser",
+                    &json!({
+                        "UserPoolId": fx.pool_id,
+                        "Username": username,
+                        "TemporaryPassword": "TempPass1!",
+                        "UserAttributes": [{"Name": "email", "Value": shared}],
+                    })
+                    .to_string(),
+                )),
+            )
+            .unwrap();
+        }
+        // The alias may resolve to either user; answering with the email the
+        // sign-in used names the session's user whichever it picked.
+        let ch = fx.initiate(op, shared, "TempPass1!");
+        assert_eq!(ch["ChallengeName"], "NEW_PASSWORD_REQUIRED", "{op:?}: {ch}");
+        let session = ch["Session"].as_str().unwrap();
+        assert_tokens(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                session,
+                json!({
+                    "USERNAME": shared,
+                    "NEW_PASSWORD": "NewPass1!",
+                    "SECRET_HASH": fx.hash(shared),
+                }),
+            ),
+            &format!("{op:?} shared alias"),
+        );
+    }
+}
+
+#[test]
+fn confidential_client_challenge_without_responses_fails_closed() {
+    for op in CHALLENGE_OPS {
+        let fx = SecretClientFixture::new(json!({"PoolName": "p"}), true);
+        fx.create_user("alice");
+        let ch = fx.initiate(op, "alice", "TempPass1!");
+        let session = ch["Session"].as_str().unwrap();
+        for responses in [Value::Null, json!("not-an-object")] {
+            assert_challenge_err(
+                fx.respond(op, "NEW_PASSWORD_REQUIRED", session, responses.clone()),
+                "NotAuthorizedException",
+                &fx.missing_message(),
+                &format!("{op:?} responses {responses}"),
+            );
+        }
+    }
 }

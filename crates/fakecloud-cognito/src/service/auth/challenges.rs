@@ -2,6 +2,65 @@
 
 use super::*;
 
+/// Check who is answering a valid challenge session. A `USERNAME` in the
+/// responses must name the session's user: its stored username, the
+/// identifier the sign-in started with, or an alias resolving to it. A
+/// confidential app client must also send a `SECRET_HASH` (AWS requires it
+/// on every challenge response, so missing or malformed `ChallengeResponses`
+/// fail closed), computed over that `USERNAME`, the sign-in identifier, or
+/// the stored username (`USER_ID_FOR_SRP`, which alias sign-ins hash over).
+fn check_challenge_identity(
+    state: &CognitoState,
+    sess: &SessionData,
+    responses: Option<&serde_json::Map<String, Value>>,
+) -> Result<(), AwsServiceError> {
+    let supplied_username = responses
+        .and_then(|r| r.get("USERNAME"))
+        .and_then(Value::as_str);
+    if let Some(supplied) = supplied_username {
+        let names_session_user = supplied == sess.username
+            || supplied == sess.signed_in_as()
+            || crate::service::resolve_alias_username(state, &sess.user_pool_id, supplied)
+                == sess.username;
+        if !names_session_user {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid session for the user.",
+            ));
+        }
+    }
+    let Some(client) = state
+        .user_pool_clients
+        .get(&sess.client_id)
+        .filter(|c| c.is_confidential())
+    else {
+        return Ok(());
+    };
+    let Some(secret_hash) = responses
+        .and_then(|r| r.get("SECRET_HASH"))
+        .and_then(Value::as_str)
+    else {
+        return Err(crate::service::secret_hash_missing(&client.client_id));
+    };
+    let mut candidates = supplied_username.into_iter().collect::<Vec<_>>();
+    for name in [sess.signed_in_as(), sess.username.as_str()] {
+        if !candidates.contains(&name) {
+            candidates.push(name);
+        }
+    }
+    // Fold without short-circuiting so timing does not reveal which
+    // candidate matched.
+    let matched = candidates.iter().fold(false, |acc, name| {
+        client.secret_hash_matches(name, secret_hash) | acc
+    });
+    if matched {
+        Ok(())
+    } else {
+        Err(crate::service::secret_hash_mismatch(&client.client_id))
+    }
+}
+
 impl CognitoService {
     /// Mint and persist tokens for a CUSTOM_AUTH flow that DefineAuthChallenge
     /// resolved with `issueTokens: true` on the very first call (no challenge
@@ -177,6 +236,19 @@ impl CognitoService {
         body: &Value,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // Peek at the session: when it is valid for this request, check who
+        // is answering it once here. An invalid one falls through so each
+        // handler reports its own session error.
+        {
+            let accounts = self.state.read();
+            if let Some(state) = accounts.get(&req.account_id) {
+                if let Some(sess) = state.sessions.get(session).filter(|sess| {
+                    sess.client_id == client_id && sess.challenge_name == challenge_name
+                }) {
+                    check_challenge_identity(state, sess, body["ChallengeResponses"].as_object())?;
+                }
+            }
+        }
         match challenge_name {
             "NEW_PASSWORD_REQUIRED" => {
                 self.respond_new_password_required(client_id, session, body, req)
@@ -224,6 +296,7 @@ impl CognitoService {
         pool_id: &str,
         client_id: &str,
         username: &str,
+        sign_in: &str,
         req: &AwsRequest,
         step_up: Option<&StepUpContext>,
     ) -> Option<AwsResponse> {
@@ -269,6 +342,7 @@ impl CognitoService {
                     challenge_results: vec![],
                     challenge_metadata: sms_code.clone(),
                     step_up: step_up.cloned(),
+                    sign_in_identifier: Some(sign_in.to_string()),
                 },
             );
             (
@@ -478,6 +552,7 @@ impl CognitoService {
         pool_id: &str,
         client_id: &str,
         username: &str,
+        sign_in: &str,
         req: &AwsRequest,
         step_up: Option<&StepUpContext>,
     ) -> Option<AwsResponse> {
@@ -503,6 +578,7 @@ impl CognitoService {
                 challenge_results: vec![],
                 challenge_metadata: None,
                 step_up: step_up.cloned(),
+                sign_in_identifier: Some(sign_in.to_string()),
             },
         );
         Some(AwsResponse::ok_json(json!({
@@ -551,7 +627,7 @@ impl CognitoService {
             .and_then(|v| v.as_str())
             .ok_or_else(bad_creds)?;
 
-        let (pool_id, username, region, stash_json, mut step_up) = {
+        let (pool_id, username, sign_in, region, stash_json, mut step_up) = {
             let accounts = self.state.read();
             let empty = CognitoState::new(&req.account_id, &req.region);
             let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -569,6 +645,7 @@ impl CognitoService {
             (
                 sess.user_pool_id.clone(),
                 sess.username.clone(),
+                sess.signed_in_as().to_string(),
                 state.region.clone(),
                 stash,
                 sess.step_up.clone(),
@@ -651,14 +728,16 @@ impl CognitoService {
 
         // A valid SRP proof of a *temporary* password still owes a reset.
         if let Some(resp) =
-            self.maybe_force_new_password(&pool_id, client_id, &username, req, step_up)
+            self.maybe_force_new_password(&pool_id, client_id, &username, &sign_in, req, step_up)
         {
             return Ok(resp);
         }
 
         // Enforce a second factor when the pool/user requires MFA, or the
         // factor a step-up target still needs.
-        if let Some(resp) = self.maybe_mfa_challenge(&pool_id, client_id, &username, req, step_up) {
+        if let Some(resp) =
+            self.maybe_mfa_challenge(&pool_id, client_id, &username, &sign_in, req, step_up)
+        {
             return Ok(resp);
         }
 
@@ -702,7 +781,7 @@ impl CognitoService {
                 )
             })?;
 
-        let (pool_id, username, region, mut step_up) = {
+        let (pool_id, username, sign_in, region, mut step_up) = {
             let accounts = self.state.read();
             let empty = CognitoState::new(&req.account_id, &req.region);
             let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -719,6 +798,7 @@ impl CognitoService {
             (
                 sess.user_pool_id.clone(),
                 sess.username.clone(),
+                sess.signed_in_as().to_string(),
                 state.region.clone(),
                 sess.step_up.clone(),
             )
@@ -744,7 +824,9 @@ impl CognitoService {
                             "SRP_A is required for the PASSWORD_SRP challenge",
                         )
                     })?;
-                self.build_srp_challenge(&pool_id, client_id, &username, srp_a, req, step_up)
+                self.build_srp_challenge(
+                    &pool_id, client_id, &username, &sign_in, srp_a, req, step_up,
+                )
             }
             "PASSWORD" => {
                 let password = responses
@@ -772,15 +854,15 @@ impl CognitoService {
                 super::complete_factor(&mut step_up, super::AMR_PWD);
                 let step_up = step_up.as_ref();
                 // A temporary password still owes a forced reset.
-                if let Some(resp) =
-                    self.maybe_force_new_password(&pool_id, client_id, &username, req, step_up)
-                {
+                if let Some(resp) = self.maybe_force_new_password(
+                    &pool_id, client_id, &username, &sign_in, req, step_up,
+                ) {
                     return Ok(resp);
                 }
                 // Enforce a second factor when the pool/user requires MFA, or
                 // the factor a step-up target still needs.
                 if let Some(resp) =
-                    self.maybe_mfa_challenge(&pool_id, client_id, &username, req, step_up)
+                    self.maybe_mfa_challenge(&pool_id, client_id, &username, &sign_in, req, step_up)
                 {
                     return Ok(resp);
                 }
@@ -827,6 +909,7 @@ impl CognitoService {
         let (
             sub,
             username,
+            sign_in,
             user_attributes,
             pool_id,
             account_id,
@@ -904,6 +987,7 @@ impl CognitoService {
             (
                 sub,
                 username,
+                session_data.signed_in_as().to_string(),
                 user_attributes,
                 pool_id,
                 account_id,
@@ -917,9 +1001,14 @@ impl CognitoService {
         // password is set: any factor it still owes is challenged next, and
         // its tokens carry the level reached.
         if let Some(step_up) = step_up.as_ref() {
-            if let Some(resp) =
-                self.maybe_mfa_challenge(&pool_id, client_id, &username, req, Some(step_up))
-            {
+            if let Some(resp) = self.maybe_mfa_challenge(
+                &pool_id,
+                client_id,
+                &username,
+                &sign_in,
+                req,
+                Some(step_up),
+            ) {
                 return Ok(resp);
             }
             return self
@@ -1031,7 +1120,14 @@ impl CognitoService {
                 )
             })?;
 
-        let (pool_id, username, session_client_id, mut challenge_results, challenge_metadata) = {
+        let (
+            pool_id,
+            username,
+            sign_in_identifier,
+            session_client_id,
+            mut challenge_results,
+            challenge_metadata,
+        ) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
             let session_data = state.sessions.remove(session).ok_or_else(|| {
@@ -1055,6 +1151,7 @@ impl CognitoService {
             (
                 session_data.user_pool_id,
                 session_data.username,
+                session_data.sign_in_identifier,
                 session_data.client_id,
                 session_data.challenge_results,
                 session_data.challenge_metadata,
@@ -1265,6 +1362,7 @@ impl CognitoService {
                     challenge_results,
                     challenge_metadata: new_challenge_metadata,
                     step_up: None,
+                    sign_in_identifier,
                 },
             );
         }

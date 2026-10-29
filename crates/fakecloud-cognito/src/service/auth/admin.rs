@@ -145,6 +145,7 @@ impl CognitoService {
                         challenge_results: vec![],
                         challenge_metadata: None,
                         step_up: None,
+                        sign_in_identifier: Some(input.sign_in_identifier.clone()),
                     },
                 );
                 return Ok(AdminAuthOutcome::NewPasswordRequired { session });
@@ -184,6 +185,7 @@ impl CognitoService {
                         challenge_results: vec![],
                         challenge_metadata: sms_code,
                         step_up: None,
+                        sign_in_identifier: Some(input.sign_in_identifier.clone()),
                     },
                 );
                 return Ok(AdminAuthOutcome::MfaChallenge {
@@ -317,18 +319,8 @@ impl CognitoService {
             // If session doesn't exist, handle_auth_challenge_response will return the error
         }
 
-        // Confidential clients must present a valid SECRET_HASH here too, keyed
-        // on the USERNAME echoed back in ChallengeResponses (matches
-        // AdminInitiateAuth's enforcement).
-        if let Some(username) = body["ChallengeResponses"]["USERNAME"].as_str() {
-            self.require_secret_hash(
-                &req.account_id,
-                client_id,
-                username,
-                body["ChallengeResponses"].get("SECRET_HASH"),
-            )?;
-        }
-
+        // The shared dispatch checks USERNAME and a confidential client's
+        // SECRET_HASH once the session is known to be valid.
         self.handle_auth_challenge_response(client_id, challenge_name, session, &body, req)
             .await
     }
