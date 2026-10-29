@@ -5,9 +5,12 @@
 //! quota request template, or set directly through the introspection API) and
 //! whether fakecloud enforces it. Enforcement is opt-in: a quota is enforced
 //! only when the user turned it on, for every quota (`--enforce-quotas`) or
-//! for that quota alone. Services that enforce a quota ask for its limit
-//! through [`QuotaProvider::enforced_limit`], so raising a quota through the
-//! Service Quotas API changes what the enforcing service accepts.
+//! for that quota alone. A quota whose capacity AWS scales automatically
+//! (Firehose throughput) is additionally enforced only at a value the user set
+//! explicitly; its AWS default is never a limit. Services that enforce a quota
+//! ask for its limit through [`QuotaProvider::enforced_limit`], so raising a
+//! quota through the Service Quotas API changes what the enforcing service
+//! accepts.
 //!
 //! The reverse direction is [`QuotaUsageSource`]: a service that can count its
 //! own resources reports the usage behind a quota, which Service Quotas turns
@@ -23,6 +26,15 @@ pub const RULES_PER_SECURITY_GROUP: &str = "L-0EA8095F";
 pub const DEFAULT_SECURITY_GROUPS_PER_INTERFACE: usize = 5;
 /// AWS default for [`RULES_PER_SECURITY_GROUP`].
 pub const DEFAULT_RULES_PER_SECURITY_GROUP: usize = 60;
+
+/// Service code of the Amazon Data Firehose quotas.
+pub const FIREHOSE_SERVICE_CODE: &str = "firehose";
+/// Combined `PutRecord` and `PutRecordBatch` requests per second per stream.
+pub const FIREHOSE_PUT_REQUESTS_PER_SECOND: &str = "L-7681C790";
+/// Records per second per Firehose delivery stream.
+pub const FIREHOSE_RECORDS_PER_SECOND: &str = "L-17D4EADE";
+/// Mebibytes per second per Firehose delivery stream.
+pub const FIREHOSE_MIB_PER_SECOND: &str = "L-937C879B";
 
 /// Service code of the IAM quotas.
 pub const IAM_SERVICE_CODE: &str = "iam";
@@ -109,8 +121,9 @@ pub trait QuotaProvider: Send + Sync {
 
     /// The applied value of `service_code`/`quota_code` when fakecloud
     /// enforces that quota for `account_id`, or `None` when it does not (the
-    /// quota is not switched on, or unknown). A service refuses a request
-    /// that would take it past the returned limit.
+    /// quota is not switched on, has no explicit value while AWS scales it
+    /// automatically, or is unknown). A service refuses a request that would
+    /// take it past the returned limit.
     fn enforced_limit(
         &self,
         account_id: &str,
@@ -118,6 +131,21 @@ pub trait QuotaProvider: Send + Sync {
         service_code: &str,
         quota_code: &str,
     ) -> Option<f64>;
+
+    /// [`QuotaProvider::enforced_limit`] of several quotas of one service,
+    /// in `quota_codes` order, for a service that checks them together.
+    fn enforced_limits(
+        &self,
+        account_id: &str,
+        region: &str,
+        service_code: &str,
+        quota_codes: &[&str],
+    ) -> Vec<Option<f64>> {
+        quota_codes
+            .iter()
+            .map(|code| self.enforced_limit(account_id, region, service_code, code))
+            .collect()
+    }
 }
 
 /// Reports how much of a quota an account currently uses.
@@ -243,6 +271,19 @@ mod tests {
         assert_eq!(get("frac"), Some(2));
         assert_eq!(get("missing"), None);
         assert_eq!(enforced_count(None, "a", "r", "s", "neg"), None);
+    }
+
+    #[test]
+    fn enforced_limits_resolves_each_code_in_order() {
+        let p = FixedQuotas::default()
+            .with("s", "a", 1.0)
+            .with("s", "b", 2.0);
+        assert_eq!(
+            p.enforced_limits("acct", "r", "s", &["b", "missing", "a"]),
+            vec![Some(2.0), None, Some(1.0)]
+        );
+        assert_eq!(p.enforced_limits("acct", "r", "other", &["a"]), vec![None]);
+        assert!(p.enforced_limits("acct", "r", "s", &[]).is_empty());
     }
 
     #[test]

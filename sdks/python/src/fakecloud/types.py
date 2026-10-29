@@ -3849,7 +3849,8 @@ class ServiceQuota:
 
     ``usage`` is ``None`` when no fakecloud service measures the quota.
     ``enforcement_source`` is one of ``"not_enforceable"``,
-    ``"account_override"``, ``"override"`` or ``"global"``.
+    ``"account_override"``, ``"override"``, ``"global"`` or
+    ``"auto_scaling_default"``.
     """
 
     service_code: str

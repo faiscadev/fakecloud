@@ -1752,8 +1752,8 @@ public final class Types {
      * One quota from {@code GET /_fakecloud/service-quotas/quotas} (or the
      * single quota returned by a put/delete). {@code usage} is {@code null}
      * when no fakecloud service measures it. {@code enforcementSource} is one
-     * of {@code not_enforceable}, {@code account_override}, {@code override}
-     * or {@code global}.
+     * of {@code not_enforceable}, {@code account_override}, {@code override},
+     * {@code global} or {@code auto_scaling_default}.
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record ServiceQuota(

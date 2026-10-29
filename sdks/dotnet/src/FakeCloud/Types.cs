@@ -1407,7 +1407,7 @@ public enum QuotaEnforcement
 /// null when no fakecloud service measures the quota.
 /// <c>EnforcementSource</c> says which setting decided <c>Enforced</c>: one of
 /// <c>not_enforceable</c>, <c>account_override</c>, <c>override</c>,
-/// <c>global</c>.
+/// <c>global</c>, <c>auto_scaling_default</c>.
 /// </summary>
 public sealed record ServiceQuota(
     string? ServiceCode,

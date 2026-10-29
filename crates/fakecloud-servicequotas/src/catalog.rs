@@ -9,13 +9,15 @@
 //! enforceable?) are answered from the static tables without decoding, so a
 //! server that enforces nothing never pays for the decode on a request path.
 //!
-//! Two things AWS does not publish through the API are a hand-maintained
-//! overlay here: which quotas a fakecloud service checks
-//! ([`QuotaDef::enforceable`], see [`ENFORCEABLE`]) and the documented maximum
-//! an increase request can be approved for ([`QuotaDef::max_value`], see
-//! [`MAX_VALUES`]). The enforcing service reads an enforceable quota's applied
-//! value through [`fakecloud_core::quota::QuotaProvider`] once the user
-//! switched enforcement on.
+//! What AWS does not publish through the API is a hand-maintained overlay
+//! here: which quotas a fakecloud service checks ([`QuotaDef::enforceable`],
+//! see [`ENFORCEABLE`]), which of those AWS scales automatically
+//! ([`AUTO_SCALING`]), the documented maximum an increase request can be
+//! approved for ([`QuotaDef::max_value`], see [`MAX_VALUES`]) and defaults
+//! that differ by region ([`REGIONAL_DEFAULTS`]). The enforcing service reads
+//! an enforceable quota's applied value through
+//! [`fakecloud_core::quota::QuotaProvider`] once the user switched
+//! enforcement on.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
@@ -79,7 +81,9 @@ pub struct QuotaDef {
 }
 
 pub use fakecloud_core::quota::{
-    RULES_PER_SECURITY_GROUP, SECURITY_GROUPS_PER_INTERFACE, VPC_SERVICE_CODE as VPC,
+    FIREHOSE_MIB_PER_SECOND, FIREHOSE_PUT_REQUESTS_PER_SECOND, FIREHOSE_RECORDS_PER_SECOND,
+    FIREHOSE_SERVICE_CODE, RULES_PER_SECURITY_GROUP, SECURITY_GROUPS_PER_INTERFACE,
+    VPC_SERVICE_CODE as VPC,
 };
 
 pub const EC2: &str = "ec2";
@@ -102,6 +106,9 @@ pub const ENFORCEABLE: &[(&str, &str)] = &[
     ("ec2", "L-7295265B"),      // Running On-Demand X instances
     ("ec2", "L-74FC7D96"),      // Running On-Demand F instances
     ("ec2", "L-DB2E81BA"),      // Running On-Demand G and VT instances
+    (FIREHOSE_SERVICE_CODE, FIREHOSE_RECORDS_PER_SECOND), // Records per second per stream
+    (FIREHOSE_SERVICE_CODE, FIREHOSE_PUT_REQUESTS_PER_SECOND), // Put requests per second per stream
+    (FIREHOSE_SERVICE_CODE, FIREHOSE_MIB_PER_SECOND), // MiB per second per stream
     ("iam", "L-0DA4ABF3"),      // Managed policies per role
     ("iam", "L-384571C4"),      // Managed policies per group
     ("iam", "L-4019AD8B"),      // Managed policies per user
@@ -133,6 +140,47 @@ pub const ENFORCEABLE: &[(&str, &str)] = &[
     ("vpc", "L-E79EC296"),      // VPC security groups per Region
     ("vpc", "L-F678F1CE"),      // VPCs per Region
     ("vpc", "L-FE5A380F"),      // NAT gateways per Availability Zone
+];
+
+/// Enforceable quotas whose capacity AWS scales automatically, so their AWS
+/// default describes a starting point rather than a limit. One is enforced
+/// only at an applied value the account set explicitly for the region (see
+/// [`crate::settings::AccountEnforcement`]). Sorted like [`ENFORCEABLE`], so
+/// [`is_auto_scaling`] can binary search it; every entry is also there.
+pub const AUTO_SCALING: &[(&str, &str)] = &[
+    (FIREHOSE_SERVICE_CODE, FIREHOSE_RECORDS_PER_SECOND), // Records per second per stream
+    (FIREHOSE_SERVICE_CODE, FIREHOSE_PUT_REQUESTS_PER_SECOND), // Put requests per second per stream
+    (FIREHOSE_SERVICE_CODE, FIREHOSE_MIB_PER_SECOND),     // MiB per second per stream
+];
+
+/// Regions where Firehose's Direct PUT throughput defaults are higher.
+const FIREHOSE_HIGH_THROUGHPUT_REGIONS: &[&str] = &["us-east-1", "us-west-2", "eu-west-1"];
+
+/// AWS defaults that differ by region, which the us-east-1 dump cannot
+/// carry: `(service, quota, regions, value in those regions, value
+/// elsewhere)`. Every other quota's default is the same in every region.
+pub const REGIONAL_DEFAULTS: &[(&str, &str, &[&str], f64, f64)] = &[
+    (
+        FIREHOSE_SERVICE_CODE,
+        FIREHOSE_PUT_REQUESTS_PER_SECOND,
+        FIREHOSE_HIGH_THROUGHPUT_REGIONS,
+        2000.0,
+        1000.0,
+    ),
+    (
+        FIREHOSE_SERVICE_CODE,
+        FIREHOSE_RECORDS_PER_SECOND,
+        FIREHOSE_HIGH_THROUGHPUT_REGIONS,
+        500_000.0,
+        100_000.0,
+    ),
+    (
+        FIREHOSE_SERVICE_CODE,
+        FIREHOSE_MIB_PER_SECOND,
+        FIREHOSE_HIGH_THROUGHPUT_REGIONS,
+        5.0,
+        1.0,
+    ),
 ];
 
 /// Maximum values AWS documents for adjustable quotas (Amazon VPC quotas,
@@ -363,6 +411,14 @@ pub fn is_enforceable(service_code: &str, quota_code: &str) -> bool {
         .is_ok()
 }
 
+/// Whether AWS scales `service_code/quota_code` automatically (the
+/// [`AUTO_SCALING`] overlay). Answered without decoding the catalog.
+pub fn is_auto_scaling(service_code: &str, quota_code: &str) -> bool {
+    AUTO_SCALING
+        .binary_search_by(|&(s, q)| s.cmp(service_code).then_with(|| q.cmp(quota_code)))
+        .is_ok()
+}
+
 fn catalog() -> &'static Catalog {
     #[cfg(test)]
     CATALOG_READS.with(|c| c.set(c.get() + 1));
@@ -397,6 +453,21 @@ pub fn quota(service_code: &str, quota_code: &str) -> Option<&'static QuotaDef> 
     c.index(service_code, quota_code).map(|i| &c.quotas[i])
 }
 
+/// AWS default in the requested region: the [`REGIONAL_DEFAULTS`] entry for
+/// the quota, else the vendored us-east-1 value.
+pub fn default_value(region: &str, def: &QuotaDef) -> f64 {
+    REGIONAL_DEFAULTS
+        .iter()
+        .find(|&&(s, q, ..)| s == def.service_code && q == def.quota_code)
+        .map_or(def.default, |&(_, _, regions, inside, elsewhere)| {
+            if regions.contains(&region) {
+                inside
+            } else {
+                elsewhere
+            }
+        })
+}
+
 /// Every quota of `service_code`, ordered by quota code. Empty for an
 /// unknown service.
 pub fn quotas_of(service_code: &str) -> &'static [QuotaDef] {
@@ -415,6 +486,118 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    #[test]
+    fn firehose_defaults_follow_the_requested_region() {
+        for (code, high, low) in [
+            ("L-7681C790", 2000.0, 1000.0),
+            ("L-17D4EADE", 500_000.0, 100_000.0),
+            ("L-937C879B", 5.0, 1.0),
+        ] {
+            let def = quota("firehose", code).unwrap();
+            for (region, expected) in [
+                ("us-east-1", high),
+                ("us-west-2", high),
+                ("eu-west-1", high),
+                ("us-east-2", low),
+                ("ap-southeast-2", low),
+            ] {
+                assert_eq!(default_value(region, def), expected, "{region}/{code}");
+            }
+            assert!(!def.adjustable);
+            assert!(!def.global);
+            assert!(def.enforceable);
+            assert!(is_enforceable("firehose", code));
+        }
+        // Do not regionalize other Firehose quotas or unrelated services.
+        for (service, code, expected) in [
+            ("firehose", "L-14BB0BE7", 5000.0),
+            ("firehose", "L-040D05FF", 5.0),
+            ("vpc", "L-F678F1CE", 5.0),
+        ] {
+            for region in ["us-east-1", "us-west-2", "eu-west-1", "us-east-2"] {
+                assert_eq!(
+                    default_value(region, quota(service, code).unwrap()),
+                    expected
+                );
+            }
+        }
+        // A matching quota code in another service must keep its own default.
+        let mut other = *quota("firehose", "L-937C879B").unwrap();
+        other.service_code = "other";
+        other.default = 42.0;
+        assert_eq!(default_value("us-east-2", &other), 42.0);
+    }
+
+    #[test]
+    fn regional_defaults_name_real_quotas_once_and_resolve_by_region() {
+        let mut seen = HashSet::new();
+        for &(service, code, regions, inside, elsewhere) in REGIONAL_DEFAULTS {
+            let def = quota(service, code)
+                .unwrap_or_else(|| panic!("regional default {service}/{code} missing"));
+            assert!(seen.insert((service, code)), "duplicate {service}/{code}");
+            assert!(!def.global, "{service}/{code} is global");
+            assert!(!regions.is_empty(), "{service}/{code}");
+            for region in regions.iter() {
+                assert_eq!(default_value(region, def), inside, "{region}/{code}");
+            }
+            for region in ["ap-southeast-2", "us-gov-west-1", "us-east-2"] {
+                assert!(!regions.contains(&region));
+                assert_eq!(default_value(region, def), elsewhere, "{region}/{code}");
+            }
+            // The vendored dump is us-east-1's view.
+            assert_eq!(def.default, default_value("us-east-1", def), "{code}");
+        }
+        assert_eq!(
+            REGIONAL_DEFAULTS
+                .iter()
+                .map(|&(s, q, r, inside, elsewhere)| (s, q, r.to_vec(), inside, elsewhere))
+                .collect::<Vec<_>>(),
+            [
+                ("L-7681C790", 2000.0, 1000.0),
+                ("L-17D4EADE", 500_000.0, 100_000.0),
+                ("L-937C879B", 5.0, 1.0),
+            ]
+            .map(|(code, inside, elsewhere)| (
+                "firehose",
+                code,
+                vec!["us-east-1", "us-west-2", "eu-west-1"],
+                inside,
+                elsewhere
+            ))
+        );
+        // Every other quota keeps its vendored default everywhere.
+        for def in quotas() {
+            if !seen.contains(&(def.service_code, def.quota_code)) {
+                assert_eq!(default_value("ap-southeast-2", def), def.default);
+            }
+        }
+    }
+
+    #[test]
+    fn auto_scaling_quotas_are_sorted_enforceable_and_answered_without_decoding() {
+        assert!(
+            AUTO_SCALING.windows(2).all(|w| w[0] < w[1]),
+            "AUTO_SCALING must be sorted"
+        );
+        let before = catalog_reads();
+        for &(svc, code) in AUTO_SCALING {
+            assert!(is_enforceable(svc, code), "{svc}/{code} not enforceable");
+            assert!(is_auto_scaling(svc, code), "{svc}/{code}");
+        }
+        assert!(!is_auto_scaling(VPC, "L-F678F1CE"));
+        assert!(!is_auto_scaling("firehose", "L-14BB0BE7"));
+        assert!(!is_auto_scaling("other", FIREHOSE_MIB_PER_SECOND));
+        assert_eq!(catalog_reads(), before);
+        assert_eq!(
+            AUTO_SCALING,
+            [
+                ("firehose", "L-17D4EADE"),
+                ("firehose", "L-7681C790"),
+                ("firehose", "L-937C879B"),
+            ]
+        );
+    }
 
     #[test]
     fn the_vendored_dump_decodes_into_every_listed_service() {

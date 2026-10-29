@@ -1792,7 +1792,8 @@ export type QuotaEnforcementSource =
   | "not_enforceable"
   | "account_override"
   | "override"
-  | "global";
+  | "global"
+  | "auto_scaling_default";
 
 /** One Service Quotas catalog quota as seen by an account and region. */
 export interface Quota {

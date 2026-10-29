@@ -11,7 +11,7 @@ use fakecloud_organizations::SharedOrganizationsState;
 use fakecloud_persistence::SnapshotHook;
 
 use crate::catalog::{self, QuotaDef};
-use crate::settings::{enforcement_of, RequestApproval, SharedQuotaSettings};
+use crate::settings::{AccountEnforcement, RequestApproval, SharedQuotaSettings};
 use crate::state::{
     applied_key, QuotaRequest, ServiceQuotasData, SharedServiceQuotasState, TemplateEntry,
 };
@@ -29,7 +29,7 @@ pub fn applied_value(data: Option<&ServiceQuotasData>, region: &str, def: &Quota
             ))
             .copied()
     })
-    .unwrap_or(def.default)
+    .unwrap_or_else(|| catalog::default_value(region, def))
 }
 
 /// The region a quota's ARN and applied value live in: global quotas have
@@ -289,20 +289,37 @@ impl QuotaProvider for ServiceQuotasProvider {
         service_code: &str,
         quota_code: &str,
     ) -> Option<f64> {
-        // Whether the quota is enforced is answered from the static overlay
-        // and the settings; the catalog is only decoded for a quota that is.
-        if !catalog::is_enforceable(service_code, quota_code) {
-            return None;
+        self.enforced_limits(account_id, region, service_code, &[quota_code])
+            .pop()
+            .flatten()
+    }
+
+    fn enforced_limits(
+        &self,
+        account_id: &str,
+        region: &str,
+        service_code: &str,
+        quota_codes: &[&str],
+    ) -> Vec<Option<f64>> {
+        // Whether a quota is enforced is answered from the static overlay and
+        // the settings; the catalog is only decoded for a quota that is.
+        if !quota_codes
+            .iter()
+            .any(|code| catalog::is_enforceable(service_code, code))
+        {
+            return vec![None; quota_codes.len()];
         }
+        // Enforcing touches the account's quotas, which applies a due
+        // organization template (see `apply_template_if_new`) before the
+        // limits are read.
         self.apply_template(account_id);
         let settings = self.settings.read();
         let guard = self.state.read();
-        let data = guard.get(account_id);
-        if !enforcement_of(&settings, data, service_code, quota_code).0 {
-            return None;
-        }
-        let def = catalog::quota(service_code, quota_code)?;
-        Some(applied_value(data, region, def))
+        let account = AccountEnforcement::new(&settings, guard.get(account_id), region);
+        quota_codes
+            .iter()
+            .map(|code| account.limit(service_code, code))
+            .collect()
     }
 }
 
@@ -324,6 +341,115 @@ mod tests {
         )
     }
 
+    #[test]
+    fn firehose_provider_reports_regional_defaults_but_enforces_none() {
+        let p = provider(Default::default());
+        let before = catalog::catalog_reads();
+        for code in ["L-7681C790", "L-17D4EADE", "L-937C879B"] {
+            assert_eq!(
+                p.enforced_limit("000000000000", "us-east-2", "firehose", code),
+                None
+            );
+        }
+        assert_eq!(catalog::catalog_reads(), before);
+        for (code, high, low) in [
+            ("L-7681C790", 2000.0, 1000.0),
+            ("L-17D4EADE", 500_000.0, 100_000.0),
+            ("L-937C879B", 5.0, 1.0),
+        ] {
+            for (region, expected) in [
+                ("us-east-1", high),
+                ("us-west-2", high),
+                ("eu-west-1", high),
+                ("us-east-2", low),
+            ] {
+                for account in ["000000000000", "222222222222"] {
+                    assert_eq!(
+                        p.applied_value(account, region, "firehose", code),
+                        Some(expected)
+                    );
+                    // AWS scales this capacity: its default is no limit.
+                    p.settings.write().enforce_all = true;
+                    assert_eq!(p.enforced_limit(account, region, "firehose", code), None);
+                    p.settings.write().enforce_all = false;
+                }
+            }
+        }
+    }
+
+    /// One batched lookup answers exactly what one lookup per code does.
+    #[test]
+    fn enforced_limits_match_one_lookup_per_code() {
+        use fakecloud_core::quota::{
+            FIREHOSE_MIB_PER_SECOND as MIB, FIREHOSE_PUT_REQUESTS_PER_SECOND as REQUESTS,
+            FIREHOSE_RECORDS_PER_SECOND as RECORDS,
+        };
+        const ACCT: &str = "000000000000";
+        let p = provider(Default::default());
+        let codes = [REQUESTS, RECORDS, MIB, "L-14BB0BE7", "L-NOPE"];
+        let limits = |p: &ServiceQuotasProvider| {
+            for (account, region) in [
+                (ACCT, "us-east-1"),
+                (ACCT, "us-east-2"),
+                ("222222222222", "us-east-2"),
+            ] {
+                let one_by_one: Vec<_> = codes
+                    .iter()
+                    .map(|code| p.enforced_limit(account, region, "firehose", code))
+                    .collect();
+                assert_eq!(
+                    p.enforced_limits(account, region, "firehose", &codes),
+                    one_by_one,
+                    "{account}/{region}"
+                );
+            }
+            p.enforced_limits(ACCT, "us-east-2", "firehose", &codes)
+        };
+        let explicit = |code: &str, v: f64| {
+            p.state
+                .write()
+                .get_or_create(ACCT)
+                .applied
+                .insert(applied_key("us-east-2", false, "firehose", code), v);
+        };
+
+        assert_eq!(limits(&p), [None; 5]);
+        p.settings.write().enforce_all = true;
+        assert_eq!(limits(&p), [None; 5]);
+        explicit(REQUESTS, 10.0);
+        explicit(MIB, 0.5);
+        assert_eq!(limits(&p), [Some(10.0), None, Some(0.5), None, None]);
+        p.settings
+            .write()
+            .overrides
+            .insert(format!("firehose/{MIB}"), false);
+        assert_eq!(limits(&p), [Some(10.0), None, None, None, None]);
+        p.settings.write().enforce_all = false;
+        explicit(RECORDS, 7.0);
+        p.state
+            .write()
+            .get_or_create(ACCT)
+            .enforcement
+            .insert(format!("firehose/{RECORDS}"), true);
+        assert_eq!(limits(&p), [None, Some(7.0), None, None, None]);
+        assert_eq!(
+            p.enforced_limits(ACCT, "us-east-2", "firehose", &[]),
+            Vec::<Option<f64>>::new()
+        );
+
+        // Quotas AWS does not scale are enforced at their applied value.
+        p.settings.write().enforce_all = true;
+        assert_eq!(
+            p.enforced_limits(
+                ACCT,
+                "us-east-2",
+                catalog::VPC,
+                &["L-0EA8095F", "L-2AFB9258"]
+            ),
+            [Some(60.0), Some(5.0)]
+        );
+    }
+
     /// With enforcement off, an enforcing service's limit lookup on its
     /// request path never touches (or decodes) the catalog.
     #[test]
@@ -342,6 +468,15 @@ mod tests {
                 None
             );
         }
+        assert_eq!(
+            p.enforced_limits(
+                "000000000000",
+                "us-east-1",
+                "firehose",
+                &["L-7681C790", "L-17D4EADE", "L-937C879B", "L-14BB0BE7"]
+            ),
+            [None; 4]
+        );
         assert_eq!(catalog::catalog_reads(), before);
     }
 

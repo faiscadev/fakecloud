@@ -614,7 +614,7 @@ async fn firehose_destination_update_changes_output_version_and_extension() {
 }
 
 #[tokio::test]
-async fn firehose_put_record_batch_reports_invalid_records() {
+async fn firehose_put_apis_reject_invalid_data_request_wide() {
     let server = TestServer::start().await;
     let firehose = setup(&server, "fh-bucket-invalid").await;
     let bucket_arn = "arn:aws:s3:::fh-bucket-invalid";
@@ -627,7 +627,7 @@ async fn firehose_put_record_batch_reports_invalid_records() {
         .await
         .expect("create");
 
-    // Mix valid + valid + valid records (SDK base64-encodes Blob for us, so
+    // Mix two valid records (SDK base64-encodes Blob for us, so
     // we can't construct invalid base64 via the SDK). Validate happy-path
     // counts here; invalid-record handling is exercised at the wire level
     // below by talking directly to the JSON endpoint.
@@ -641,38 +641,60 @@ async fn firehose_put_record_batch_reports_invalid_records() {
         .expect("put batch");
     assert_eq!(resp.failed_put_count(), 0);
 
-    // Wire-level invalid-base64 records should bump FailedPutCount and
-    // surface an ErrorCode on the corresponding response entry.
+    // Missing, wrong-type and invalid-base64 data reject the whole request.
+    // A valid leading batch entry must not turn a validation error into a
+    // successful partial response.
     let http = reqwest::Client::new();
     let url = format!("{}/", server.endpoint());
-    let body = serde_json::json!({
-        "DeliveryStreamName": "fh-invalid-stream",
-        "Records": [
-            {"Data": "@@@not-base64@@@"},
-            {"Data": "Z29vZA=="}
-        ]
-    });
-    let r = http
-        .post(&url)
-        .header("Content-Type", "application/x-amz-json-1.1")
-        .header("X-Amz-Target", "Firehose_20150804.PutRecordBatch")
-        .header(
-            "Authorization",
-            "AWS4-HMAC-SHA256 \
-             Credential=AKIAIOSFODNN7EXAMPLE/20260501/us-east-1/firehose/aws4_request, \
-             SignedHeaders=host;x-amz-target, Signature=deadbeef",
-        )
-        .body(body.to_string())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 200);
-    let json: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(json["FailedPutCount"], 1);
-    let resps = json["RequestResponses"].as_array().unwrap();
-    assert_eq!(resps.len(), 2);
-    assert_eq!(resps[0]["ErrorCode"], "InvalidArgumentException");
-    assert!(resps[1].get("RecordId").is_some());
+    for (record, expected_code) in [
+        (serde_json::json!({}), "InvalidArgumentException"),
+        (
+            serde_json::json!({"Data": null}),
+            "InvalidArgumentException",
+        ),
+        (serde_json::json!({"Data": 1}), "SerializationException"),
+        (serde_json::json!({"Data": false}), "SerializationException"),
+        (serde_json::json!({"Data": []}), "SerializationException"),
+        (serde_json::json!({"Data": {}}), "SerializationException"),
+        (
+            serde_json::json!({"Data": "@@@not-base64@@@"}),
+            "SerializationException",
+        ),
+    ] {
+        for action in ["PutRecord", "PutRecordBatch"] {
+            let body = if action == "PutRecord" {
+                serde_json::json!({
+                    "DeliveryStreamName": "fh-invalid-stream", "Record": record,
+                })
+            } else {
+                serde_json::json!({
+                    "DeliveryStreamName": "fh-invalid-stream",
+                    "Records": [{"Data": "Z29vZA=="}, record],
+                })
+            };
+            let r = http
+                .post(&url)
+                .header("Content-Type", "application/x-amz-json-1.1")
+                .header("X-Amz-Target", format!("Firehose_20150804.{action}"))
+                .header(
+                    "Authorization",
+                    "AWS4-HMAC-SHA256 \
+              Credential=AKIAIOSFODNN7EXAMPLE/20260501/us-east-1/firehose/aws4_request, \
+              SignedHeaders=host;x-amz-target, Signature=deadbeef",
+                )
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "{action}: {record}");
+            let json: serde_json::Value = r.json().await.unwrap();
+            assert!(
+                json["__type"].as_str().unwrap().ends_with(expected_code),
+                "{action}: {record}: {json}",
+            );
+            assert!(json.get("RequestResponses").is_none());
+        }
+    }
 }
 
 #[tokio::test]

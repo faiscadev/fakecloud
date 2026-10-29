@@ -1375,6 +1375,7 @@ async fn main() {
         firehose_state.clone(),
     ));
     firehose_engine.set_s3(s3_state.clone());
+    firehose_engine.set_quota_provider(quota_provider.clone());
     let firehose_delivery_for_logs = Arc::new(
         fakecloud_firehose::FirehoseDeliveryImpl::with_engine(firehose_engine.clone()),
     );
