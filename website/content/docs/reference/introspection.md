@@ -445,7 +445,7 @@ See [Service Quotas](/docs/services/servicequotas/#introspection) for semantics.
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
-| `/_fakecloud/sqs/messages` | GET | List messages across queues in every account and region. Each entry carries `queueUrl`, `queueName`, `region` and `queueArn` (queue URLs carry no region, so `region` / `queueArn` tell same-named queues apart). |
+| `/_fakecloud/sqs/messages` | GET | List messages across queues in every account and region. Each entry carries `queueUrl`, `queueName`, `region` and `queueArn` (queue URLs carry no region, so `region` / `queueArn` tell same-named queues apart). Each message's `body` is the plaintext the sender sent; `storedBody` is the body as stored at rest, the KMS ciphertext envelope on an SSE-SQS (the default) or SSE-KMS queue and equal to `body` otherwise. Reading `body` makes no KMS call, so it works after the queue's key is disabled and adds nothing to `/_fakecloud/kms/usage`. |
 | `/_fakecloud/sqs/expiration-processor/tick` | POST | Expire messages whose retention window has passed. |
 | `/_fakecloud/sqs/{queue_name}/force-dlq` | POST | Force-move in-flight messages to the dead-letter queue. Optional `accountId` and `region` query parameters pick the queue (default: the server's account and region); same-named queues elsewhere are untouched. |
 

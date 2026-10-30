@@ -1,3 +1,6 @@
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 using Xunit;
 
 namespace FakeCloud.Tests;
@@ -12,9 +15,11 @@ namespace FakeCloud.Tests;
 public sealed class E2ETests : IDisposable
 {
     private readonly FakeCloudClient _fc;
+    private readonly string _endpoint;
 
     public E2ETests(FakeCloudServer server)
     {
+        _endpoint = server.Endpoint;
         _fc = new FakeCloudClient(server.Endpoint);
         _fc.ResetAsync().GetAwaiter().GetResult();
     }
@@ -37,6 +42,37 @@ public sealed class E2ETests : IDisposable
         Assert.Equal("ok", reset.Status);
         var queues = await _fc.Sqs.GetMessagesAsync();
         Assert.True(queues.Queues is null || queues.Queues.Count == 0);
+    }
+
+    [Fact]
+    public async Task SqsMessagesShowPlaintextBodyAndStoredEnvelope()
+    {
+        // A default queue: SSE-SQS seals the body at rest. Plain JSON-protocol
+        // calls (the server does not verify SigV4 by default).
+        using var http = new HttpClient { BaseAddress = new Uri(_endpoint) };
+        async Task<JsonElement> Sqs(string action, object body)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, "/")
+            {
+                Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8),
+            };
+            req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/x-amz-json-1.0");
+            req.Headers.Add("X-Amz-Target", $"AmazonSQS.{action}");
+            using var resp = await http.SendAsync(req);
+            resp.EnsureSuccessStatusCode();
+            return JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement.Clone();
+        }
+
+        var created = await Sqs("CreateQueue", new { QueueName = "dotnet-sqs-queue" });
+        var queueUrl = created.GetProperty("QueueUrl").GetString();
+        await Sqs("SendMessage", new { QueueUrl = queueUrl, MessageBody = "hello from dotnet" });
+
+        var result = await _fc.Sqs.GetMessagesAsync();
+        var queue = Assert.Single(result.Queues!, q => q.QueueName == "dotnet-sqs-queue");
+        var msg = Assert.Single(queue.Messages!);
+        Assert.Equal("hello from dotnet", msg.Body);
+        Assert.False(string.IsNullOrEmpty(msg.StoredBody));
+        Assert.NotEqual(msg.Body, msg.StoredBody);
     }
 
     [Fact]

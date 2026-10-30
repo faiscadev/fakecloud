@@ -330,14 +330,10 @@ describe("sqs", () => {
   it("getMessages() returns sent messages", async () => {
     const sqs = new SQSClient(awsConfig());
 
-    // Disable SSE-SQS so the introspection endpoint surfaces the
-    // plaintext body. Default queues encrypt at rest under
-    // `alias/aws/sqs` (AWS default since May 2023).
+    // A default queue: SSE-SQS seals the body at rest, introspection
+    // shows the plaintext in `body` and the envelope in `storedBody`.
     const { QueueUrl } = await sqs.send(
-      new CreateQueueCommand({
-        QueueName: "test-queue",
-        Attributes: { SqsManagedSseEnabled: "false" },
-      }),
+      new CreateQueueCommand({ QueueName: "test-queue" }),
     );
     expect(QueueUrl).toBeDefined();
 
@@ -355,6 +351,8 @@ describe("sqs", () => {
     expect(queue).toBeDefined();
     expect(queue!.messages.length).toBe(1);
     expect(queue!.messages[0].body).toBe("hello from e2e");
+    expect(queue!.messages[0].storedBody).not.toBe("hello from e2e");
+    expect(queue!.messages[0].storedBody).not.toBe("");
   });
 });
 

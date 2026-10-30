@@ -276,12 +276,16 @@ public sealed record ConfirmSubscriptionRequest(string? SubscriptionArn);
 public sealed record ConfirmSubscriptionResponse(bool Confirmed);
 
 // ── SQS ────────────────────────────────────────────────────────
+/// <summary>A queued message. <c>Body</c> is the plaintext; <c>StoredBody</c> is the
+/// body as stored at rest (the KMS ciphertext envelope on an SSE-SQS / SSE-KMS queue,
+/// equal to <c>Body</c> otherwise).</summary>
 public sealed record SqsMessageInfo(
     string? MessageId,
     string? Body,
     int ReceiveCount,
     bool InFlight,
-    string? CreatedAt);
+    string? CreatedAt,
+    string? StoredBody = null);
 
 /// <summary>Messages of one queue. <c>Region</c> is the queue's region (queue URLs
 /// carry none, so same-named queues in different regions share a URL);

@@ -4,7 +4,9 @@ pub(crate) mod service;
 pub mod simulation;
 pub(crate) mod state;
 
-pub use service::helpers::{parse_redrive_policy, validate_create_queue_attributes};
+pub use service::helpers::{
+    parse_redrive_policy, plaintext_body, validate_create_queue_attributes,
+};
 pub use service::helpers::{render_queue_url, resolve_endpoint_base, resolve_endpoint_base_with};
 pub use service::SqsService;
 pub use state::{

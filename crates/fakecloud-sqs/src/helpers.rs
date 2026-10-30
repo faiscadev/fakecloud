@@ -26,6 +26,19 @@ pub(crate) fn looks_like_fakecloud_envelope(body: &str) -> bool {
     }
 }
 
+/// The plaintext of a stored message body, for introspection. An SSE body
+/// (one that passes the same envelope check ReceiveMessage applies) is
+/// unsealed by `unseal`; anything else, or an envelope `unseal` cannot open,
+/// is returned as stored.
+pub fn plaintext_body(stored: &str, unseal: impl FnOnce(&str) -> Option<Vec<u8>>) -> String {
+    if !looks_like_fakecloud_envelope(stored) {
+        return stored.to_string();
+    }
+    unseal(stored)
+        .map(|p| String::from_utf8_lossy(&p).into_owned())
+        .unwrap_or_else(|| stored.to_string())
+}
+
 /// Validate DelaySeconds (0–900), VisibilityTimeout (0–43200), and
 /// MaximumMessageSize (1024–1 MiB) if present in the caller-supplied queue
 /// attributes. All match AWS's documented ranges; we return the same error
@@ -1715,7 +1728,7 @@ mod canonicalize_tests {
 
 #[cfg(test)]
 mod envelope_tests {
-    use super::looks_like_fakecloud_envelope;
+    use super::{looks_like_fakecloud_envelope, plaintext_body};
     use base64::Engine;
 
     #[test]
@@ -1738,6 +1751,27 @@ mod envelope_tests {
         blob.extend_from_slice(&[0u8; 32]);
         let b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
         assert!(looks_like_fakecloud_envelope(&b64));
+    }
+
+    /// Only envelope-shaped bodies reach `unseal`; one it cannot open, and
+    /// every plain body, read back as stored.
+    #[test]
+    fn plaintext_body_unseals_only_envelopes() {
+        let mut blob = vec![0x01, 0x02, 0x02, 0x00];
+        blob.extend_from_slice(&[0u8; 32]);
+        let sealed = base64::engine::general_purpose::STANDARD.encode(&blob);
+        assert_eq!(
+            plaintext_body(&sealed, |ct| {
+                assert_eq!(ct, sealed);
+                Some(b"hello".to_vec())
+            }),
+            "hello"
+        );
+        assert_eq!(plaintext_body(&sealed, |_| None), sealed);
+        assert_eq!(
+            plaintext_body("plain", |_| panic!("plain body must not be unsealed")),
+            "plain"
+        );
     }
 
     #[test]

@@ -420,8 +420,11 @@ type ConfirmSubscriptionResponse struct {
 
 // SQSMessageInfo describes a message in an SQS queue.
 type SQSMessageInfo struct {
-	MessageID    string `json:"messageId"`
-	Body         string `json:"body"`
+	MessageID string `json:"messageId"`
+	Body      string `json:"body"`
+	// StoredBody is the body as stored at rest: the KMS ciphertext envelope
+	// on an SSE-SQS / SSE-KMS queue, equal to Body otherwise.
+	StoredBody   string `json:"storedBody"`
 	ReceiveCount uint64 `json:"receiveCount"`
 	InFlight     bool   `json:"inFlight"`
 	CreatedAt    string `json:"createdAt"`

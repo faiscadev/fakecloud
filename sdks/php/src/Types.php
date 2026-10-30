@@ -972,11 +972,13 @@ final class SqsMessageInfo
         public readonly int $receiveCount,
         public readonly bool $inFlight,
         public readonly string $createdAt,
+        /** The body as stored at rest: the KMS ciphertext envelope on an SSE-SQS / SSE-KMS queue, equal to `body` otherwise. */
+        public readonly string $storedBody = '',
     ) {}
 
     public static function fromArray(array $data): self
     {
-        return new self($data['messageId'], $data['body'], $data['receiveCount'], $data['inFlight'], $data['createdAt']);
+        return new self($data['messageId'], $data['body'], $data['receiveCount'], $data['inFlight'], $data['createdAt'], $data['storedBody'] ?? '');
     }
 }
 
