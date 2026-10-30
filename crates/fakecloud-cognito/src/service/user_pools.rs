@@ -1198,7 +1198,8 @@ impl CognitoService {
             ));
         }
 
-        let meta = upc.issue_secret_meta(Utc::now());
+        let now = Utc::now();
+        let meta = upc.issue_secret_meta(now);
         let mut descriptor_json = json!({
             "ClientSecretId": meta.client_secret_id,
             "ClientSecretCreateDate": meta.client_secret_create_date.timestamp() as f64,
@@ -1218,6 +1219,7 @@ impl CognitoService {
             client_secret_value: secret_value,
             client_secret_create_date: meta.client_secret_create_date,
         });
+        upc.last_modified_date = now;
 
         Ok(AwsResponse::ok_json(json!({
             "ClientSecretDescriptor": descriptor_json
@@ -1275,6 +1277,7 @@ impl CognitoService {
         {
             upc.client_secrets.remove(idx);
         }
+        upc.last_modified_date = Utc::now();
 
         Ok(AwsResponse::ok_json(json!({})))
     }

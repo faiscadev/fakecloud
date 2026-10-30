@@ -360,12 +360,13 @@ impl ResourceProvisioner {
                 .cloned(),
         };
         client.init_primary_secret(now);
+        let name = client.client_name.clone();
 
         state.user_pool_clients.insert(client_id.clone(), client);
 
         let mut result = ProvisionResult::new(client_id.clone())
-            .with("ClientId", client_id.clone())
-            .with("Name", client_id);
+            .with("ClientId", client_id)
+            .with("Name", name);
         if let Some(secret) = client_secret {
             result = result.with("ClientSecret", secret);
         }
@@ -450,9 +451,15 @@ impl ResourceProvisioner {
         }
         client.last_modified_date = Utc::now();
 
-        Ok(ProvisionResult::new(client_id.clone())
+        let mut result = ProvisionResult::new(client_id.clone())
             .with("ClientId", client_id.clone())
-            .with("Name", client_id.clone()))
+            .with("Name", client.client_name.clone());
+        // The secret may have rotated since create (AddUserPoolClientSecret
+        // then deleting the original), so GetAtt reports the current primary.
+        if let Some(secret) = &client.client_secret {
+            result = result.with("ClientSecret", secret.clone());
+        }
+        Ok(result)
     }
 
     pub(super) fn delete_cognito_user_pool_client(&self, physical_id: &str) -> Result<(), String> {
@@ -611,11 +618,15 @@ impl ResourceProvisioner {
             creation_date: Utc::now(),
         };
 
+        let name = pool.identity_pool_name.clone();
         let mut accounts = self.cognito_state.write();
         let state = accounts.get_or_create(&self.account_id);
         state.identity_pools.insert(identity_pool_id.clone(), pool);
 
-        Ok(ProvisionResult::new(identity_pool_id.clone()).with("Name", identity_pool_id))
+        // GetAtt Name is the pool's name; Ref is the id.
+        Ok(ProvisionResult::new(identity_pool_id.clone())
+            .with("Id", identity_pool_id)
+            .with("Name", name))
     }
 
     /// In-place `UpdateStack` for an `AWS::Cognito::IdentityPool`. Mutates the
@@ -705,7 +716,9 @@ impl ResourceProvisioner {
             pool.identity_pool_tags = parse_cognito_tags(props.get("IdentityPoolTags"));
         }
 
-        Ok(ProvisionResult::new(pool_id.clone()).with("Name", pool_id.clone()))
+        Ok(ProvisionResult::new(pool_id.clone())
+            .with("Id", pool_id.clone())
+            .with("Name", pool.identity_pool_name.clone()))
     }
 
     pub(super) fn delete_cognito_identity_pool(&self, physical_id: &str) -> Result<(), String> {

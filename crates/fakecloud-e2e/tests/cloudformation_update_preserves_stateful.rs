@@ -874,7 +874,9 @@ const POOL_TEMPLATE_V1: &str = r#"{
     }
   },
   "Outputs": {
-    "PoolId": {"Value": {"Ref": "Pool"}}
+    "PoolId": {"Value": {"Ref": "Pool"}},
+    "PoolIdAttr": {"Value": {"Fn::GetAtt": ["Pool", "Id"]}},
+    "PoolName": {"Value": {"Fn::GetAtt": ["Pool", "Name"]}}
   }
 }"#;
 
@@ -891,7 +893,9 @@ const POOL_TEMPLATE_V2: &str = r#"{
     }
   },
   "Outputs": {
-    "PoolId": {"Value": {"Ref": "Pool"}}
+    "PoolId": {"Value": {"Ref": "Pool"}},
+    "PoolIdAttr": {"Value": {"Fn::GetAtt": ["Pool", "Id"]}},
+    "PoolName": {"Value": {"Fn::GetAtt": ["Pool", "Name"]}}
   }
 }"#;
 
@@ -952,6 +956,14 @@ async fn cfn_update_cognito_identity_pool_preserves_role_attachment() {
         pool_id.contains(':'),
         "identity pool id should be `<region>:<uuid>`: {pool_id}"
     );
+    assert_eq!(
+        stack_output(&server, "pool-preserve", "PoolIdAttr").await,
+        pool_id
+    );
+    assert_eq!(
+        stack_output(&server, "pool-preserve", "PoolName").await,
+        "cfn_preserve_pool_v1"
+    );
 
     // Out-of-band: attach roles to the pool (a separate SetIdentityPoolRoles
     // record). A delete+recreate would cascade-drop this attachment.
@@ -982,6 +994,16 @@ async fn cfn_update_cognito_identity_pool_preserves_role_attachment() {
     assert_eq!(
         pool_id_after, pool_id,
         "identity pool id must be stable across an in-place update; a recreate would mint a new `<region>:<uuid>`"
+    );
+
+    // GetAtt Name follows the rename; GetAtt Id stays the pool id.
+    assert_eq!(
+        stack_output(&server, "pool-preserve", "PoolName").await,
+        "cfn_preserve_pool_v2"
+    );
+    assert_eq!(
+        stack_output(&server, "pool-preserve", "PoolIdAttr").await,
+        pool_id
     );
 
     // The name change was actually applied.

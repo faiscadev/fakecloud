@@ -7390,6 +7390,46 @@ fn delete_last_client_secret_is_rejected() {
     block_on(svc.get_client_token(&make_req("GetClientToken", &body.to_string()))).unwrap();
 }
 
+/// Adding or deleting a secret modifies the client, so its
+/// LastModifiedDate moves forward.
+#[test]
+fn client_secret_add_and_delete_bump_last_modified_date() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, _) = create_m2m_client(&svc, &pool_id, &[]);
+    let backdate = || {
+        let old = chrono::Utc::now() - chrono::Duration::days(1);
+        state
+            .write()
+            .get_or_create("123456789012")
+            .user_pool_clients
+            .get_mut(&client_id)
+            .unwrap()
+            .last_modified_date = old;
+        old.timestamp() as f64
+    };
+    let last_modified = || {
+        let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
+        resp_json(
+            &svc.describe_user_pool_client(&make_req("DescribeUserPoolClient", &body.to_string()))
+                .unwrap(),
+        )["UserPoolClient"]["LastModifiedDate"]
+            .as_f64()
+            .unwrap()
+    };
+
+    let old = backdate();
+    let (added_id, _) = add_client_secret(&svc, &pool_id, &client_id);
+    assert!(last_modified() > old, "add did not bump LastModifiedDate");
+
+    let old = backdate();
+    delete_client_secret(&svc, &pool_id, &client_id, &added_id).unwrap();
+    assert!(
+        last_modified() > old,
+        "delete did not bump LastModifiedDate"
+    );
+}
+
 /// A delete and re-add in the same instant never reuses an id, and each id
 /// stays consistent with its create date.
 #[test]
@@ -12091,6 +12131,18 @@ fn new_password_challenge_requires_secret_hash_for_confidential_client() {
             "NotAuthorizedException",
             "Invalid session for the user.",
             &format!("{op:?} other user"),
+        );
+        // Client authentication is checked before the user, as on
+        // InitiateAuth: a bad hash with another user's name is a hash error.
+        assert_challenge_err(
+            respond(json!({
+                "USERNAME": "bob",
+                "NEW_PASSWORD": "NewPass1!",
+                "SECRET_HASH": "bad",
+            })),
+            "NotAuthorizedException",
+            &fx.wrong_message(),
+            &format!("{op:?} other user, wrong hash"),
         );
 
         // A secret added for rotation authenticates the response too, and the

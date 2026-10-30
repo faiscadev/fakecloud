@@ -90,6 +90,7 @@ const TEMPLATE: &str = r#"{
   },
   "Outputs": {
     "IdPoolId": {"Value": {"Ref": "IdPool"}},
+    "IdPoolName": {"Value": {"Fn::GetAtt": ["IdPool", "Name"]}},
     "RoleAttachId": {"Value": {"Ref": "RoleAttach"}}
   }
 }"#;
@@ -125,15 +126,19 @@ async fn cfn_provisions_cognito_identity_pool_and_role_attachment() {
 
     let mut id_pool_id = None;
     let mut role_attach_id = None;
+    let mut id_pool_name = None;
     for o in stack.outputs() {
         match o.output_key() {
             Some("IdPoolId") => id_pool_id = o.output_value().map(|s| s.to_string()),
             Some("RoleAttachId") => role_attach_id = o.output_value().map(|s| s.to_string()),
+            Some("IdPoolName") => id_pool_name = o.output_value().map(|s| s.to_string()),
             _ => {}
         }
     }
     let id_pool_id = id_pool_id.expect("IdPoolId output");
     let role_attach_id = role_attach_id.expect("RoleAttachId output");
+    // GetAtt Name is the pool's name, not its id.
+    assert_eq!(id_pool_name.as_deref(), Some("fed_id_pool"));
 
     // Identity pool ids look like `<region>:<uuid>` per AWS shape.
     assert!(

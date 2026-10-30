@@ -11512,6 +11512,61 @@ mod tests {
     }
 
     #[test]
+    fn update_stack_reports_rotated_cognito_client_secret() {
+        let prov = make_provisioner();
+        let pool = prov
+            .create_resource(&make_resource(
+                "AWS::Cognito::UserPool",
+                "UP",
+                serde_json::json!({"PoolName": "pool"}),
+            ))
+            .expect("pool provisions");
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Cognito::UserPoolClient",
+                "Client",
+                serde_json::json!({
+                    "UserPoolId": pool.physical_id,
+                    "ClientName": "c1",
+                    "GenerateSecret": true
+                }),
+            ))
+            .expect("client provisions");
+        let original = created.attributes["ClientSecret"].clone();
+        // Rotate out of band: the primary is replaced by a newer secret.
+        let rotated = "rotatedsecretvalue0123456789abcdef".to_string();
+        {
+            let mut cognito = prov.cognito_state.write();
+            let client = cognito
+                .get_or_create("123456789012")
+                .user_pool_clients
+                .get_mut(&created.physical_id)
+                .unwrap();
+            client.client_secret = Some(rotated.clone());
+        }
+        let updated = prov
+            .update_resource(
+                &created,
+                &make_resource(
+                    "AWS::Cognito::UserPoolClient",
+                    "Client",
+                    serde_json::json!({
+                        "UserPoolId": pool.physical_id,
+                        "ClientName": "c1-renamed",
+                        "GenerateSecret": true
+                    }),
+                ),
+            )
+            .expect("update succeeds")
+            .expect("AWS::Cognito::UserPoolClient is updatable");
+        assert_ne!(original, rotated);
+        assert_eq!(updated.attributes["ClientSecret"], rotated);
+        // GetAtt Name is the client's name, following a rename.
+        assert_eq!(created.attributes["Name"], "c1");
+        assert_eq!(updated.attributes["Name"], "c1-renamed");
+    }
+
+    #[test]
     fn cognito_user_pool_client_token_validity_honors_units_and_range() {
         let prov = make_provisioner();
         let pool = prov
