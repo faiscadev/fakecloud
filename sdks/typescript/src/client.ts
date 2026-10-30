@@ -1912,9 +1912,8 @@ export class Elbv2Client {
   }
 
   /**
-   * Pass-through admin endpoint returning the current WAF
-   * association/evaluation counts as recorded by fakecloud's ELBv2
-   * stack. Shape is opaque; treat as data for assertion-by-equality.
+   * How many requests matched each WAF rule whose action is `Count`,
+   * per WebACL associated with an ALB.
    */
   async getWafCounts(): Promise<Elbv2WafCountsResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/elbv2/waf-counts`);

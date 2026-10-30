@@ -973,9 +973,8 @@ public sealed class FakeCloudClient : IDisposable
             _http.PostEmptyAsync<Elbv2FlushAccessLogsResponse>("/_fakecloud/elbv2/access-logs/flush", ct);
 
         /// <summary>
-        /// Returns the WAFv2 association/evaluation counts the ELBv2 service
-        /// has accumulated. The exact shape of <c>Counts</c> is
-        /// service-internal and intentionally returned as free-form JSON.
+        /// Returns how many requests matched each WAF rule whose action is
+        /// <c>Count</c>, per WebACL associated with an ALB.
         /// </summary>
         public Task<Elbv2WafCountsResponse> GetWafCountsAsync(CancellationToken ct = default) =>
             _http.GetAsync<Elbv2WafCountsResponse>("/_fakecloud/elbv2/waf-counts", ct);

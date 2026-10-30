@@ -718,20 +718,38 @@ public final class Types {
     public record CompromisedPasswordsResponse(long added) {}
 
     /**
+     * What fakecloud saw when it parsed a WebAuthn {@code attestationObject}.
+     * {@code selfAttestVerified} is {@code true} when the self-attestation
+     * signature was verified against the COSE public key and {@code false}
+     * when an {@code x5c} chain was accepted structurally.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record WebAuthnAttestationInfo(
+            String fmt,
+            long alg,
+            long signatureLen,
+            long x5cChainLen,
+            boolean cosePublicKeyPresent,
+            boolean selfAttestVerified) {}
+
+    /**
      * Registered WebAuthn credential from
-     * {@code GET /_fakecloud/cognito/webauthn-credentials}. The
-     * {@code attestationInfo} field is the parsed-attestation JSON
-     * (packed format details, AAGUID, certificate chain summary,
-     * signature counter); its shape depends on the attestation format
-     * so it is surfaced as a generic {@link Object}.
+     * {@code GET /_fakecloud/cognito/webauthn-credentials}.
+     * {@code attestationInfo} is {@code null} when the client registered
+     * without an {@code attestationObject}.
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record WebAuthnCredential(
-            @com.fasterxml.jackson.annotation.JsonProperty("account_id") String accountId,
-            @com.fasterxml.jackson.annotation.JsonProperty("pool_user") String poolUser,
-            @com.fasterxml.jackson.annotation.JsonProperty("credential_id") String credentialId,
-            @com.fasterxml.jackson.annotation.JsonProperty("relying_party_id") String relyingPartyId,
-            @com.fasterxml.jackson.annotation.JsonProperty("attestation_info") Object attestationInfo) {}
+            String accountId,
+            String poolId,
+            String username,
+            String credentialId,
+            String friendlyCredentialName,
+            String relyingPartyId,
+            String authenticatorAttachment,
+            List<String> authenticatorTransports,
+            String createdAt,
+            WebAuthnAttestationInfo attestationInfo) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record WebAuthnCredentialsResponse(List<WebAuthnCredential> credentials) {}
@@ -924,9 +942,11 @@ public final class Types {
             String path,
             Map<String, String> headers,
             Map<String, String> queryParams,
+            /** UTF-8 text as-is, anything else base64-encoded (see {@code isBase64Encoded}). */
             String body,
             String timestamp,
-            int statusCode) {}
+            int statusCode,
+            boolean isBase64Encoded) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record ApiGatewayV2RequestsResponse(List<ApiGatewayV2Request> requests) {}
@@ -1671,13 +1691,16 @@ public final class Types {
 
     // ── ELBv2 WAF counts (admin) ─────────────────────────────────
 
+    /** Requests that matched one Count-action rule of an ALB's WebACL. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2WafCount(String webAclArn, String ruleName, long count) {}
+
     /**
-     * Response from {@code GET /_fakecloud/elbv2/waf-counts}. The exact
-     * shape of {@code counts} is service-internal and intentionally left
-     * as free-form JSON.
+     * Response from {@code GET /_fakecloud/elbv2/waf-counts}: one entry per
+     * (WebACL, Count-action rule) pair that has matched.
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record Elbv2WafCountsResponse(Object counts) {}
+    public record Elbv2WafCountsResponse(List<Elbv2WafCount> counts) {}
 
     // ── CloudFront ───────────────────────────────────────────────
 

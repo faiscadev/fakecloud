@@ -2173,3 +2173,98 @@ async fn product_rest_endpoint_page_try_it_state_round_trips() {
         .unwrap_err();
     assert!(err.into_service_error().is_not_found_exception());
 }
+
+#[tokio::test]
+async fn test_simulation_endpoint_records_binary_body_base64() {
+    use base64::prelude::*;
+
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("test-api-binary-body")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+    let api_id = api.api_id.as_ref().unwrap();
+    let integration = client
+        .create_integration()
+        .api_id(api_id)
+        .integration_type(aws_sdk_apigatewayv2::types::IntegrationType::Mock)
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_route()
+        .api_id(api_id)
+        .route_key("POST /upload")
+        .target(format!(
+            "integrations/{}",
+            integration.integration_id.as_ref().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .auto_deploy(true)
+        .send()
+        .await
+        .unwrap();
+
+    let http_client = reqwest::Client::new();
+    let binary: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x00, 0xff, 0xfe];
+    for (body, content_type) in [
+        (binary.clone(), "text/plain"),
+        (b"plain text".to_vec(), "text/plain"),
+        // A binary content type is base64-encoded even when the bytes are
+        // valid UTF-8, as in the Lambda proxy event.
+        (b"GIF89a".to_vec(), "image/gif"),
+    ] {
+        let resp = http_client
+            .post(format!("{}/prod/upload", server.endpoint()))
+            .header("content-type", content_type)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    let history: serde_json::Value = http_client
+        .get(format!(
+            "{}/_fakecloud/apigatewayv2/requests",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let requests = history["requests"].as_array().unwrap();
+    assert_eq!(requests.len(), 3, "{history}");
+    assert_eq!(requests[0]["isBase64Encoded"], true, "{history}");
+    assert_eq!(
+        BASE64_STANDARD
+            .decode(requests[0]["body"].as_str().unwrap())
+            .unwrap(),
+        binary
+    );
+    assert_eq!(requests[1]["isBase64Encoded"], false, "{history}");
+    assert_eq!(requests[1]["body"], "plain text");
+    assert_eq!(requests[2]["isBase64Encoded"], true, "{history}");
+    assert_eq!(requests[2]["body"], BASE64_STANDARD.encode(b"GIF89a"));
+
+    let typed = fakecloud_sdk::FakeCloud::new(server.endpoint())
+        .apigatewayv2()
+        .get_requests()
+        .await
+        .expect("sdk requests");
+    assert!(typed.requests[0].is_base64_encoded);
+    assert!(!typed.requests[1].is_base64_encoded);
+}

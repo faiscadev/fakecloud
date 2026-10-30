@@ -1273,9 +1273,8 @@ public final class FakeCloud {
         }
 
         /**
-         * Returns the WAFv2 association/evaluation counts the ELBv2 service
-         * has accumulated. The exact shape of {@code counts} is
-         * service-internal and intentionally returned as free-form JSON.
+         * Returns how many requests matched each WAF rule whose action is
+         * {@code Count}, per WebACL associated with an ALB.
          */
         public Elbv2WafCountsResponse getWafCounts() {
             return http.get("/_fakecloud/elbv2/waf-counts", Elbv2WafCountsResponse.class);

@@ -102,7 +102,7 @@ pub struct Elbv2Service {
     /// Shared per-(WebACL ARN, rule name) Count-action match counter.
     /// Threaded into the dataplane on `start_dataplane` so the
     /// `/_fakecloud/elbv2/waf-counts` admin endpoint can read it.
-    waf_count_metrics: Arc<parking_lot::Mutex<std::collections::BTreeMap<String, u64>>>,
+    waf_count_metrics: crate::dataplane::WafCountMetrics,
     pub region: String,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
@@ -227,9 +227,9 @@ impl Elbv2Service {
     }
 
     /// Snapshot of the WAF Count-action metrics. Keyed by
-    /// `"<webacl-arn>|<rule-name>"`. Returns an empty map when no
+    /// `(webacl_arn, rule_name)`. Returns an empty map when no
     /// Count rules have fired (or when WAF inspection is disabled).
-    pub fn waf_count_metrics_snapshot(&self) -> std::collections::BTreeMap<String, u64> {
+    pub fn waf_count_metrics_snapshot(&self) -> std::collections::BTreeMap<(String, String), u64> {
         self.waf_count_metrics.lock().clone()
     }
 

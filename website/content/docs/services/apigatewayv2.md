@@ -27,7 +27,7 @@ REST for management, path-based routing for the executed API. A deployed stage i
 
 ## Introspection
 
-- `GET /_fakecloud/apigatewayv2/requests` — list all HTTP API requests received (method, path, headers, query params, status code, integration response)
+- `GET /_fakecloud/apigatewayv2/requests`: list the HTTP API requests received (method, path, headers, query params, body, status code; the 1000 most recent); binary bodies are base64-encoded with `isBase64Encoded: true`, as in the Lambda proxy event
 - `GET /_fakecloud/apigatewayv2/connections` — list live WebSocket connections with `connectionId`, `apiId`, `stage`, `connectedAt`, `lastActiveAt`, `sourceIp`
 
 ## Cross-service delivery

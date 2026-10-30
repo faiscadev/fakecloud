@@ -194,7 +194,7 @@ Top-level client. Defaults to `http://localhost:4566`.
 | `getRules()`         | List every listener rule                                               |
 | `getTargetGroups()`  | List every target group                                                |
 | `flushAccessLogs()`  | Flush buffered ALB access-log + connection-log lines to S3 now         |
-| `getWafCounts()`     | Return current WAF association / evaluation counts                     |
+| `getWafCounts()`     | Count-action WAF rule matches per WebACL and rule                      |
 
 ### `fc.events`
 

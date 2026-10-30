@@ -1313,10 +1313,8 @@ final class Elbv2Client
     }
 
     /**
-     * Snapshot of per-association WAF evaluation counters as recorded
-     * by the ELBv2 -> WAFv2 bridge. The `counts` payload shape is
-     * server-defined; it's exposed as-is so tests can drill into it
-     * with array access.
+     * How many requests matched each WAF rule whose action is `Count`,
+     * per WebACL associated with an ALB.
      */
     public function getWafCounts(): Elbv2WafCountsResponse
     {

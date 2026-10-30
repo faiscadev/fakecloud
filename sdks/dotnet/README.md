@@ -298,7 +298,7 @@ var fc = new FakeCloudClient("http://localhost:4566"); // explicit base URL
 | `GetListenersAsync()`      | List ELBv2 listeners                                                             |
 | `GetRulesAsync()`          | List ELBv2 listener rules                                                        |
 | `FlushAccessLogsAsync()`   | Force every buffered access-log + connection-log line to flush to S3 immediately |
-| `GetWafCountsAsync()`      | Return WAFv2 association/evaluation counts the ELBv2 service has accumulated     |
+| `GetWafCountsAsync()`      | Count-action WAF rule matches per WebACL and rule                                |
 
 ### `fc.Route53`
 

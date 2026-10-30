@@ -62,6 +62,9 @@ impl Drop for BoundListener {
     }
 }
 
+/// Count of WAF Count-action matches, keyed by `(web_acl_arn, rule_name)`.
+pub type WafCountMetrics = Arc<Mutex<BTreeMap<(String, String), u64>>>;
+
 /// State shared across the supervisor and per-connection handlers.
 #[derive(Clone)]
 struct DataPlane {
@@ -76,9 +79,9 @@ struct DataPlane {
     /// flusher background task ships gzipped batches to S3 every
     /// ~60 seconds or when the buffer fills.
     access_logger: Option<Arc<AccessLogger>>,
-    /// Count of WAF Count-action matches, keyed by `WebACL ARN | rule
-    /// name`. Exposed for tests and future metrics scraping.
-    waf_count_metrics: Arc<Mutex<BTreeMap<String, u64>>>,
+    /// Count of WAF Count-action matches. Exposed for tests and future
+    /// metrics scraping.
+    waf_count_metrics: WafCountMetrics,
     /// Round-robin index per target group ARN (mod target count).
     rr_counters: Arc<Mutex<BTreeMap<String, usize>>>,
     /// Sticky-session map: `AWSALB` cookie value -> `tg_arn|target_id|target_port`.
@@ -96,7 +99,7 @@ struct DataPlane {
 pub fn spawn_dataplane(
     state: SharedElbv2State,
     waf_state: Option<SharedWafv2State>,
-    waf_count_metrics: Option<Arc<Mutex<BTreeMap<String, u64>>>>,
+    waf_count_metrics: Option<WafCountMetrics>,
 ) {
     spawn_dataplane_with_delivery(state, waf_state, None, waf_count_metrics);
 }
@@ -108,7 +111,7 @@ pub fn spawn_dataplane_with_delivery(
     state: SharedElbv2State,
     waf_state: Option<SharedWafv2State>,
     delivery_bus: Option<Arc<DeliveryBus>>,
-    waf_count_metrics: Option<Arc<Mutex<BTreeMap<String, u64>>>>,
+    waf_count_metrics: Option<WafCountMetrics>,
 ) -> Option<Arc<AccessLogger>> {
     if !dataplane_enabled() {
         debug!("ELBv2 data plane disabled via {ENV_DISABLE}");
@@ -774,7 +777,7 @@ pub(crate) fn evaluate_waf_outcome(
     headers: &HeaderMap,
     body: &[u8],
     peer_addr: SocketAddr,
-    count_metrics: Option<&Arc<Mutex<BTreeMap<String, u64>>>>,
+    count_metrics: Option<&WafCountMetrics>,
 ) -> WafEvalOutcome {
     let Some(snap) = waf_snapshot_for_lb(waf_state, lb_arn) else {
         return WafEvalOutcome::NoAcl;
@@ -810,8 +813,8 @@ pub(crate) fn evaluate_waf_outcome(
         if let Some(metrics) = count_metrics {
             let mut m = metrics.lock();
             for rule_name in &detailed.count_rules {
-                let key = format!("{}|{}", snap.web_acl.arn, rule_name);
-                *m.entry(key).or_insert(0) += 1;
+                *m.entry((snap.web_acl.arn.clone(), rule_name.clone()))
+                    .or_insert(0) += 1;
             }
         }
     }
@@ -1568,7 +1571,7 @@ mod waf_tests {
         assert_eq!(outcome, WafEvalOutcome::Count);
         assert!(waf_outcome_to_response(outcome).is_none());
         let snap = metrics.lock();
-        let key = format!("{ACL_ARN}|count-admin");
+        let key = (ACL_ARN.to_string(), "count-admin".to_string());
         assert_eq!(snap.get(&key).copied(), Some(1));
     }
 

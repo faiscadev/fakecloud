@@ -482,8 +482,12 @@ pub struct ApiRequest {
     pub path: String,
     pub headers: BTreeMap<String, String>,
     pub query_params: BTreeMap<String, String>,
+    /// Request body: UTF-8 text as-is, anything else base64-encoded with
+    /// `is_base64_encoded` set (the Lambda proxy event convention).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(default)]
+    pub is_base64_encoded: bool,
     pub timestamp: DateTime<Utc>,
     pub status_code: u16,
 }

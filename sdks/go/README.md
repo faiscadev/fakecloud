@@ -281,7 +281,7 @@ func main() {
 | `GetTargetGroups(ctx)` | List target groups |
 | `GetListeners(ctx)` | List listeners |
 | `GetRules(ctx)` | List listener rules |
-| `GetWafCounts(ctx)` | WAF allow/block counters per listener |
+| `GetWafCounts(ctx)` | Count-action WAF rule matches per WebACL and rule |
 | `FlushAccessLogs(ctx)` | Flush buffered access logs to S3 |
 
 ### Route 53 - `fc.Route53()`

@@ -779,16 +779,34 @@ type CompromisedPasswordsResponse struct {
 }
 
 // WebAuthnCredential describes a registered WebAuthn credential
-// surfaced by the introspection endpoint. `AttestationInfo` is the
-// parsed-attestation JSON object (packed format details, AAGUID,
-// certificate chain summary, signature counter) and is left as raw
-// JSON because its shape depends on the attestation format.
+// surfaced by the introspection endpoint.
 type WebAuthnCredential struct {
-	AccountID       string          `json:"account_id"`
-	PoolUser        string          `json:"pool_user"`
-	CredentialID    string          `json:"credential_id"`
-	RelyingPartyID  string          `json:"relying_party_id"`
-	AttestationInfo json.RawMessage `json:"attestation_info"`
+	AccountID               string   `json:"accountId"`
+	PoolID                  string   `json:"poolId"`
+	Username                string   `json:"username"`
+	CredentialID            string   `json:"credentialId"`
+	FriendlyCredentialName  *string  `json:"friendlyCredentialName"`
+	RelyingPartyID          string   `json:"relyingPartyId"`
+	AuthenticatorAttachment *string  `json:"authenticatorAttachment"`
+	AuthenticatorTransports []string `json:"authenticatorTransports"`
+	CreatedAt               string   `json:"createdAt"`
+	// AttestationInfo is what fakecloud parsed from the attestationObject;
+	// nil when the client registered without one.
+	AttestationInfo *WebAuthnAttestationInfo `json:"attestationInfo"`
+}
+
+// WebAuthnAttestationInfo is what fakecloud saw when it parsed a WebAuthn
+// attestationObject.
+type WebAuthnAttestationInfo struct {
+	Fmt                  string `json:"fmt"`
+	Alg                  int64  `json:"alg"`
+	SignatureLen         uint64 `json:"signatureLen"`
+	X5cChainLen          uint64 `json:"x5cChainLen"`
+	CosePublicKeyPresent bool   `json:"cosePublicKeyPresent"`
+	// SelfAttestVerified is true when the self-attestation signature was
+	// verified against the COSE public key; false when an x5c chain was
+	// accepted structurally.
+	SelfAttestVerified bool `json:"selfAttestVerified"`
 }
 
 // WebAuthnCredentialsResponse contains all registered WebAuthn credentials.
@@ -1048,9 +1066,12 @@ type ApiGatewayV2Request struct {
 	Path        string            `json:"path"`
 	Headers     map[string]string `json:"headers"`
 	QueryParams map[string]string `json:"queryParams"`
-	Body        *string           `json:"body,omitempty"`
-	Timestamp   string            `json:"timestamp"`
-	StatusCode  uint16            `json:"statusCode"`
+	// Body is UTF-8 text as-is, anything else base64-encoded (see
+	// IsBase64Encoded). nil when the request had no body.
+	Body            *string `json:"body,omitempty"`
+	IsBase64Encoded bool    `json:"isBase64Encoded"`
+	Timestamp       string  `json:"timestamp"`
+	StatusCode      uint16  `json:"statusCode"`
 }
 
 // ApiGatewayV2RequestsResponse contains all recorded HTTP API requests.
@@ -1884,10 +1905,18 @@ type CloudFrontDistributionsResponse struct {
 
 // ── ELBv2 WAF counts ───────────────────────────────────────────────
 
-// Elbv2WafCountsResponse is the pass-through payload from
-// GET /_fakecloud/elbv2/waf-counts.
+// Elbv2WafCount is how many requests matched one WAF rule whose action is
+// Count, on a WebACL associated with an ALB.
+type Elbv2WafCount struct {
+	WebACLArn string `json:"webAclArn"`
+	RuleName  string `json:"ruleName"`
+	Count     uint64 `json:"count"`
+}
+
+// Elbv2WafCountsResponse is returned by GET /_fakecloud/elbv2/waf-counts:
+// one entry per (WebACL, Count-action rule) pair that has matched.
 type Elbv2WafCountsResponse struct {
-	Counts json.RawMessage `json:"counts"`
+	Counts []Elbv2WafCount `json:"counts"`
 }
 
 // -- Service Quotas --------------------------------------------------

@@ -1180,8 +1180,12 @@ pub struct ApiGatewayV2Request {
     pub path: String,
     pub headers: std::collections::HashMap<String, String>,
     pub query_params: std::collections::HashMap<String, String>,
+    /// Request body: UTF-8 text as-is, anything else base64-encoded (see
+    /// `is_base64_encoded`). `None` when the request had no body.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(default)]
+    pub is_base64_encoded: bool,
     pub timestamp: String,
     pub status_code: u16,
 }
@@ -2309,18 +2313,42 @@ pub struct CompromisedPasswordsResponse {
 }
 
 /// One registered WebAuthn credential surfaced by
-/// `GET /_fakecloud/cognito/webauthn-credentials`. `attestation_info` is
-/// kept as raw JSON because its shape depends on the attestation format.
+/// `GET /_fakecloud/cognito/webauthn-credentials`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WebAuthnCredential {
     pub account_id: String,
-    pub pool_user: String,
+    pub pool_id: String,
+    pub username: String,
     pub credential_id: String,
+    pub friendly_credential_name: Option<String>,
     pub relying_party_id: String,
-    pub attestation_info: serde_json::Value,
+    pub authenticator_attachment: Option<String>,
+    #[serde(default)]
+    pub authenticator_transports: Vec<String>,
+    pub created_at: String,
+    /// What fakecloud parsed from the `attestationObject`; `None` when the
+    /// client registered without one.
+    pub attestation_info: Option<WebAuthnAttestationInfo>,
+}
+
+/// What fakecloud saw when it parsed a WebAuthn `attestationObject`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebAuthnAttestationInfo {
+    pub fmt: String,
+    pub alg: i64,
+    pub signature_len: u64,
+    pub x5c_chain_len: u64,
+    pub cose_public_key_present: bool,
+    /// `true` when the self-attestation signature was verified against the
+    /// COSE public key; `false` when an `x5c` chain was accepted
+    /// structurally.
+    pub self_attest_verified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WebAuthnCredentialsResponse {
     pub credentials: Vec<WebAuthnCredential>,
 }
@@ -2488,14 +2516,22 @@ pub struct KmsUsageResponse {
 
 // ── ELBv2 WAF counts (admin) ────────────────────────────────────────
 
-/// Response body for `GET /_fakecloud/elbv2/waf-counts`. The exact
-/// shape of `counts` is service-internal and intentionally left as
-/// free-form JSON so we don't have to track every new dimension in
-/// the SDK.
+/// How many requests matched one WAF rule whose action is `Count`, on a
+/// WebACL associated with an ALB.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2WafCount {
+    pub web_acl_arn: String,
+    pub rule_name: String,
+    pub count: u64,
+}
+
+/// Response body for `GET /_fakecloud/elbv2/waf-counts`: one entry per
+/// (WebACL, Count-action rule) pair that has matched at least once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Elbv2WafCountsResponse {
-    pub counts: serde_json::Value,
+    pub counts: Vec<Elbv2WafCount>,
 }
 
 // ── EC2 instances (introspection) ───────────────────────────────────

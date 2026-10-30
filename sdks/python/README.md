@@ -161,7 +161,7 @@ Pass `base_url` (default `http://localhost:4566`).
 | `get_listeners()` | List listeners |
 | `get_rules()` | List listener rules |
 | `flush_access_logs()` | Force buffered access + connection logs to S3 |
-| `get_waf_counts()` | Snapshot WAF-association counts across ALBs |
+| `get_waf_counts()` | Count-action WAF rule matches per WebACL and rule |
 
 ### `fc.route53`
 

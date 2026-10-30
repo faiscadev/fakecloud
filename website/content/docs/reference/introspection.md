@@ -56,7 +56,7 @@ curl http://localhost:4566/_fakecloud/health
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
-| `/_fakecloud/apigatewayv2/requests` | GET | List captured HTTP API requests. |
+| `/_fakecloud/apigatewayv2/requests` | GET | List captured HTTP API requests: `{"requests": [{requestId, apiId, stage, method, path, headers, queryParams, body, isBase64Encoded, timestamp, statusCode}]}`. `body` is the UTF-8 request body as-is; a binary body (non-UTF-8 bytes, or an `application/octet-stream`, `image/*`, `video/*` or `audio/*` content type) is base64-encoded with `isBase64Encoded: true`, exactly as in the Lambda proxy event. `body` is absent when the request had none. Keeps the 1000 most recent requests. |
 | `/_fakecloud/apigatewayv2/connections` | GET | List active WebSocket connections. |
 | `/_fakecloud/apigatewayv2/ws/{api_id}` | WS | WebSocket upgrade endpoint backing a deployed WebSocket API. |
 | `/_fakecloud/apigatewayv2/domain-names/{name}/mtls-info` | GET | **NEW** -- Inspect attached mTLS trust store and client-CA bundle. |
@@ -180,7 +180,7 @@ curl http://localhost:4566/_fakecloud/health
 | `/_fakecloud/cognito/authorization-codes` | POST | Mint an OAuth2 authorization code (for hosted-UI flow simulation). |
 | `/_fakecloud/cognito/compromised-passwords` | POST | **NEW** -- Mark a password as compromised so the next AdminInitiateAuth surfaces the advisory. |
 | `/_fakecloud/cognito/software-token` | POST | Give a user a verified authenticator-app (TOTP) secret. Body `{"userPoolId", "username", "secretCode"}` (base32, like `AssociateSoftwareToken`'s `SecretCode`). Returns `{"enrolled": true}`, `400` for a secret that is not base32, `404` for an unknown user. |
-| `/_fakecloud/cognito/webauthn-credentials` | GET | **NEW** -- List registered WebAuthn credentials with their attestation details. |
+| `/_fakecloud/cognito/webauthn-credentials` | GET | **NEW** -- List registered WebAuthn credentials: `{"credentials": [{accountId, poolId, username, credentialId, friendlyCredentialName, relyingPartyId, authenticatorAttachment, authenticatorTransports, createdAt, attestationInfo}]}`. `attestationInfo` is `{fmt, alg, signatureLen, x5cChainLen, cosePublicKeyPresent, selfAttestVerified}` (`selfAttestVerified` is `false` when an `x5c` chain was accepted structurally), or `null` when the client registered without an `attestationObject`. |
 | `/_fakecloud/cognito/pretokengen/invocations` | GET | **NEW** -- List PreTokenGeneration Lambda trigger invocations with parsed claim overrides, suppressed claims, and group overrides. |
 
 ## DynamoDB
@@ -239,7 +239,7 @@ curl http://localhost:4566/_fakecloud/health
 | `/_fakecloud/elbv2/listeners` | GET | List listeners across load balancers. |
 | `/_fakecloud/elbv2/rules` | GET | List listener rules. |
 | `/_fakecloud/elbv2/access-logs/flush` | POST | Force-flush buffered access logs to S3. |
-| `/_fakecloud/elbv2/waf-counts` | GET | **NEW** -- Per-target-group WAF allow/block counters. |
+| `/_fakecloud/elbv2/waf-counts` | GET | **NEW** -- How many ALB requests matched each WAF rule whose action is `Count`: `{"counts": [{webAclArn, ruleName, count}]}`, one entry per (WebACL, rule) pair that has matched at least once. Terminal actions (Allow/Block/CAPTCHA/Challenge) are not counted here. |
 
 ## EventBridge
 

@@ -673,19 +673,36 @@ export interface CompromisedPasswordsResponse {
   added: number;
 }
 
+/** What fakecloud saw when it parsed a WebAuthn `attestationObject`. */
+export interface WebAuthnAttestationInfo {
+  fmt: string;
+  alg: number;
+  signatureLen: number;
+  x5cChainLen: number;
+  cosePublicKeyPresent: boolean;
+  /**
+   * `true` when the self-attestation signature was verified against the
+   * COSE public key; `false` when an `x5c` chain was accepted structurally.
+   */
+  selfAttestVerified: boolean;
+}
+
 /**
  * Registered WebAuthn credential from
  * `GET /_fakecloud/cognito/webauthn-credentials`. `attestationInfo` is
- * the parsed-attestation JSON (packed format details, AAGUID,
- * certificate chain summary, signature counter); its shape depends on
- * the attestation format so it is left untyped.
+ * `null` when the client registered without an `attestationObject`.
  */
 export interface WebAuthnCredential {
-  account_id: string;
-  pool_user: string;
-  credential_id: string;
-  relying_party_id: string;
-  attestation_info: unknown;
+  accountId: string;
+  poolId: string;
+  username: string;
+  credentialId: string;
+  friendlyCredentialName: string | null;
+  relyingPartyId: string;
+  authenticatorAttachment: string | null;
+  authenticatorTransports: string[];
+  createdAt: string;
+  attestationInfo: WebAuthnAttestationInfo | null;
 }
 
 export interface WebAuthnCredentialsResponse {
@@ -921,7 +938,9 @@ export interface ApiGatewayV2Request {
   path: string;
   headers: Record<string, string>;
   queryParams: Record<string, string>;
+  /** UTF-8 text as-is, anything else base64-encoded (see `isBase64Encoded`). */
   body?: string | null;
+  isBase64Encoded: boolean;
   timestamp: string;
   statusCode: number;
 }
@@ -1780,9 +1799,19 @@ export interface CloudFrontDistributionStatusRequest {
 
 // ── ELBv2 WAF counts ───────────────────────────────────────────────
 
-/** Pass-through response from `GET /_fakecloud/elbv2/waf-counts`. */
+/** Requests that matched one Count-action rule of an ALB's WebACL. */
+export interface Elbv2WafCount {
+  webAclArn: string;
+  ruleName: string;
+  count: number;
+}
+
+/**
+ * Response from `GET /_fakecloud/elbv2/waf-counts`: one entry per
+ * (WebACL, Count-action rule) pair that has matched.
+ */
 export interface Elbv2WafCountsResponse {
-  counts: unknown;
+  counts: Elbv2WafCount[];
 }
 
 // -- Service Quotas --------------------------------------------------
