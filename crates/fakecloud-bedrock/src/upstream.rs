@@ -1355,6 +1355,12 @@ pub(crate) async fn converse_upstream(
     cfg: &UpstreamConfig,
     request_metadata: Option<&RequestMetadata>,
 ) -> Result<AwsResponse, AwsServiceError> {
+    // Explicit simulation overrides keep working with an upstream configured,
+    // as on InvokeModel and ConverseStream. The offline path also handles
+    // fault injection.
+    if crate::prompt::resolve_override(state, req, model_id, body).is_some() {
+        return crate::converse::converse(state, req, model_id, body, request_metadata);
+    }
     if let Some(fault) = crate::faults::take_matching_fault(state, req, model_id, "Converse") {
         crate::faults::record_faulted_invocation(
             state,
@@ -1531,35 +1537,16 @@ pub(crate) async fn converse_stream_upstream(
     cfg: &UpstreamConfig,
     request_metadata: Option<&RequestMetadata>,
 ) -> Result<AwsResponse, AwsServiceError> {
-    // A configured simulation override wins over the live upstream.
-    if let Some(custom) = crate::prompt::resolve_override(state, req, model_id, body) {
-        let text = crate::streaming::override_text(model_id, custom);
-        let in_t = crate::prompt::count_tokens(&crate::prompt::extract_prompt_text(model_id, body));
-        let out_t = crate::prompt::count_tokens(&text);
-        let output = crate::converse::response_json(
-            &text,
-            None,
-            stop_converse(StopKind::EndTurn),
-            in_t,
-            out_t,
-        );
-        let deltas = vec![text];
-        let event_body = crate::streaming::build_converse_stream_from_deltas(
-            &deltas,
-            StopKind::EndTurn,
-            in_t,
-            out_t,
-        );
-        crate::invoke::record_invocation(
+    // A configured simulation override wins over the live upstream: reply
+    // exactly as offline ConverseStream (and Converse) would.
+    if crate::prompt::resolve_override(state, req, model_id, body).is_some() {
+        return Ok(crate::converse::converse_stream_offline(
             state,
             req,
             model_id,
             body,
-            &output,
-            None,
             request_metadata,
-        );
-        return Ok(eventstream_response(event_body));
+        ));
     }
 
     let input = parse_body(body)?;

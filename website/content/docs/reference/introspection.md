@@ -6,7 +6,7 @@ weight = 3
 
 fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs asynchronously (TTL expiration, scheduled rotation, lifecycle, etc.) and for asserting on state from within tests. The first-party SDKs wrap these into ergonomic helpers -- see [SDK setup](/docs/getting-started/sdk-setup/) -- but the raw endpoints are documented here as the source of truth.
 
-This page lists every `/_fakecloud/*` endpoint shipped today: 131 routes across 36 service areas. Endpoints marked **NEW** are recent additions.
+This page lists every `/_fakecloud/*` endpoint shipped today: 132 routes across 36 service areas. Endpoints marked **NEW** are recent additions.
 
 ### JSON document fields
 
@@ -475,6 +475,7 @@ See [Service Quotas](/docs/services/servicequotas/#introspection) for semantics.
 | -------- | ------ | ----------- |
 | `/_fakecloud/stepfunctions/executions` | GET | List the default account's executions, newest first: `executionArn`, `stateMachineArn`, `name`, `status`, `input`, `output`, `startDate`, `stopDate`. `input` / `output` are JSON values (see [JSON document fields](#json-document-fields)). Per-state history is not included; read it with the `GetExecutionHistory` API. |
 | `/_fakecloud/stepfunctions/sync-executions` | GET | EXPRESS executions started with `StartSyncExecution`: the fields above (`startedAt` / `stoppedAt` instead of `startDate` / `stopDate`) plus `durationMs` and `billingDetails`. |
+| `/_fakecloud/stepfunctions/execution-tree/{arn}` | GET | The execution tree rooted at an execution (URL-encoded ARN): `rootArn` plus a `tree` of `{arn, stateMachineArn, status, startedAt, stoppedAt, children}` nodes for the child executions started via `states:startExecution`. `404` for an unknown execution. |
 | `/_fakecloud/stepfunctions/enqueue-activity-task` | POST | Enqueue an activity task for a worker to pick up. |
 
 ## WAFv2

@@ -1741,22 +1741,20 @@ impl AwsService for BedrockService {
                         .await;
                     }
                 }
-                let response_text =
-                    crate::streaming::get_response_text(&self.state, &req, &model_id, &req.body);
+                // Resolve the override once: the stream carries its text and
+                // introspection records the body InvokeModel returns for the
+                // same call, so both read alike.
+                let custom =
+                    crate::prompt::resolve_override(&self.state, &req, &model_id, &req.body);
+                let response_text = match &custom {
+                    Some(c) => crate::streaming::override_text(&model_id, c.clone()),
+                    None => crate::streaming::fallback_text(&model_id, &req.body),
+                };
                 let body =
                     crate::streaming::build_invoke_stream_response(&model_id, &response_text);
-
-                // Record the body InvokeModel returns for the same call, so
-                // introspection reads alike for both.
                 let input: serde_json::Value =
                     serde_json::from_slice(&req.body).unwrap_or_default();
-                let output = crate::invoke::offline_response_body(
-                    &self.state,
-                    &req,
-                    &model_id,
-                    &req.body,
-                    &input,
-                );
+                let output = crate::invoke::offline_response_body(&model_id, custom, &input);
                 crate::invoke::record_invocation(
                     &self.state,
                     &req,
@@ -1806,35 +1804,13 @@ impl AwsService for BedrockService {
                     )
                     .await;
                 }
-                // The same reply the non-streaming Converse path builds for
-                // identical input (maxTokens truncation, forced toolUse, stop
-                // reason, usage), streamed as events.
-                let reply = crate::converse::offline_reply(&self.state, &req, &model_id, &req.body);
-                let body = crate::streaming::build_converse_stream_response(
-                    &reply.text,
-                    reply.stop_reason,
-                    reply.forced_tool.as_deref(),
-                    reply.input_tokens,
-                    reply.output_tokens,
-                );
-
-                // Record the Converse body the stream amounts to.
-                crate::invoke::record_invocation(
+                Ok(crate::converse::converse_stream_offline(
                     &self.state,
                     &req,
                     &model_id,
                     &req.body,
-                    &reply.response_json(),
-                    None,
                     metadata.as_ref(),
-                );
-
-                Ok(AwsResponse {
-                    status: http::StatusCode::OK,
-                    content_type: "application/vnd.amazon.eventstream".to_string(),
-                    body: bytes::Bytes::from(body).into(),
-                    headers: http::HeaderMap::new(),
-                })
+                ))
             }
             // Async invoke
             "StartAsyncInvoke" => crate::async_invoke::start_async_invoke(&self.state, &req, &body),

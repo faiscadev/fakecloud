@@ -129,6 +129,42 @@ pub(crate) fn offline_reply(
     }
 }
 
+/// Offline ConverseStream: the same reply the non-streaming Converse path
+/// builds for identical input (maxTokens truncation, forced toolUse, stop
+/// reason, usage), streamed as events and recorded as the Converse body it
+/// amounts to. Fault injection is the caller's job.
+pub(crate) fn converse_stream_offline(
+    state: &SharedBedrockState,
+    req: &AwsRequest,
+    model_id: &str,
+    body: &[u8],
+    request_metadata: Option<&crate::runtime_validation::RequestMetadata>,
+) -> AwsResponse {
+    let reply = offline_reply(state, req, model_id, body);
+    let event_body = crate::streaming::build_converse_stream_response(
+        &reply.text,
+        reply.stop_reason,
+        reply.forced_tool.as_deref(),
+        reply.input_tokens,
+        reply.output_tokens,
+    );
+    crate::invoke::record_invocation(
+        state,
+        req,
+        model_id,
+        body,
+        &reply.response_json(),
+        None,
+        request_metadata,
+    );
+    AwsResponse {
+        status: StatusCode::OK,
+        content_type: "application/vnd.amazon.eventstream".to_string(),
+        body: bytes::Bytes::from(event_body).into(),
+        headers: http::HeaderMap::new(),
+    }
+}
+
 /// The Converse response body for an offline reply: the text block, an
 /// optional forced `toolUse` block, the stop reason and usage. ConverseStream
 /// records the same body for introspection, so a streamed call reads back
@@ -307,6 +343,42 @@ mod tests {
         assert_eq!(v["output"]["message"]["role"], "assistant");
         assert_eq!(v["stopReason"], "end_turn");
         assert!(v["usage"]["totalTokens"].is_u64());
+    }
+
+    #[test]
+    fn converse_extracts_text_from_anthropic_shaped_override() {
+        let s = shared();
+        s.write().default_mut().custom_responses.insert(
+            "m".to_string(),
+            r#"{"content":[{"text":"from anthropic"}]}"#.to_string(),
+        );
+        let body = br#"{"messages":[{"content":[{"text":"hi"}]}]}"#;
+        let resp = converse(&s, &req(), "m", body, None).unwrap();
+        let v: Value =
+            serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
+        assert_eq!(
+            v["output"]["message"]["content"][0]["text"],
+            "from anthropic"
+        );
+    }
+
+    #[test]
+    fn converse_stream_records_the_converse_body() {
+        let s = shared();
+        let body = br#"{"messages":[{"content":[{"text":"hi there"}]}],
+            "inferenceConfig":{"maxTokens":2},
+            "toolConfig":{"tools":[{"toolSpec":{"name":"lookup"}}],"toolChoice":{"any":{}}}}"#;
+        let converse_resp = converse(&s, &req(), "m", body, None).unwrap();
+        let converse_body: Value =
+            serde_json::from_str(std::str::from_utf8(converse_resp.body.expect_bytes()).unwrap())
+                .unwrap();
+        converse_stream_offline(&s, &req(), "m", body, None);
+        let accts = s.read();
+        let invs = &accts.default_ref().invocations;
+        assert_eq!(invs.len(), 2);
+        let streamed: Value = serde_json::from_str(&invs[1].output).unwrap();
+        assert_eq!(streamed, converse_body);
+        assert_eq!(streamed["stopReason"], "tool_use");
     }
 
     #[test]
