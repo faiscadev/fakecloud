@@ -409,6 +409,8 @@ def test_events_history(fc: FakeCloudSync, fakecloud_url: str) -> None:
     assert len(result.events) >= 1
     event = next(e for e in result.events if e.source == "sdk.test")
     assert event.detail_type == "TestEvent"
+    # The Detail document comes back structured, not as an escaped string.
+    assert event.detail == {"key": "value"}
     assert event.bus_name == "default"
 
 
@@ -533,6 +535,58 @@ def test_bedrock_invocation_keeps_request_metadata_keys_verbatim() -> None:
         {"modelId": "m", "input": "", "output": "", "timestamp": "t", "error": None}
     )
     assert bare.request_metadata is None
+
+
+def test_json_document_fields_keep_keys_verbatim() -> None:
+    from fakecloud.types import (
+        BedrockInvocation,
+        EventBridgeEvent,
+        LambdaInvocation,
+        StepFunctionsExecution,
+    )
+
+    inv = BedrockInvocation.from_dict(
+        {
+            "modelId": "m",
+            "input": {"inputText": "hi"},
+            "output": {"results": [{"outputText": "yo"}]},
+            "timestamp": "t",
+            "error": None,
+        }
+    )
+    # JSON documents are caller data: no snake_casing of their keys.
+    assert inv.input == {"inputText": "hi"}
+    assert inv.output == {"results": [{"outputText": "yo"}]}
+
+    evt = EventBridgeEvent.from_dict(
+        {
+            "eventId": "e",
+            "source": "s",
+            "detailType": "d",
+            "detail": {"orderId": 1},
+            "busName": "default",
+            "timestamp": "t",
+        }
+    )
+    assert evt.detail == {"orderId": 1}
+
+    lam = LambdaInvocation.from_dict(
+        {"functionArn": "f", "payload": "not json", "source": "s", "timestamp": "t"}
+    )
+    assert lam.payload == "not json"
+
+    ex = StepFunctionsExecution.from_dict(
+        {
+            "executionArn": "a",
+            "stateMachineArn": "sm",
+            "name": "n",
+            "status": "SUCCEEDED",
+            "startDate": "t",
+            "input": {"userId": 7},
+        }
+    )
+    assert ex.input == {"userId": 7}
+    assert ex.output is None
 
 
 def test_inbound_email_request_to_dict() -> None:

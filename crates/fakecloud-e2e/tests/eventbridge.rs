@@ -1059,6 +1059,132 @@ async fn eb_update_event_bus() {
     assert_eq!(desc.description().unwrap(), "new desc");
 }
 
+/// `/_fakecloud/events/history` deliveries and `/_fakecloud/lambda/invocations`
+/// return the delivered JSON payloads structured; a payload that is not JSON
+/// (an InputTransformer template rendering plain text) comes back as a string.
+#[tokio::test]
+async fn eventbridge_introspection_payloads_are_structured_json() {
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+    let logs = server.logs_client().await;
+
+    logs.create_log_group()
+        .log_group_name("/eb/structured")
+        .send()
+        .await
+        .unwrap();
+    let fn_arn = "arn:aws:lambda:us-east-1:123456789012:function:eb-structured";
+    let text_fn_arn = "arn:aws:lambda:us-east-1:123456789012:function:eb-text";
+    let log_arn = "arn:aws:logs:us-east-1:123456789012:log-group:/eb/structured";
+
+    client
+        .put_rule()
+        .name("structured-rule")
+        .event_pattern(r#"{"source": ["structured.test"]}"#)
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_targets()
+        .rule("structured-rule")
+        .targets(Target::builder().id("fn").arn(fn_arn).build().unwrap())
+        .targets(Target::builder().id("logs").arn(log_arn).build().unwrap())
+        .targets(
+            Target::builder()
+                .id("text")
+                .arn(text_fn_arn)
+                .input_transformer(
+                    aws_sdk_eventbridge::types::InputTransformer::builder()
+                        .input_paths_map("id", "$.detail.orderId")
+                        .input_template("order <id> placed")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_events()
+        .entries(
+            PutEventsRequestEntry::builder()
+                .source("structured.test")
+                .detail_type("OrderPlaced")
+                .detail(r#"{"orderId": "42", "items": [1, 2]}"#)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let history: serde_json::Value =
+        reqwest::get(format!("{}/_fakecloud/events/history", server.endpoint()))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    let evt = history["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["source"] == "structured.test")
+        .expect("event recorded");
+    assert_eq!(
+        evt["detail"],
+        serde_json::json!({"orderId": "42", "items": [1, 2]})
+    );
+
+    let lambda = history["deliveries"]["lambda"].as_array().unwrap();
+    let to_fn = lambda
+        .iter()
+        .find(|d| d["functionArn"] == fn_arn)
+        .expect("lambda delivery recorded");
+    assert_eq!(to_fn["payload"]["detail-type"], "OrderPlaced");
+    assert_eq!(to_fn["payload"]["detail"]["orderId"], "42");
+    let to_text = lambda
+        .iter()
+        .find(|d| d["functionArn"] == text_fn_arn)
+        .expect("transformed lambda delivery recorded");
+    assert_eq!(to_text["payload"], "order 42 placed");
+
+    let to_logs = history["deliveries"]["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["logGroupArn"] == log_arn)
+        .expect("logs delivery recorded");
+    assert_eq!(
+        to_logs["payload"]["detail"]["items"],
+        serde_json::json!([1, 2])
+    );
+
+    let invocations: serde_json::Value = reqwest::get(format!(
+        "{}/_fakecloud/lambda/invocations",
+        server.endpoint()
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let invs = invocations["invocations"].as_array().unwrap();
+    let inv = invs
+        .iter()
+        .find(|i| i["functionArn"] == fn_arn)
+        .expect("lambda invocation recorded");
+    assert_eq!(inv["source"], "aws:events");
+    assert_eq!(inv["payload"]["detail"]["orderId"], "42");
+    let text_inv = invs
+        .iter()
+        .find(|i| i["functionArn"] == text_fn_arn)
+        .expect("transformed lambda invocation recorded");
+    assert_eq!(text_inv["payload"], "order 42 placed");
+}
+
 #[tokio::test]
 async fn eventbridge_introspection_history() {
     let server = TestServer::start().await;
@@ -1080,7 +1206,8 @@ async fn eventbridge_introspection_history() {
     let evt = &events[events.len() - 1];
     assert_eq!(evt["source"], "test.source");
     assert_eq!(evt["detailType"], "TestDetail");
-    assert_eq!(evt["detail"], r#"{"key": "value"}"#);
+    // The Detail document is returned structured, not as an escaped string.
+    assert_eq!(evt["detail"], serde_json::json!({"key": "value"}));
     assert_eq!(evt["busName"], "default");
     assert!(!evt["eventId"].as_str().unwrap().is_empty());
     assert!(!evt["timestamp"].as_str().unwrap().is_empty());

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Xunit;
 
 namespace FakeCloud.Tests;
@@ -58,5 +59,26 @@ public class ClientUnitTests
 
         var https = new FakeCloudClient("https://fakecloud.example");
         Assert.StartsWith("wss://fakecloud.example/", https.ApiGatewayV2.WsUrl("api-1"));
+    }
+
+    [Fact]
+    public void JsonDocumentFieldsDeserializeAsStructuredValues()
+    {
+        var inv = JsonSerializer.Deserialize<BedrockInvocation>(
+            """{"modelId":"m","input":{"inputText":"hi"},"output":"","timestamp":"t","error":null}""",
+            HttpTransport.JsonOptions)!;
+        Assert.Equal("hi", inv.Input!.Value.GetProperty("inputText").GetString());
+        Assert.Equal(JsonValueKind.String, inv.Output!.Value.ValueKind);
+
+        var evt = JsonSerializer.Deserialize<EventBridgeEvent>(
+            """{"eventId":"e","source":"s","detailType":"d","detail":{"orderId":42},"busName":"default","timestamp":"t"}""",
+            HttpTransport.JsonOptions)!;
+        Assert.Equal(42, evt.Detail!.Value.GetProperty("orderId").GetInt32());
+
+        var exec = JsonSerializer.Deserialize<StepFunctionsExecution>(
+            """{"executionArn":"a","stateMachineArn":"sm","name":"n","status":"RUNNING","startDate":"t","input":{"k":1}}""",
+            HttpTransport.JsonOptions)!;
+        Assert.Equal(1, exec.Input!.Value.GetProperty("k").GetInt32());
+        Assert.Null(exec.Output);
     }
 }

@@ -591,7 +591,7 @@ describe("eventbridge", () => {
     const event = result.events.find((e) => e.source === "test.source");
     expect(event).toBeDefined();
     expect(event!.detailType).toBe("TestEvent");
-    expect(JSON.parse(event!.detail)).toEqual({ key: "value" });
+    expect(event!.detail).toEqual({ key: "value" });
   });
 });
 

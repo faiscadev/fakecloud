@@ -30,7 +30,7 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 
 ## Introspection
 
-- `GET /_fakecloud/stepfunctions/executions` — list all executions with status, input, output, and timestamps
+- `GET /_fakecloud/stepfunctions/executions` — list all executions with status, input, output (both as structured JSON), and timestamps
 - `POST /_fakecloud/stepfunctions/enqueue-activity-task` — directly insert a pending activity task (skipping a state-machine execution). Body: `{"activityArn": "...", "input": "{}", "heartbeatSeconds": 60, "timeoutSeconds": 300}`. Returns `{"taskToken": "..."}`. Useful for testing worker pool clients without authoring a full ASL workflow.
 
 ## Cross-service delivery

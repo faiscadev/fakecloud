@@ -404,8 +404,12 @@ func TestClassifierBranchesOnSpamVsHam(t *testing.T) {
     if len(invs.Invocations) != 2 {
         t.Fatalf("expected 2 invocations, got %d", len(invs.Invocations))
     }
-    if !strings.Contains(invs.Invocations[0].Output, "ham") ||
-        !strings.Contains(invs.Invocations[1].Output, "spam") {
+    // Output is the model's response body, decoded from JSON.
+    label := func(i int) interface{} {
+        out, _ := invs.Invocations[i].Output.(map[string]interface{})
+        return out["label"]
+    }
+    if label(0) != "ham" || label(1) != "spam" {
         t.Errorf("routing broken")
     }
 }

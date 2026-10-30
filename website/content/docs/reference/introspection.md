@@ -8,6 +8,16 @@ fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs 
 
 This page lists every `/_fakecloud/*` endpoint shipped today: 120 routes across 35 service areas. Endpoints marked **NEW** are recent additions.
 
+### JSON document fields
+
+Fields that hold a JSON document (Lambda `payload`, EventBridge `detail` and delivery `payload`, Step Functions `input` / `output`, Bedrock `input` / `output`) are returned as structured JSON, so tests assert on them directly instead of parsing an escaped string first:
+
+```json
+{"eventId": "...", "detail": {"orderId": "42"}, "busName": "default"}
+```
+
+A stored value that is not valid JSON is returned unchanged as a JSON string.
+
 ## Health and reset
 
 | Endpoint | Method | Description |
@@ -78,7 +88,7 @@ curl http://localhost:4566/_fakecloud/health
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
-| `/_fakecloud/bedrock/invocations` | GET | List model invocations captured by the runtime. |
+| `/_fakecloud/bedrock/invocations` | GET | List model invocations captured by the runtime: `modelId`, `input` (the request body), `output`, `timestamp`, `error`, `requestMetadata`. `output` is the body the equivalent non-streaming call returns (provider JSON for InvokeModel and InvokeModelWithResponseStream, the Converse response for Converse and ConverseStream), so a streamed call reads back in the same shape; it is `""` for faulted calls. `input` and `output` are returned as JSON values, not escaped strings (see [JSON document fields](#json-document-fields)). |
 | `/_fakecloud/bedrock/models/{model_id}/response` | POST | Set a single canned response for a model. |
 | `/_fakecloud/bedrock/models/{model_id}/responses` | POST | Set prompt-conditional response rules. |
 | `/_fakecloud/bedrock/faults` | POST | Inject faults (throttle, timeout, error) into the next N invocations. |
@@ -245,7 +255,7 @@ curl http://localhost:4566/_fakecloud/health
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
-| `/_fakecloud/events/history` | GET | All events seen plus per-rule delivery results. |
+| `/_fakecloud/events/history` | GET | Every event put on a bus (`eventId`, `source`, `detailType`, `detail`, `busName`, `timestamp`) plus the payloads delivered to Lambda (`deliveries.lambda`) and CloudWatch Logs (`deliveries.logs`) targets. `detail` and each delivery `payload` are JSON values (see [JSON document fields](#json-document-fields)). |
 | `/_fakecloud/events/fire-rule` | POST | Manually fire a rule against the current bus state. |
 
 ## Firehose
@@ -314,7 +324,7 @@ and accepts, or is created through `CreateAccount`. Naming an
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
-| `/_fakecloud/lambda/invocations` | GET | All recorded invocations (function, payload, response, duration). |
+| `/_fakecloud/lambda/invocations` | GET | Invocations delivered to Lambda by other services (SQS, Kinesis, DynamoDB Streams, SNS, EventBridge, S3, SES, ...): `functionArn`, `payload` (the event sent to the function, as a JSON value; see [JSON document fields](#json-document-fields)), `source` (e.g. `aws:sqs`), `timestamp`. The function's response and duration are not recorded. |
 | `/_fakecloud/lambda/warm-containers` | GET | Current warm execution environments. |
 | `/_fakecloud/lambda/{function_name}/evict-container` | POST | Force a cold start by evicting warm containers. |
 | `/_fakecloud/lambda/layer-content/{account_id}/{layer_name}/{file}` | GET | Serve a layer zip (used by the invoke runtime to mount `/opt`). Optional `?region=` names the layer's region (default: the server's region, then any region of the account). |
@@ -463,7 +473,8 @@ See [Service Quotas](/docs/services/servicequotas/#introspection) for semantics.
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
-| `/_fakecloud/stepfunctions/executions` | GET | List state-machine executions and step history. |
+| `/_fakecloud/stepfunctions/executions` | GET | List the default account's executions, newest first: `executionArn`, `stateMachineArn`, `name`, `status`, `input`, `output`, `startDate`, `stopDate`. `input` / `output` are JSON values (see [JSON document fields](#json-document-fields)). Per-state history is not included; read it with the `GetExecutionHistory` API. |
+| `/_fakecloud/stepfunctions/sync-executions` | GET | EXPRESS executions started with `StartSyncExecution`: the fields above (`startedAt` / `stoppedAt` instead of `startDate` / `stopDate`) plus `durationMs` and `billingDetails`. |
 | `/_fakecloud/stepfunctions/enqueue-activity-task` | POST | Enqueue an activity task for a worker to pick up. |
 
 ## WAFv2

@@ -345,6 +345,8 @@ class E2ETest {
                 .findFirst()
                 .orElseThrow();
         assertEquals("TestEvent", event.detailType());
+        // The Detail document comes back structured, not as an escaped string.
+        assertEquals("value", event.detail().get("key").asText());
     }
 
     // ── RDS ────────────────────────────────────────────────────────

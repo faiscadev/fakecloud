@@ -136,11 +136,12 @@ final class ClientTest extends TestCase
     {
         $resp = LambdaInvocationsResponse::fromArray([
             'invocations' => [
-                ['functionArn' => 'arn:aws:lambda:us-east-1:123:function:my-fn', 'payload' => '{}', 'source' => 'sdk', 'timestamp' => '2026-01-01T00:00:00Z'],
+                ['functionArn' => 'arn:aws:lambda:us-east-1:123:function:my-fn', 'payload' => ['orderId' => 42], 'source' => 'sdk', 'timestamp' => '2026-01-01T00:00:00Z'],
             ],
         ]);
         $this->assertCount(1, $resp->invocations);
         $this->assertStringEndsWith(':my-fn', $resp->invocations[0]->functionArn);
+        $this->assertSame(['orderId' => 42], $resp->invocations[0]->payload);
     }
 
     public function testWarmContainersResponseFromArray(): void
@@ -228,11 +229,12 @@ final class ClientTest extends TestCase
     {
         $resp = EventHistoryResponse::fromArray([
             'events' => [
-                ['eventId' => 'e1', 'source' => 'my.app', 'detailType' => 'OrderPlaced', 'detail' => '{}', 'busName' => 'default', 'timestamp' => '2026-01-01T00:00:00Z'],
+                ['eventId' => 'e1', 'source' => 'my.app', 'detailType' => 'OrderPlaced', 'detail' => ['orderId' => '1'], 'busName' => 'default', 'timestamp' => '2026-01-01T00:00:00Z'],
             ],
             'deliveries' => ['lambda' => [], 'logs' => []],
         ]);
         $this->assertCount(1, $resp->events);
+        $this->assertSame(['orderId' => '1'], $resp->events[0]->detail);
         $this->assertEmpty($resp->deliveries->lambda);
     }
 

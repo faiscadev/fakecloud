@@ -1746,13 +1746,23 @@ impl AwsService for BedrockService {
                 let body =
                     crate::streaming::build_invoke_stream_response(&model_id, &response_text);
 
-                // Record invocation
+                // Record the InvokeModel-shaped body the streamed text
+                // amounts to, so introspection reads alike for both calls.
+                let input: serde_json::Value =
+                    serde_json::from_slice(&req.body).unwrap_or_default();
+                let output = crate::upstream::provider_response_for_text(
+                    &model_id,
+                    &response_text,
+                    crate::upstream::StopKind::EndTurn,
+                    crate::prompt::count_tokens(&crate::invoke::extract_input_text(&input)),
+                    crate::prompt::count_tokens(&response_text),
+                );
                 crate::invoke::record_invocation(
                     &self.state,
                     &req,
                     &model_id,
                     &req.body,
-                    &response_text,
+                    &output,
                     None,
                     metadata.as_ref(),
                 );
@@ -1840,13 +1850,20 @@ impl AwsService for BedrockService {
                     output_tokens,
                 );
 
-                // Record invocation
+                // Record the Converse-shaped body the stream amounts to.
+                let output = crate::converse::response_json(
+                    &response_text,
+                    forced_tool.as_deref(),
+                    stop_reason,
+                    input_tokens,
+                    output_tokens,
+                );
                 crate::invoke::record_invocation(
                     &self.state,
                     &req,
                     &model_id,
                     &req.body,
-                    &response_text,
+                    &output,
                     None,
                     metadata.as_ref(),
                 );

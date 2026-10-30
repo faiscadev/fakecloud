@@ -68,7 +68,9 @@ pub struct RdsInstancesResponse {
 #[serde(rename_all = "camelCase")]
 pub struct LambdaInvocation {
     pub function_arn: String,
-    pub payload: String,
+    /// The event payload: structured JSON when it parses as JSON, else the
+    /// raw string.
+    pub payload: serde_json::Value,
     pub source: String,
     pub timestamp: String,
 }
@@ -565,7 +567,9 @@ pub struct EventBridgeEvent {
     pub event_id: String,
     pub source: String,
     pub detail_type: String,
-    pub detail: String,
+    /// The event's `Detail` document: structured JSON when it parses as
+    /// JSON, else the raw string.
+    pub detail: serde_json::Value,
     pub bus_name: String,
     pub timestamp: String,
 }
@@ -574,7 +578,9 @@ pub struct EventBridgeEvent {
 #[serde(rename_all = "camelCase")]
 pub struct EventBridgeLambdaDelivery {
     pub function_arn: String,
-    pub payload: String,
+    /// The delivered payload: structured JSON when it parses as JSON, else
+    /// the raw string.
+    pub payload: serde_json::Value,
     pub timestamp: String,
 }
 
@@ -582,7 +588,9 @@ pub struct EventBridgeLambdaDelivery {
 #[serde(rename_all = "camelCase")]
 pub struct EventBridgeLogDelivery {
     pub log_group_arn: String,
-    pub payload: String,
+    /// The delivered payload: structured JSON when it parses as JSON, else
+    /// the raw string.
+    pub payload: serde_json::Value,
     pub timestamp: String,
 }
 
@@ -917,10 +925,14 @@ pub struct StepFunctionsExecution {
     pub state_machine_arn: String,
     pub name: String,
     pub status: String,
+    /// Execution input: structured JSON when it parses as JSON, else the
+    /// raw string.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub input: Option<String>,
+    pub input: Option<serde_json::Value>,
+    /// Execution output: structured JSON when it parses as JSON, else the
+    /// raw string.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
+    pub output: Option<serde_json::Value>,
     pub start_date: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_date: Option<String>,
@@ -946,10 +958,14 @@ pub struct StepFunctionsSyncExecution {
     pub state_machine_arn: String,
     pub name: String,
     pub status: String,
+    /// Execution input: structured JSON when it parses as JSON, else the
+    /// raw string.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub input: Option<String>,
+    pub input: Option<serde_json::Value>,
+    /// Execution output: structured JSON when it parses as JSON, else the
+    /// raw string.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
+    pub output: Option<serde_json::Value>,
     pub started_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stopped_at: Option<String>,
@@ -1198,8 +1214,14 @@ pub struct ApiGatewayV2RequestsResponse {
 #[serde(rename_all = "camelCase")]
 pub struct BedrockInvocation {
     pub model_id: String,
-    pub input: String,
-    pub output: String,
+    /// The request body: structured JSON when it parses as JSON, else the
+    /// raw string.
+    pub input: serde_json::Value,
+    /// The response the equivalent non-streaming call returns (provider
+    /// JSON for InvokeModel / InvokeModelWithResponseStream, the Converse
+    /// response for Converse / ConverseStream), structured when it parses
+    /// as JSON. Empty string for faulted calls.
+    pub output: serde_json::Value,
     pub timestamp: String,
     /// Error detail for faulted calls, or `None` on success.
     #[serde(default)]

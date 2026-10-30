@@ -420,8 +420,9 @@ classify('buy now cheap pills');
 
 $invocations = $fc->bedrock()->getInvocations()->invocations;
 assert(count($invocations) === 2);
-assert(str_contains($invocations[0]->output, 'ham'));
-assert(str_contains($invocations[1]->output, 'spam'));
+// `output` is the model's response body, decoded from JSON.
+assert($invocations[0]->output['label'] === 'ham');
+assert($invocations[1]->output['label'] === 'spam');
 ```
 
 ### Error handling

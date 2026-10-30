@@ -77,23 +77,11 @@ pub(crate) fn converse(
         (response_text, false)
     };
 
-    // Build content blocks
-    let mut content = vec![json!({"text": truncated_text})];
-
     // Only emit a toolUse block when the caller's `toolChoice` actually
     // requires one. A bare `toolConfig` (or `toolChoice:{auto:{}}`) leaves the
     // decision to the model, and offline we choose a plain text reply — forcing
     // an empty-arg tool call here derails LangChain / agent tool-loops.
     let forced_tool = forced_tool_name(tool_config);
-    if let Some(tool_name) = &forced_tool {
-        content.push(json!({
-            "toolUse": {
-                "toolUseId": "tooluse_fakecloud_01",
-                "name": tool_name,
-                "input": {}
-            }
-        }));
-    }
 
     let stop_reason = if forced_tool.is_some() {
         "tool_use"
@@ -108,6 +96,49 @@ pub(crate) fn converse(
     let input_tokens = estimate_tokens(&input);
     let output_tokens = crate::prompt::count_tokens(&truncated_text).max(1);
 
+    let response_str = response_json(
+        &truncated_text,
+        forced_tool.as_deref(),
+        stop_reason,
+        input_tokens,
+        output_tokens,
+    );
+
+    // Record invocation for introspection
+    crate::invoke::record_invocation(
+        state,
+        req,
+        model_id,
+        body,
+        &response_str,
+        None,
+        request_metadata,
+    );
+
+    Ok(AwsResponse::json(StatusCode::OK, response_str))
+}
+
+/// The Converse response body for an offline reply: the text block, an
+/// optional forced `toolUse` block, the stop reason and usage. ConverseStream
+/// records the same body for introspection, so a streamed call reads back
+/// exactly like the equivalent Converse call.
+pub(crate) fn response_json(
+    text: &str,
+    forced_tool: Option<&str>,
+    stop_reason: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> String {
+    let mut content = vec![json!({"text": text})];
+    if let Some(tool_name) = forced_tool {
+        content.push(json!({
+            "toolUse": {
+                "toolUseId": "tooluse_fakecloud_01",
+                "name": tool_name,
+                "input": {}
+            }
+        }));
+    }
     let response = json!({
         "output": {
             "message": {
@@ -125,21 +156,7 @@ pub(crate) fn converse(
             "latencyMs": 100
         }
     });
-
-    let response_str = serde_json::to_string(&response).unwrap();
-
-    // Record invocation for introspection
-    crate::invoke::record_invocation(
-        state,
-        req,
-        model_id,
-        body,
-        &response_str,
-        None,
-        request_metadata,
-    );
-
-    Ok(AwsResponse::json(StatusCode::OK, response_str))
+    serde_json::to_string(&response).expect("serde_json::Value serialization is infallible")
 }
 
 /// Resolve the tool the caller *forced* the model to call via the Converse

@@ -7,6 +7,13 @@
 
 use fakecloud_sdk::types;
 
+/// A stored JSON document (an event `Detail`, a Lambda payload, an execution
+/// input) as structured JSON, so tests can assert on it without a parse
+/// step. A string that is not valid JSON is returned as a JSON string.
+pub(crate) fn json_document(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+}
+
 pub(crate) fn rds_instance_response(instance: &fakecloud_rds::DbInstance) -> types::RdsInstance {
     types::RdsInstance {
         db_instance_identifier: instance.db_instance_identifier.clone(),
@@ -644,7 +651,21 @@ mod tests {
     };
     use fakecloud_rds::DbInstance;
 
-    use super::{elasticache_acls_response, rds_instance_response};
+    use super::{elasticache_acls_response, json_document, rds_instance_response};
+
+    #[test]
+    fn json_document_parses_json_and_falls_back_to_string() {
+        assert_eq!(
+            json_document(r#"{"a":[1,true]}"#),
+            serde_json::json!({"a": [1, true]})
+        );
+        assert_eq!(json_document("[1,2]"), serde_json::json!([1, 2]));
+        assert_eq!(json_document("\"quoted\""), serde_json::json!("quoted"));
+        assert_eq!(json_document("42"), serde_json::json!(42));
+        assert_eq!(json_document("not json"), serde_json::json!("not json"));
+        assert_eq!(json_document(""), serde_json::json!(""));
+        assert_eq!(json_document("{\"a\":"), serde_json::json!("{\"a\":"));
+    }
 
     fn test_replication_group(id: &str, user_group_ids: Vec<String>) -> ReplicationGroup {
         ReplicationGroup {

@@ -431,8 +431,9 @@ def test_classifier_branches_on_spam_vs_ham():
 
     invocations = fc.bedrock.get_invocations().invocations
     assert len(invocations) == 2
-    assert "ham" in invocations[0].output
-    assert "spam" in invocations[1].output
+    # `output` is the model's response body as structured JSON.
+    assert invocations[0].output["label"] == "ham"
+    assert invocations[1].output["label"] == "spam"
 
 
 def test_retries_on_throttling():

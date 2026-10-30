@@ -3,6 +3,7 @@ package dev.fakecloud;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.List;
 import java.util.Map;
@@ -164,9 +165,10 @@ public final class Types {
     public record ElastiCacheAclsResponse(List<ElastiCacheAclCluster> acls) {}
 
     // ── Lambda ─────────────────────────────────────────────────────
+    /** {@code payload} is structured JSON when it parses as JSON, else a text node. */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record LambdaInvocation(
-            String functionArn, String payload, String source, String timestamp) {}
+            String functionArn, JsonNode payload, String source, String timestamp) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record LambdaInvocationsResponse(List<LambdaInvocation> invocations) {}
@@ -372,22 +374,25 @@ public final class Types {
     public record AppAsScheduledTickResponse(int fired) {}
 
     // ── EventBridge ────────────────────────────────────────────────
+    /** {@code detail} is structured JSON when it parses as JSON, else a text node. */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record EventBridgeEvent(
             String eventId,
             String source,
             String detailType,
-            String detail,
+            JsonNode detail,
             String busName,
             String timestamp) {}
 
+    /** {@code payload} is structured JSON when it parses as JSON, else a text node. */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record EventBridgeLambdaDelivery(
-            String functionArn, String payload, String timestamp) {}
+            String functionArn, JsonNode payload, String timestamp) {}
 
+    /** {@code payload} is structured JSON when it parses as JSON, else a text node. */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record EventBridgeLogDelivery(
-            String logGroupArn, String payload, String timestamp) {}
+            String logGroupArn, JsonNode payload, String timestamp) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record EventBridgeDeliveries(
@@ -737,6 +742,10 @@ public final class Types {
     public record WebAuthnCredentialsResponse(List<WebAuthnCredential> credentials) {}
 
     // ── Step Functions ─────────────────────────────────────────────
+    /**
+     * {@code input} / {@code output} are structured JSON when they parse as JSON, else a
+     * text node; {@code null} when absent.
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record StepFunctionsExecution(
             String executionArn,
@@ -744,8 +753,8 @@ public final class Types {
             String name,
             String status,
             String startDate,
-            String input,
-            String output,
+            JsonNode input,
+            JsonNode output,
             String stopDate) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -756,14 +765,18 @@ public final class Types {
             long billedDurationInMilliseconds,
             long billedMemoryUsedInMb) {}
 
+    /**
+     * {@code input} / {@code output} are structured JSON when they parse as JSON, else a
+     * text node; {@code null} when absent.
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record StepFunctionsSyncExecution(
             String executionArn,
             String stateMachineArn,
             String name,
             String status,
-            String input,
-            String output,
+            JsonNode input,
+            JsonNode output,
             String startedAt,
             String stoppedAt,
             long durationMs,
@@ -797,11 +810,18 @@ public final class Types {
     public record SfnEnqueueActivityTaskResponse(String taskToken) {}
 
     // ── Bedrock ────────────────────────────────────────────────────
+    /**
+     * {@code input} is the request body and {@code output} the response the equivalent
+     * non-streaming call returns (provider JSON for InvokeModel /
+     * InvokeModelWithResponseStream, the Converse response for Converse / ConverseStream),
+     * each structured JSON when it parses as JSON, else a text node. {@code output} is an
+     * empty text node for faulted calls.
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record BedrockInvocation(
             String modelId,
-            String input,
-            String output,
+            JsonNode input,
+            JsonNode output,
             String timestamp,
             String error,
             Map<String, String> requestMetadata) {}

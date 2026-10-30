@@ -857,6 +857,7 @@ async fn sdk_eventbridge_get_history() {
         .find(|e| e.source == "sdk.test")
         .expect("should find sdk.test event");
     assert_eq!(event.detail_type, "TestEvent");
+    assert_eq!(event.detail, serde_json::json!({"key": "value"}));
 }
 
 // ── Bedrock ────────────────────────────────────────────────────────

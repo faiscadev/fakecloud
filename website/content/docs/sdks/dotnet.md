@@ -381,8 +381,8 @@ public class ClassifierTests : IAsyncLifetime
 
         var invocations = (await _fc.Bedrock.GetInvocationsAsync()).Invocations!;
         Assert.Equal(2, invocations.Count);
-        Assert.Contains("ham", invocations[0].Output);
-        Assert.Contains("spam", invocations[1].Output);
+        Assert.Equal("ham", invocations[0].Output!.Value.GetProperty("label").GetString());
+        Assert.Equal("spam", invocations[1].Output!.Value.GetProperty("label").GetString());
     }
 
     [Fact]

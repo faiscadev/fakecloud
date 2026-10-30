@@ -43,7 +43,8 @@ use introspection::{
     elasticache_acls_response, elasticache_cluster_response,
     elasticache_replication_group_response, elasticache_serverless_cache_response,
     elbv2_listener_response, elbv2_load_balancer_response, elbv2_rule_response,
-    elbv2_target_group_response, organizations_accounts_snapshot, rds_instance_response,
+    elbv2_target_group_response, json_document, organizations_accounts_snapshot,
+    rds_instance_response,
 };
 use kinesis_lambda_poller::KinesisLambdaPoller;
 use reset::ResetState;
@@ -7880,7 +7881,7 @@ async fn main() {
                         .flat_map(|(_, _, state)| state.invocations.iter())
                         .map(|inv| types::LambdaInvocation {
                             function_arn: inv.function_arn.clone(),
-                            payload: inv.payload.clone(),
+                            payload: json_document(&inv.payload),
                             source: inv.source.clone(),
                             timestamp: inv.timestamp.to_rfc3339(),
                         })
@@ -8872,7 +8873,7 @@ async fn main() {
                             event_id: evt.event_id.clone(),
                             source: evt.source.clone(),
                             detail_type: evt.detail_type.clone(),
-                            detail: evt.detail.clone(),
+                            detail: json_document(&evt.detail),
                             bus_name: evt.event_bus_name.clone(),
                             timestamp: evt.time.to_rfc3339(),
                         })
@@ -8882,7 +8883,7 @@ async fn main() {
                         .flat_map(|(_, state)| state.lambda_invocations.iter())
                         .map(|inv| types::EventBridgeLambdaDelivery {
                             function_arn: inv.function_arn.clone(),
-                            payload: inv.payload.clone(),
+                            payload: json_document(&inv.payload),
                             timestamp: inv.timestamp.to_rfc3339(),
                         })
                         .collect();
@@ -8891,7 +8892,7 @@ async fn main() {
                         .flat_map(|(_, state)| state.log_deliveries.iter())
                         .map(|ld| types::EventBridgeLogDelivery {
                             log_group_arn: ld.log_group_arn.clone(),
-                            payload: ld.payload.clone(),
+                            payload: json_document(&ld.payload),
                             timestamp: ld.timestamp.to_rfc3339(),
                         })
                         .collect();
@@ -11347,8 +11348,8 @@ async fn main() {
                                 state_machine_arn: exec.state_machine_arn.clone(),
                                 name: exec.name.clone(),
                                 status: exec.status.as_str().to_string(),
-                                input: exec.input.clone(),
-                                output: exec.output.clone(),
+                                input: exec.input.as_deref().map(json_document),
+                                output: exec.output.as_deref().map(json_document),
                                 start_date: exec.start_date.to_rfc3339(),
                                 stop_date: exec.stop_date.map(|d| d.to_rfc3339()),
                             })
@@ -11384,8 +11385,8 @@ async fn main() {
                                     state_machine_arn: exec.state_machine_arn.clone(),
                                     name: exec.name.clone(),
                                     status: exec.status.as_str().to_string(),
-                                    input: exec.input.clone(),
-                                    output: exec.output.clone(),
+                                    input: exec.input.as_deref().map(json_document),
+                                    output: exec.output.as_deref().map(json_document),
                                     started_at: exec.start_date.to_rfc3339(),
                                     stopped_at: exec.stop_date.map(|d| d.to_rfc3339()),
                                     duration_ms,
@@ -11987,8 +11988,8 @@ async fn main() {
                         .map(|inv| {
                             serde_json::json!({
                                 "modelId": inv.model_id,
-                                "input": inv.input,
-                                "output": inv.output,
+                                "input": json_document(&inv.input),
+                                "output": json_document(&inv.output),
                                 "timestamp": inv.timestamp.to_rfc3339(),
                                 "error": inv.error,
                                 "requestMetadata": inv.request_metadata,

@@ -147,8 +147,11 @@ async fn sqs_filter_criteria_drops_non_matching_messages() {
         "expected the matching message to be routed to filter-fn at least once"
     );
     let saw_skipped = filter_arr.iter().any(|inv| {
-        let payload = inv["payload"].as_str().unwrap_or("");
-        payload.contains("\"action\":\"skip\"") || payload.contains("\"action\": \"skip\"")
+        inv["payload"]["Records"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| r["body"].as_str().unwrap_or("").contains("\"skip\""))
     });
     assert!(
         !saw_skipped,
@@ -298,7 +301,7 @@ async fn sqs_filter_criteria_matches_array_values() {
                     .or_else(|| inv["function_arn"].as_str())
                     == Some(function_arn.as_str())
             })
-            .filter_map(|inv| inv["payload"].as_str().map(String::from))
+            .map(|inv| inv["payload"].to_string())
             .collect();
         if !payloads.is_empty() {
             break;

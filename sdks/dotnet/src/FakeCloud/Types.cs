@@ -136,8 +136,9 @@ public sealed record ElastiCacheAclCluster(
 public sealed record ElastiCacheAclsResponse(IReadOnlyList<ElastiCacheAclCluster>? Acls);
 
 // ── Lambda ─────────────────────────────────────────────────────
+// Payload is the structured JSON value when it parses as JSON, else a JSON string.
 public sealed record LambdaInvocation(
-    string? FunctionArn, string? Payload, string? Source, string? Timestamp);
+    string? FunctionArn, JsonElement? Payload, string? Source, string? Timestamp);
 
 public sealed record LambdaInvocationsResponse(IReadOnlyList<LambdaInvocation>? Invocations);
 
@@ -301,19 +302,22 @@ public sealed record AppAsTickResponse(int Applied);
 public sealed record AppAsScheduledTickResponse(int Fired);
 
 // ── EventBridge ────────────────────────────────────────────────
+// Detail is the structured JSON value when it parses as JSON, else a JSON string.
 public sealed record EventBridgeEvent(
     string? EventId,
     string? Source,
     string? DetailType,
-    string? Detail,
+    JsonElement? Detail,
     string? BusName,
     string? Timestamp);
 
+// Payload is the structured JSON value when it parses as JSON, else a JSON string.
 public sealed record EventBridgeLambdaDelivery(
-    string? FunctionArn, string? Payload, string? Timestamp);
+    string? FunctionArn, JsonElement? Payload, string? Timestamp);
 
+// Payload is the structured JSON value when it parses as JSON, else a JSON string.
 public sealed record EventBridgeLogDelivery(
-    string? LogGroupArn, string? Payload, string? Timestamp);
+    string? LogGroupArn, JsonElement? Payload, string? Timestamp);
 
 public sealed record EventBridgeDeliveries(
     IReadOnlyList<EventBridgeLambdaDelivery>? Lambda,
@@ -608,14 +612,16 @@ public sealed record WebAuthnCredential(
 public sealed record WebAuthnCredentialsResponse(IReadOnlyList<WebAuthnCredential>? Credentials);
 
 // ── Step Functions ─────────────────────────────────────────────
+// Input / Output are the structured JSON value when they parse as JSON, else a
+// JSON string; null when absent.
 public sealed record StepFunctionsExecution(
     string? ExecutionArn,
     string? StateMachineArn,
     string? Name,
     string? Status,
     string? StartDate,
-    string? Input,
-    string? Output,
+    JsonElement? Input,
+    JsonElement? Output,
     string? StopDate);
 
 public sealed record StepFunctionsExecutionsResponse(IReadOnlyList<StepFunctionsExecution>? Executions);
@@ -624,13 +630,15 @@ public sealed record StepFunctionsSyncBillingDetails(
     long BilledDurationInMilliseconds,
     long BilledMemoryUsedInMb);
 
+// Input / Output are the structured JSON value when they parse as JSON, else a
+// JSON string; null when absent.
 public sealed record StepFunctionsSyncExecution(
     string? ExecutionArn,
     string? StateMachineArn,
     string? Name,
     string? Status,
-    string? Input,
-    string? Output,
+    JsonElement? Input,
+    JsonElement? Output,
     string? StartedAt,
     string? StoppedAt,
     long DurationMs,
@@ -659,10 +667,14 @@ public sealed record SfnEnqueueActivityTaskRequest(
 public sealed record SfnEnqueueActivityTaskResponse(string? TaskToken);
 
 // ── Bedrock ────────────────────────────────────────────────────
+// Input is the request body; Output is the response the equivalent non-streaming
+// call returns (provider JSON for InvokeModel / InvokeModelWithResponseStream, the
+// Converse response for Converse / ConverseStream). Each is the structured JSON
+// value when it parses as JSON, else a JSON string (empty for faulted calls).
 public sealed record BedrockInvocation(
     string? ModelId,
-    string? Input,
-    string? Output,
+    JsonElement? Input,
+    JsonElement? Output,
     string? Timestamp,
     string? Error,
     IReadOnlyDictionary<string, string>? RequestMetadata);

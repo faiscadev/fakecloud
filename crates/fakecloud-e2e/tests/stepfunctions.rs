@@ -3699,6 +3699,11 @@ async fn sfn_introspection_executions_endpoint() {
         .contains("introspect-sm"));
     assert!(exec["startDate"].as_str().is_some());
     assert!(exec["stopDate"].as_str().is_some());
+    // Input / output are returned as JSON values, not escaped strings: the
+    // input object comes back as an object and the Pass state's JSON string
+    // result as a plain string.
+    assert_eq!(exec["input"], json!({"test": true}));
+    assert_eq!(exec["output"], json!("Hello, World!"));
 }
 
 #[tokio::test]
@@ -4286,6 +4291,8 @@ async fn sfn_introspection_sync_executions_endpoint() {
     let exec = &executions[0];
     assert_eq!(exec["status"], "SUCCEEDED");
     assert_eq!(exec["stateMachineArn"], create.state_machine_arn());
+    assert_eq!(exec["input"], json!({"hello": "world"}));
+    assert_eq!(exec["output"], json!("Hello, World!"));
     assert!(exec["startedAt"].as_str().is_some());
     assert!(exec["stoppedAt"].as_str().is_some());
     assert!(exec["durationMs"].as_i64().unwrap() >= 0);

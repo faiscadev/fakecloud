@@ -273,8 +273,8 @@ const { invocations } = await fc.bedrock.getInvocations();
 
 for (const call of invocations) {
   console.log(call.modelId);   // "anthropic.claude-3-haiku-20240307-v1:0"
-  console.log(call.input);     // raw request body
-  console.log(call.output);    // raw response body (or the faulted response)
+  console.log(call.input);     // request body, as parsed JSON
+  console.log(call.output);    // response body, as parsed JSON ("" for a faulted call)
   console.log(call.timestamp); // ISO 8601
   console.log(call.error);     // null on success, "ThrottlingException: Rate exceeded" on fault
 }
@@ -291,13 +291,15 @@ expect(invocations[0].error).toContain("ThrottlingException");
 expect(invocations[1].error).toBeNull();
 
 // Did we pass the right context?
-const firstCall = JSON.parse(invocations[0].input);
+const firstCall = invocations[0].input as { messages: { content: string }[] };
 expect(firstCall.messages[0].content).toContain("user-12345");
 
 // Did our cost-tracking see the right token count?
-const response = JSON.parse(invocations[0].output);
+const response = invocations[0].output as { usage: { output_tokens: number } };
 expect(response.usage.output_tokens).toBe(42);
 ```
+
+Streaming calls record the body the equivalent non-streaming call returns: an `InvokeModelWithResponseStream` call reads back as the provider's InvokeModel response, and a `ConverseStream` call as the Converse response, so the same assertions work for both.
 
 ## Per-provider request formats
 
@@ -386,7 +388,7 @@ test("classifier pipeline end-to-end", async () => {
   // Assert: Bedrock was called
   const { invocations } = await fc.bedrock.getInvocations();
   expect(invocations).toHaveLength(1);
-  expect(invocations[0].output).toContain("spam");
+  expect(invocations[0].output).toEqual(JSON.parse(spamResponse));
 
   // Assert: DynamoDB was written
   const result = await ddb.send(new GetItemCommand({

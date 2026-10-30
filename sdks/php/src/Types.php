@@ -432,7 +432,8 @@ final class LambdaInvocation
 {
     public function __construct(
         public readonly string $functionArn,
-        public readonly string $payload,
+        /** @var mixed decoded JSON (array/scalar) when the payload parses as JSON, else the raw string */
+        public readonly mixed $payload,
         public readonly string $source,
         public readonly string $timestamp,
     ) {}
@@ -1074,7 +1075,8 @@ final class EventBridgeEvent
         public readonly string $eventId,
         public readonly string $source,
         public readonly string $detailType,
-        public readonly string $detail,
+        /** @var mixed decoded JSON (array/scalar) when the detail parses as JSON, else the raw string */
+        public readonly mixed $detail,
         public readonly string $busName,
         public readonly string $timestamp,
     ) {}
@@ -1089,7 +1091,8 @@ final class EventBridgeLambdaDelivery
 {
     public function __construct(
         public readonly string $functionArn,
-        public readonly string $payload,
+        /** @var mixed decoded JSON (array/scalar) when the payload parses as JSON, else the raw string */
+        public readonly mixed $payload,
         public readonly string $timestamp,
     ) {}
 
@@ -1103,7 +1106,8 @@ final class EventBridgeLogDelivery
 {
     public function __construct(
         public readonly string $logGroupArn,
-        public readonly string $payload,
+        /** @var mixed decoded JSON (array/scalar) when the payload parses as JSON, else the raw string */
+        public readonly mixed $payload,
         public readonly string $timestamp,
     ) {}
 
@@ -2186,8 +2190,10 @@ final class StepFunctionsExecution
         public readonly string $name,
         public readonly string $status,
         public readonly string $startDate,
-        public readonly ?string $input,
-        public readonly ?string $output,
+        /** @var mixed decoded JSON when the input parses as JSON, else the raw string; null when absent */
+        public readonly mixed $input,
+        /** @var mixed decoded JSON when the output parses as JSON, else the raw string; null when absent */
+        public readonly mixed $output,
         public readonly ?string $stopDate,
     ) {}
 
@@ -2242,8 +2248,10 @@ final class StepFunctionsSyncExecution
         public readonly string $stateMachineArn,
         public readonly string $name,
         public readonly string $status,
-        public readonly ?string $input,
-        public readonly ?string $output,
+        /** @var mixed decoded JSON when the input parses as JSON, else the raw string; null when absent */
+        public readonly mixed $input,
+        /** @var mixed decoded JSON when the output parses as JSON, else the raw string; null when absent */
+        public readonly mixed $output,
         public readonly string $startedAt,
         public readonly ?string $stoppedAt,
         public readonly int $durationMs,
@@ -2364,8 +2372,14 @@ final class BedrockInvocation
 {
     public function __construct(
         public readonly string $modelId,
-        public readonly string $input,
-        public readonly ?string $output,
+        /** @var mixed the request body: decoded JSON when it parses as JSON, else the raw string */
+        public readonly mixed $input,
+        /**
+         * @var mixed the response the equivalent non-streaming call returns (provider JSON for
+         * InvokeModel / InvokeModelWithResponseStream, the Converse response for Converse /
+         * ConverseStream), decoded like $input; empty string for faulted calls
+         */
+        public readonly mixed $output,
         public readonly string $timestamp,
         public readonly ?string $error,
         /** @var array<string, string>|null requestMetadata key-value pairs, or null when none were supplied */
@@ -2376,7 +2390,7 @@ final class BedrockInvocation
     {
         return new self(
             $data['modelId'],
-            $data['input'],
+            $data['input'] ?? null,
             $data['output'] ?? null,
             $data['timestamp'],
             $data['error'] ?? null,
