@@ -360,12 +360,13 @@ impl ResourceProvisioner {
                 .cloned(),
         };
         client.init_primary_secret(now);
+        let name = client.client_name.clone();
 
         state.user_pool_clients.insert(client_id.clone(), client);
 
         let mut result = ProvisionResult::new(client_id.clone())
-            .with("ClientId", client_id.clone())
-            .with("Name", client_id);
+            .with("ClientId", client_id)
+            .with("Name", name);
         if let Some(secret) = client_secret {
             result = result.with("ClientSecret", secret);
         }
@@ -452,7 +453,7 @@ impl ResourceProvisioner {
 
         let mut result = ProvisionResult::new(client_id.clone())
             .with("ClientId", client_id.clone())
-            .with("Name", client_id.clone());
+            .with("Name", client.client_name.clone());
         // The secret may have rotated since create (AddUserPoolClientSecret
         // then deleting the original), so GetAtt reports the current primary.
         if let Some(secret) = &client.client_secret {

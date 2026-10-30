@@ -11561,6 +11561,9 @@ mod tests {
             .expect("AWS::Cognito::UserPoolClient is updatable");
         assert_ne!(original, rotated);
         assert_eq!(updated.attributes["ClientSecret"], rotated);
+        // GetAtt Name is the client's name, following a rename.
+        assert_eq!(created.attributes["Name"], "c1");
+        assert_eq!(updated.attributes["Name"], "c1-renamed");
     }
 
     #[test]

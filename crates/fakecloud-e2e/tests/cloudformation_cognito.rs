@@ -172,3 +172,112 @@ async fn cfn_provisions_cognito_user_pool_client_domain() {
         "pool should be gone after stack deletion"
     );
 }
+
+fn rotation_template(client_name: &str) -> String {
+    format!(
+        r#"{{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {{
+    "Pool": {{
+      "Type": "AWS::Cognito::UserPool",
+      "Properties": {{"PoolName": "cfn-rotation-pool"}}
+    }},
+    "Client": {{
+      "Type": "AWS::Cognito::UserPoolClient",
+      "Properties": {{
+        "ClientName": "{client_name}",
+        "UserPoolId": {{"Ref": "Pool"}},
+        "GenerateSecret": true
+      }}
+    }}
+  }},
+  "Outputs": {{
+    "PoolId": {{"Value": {{"Ref": "Pool"}}}},
+    "ClientId": {{"Value": {{"Ref": "Client"}}}},
+    "ClientName": {{"Value": {{"Fn::GetAtt": ["Client", "Name"]}}}},
+    "ClientSecret": {{"Value": {{"Fn::GetAtt": ["Client", "ClientSecret"]}}}}
+  }}
+}}"#
+    )
+}
+
+async fn stack_outputs(
+    cfn: &aws_sdk_cloudformation::Client,
+    stack: &str,
+) -> std::collections::HashMap<String, String> {
+    let described = cfn
+        .describe_stacks()
+        .stack_name(stack)
+        .send()
+        .await
+        .expect("describe_stacks");
+    described.stacks()[0]
+        .outputs()
+        .iter()
+        .filter_map(|o| Some((o.output_key()?.to_string(), o.output_value()?.to_string())))
+        .collect()
+}
+
+/// Rotating the client secret through the Cognito API (add a second secret,
+/// delete the original primary) and then updating the client through the
+/// stack refreshes GetAtt ClientSecret to the surviving secret, and GetAtt
+/// Name follows the rename.
+#[tokio::test]
+async fn cfn_update_reports_rotated_client_secret() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let cognito = aws_sdk_cognitoidentityprovider::Client::new(&server.aws_config().await);
+
+    cfn.create_stack()
+        .stack_name("rotation-stack")
+        .template_body(rotation_template("rotation-client"))
+        .send()
+        .await
+        .expect("create_stack");
+    let outputs = stack_outputs(&cfn, "rotation-stack").await;
+    let pool_id = outputs["PoolId"].clone();
+    let client_id = outputs["ClientId"].clone();
+    let original = outputs["ClientSecret"].clone();
+    assert_eq!(outputs["ClientName"], "rotation-client");
+
+    let added = cognito
+        .add_user_pool_client_secret()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .expect("add_user_pool_client_secret");
+    let added = added.client_secret_descriptor().expect("descriptor");
+    let added_value = added.client_secret_value().expect("generated value");
+    assert_ne!(added_value, original);
+    let primary_id = cognito
+        .list_user_pool_client_secrets()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .expect("list_user_pool_client_secrets")
+        .client_secrets()[0]
+        .client_secret_id()
+        .expect("primary id")
+        .to_string();
+    cognito
+        .delete_user_pool_client_secret()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .client_secret_id(&primary_id)
+        .send()
+        .await
+        .expect("delete_user_pool_client_secret");
+
+    cfn.update_stack()
+        .stack_name("rotation-stack")
+        .template_body(rotation_template("rotation-client-renamed"))
+        .send()
+        .await
+        .expect("update_stack");
+    let outputs = stack_outputs(&cfn, "rotation-stack").await;
+    assert_eq!(outputs["ClientId"], client_id);
+    assert_eq!(outputs["ClientSecret"], added_value);
+    assert_eq!(outputs["ClientName"], "rotation-client-renamed");
+}
