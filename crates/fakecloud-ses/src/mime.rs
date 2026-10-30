@@ -1,9 +1,11 @@
 //! RFC 5322 / MIME parsing and building for fakecloud SES.
 //!
-//! Parsing: `RawMail` reads the header block of a raw message supplied to
-//! `SendRawEmail` (v1) or `SendEmail` with `Content.Raw` (v2): unfolded
+//! Parsing: `RawMail` decodes the base64 raw message supplied to
+//! `SendRawEmail` (v1) or `SendEmail` with `Content.Raw` (v2) into the plain
+//! MIME that is recorded and relayed, and reads its header block: unfolded
 //! header lookup, RFC 2047 decoding of `Subject`, `X-SES-*` headers, and
-//! address fields. Address fields and API address members are validated as
+//! address fields. `message_bodies` extracts the text and HTML bodies of a
+//! plain MIME message. Address fields and API address members are validated as
 //! RFC 5322 mailboxes or groups via `mail-parser` (`parse_address_list`,
 //! `mailbox_address`, `api_recipients`).
 //!
@@ -25,6 +27,7 @@
 
 use base64::Engine;
 use chrono::Utc;
+use mail_parser::MimeHeaders;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
@@ -33,12 +36,18 @@ pub(crate) struct InvalidAddress;
 /// Shared raw-message metadata for both SES APIs. Header parsing stops at the
 /// body; address fields are validated only when used as the effective envelope.
 pub(crate) struct RawMail {
+    bytes: Vec<u8>,
     headers: Vec<(String, String)>,
 }
 
 impl RawMail {
     pub(crate) fn parse(encoded: &str) -> Result<Self, base64::DecodeError> {
         let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+        Ok(Self::from_mime(bytes))
+    }
+
+    /// Read the header block of an already-decoded (plain MIME) message.
+    pub(crate) fn from_mime(bytes: Vec<u8>) -> Self {
         let text = String::from_utf8_lossy(&bytes);
         let mut headers: Vec<(String, String)> = Vec::new();
         for line in text.lines() {
@@ -59,7 +68,17 @@ impl RawMail {
         for (_, value) in &mut headers {
             *value = value.trim().to_string();
         }
-        Ok(Self { headers })
+        Self { bytes, headers }
+    }
+
+    /// The decoded message as plain MIME text, the form SES records and sends.
+    pub(crate) fn mime(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+
+    /// The message's `(text, html)` bodies; see `message_bodies`.
+    pub(crate) fn bodies(&self) -> (Option<String>, Option<String>) {
+        message_bodies(&self.bytes)
     }
 
     pub(crate) fn header(&self, name: &str) -> Option<&str> {
@@ -106,6 +125,52 @@ impl RawMail {
             })
             .unwrap_or_default()
     }
+}
+
+/// The body of a plain MIME message: everything after the blank line that
+/// ends the header block (empty when there is none).
+pub(crate) fn body_section(raw: &str) -> &str {
+    let crlf = raw.find("\r\n\r\n").map(|i| i + 4);
+    let lf = raw.find("\n\n").map(|i| i + 2);
+    match (crlf, lf) {
+        (Some(a), Some(b)) => &raw[a.min(b)..],
+        (Some(i), None) | (None, Some(i)) => &raw[i..],
+        (None, None) => "",
+    }
+}
+
+/// The decoded `Subject` of a plain MIME message (as `RawMail::subject`).
+pub fn message_subject(raw: &[u8]) -> Option<String> {
+    RawMail::from_mime(raw.to_vec()).subject()
+}
+
+/// The first `text/plain` and first `text/html` body of a plain MIME message,
+/// transfer-decoded (quoted-printable, base64) and converted from their
+/// charset. Attachments are never bodies; a body type the message does not
+/// carry is `None` rather than converted from the other one.
+pub fn message_bodies(raw: &[u8]) -> (Option<String>, Option<String>) {
+    let Some(message) = mail_parser::MessageParser::new().parse(raw) else {
+        return (None, None);
+    };
+    let text = message
+        .text_bodies()
+        .find(|part| {
+            matches!(part.body, mail_parser::PartType::Text(_))
+                && part.content_type().is_none_or(|ct| {
+                    ct.ctype().eq_ignore_ascii_case("text")
+                        && ct
+                            .subtype()
+                            .is_none_or(|sub| sub.eq_ignore_ascii_case("plain"))
+                })
+        })
+        .and_then(|part| part.text_contents())
+        .map(str::to_string);
+    let html = message
+        .html_bodies()
+        .find(|part| part.is_text_html())
+        .and_then(|part| part.text_contents())
+        .map(str::to_string);
+    (text, html)
 }
 
 /// Parse a raw RFC 5322 address field. Empty groups are permitted, but every
@@ -631,5 +696,86 @@ mod tests {
         assert_eq!(normalize_crlf("a\rb"), "a\r\nb");
         assert_eq!(normalize_crlf("a\r\n\r\nb"), "a\r\n\r\nb");
         assert_eq!(normalize_crlf("a\n\nb"), "a\r\n\r\nb");
+    }
+
+    #[test]
+    fn raw_mail_exposes_the_decoded_message_as_plain_mime() {
+        let mail = raw("Subject: Hi\r\n\r\nBody");
+        assert_eq!(mail.mime(), "Subject: Hi\r\n\r\nBody");
+    }
+
+    #[test]
+    fn bodies_of_multipart_alternative_are_transfer_and_charset_decoded() {
+        let mime = concat!(
+            "From: a@example.com\r\n",
+            "Subject: Hi\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/alternative; boundary=\"b1\"\r\n",
+            "\r\n",
+            "--b1\r\n",
+            "Content-Type: text/plain; charset=iso-8859-1\r\n",
+            "Content-Transfer-Encoding: quoted-printable\r\n",
+            "\r\n",
+            "Ol=E1 mundo=\r\n",
+            " soft break\r\n",
+            "--b1\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "PHA+T2zDoTwvcD4=\r\n",
+            "--b1--\r\n",
+        );
+        let (text, html) = message_bodies(mime.as_bytes());
+        assert_eq!(text.as_deref(), Some("Ol\u{e1} mundo soft break"));
+        assert_eq!(html.as_deref(), Some("<p>Ol\u{e1}</p>"));
+    }
+
+    #[test]
+    fn attachments_are_not_bodies_and_missing_types_stay_none() {
+        let mime = concat!(
+            "Subject: Report\r\n",
+            "Content-Type: multipart/mixed; boundary=\"m\"\r\n",
+            "\r\n",
+            "--m\r\n",
+            "Content-Type: text/html\r\n",
+            "\r\n",
+            "<b>see attached</b>\r\n",
+            "--m\r\n",
+            "Content-Type: text/plain; name=\"notes.txt\"\r\n",
+            "Content-Disposition: attachment; filename=\"notes.txt\"\r\n",
+            "\r\n",
+            "attached notes\r\n",
+            "--m--\r\n",
+        );
+        let (text, html) = message_bodies(mime.as_bytes());
+        // The only text/plain part is an attachment, and the HTML body is
+        // never converted into a text one.
+        assert_eq!(text, None);
+        assert_eq!(html.as_deref(), Some("<b>see attached</b>"));
+    }
+
+    #[test]
+    fn single_part_message_without_content_type_is_a_text_body() {
+        let (text, html) = message_bodies(b"Subject: Hi\r\n\r\nplain body");
+        assert_eq!(text.as_deref(), Some("plain body"));
+        assert_eq!(html, None);
+    }
+
+    #[test]
+    fn body_section_starts_after_the_header_block() {
+        assert_eq!(
+            body_section("A: 1\r\nB: 2\r\n\r\nbody\r\n\r\nmore"),
+            "body\r\n\r\nmore"
+        );
+        assert_eq!(body_section("A: 1\n\nbody"), "body");
+        assert_eq!(body_section("A: 1\r\n"), "");
+    }
+
+    #[test]
+    fn message_subject_decodes_encoded_words() {
+        assert_eq!(
+            message_subject(b"Subject: =?UTF-8?B?T2zDoQ==?=\r\n\r\nx").as_deref(),
+            Some("Ol\u{e1}")
+        );
     }
 }

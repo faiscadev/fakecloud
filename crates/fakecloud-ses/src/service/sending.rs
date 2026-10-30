@@ -375,12 +375,9 @@ impl SesV2Service {
                     .as_str()
                     .map(|s| s.to_string());
                 (subject, html, text, None, None, None)
-            } else if body["Content"]["Raw"].is_object() {
-                let raw = body["Content"]["Raw"]["Data"]
-                    .as_str()
-                    .map(|s| s.to_string());
-                let subject = raw_mail.as_ref().and_then(crate::mime::RawMail::subject);
-                (subject, None, None, raw, None, None)
+            } else if let Some(raw) = &raw_mail {
+                let (text, html) = raw.bodies();
+                (raw.subject(), html, text, Some(raw.mime()), None, None)
             } else if body["Content"]["Template"].is_object() {
                 let tmpl = &body["Content"]["Template"];
                 let tmpl_name = tmpl["TemplateName"].as_str().map(|s| s.to_string());
@@ -476,30 +473,7 @@ impl SesV2Service {
             );
         }
 
-        // Opt-in SMTP relay: when FAKECLOUD_SES_SMTP_RELAY is set, fire a
-        // best-effort send to the configured MTA (e.g. Mailpit) so dev
-        // setups see real mail in their inbox. Failures are logged and
-        // don't fail the SES call — the in-memory store is the source
-        // of truth for tests.
-        if let Ok(relay_url) = std::env::var("FAKECLOUD_SES_SMTP_RELAY") {
-            // Raw sends relay the caller's original message, not a rebuild.
-            let raw_message = sent.raw_data.as_deref().and_then(|data| {
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).ok()
-            });
-            let outbound = crate::smtp_relay::OutboundMail {
-                from: &sent.from,
-                to: &sent.to,
-                cc: &sent.cc,
-                bcc: &sent.bcc,
-                subject: sent.subject.as_deref(),
-                text_body: sent.text_body.as_deref(),
-                html_body: sent.html_body.as_deref(),
-                raw_message: raw_message.as_deref(),
-            };
-            if let Err(err) = crate::smtp_relay::relay(&relay_url, &outbound) {
-                tracing::warn!(relay = %relay_url, error = %err, "SES SMTP relay failed");
-            }
-        }
+        crate::smtp_relay::relay_sent_email(&sent);
 
         self.state
             .write()
@@ -684,6 +658,7 @@ impl SesV2Service {
                     config_set_name.as_deref(),
                 );
             }
+            crate::smtp_relay::relay_sent_email(&sent);
 
             self.state
                 .write()

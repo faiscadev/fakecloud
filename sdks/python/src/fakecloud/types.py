@@ -430,8 +430,13 @@ class SentEmail:
     cc: List[str] = field(default_factory=list)
     bcc: List[str] = field(default_factory=list)
     subject: Optional[str] = None
+    # For a raw message: its first text/html and text/plain parts,
+    # transfer- and charset-decoded.
     html_body: Optional[str] = None
     text_body: Optional[str] = None
+    # A raw message (SendRawEmail, v2 SendEmail with Content.Raw, SMTP
+    # submission) as plain MIME text, decoded from the base64 the API carries
+    # it in. None for messages SES builds from fields.
     raw_data: Optional[str] = None
     template_name: Optional[str] = None
     template_data: Optional[str] = None

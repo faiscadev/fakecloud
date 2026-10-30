@@ -510,8 +510,15 @@ final class SentEmail
         /** @var string[] */
         public readonly array $bcc,
         public readonly ?string $subject,
+        /** For a raw message, its first text/html part, transfer- and charset-decoded. */
         public readonly ?string $htmlBody,
+        /** For a raw message, its first text/plain part, transfer- and charset-decoded. */
         public readonly ?string $textBody,
+        /**
+         * A raw message (SendRawEmail, v2 SendEmail with Content.Raw, SMTP
+         * submission) as plain MIME text, decoded from the base64 the API
+         * carries it in. Null for messages SES builds from fields.
+         */
         public readonly ?string $rawData,
         public readonly ?string $templateName,
         public readonly ?string $templateData,

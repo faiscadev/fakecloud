@@ -344,7 +344,8 @@ fn store_email(
 ) -> String {
     let message_id = format!("smtp-{:032x}", rand::random::<u128>());
     let now = Utc::now();
-    let subject = parse_subject(&data);
+    let subject = fakecloud_ses::mime::message_subject(data.as_bytes());
+    let (text_body, html_body) = fakecloud_ses::mime::message_bodies(data.as_bytes());
     let raw_size_bytes = data.len();
     let sent = SentEmail {
         message_id: message_id.clone(),
@@ -353,8 +354,8 @@ fn store_email(
         cc: Vec::new(),
         bcc: Vec::new(),
         subject: subject.clone(),
-        html_body: None,
-        text_body: None,
+        html_body,
+        text_body,
         raw_data: Some(data),
         template_name: None,
         template_data: None,
@@ -373,28 +374,16 @@ fn store_email(
         received_at: now,
         auth_user: auth_user.to_string(),
     };
+    if std::env::var_os("FAKECLOUD_SES_SMTP_RELAY").is_some() {
+        // The relay client is blocking; keep it off the listener's runtime.
+        let relayed = sent.clone();
+        tokio::task::spawn_blocking(move || fakecloud_ses::smtp_relay::relay_sent_email(&relayed));
+    }
     let mut accounts = ses.write();
     let state = accounts.get_or_create(account_id);
     state.sent_emails.push(sent);
     state.smtp_submissions.push(submission);
     message_id
-}
-
-/// Return the first `Subject:` header value in an RFC 5322 message blob,
-/// or `None` if no header is found. Folded continuation lines are not
-/// unfolded — fakecloud just keeps the first physical line, which is
-/// good enough for test assertions and matches the shape captured in
-/// `SentEmail::subject` for the v2 SDK path.
-fn parse_subject(raw: &str) -> Option<String> {
-    for line in raw.lines() {
-        if line.is_empty() {
-            break;
-        }
-        if let Some(rest) = line.strip_prefix("Subject:") {
-            return Some(rest.trim().to_string());
-        }
-    }
-    None
 }
 
 #[cfg(test)]

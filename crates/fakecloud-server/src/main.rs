@@ -2930,6 +2930,7 @@ async fn main() {
                                     fakecloud_ses::SES_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
+                            let snapshot = snapshot.upgrade();
                             if let Some(accounts) = snapshot.accounts {
                                 let account_count = accounts.account_count();
                                 *ses_state.write() = accounts;

@@ -135,8 +135,9 @@ pub fn signature_for_sent_email(state: &SesState, sent: &SentEmail) -> Option<St
 
 /// Variant of [`signature_for_sent_email`] that also returns the full
 /// header block we stamped onto the message: the `DKIM-Signature`
-/// header followed by the synthesized `From`/`To`/`Subject`/`Date`/
-/// `Message-ID` lines that were covered by the signature. Returns
+/// header followed by the `From`/`To`/`Subject`/`Date`/`Message-ID`
+/// lines covered by the signature (a raw message's own, otherwise the
+/// ones SES builds). Returns
 /// `None` when DKIM signing is disabled or no key is on file.
 pub fn signed_headers_for_sent_email(
     state: &SesState,
@@ -156,20 +157,42 @@ pub fn signed_headers_for_sent_email(
         .dkim_domain_signing_selector
         .as_deref()
         .unwrap_or("fakecloudses");
-    let body_text = sent
-        .raw_data
-        .clone()
-        .or_else(|| sent.html_body.clone())
-        .or_else(|| sent.text_body.clone())
-        .unwrap_or_default();
-    let to_header = sent.to.join(", ");
+    let (signed_headers, body_text) = match sent.raw_data.as_deref() {
+        // A raw message (plain MIME) is signed as sent: its own header
+        // fields and its body.
+        Some(raw) => {
+            let mail = crate::mime::RawMail::from_mime(raw.as_bytes().to_vec());
+            let headers = ["From", "To", "Subject", "Date", "Message-ID"]
+                .into_iter()
+                .filter_map(|name| Some((name.to_string(), mail.header(name)?.to_string())))
+                .collect();
+            (headers, crate::mime::body_section(raw).to_string())
+        }
+        None => {
+            let body = sent
+                .html_body
+                .clone()
+                .or_else(|| sent.text_body.clone())
+                .unwrap_or_default();
+            (built_signed_headers(sent), body)
+        }
+    };
+    let signature = sign_message(private_key, domain, selector, &signed_headers, &body_text)?;
+    let mut all_headers = Vec::with_capacity(signed_headers.len() + 1);
+    all_headers.push(("DKIM-Signature".to_string(), signature.clone()));
+    all_headers.extend(signed_headers);
+    Some((signature, all_headers))
+}
+
+/// The signed header fields of a message SES builds from its fields.
+fn built_signed_headers(sent: &SentEmail) -> Vec<(String, String)> {
     let date = sent
         .timestamp
         .format("%a, %d %b %Y %H:%M:%S +0000")
         .to_string();
-    let signed_headers = vec![
+    vec![
         ("From".to_string(), sent.from.clone()),
-        ("To".to_string(), to_header),
+        ("To".to_string(), sent.to.join(", ")),
         // Sign the wire form of the subject: a decoded raw subject may hold
         // non-ASCII or line breaks, which only travel as an encoded-word.
         (
@@ -181,12 +204,7 @@ pub fn signed_headers_for_sent_email(
             "Message-ID".to_string(),
             format!("<{}@fakecloud.local>", sent.message_id),
         ),
-    ];
-    let signature = sign_message(private_key, domain, selector, &signed_headers, &body_text)?;
-    let mut all_headers = Vec::with_capacity(signed_headers.len() + 1);
-    all_headers.push(("DKIM-Signature".to_string(), signature.clone()));
-    all_headers.extend(signed_headers);
-    Some((signature, all_headers))
+    ]
 }
 
 fn parse_private_key(pem: &str) -> Option<RsaPrivateKey> {
@@ -421,6 +439,80 @@ mod tests {
         let subject = &headers.iter().find(|(n, _)| n == "Subject").unwrap().1;
         assert!(subject.starts_with("=?UTF-8?B?"), "{subject}");
         assert!(!subject.contains(['\r', '\n']));
+    }
+
+    #[test]
+    fn raw_message_is_signed_over_its_own_headers_and_body() {
+        let (pem, _) = generate_easy_dkim_keypair();
+        let pem_copy = pem.clone();
+        let mut state = SesState::new("123456789012", "us-east-1");
+        state.identities.insert(
+            "example.com".to_string(),
+            crate::state::EmailIdentity {
+                identity_name: "example.com".to_string(),
+                identity_type: "DOMAIN".to_string(),
+                verified: true,
+                created_at: chrono::Utc::now(),
+                dkim_signing_enabled: true,
+                dkim_signing_attributes_origin: "AWS_SES".to_string(),
+                dkim_domain_signing_private_key: Some(pem),
+                dkim_domain_signing_selector: None,
+                dkim_next_signing_key_length: None,
+                dkim_public_key_b64: None,
+                email_forwarding_enabled: true,
+                mail_from_domain: None,
+                mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
+                mail_from_domain_status: "NotStarted".to_string(),
+                configuration_set_name: None,
+                bounce_topic: None,
+                complaint_topic: None,
+                delivery_topic: None,
+                verification_token: None,
+            },
+        );
+        let sent = SentEmail {
+            message_id: "m".to_string(),
+            from: "sender@example.com".to_string(),
+            to: vec!["to@example.com".to_string()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: Some("Ol\u{e1}".to_string()),
+            html_body: None,
+            text_body: Some("Hello\r\nthere\r\n".to_string()),
+            raw_data: Some(
+                "From: Sender <sender@example.com>\r\nTo: to@example.com\r\nSubject: =?UTF-8?B?T2zDoQ==?=\r\nMessage-ID: <raw-1@example.com>\r\n\r\nHello\r\nthere\r\n"
+                    .to_string(),
+            ),
+            template_name: None,
+            template_data: None,
+            dkim_signature: None,
+            headers: Vec::new(),
+            timestamp: chrono::Utc::now(),
+            email_tags: Vec::new(),
+            delivery_insights: Vec::new(),
+        };
+        let (signature, headers) = signed_headers_for_sent_email(&state, &sent).unwrap();
+        let own = vec![
+            (
+                "From".to_string(),
+                "Sender <sender@example.com>".to_string(),
+            ),
+            ("To".to_string(), "to@example.com".to_string()),
+            ("Subject".to_string(), "=?UTF-8?B?T2zDoQ==?=".to_string()),
+            ("Message-ID".to_string(), "<raw-1@example.com>".to_string()),
+        ];
+        assert_eq!(headers[1..], own[..]);
+        // Signing is deterministic: the same headers and the MIME body
+        // (not the whole message, and never base64) give the same value.
+        let expected = sign_message(
+            &pem_copy,
+            "example.com",
+            "fakecloudses",
+            &own,
+            "Hello\r\nthere\r\n",
+        )
+        .unwrap();
+        assert_eq!(signature, expected);
     }
 
     #[test]

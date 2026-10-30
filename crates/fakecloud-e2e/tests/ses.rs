@@ -561,6 +561,70 @@ async fn ses_send_email_raw() {
 }
 
 #[tokio::test]
+async fn ses_send_email_raw_introspection_is_plain_mime_with_parsed_bodies() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    for identity in ["sender@example.com", "recipient@example.com"] {
+        client
+            .create_email_identity()
+            .email_identity(identity)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let raw_message = concat!(
+        "From: sender@example.com\r\n",
+        "To: recipient@example.com\r\n",
+        "Subject: Raw parts\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/mixed; boundary=\"outer\"\r\n",
+        "\r\n",
+        "--outer\r\n",
+        "Content-Type: multipart/alternative; boundary=\"inner\"\r\n",
+        "\r\n",
+        "--inner\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n",
+        "plain part\r\n",
+        "--inner\r\n",
+        "Content-Type: text/html; charset=utf-8\r\n",
+        "Content-Transfer-Encoding: quoted-printable\r\n",
+        "\r\n",
+        "<p class=3D\"x\">html part</p>\r\n",
+        "--inner--\r\n",
+        "--outer\r\n",
+        "Content-Type: text/plain; name=\"a.txt\"\r\n",
+        "Content-Disposition: attachment; filename=\"a.txt\"\r\n",
+        "\r\n",
+        "attachment text\r\n",
+        "--outer--\r\n",
+    );
+    client
+        .send_email()
+        .content(
+            EmailContent::builder()
+                .raw(
+                    RawMessage::builder()
+                        .data(aws_sdk_sesv2::primitives::Blob::new(raw_message.as_bytes()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let url = format!("{}/_fakecloud/ses/emails", server.endpoint());
+    let resp: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+    let email = &resp["emails"][0];
+    assert_eq!(email["rawData"], raw_message);
+    assert_eq!(email["textBody"], "plain part");
+    assert_eq!(email["htmlBody"], "<p class=\"x\">html part</p>");
+}
+
+#[tokio::test]
 async fn ses_get_account() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;

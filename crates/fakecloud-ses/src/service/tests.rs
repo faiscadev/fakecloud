@@ -141,8 +141,8 @@ async fn optional_v2_raw_resolves_headers_before_admission_and_honors_api_preced
                 .default_mut()
                 .account_settings
                 .production_access_enabled = false;
-            let raw = base64::Engine::encode(&base64::engine::general_purpose::STANDARD,
-                "From: Header <header@example.com>\r\nTo: header-to@example.com\r\nCc: header-cc@example.com\r\nBcc: header-bcc@example.com\r\nX-SES-CONFIGURATION-SET: header-cs\r\nSubject: raw\r\n\r\nbody");
+            let mime = "From: Header <header@example.com>\r\nTo: header-to@example.com\r\nCc: header-cc@example.com\r\nBcc: header-bcc@example.com\r\nX-SES-CONFIGURATION-SET: header-cs\r\nSubject: raw\r\n\r\nbody";
+            let raw = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, mime);
             let mut body = json!({"Content":{"Raw":{"Data":raw}}});
             if explicit_from {
                 body["FromEmailAddress"] = json!("API <api@example.com>");
@@ -204,7 +204,8 @@ async fn optional_v2_raw_resolves_headers_before_admission_and_honors_api_preced
                     "Header <header@example.com>"
                 }
             );
-            assert_eq!(sent.raw_data.as_deref(), Some(raw.as_str()));
+            assert_eq!(sent.raw_data.as_deref(), Some(mime));
+            assert_eq!(sent.text_body.as_deref(), Some("body"));
         }
     }
 }
@@ -1117,7 +1118,7 @@ async fn review_raw_comments_groups_quoted_commas_and_header_from_work_in_sandbo
         let accounts = svc.state.read();
         let email = accounts.default_ref().sent_emails.last().unwrap();
         assert_eq!(email.from, from, "display-name header storage is preserved");
-        assert_eq!(email.raw_data.as_deref(), Some(raw.as_str()));
+        assert_eq!(email.raw_data.as_deref(), Some(text.as_str()));
     }
 }
 
@@ -1598,7 +1599,12 @@ async fn test_send_email_raw_content() {
     let _mas_r = state.read();
     let s = _mas_r.default_ref();
     assert_eq!(s.sent_emails.len(), 1);
-    assert_eq!(s.sent_emails[0].raw_data.as_deref(), Some(raw.as_str()));
+    assert_eq!(
+        s.sent_emails[0].raw_data.as_deref(),
+        Some("From: sender@example.com\r\nTo: to@example.com\r\nSubject: =?UTF-8?B?UmF3IGjDqQ==?=\r\n\r\nBody")
+    );
+    assert_eq!(s.sent_emails[0].text_body.as_deref(), Some("Body"));
+    assert_eq!(s.sent_emails[0].html_body, None);
     // The RFC 2047 Subject is decoded, matching v1 SendRawEmail.
     assert_eq!(s.sent_emails[0].subject.as_deref(), Some("Raw h\u{e9}"));
 }

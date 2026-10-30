@@ -149,6 +149,10 @@ public sealed record WarmContainersResponse(IReadOnlyList<WarmContainer>? Contai
 public sealed record EvictContainerResponse(bool Evicted);
 
 // ── SES ────────────────────────────────────────────────────────
+/// <summary>A message SES accepted.</summary>
+/// <param name="HtmlBody">For a raw message, its first text/html part, transfer- and charset-decoded.</param>
+/// <param name="TextBody">For a raw message, its first text/plain part, transfer- and charset-decoded.</param>
+/// <param name="RawData">A raw message (SendRawEmail, v2 SendEmail with Content.Raw, SMTP submission) as plain MIME text, decoded from the base64 the API carries it in; null for messages SES builds from fields.</param>
 public sealed record SentEmail(
     string? MessageId,
     string? From,

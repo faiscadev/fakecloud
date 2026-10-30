@@ -62,19 +62,19 @@ fakecloud also exposes a minimal SMTP submission listener that mirrors `email-sm
 
 - Authenticate with credentials produced by IAM `CreateServiceSpecificCredential` for `ServiceName=ses.amazonaws.com` (the `ServiceUserName` / `ServicePassword` pair from the response).
 - Both `AUTH PLAIN` and `AUTH LOGIN` mechanisms are supported.
-- After `MAIL FROM` / `RCPT TO` / `DATA`, the message is recorded in the SES `sent_emails` ledger as a `SentEmail` with `raw_data` populated, mirroring `SendRawEmail`. It then surfaces on `GET /_fakecloud/ses/emails` like any other accepted message.
+- After `MAIL FROM` / `RCPT TO` / `DATA`, the message is recorded in the SES `sent_emails` ledger as a `SentEmail` with `rawData` (the plain MIME) and its parsed `textBody` / `htmlBody`, exactly like `SendRawEmail`. It then surfaces on `GET /_fakecloud/ses/emails` like any other accepted message.
 - STARTTLS is not implemented — keep the listener bound to localhost in tests.
 
 ## SMTP outbound relay (opt-in)
 
-For tests that want fakecloud to forward accepted messages out to a real SMTP server (for example [MailHog](https://github.com/mailhog/MailHog) or your own integration mailbox), set `FAKECLOUD_SES_SMTP_RELAY=smtp://host:port` before starting the server. When set, fakecloud will dispatch every accepted `SendEmail` / `SendRawEmail` / `SendBulkEmail` / SMTP-submitted message to the configured relay in addition to recording it locally.
+For tests that want fakecloud to forward accepted messages out to a real SMTP server (for example [MailHog](https://github.com/mailhog/MailHog) or your own integration mailbox), set `FAKECLOUD_SES_SMTP_RELAY=smtp://host:port` before starting the server. When set, fakecloud will dispatch every accepted `SendEmail` / `SendRawEmail` / `SendBulkEmail` / SMTP-submitted message to the configured relay in addition to recording it locally. Raw messages are relayed exactly as sent (the plain MIME); other sends are rebuilt from their fields.
 
 - **Opt-in only.** With the variable unset, no outbound network traffic is generated — messages are recorded in memory like before.
 - Failures from the relay are logged but do not fail the send (the message is still recorded), matching SES's "accepted for delivery" semantics.
 
 ## Introspection
 
-- `GET /_fakecloud/ses/emails` — list all sent emails with full body, synthesized headers (DKIM-Signature first when signing was active), attachments
+- `GET /_fakecloud/ses/emails` — list all sent emails with full body, synthesized headers (DKIM-Signature first when signing was active), attachments. For raw messages `rawData` is the plain MIME text (decoded from the API's base64) and `textBody` / `htmlBody` are its parsed `text/plain` / `text/html` parts; DKIM signs a raw message over its own headers and MIME body
 - `GET /_fakecloud/ses/metrics` — counters (e.g. `suppressedDropsTotal`) for the SES emulator
 - `GET /_fakecloud/ses/identities/{name}/dkim-public-key` — pull the published Easy DKIM public key (SPKI DER, base64) so tests can verify signatures end-to-end
 - `POST /_fakecloud/ses/identities/{name}/mail-from-status` — override an identity's MAIL FROM domain verification status (`NotStarted` / `Pending` / `Success` / `Failed`)

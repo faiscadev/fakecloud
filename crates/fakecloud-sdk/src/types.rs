@@ -113,8 +113,15 @@ pub struct SentEmail {
     #[serde(default)]
     pub bcc: Vec<String>,
     pub subject: Option<String>,
+    /// The HTML body. For a raw message, its first `text/html` part,
+    /// transfer- and charset-decoded.
     pub html_body: Option<String>,
+    /// The text body. For a raw message, its first `text/plain` part,
+    /// transfer- and charset-decoded.
     pub text_body: Option<String>,
+    /// A raw message (`SendRawEmail`, v2 `SendEmail` with `Content.Raw`,
+    /// SMTP submission) as plain MIME text, decoded from the base64 the API
+    /// carries it in. `None` for messages SES builds from fields.
     pub raw_data: Option<String>,
     pub template_name: Option<String>,
     pub template_data: Option<String>,

@@ -1284,7 +1284,12 @@ fn test_send_raw_email() {
         let mas = state.read();
         let st = mas.default_ref();
         assert_eq!(st.sent_emails.len(), 1);
-        assert!(st.sent_emails[0].raw_data.is_some());
+        // Stored decoded: the plain MIME, with its body parsed out.
+        assert_eq!(
+            st.sent_emails[0].raw_data.as_deref(),
+            Some("From: sender@example.com\r\nTo: to@example.com\r\nSubject: Test\r\n\r\nBody")
+        );
+        assert_eq!(st.sent_emails[0].text_body.as_deref(), Some("Body"));
     }
 }
 
