@@ -1667,6 +1667,10 @@ async fn bedrock_introspection_input_output_are_structured_for_all_calls() {
         assert!(inv["output"]["usage"]["output_tokens"].is_u64(), "{inv}");
     }
     assert_eq!(invocations[1]["output"]["stop_reason"], "end_turn");
+    assert_eq!(
+        invocations[0]["output"], invocations[1]["output"],
+        "the stream records the body InvokeModel returns"
+    );
 
     // Converse and ConverseStream: the Converse response shape for both.
     for inv in &invocations[2..] {
@@ -1680,10 +1684,64 @@ async fn bedrock_introspection_input_output_are_structured_for_all_calls() {
         assert!(inv["output"]["usage"]["totalTokens"].is_u64(), "{inv}");
     }
     assert_eq!(
-        invocations[2]["output"]["output"]["message"]["content"][0]["text"],
-        invocations[3]["output"]["output"]["message"]["content"][0]["text"],
-        "ConverseStream records the same reply text as Converse"
+        invocations[2]["output"], invocations[3]["output"],
+        "ConverseStream records the same body as Converse"
     );
+}
+
+/// A configured response override reads back verbatim for both InvokeModel
+/// and InvokeModelWithResponseStream.
+#[tokio::test]
+async fn bedrock_introspection_stream_records_override_like_invoke_model() {
+    let server = TestServer::start().await;
+    let runtime_client = server.bedrock_runtime_client().await;
+    let http_client = reqwest::Client::new();
+    let model_id = "anthropic.claude-3-haiku-20240307-v1:0";
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let fc = fakecloud_sdk::FakeCloud::new(server.endpoint());
+    fc.bedrock()
+        .set_response_rules(
+            model_id,
+            &[fakecloud_sdk::types::BedrockResponseRule {
+                prompt_contains: None,
+                response: r#"{"label":"ham"}"#.into(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "hello friend"}]
+    });
+    runtime_client
+        .invoke_model()
+        .model_id(model_id)
+        .content_type("application/json")
+        .body(Blob::new(serde_json::to_vec(&body).unwrap()))
+        .send()
+        .await
+        .unwrap();
+    let stream = http_client
+        .post(format!(
+            "{}/model/{model_id}/invoke-with-response-stream",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), 200);
+
+    let invocations = fc.bedrock().get_invocations().await.unwrap().invocations;
+    assert_eq!(invocations.len(), 2);
+    for inv in &invocations {
+        assert_eq!(inv.output, serde_json::json!({"label": "ham"}));
+    }
 }
 
 // Custom Models

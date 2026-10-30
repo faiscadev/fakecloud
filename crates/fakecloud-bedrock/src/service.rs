@@ -1746,16 +1746,16 @@ impl AwsService for BedrockService {
                 let body =
                     crate::streaming::build_invoke_stream_response(&model_id, &response_text);
 
-                // Record the InvokeModel-shaped body the streamed text
-                // amounts to, so introspection reads alike for both calls.
+                // Record the body InvokeModel returns for the same call, so
+                // introspection reads alike for both.
                 let input: serde_json::Value =
                     serde_json::from_slice(&req.body).unwrap_or_default();
-                let output = crate::upstream::provider_response_for_text(
+                let output = crate::invoke::offline_response_body(
+                    &self.state,
+                    &req,
                     &model_id,
-                    &response_text,
-                    crate::upstream::StopKind::EndTurn,
-                    crate::prompt::count_tokens(&crate::invoke::extract_input_text(&input)),
-                    crate::prompt::count_tokens(&response_text),
+                    &req.body,
+                    &input,
                 );
                 crate::invoke::record_invocation(
                     &self.state,
@@ -1806,64 +1806,25 @@ impl AwsService for BedrockService {
                     )
                     .await;
                 }
-                let response_text =
-                    crate::streaming::get_response_text(&self.state, &req, &model_id, &req.body);
-                // Apply the same inferenceConfig / toolChoice semantics as the
-                // non-streaming Converse path so the two agree for identical
-                // input: honour maxTokens truncation, only force a tool when
-                // toolChoice requires it, and report the matching stopReason.
-                let input: serde_json::Value =
-                    serde_json::from_slice(&req.body).unwrap_or_default();
-                let max_tokens = input
-                    .get("inferenceConfig")
-                    .and_then(|c| c["maxTokens"].as_u64())
-                    .unwrap_or(u64::MAX);
-                let (response_text, truncated) = if max_tokens < u64::MAX {
-                    let char_limit = (max_tokens as usize).saturating_mul(4);
-                    if response_text.chars().count() > char_limit {
-                        (
-                            response_text.chars().take(char_limit).collect::<String>(),
-                            true,
-                        )
-                    } else {
-                        (response_text, false)
-                    }
-                } else {
-                    (response_text, false)
-                };
-                let forced_tool = crate::converse::forced_tool_name(input.get("toolConfig"));
-                let stop_reason = if forced_tool.is_some() {
-                    "tool_use"
-                } else if truncated {
-                    "max_tokens"
-                } else {
-                    "end_turn"
-                };
-                let prompt = crate::prompt::extract_prompt_text(&model_id, &req.body);
-                let input_tokens = crate::prompt::count_tokens(&prompt);
-                let output_tokens = crate::prompt::count_tokens(&response_text);
+                // The same reply the non-streaming Converse path builds for
+                // identical input (maxTokens truncation, forced toolUse, stop
+                // reason, usage), streamed as events.
+                let reply = crate::converse::offline_reply(&self.state, &req, &model_id, &req.body);
                 let body = crate::streaming::build_converse_stream_response(
-                    &response_text,
-                    stop_reason,
-                    forced_tool.as_deref(),
-                    input_tokens,
-                    output_tokens,
+                    &reply.text,
+                    reply.stop_reason,
+                    reply.forced_tool.as_deref(),
+                    reply.input_tokens,
+                    reply.output_tokens,
                 );
 
-                // Record the Converse-shaped body the stream amounts to.
-                let output = crate::converse::response_json(
-                    &response_text,
-                    forced_tool.as_deref(),
-                    stop_reason,
-                    input_tokens,
-                    output_tokens,
-                );
+                // Record the Converse body the stream amounts to.
                 crate::invoke::record_invocation(
                     &self.state,
                     &req,
                     &model_id,
                     &req.body,
-                    &output,
+                    &reply.response_json(),
                     None,
                     metadata.as_ref(),
                 );

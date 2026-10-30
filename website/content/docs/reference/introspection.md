@@ -6,7 +6,7 @@ weight = 3
 
 fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs asynchronously (TTL expiration, scheduled rotation, lifecycle, etc.) and for asserting on state from within tests. The first-party SDKs wrap these into ergonomic helpers -- see [SDK setup](/docs/getting-started/sdk-setup/) -- but the raw endpoints are documented here as the source of truth.
 
-This page lists every `/_fakecloud/*` endpoint shipped today: 120 routes across 35 service areas. Endpoints marked **NEW** are recent additions.
+This page lists every `/_fakecloud/*` endpoint shipped today: 131 routes across 36 service areas. Endpoints marked **NEW** are recent additions.
 
 ### JSON document fields
 

@@ -40,8 +40,7 @@ pub(crate) fn invoke_model(
 
     let input: Value = serde_json::from_slice(body).unwrap_or_default();
 
-    let response_body = crate::prompt::resolve_override(state, req, model_id, body)
-        .unwrap_or_else(|| generate_canned_response(model_id, &input));
+    let response_body = offline_response_body(state, req, model_id, body, &input);
 
     Ok(respond_with_body(
         state,
@@ -52,6 +51,21 @@ pub(crate) fn invoke_model(
         response_body,
         request_metadata,
     ))
+}
+
+/// The body an offline InvokeModel call returns: the configured simulation
+/// override verbatim, else the provider's canned (or echo) response.
+/// InvokeModelWithResponseStream records it too, so a streamed call reads
+/// back exactly like the equivalent InvokeModel call.
+pub(crate) fn offline_response_body(
+    state: &SharedBedrockState,
+    req: &AwsRequest,
+    model_id: &str,
+    body: &[u8],
+    input: &Value,
+) -> String {
+    crate::prompt::resolve_override(state, req, model_id, body)
+        .unwrap_or_else(|| generate_canned_response(model_id, input))
 }
 
 /// Record an InvokeModel invocation for introspection.

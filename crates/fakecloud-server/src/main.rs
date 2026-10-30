@@ -11982,21 +11982,19 @@ async fn main() {
                 let bs = bedrock_state.clone();
                 move || async move {
                     let accounts = bs.read(); let state = accounts.default_ref();
-                    let invocations: Vec<serde_json::Value> = state
+                    let invocations = state
                         .invocations
                         .iter()
-                        .map(|inv| {
-                            serde_json::json!({
-                                "modelId": inv.model_id,
-                                "input": json_document(&inv.input),
-                                "output": json_document(&inv.output),
-                                "timestamp": inv.timestamp.to_rfc3339(),
-                                "error": inv.error,
-                                "requestMetadata": inv.request_metadata,
-                            })
+                        .map(|inv| types::BedrockInvocation {
+                            model_id: inv.model_id.clone(),
+                            input: json_document(&inv.input),
+                            output: json_document(&inv.output),
+                            timestamp: inv.timestamp.to_rfc3339(),
+                            error: inv.error.clone(),
+                            request_metadata: inv.request_metadata.clone(),
                         })
                         .collect();
-                    axum::Json(serde_json::json!({ "invocations": invocations }))
+                    axum::Json(types::BedrockInvocationsResponse { invocations })
                 }
             }),
         )

@@ -25,6 +25,54 @@ pub(crate) fn converse(
         return Err(crate::faults::fault_to_error(&fault));
     }
 
+    let reply = offline_reply(state, req, model_id, body);
+    let response_str = reply.response_json();
+
+    // Record invocation for introspection
+    crate::invoke::record_invocation(
+        state,
+        req,
+        model_id,
+        body,
+        &response_str,
+        None,
+        request_metadata,
+    );
+
+    Ok(AwsResponse::json(StatusCode::OK, response_str))
+}
+
+/// An offline Converse reply: the assistant text (truncated to
+/// `maxTokens`), the forced tool if `toolChoice` requires one, the stop
+/// reason and usage. Converse and ConverseStream both build from it, so the
+/// two return the same reply for identical input.
+pub(crate) struct OfflineReply {
+    pub(crate) text: String,
+    pub(crate) forced_tool: Option<String>,
+    pub(crate) stop_reason: &'static str,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+}
+
+impl OfflineReply {
+    /// The Converse response body for this reply.
+    pub(crate) fn response_json(&self) -> String {
+        response_json(
+            &self.text,
+            self.forced_tool.as_deref(),
+            self.stop_reason,
+            self.input_tokens,
+            self.output_tokens,
+        )
+    }
+}
+
+pub(crate) fn offline_reply(
+    state: &SharedBedrockState,
+    req: &AwsRequest,
+    model_id: &str,
+    body: &[u8],
+) -> OfflineReply {
     let input: Value = serde_json::from_slice(body).unwrap_or_default();
 
     let inference_config = input.get("inferenceConfig");
@@ -33,31 +81,7 @@ pub(crate) fn converse(
         .unwrap_or(u64::MAX);
     let tool_config = input.get("toolConfig");
 
-    let response_text = match crate::prompt::resolve_override(state, req, model_id, body) {
-        Some(custom) => {
-            let parsed: Value = serde_json::from_str(&custom).unwrap_or_default();
-            if let Some(text) = parsed["output"]["message"]["content"][0]["text"].as_str() {
-                text.to_string()
-            } else {
-                custom
-            }
-        }
-        None => {
-            // Echo mode short-circuits the canned phrase: reflect the
-            // caller's prompt back as the assistant text so tests can
-            // assert against their own input.
-            if crate::prompt::echo_enabled() {
-                let echoed = crate::prompt::extract_prompt_text(model_id, body);
-                if echoed.is_empty() {
-                    "(empty prompt)".to_string()
-                } else {
-                    echoed
-                }
-            } else {
-                "This is a test response from the emulated model.".to_string()
-            }
-        }
-    };
+    let response_text = crate::streaming::get_response_text(state, req, model_id, body);
 
     // Respect maxTokens by truncating (rough approximation: 1 token ~= 4 chars).
     // `saturating_mul` keeps a hostile `maxTokens` (e.g. `u64::MAX - 1` sent
@@ -96,26 +120,13 @@ pub(crate) fn converse(
     let input_tokens = estimate_tokens(&input);
     let output_tokens = crate::prompt::count_tokens(&truncated_text).max(1);
 
-    let response_str = response_json(
-        &truncated_text,
-        forced_tool.as_deref(),
+    OfflineReply {
+        text: truncated_text,
+        forced_tool,
         stop_reason,
         input_tokens,
         output_tokens,
-    );
-
-    // Record invocation for introspection
-    crate::invoke::record_invocation(
-        state,
-        req,
-        model_id,
-        body,
-        &response_str,
-        None,
-        request_metadata,
-    );
-
-    Ok(AwsResponse::json(StatusCode::OK, response_str))
+    }
 }
 
 /// The Converse response body for an offline reply: the text block, an
