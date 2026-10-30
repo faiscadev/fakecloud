@@ -47,9 +47,8 @@ func (c *ELBv2Client) GetRules(ctx context.Context) (*Elbv2RulesResponse, error)
 	return &out, nil
 }
 
-// GetWafCounts returns the WAF rule-match counters accumulated per
-// load balancer / listener. Payload is passed through as raw JSON so
-// the SDK doesn't need a release every time a new counter is added.
+// GetWafCounts returns how many requests matched each WAF rule whose
+// action is Count, per WebACL associated with an ALB.
 func (c *ELBv2Client) GetWafCounts(ctx context.Context) (*Elbv2WafCountsResponse, error) {
 	var out Elbv2WafCountsResponse
 	if err := c.fc.doGet(ctx, "/_fakecloud/elbv2/waf-counts", &out); err != nil {

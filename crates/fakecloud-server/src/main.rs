@@ -11323,8 +11323,16 @@ async fn main() {
                 move || {
                     let svc = svc.clone();
                     async move {
-                        let counts = svc.waf_count_metrics_snapshot();
-                        axum::Json(serde_json::json!({ "counts": counts }))
+                        let counts = svc
+                            .waf_count_metrics_snapshot()
+                            .into_iter()
+                            .map(|((web_acl_arn, rule_name), count)| types::Elbv2WafCount {
+                                web_acl_arn,
+                                rule_name,
+                                count,
+                            })
+                            .collect();
+                        axum::Json(types::Elbv2WafCountsResponse { counts })
                     }
                 }
             }),
@@ -12647,18 +12655,45 @@ async fn main() {
                         let mut out = Vec::new();
                         for (account_id, state) in accounts.iter() {
                             for (pool_user_key, creds) in &state.webauthn_credentials {
+                                // Keyed `{pool_id}:{username}`; pool ids
+                                // (`<region>_<id>`) never contain a colon.
+                                let Some((pool_id, username)) = pool_user_key.split_once(':')
+                                else {
+                                    continue;
+                                };
                                 for c in creds {
-                                    out.push(serde_json::json!({
-                                        "account_id": account_id,
-                                        "pool_user": pool_user_key,
-                                        "credential_id": c.credential_id,
-                                        "relying_party_id": c.relying_party_id,
-                                        "attestation_info": c.attestation_info,
-                                    }));
+                                    out.push(types::WebAuthnCredential {
+                                        account_id: account_id.to_string(),
+                                        pool_id: pool_id.to_string(),
+                                        username: username.to_string(),
+                                        credential_id: c.credential_id.clone(),
+                                        friendly_credential_name: c
+                                            .friendly_credential_name
+                                            .clone(),
+                                        relying_party_id: c.relying_party_id.clone(),
+                                        authenticator_attachment: c
+                                            .authenticator_attachment
+                                            .clone(),
+                                        authenticator_transports: c
+                                            .authenticator_transport
+                                            .clone(),
+                                        created_at: c.created_at.to_rfc3339(),
+                                        attestation_info: c.attestation_info.as_ref().map(
+                                            |a| types::WebAuthnAttestationInfo {
+                                                fmt: a.fmt.clone(),
+                                                alg: a.alg,
+                                                signature_len: a.signature_len as u64,
+                                                x5c_chain_len: a.x5c_chain_len as u64,
+                                                cose_public_key_present: a
+                                                    .cose_public_key_present,
+                                                self_attest_verified: a.self_attest_verified,
+                                            },
+                                        ),
+                                    });
                                 }
                             }
                         }
-                        axum::Json(serde_json::json!({ "credentials": out }))
+                        axum::Json(types::WebAuthnCredentialsResponse { credentials: out })
                     }
                 }
             }),

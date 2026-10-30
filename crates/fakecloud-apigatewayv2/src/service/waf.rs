@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Most recent requests kept for `/_fakecloud/apigatewayv2/requests`.
+const MAX_REQUEST_HISTORY: usize = 1000;
+
 impl ApiGatewayV2Service {
     /// Wire the shared WAFv2 state + rate limiter so the execute-API
     /// data plane can evaluate the WebACL associated with the matched
@@ -81,11 +84,9 @@ impl ApiGatewayV2Service {
             })
             .collect();
 
-        let body_string = if req.body.is_empty() {
-            None
-        } else {
-            String::from_utf8(req.body.to_vec()).ok()
-        };
+        // Same encoding the Lambda proxy event carries, so a binary body
+        // stays visible instead of collapsing into "no body".
+        let (is_base64_encoded, body_string) = crate::lambda_proxy::encode_body(req);
 
         let request_record = ApiRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -96,6 +97,7 @@ impl ApiGatewayV2Service {
             headers: headers_map,
             query_params: req.query_params.clone().into_iter().collect(),
             body: body_string,
+            is_base64_encoded,
             timestamp: chrono::Utc::now(),
             status_code,
         };
@@ -103,5 +105,10 @@ impl ApiGatewayV2Service {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state.request_history.push(request_record);
+        // Bounded like API Gateway v1's history: bodies are kept in full.
+        if state.request_history.len() > MAX_REQUEST_HISTORY {
+            let drop = state.request_history.len() - MAX_REQUEST_HISTORY;
+            state.request_history.drain(..drop);
+        }
     }
 }

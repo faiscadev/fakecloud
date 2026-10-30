@@ -1833,29 +1833,68 @@ class CompromisedPasswordsResponse:
 
 
 @dataclass
+class WebAuthnAttestationInfo:
+    """What fakecloud saw when it parsed a WebAuthn ``attestationObject``.
+
+    ``self_attest_verified`` is ``True`` when the self-attestation signature
+    was verified against the COSE public key and ``False`` when an ``x5c``
+    chain was accepted structurally.
+    """
+
+    fmt: str
+    alg: int
+    signature_len: int
+    x5c_chain_len: int
+    cose_public_key_present: bool
+    self_attest_verified: bool
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> WebAuthnAttestationInfo:
+        return cls(
+            fmt=data["fmt"],
+            alg=int(data["alg"]),
+            signature_len=int(data["signatureLen"]),
+            x5c_chain_len=int(data["x5cChainLen"]),
+            cose_public_key_present=bool(data["cosePublicKeyPresent"]),
+            self_attest_verified=bool(data["selfAttestVerified"]),
+        )
+
+
+@dataclass
 class WebAuthnCredential:
     """Registered WebAuthn credential surfaced by introspection.
 
-    `attestation_info` is the parsed-attestation JSON object (packed
-    format details, AAGUID, certificate chain summary, signature
-    counter); its shape depends on the attestation format so it is
-    surfaced as an opaque mapping.
+    ``attestation_info`` is ``None`` when the client registered without an
+    ``attestationObject``.
     """
 
     account_id: str
-    pool_user: str
+    pool_id: str
+    username: str
     credential_id: str
     relying_party_id: str
-    attestation_info: Any
+    created_at: str
+    friendly_credential_name: Optional[str] = None
+    authenticator_attachment: Optional[str] = None
+    authenticator_transports: List[str] = field(default_factory=list)
+    attestation_info: Optional[WebAuthnAttestationInfo] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> WebAuthnCredential:
+        info = data.get("attestationInfo")
         return cls(
-            account_id=data["account_id"],
-            pool_user=data["pool_user"],
-            credential_id=data["credential_id"],
-            relying_party_id=data["relying_party_id"],
-            attestation_info=data.get("attestation_info"),
+            account_id=data["accountId"],
+            pool_id=data["poolId"],
+            username=data["username"],
+            credential_id=data["credentialId"],
+            relying_party_id=data["relyingPartyId"],
+            created_at=data["createdAt"],
+            friendly_credential_name=data.get("friendlyCredentialName"),
+            authenticator_attachment=data.get("authenticatorAttachment"),
+            authenticator_transports=list(data.get("authenticatorTransports") or []),
+            attestation_info=(
+                WebAuthnAttestationInfo.from_dict(info) if info is not None else None
+            ),
         )
 
 
@@ -2373,12 +2412,27 @@ class ApiGatewayV2Request:
     query_params: Dict[str, str]
     timestamp: str
     status_code: int
+    # UTF-8 text as-is, anything else base64-encoded (see is_base64_encoded).
     body: Optional[str] = None
+    is_base64_encoded: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ApiGatewayV2Request:
-        d = _convert_keys(data)
-        return cls(**d)
+        # Mapped explicitly: header names and query keys are user data and
+        # must not be snake-cased.
+        return cls(
+            request_id=data["requestId"],
+            api_id=data["apiId"],
+            stage=data["stage"],
+            method=data["method"],
+            path=data["path"],
+            headers=dict(data.get("headers") or {}),
+            query_params=dict(data.get("queryParams") or {}),
+            timestamp=data["timestamp"],
+            status_code=int(data["statusCode"]),
+            body=data.get("body"),
+            is_base64_encoded=bool(data.get("isBase64Encoded", False)),
+        )
 
 
 @dataclass
@@ -3811,12 +3865,31 @@ class CloudFrontDistributionsResponse:
 
 
 @dataclass
+class Elbv2WafCount:
+    """Requests that matched one Count-action rule of an ALB's WebACL."""
+
+    web_acl_arn: str
+    rule_name: str
+    count: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2WafCount:
+        return cls(
+            web_acl_arn=data["webAclArn"],
+            rule_name=data["ruleName"],
+            count=int(data["count"]),
+        )
+
+
+@dataclass
 class Elbv2WafCountsResponse:
-    counts: Dict[str, Any] = field(default_factory=dict)
+    counts: List[Elbv2WafCount] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Elbv2WafCountsResponse:
-        return cls(counts=dict(data.get("counts") or {}))
+        return cls(
+            counts=[Elbv2WafCount.from_dict(c) for c in data.get("counts") or []]
+        )
 
 
 # -- Service Quotas --------------------------------------------------

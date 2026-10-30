@@ -382,4 +382,50 @@ public sealed class FakeServerTests : IDisposable
         Assert.Equal(400, err.Status);
         Assert.Contains("mode must be auto or manual", err.Body);
     }
+
+    [Fact]
+    public async Task DeserializesWafCountEntries()
+    {
+        _routes["GET /_fakecloud/elbv2/waf-counts"] = (200, """
+            {"counts":[{"webAclArn":"arn:acl","ruleName":"count-admin","count":3}]}
+            """);
+        var fc = new FakeCloudClient(_baseUrl);
+        var count = Assert.Single((await fc.Elbv2.GetWafCountsAsync()).Counts!);
+        Assert.Equal("arn:acl", count.WebAclArn);
+        Assert.Equal("count-admin", count.RuleName);
+        Assert.Equal(3, count.Count);
+    }
+
+    [Fact]
+    public async Task DeserializesCamelCaseWebAuthnCredentials()
+    {
+        _routes["GET /_fakecloud/cognito/webauthn-credentials"] = (200, """
+            {"credentials":[{"accountId":"123456789012","poolId":"us-east-1_abc","username":"a:b",
+              "credentialId":"cred","friendlyCredentialName":null,"relyingPartyId":"rp",
+              "authenticatorAttachment":"platform","authenticatorTransports":["internal"],
+              "createdAt":"t","attestationInfo":{"fmt":"packed","alg":-7,"signatureLen":70,
+              "x5cChainLen":0,"cosePublicKeyPresent":true,"selfAttestVerified":true}}]}
+            """);
+        var fc = new FakeCloudClient(_baseUrl);
+        var cred = Assert.Single((await fc.Cognito.GetWebAuthnCredentialsAsync()).Credentials!);
+        Assert.Equal("us-east-1_abc", cred.PoolId);
+        Assert.Equal("a:b", cred.Username);
+        Assert.Equal(["internal"], cred.AuthenticatorTransports!);
+        Assert.Equal(-7, cred.AttestationInfo!.Alg);
+        Assert.True(cred.AttestationInfo.SelfAttestVerified);
+    }
+
+    [Fact]
+    public async Task DeserializesApiGatewayV2Base64Flag()
+    {
+        _routes["GET /_fakecloud/apigatewayv2/requests"] = (200, """
+            {"requests":[{"requestId":"r","apiId":"a","stage":"prod","method":"POST","path":"/u",
+              "headers":{},"queryParams":{},"body":"/wD+","isBase64Encoded":true,
+              "timestamp":"t","statusCode":200}]}
+            """);
+        var fc = new FakeCloudClient(_baseUrl);
+        var req = Assert.Single((await fc.ApiGatewayV2.GetRequestsAsync()).Requests!);
+        Assert.True(req.IsBase64Encoded);
+        Assert.Equal("/wD+", req.Body);
+    }
 }

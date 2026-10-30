@@ -262,7 +262,7 @@ FakeCloud fc2 = new FakeCloud("http://localhost:5000"); // explicit base URL
 | `getListeners()`     | List ELBv2 listeners                                                                         |
 | `getRules()`         | List ELBv2 listener rules                                                                    |
 | `flushAccessLogs()`  | Force every buffered access-log + connection-log line to flush to S3 immediately             |
-| `getWafCounts()`     | Return WAFv2 association/evaluation counts the ELBv2 service has accumulated                 |
+| `getWafCounts()`     | Count-action WAF rule matches per WebACL and rule                                            |
 
 ## `fc.route53()`
 

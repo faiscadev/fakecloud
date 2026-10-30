@@ -300,7 +300,7 @@ $fc = new FakeCloud('http://localhost:4566'); // explicit base URL
 | `getListeners()`      | List ELBv2 listeners                                   |
 | `getRules()`          | List ELBv2 listener rules                              |
 | `flushAccessLogs()`   | Flush buffered ELBv2 access logs to their S3 bucket    |
-| `getWafCounts()`      | Get WAF allow/block counts seen by ELBv2 listeners     |
+| `getWafCounts()`      | Count-action WAF rule matches per WebACL and rule      |
 
 ### `$fc->route53()`
 

@@ -218,7 +218,9 @@ fn host_api_id(req: &AwsRequest) -> String {
         .to_string()
 }
 
-fn encode_body(req: &AwsRequest) -> (bool, Option<String>) {
+/// A request body as API Gateway hands it to Lambda: UTF-8 text as-is,
+/// binary content types and non-UTF-8 bytes base64-encoded with the flag set.
+pub(crate) fn encode_body(req: &AwsRequest) -> (bool, Option<String>) {
     if req.body.is_empty() {
         return (false, None);
     }
@@ -771,5 +773,23 @@ mod tests {
         let event = construct_event(&req, "GET /noop", "prod", HashMap::new(), None);
         assert_eq!(event["isBase64Encoded"], false);
         assert!(event["body"].is_null());
+    }
+
+    #[test]
+    fn encode_body_base64_encodes_non_utf8_without_binary_content_type() {
+        let mut req = create_test_request();
+        req.body = Bytes::from_static(&[0xff, 0x00, 0xfe]);
+        assert_eq!(encode_body(&req), (true, Some("/wD+".to_string())));
+    }
+
+    #[test]
+    fn encode_body_keeps_utf8_text_and_empty_is_none() {
+        let mut req = create_test_request();
+        assert_eq!(
+            encode_body(&req),
+            (false, Some(r#"{"name":"Fluffy"}"#.to_string()))
+        );
+        req.body = Bytes::new();
+        assert_eq!(encode_body(&req), (false, None));
     }
 }

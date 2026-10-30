@@ -168,7 +168,7 @@ Every sub-client is constructed lazily via an accessor (`fc.lambda()`, `fc.sqs()
 | `get_rules().await`                  | List listener rules                        |
 | `get_target_groups().await`          | List target groups                         |
 | `flush_access_logs().await`          | Flush buffered access-log entries          |
-| `waf_counts().await`                 | Inspect WAF allow/block counters           |
+| `waf_counts().await`                 | Count-action WAF rule matches per WebACL and rule |
 
 ## `fc.events()`
 

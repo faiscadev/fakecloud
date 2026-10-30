@@ -8005,3 +8005,87 @@ async fn cognito_client_secret_full_rotation() {
     assert_eq!(listed.client_secrets().len(), 1);
     auth(&rotated).await.expect("rotated secret still works");
 }
+
+#[tokio::test]
+async fn cognito_webauthn_credentials_introspection_splits_pool_and_user() {
+    use aws_smithy_types::Document;
+    use std::collections::HashMap;
+
+    let (server, client, pool_id, _client_id, access_token) = setup_authed_user(
+        "webauthn-intro-pool",
+        "webauthn-intro-client",
+        "passkey:user",
+        "mypasswd",
+        "passkey@example.com",
+    )
+    .await;
+
+    client
+        .start_web_authn_registration()
+        .access_token(&access_token)
+        .send()
+        .await
+        .expect("start registration");
+    let credential = Document::Object(HashMap::from([
+        ("id".to_string(), Document::String("cred-abc".to_string())),
+        (
+            "authenticatorAttachment".to_string(),
+            Document::String("platform".to_string()),
+        ),
+        (
+            "response".to_string(),
+            Document::Object(HashMap::from([(
+                "transports".to_string(),
+                Document::Array(vec![Document::String("internal".to_string())]),
+            )])),
+        ),
+    ]));
+    client
+        .complete_web_authn_registration()
+        .access_token(&access_token)
+        .credential(credential)
+        .send()
+        .await
+        .expect("complete registration");
+
+    let raw: serde_json::Value = reqwest::get(format!(
+        "{}/_fakecloud/cognito/webauthn-credentials",
+        server.endpoint()
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let cred = &raw["credentials"][0];
+    assert_eq!(cred["poolId"], pool_id.as_str(), "{raw}");
+    // The username keeps its colon: only the pool id is split off.
+    assert_eq!(cred["username"], "passkey:user", "{raw}");
+    assert_eq!(cred["credentialId"], "cred-abc");
+    assert_eq!(cred["accountId"], "123456789012");
+    assert_eq!(cred["authenticatorAttachment"], "platform");
+    assert_eq!(cred["authenticatorTransports"][0], "internal");
+    assert!(cred["relyingPartyId"]
+        .as_str()
+        .unwrap()
+        .ends_with(&format!("/{pool_id}")));
+    assert!(cred["createdAt"].is_string());
+    assert!(cred["attestationInfo"].is_null());
+    for snake in [
+        "pool_user",
+        "account_id",
+        "credential_id",
+        "relying_party_id",
+    ] {
+        assert!(cred.get(snake).is_none(), "unexpected snake_case {snake}");
+    }
+
+    let typed = fakecloud_sdk::FakeCloud::new(server.endpoint())
+        .cognito()
+        .get_webauthn_credentials()
+        .await
+        .expect("sdk webauthn credentials");
+    assert_eq!(typed.credentials.len(), 1);
+    assert_eq!(typed.credentials[0].pool_id, pool_id);
+    assert_eq!(typed.credentials[0].username, "passkey:user");
+}

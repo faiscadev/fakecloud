@@ -52,7 +52,7 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 - `POST /_fakecloud/cognito/authorization-codes` — mint a single-use OAuth2 authorization code for the `authorization_code` grant (programmatic alternative to driving `/oauth2/authorize`)
 - `POST /_fakecloud/cognito/compromised-passwords` — register plaintext passwords as compromised; each is SHA-256 hashed server-side and added to the per-account set checked by `CompromisedCredentialsRiskConfiguration` enforcement
 - `POST /_fakecloud/cognito/software-token`: give a user a verified authenticator-app (TOTP) secret chosen by the caller (body `{"userPoolId", "username", "secretCode"}`, base32; `username` can also be an email or phone alias), as if they had completed `AssociateSoftwareToken` + `VerifySoftwareToken` with it, so the same secret can be added to an authenticator app
-- `GET /_fakecloud/cognito/webauthn-credentials` — list registered WebAuthn credentials with parsed `packed`-attestation info (AAGUID, certificate chain summary, signature counter)
+- `GET /_fakecloud/cognito/webauthn-credentials`: list registered WebAuthn credentials (pool id, username, credential id, transports) with parsed `packed`-attestation info (format, algorithm, `x5c` chain length, whether the self-attestation signature was verified)
 - `GET /_fakecloud/cognito/pretokengen/invocations` — list PreTokenGeneration Lambda trigger invocations recorded by `InitiateAuth`, with full request/response payloads plus pre-parsed `claims_added`, `claims_overridden`, and `group_overrides` so tests can assert claim mutation flows without inspecting the issued JWT
 
 ## Cross-service delivery

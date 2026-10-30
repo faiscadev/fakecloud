@@ -2134,31 +2134,71 @@ final class CompromisedPasswordsResponse
     }
 }
 
-/**
- * Registered WebAuthn credential surfaced by
- * `GET /_fakecloud/cognito/webauthn-credentials`. `$attestationInfo`
- * is the parsed-attestation associative array (packed format details,
- * AAGUID, certificate chain summary, signature counter); its shape
- * depends on the attestation format so it stays untyped.
- */
-final class WebAuthnCredential
+/** What fakecloud saw when it parsed a WebAuthn `attestationObject`. */
+final class WebAuthnAttestationInfo
 {
     public function __construct(
-        public readonly string $accountId,
-        public readonly string $poolUser,
-        public readonly string $credentialId,
-        public readonly string $relyingPartyId,
-        public readonly mixed $attestationInfo,
+        public readonly string $fmt,
+        public readonly int $alg,
+        public readonly int $signatureLen,
+        public readonly int $x5cChainLen,
+        public readonly bool $cosePublicKeyPresent,
+        /**
+         * `true` when the self-attestation signature was verified against
+         * the COSE public key; `false` when an `x5c` chain was accepted
+         * structurally.
+         */
+        public readonly bool $selfAttestVerified,
     ) {}
 
     public static function fromArray(array $data): self
     {
         return new self(
-            $data['account_id'],
-            $data['pool_user'],
-            $data['credential_id'],
-            $data['relying_party_id'],
-            $data['attestation_info'] ?? null,
+            $data['fmt'],
+            $data['alg'],
+            $data['signatureLen'],
+            $data['x5cChainLen'],
+            $data['cosePublicKeyPresent'],
+            $data['selfAttestVerified'],
+        );
+    }
+}
+
+/**
+ * Registered WebAuthn credential surfaced by
+ * `GET /_fakecloud/cognito/webauthn-credentials`. `$attestationInfo` is
+ * `null` when the client registered without an `attestationObject`.
+ */
+final class WebAuthnCredential
+{
+    public function __construct(
+        public readonly string $accountId,
+        public readonly string $poolId,
+        public readonly string $username,
+        public readonly string $credentialId,
+        public readonly ?string $friendlyCredentialName,
+        public readonly string $relyingPartyId,
+        public readonly ?string $authenticatorAttachment,
+        /** @var string[] */
+        public readonly array $authenticatorTransports,
+        public readonly string $createdAt,
+        public readonly ?WebAuthnAttestationInfo $attestationInfo,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        $info = $data['attestationInfo'] ?? null;
+        return new self(
+            $data['accountId'],
+            $data['poolId'],
+            $data['username'],
+            $data['credentialId'],
+            $data['friendlyCredentialName'] ?? null,
+            $data['relyingPartyId'],
+            $data['authenticatorAttachment'] ?? null,
+            $data['authenticatorTransports'] ?? [],
+            $data['createdAt'],
+            $info === null ? null : WebAuthnAttestationInfo::fromArray($info),
         );
     }
 }
@@ -2720,9 +2760,11 @@ final class ApiGatewayV2Request
         public readonly array $headers,
         /** @var array<string, string> */
         public readonly array $queryParams,
+        /** UTF-8 text as-is, anything else base64-encoded (see `$isBase64Encoded`). */
         public readonly ?string $body,
         public readonly string $timestamp,
         public readonly int $statusCode,
+        public readonly bool $isBase64Encoded = false,
     ) {}
 
     public static function fromArray(array $data): self
@@ -2738,6 +2780,7 @@ final class ApiGatewayV2Request
             $data['body'] ?? null,
             $data['timestamp'],
             $data['statusCode'],
+            $data['isBase64Encoded'] ?? false,
         );
     }
 }
@@ -4368,16 +4411,35 @@ final class KmsUsageResponse
 
 // ── ELBv2 admin ─────────────────────────────────────────────────
 
-final class Elbv2WafCountsResponse
+/** Requests that matched one Count-action rule of an ALB's WebACL. */
+final class Elbv2WafCount
 {
     public function __construct(
-        /** @var mixed Arbitrary counts payload (server-defined shape). */
-        public readonly mixed $counts,
+        public readonly string $webAclArn,
+        public readonly string $ruleName,
+        public readonly int $count,
     ) {}
 
     public static function fromArray(array $data): self
     {
-        return new self($data['counts'] ?? null);
+        return new self($data['webAclArn'], $data['ruleName'], $data['count']);
+    }
+}
+
+/**
+ * Response from `GET /_fakecloud/elbv2/waf-counts`: one entry per
+ * (WebACL, Count-action rule) pair that has matched.
+ */
+final class Elbv2WafCountsResponse
+{
+    public function __construct(
+        /** @var Elbv2WafCount[] */
+        public readonly array $counts,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(Elbv2WafCount::fromArray(...), $data['counts'] ?? []));
     }
 }
 

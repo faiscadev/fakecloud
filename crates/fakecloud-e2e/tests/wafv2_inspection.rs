@@ -261,13 +261,27 @@ async fn alb_waf_count_rule_lets_request_through_and_increments_metric() {
         .json()
         .await
         .unwrap();
-    let key = format!("{acl_arn}|count-admin");
-    let count = admin
-        .get("counts")
-        .and_then(|c| c.get(&key))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    assert_eq!(count, 1, "expected count-admin metric, got {admin}");
+    assert_eq!(
+        admin,
+        serde_json::json!({
+            "counts": [{
+                "webAclArn": acl_arn,
+                "ruleName": "count-admin",
+                "count": 1,
+            }]
+        }),
+        "expected one count-admin entry"
+    );
+
+    let typed = fakecloud_sdk::FakeCloud::new(server.endpoint())
+        .elbv2()
+        .waf_counts()
+        .await
+        .expect("sdk waf counts");
+    assert_eq!(typed.counts.len(), 1);
+    assert_eq!(typed.counts[0].web_acl_arn, acl_arn);
+    assert_eq!(typed.counts[0].rule_name, "count-admin");
+    assert_eq!(typed.counts[0].count, 1);
 }
 
 #[tokio::test]

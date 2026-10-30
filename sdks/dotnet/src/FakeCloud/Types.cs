@@ -591,19 +591,36 @@ public sealed record CompromisedPasswordsRequest(IReadOnlyList<string>? Password
 public sealed record CompromisedPasswordsResponse(long Added);
 
 /// <summary>
+/// What fakecloud saw when it parsed a WebAuthn <c>attestationObject</c>.
+/// <c>SelfAttestVerified</c> is <c>true</c> when the self-attestation signature
+/// was verified against the COSE public key and <c>false</c> when an
+/// <c>x5c</c> chain was accepted structurally.
+/// </summary>
+public sealed record WebAuthnAttestationInfo(
+    string? Fmt,
+    long Alg,
+    long SignatureLen,
+    long X5cChainLen,
+    bool CosePublicKeyPresent,
+    bool SelfAttestVerified);
+
+/// <summary>
 /// Registered WebAuthn credential from
-/// <c>GET /_fakecloud/cognito/webauthn-credentials</c>. The
-/// <c>AttestationInfo</c> field is the parsed-attestation JSON (packed format
-/// details, AAGUID, certificate chain summary, signature counter); its shape
-/// depends on the attestation format so it is surfaced as a raw
-/// <see cref="JsonElement"/>.
+/// <c>GET /_fakecloud/cognito/webauthn-credentials</c>. <c>AttestationInfo</c>
+/// is <c>null</c> when the client registered without an
+/// <c>attestationObject</c>.
 /// </summary>
 public sealed record WebAuthnCredential(
-    [property: JsonPropertyName("account_id")] string? AccountId,
-    [property: JsonPropertyName("pool_user")] string? PoolUser,
-    [property: JsonPropertyName("credential_id")] string? CredentialId,
-    [property: JsonPropertyName("relying_party_id")] string? RelyingPartyId,
-    [property: JsonPropertyName("attestation_info")] JsonElement? AttestationInfo);
+    string? AccountId,
+    string? PoolId,
+    string? Username,
+    string? CredentialId,
+    string? FriendlyCredentialName,
+    string? RelyingPartyId,
+    string? AuthenticatorAttachment,
+    IReadOnlyList<string>? AuthenticatorTransports,
+    string? CreatedAt,
+    WebAuthnAttestationInfo? AttestationInfo);
 
 public sealed record WebAuthnCredentialsResponse(IReadOnlyList<WebAuthnCredential>? Credentials);
 
@@ -760,6 +777,12 @@ public sealed record BedrockAgentRuntimeInvocationsResponse(
     IReadOnlyList<BedrockAgentRuntimeInvocation>? Invocations);
 
 // ── API Gateway v2 ─────────────────────────────────────────────
+
+/// <summary>
+/// A request recorded by <c>GET /_fakecloud/apigatewayv2/requests</c>.
+/// <c>Body</c> is UTF-8 text as-is, anything else base64-encoded with
+/// <c>IsBase64Encoded</c> set.
+/// </summary>
 public sealed record ApiGatewayV2Request(
     string? RequestId,
     string? ApiId,
@@ -770,7 +793,8 @@ public sealed record ApiGatewayV2Request(
     IReadOnlyDictionary<string, string>? QueryParams,
     string? Body,
     string? Timestamp,
-    int StatusCode);
+    int StatusCode,
+    bool IsBase64Encoded);
 
 public sealed record ApiGatewayV2RequestsResponse(IReadOnlyList<ApiGatewayV2Request>? Requests);
 
@@ -1353,11 +1377,14 @@ public sealed record KmsUsageResponse(IReadOnlyList<KmsUsageRecord>? Records);
 
 // ── ELBv2 WAF counts (admin) ─────────────────────────────────
 
+/// <summary>Requests that matched one Count-action rule of an ALB's WebACL.</summary>
+public sealed record Elbv2WafCount(string? WebAclArn, string? RuleName, long Count);
+
 /// <summary>
-/// Response from <c>GET /_fakecloud/elbv2/waf-counts</c>. The exact shape of
-/// <c>Counts</c> is service-internal and intentionally left as free-form JSON.
+/// Response from <c>GET /_fakecloud/elbv2/waf-counts</c>: one entry per
+/// (WebACL, Count-action rule) pair that has matched.
 /// </summary>
-public sealed record Elbv2WafCountsResponse(JsonElement? Counts);
+public sealed record Elbv2WafCountsResponse(IReadOnlyList<Elbv2WafCount>? Counts);
 
 // ── CloudFront ───────────────────────────────────────────────
 
