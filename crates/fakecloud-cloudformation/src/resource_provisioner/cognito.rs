@@ -450,9 +450,15 @@ impl ResourceProvisioner {
         }
         client.last_modified_date = Utc::now();
 
-        Ok(ProvisionResult::new(client_id.clone())
+        let mut result = ProvisionResult::new(client_id.clone())
             .with("ClientId", client_id.clone())
-            .with("Name", client_id.clone()))
+            .with("Name", client_id.clone());
+        // The secret may have rotated since create (AddUserPoolClientSecret
+        // then deleting the original), so GetAtt reports the current primary.
+        if let Some(secret) = &client.client_secret {
+            result = result.with("ClientSecret", secret.clone());
+        }
+        Ok(result)
     }
 
     pub(super) fn delete_cognito_user_pool_client(&self, physical_id: &str) -> Result<(), String> {

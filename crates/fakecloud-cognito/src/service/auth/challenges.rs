@@ -2,13 +2,15 @@
 
 use super::*;
 
-/// Check who is answering a valid challenge session. A `USERNAME` in the
-/// responses must name the session's user: its stored username, the
-/// identifier the sign-in started with, or an alias resolving to it. A
-/// confidential app client must also send a `SECRET_HASH` (AWS requires it
-/// on every challenge response, so missing or malformed `ChallengeResponses`
-/// fail closed), computed over that `USERNAME`, the sign-in identifier, or
-/// the stored username (`USER_ID_FOR_SRP`, which alias sign-ins hash over).
+/// Check who is answering a valid challenge session. A confidential app
+/// client must first authenticate with a `SECRET_HASH` (AWS requires it on
+/// every challenge response, so missing or malformed `ChallengeResponses`
+/// fail closed), computed over the supplied `USERNAME`, the sign-in
+/// identifier, or the stored username (`USER_ID_FOR_SRP`, which alias
+/// sign-ins hash over). Client authentication comes before the user check,
+/// as on `InitiateAuth`. A `USERNAME` in the responses must then name the
+/// session's user: its stored username, the identifier the sign-in started
+/// with, or an alias resolving to it.
 fn check_challenge_identity(
     state: &CognitoState,
     sess: &SessionData,
@@ -17,6 +19,32 @@ fn check_challenge_identity(
     let supplied_username = responses
         .and_then(|r| r.get("USERNAME"))
         .and_then(Value::as_str);
+    if let Some(client) = state
+        .user_pool_clients
+        .get(&sess.client_id)
+        .filter(|c| c.is_confidential())
+    {
+        let Some(secret_hash) = responses
+            .and_then(|r| r.get("SECRET_HASH"))
+            .and_then(Value::as_str)
+        else {
+            return Err(crate::service::secret_hash_missing(&client.client_id));
+        };
+        let mut candidates = supplied_username.into_iter().collect::<Vec<_>>();
+        for name in [sess.signed_in_as(), sess.username.as_str()] {
+            if !candidates.contains(&name) {
+                candidates.push(name);
+            }
+        }
+        // Fold without short-circuiting so timing does not reveal which
+        // candidate matched.
+        let matched = candidates.iter().fold(false, |acc, name| {
+            client.secret_hash_matches(name, secret_hash) | acc
+        });
+        if !matched {
+            return Err(crate::service::secret_hash_mismatch(&client.client_id));
+        }
+    }
     if let Some(supplied) = supplied_username {
         let names_session_user = supplied == sess.username
             || supplied == sess.signed_in_as()
@@ -30,35 +58,7 @@ fn check_challenge_identity(
             ));
         }
     }
-    let Some(client) = state
-        .user_pool_clients
-        .get(&sess.client_id)
-        .filter(|c| c.is_confidential())
-    else {
-        return Ok(());
-    };
-    let Some(secret_hash) = responses
-        .and_then(|r| r.get("SECRET_HASH"))
-        .and_then(Value::as_str)
-    else {
-        return Err(crate::service::secret_hash_missing(&client.client_id));
-    };
-    let mut candidates = supplied_username.into_iter().collect::<Vec<_>>();
-    for name in [sess.signed_in_as(), sess.username.as_str()] {
-        if !candidates.contains(&name) {
-            candidates.push(name);
-        }
-    }
-    // Fold without short-circuiting so timing does not reveal which
-    // candidate matched.
-    let matched = candidates.iter().fold(false, |acc, name| {
-        client.secret_hash_matches(name, secret_hash) | acc
-    });
-    if matched {
-        Ok(())
-    } else {
-        Err(crate::service::secret_hash_mismatch(&client.client_id))
-    }
+    Ok(())
 }
 
 impl CognitoService {
