@@ -211,7 +211,10 @@ async fn stack_outputs(
         .send()
         .await
         .expect("describe_stacks");
-    described.stacks()[0]
+    described
+        .stacks()
+        .first()
+        .expect("stack present")
         .outputs()
         .iter()
         .filter_map(|o| Some((o.output_key()?.to_string(), o.output_value()?.to_string())))
@@ -282,7 +285,9 @@ async fn cfn_update_reports_rotated_client_secret() {
         .send()
         .await
         .expect("describe_stacks")
-        .stacks()[0]
+        .stacks()
+        .first()
+        .expect("stack present")
         .stack_status()
         .map(|s| s.as_str().to_string());
     assert_eq!(status.as_deref(), Some("UPDATE_COMPLETE"));

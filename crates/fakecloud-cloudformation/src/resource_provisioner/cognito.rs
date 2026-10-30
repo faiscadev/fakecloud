@@ -624,7 +624,9 @@ impl ResourceProvisioner {
         state.identity_pools.insert(identity_pool_id.clone(), pool);
 
         // GetAtt Name is the pool's name; Ref is the id.
-        Ok(ProvisionResult::new(identity_pool_id).with("Name", name))
+        Ok(ProvisionResult::new(identity_pool_id.clone())
+            .with("Id", identity_pool_id)
+            .with("Name", name))
     }
 
     /// In-place `UpdateStack` for an `AWS::Cognito::IdentityPool`. Mutates the
@@ -714,7 +716,9 @@ impl ResourceProvisioner {
             pool.identity_pool_tags = parse_cognito_tags(props.get("IdentityPoolTags"));
         }
 
-        Ok(ProvisionResult::new(pool_id.clone()).with("Name", pool.identity_pool_name.clone()))
+        Ok(ProvisionResult::new(pool_id.clone())
+            .with("Id", pool_id.clone())
+            .with("Name", pool.identity_pool_name.clone()))
     }
 
     pub(super) fn delete_cognito_identity_pool(&self, physical_id: &str) -> Result<(), String> {
