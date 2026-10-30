@@ -112,3 +112,44 @@ jobs:
               ;;
           esac
           "$BIN" --version
+
+  # The opt-in `lean` profile in Cargo.toml. Builds it once when the build
+  # config changes, so a change that breaks it or pushes its link past runner
+  # limits shows up on the PR.
+  lean:
+    name: Build lean profile (linux-amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: release-check-lean-x86_64-unknown-linux-gnu
+
+      - name: Install zig + cargo-zigbuild
+        run: |
+          python3 -m pip install --user --break-system-packages "ziglang==${ZIG_VERSION}"
+          cargo install --locked cargo-zigbuild --version "${CARGO_ZIGBUILD_VERSION}"
+        env:
+          ZIG_VERSION: "0.16.0"
+          CARGO_ZIGBUILD_VERSION: "0.23.4"
+
+      - name: Build (lean)
+        env:
+          LIBZ_SYS_STATIC: "1"
+          LZMA_API_STATIC: "1"
+        run: cargo zigbuild --profile lean --locked --target x86_64-unknown-linux-gnu.2.17 --bin fakecloud --features vendored-openssl
+
+      - name: Report size and start
+        shell: bash
+        run: |
+          BIN="target/x86_64-unknown-linux-gnu/lean/fakecloud"
+          ls -l "$BIN"
+          echo "gzip bytes: $(gzip -c "$BIN" | wc -c)"
+          "$BIN" --version
+          "$BIN" --addr 127.0.0.1:4566 &
+          for _ in $(seq 1 50); do curl -sf --max-time 1 http://127.0.0.1:4566/_fakecloud/health > /dev/null && break; sleep 0.2; done
+          curl -sf --max-time 1 http://127.0.0.1:4566/_fakecloud/health > /dev/null
