@@ -130,6 +130,10 @@ impl RawMail {
 /// The body of a plain MIME message: everything after the blank line that
 /// ends the header block (empty when there is none).
 pub(crate) fn body_section(raw: &str) -> &str {
+    // An empty header block: the message opens with the blank line.
+    if let Some(body) = raw.strip_prefix("\r\n").or_else(|| raw.strip_prefix('\n')) {
+        return body;
+    }
     let crlf = raw.find("\r\n\r\n").map(|i| i + 4);
     let lf = raw.find("\n\n").map(|i| i + 2);
     match (crlf, lf) {
@@ -769,6 +773,7 @@ mod tests {
         );
         assert_eq!(body_section("A: 1\n\nbody"), "body");
         assert_eq!(body_section("A: 1\r\n"), "");
+        assert_eq!(body_section("\r\nno headers"), "no headers");
     }
 
     #[test]

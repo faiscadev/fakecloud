@@ -52,15 +52,19 @@ impl<'a> OutboundMail<'a> {
 
 /// Opt-in relay of a recorded message: when `FAKECLOUD_SES_SMTP_RELAY` is
 /// set, fire a best-effort send to the configured MTA (e.g. Mailpit) so dev
-/// setups see real mail in their inbox. Failures are logged and never fail
-/// the SES call; the in-memory store is the source of truth for tests.
+/// setups see real mail in their inbox. The SMTP client blocks, so the send
+/// runs on its own thread and never holds up the SES call. Failures are
+/// logged; the in-memory store is the source of truth for tests.
 pub fn relay_sent_email(sent: &crate::state::SentEmail) {
     let Ok(relay_url) = std::env::var("FAKECLOUD_SES_SMTP_RELAY") else {
         return;
     };
-    if let Err(err) = relay(&relay_url, &OutboundMail::from_sent(sent)) {
-        tracing::warn!(relay = %relay_url, error = %err, "SES SMTP relay failed");
-    }
+    let sent = sent.clone();
+    std::thread::spawn(move || {
+        if let Err(err) = relay(&relay_url, &OutboundMail::from_sent(&sent)) {
+            tracing::warn!(relay = %relay_url, error = %err, "SES SMTP relay failed");
+        }
+    });
 }
 
 /// Best-effort SMTP delivery. Returns `Err` only for caller visibility

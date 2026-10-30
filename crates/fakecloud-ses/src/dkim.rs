@@ -159,12 +159,19 @@ pub fn signed_headers_for_sent_email(
         .unwrap_or("fakecloudses");
     let (signed_headers, body_text) = match sent.raw_data.as_deref() {
         // A raw message (plain MIME) is signed as sent: its own header
-        // fields and its body.
+        // fields and its body. A field it lacks is the one SES adds (the
+        // envelope sender, a generated Date / Message-ID).
         Some(raw) => {
             let mail = crate::mime::RawMail::from_mime(raw.as_bytes().to_vec());
-            let headers = ["From", "To", "Subject", "Date", "Message-ID"]
+            let headers = built_signed_headers(sent)
                 .into_iter()
-                .filter_map(|name| Some((name.to_string(), mail.header(name)?.to_string())))
+                .filter_map(|(name, built)| match mail.header(&name) {
+                    Some(own) => Some((name, own.to_string())),
+                    None if matches!(name.as_str(), "From" | "Date" | "Message-ID") => {
+                        Some((name, built))
+                    }
+                    None => None,
+                })
                 .collect();
             (headers, crate::mime::body_section(raw).to_string())
         }
@@ -499,6 +506,13 @@ mod tests {
             ),
             ("To".to_string(), "to@example.com".to_string()),
             ("Subject".to_string(), "=?UTF-8?B?T2zDoQ==?=".to_string()),
+            // Missing from the message: the Date SES adds.
+            (
+                "Date".to_string(),
+                sent.timestamp
+                    .format("%a, %d %b %Y %H:%M:%S +0000")
+                    .to_string(),
+            ),
             ("Message-ID".to_string(), "<raw-1@example.com>".to_string()),
         ];
         assert_eq!(headers[1..], own[..]);

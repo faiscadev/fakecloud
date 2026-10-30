@@ -738,11 +738,14 @@ impl SesSnapshot {
     }
 }
 
-/// Before schema 3 an API raw send kept the caller's base64 in `raw_data`
-/// (SMTP submissions were already plain MIME, which is never valid base64:
-/// its header lines carry `:` and spaces). Decode it and fill in the bodies.
+/// Before schema 3 an API raw send kept the caller's base64 in `raw_data`;
+/// SMTP submissions (`smtp-` message IDs) were already plain MIME. Decode it
+/// and fill in the bodies.
 fn decode_legacy_raw_data(email: &mut SentEmail) {
     use base64::Engine;
+    if email.message_id.starts_with("smtp-") {
+        return;
+    }
     let Some(bytes) = email
         .raw_data
         .as_deref()
@@ -1065,11 +1068,19 @@ mod tests {
             delivery_insights: Vec::new(),
         };
         let mut state = SesState::new("123456789012", "us-east-1");
-        // An API raw send (base64) and an SMTP submission (already plain).
+        // An API raw send (base64) and SMTP submissions (already plain, even
+        // when the text happens to be valid base64).
         state.sent_emails.push(email(
             &base64::engine::general_purpose::STANDARD.encode(mime),
         ));
-        state.sent_emails.push(email(mime));
+        state.sent_emails.push(SentEmail {
+            message_id: "smtp-1".to_string(),
+            ..email(mime)
+        });
+        state.sent_emails.push(SentEmail {
+            message_id: "smtp-2".to_string(),
+            ..email("QUJD")
+        });
         let snapshot = SesSnapshot {
             schema_version: 2,
             accounts: None,
@@ -1077,9 +1088,11 @@ mod tests {
         }
         .upgrade();
         assert_eq!(snapshot.schema_version, SES_SNAPSHOT_SCHEMA_VERSION);
-        for sent in &snapshot.state.unwrap().sent_emails {
-            assert_eq!(sent.raw_data.as_deref(), Some(mime));
-        }
+        let sent = snapshot.state.unwrap().sent_emails;
+        assert_eq!(sent[0].raw_data.as_deref(), Some(mime));
+        assert_eq!(sent[0].html_body.as_deref(), Some("<p>hi</p>"));
+        assert_eq!(sent[1].raw_data.as_deref(), Some(mime));
+        assert_eq!(sent[2].raw_data.as_deref(), Some("QUJD"));
 
         // A current snapshot is left as-is, even when a body looks like base64.
         let mut state = SesState::new("123456789012", "us-east-1");

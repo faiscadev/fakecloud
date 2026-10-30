@@ -121,7 +121,7 @@ async fn smtp_auth_plain_accepts_credentials_and_records_email() {
     wr.write_all(b"DATA\r\n").await.unwrap();
     assert!(read_line(&mut rd).await.starts_with("354 "));
     wr.write_all(
-        b"Subject: hi\r\nFrom: noreply@example.com\r\nTo: dest@example.com\r\n\r\nbody\r\n.\r\n",
+        b"Subject: hi\r\nFrom: noreply@example.com\r\nTo: dest@example.com\r\n\r\nbody\r\n..sig\r\n.\r\n",
     )
     .await
     .unwrap();
@@ -150,9 +150,10 @@ async fn smtp_auth_plain_accepts_credentials_and_records_email() {
     // Recorded like an API raw send: plain MIME with its body parsed out.
     assert_eq!(
         email["rawData"],
-        "Subject: hi\r\nFrom: noreply@example.com\r\nTo: dest@example.com\r\n\r\nbody\r\n"
+        "Subject: hi\r\nFrom: noreply@example.com\r\nTo: dest@example.com\r\n\r\nbody\r\n.sig\r\n"
     );
-    assert_eq!(email["textBody"], "body\r\n");
+    // Dot-stuffing removed one dot, not both.
+    assert_eq!(email["textBody"], "body\r\n.sig\r\n");
 }
 
 #[tokio::test]

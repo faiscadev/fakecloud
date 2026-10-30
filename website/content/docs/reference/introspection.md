@@ -420,7 +420,7 @@ See [Service Quotas](/docs/services/servicequotas/#introspection) for semantics.
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
-| `/_fakecloud/ses/emails` | GET | List sent emails with full envelope and body. For raw messages (`SendRawEmail`, v2 `SendEmail` with `Content.Raw`, SMTP submissions) `rawData` is the message as plain MIME text (never the API's base64) and `textBody` / `htmlBody` are its first `text/plain` / `text/html` parts, transfer- and charset-decoded. |
+| `/_fakecloud/ses/emails` | GET | List sent emails with full envelope and body. For raw messages (`SendRawEmail`, v2 `SendEmail` with `Content.Raw`, SMTP submissions) `rawData` is the message as plain MIME text (never the API's base64; bytes that are not UTF-8 show as U+FFFD) and `textBody` / `htmlBody` are its first `text/plain` / `text/html` parts, transfer- and charset-decoded. |
 | `/_fakecloud/ses/inbound` | POST | Simulate an inbound email being received by a rule set. |
 | `/_fakecloud/ses/account/sandbox` | POST | Move the account in or out of the SES sandbox. |
 | `/_fakecloud/ses/identities/{name}/mail-from-status` | POST | Set the custom MAIL FROM verification state. |

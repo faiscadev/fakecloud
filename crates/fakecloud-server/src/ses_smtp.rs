@@ -260,25 +260,22 @@ async fn finish_plain_auth(
 }
 
 async fn read_data(rd: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> std::io::Result<String> {
-    let mut data = String::new();
-    let mut buf = String::new();
+    let mut data = Vec::new();
+    let mut buf = Vec::new();
     loop {
         buf.clear();
-        let n = rd.read_line(&mut buf).await?;
+        let n = rd.read_until(b'\n', &mut buf).await?;
         if n == 0 {
             break;
         }
-        if buf == ".\r\n" || buf == ".\n" {
+        if buf == b".\r\n" || buf == b".\n" {
             break;
         }
-        let unstuffed = if let Some(rest) = buf.strip_prefix("..") {
-            rest.to_string()
-        } else {
-            buf.clone()
-        };
-        data.push_str(&unstuffed);
+        // RFC 5321 section 4.5.2: drop the one dot the client stuffed.
+        data.extend_from_slice(buf.strip_prefix(b".").unwrap_or(&buf));
     }
-    Ok(data)
+    // 8bit content need not be UTF-8; keep the rest of the message intact.
+    Ok(String::from_utf8_lossy(&data).into_owned())
 }
 
 fn extract_addr(line: &str) -> Option<String> {
@@ -374,11 +371,7 @@ fn store_email(
         received_at: now,
         auth_user: auth_user.to_string(),
     };
-    if std::env::var_os("FAKECLOUD_SES_SMTP_RELAY").is_some() {
-        // The relay client is blocking; keep it off the listener's runtime.
-        let relayed = sent.clone();
-        tokio::task::spawn_blocking(move || fakecloud_ses::smtp_relay::relay_sent_email(&relayed));
-    }
+    fakecloud_ses::smtp_relay::relay_sent_email(&sent);
     let mut accounts = ses.write();
     let state = accounts.get_or_create(account_id);
     state.sent_emails.push(sent);

@@ -67,14 +67,14 @@ fakecloud also exposes a minimal SMTP submission listener that mirrors `email-sm
 
 ## SMTP outbound relay (opt-in)
 
-For tests that want fakecloud to forward accepted messages out to a real SMTP server (for example [MailHog](https://github.com/mailhog/MailHog) or your own integration mailbox), set `FAKECLOUD_SES_SMTP_RELAY=smtp://host:port` before starting the server. When set, fakecloud will dispatch every accepted `SendEmail` / `SendRawEmail` / `SendBulkEmail` / SMTP-submitted message to the configured relay in addition to recording it locally. Raw messages are relayed exactly as sent (the plain MIME); other sends are rebuilt from their fields.
+For tests that want fakecloud to forward accepted messages out to a real SMTP server (for example [MailHog](https://github.com/mailhog/MailHog) or your own integration mailbox), set `FAKECLOUD_SES_SMTP_RELAY=smtp://host:port` before starting the server. When set, fakecloud will dispatch every accepted `SendEmail` / `SendRawEmail` / `SendBulkEmail` / SMTP-submitted message to the configured relay in addition to recording it locally. Raw messages are relayed as recorded (the plain MIME); other sends are rebuilt from their fields.
 
 - **Opt-in only.** With the variable unset, no outbound network traffic is generated — messages are recorded in memory like before.
 - Failures from the relay are logged but do not fail the send (the message is still recorded), matching SES's "accepted for delivery" semantics.
 
 ## Introspection
 
-- `GET /_fakecloud/ses/emails` — list all sent emails with full body, synthesized headers (DKIM-Signature first when signing was active), attachments. For raw messages `rawData` is the plain MIME text (decoded from the API's base64) and `textBody` / `htmlBody` are its parsed `text/plain` / `text/html` parts; DKIM signs a raw message over its own headers and MIME body
+- `GET /_fakecloud/ses/emails`: list all sent emails with full body, synthesized headers (DKIM-Signature first when signing was active), attachments. For raw messages `rawData` is the plain MIME text (decoded from the API's base64) and `textBody` / `htmlBody` are its parsed `text/plain` / `text/html` parts; DKIM signs a raw message over its own headers and MIME body
 - `GET /_fakecloud/ses/metrics` — counters (e.g. `suppressedDropsTotal`) for the SES emulator
 - `GET /_fakecloud/ses/identities/{name}/dkim-public-key` — pull the published Easy DKIM public key (SPKI DER, base64) so tests can verify signatures end-to-end
 - `POST /_fakecloud/ses/identities/{name}/mail-from-status` — override an identity's MAIL FROM domain verification status (`NotStarted` / `Pending` / `Success` / `Failed`)
