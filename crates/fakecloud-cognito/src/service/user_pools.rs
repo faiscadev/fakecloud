@@ -1218,9 +1218,7 @@ impl CognitoService {
             client_secret_value: secret_value,
             client_secret_create_date: meta.client_secret_create_date,
         });
-        // The secret's create date can sit past `now` (ids stay unique per
-        // second), and the client is never modified before its own change.
-        upc.last_modified_date = meta.client_secret_create_date;
+        upc.last_modified_date = Utc::now();
 
         Ok(AwsResponse::ok_json(json!({
             "ClientSecretDescriptor": descriptor_json

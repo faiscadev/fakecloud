@@ -90,6 +90,7 @@ const TEMPLATE: &str = r#"{
   },
   "Outputs": {
     "IdPoolId": {"Value": {"Ref": "IdPool"}},
+    "IdPoolName": {"Value": {"Fn::GetAtt": ["IdPool", "Name"]}},
     "RoleAttachId": {"Value": {"Ref": "RoleAttach"}}
   }
 }"#;
@@ -129,6 +130,8 @@ async fn cfn_provisions_cognito_identity_pool_and_role_attachment() {
         match o.output_key() {
             Some("IdPoolId") => id_pool_id = o.output_value().map(|s| s.to_string()),
             Some("RoleAttachId") => role_attach_id = o.output_value().map(|s| s.to_string()),
+            // GetAtt Name is the pool's name, not its id.
+            Some("IdPoolName") => assert_eq!(o.output_value(), Some("fed_id_pool")),
             _ => {}
         }
     }

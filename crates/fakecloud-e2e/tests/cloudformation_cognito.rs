@@ -276,6 +276,16 @@ async fn cfn_update_reports_rotated_client_secret() {
         .send()
         .await
         .expect("update_stack");
+    let status = cfn
+        .describe_stacks()
+        .stack_name("rotation-stack")
+        .send()
+        .await
+        .expect("describe_stacks")
+        .stacks()[0]
+        .stack_status()
+        .map(|s| s.as_str().to_string());
+    assert_eq!(status.as_deref(), Some("UPDATE_COMPLETE"));
     let outputs = stack_outputs(&cfn, "rotation-stack").await;
     assert_eq!(outputs["ClientId"], client_id);
     assert_eq!(outputs["ClientSecret"], added_value);
