@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
@@ -654,8 +654,20 @@ pub struct UserPoolClient {
     /// defaulting to false.
     #[serde(default)]
     pub enable_propagate_additional_user_context_data: bool,
-    /// Additional client secrets (beyond the primary client_secret)
+    /// Secrets added through `AddUserPoolClientSecret`, beyond the primary
+    /// `client_secret`. Together with the primary they form the client's
+    /// secret set, capped at [`MAX_CLIENT_SECRETS`].
     pub client_secrets: Vec<ClientSecretDescriptor>,
+    /// Id and create date of the primary `client_secret`. Absent for public
+    /// clients and for snapshots written before the primary was listed; see
+    /// [`UserPoolClient::primary_secret_meta`] for the derived fallback.
+    #[serde(default)]
+    pub primary_secret: Option<ClientSecretMeta>,
+    /// Epoch seconds of the last secret id issued for this client. Every
+    /// new id is strictly later, so an id is never reused, even after a
+    /// delete and re-add within the same second.
+    #[serde(default)]
+    pub last_secret_epoch_secs: i64,
     /// "ENABLED" rotates refresh token on every refresh-token grant
     /// (old token invalidated). Default "DISABLED".
     #[serde(default)]
@@ -667,7 +679,74 @@ pub struct UserPoolClient {
     pub analytics_configuration: Option<serde_json::Value>,
 }
 
+/// AWS allows at most this many active secrets per app client (the primary
+/// included), enough for zero-downtime rotation.
+pub const MAX_CLIENT_SECRETS: usize = 2;
+
 impl UserPoolClient {
+    /// Id and create date of the primary secret, `None` for a public client.
+    /// A client persisted before the primary carried an id gets one derived
+    /// deterministically from the client's creation date.
+    pub fn primary_secret_meta(&self) -> Option<ClientSecretMeta> {
+        self.client_secret.as_ref()?;
+        Some(self.primary_secret.clone().unwrap_or_else(|| {
+            let date = self.creation_date.trunc_subsecs(0);
+            ClientSecretMeta {
+                client_secret_id: format!("{}--{}", self.client_id, date.timestamp()),
+                client_secret_create_date: date,
+            }
+        }))
+    }
+
+    /// The whole secret set, primary first, as (id, create date) pairs.
+    /// Empty for a public client: stray secrets an older snapshot added to
+    /// one stay invisible, as they do to `secret_values`.
+    pub fn secret_metas(&self) -> Vec<ClientSecretMeta> {
+        if !self.is_confidential() {
+            return Vec::new();
+        }
+        self.primary_secret_meta()
+            .into_iter()
+            .chain(self.client_secrets.iter().map(|s| ClientSecretMeta {
+                client_secret_id: s.client_secret_id.clone(),
+                client_secret_create_date: s.client_secret_create_date,
+            }))
+            .collect()
+    }
+
+    /// Issue the id and create date for a new secret. Both come from one
+    /// epoch second, at or after `now` and strictly after every id this
+    /// client has issued or lists (including a legacy derived primary id),
+    /// so ids stay unique and the id's epoch always matches the create date.
+    pub fn issue_secret_meta(&mut self, now: DateTime<Utc>) -> ClientSecretMeta {
+        let primary_epoch = self
+            .primary_secret
+            .as_ref()
+            .map(|m| m.client_secret_create_date)
+            .or(self.client_secret.as_ref().map(|_| self.creation_date))
+            .map_or(i64::MIN, |d| d.timestamp());
+        let latest = self
+            .client_secrets
+            .iter()
+            .map(|s| s.client_secret_create_date.timestamp())
+            .fold(self.last_secret_epoch_secs.max(primary_epoch), i64::max);
+        let epoch = now.timestamp().max(latest.saturating_add(1));
+        self.last_secret_epoch_secs = epoch;
+        let date = now.trunc_subsecs(0) + chrono::TimeDelta::seconds(epoch - now.timestamp());
+        ClientSecretMeta {
+            client_secret_id: format!("{}--{}", self.client_id, epoch),
+            client_secret_create_date: date,
+        }
+    }
+
+    /// Give a freshly built confidential client the id and create date of
+    /// its primary secret. A no-op for a public client.
+    pub fn init_primary_secret(&mut self, now: DateTime<Utc>) {
+        if self.client_secret.is_some() && self.primary_secret.is_none() {
+            self.primary_secret = Some(self.issue_secret_meta(now));
+        }
+    }
+
     /// Whether this is a confidential client, i.e. it was created with a
     /// secret. Secrets added to a public client do not make it confidential.
     pub fn is_confidential(&self) -> bool {
@@ -716,6 +795,14 @@ pub struct RefreshTokenRotationConfig {
     /// grace period in seconds during which old token still works
     #[serde(default)]
     pub retry_grace_period_seconds: Option<i64>,
+}
+
+/// The public half of a client secret: what `ListUserPoolClientSecrets`
+/// reports, never the value.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ClientSecretMeta {
+    pub client_secret_id: String,
+    pub client_secret_create_date: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -307,7 +307,7 @@ impl ResourceProvisioner {
             parse_cfn_token_validity_units(props.get("TokenValidityUnits")),
         )
         .map_err(str::to_string)?;
-        let client = UserPoolClient {
+        let mut client = UserPoolClient {
             client_id: client_id.clone(),
             client_name,
             user_pool_id: pool_id.clone(),
@@ -351,12 +351,15 @@ impl ResourceProvisioner {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             client_secrets: Vec::new(),
+            primary_secret: None,
+            last_secret_epoch_secs: 0,
             refresh_token_rotation: None,
             analytics_configuration: props
                 .get("AnalyticsConfiguration")
                 .filter(|v| !v.is_null())
                 .cloned(),
         };
+        client.init_primary_secret(now);
 
         state.user_pool_clients.insert(client_id.clone(), client);
 

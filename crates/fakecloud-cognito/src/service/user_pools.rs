@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
-    default_schema_attributes, ClientSecretDescriptor, CognitoState, PoolPolicies, UserPool,
-    UserPoolClient,
+    default_schema_attributes, ClientSecretDescriptor, ClientSecretMeta, CognitoState,
+    PoolPolicies, UserPool, UserPoolClient, MAX_CLIENT_SECRETS,
 };
 
 use super::{
@@ -778,7 +778,7 @@ impl CognitoService {
 
         let now = Utc::now();
 
-        let client = UserPoolClient {
+        let mut client = UserPoolClient {
             client_id: client_id.clone(),
             client_name: client_name.to_string(),
             user_pool_id: pool_id.to_string(),
@@ -815,12 +815,15 @@ impl CognitoService {
                 .as_bool()
                 .unwrap_or(false),
             client_secrets: Vec::new(),
+            primary_secret: None,
+            last_secret_epoch_secs: 0,
             refresh_token_rotation: parse_refresh_token_rotation(&body["RefreshTokenRotation"]),
             analytics_configuration: body
                 .get("AnalyticsConfiguration")
                 .filter(|v| !v.is_null())
                 .cloned(),
         };
+        client.init_primary_secret(now);
 
         let response = user_pool_client_to_json(&client);
         state.user_pool_clients.insert(client_id, client);
@@ -1178,29 +1181,47 @@ impl CognitoService {
 
         let upc = pool_client_mut(state, pool_id, client_id)?;
 
-        let now = Utc::now();
-        let secret_value = custom_secret
-            .map(|s| s.to_string())
-            .unwrap_or_else(generate_client_secret);
-        let secret_id = format!("{}--{}", client_id, now.timestamp());
+        if !upc.is_confidential() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                format!("Client {client_id} is not configured with a client secret."),
+            ));
+        }
+        if upc.secret_metas().len() >= MAX_CLIENT_SECRETS {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "LimitExceededException",
+                format!(
+                    "Client {client_id} already has the maximum of {MAX_CLIENT_SECRETS} client secrets."
+                ),
+            ));
+        }
 
-        let descriptor = ClientSecretDescriptor {
-            client_secret_id: secret_id,
-            client_secret_value: secret_value,
-            client_secret_create_date: now,
+        let meta = upc.issue_secret_meta(Utc::now());
+        let mut descriptor_json = json!({
+            "ClientSecretId": meta.client_secret_id,
+            "ClientSecretCreateDate": meta.client_secret_create_date.timestamp() as f64,
+        });
+        let secret_value = match custom_secret {
+            Some(secret) => secret.to_string(),
+            None => {
+                // The value is revealed only when Cognito generated it.
+                let generated = generate_client_secret();
+                descriptor_json["ClientSecretValue"] = json!(generated);
+                generated
+            }
         };
 
-        let resp = json!({
-            "ClientSecretDescriptor": {
-                "ClientSecretId": descriptor.client_secret_id,
-                "ClientSecretValue": descriptor.client_secret_value,
-                "ClientSecretCreateDate": descriptor.client_secret_create_date.timestamp() as f64,
-            }
+        upc.client_secrets.push(ClientSecretDescriptor {
+            client_secret_id: meta.client_secret_id,
+            client_secret_value: secret_value,
+            client_secret_create_date: meta.client_secret_create_date,
         });
 
-        upc.client_secrets.push(descriptor);
-
-        Ok(AwsResponse::ok_json(resp))
+        Ok(AwsResponse::ok_json(json!({
+            "ClientSecretDescriptor": descriptor_json
+        })))
     }
 
     pub(super) fn delete_user_pool_client_secret(
@@ -1219,19 +1240,41 @@ impl CognitoService {
 
         let upc = pool_client_mut(state, pool_id, client_id)?;
 
-        let idx = upc
+        let metas = upc.secret_metas();
+        if !metas.iter().any(|m| m.client_secret_id == secret_id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Client secret {secret_id} does not exist."),
+            ));
+        }
+        if metas.len() <= 1 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                format!("Cannot delete the last remaining client secret of client {client_id}."),
+            ));
+        }
+
+        let is_primary = upc
+            .primary_secret_meta()
+            .is_some_and(|m| m.client_secret_id == secret_id);
+        if is_primary {
+            // The oldest added secret takes over as the primary, so
+            // DescribeUserPoolClient keeps reporting a valid ClientSecret.
+            let promoted = upc.client_secrets.remove(0);
+            upc.client_secret = Some(promoted.client_secret_value);
+            upc.primary_secret = Some(ClientSecretMeta {
+                client_secret_id: promoted.client_secret_id,
+                client_secret_create_date: promoted.client_secret_create_date,
+            });
+        } else if let Some(idx) = upc
             .client_secrets
             .iter()
             .position(|s| s.client_secret_id == secret_id)
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ResourceNotFoundException",
-                    format!("Client secret {secret_id} does not exist."),
-                )
-            })?;
-
-        upc.client_secrets.remove(idx);
+        {
+            upc.client_secrets.remove(idx);
+        }
 
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -1253,13 +1296,15 @@ impl CognitoService {
 
         let upc = pool_client(state, pool_id, client_id)?;
 
+        // The whole set (primary first) fits in one page, and values are
+        // never revealed.
         let secrets: Vec<Value> = upc
-            .client_secrets
-            .iter()
-            .map(|s| {
+            .secret_metas()
+            .into_iter()
+            .map(|m| {
                 json!({
-                    "ClientSecretId": s.client_secret_id,
-                    "ClientSecretCreateDate": s.client_secret_create_date.timestamp() as f64,
+                    "ClientSecretId": m.client_secret_id,
+                    "ClientSecretCreateDate": m.client_secret_create_date.timestamp() as f64,
                 })
             })
             .collect();

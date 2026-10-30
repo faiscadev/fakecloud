@@ -7500,12 +7500,10 @@ async fn cognito_added_client_secret_authenticates_until_deleted() {
         .send()
         .await
         .expect("add secret");
-    let new_secret_id = added
-        .client_secret_descriptor()
-        .unwrap()
-        .client_secret_id()
-        .unwrap()
-        .to_string();
+    let descriptor = added.client_secret_descriptor().unwrap();
+    // A caller-supplied secret is not echoed back.
+    assert!(descriptor.client_secret_value().is_none());
+    let new_secret_id = descriptor.client_secret_id().unwrap().to_string();
 
     let listed = client
         .list_user_pool_client_secrets()
@@ -7514,10 +7512,12 @@ async fn cognito_added_client_secret_authenticates_until_deleted() {
         .send()
         .await
         .expect("list secrets");
-    assert!(listed
-        .client_secrets()
-        .iter()
-        .any(|s| s.client_secret_id() == Some(new_secret_id.as_str())));
+    // The primary and the added secret, primary first.
+    assert_eq!(listed.client_secrets().len(), 2);
+    assert_eq!(
+        listed.client_secrets()[1].client_secret_id(),
+        Some(new_secret_id.as_str())
+    );
 
     let auth = || {
         client
@@ -7826,4 +7826,182 @@ async fn cognito_respond_to_auth_challenge_requires_secret_hash() {
         .authentication_result()
         .and_then(|r| r.access_token())
         .is_some());
+}
+
+/// Full zero-downtime rotation: a confidential client gets a second secret,
+/// both are listed, the original is deleted, the new one (promoted to
+/// primary) authenticates while the old one is rejected, and the last
+/// remaining secret cannot be deleted.
+#[tokio::test]
+async fn cognito_client_secret_full_rotation() {
+    use aws_sdk_cognitoidentityprovider::types::AuthFlowType;
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+
+    fn secret_hash(username: &str, client_id: &str, secret: &str) -> String {
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(username.as_bytes());
+        mac.update(client_id.as_bytes());
+        base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+    }
+
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_id = client
+        .create_user_pool()
+        .pool_name("full-rotation-pool")
+        .send()
+        .await
+        .expect("create pool")
+        .user_pool()
+        .unwrap()
+        .id()
+        .unwrap()
+        .to_string();
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("full-rotation-client")
+        .generate_secret(true)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let app = app.user_pool_client().unwrap();
+    let client_id = app.client_id().unwrap().to_string();
+    let original = app.client_secret().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("rotator")
+        .send()
+        .await
+        .expect("create user");
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("rotator")
+        .password("P@ssw0rd!123")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    let list = || {
+        client
+            .list_user_pool_client_secrets()
+            .user_pool_id(&pool_id)
+            .client_id(&client_id)
+            .send()
+    };
+    let listed = list().await.expect("list secrets");
+    assert_eq!(listed.client_secrets().len(), 1);
+    let original_id = listed.client_secrets()[0]
+        .client_secret_id()
+        .unwrap()
+        .to_string();
+
+    let added = client
+        .add_user_pool_client_secret()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .expect("add secret");
+    let descriptor = added.client_secret_descriptor().unwrap();
+    // A generated secret is revealed once, on Add.
+    let rotated = descriptor.client_secret_value().unwrap().to_string();
+    let rotated_id = descriptor.client_secret_id().unwrap().to_string();
+
+    let listed = list().await.expect("list secrets");
+    let ids: Vec<_> = listed
+        .client_secrets()
+        .iter()
+        .map(|s| s.client_secret_id().unwrap())
+        .collect();
+    assert_eq!(ids, [original_id.as_str(), rotated_id.as_str()]);
+    assert!(listed
+        .client_secrets()
+        .iter()
+        .all(|s| s.client_secret_value().is_none()));
+
+    // A third secret exceeds the two-secret limit.
+    let err = client
+        .add_user_pool_client_secret()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .expect_err("third secret");
+    assert!(
+        err.as_service_error()
+            .is_some_and(|e| e.is_limit_exceeded_exception()),
+        "{err:?}"
+    );
+
+    client
+        .delete_user_pool_client_secret()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .client_secret_id(&original_id)
+        .send()
+        .await
+        .expect("delete original secret");
+
+    let described = client
+        .describe_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .expect("describe client");
+    assert_eq!(
+        described.user_pool_client().unwrap().client_secret(),
+        Some(rotated.as_str())
+    );
+
+    let auth = |secret: &str| {
+        client
+            .admin_initiate_auth()
+            .user_pool_id(&pool_id)
+            .client_id(&client_id)
+            .auth_flow(AuthFlowType::AdminUserPasswordAuth)
+            .auth_parameters("USERNAME", "rotator")
+            .auth_parameters("PASSWORD", "P@ssw0rd!123")
+            .auth_parameters("SECRET_HASH", secret_hash("rotator", &client_id, secret))
+            .send()
+    };
+    let ok = auth(&rotated).await.expect("auth with the rotated secret");
+    assert!(ok
+        .authentication_result()
+        .and_then(|r| r.access_token())
+        .is_some());
+    let err = auth(&original)
+        .await
+        .expect_err("deleted original secret must stop working");
+    assert!(
+        err.as_service_error()
+            .is_some_and(|e| e.is_not_authorized_exception()),
+        "{err:?}"
+    );
+
+    let err = client
+        .delete_user_pool_client_secret()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .client_secret_id(&rotated_id)
+        .send()
+        .await
+        .expect_err("last secret cannot be deleted");
+    assert!(
+        err.as_service_error()
+            .is_some_and(|e| e.is_invalid_parameter_exception()),
+        "{err:?}"
+    );
+    let listed = list().await.expect("list secrets");
+    assert_eq!(listed.client_secrets().len(), 1);
+    auth(&rotated).await.expect("rotated secret still works");
 }
