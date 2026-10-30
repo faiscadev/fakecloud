@@ -78,6 +78,28 @@ opt-level = 3
 [profile.dev.package.num-bigint-dig]
 opt-level = 3
 
+# Opt-in smaller binary: `cargo build --profile lean`. Same code, optimized for
+# size in one codegen unit, symbols stripped (panic backtraces lose function
+# names). Default `release` builds are unchanged.
+[profile.lean]
+inherits = "release"
+opt-level = "s"
+codegen-units = 1
+strip = "symbols"
+
+# At opt-level "s" these hashing and RSA crates run 25-35% slower (S3 PUT
+# checksums, KMS keys). Full optimization here costs about 50 KB.
+[profile.lean.package]
+md-5.opt-level = 3
+sha1.opt-level = 3
+sha2.opt-level = 3
+crc32c.opt-level = 3
+crc32fast.opt-level = 3
+crc64fast-nvme.opt-level = 3
+xxhash-rust.opt-level = 3
+rsa.opt-level = 3
+num-bigint-dig.opt-level = 3
+
 [workspace.dependencies.tokio]
 version = "1"
 features = [ "macros", "rt-multi-thread", "net", "io-util", "time", "signal", "sync", "process", "fs",]
