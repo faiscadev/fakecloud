@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type, TypeVar
 
 
 def _camel_to_snake(name: str) -> str:
@@ -29,6 +29,19 @@ def _convert_keys(data: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+_T = TypeVar("_T")
+
+
+def _from_known(cls: Type[_T], d: Dict[str, Any]) -> _T:
+    """Build ``cls`` from ``d``, dropping keys it has no field for.
+
+    The server adds response fields over time; an older SDK must keep
+    parsing them instead of raising ``TypeError`` on the unknown keyword.
+    """
+    known = {f.name for f in fields(cls)}  # type: ignore[arg-type]
+    return cls(**{k: v for k, v in d.items() if k in known})
+
+
 # ── Health & Reset ──────────────────────────────────────────────────
 
 
@@ -41,7 +54,7 @@ class HealthResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> HealthResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -51,7 +64,7 @@ class ResetResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ResetResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -61,7 +74,7 @@ class ResetServiceResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ResetServiceResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 # ── RDS ─────────────────────────────────────────────────────────────
@@ -75,7 +88,7 @@ class RdsTag:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> RdsTag:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -103,7 +116,7 @@ class RdsInstance:
     def from_dict(cls, data: Dict[str, Any]) -> RdsInstance:
         d = _convert_keys(data)
         d["tags"] = [RdsTag.from_dict(tag) for tag in d.get("tags", [])]
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -143,7 +156,7 @@ class Ec2Instance:
     def from_dict(cls, data: Dict[str, Any]) -> Ec2Instance:
         d = _convert_keys(data)
         d["security_group_ids"] = list(d.get("security_group_ids", []))
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -182,7 +195,7 @@ class Ec2InstanceNetwork:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Ec2InstanceNetwork:
-        return cls(**_convert_keys(data))
+        return _from_known(cls, _convert_keys(data))
 
 
 @dataclass
@@ -219,7 +232,7 @@ class ElastiCacheCluster:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheCluster:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -254,7 +267,7 @@ class ElastiCacheReplicationGroupIntrospection:
         cls, data: Dict[str, Any]
     ) -> ElastiCacheReplicationGroupIntrospection:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -283,7 +296,7 @@ class ElastiCacheServerlessCacheIntrospection:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheServerlessCacheIntrospection:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -312,7 +325,7 @@ class ElastiCacheAclUser:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheAclUser:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -401,7 +414,7 @@ class WarmContainer:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> WarmContainer:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -422,7 +435,7 @@ class EvictContainerResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EvictContainerResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 # ── SES ─────────────────────────────────────────────────────────────
@@ -459,10 +472,7 @@ class SentEmail:
         if "from" in data:
             d["from_addr"] = data["from"]
         d.pop("from", None)
-        # Drop unknown fields the server might add to keep the SDK forward-compatible.
-        known = {f.name for f in fields(cls)}
-        d = {k: v for k, v in d.items() if k in known}
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -533,7 +543,7 @@ class InboundActionExecuted:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> InboundActionExecuted:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -806,7 +816,7 @@ class SnsMessage:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SnsMessage:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -831,7 +841,7 @@ class PendingConfirmation:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> PendingConfirmation:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -863,7 +873,7 @@ class ConfirmSubscriptionResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ConfirmSubscriptionResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 # ── SQS ─────────────────────────────────────────────────────────────
@@ -883,7 +893,7 @@ class SqsMessageInfo:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SqsMessageInfo:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -925,7 +935,7 @@ class ExpirationTickResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ExpirationTickResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -937,7 +947,7 @@ class AppAsTickResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AppAsTickResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -949,7 +959,7 @@ class AppAsScheduledTickResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AppAsScheduledTickResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -959,7 +969,7 @@ class ForceDlqResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ForceDlqResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 # ── EventBridge ─────────────────────────────────────────────────────
@@ -1452,7 +1462,7 @@ class S3Notification:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> S3Notification:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -1477,7 +1487,7 @@ class LifecycleTickResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> LifecycleTickResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -1494,7 +1504,7 @@ class S3AccessPointEntry:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> S3AccessPointEntry:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -1525,7 +1535,7 @@ class S3ObjectLambdaResponse:
     def from_dict(cls, data: Dict[str, Any]) -> S3ObjectLambdaResponse:
         d = _convert_keys(data)
         d.setdefault("metadata", {})
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -1551,7 +1561,7 @@ class TtlTickResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> TtlTickResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -1561,7 +1571,7 @@ class DynamoDbSnapshotSaveResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> DynamoDbSnapshotSaveResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 # ── SecretsManager ──────────────────────────────────────────────────
@@ -1574,7 +1584,7 @@ class RotationTickResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> RotationTickResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 # ── Cognito ─────────────────────────────────────────────────────────
@@ -1588,7 +1598,7 @@ class UserConfirmationCodes:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> UserConfirmationCodes:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -1606,7 +1616,7 @@ class ConfirmationCode:
         if "type" in data:
             d["code_type"] = data["type"]
         d.pop("type", None)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -1637,7 +1647,7 @@ class ConfirmUserResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ConfirmUserResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -1655,7 +1665,7 @@ class TokenInfo:
         if "type" in data:
             d["token_type"] = data["type"]
         d.pop("type", None)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -1690,7 +1700,7 @@ class ExpireTokensResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ExpireTokensResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -1705,7 +1715,7 @@ class AuthEvent:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AuthEvent:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -1744,7 +1754,7 @@ class PreTokenGenInvocation:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> PreTokenGenInvocation:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -1992,7 +2002,7 @@ class StepFunctionsSyncBillingDetails:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> StepFunctionsSyncBillingDetails:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2159,7 +2169,7 @@ class BedrockModelResponseConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> BedrockModelResponseConfig:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2218,7 +2228,7 @@ class BedrockFaultRuleState:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> BedrockFaultRuleState:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2447,7 +2457,7 @@ class CreateAdminResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> CreateAdminResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 # ── API Gateway v2 ──────────────────────────────────────────────────────
@@ -2511,7 +2521,7 @@ class EcrTag:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EcrTag:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2534,7 +2544,7 @@ class EcrRepository:
         tags = [EcrTag.from_dict(t) for t in data.get("tags", [])]
         d = _convert_keys(data)
         d["tags"] = tags
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2562,7 +2572,7 @@ class EcrImage:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EcrImage:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2587,7 +2597,7 @@ class EcrPullThroughRule:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EcrPullThroughRule:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2611,7 +2621,7 @@ class EcsTag:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EcsTag:
-        return cls(**_convert_keys(data))
+        return _from_known(cls, _convert_keys(data))
 
 
 @dataclass
@@ -2631,7 +2641,7 @@ class EcsCluster:
     def from_dict(cls, data: Dict[str, Any]) -> EcsCluster:
         d = _convert_keys(data)
         d["tags"] = [EcsTag.from_dict(t) for t in d.get("tags", [])]
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2656,7 +2666,7 @@ class EcsTaskContainer:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EcsTaskContainer:
-        return cls(**_convert_keys(data))
+        return _from_known(cls, _convert_keys(data))
 
 
 @dataclass
@@ -2686,7 +2696,7 @@ class EcsTask:
         d["containers"] = [
             EcsTaskContainer.from_dict(c) for c in d.get("containers", [])
         ]
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2707,7 +2717,7 @@ class EcsTaskLogsResponse:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EcsTaskLogsResponse:
-        return cls(**_convert_keys(data))
+        return _from_known(cls, _convert_keys(data))
 
 
 @dataclass
@@ -2736,7 +2746,7 @@ class EcsLifecycleEvent:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EcsLifecycleEvent:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2769,7 +2779,7 @@ class EcsTaskMetadataPort:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EcsTaskMetadataPort:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2861,7 +2871,7 @@ class Elbv2Tag:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Elbv2Tag:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2872,7 +2882,7 @@ class Elbv2AvailabilityZone:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Elbv2AvailabilityZone:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -2938,7 +2948,7 @@ class Elbv2Target:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Elbv2Target:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -3043,7 +3053,7 @@ class Elbv2Rule:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Elbv2Rule:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -3091,7 +3101,7 @@ class LogsAnomalyInjectResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> LogsAnomalyInjectResponse:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -3116,8 +3126,7 @@ class LogsDeliveryConfiguration:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> LogsDeliveryConfiguration:
         d = _convert_keys(data)
-        valid = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in d.items() if k in valid})
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -3145,7 +3154,7 @@ class OrganizationsTag:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> OrganizationsTag:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -3174,7 +3183,7 @@ class OrganizationsAccount:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> OrganizationsAccount:
         d = _convert_keys(data)
-        tags = [OrganizationsTag(**t) for t in d.get("tags", [])]
+        tags = [_from_known(OrganizationsTag, t) for t in d.get("tags", [])]
         return cls(
             id=d["id"],
             arn=d["arn"],
@@ -3399,7 +3408,7 @@ class ApiGatewayV2Connection:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ApiGatewayV2Connection:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -3480,7 +3489,7 @@ class SsmParameterPolicyEvent:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SsmParameterPolicyEvent:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -3625,7 +3634,7 @@ class Route53DnssecMaterial:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Route53DnssecMaterial:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -3685,7 +3694,7 @@ class SnsSmsMessage:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SnsSmsMessage:
         d = _convert_keys(data)
-        return cls(**d)
+        return _from_known(cls, d)
 
 
 @dataclass
@@ -4059,10 +4068,11 @@ class ServiceQuotasEnforcementResponse:
         return cls(
             enforce_all=d["enforce_all"],
             overrides=[
-                ServiceQuotaEnforcementOverride(**o) for o in d.get("overrides", [])
+                _from_known(ServiceQuotaEnforcementOverride, o)
+                for o in d.get("overrides", [])
             ],
             account_overrides=[
-                ServiceQuotaAccountEnforcementOverride(**o)
+                _from_known(ServiceQuotaAccountEnforcementOverride, o)
                 for o in d.get("account_overrides", [])
             ],
         )
