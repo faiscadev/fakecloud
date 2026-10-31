@@ -61,6 +61,29 @@ fn check_challenge_identity(
     Ok(())
 }
 
+/// Refuse a challenge response from a confidential app client that sends no
+/// `SECRET_HASH`. This needs only the client, so it runs before any session
+/// check, as client authentication does on `InitiateAuth`.
+pub(super) fn refuse_missing_secret_hash(
+    state: &CognitoState,
+    client_id: &str,
+    body: &Value,
+) -> Result<(), AwsServiceError> {
+    let hash_missing = body["ChallengeResponses"]
+        .get("SECRET_HASH")
+        .and_then(Value::as_str)
+        .is_none();
+    if hash_missing
+        && state
+            .user_pool_clients
+            .get(client_id)
+            .is_some_and(|c| c.is_confidential())
+    {
+        return Err(crate::service::secret_hash_missing(client_id));
+    }
+    Ok(())
+}
+
 impl CognitoService {
     /// Mint and persist tokens for a CUSTOM_AUTH flow that DefineAuthChallenge
     /// resolved with `issueTokens: true` on the very first call (no challenge
@@ -238,10 +261,12 @@ impl CognitoService {
     ) -> Result<AwsResponse, AwsServiceError> {
         // Peek at the session: when it is valid for this request, check who
         // is answering it once here. An invalid one falls through so each
-        // handler reports its own session error.
+        // handler reports its own session error. A missing SECRET_HASH is
+        // refused before any of that.
         {
             let accounts = self.state.read();
             if let Some(state) = accounts.get(&req.account_id) {
+                refuse_missing_secret_hash(state, client_id, body)?;
                 if let Some(sess) = state.sessions.get(session).filter(|sess| {
                     sess.client_id == client_id && sess.challenge_name == challenge_name
                 }) {

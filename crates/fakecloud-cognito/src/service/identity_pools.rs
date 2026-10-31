@@ -341,9 +341,10 @@ impl CognitoIdentityService {
     fn update_identity_pool(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let pool_id = require_str(&body, "IdentityPoolId")?.to_string();
-        // Real Cognito Identity returns the merged pool from UpdateIdentityPool;
-        // mirror the request shape: every top-level field (except the pool id
-        // itself) is replace-on-write when present.
+        // UpdateIdentityPool replaces the pool's configuration: AWS documents
+        // that a parameter the request omits goes back to its default. Two
+        // exceptions carry over: the developer provider name, which cannot
+        // change once set, and the tags, which TagResource/UntagResource own.
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         ensure_identity_pool_exists(state, &pool_id)?;
@@ -355,28 +356,17 @@ impl CognitoIdentityService {
         if let Some(b) = body["AllowUnauthenticatedIdentities"].as_bool() {
             pool.allow_unauthenticated_identities = b;
         }
-        if let Some(b) = body["AllowClassicFlow"].as_bool() {
-            pool.allow_classic_flow = b;
-        }
+        pool.allow_classic_flow = body["AllowClassicFlow"].as_bool().unwrap_or(false);
         if body["DeveloperProviderName"].is_string() {
             pool.developer_provider_name = body["DeveloperProviderName"]
                 .as_str()
                 .map(|s| s.to_string());
         }
-        if body["CognitoIdentityProviders"].is_array() {
-            pool.cognito_identity_providers =
-                parse_cognito_providers(&body["CognitoIdentityProviders"]);
-        }
-        if body["OpenIdConnectProviderARNs"].is_array() {
-            pool.open_id_connect_provider_arns =
-                parse_string_array(&body["OpenIdConnectProviderARNs"]);
-        }
-        if body["SamlProviderARNs"].is_array() {
-            pool.saml_provider_arns = parse_string_array(&body["SamlProviderARNs"]);
-        }
-        if body["SupportedLoginProviders"].is_object() {
-            pool.supported_login_providers = parse_string_map(&body["SupportedLoginProviders"]);
-        }
+        pool.cognito_identity_providers =
+            parse_cognito_providers(&body["CognitoIdentityProviders"]);
+        pool.open_id_connect_provider_arns = parse_string_array(&body["OpenIdConnectProviderARNs"]);
+        pool.saml_provider_arns = parse_string_array(&body["SamlProviderARNs"]);
+        pool.supported_login_providers = parse_string_map(&body["SupportedLoginProviders"]);
         if body["IdentityPoolTags"].is_object() {
             pool.identity_pool_tags = parse_string_map(&body["IdentityPoolTags"]);
         }
@@ -1387,5 +1377,70 @@ mod merge_tests {
         let accounts = svc.state.read();
         let st = accounts.get("123456789012").unwrap();
         assert!(st.federated_identities.contains_key(&identity_id));
+    }
+
+    #[test]
+    fn update_identity_pool_resets_omitted_parameters() {
+        let svc = svc();
+        let create = block_on(svc.handle(req(
+            "CreateIdentityPool",
+            json!({
+                "IdentityPoolName": "full",
+                "AllowUnauthenticatedIdentities": true,
+                "AllowClassicFlow": true,
+                "DeveloperProviderName": "login.example.com",
+                "SupportedLoginProviders": {"graph.facebook.com": "123"},
+                "OpenIdConnectProviderARNs": ["arn:aws:iam::123456789012:oidc-provider/example.com"],
+                "SamlProviderARNs": ["arn:aws:iam::123456789012:saml-provider/corp"],
+                "CognitoIdentityProviders": [{
+                    "ProviderName": "cognito-idp.us-east-1.amazonaws.com/us-east-1_abc",
+                    "ClientId": "client"
+                }],
+                "IdentityPoolTags": {"team": "a"}
+            }),
+        )))
+        .expect("create identity pool");
+        let cb: Value = serde_json::from_slice(create.body.expect_bytes()).unwrap();
+        let pool_id = cb["IdentityPoolId"].as_str().unwrap().to_string();
+
+        // An update naming only the required parameters puts the rest back to
+        // their defaults, as AWS documents. The developer provider name (which
+        // cannot change once set) and the tags carry over.
+        let resp = block_on(svc.handle(req(
+            "UpdateIdentityPool",
+            json!({
+                "IdentityPoolId": pool_id,
+                "IdentityPoolName": "bare",
+                "AllowUnauthenticatedIdentities": false
+            }),
+        )))
+        .expect("update identity pool");
+        let ub: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(ub["IdentityPoolName"], "bare");
+        assert_eq!(ub["AllowUnauthenticatedIdentities"], false);
+        assert_eq!(ub["AllowClassicFlow"], false);
+        for key in [
+            "SupportedLoginProviders",
+            "OpenIdConnectProviderARNs",
+            "SamlProviderARNs",
+            "CognitoIdentityProviders",
+        ] {
+            assert!(
+                ub.get(key)
+                    .is_none_or(|v| v.as_array().is_some_and(|a| a.is_empty())
+                        || v.as_object().is_some_and(|o| o.is_empty())),
+                "{key} should be reset: {ub}"
+            );
+        }
+        assert_eq!(ub["DeveloperProviderName"], "login.example.com");
+        assert_eq!(ub["IdentityPoolTags"]["team"], "a");
+
+        let describe = block_on(svc.handle(req(
+            "DescribeIdentityPool",
+            json!({"IdentityPoolId": pool_id}),
+        )))
+        .expect("describe identity pool");
+        let db: Value = serde_json::from_slice(describe.body.expect_bytes()).unwrap();
+        assert_eq!(db, ub);
     }
 }

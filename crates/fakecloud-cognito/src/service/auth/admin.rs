@@ -307,6 +307,7 @@ impl CognitoService {
             let accounts = self.state.read();
             let empty = CognitoState::new(&req.account_id, &req.region);
             let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            super::challenges::refuse_missing_secret_hash(state, client_id, &body)?;
             if let Some(session_data) = state.sessions.get(session) {
                 if session_data.user_pool_id != pool_id {
                     return Err(AwsServiceError::aws_error(
@@ -320,7 +321,7 @@ impl CognitoService {
         }
 
         // The shared dispatch checks USERNAME and a confidential client's
-        // SECRET_HASH once the session is known to be valid.
+        // SECRET_HASH value once the session is known to be valid.
         self.handle_auth_challenge_response(client_id, challenge_name, session, &body, req)
             .await
     }
