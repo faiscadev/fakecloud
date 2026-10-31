@@ -431,6 +431,9 @@ async fn kinesis_reports_millis_behind_latest_when_limit_truncates() {
         .send()
         .await
         .unwrap();
+    // On an optimized build both writes can land in the same millisecond,
+    // which makes the real lag 0.
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let write = client
         .put_record()
         .stream_name("lag")
