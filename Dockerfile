@@ -25,10 +25,10 @@ ARG TARGETARCH
 # image's Trivy CRITICAL/HIGH gate (27.5.1 shipped go1.22.11, flagged by
 # CVE-2025-68121; 29.7.2 shipped go1.26.5, flagged by CVE-2026-33818 and the
 # CVE-2026-568xx batch; 29.8.0 shipped go1.26.8, flagged by CVE-2026-78667,
-# CVE-2026-78669 and CVE-2026-97031). 29.9.0 ships go1.26.9, which clears
-# every known stdlib HIGH on both linux/amd64 and linux/arm64, so
+# CVE-2026-78669 and CVE-2026-97031; 29.9.0 shipped go1.26.9, flagged by
+# CVE-2026-111943). 29.9.2 ships go1.26.10, which clears every known stdlib HIGH on both linux/amd64 and linux/arm64, so
 # .trivyignore carries no entries.
-ARG DOCKER_CLI_VERSION=29.9.0
+ARG DOCKER_CLI_VERSION=29.9.2
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && case "$TARGETARCH" in \
