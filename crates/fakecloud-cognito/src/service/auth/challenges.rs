@@ -7,9 +7,10 @@ use super::*;
 /// every challenge response, so missing or malformed `ChallengeResponses`
 /// fail closed), computed over the supplied `USERNAME`, the sign-in
 /// identifier, or the stored username (`USER_ID_FOR_SRP`, which alias
-/// sign-ins hash over; a missing one was already refused by
-/// [`refuse_missing_secret_hash`]). Client authentication comes before the
-/// user check, as on `InitiateAuth`. A `USERNAME` in the responses must then name the
+/// sign-ins hash over). The dispatch refuses a missing `SECRET_HASH` before
+/// calling this (see [`refuse_missing_secret_hash`]); the check here only
+/// keeps this function fail-closed on its own. Client authentication comes
+/// before the user check, as on `InitiateAuth`. A `USERNAME` in the responses must then name the
 /// session's user: its stored username, the identifier the sign-in started
 /// with, or an alias resolving to it.
 fn check_challenge_identity(
