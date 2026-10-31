@@ -121,7 +121,7 @@ async fn smtp_auth_plain_accepts_credentials_and_records_email() {
     wr.write_all(b"DATA\r\n").await.unwrap();
     assert!(read_line(&mut rd).await.starts_with("354 "));
     wr.write_all(
-        b"Subject: hi\r\nFrom: noreply@example.com\r\nTo: dest@example.com\r\n\r\nbody\r\n.\r\n",
+        b"Subject: hi\r\nFrom: noreply@example.com\r\nTo: dest@example.com\r\n\r\nbody\r\n..sig\r\n.\r\n",
     )
     .await
     .unwrap();
@@ -143,13 +143,17 @@ async fn smtp_auth_plain_accepts_credentials_and_records_email() {
     assert!(resp.status().is_success(), "status = {}", resp.status());
     let body: serde_json::Value = resp.json().await.expect("json");
     let emails = body["emails"].as_array().expect("emails array");
-    let found = emails
+    let email = emails
         .iter()
-        .any(|e| e["from"].as_str() == Some("noreply@example.com"));
-    assert!(
-        found,
-        "expected SMTP-delivered email in introspection list: {body}"
+        .find(|e| e["from"].as_str() == Some("noreply@example.com"))
+        .unwrap_or_else(|| panic!("expected SMTP-delivered email in introspection list: {body}"));
+    // Recorded like an API raw send: plain MIME with its body parsed out.
+    assert_eq!(
+        email["rawData"],
+        "Subject: hi\r\nFrom: noreply@example.com\r\nTo: dest@example.com\r\n\r\nbody\r\n.sig\r\n"
     );
+    // Dot-stuffing removed one dot, not both.
+    assert_eq!(email["textBody"], "body\r\n.sig\r\n");
 }
 
 #[tokio::test]

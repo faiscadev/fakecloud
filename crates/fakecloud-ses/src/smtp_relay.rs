@@ -1,5 +1,5 @@
-//! Minimal SMTP client used as an opt-in outbound relay for SES
-//! SendEmail / SendEmailV2 / SendRawEmail. Wired only when the
+//! Minimal SMTP client used as an opt-in outbound relay for every message
+//! SES accepts (v1 and v2 sends, SMTP submissions). Wired only when the
 //! `FAKECLOUD_SES_SMTP_RELAY` env var is set (e.g.
 //! `smtp://localhost:1025` to drop mail at a local Mailpit / MailHog
 //! instance for development).
@@ -31,6 +31,40 @@ pub struct OutboundMail<'a> {
     /// The original message of a raw send (decoded). When present it is
     /// relayed verbatim instead of rebuilding headers from the fields above.
     pub raw_message: Option<&'a [u8]>,
+}
+
+impl<'a> OutboundMail<'a> {
+    /// The outbound form of a recorded message. A raw send (API or SMTP
+    /// submission) carries its plain MIME in `raw_data` and relays as-is.
+    pub fn from_sent(sent: &'a crate::state::SentEmail) -> Self {
+        Self {
+            from: &sent.from,
+            to: &sent.to,
+            cc: &sent.cc,
+            bcc: &sent.bcc,
+            subject: sent.subject.as_deref(),
+            text_body: sent.text_body.as_deref(),
+            html_body: sent.html_body.as_deref(),
+            raw_message: sent.raw_data.as_deref().map(str::as_bytes),
+        }
+    }
+}
+
+/// Opt-in relay of a recorded message: when `FAKECLOUD_SES_SMTP_RELAY` is
+/// set, fire a best-effort send to the configured MTA (e.g. Mailpit) so dev
+/// setups see real mail in their inbox. The SMTP client blocks, so the send
+/// runs on its own thread and never holds up the SES call. Failures are
+/// logged; the in-memory store is the source of truth for tests.
+pub fn relay_sent_email(sent: &crate::state::SentEmail) {
+    let Ok(relay_url) = std::env::var("FAKECLOUD_SES_SMTP_RELAY") else {
+        return;
+    };
+    let sent = sent.clone();
+    std::thread::spawn(move || {
+        if let Err(err) = relay(&relay_url, &OutboundMail::from_sent(&sent)) {
+            tracing::warn!(relay = %relay_url, error = %err, "SES SMTP relay failed");
+        }
+    });
 }
 
 /// Best-effort SMTP delivery. Returns `Err` only for caller visibility
@@ -201,6 +235,35 @@ mod tests {
             },
         );
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn raw_sends_relay_their_recorded_plain_mime() {
+        let mime = "From: a@example.com\r\nSubject: Hi\r\n\r\nhello\r\n";
+        let sent = crate::state::SentEmail {
+            message_id: "m".to_string(),
+            from: "a@example.com".to_string(),
+            to: vec!["b@example.com".to_string()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: Some("Hi".to_string()),
+            html_body: None,
+            text_body: Some("hello".to_string()),
+            raw_data: Some(mime.to_string()),
+            template_name: None,
+            template_data: None,
+            dkim_signature: None,
+            headers: Vec::new(),
+            timestamp: chrono::Utc::now(),
+            email_tags: Vec::new(),
+            delivery_insights: Vec::new(),
+        };
+        let mail = OutboundMail::from_sent(&sent);
+        assert_eq!(mail.raw_message, Some(mime.as_bytes()));
+        assert_eq!(
+            raw_data_section(mail.raw_message.unwrap()),
+            b"From: a@example.com\r\nSubject: Hi\r\n\r\nhello\r\n.\r\n"
+        );
     }
 }
 

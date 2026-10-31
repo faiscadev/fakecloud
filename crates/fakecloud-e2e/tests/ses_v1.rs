@@ -436,6 +436,135 @@ async fn test_send_raw_email_v1() {
     assert!(emails[0]["rawData"].as_str().is_some());
 }
 
+/// A raw message in both MIME body types, with transfer encodings and a
+/// non-UTF-8 charset, as an application would build it.
+const MULTIPART_RAW: &str = concat!(
+    "From: sender@example.com\r\n",
+    "To: to@example.com\r\n",
+    "Subject: =?UTF-8?B?T2zDoQ==?=\r\n",
+    "MIME-Version: 1.0\r\n",
+    "Content-Type: multipart/alternative; boundary=\"fc-b\"\r\n",
+    "\r\n",
+    "--fc-b\r\n",
+    "Content-Type: text/plain; charset=iso-8859-1\r\n",
+    "Content-Transfer-Encoding: quoted-printable\r\n",
+    "\r\n",
+    "Ol=E1 from raw\r\n",
+    "--fc-b\r\n",
+    "Content-Type: text/html; charset=utf-8\r\n",
+    "Content-Transfer-Encoding: base64\r\n",
+    "\r\n",
+    "PHA+T2zDoSBmcm9tIHJhdzwvcD4=\r\n",
+    "--fc-b--\r\n",
+);
+
+#[tokio::test]
+async fn send_raw_email_v1_introspection_is_plain_mime_with_parsed_bodies() {
+    let server = TestServer::start().await;
+    let client = server.ses_client().await;
+    for address in ["sender@example.com", "to@example.com"] {
+        client
+            .verify_email_identity()
+            .email_address(address)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    client
+        .send_raw_email()
+        .raw_message(
+            aws_sdk_ses::types::RawMessage::builder()
+                .data(aws_sdk_ses::primitives::Blob::new(MULTIPART_RAW))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("send raw email");
+
+    let url = format!("{}/_fakecloud/ses/emails", server.endpoint());
+    let resp: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+    let email = &resp["emails"][0];
+    // The message as sent, not the base64 the API carried it in.
+    assert_eq!(email["rawData"], MULTIPART_RAW);
+    assert_eq!(email["subject"], "Ol\u{e1}");
+    assert_eq!(email["textBody"], "Ol\u{e1} from raw");
+    assert_eq!(email["htmlBody"], "<p>Ol\u{e1} from raw</p>");
+}
+
+/// Accept one SMTP session and hand back its DATA section.
+fn spawn_smtp_sink() -> (u16, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut out = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        out.write_all(b"220 sink\r\n").unwrap();
+        let (mut data, mut in_data) = (String::new(), false);
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            if in_data {
+                if line == ".\r\n" {
+                    in_data = false;
+                    out.write_all(b"250 ok\r\n").unwrap();
+                } else {
+                    data.push_str(&line);
+                }
+            } else if line.starts_with("DATA") {
+                in_data = true;
+                out.write_all(b"354 go\r\n").unwrap();
+            } else if line.starts_with("QUIT") {
+                out.write_all(b"221 bye\r\n").unwrap();
+                break;
+            } else {
+                out.write_all(b"250 ok\r\n").unwrap();
+            }
+            line.clear();
+        }
+        tx.send(data).ok();
+    });
+    (port, rx)
+}
+
+#[tokio::test]
+async fn send_raw_email_v1_relays_the_plain_mime() {
+    let (port, rx) = spawn_smtp_sink();
+    let relay = format!("smtp://127.0.0.1:{port}");
+    let server = TestServer::start_with_env(&[("FAKECLOUD_SES_SMTP_RELAY", &relay)]).await;
+    let client = server.ses_client().await;
+    for address in ["sender@example.com", "to@example.com"] {
+        client
+            .verify_email_identity()
+            .email_address(address)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    client
+        .send_raw_email()
+        .raw_message(
+            aws_sdk_ses::types::RawMessage::builder()
+                .data(aws_sdk_ses::primitives::Blob::new(MULTIPART_RAW))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("send raw email");
+
+    let relayed =
+        tokio::task::spawn_blocking(move || rx.recv_timeout(std::time::Duration::from_secs(10)))
+            .await
+            .unwrap()
+            .expect("relay never delivered");
+    assert_eq!(relayed, MULTIPART_RAW);
+}
+
 // ── Templates ──
 
 #[tokio::test]

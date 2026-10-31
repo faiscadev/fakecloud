@@ -205,8 +205,15 @@ export interface SentEmail {
   cc: string[];
   bcc: string[];
   subject: string | null;
+  /** For a raw message, its first text/html part, transfer- and charset-decoded. */
   htmlBody: string | null;
+  /** For a raw message, its first text/plain part, transfer- and charset-decoded. */
   textBody: string | null;
+  /**
+   * A raw message (SendRawEmail, v2 SendEmail with Content.Raw, SMTP
+   * submission) as plain MIME text, decoded from the base64 the API carries
+   * it in. Null for messages SES builds from fields.
+   */
   rawData: string | null;
   templateName: string | null;
   templateData: string | null;

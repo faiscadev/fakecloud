@@ -1509,6 +1509,7 @@ fn record_sent_email(
             config_set_name,
         );
     }
+    crate::smtp_relay::relay_sent_email(&sent);
     state
         .write()
         .get_or_create(&req.account_id)
@@ -1615,6 +1616,7 @@ pub(crate) fn send_raw_email(
         rand_u16(),
     );
 
+    let (text_body, html_body) = raw_mail.bodies();
     let sent = SentEmail {
         message_id: message_id.clone(),
         from,
@@ -1622,9 +1624,9 @@ pub(crate) fn send_raw_email(
         cc,
         bcc,
         subject: raw_mail.subject(),
-        html_body: None,
-        text_body: None,
-        raw_data: Some(raw_data.to_string()),
+        html_body,
+        text_body,
+        raw_data: Some(raw_mail.mime()),
         template_name: None,
         template_data: None,
         dkim_signature: None,

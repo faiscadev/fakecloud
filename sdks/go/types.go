@@ -217,6 +217,12 @@ type EvictContainerResponse struct {
 // ── SES ────────────────────────────────────────────────────────────
 
 // SentEmail represents an email captured by the SES emulator.
+//
+// For a raw message (SendRawEmail, v2 SendEmail with Content.Raw, SMTP
+// submission) RawData is the message as plain MIME text, decoded from the
+// base64 the API carries it in, and TextBody / HTMLBody are its first
+// text/plain / text/html parts, transfer- and charset-decoded. RawData is
+// nil for messages SES builds from fields.
 type SentEmail struct {
 	MessageID     string      `json:"messageId"`
 	From          string      `json:"from"`

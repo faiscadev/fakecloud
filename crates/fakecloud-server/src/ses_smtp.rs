@@ -260,25 +260,22 @@ async fn finish_plain_auth(
 }
 
 async fn read_data(rd: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> std::io::Result<String> {
-    let mut data = String::new();
-    let mut buf = String::new();
+    let mut data = Vec::new();
+    let mut buf = Vec::new();
     loop {
         buf.clear();
-        let n = rd.read_line(&mut buf).await?;
+        let n = rd.read_until(b'\n', &mut buf).await?;
         if n == 0 {
             break;
         }
-        if buf == ".\r\n" || buf == ".\n" {
+        if buf == b".\r\n" || buf == b".\n" {
             break;
         }
-        let unstuffed = if let Some(rest) = buf.strip_prefix("..") {
-            rest.to_string()
-        } else {
-            buf.clone()
-        };
-        data.push_str(&unstuffed);
+        // RFC 5321 section 4.5.2: drop the one dot the client stuffed.
+        data.extend_from_slice(buf.strip_prefix(b".").unwrap_or(&buf));
     }
-    Ok(data)
+    // 8bit content need not be UTF-8; keep the rest of the message intact.
+    Ok(String::from_utf8_lossy(&data).into_owned())
 }
 
 fn extract_addr(line: &str) -> Option<String> {
@@ -344,7 +341,8 @@ fn store_email(
 ) -> String {
     let message_id = format!("smtp-{:032x}", rand::random::<u128>());
     let now = Utc::now();
-    let subject = parse_subject(&data);
+    let subject = fakecloud_ses::mime::message_subject(data.as_bytes());
+    let (text_body, html_body) = fakecloud_ses::mime::message_bodies(data.as_bytes());
     let raw_size_bytes = data.len();
     let sent = SentEmail {
         message_id: message_id.clone(),
@@ -353,8 +351,8 @@ fn store_email(
         cc: Vec::new(),
         bcc: Vec::new(),
         subject: subject.clone(),
-        html_body: None,
-        text_body: None,
+        html_body,
+        text_body,
         raw_data: Some(data),
         template_name: None,
         template_data: None,
@@ -373,28 +371,12 @@ fn store_email(
         received_at: now,
         auth_user: auth_user.to_string(),
     };
+    fakecloud_ses::smtp_relay::relay_sent_email(&sent);
     let mut accounts = ses.write();
     let state = accounts.get_or_create(account_id);
     state.sent_emails.push(sent);
     state.smtp_submissions.push(submission);
     message_id
-}
-
-/// Return the first `Subject:` header value in an RFC 5322 message blob,
-/// or `None` if no header is found. Folded continuation lines are not
-/// unfolded — fakecloud just keeps the first physical line, which is
-/// good enough for test assertions and matches the shape captured in
-/// `SentEmail::subject` for the v2 SDK path.
-fn parse_subject(raw: &str) -> Option<String> {
-    for line in raw.lines() {
-        if line.is_empty() {
-            break;
-        }
-        if let Some(rest) = line.strip_prefix("Subject:") {
-            return Some(rest.trim().to_string());
-        }
-    }
-    None
 }
 
 #[cfg(test)]

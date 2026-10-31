@@ -400,6 +400,18 @@ async fn ses_v1_dkim_signs_send_raw_email() {
         .expect("v1 SendRawEmail must produce a DKIM-Signature when signing is enabled");
     assert!(dkim.contains("d=example.com"));
     assert!(dkim.contains("c=relaxed/relaxed"));
+    // Signed as sent: the message's own header fields plus the Date and
+    // Message-ID SES adds, and the hash of its MIME body (not of the whole
+    // message, nor of the API's base64).
+    assert!(
+        dkim.contains("h=from:to:subject:date:message-id;"),
+        "{dkim}"
+    );
+    let body_hash = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        <sha2::Sha256 as sha2::Digest>::digest(b"body\r\n"),
+    );
+    assert!(dkim.contains(&format!("bh={body_hash};")), "{dkim}");
 }
 
 /// Switching DKIM signing on via the public attribute API must lazily
