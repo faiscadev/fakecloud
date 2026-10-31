@@ -7,7 +7,7 @@
 # The only recurring source of HIGH findings in the image is the bundled
 # static Docker CLI (/usr/local/bin/docker), whose binary bakes in the Go
 # stdlib — a stale Docker release therefore carries stale-toolchain CVEs.
-# DOCKER_CLI_VERSION 29.9.0 ships go1.26.9 and scans clean on both
+# DOCKER_CLI_VERSION 29.9.2 ships go1.26.10 and scans clean on both
 # linux/amd64 and linux/arm64, so nothing needs suppressing today.
 #
 # When a new Go stdlib advisory lands, prefer bumping DOCKER_CLI_VERSION in
