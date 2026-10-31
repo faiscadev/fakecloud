@@ -335,13 +335,19 @@ public final class Types {
     public record ConfirmSubscriptionResponse(boolean confirmed) {}
 
     // ── SQS ────────────────────────────────────────────────────────
+    /**
+     * A queued message. {@code body} is the plaintext; {@code storedBody} is the
+     * body as stored at rest (the KMS ciphertext envelope on an SSE-SQS / SSE-KMS
+     * queue, equal to {@code body} otherwise).
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record SqsMessageInfo(
             String messageId,
             String body,
             int receiveCount,
             boolean inFlight,
-            String createdAt) {}
+            String createdAt,
+            String storedBody) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     /**

@@ -507,20 +507,15 @@ async fn sdk_athena_get_named_queries() {
 
 #[tokio::test]
 async fn sdk_sqs_get_messages() {
-    use aws_sdk_sqs::types::QueueAttributeName;
-
     let server = TestServer::start().await;
     let fc = FakeCloud::new(server.endpoint());
     let sqs = server.sqs_client().await;
 
-    // Disable SSE-SQS so the introspection endpoint surfaces the
-    // plaintext body. Default queues encrypt at rest under
-    // `alias/aws/sqs` (AWS default since May 2023) and the SDK probe
-    // would see the at-rest envelope.
+    // A default queue: SSE-SQS seals the body at rest, introspection
+    // shows the plaintext in `body` and the envelope in `stored_body`.
     let create = sqs
         .create_queue()
         .queue_name("sdk-sqs-queue")
-        .attributes(QueueAttributeName::SqsManagedSseEnabled, "false")
         .send()
         .await
         .unwrap();
@@ -538,6 +533,8 @@ async fn sdk_sqs_get_messages() {
     assert_eq!(resp.queues[0].queue_name, "sdk-sqs-queue");
     assert_eq!(resp.queues[0].messages.len(), 1);
     assert_eq!(resp.queues[0].messages[0].body, "hello from sdk test");
+    let stored = &resp.queues[0].messages[0].stored_body;
+    assert!(!stored.is_empty() && stored != "hello from sdk test");
 }
 
 // ── SNS ────────────────────────────────────────────────────────────

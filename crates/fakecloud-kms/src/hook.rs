@@ -151,36 +151,7 @@ impl KmsServiceHook {
         service_principal: &str,
         encryption_context: HashMap<String, String>,
     ) -> Result<Vec<u8>, KmsHookError> {
-        let envelope_bytes = base64::engine::general_purpose::STANDARD
-            .decode(ciphertext_b64)
-            .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
-
-        // Try AWS-shaped binary blob first using the account's master key;
-        // older textual envelopes fall through to the legacy parser below.
-        let master_key_bytes = {
-            let mas = self.state.read();
-            mas.get(account_id)
-                .map(|s| s.master_key_bytes.clone())
-                .unwrap_or_default()
-        };
-        let (key_short, plaintext) =
-            if let Some(decoded) = crate::blob::decode(&master_key_bytes, &envelope_bytes) {
-                (decoded.key_id, decoded.plaintext)
-            } else {
-                let envelope = String::from_utf8(envelope_bytes)
-                    .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
-                let rest = envelope.strip_prefix("fakecloud-kms:").ok_or_else(|| {
-                    KmsHookError::InvalidCiphertext("unrecognized envelope".into())
-                })?;
-                let (key_short, plaintext_b64) = rest.split_once(':').ok_or_else(|| {
-                    KmsHookError::InvalidCiphertext("missing key separator".into())
-                })?;
-
-                let plaintext = base64::engine::general_purpose::STANDARD
-                    .decode(plaintext_b64)
-                    .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
-                (key_short.to_string(), plaintext)
-            };
+        let (key_short, plaintext) = self.open_envelope(account_id, ciphertext_b64)?;
 
         let key_arn = {
             let mas = self.state.read();
@@ -210,6 +181,52 @@ impl KmsServiceHook {
         });
 
         Ok(plaintext)
+    }
+
+    /// The plaintext inside a ciphertext envelope, read without the KMS
+    /// key-state check or a usage record. For introspection only: tests
+    /// inspecting stored SSE data see what was encrypted even after the key
+    /// was disabled, and the read does not show up in `/_fakecloud/kms/usage`.
+    /// `None` when `ciphertext_b64` is not an envelope this account sealed.
+    pub fn peek_plaintext(&self, account_id: &str, ciphertext_b64: &str) -> Option<Vec<u8>> {
+        self.open_envelope(account_id, ciphertext_b64)
+            .ok()
+            .map(|(_, plaintext)| plaintext)
+    }
+
+    /// Unseal a ciphertext envelope into its key id and plaintext.
+    fn open_envelope(
+        &self,
+        account_id: &str,
+        ciphertext_b64: &str,
+    ) -> Result<(String, Vec<u8>), KmsHookError> {
+        let envelope_bytes = base64::engine::general_purpose::STANDARD
+            .decode(ciphertext_b64)
+            .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
+
+        // Try AWS-shaped binary blob first using the account's master key;
+        // older textual envelopes fall through to the legacy parser below.
+        let master_key_bytes = {
+            let mas = self.state.read();
+            mas.get(account_id)
+                .map(|s| s.master_key_bytes.clone())
+                .unwrap_or_default()
+        };
+        if let Some(decoded) = crate::blob::decode(&master_key_bytes, &envelope_bytes) {
+            return Ok((decoded.key_id, decoded.plaintext));
+        }
+        let envelope = String::from_utf8(envelope_bytes)
+            .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
+        let rest = envelope
+            .strip_prefix("fakecloud-kms:")
+            .ok_or_else(|| KmsHookError::InvalidCiphertext("unrecognized envelope".into()))?;
+        let (key_short, plaintext_b64) = rest
+            .split_once(':')
+            .ok_or_else(|| KmsHookError::InvalidCiphertext("missing key separator".into()))?;
+        let plaintext = base64::engine::general_purpose::STANDARD
+            .decode(plaintext_b64)
+            .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
+        Ok((key_short.to_string(), plaintext))
     }
 
     /// Resolve `key_id` to its key ARN, provisioning an AWS-managed
@@ -568,6 +585,42 @@ fn key_id_from_arn(arn: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Peeking returns what was sealed even after the key is disabled, and
+    /// records no usage; a non-envelope body peeks to `None`.
+    #[test]
+    fn peek_plaintext_bypasses_key_state_and_usage() {
+        let acct = "123456789012";
+        let state: SharedKmsState = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(acct, "us-east-1", ""),
+        ));
+        let usage = SharedKmsUsageState::default();
+        let hook = KmsServiceHook::new(state.clone(), usage.clone());
+        let ct = hook
+            .encrypt(
+                acct,
+                "us-east-1",
+                "alias/aws/sqs",
+                b"hello",
+                "sqs.amazonaws.com",
+                HashMap::new(),
+            )
+            .unwrap();
+        let recorded = usage.read().records().len();
+        for key in state.write().get_or_create(acct).keys.values_mut() {
+            key.enabled = false;
+        }
+        assert!(hook
+            .decrypt(acct, &ct, "sqs.amazonaws.com", HashMap::new())
+            .is_err());
+        assert_eq!(
+            hook.peek_plaintext(acct, &ct).as_deref(),
+            Some(&b"hello"[..])
+        );
+        assert_eq!(usage.read().records().len(), recorded);
+        assert_eq!(hook.peek_plaintext(acct, "plain text body"), None);
+        assert_eq!(hook.peek_plaintext("999999999999", &ct), None);
+    }
 
     #[test]
     fn aws_managed_keys_take_the_partition_of_their_region() {

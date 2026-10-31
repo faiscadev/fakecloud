@@ -4,10 +4,52 @@
 //! - ReceiveMessage decrypts via `kms:Decrypt` and returns the original
 //!   plaintext body
 //! - Both calls land in `/_fakecloud/kms/usage`
+//! - `/_fakecloud/sqs/messages` shows the plaintext `body` next to the
+//!   at-rest `storedBody`
 
 mod helpers;
 
 use helpers::TestServer;
+
+/// `(body, storedBody)` of the single message on `queue_name`, read from
+/// `/_fakecloud/sqs/messages`.
+async fn introspected_body(server: &TestServer, queue_name: &str) -> (String, String) {
+    let resp: serde_json::Value =
+        reqwest::get(format!("{}/_fakecloud/sqs/messages", server.endpoint()))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    let queue = resp["queues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|q| q["queueName"] == queue_name)
+        .unwrap_or_else(|| panic!("{queue_name} missing from {resp}"));
+    let msg = &queue["messages"][0];
+    (
+        msg["body"].as_str().unwrap().to_string(),
+        msg["storedBody"].as_str().unwrap().to_string(),
+    )
+}
+
+/// How many KMS usage records SQS has left.
+async fn sqs_kms_usage_count(server: &TestServer) -> usize {
+    let usage: serde_json::Value =
+        reqwest::get(format!("{}/_fakecloud/kms/usage", server.endpoint()))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    usage["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["servicePrincipal"] == "sqs.amazonaws.com")
+        .count()
+}
 
 #[tokio::test]
 async fn sqs_send_receive_encrypted_round_trips_through_kms() {
@@ -111,8 +153,17 @@ async fn sqs_receive_decrypt_failure_does_not_destroy_messages() {
         .await
         .unwrap();
 
+    let (body, stored_body) = introspected_body(&server, "decrypt-fail").await;
+    assert_eq!(body, "do-not-lose-me");
+    assert_ne!(stored_body, "do-not-lose-me");
+
     // Disable the key: the next receive must fail to decrypt.
     kms.disable_key().key_id(&key_id).send().await.unwrap();
+    // Introspection still reads the plaintext and leaves no KMS usage.
+    let usage_before = sqs_kms_usage_count(&server).await;
+    let (body, _) = introspected_body(&server, "decrypt-fail").await;
+    assert_eq!(body, "do-not-lose-me");
+    assert_eq!(sqs_kms_usage_count(&server).await, usage_before);
     let failed = sqs
         .receive_message()
         .queue_url(&queue_url)
@@ -168,6 +219,9 @@ async fn sqs_unencrypted_queue_does_not_record_kms_usage() {
         .send()
         .await
         .unwrap();
+    let (body, stored_body) = introspected_body(&server, "plain").await;
+    assert_eq!(body, "plain");
+    assert_eq!(stored_body, "plain");
 
     let usage: serde_json::Value = http
         .get(format!("{}/_fakecloud/kms/usage", server.endpoint()))
@@ -213,23 +267,14 @@ async fn sqs_managed_sse_round_trips_through_alias_aws_sqs() {
         .await
         .unwrap();
 
-    // Stored body should be an opaque ciphertext (no plaintext leak).
-    let stored: serde_json::Value = http
-        .get(format!("{}/_fakecloud/sqs/messages", server.endpoint()))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let stored_body = stored["queues"][0]["messages"][0]["body"]
-        .as_str()
-        .expect("introspection should expose the at-rest body")
-        .to_string();
+    // Stored body is an opaque ciphertext (no plaintext leak); `body` is
+    // the plaintext.
+    let (body, stored_body) = introspected_body(&server, "sse-managed").await;
     assert_ne!(
         stored_body, "managed-sse-payload",
         "SqsManagedSseEnabled must encrypt the body at rest, got plaintext"
     );
+    assert_eq!(body, "managed-sse-payload");
 
     // Receive must surface the original plaintext.
     let got = sqs

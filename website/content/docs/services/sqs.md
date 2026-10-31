@@ -27,7 +27,7 @@ Query protocol. Form-encoded body, `Action` parameter, XML responses.
 
 ## Introspection
 
-- `GET /_fakecloud/sqs/messages` — list all messages across all queues (each entry names its `region` and `queueArn`)
+- `GET /_fakecloud/sqs/messages` — list all messages across all queues (each entry names its `region` and `queueArn`; each message carries the plaintext `body` and the at-rest `storedBody`, which is the KMS ciphertext envelope on encrypted queues)
 - `POST /_fakecloud/sqs/expiration-processor/tick` — expire messages past retention
 - `POST /_fakecloud/sqs/{queue_name}/force-dlq` — force-move messages exceeding `maxReceiveCount` to DLQ (optional `?accountId=&region=`, default the server's)
 

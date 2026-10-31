@@ -371,6 +371,8 @@ export interface ConfirmSubscriptionResponse {
 export interface SqsMessageInfo {
   messageId: string;
   body: string;
+  /** The body as stored at rest: the KMS ciphertext envelope on an SSE-SQS / SSE-KMS queue, equal to `body` otherwise. */
+  storedBody: string;
   receiveCount: number;
   inFlight: boolean;
   createdAt: string;

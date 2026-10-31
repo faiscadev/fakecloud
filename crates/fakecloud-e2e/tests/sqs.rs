@@ -1311,13 +1311,11 @@ async fn sqs_introspection_messages() {
     let server = TestServer::start().await;
     let client = server.sqs_client().await;
 
-    // Disable SSE-SQS so the introspection endpoint surfaces the
-    // plaintext body rather than the at-rest ciphertext envelope. The
-    // SSE round-trip is covered by `sqs_managed_sse_round_trips_through_alias_aws_sqs`.
+    // A default queue: SSE-SQS seals the body at rest, and introspection
+    // still shows the plaintext.
     let queue = client
         .create_queue()
         .queue_name("intro-queue")
-        .attributes(QueueAttributeName::SqsManagedSseEnabled, "false")
         .send()
         .await
         .unwrap();
@@ -1345,6 +1343,11 @@ async fn sqs_introspection_messages() {
     let messages = q["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["body"], "introspection test body");
+    let stored = messages[0]["storedBody"].as_str().unwrap();
+    assert!(
+        !stored.is_empty() && stored != "introspection test body",
+        "storedBody must be the at-rest ciphertext, got {stored:?}"
+    );
     assert_eq!(messages[0]["receiveCount"], 0);
     assert_eq!(messages[0]["inFlight"], false);
     assert!(!messages[0]["messageId"].as_str().unwrap().is_empty());

@@ -865,6 +865,9 @@ class SqsMessageInfo:
     receive_count: int
     in_flight: bool
     created_at: str
+    # The body as stored at rest: the KMS ciphertext envelope on an
+    # SSE-SQS / SSE-KMS queue, equal to ``body`` otherwise.
+    stored_body: str = ""
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SqsMessageInfo:

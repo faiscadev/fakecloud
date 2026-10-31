@@ -8805,6 +8805,7 @@ async fn main() {
             "/_fakecloud/sqs/messages",
             axum::routing::get({
                 let ss = sqs_introspection_state;
+                let kms = kms_hook_adapter.clone();
                 // Render each queue_url against the caller's Host so the
                 // introspection view matches the QueueUrls returned by the SQS
                 // API (host-aware, bug-hunt 1.10).
@@ -8813,33 +8814,32 @@ async fn main() {
                     // Every account and region's queues.
                     let queues = mas
                         .iter_regional()
-                        .flat_map(|(_, _, state)| {
+                        .flat_map(|(account_id, _, state)| {
                             let base =
                                 fakecloud_sqs::resolve_endpoint_base(&headers, &state.endpoint);
+                            let kms = &kms;
                             state.queues.values().map(move |queue| {
-                                let mut messages: Vec<types::SqsMessageInfo> = queue
+                                // SSE bodies are stored sealed; `body` is the
+                                // plaintext the sender sent, `storedBody` the
+                                // at-rest form.
+                                let info = |msg: &fakecloud_sqs::SqsMessage, in_flight| {
+                                    types::SqsMessageInfo {
+                                        message_id: msg.message_id.clone(),
+                                        body: fakecloud_sqs::plaintext_body(&msg.body, |ct| {
+                                            kms.inner.peek_plaintext(account_id, ct)
+                                        }),
+                                        stored_body: msg.body.clone(),
+                                        receive_count: msg.receive_count as u64,
+                                        in_flight,
+                                        created_at: msg.created_at.to_rfc3339(),
+                                    }
+                                };
+                                let messages: Vec<types::SqsMessageInfo> = queue
                                     .messages
                                     .iter()
-                                    .map(|msg| types::SqsMessageInfo {
-                                        message_id: msg.message_id.clone(),
-                                        body: msg.body.clone(),
-                                        receive_count: msg.receive_count as u64,
-                                        in_flight: false,
-                                        created_at: msg.created_at.to_rfc3339(),
-                                    })
+                                    .map(|msg| info(msg, false))
+                                    .chain(queue.inflight.iter().map(|msg| info(msg, true)))
                                     .collect();
-                                let inflight: Vec<types::SqsMessageInfo> = queue
-                                    .inflight
-                                    .iter()
-                                    .map(|msg| types::SqsMessageInfo {
-                                        message_id: msg.message_id.clone(),
-                                        body: msg.body.clone(),
-                                        receive_count: msg.receive_count as u64,
-                                        in_flight: true,
-                                        created_at: msg.created_at.to_rfc3339(),
-                                    })
-                                    .collect();
-                                messages.extend(inflight);
                                 types::SqsQueueMessages {
                                     queue_url: fakecloud_sqs::render_queue_url(
                                         &queue.queue_url,

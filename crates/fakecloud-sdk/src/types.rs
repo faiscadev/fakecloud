@@ -424,6 +424,10 @@ pub struct ConfirmSubscriptionResponse {
 pub struct SqsMessageInfo {
     pub message_id: String,
     pub body: String,
+    /// The body as stored at rest: the KMS ciphertext envelope on an
+    /// SSE-SQS / SSE-KMS queue, equal to `body` otherwise.
+    #[serde(default)]
+    pub stored_body: String,
     pub receive_count: u64,
     pub in_flight: bool,
     pub created_at: String,

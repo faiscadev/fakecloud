@@ -585,15 +585,10 @@ func TestE2ESQS(t *testing.T) {
 		o.BaseEndpoint = aws.String(fakecloudURL)
 	})
 
-	// Create queue with managed SSE off so the introspection endpoint
-	// surfaces the plaintext body. Default queues encrypt at rest under
-	// `alias/aws/sqs` post-May-2023, and the introspection probe sees
-	// the at-rest envelope.
+	// A default queue: SSE-SQS seals the body at rest, introspection
+	// shows the plaintext in Body and the envelope in StoredBody.
 	createResp, err := sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
 		QueueName: aws.String("sdk-go-test-queue"),
-		Attributes: map[string]string{
-			"SqsManagedSseEnabled": "false",
-		},
 	})
 	if err != nil {
 		t.Fatalf("CreateQueue failed: %v", err)
@@ -621,6 +616,9 @@ func TestE2ESQS(t *testing.T) {
 			for _, m := range q.Messages {
 				if m.Body == "hello from go sdk test" {
 					found = true
+					if m.StoredBody == "" || m.StoredBody == m.Body {
+						t.Errorf("StoredBody should be the at-rest envelope, got %q", m.StoredBody)
+					}
 				}
 			}
 		}
