@@ -323,12 +323,11 @@ async fn dynamodb_streams_lambda_event_source_mapping() {
     let inv = loop {
         let invs = get_lambda_invocations(server.endpoint()).await;
         let inv_list = invs["invocations"].as_array().cloned().unwrap_or_default();
-        if let Some(inv) = inv_list.iter().rev().find(|inv| {
-            inv["payload"]
-                .as_str()
-                .unwrap_or("")
-                .contains("\"eventSource\":\"aws:dynamodb\"")
-        }) {
+        if let Some(inv) = inv_list
+            .iter()
+            .rev()
+            .find(|inv| inv["payload"]["Records"][0]["eventSource"] == "aws:dynamodb")
+        {
             break inv.clone();
         }
         if std::time::Instant::now() >= deadline {
@@ -341,8 +340,7 @@ async fn dynamodb_streams_lambda_event_source_mapping() {
         .as_str()
         .unwrap()
         .contains("ddb-stream-processor"));
-    let payload: serde_json::Value =
-        serde_json::from_str(inv["payload"].as_str().unwrap()).unwrap();
+    let payload = &inv["payload"];
     let record = &payload["Records"][0];
     assert_eq!(record["eventSource"], "aws:dynamodb");
     assert_eq!(record["eventName"], "INSERT");

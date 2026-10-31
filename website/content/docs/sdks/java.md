@@ -383,8 +383,8 @@ void classifierBranchesOnSpamVsHam() {
 
     var invocations = fc.bedrock().getInvocations().invocations();
     assertEquals(2, invocations.size());
-    assertTrue(invocations.get(0).output().contains("ham"));
-    assertTrue(invocations.get(1).output().contains("spam"));
+    assertEquals("ham", invocations.get(0).output().get("label").asText());
+    assertEquals("spam", invocations.get(1).output().get("label").asText());
 }
 
 @Test

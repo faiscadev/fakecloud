@@ -172,7 +172,8 @@ export interface ElastiCacheAclsResponse {
 
 export interface LambdaInvocation {
   functionArn: string;
-  payload: string;
+  /** Structured JSON when the payload parses as JSON, else the raw string. */
+  payload: unknown;
   source: string;
   timestamp: string;
 }
@@ -431,20 +432,23 @@ export interface EventBridgeEvent {
   eventId: string;
   source: string;
   detailType: string;
-  detail: string;
+  /** Structured JSON when the detail parses as JSON, else the raw string. */
+  detail: unknown;
   busName: string;
   timestamp: string;
 }
 
 export interface EventBridgeLambdaDelivery {
   functionArn: string;
-  payload: string;
+  /** Structured JSON when the payload parses as JSON, else the raw string. */
+  payload: unknown;
   timestamp: string;
 }
 
 export interface EventBridgeLogDelivery {
   logGroupArn: string;
-  payload: string;
+  /** Structured JSON when the payload parses as JSON, else the raw string. */
+  payload: unknown;
   timestamp: string;
 }
 
@@ -726,8 +730,10 @@ export interface StepFunctionsExecution {
   name: string;
   status: string;
   startDate: string;
-  input?: string | null;
-  output?: string | null;
+  /** Structured JSON when the input parses as JSON, else the raw string. */
+  input?: unknown;
+  /** Structured JSON when the output parses as JSON, else the raw string. */
+  output?: unknown;
   stopDate?: string | null;
 }
 
@@ -745,8 +751,10 @@ export interface StepFunctionsSyncExecution {
   stateMachineArn: string;
   name: string;
   status: string;
-  input?: string | null;
-  output?: string | null;
+  /** Structured JSON when the input parses as JSON, else the raw string. */
+  input?: unknown;
+  /** Structured JSON when the output parses as JSON, else the raw string. */
+  output?: unknown;
   startedAt: string;
   stoppedAt?: string | null;
   durationMs: number;
@@ -786,8 +794,14 @@ export interface SfnEnqueueActivityTaskResponse {
 
 export interface BedrockInvocation {
   modelId: string;
-  input: string;
-  output: string;
+  /** The request body: structured JSON when it parses as JSON, else the raw string. */
+  input: unknown;
+  /**
+   * The response the equivalent non-streaming call returns (provider JSON for
+   * InvokeModel / InvokeModelWithResponseStream, the Converse response for
+   * Converse / ConverseStream). Empty string for faulted calls.
+   */
+  output: unknown;
   timestamp: string;
   /** Error detail for faulted calls, or null on success. */
   error: string | null;

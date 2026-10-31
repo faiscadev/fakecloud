@@ -34,7 +34,7 @@ REST. Path-based routing for invoke operations, JSON for control plane.
 
 ## Introspection
 
-- `GET /_fakecloud/lambda/invocations` — list all Lambda invocations with input/output/errors
+- `GET /_fakecloud/lambda/invocations` — list invocations delivered by other services (SQS, Kinesis, DynamoDB Streams, SNS, EventBridge, ...) with `functionArn`, `payload` (the event, as structured JSON), `source`, and `timestamp`
 - `GET /_fakecloud/lambda/warm-containers` — list currently warm containers
 - `POST /_fakecloud/lambda/{function-name}/evict-container` — force a cold start on the next invoke
 - `GET /_fakecloud/lambda/layer-content/{account-id}/{layer-name}/{version}.zip[?region=<region>]` — download the raw layer ZIP. Returned as the `Content.Location` from `PublishLayerVersion` and `GetLayerVersion` (with the layer's `region`), so AWS SDK / Terraform clients that re-download a layer get the actual bytes. Without `region` the server's `--region` is tried first, then the account's other regions

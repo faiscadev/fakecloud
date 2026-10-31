@@ -25,6 +25,54 @@ pub(crate) fn converse(
         return Err(crate::faults::fault_to_error(&fault));
     }
 
+    let reply = offline_reply(state, req, model_id, body);
+    let response_str = reply.response_json();
+
+    // Record invocation for introspection
+    crate::invoke::record_invocation(
+        state,
+        req,
+        model_id,
+        body,
+        &response_str,
+        None,
+        request_metadata,
+    );
+
+    Ok(AwsResponse::json(StatusCode::OK, response_str))
+}
+
+/// An offline Converse reply: the assistant text (truncated to
+/// `maxTokens`), the forced tool if `toolChoice` requires one, the stop
+/// reason and usage. Converse and ConverseStream both build from it, so the
+/// two return the same reply for identical input.
+pub(crate) struct OfflineReply {
+    pub(crate) text: String,
+    pub(crate) forced_tool: Option<String>,
+    pub(crate) stop_reason: &'static str,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+}
+
+impl OfflineReply {
+    /// The Converse response body for this reply.
+    pub(crate) fn response_json(&self) -> String {
+        response_json(
+            &self.text,
+            self.forced_tool.as_deref(),
+            self.stop_reason,
+            self.input_tokens,
+            self.output_tokens,
+        )
+    }
+}
+
+pub(crate) fn offline_reply(
+    state: &SharedBedrockState,
+    req: &AwsRequest,
+    model_id: &str,
+    body: &[u8],
+) -> OfflineReply {
     let input: Value = serde_json::from_slice(body).unwrap_or_default();
 
     let inference_config = input.get("inferenceConfig");
@@ -33,31 +81,7 @@ pub(crate) fn converse(
         .unwrap_or(u64::MAX);
     let tool_config = input.get("toolConfig");
 
-    let response_text = match crate::prompt::resolve_override(state, req, model_id, body) {
-        Some(custom) => {
-            let parsed: Value = serde_json::from_str(&custom).unwrap_or_default();
-            if let Some(text) = parsed["output"]["message"]["content"][0]["text"].as_str() {
-                text.to_string()
-            } else {
-                custom
-            }
-        }
-        None => {
-            // Echo mode short-circuits the canned phrase: reflect the
-            // caller's prompt back as the assistant text so tests can
-            // assert against their own input.
-            if crate::prompt::echo_enabled() {
-                let echoed = crate::prompt::extract_prompt_text(model_id, body);
-                if echoed.is_empty() {
-                    "(empty prompt)".to_string()
-                } else {
-                    echoed
-                }
-            } else {
-                "This is a test response from the emulated model.".to_string()
-            }
-        }
-    };
+    let response_text = crate::streaming::get_response_text(state, req, model_id, body);
 
     // Respect maxTokens by truncating (rough approximation: 1 token ~= 4 chars).
     // `saturating_mul` keeps a hostile `maxTokens` (e.g. `u64::MAX - 1` sent
@@ -77,23 +101,11 @@ pub(crate) fn converse(
         (response_text, false)
     };
 
-    // Build content blocks
-    let mut content = vec![json!({"text": truncated_text})];
-
     // Only emit a toolUse block when the caller's `toolChoice` actually
     // requires one. A bare `toolConfig` (or `toolChoice:{auto:{}}`) leaves the
     // decision to the model, and offline we choose a plain text reply — forcing
     // an empty-arg tool call here derails LangChain / agent tool-loops.
     let forced_tool = forced_tool_name(tool_config);
-    if let Some(tool_name) = &forced_tool {
-        content.push(json!({
-            "toolUse": {
-                "toolUseId": "tooluse_fakecloud_01",
-                "name": tool_name,
-                "input": {}
-            }
-        }));
-    }
 
     let stop_reason = if forced_tool.is_some() {
         "tool_use"
@@ -108,6 +120,72 @@ pub(crate) fn converse(
     let input_tokens = estimate_tokens(&input);
     let output_tokens = crate::prompt::count_tokens(&truncated_text).max(1);
 
+    OfflineReply {
+        text: truncated_text,
+        forced_tool,
+        stop_reason,
+        input_tokens,
+        output_tokens,
+    }
+}
+
+/// Offline ConverseStream: the same reply the non-streaming Converse path
+/// builds for identical input (maxTokens truncation, forced toolUse, stop
+/// reason, usage), streamed as events and recorded as the Converse body it
+/// amounts to. Fault injection is the caller's job.
+pub(crate) fn converse_stream_offline(
+    state: &SharedBedrockState,
+    req: &AwsRequest,
+    model_id: &str,
+    body: &[u8],
+    request_metadata: Option<&crate::runtime_validation::RequestMetadata>,
+) -> AwsResponse {
+    let reply = offline_reply(state, req, model_id, body);
+    let event_body = crate::streaming::build_converse_stream_response(
+        &reply.text,
+        reply.stop_reason,
+        reply.forced_tool.as_deref(),
+        reply.input_tokens,
+        reply.output_tokens,
+    );
+    crate::invoke::record_invocation(
+        state,
+        req,
+        model_id,
+        body,
+        &reply.response_json(),
+        None,
+        request_metadata,
+    );
+    AwsResponse {
+        status: StatusCode::OK,
+        content_type: "application/vnd.amazon.eventstream".to_string(),
+        body: bytes::Bytes::from(event_body).into(),
+        headers: http::HeaderMap::new(),
+    }
+}
+
+/// The Converse response body for an offline reply: the text block, an
+/// optional forced `toolUse` block, the stop reason and usage. ConverseStream
+/// records the same body for introspection, so a streamed call reads back
+/// exactly like the equivalent Converse call.
+pub(crate) fn response_json(
+    text: &str,
+    forced_tool: Option<&str>,
+    stop_reason: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> String {
+    let mut content = vec![json!({"text": text})];
+    if let Some(tool_name) = forced_tool {
+        content.push(json!({
+            "toolUse": {
+                "toolUseId": "tooluse_fakecloud_01",
+                "name": tool_name,
+                "input": {}
+            }
+        }));
+    }
     let response = json!({
         "output": {
             "message": {
@@ -125,21 +203,7 @@ pub(crate) fn converse(
             "latencyMs": 100
         }
     });
-
-    let response_str = serde_json::to_string(&response).unwrap();
-
-    // Record invocation for introspection
-    crate::invoke::record_invocation(
-        state,
-        req,
-        model_id,
-        body,
-        &response_str,
-        None,
-        request_metadata,
-    );
-
-    Ok(AwsResponse::json(StatusCode::OK, response_str))
+    serde_json::to_string(&response).expect("serde_json::Value serialization is infallible")
 }
 
 /// Resolve the tool the caller *forced* the model to call via the Converse
@@ -279,6 +343,42 @@ mod tests {
         assert_eq!(v["output"]["message"]["role"], "assistant");
         assert_eq!(v["stopReason"], "end_turn");
         assert!(v["usage"]["totalTokens"].is_u64());
+    }
+
+    #[test]
+    fn converse_extracts_text_from_anthropic_shaped_override() {
+        let s = shared();
+        s.write().default_mut().custom_responses.insert(
+            "m".to_string(),
+            r#"{"content":[{"text":"from anthropic"}]}"#.to_string(),
+        );
+        let body = br#"{"messages":[{"content":[{"text":"hi"}]}]}"#;
+        let resp = converse(&s, &req(), "m", body, None).unwrap();
+        let v: Value =
+            serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
+        assert_eq!(
+            v["output"]["message"]["content"][0]["text"],
+            "from anthropic"
+        );
+    }
+
+    #[test]
+    fn converse_stream_records_the_converse_body() {
+        let s = shared();
+        let body = br#"{"messages":[{"content":[{"text":"hi there"}]}],
+            "inferenceConfig":{"maxTokens":2},
+            "toolConfig":{"tools":[{"toolSpec":{"name":"lookup"}}],"toolChoice":{"any":{}}}}"#;
+        let converse_resp = converse(&s, &req(), "m", body, None).unwrap();
+        let converse_body: Value =
+            serde_json::from_str(std::str::from_utf8(converse_resp.body.expect_bytes()).unwrap())
+                .unwrap();
+        converse_stream_offline(&s, &req(), "m", body, None);
+        let accts = s.read();
+        let invs = &accts.default_ref().invocations;
+        assert_eq!(invs.len(), 2);
+        let streamed: Value = serde_json::from_str(&invs[1].output).unwrap();
+        assert_eq!(streamed, converse_body);
+        assert_eq!(streamed["stopReason"], "tool_use");
     }
 
     #[test]

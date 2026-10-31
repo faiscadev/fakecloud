@@ -186,9 +186,11 @@ type ElastiCacheAclsResponse struct {
 // LambdaInvocation represents a recorded Lambda invocation.
 type LambdaInvocation struct {
 	FunctionArn string `json:"functionArn"`
-	Payload     string `json:"payload"`
-	Source      string `json:"source"`
-	Timestamp   string `json:"timestamp"`
+	// Payload is the decoded JSON value when the payload parses as JSON
+	// (map[string]interface{}, []interface{}, ...), else the raw string.
+	Payload   interface{} `json:"payload"`
+	Source    string      `json:"source"`
+	Timestamp string      `json:"timestamp"`
 }
 
 // LambdaInvocationsResponse contains recorded Lambda invocations.
@@ -482,23 +484,29 @@ type EventBridgeEvent struct {
 	EventID    string `json:"eventId"`
 	Source     string `json:"source"`
 	DetailType string `json:"detailType"`
-	Detail     string `json:"detail"`
-	BusName    string `json:"busName"`
-	Timestamp  string `json:"timestamp"`
+	// Detail is the decoded JSON value when the detail parses as JSON,
+	// else the raw string.
+	Detail    interface{} `json:"detail"`
+	BusName   string      `json:"busName"`
+	Timestamp string      `json:"timestamp"`
 }
 
 // EventBridgeLambdaDelivery represents a delivery to a Lambda target.
 type EventBridgeLambdaDelivery struct {
 	FunctionArn string `json:"functionArn"`
-	Payload     string `json:"payload"`
-	Timestamp   string `json:"timestamp"`
+	// Payload is the decoded JSON value when the payload parses as JSON,
+	// else the raw string.
+	Payload   interface{} `json:"payload"`
+	Timestamp string      `json:"timestamp"`
 }
 
 // EventBridgeLogDelivery represents a delivery to a CloudWatch Logs target.
 type EventBridgeLogDelivery struct {
 	LogGroupArn string `json:"logGroupArn"`
-	Payload     string `json:"payload"`
-	Timestamp   string `json:"timestamp"`
+	// Payload is the decoded JSON value when the payload parses as JSON,
+	// else the raw string.
+	Payload   interface{} `json:"payload"`
+	Timestamp string      `json:"timestamp"`
 }
 
 // EventBridgeDeliveries contains all deliveries from EventBridge rules.
@@ -827,14 +835,16 @@ type WebAuthnCredentialsResponse struct {
 
 // StepFunctionsExecution represents a state machine execution.
 type StepFunctionsExecution struct {
-	ExecutionARN    string  `json:"executionArn"`
-	StateMachineARN string  `json:"stateMachineArn"`
-	Name            string  `json:"name"`
-	Status          string  `json:"status"`
-	StartDate       string  `json:"startDate"`
-	Input           *string `json:"input,omitempty"`
-	Output          *string `json:"output,omitempty"`
-	StopDate        *string `json:"stopDate,omitempty"`
+	ExecutionARN    string `json:"executionArn"`
+	StateMachineARN string `json:"stateMachineArn"`
+	Name            string `json:"name"`
+	Status          string `json:"status"`
+	StartDate       string `json:"startDate"`
+	// Input and Output are the decoded JSON values when they parse as
+	// JSON, else the raw string; nil when absent.
+	Input    interface{} `json:"input,omitempty"`
+	Output   interface{} `json:"output,omitempty"`
+	StopDate *string     `json:"stopDate,omitempty"`
 }
 
 // StepFunctionsExecutionsResponse contains all recorded executions.
@@ -850,16 +860,18 @@ type StepFunctionsSyncBillingDetails struct {
 
 // StepFunctionsSyncExecution represents a recorded EXPRESS sync execution.
 type StepFunctionsSyncExecution struct {
-	ExecutionARN    string                          `json:"executionArn"`
-	StateMachineARN string                          `json:"stateMachineArn"`
-	Name            string                          `json:"name"`
-	Status          string                          `json:"status"`
-	Input           *string                         `json:"input,omitempty"`
-	Output          *string                         `json:"output,omitempty"`
-	StartedAt       string                          `json:"startedAt"`
-	StoppedAt       *string                         `json:"stoppedAt,omitempty"`
-	DurationMs      int64                           `json:"durationMs"`
-	BillingDetails  StepFunctionsSyncBillingDetails `json:"billingDetails"`
+	ExecutionARN    string `json:"executionArn"`
+	StateMachineARN string `json:"stateMachineArn"`
+	Name            string `json:"name"`
+	Status          string `json:"status"`
+	// Input and Output are the decoded JSON values when they parse as
+	// JSON, else the raw string; nil when absent.
+	Input          interface{}                     `json:"input,omitempty"`
+	Output         interface{}                     `json:"output,omitempty"`
+	StartedAt      string                          `json:"startedAt"`
+	StoppedAt      *string                         `json:"stoppedAt,omitempty"`
+	DurationMs     int64                           `json:"durationMs"`
+	BillingDetails StepFunctionsSyncBillingDetails `json:"billingDetails"`
 }
 
 // StepFunctionsSyncExecutionsResponse contains all recorded sync executions.
@@ -901,10 +913,16 @@ type SfnEnqueueActivityTaskResponse struct {
 
 // BedrockInvocation represents a recorded Bedrock model invocation.
 type BedrockInvocation struct {
-	ModelID   string `json:"modelId"`
-	Input     string `json:"input"`
-	Output    string `json:"output"`
-	Timestamp string `json:"timestamp"`
+	ModelID string `json:"modelId"`
+	// Input is the request body: the decoded JSON value when it parses as
+	// JSON, else the raw string.
+	Input interface{} `json:"input"`
+	// Output is the response the equivalent non-streaming call returns
+	// (provider JSON for InvokeModel / InvokeModelWithResponseStream, the
+	// Converse response for Converse / ConverseStream), decoded like Input.
+	// Empty string for faulted calls.
+	Output    interface{} `json:"output"`
+	Timestamp string      `json:"timestamp"`
 	// Error is non-nil for calls that were faulted via QueueFault.
 	Error *string `json:"error"`
 	// RequestMetadata holds the call's requestMetadata key-value pairs

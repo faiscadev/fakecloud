@@ -362,14 +362,20 @@ class ElastiCacheAclsResponse:
 @dataclass
 class LambdaInvocation:
     function_arn: str
-    payload: str
+    # Structured JSON when the payload parses as JSON, else the raw string.
+    # Kept verbatim (keys are not snake_cased).
+    payload: Any
     source: str
     timestamp: str
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> LambdaInvocation:
-        d = _convert_keys(data)
-        return cls(**d)
+        return cls(
+            function_arn=data["functionArn"],
+            payload=data.get("payload"),
+            source=data["source"],
+            timestamp=data["timestamp"],
+        )
 
 
 @dataclass
@@ -964,38 +970,54 @@ class EventBridgeEvent:
     event_id: str
     source: str
     detail_type: str
-    detail: str
+    # Structured JSON when the detail parses as JSON, else the raw string.
+    # Kept verbatim (keys are not snake_cased).
+    detail: Any
     bus_name: str
     timestamp: str
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EventBridgeEvent:
-        d = _convert_keys(data)
-        return cls(**d)
+        return cls(
+            event_id=data["eventId"],
+            source=data["source"],
+            detail_type=data["detailType"],
+            detail=data.get("detail"),
+            bus_name=data["busName"],
+            timestamp=data["timestamp"],
+        )
 
 
 @dataclass
 class EventBridgeLambdaDelivery:
     function_arn: str
-    payload: str
+    # Structured JSON when the payload parses as JSON, else the raw string.
+    payload: Any
     timestamp: str
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EventBridgeLambdaDelivery:
-        d = _convert_keys(data)
-        return cls(**d)
+        return cls(
+            function_arn=data["functionArn"],
+            payload=data.get("payload"),
+            timestamp=data["timestamp"],
+        )
 
 
 @dataclass
 class EventBridgeLogDelivery:
     log_group_arn: str
-    payload: str
+    # Structured JSON when the payload parses as JSON, else the raw string.
+    payload: Any
     timestamp: str
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EventBridgeLogDelivery:
-        d = _convert_keys(data)
-        return cls(**d)
+        return cls(
+            log_group_arn=data["logGroupArn"],
+            payload=data.get("payload"),
+            timestamp=data["timestamp"],
+        )
 
 
 @dataclass
@@ -1929,14 +1951,24 @@ class StepFunctionsExecution:
     name: str
     status: str
     start_date: str
-    input: Optional[str] = None
-    output: Optional[str] = None
+    # Structured JSON when the value parses as JSON, else the raw string.
+    # Kept verbatim (keys are not snake_cased).
+    input: Any = None
+    output: Any = None
     stop_date: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> StepFunctionsExecution:
-        d = _convert_keys(data)
-        return cls(**d)
+        return cls(
+            execution_arn=data["executionArn"],
+            state_machine_arn=data["stateMachineArn"],
+            name=data["name"],
+            status=data["status"],
+            start_date=data["startDate"],
+            input=data.get("input"),
+            output=data.get("output"),
+            stop_date=data.get("stopDate"),
+        )
 
 
 @dataclass
@@ -1972,8 +2004,9 @@ class StepFunctionsSyncExecution:
     started_at: str
     duration_ms: int
     billing_details: StepFunctionsSyncBillingDetails
-    input: Optional[str] = None
-    output: Optional[str] = None
+    # Structured JSON when the value parses as JSON, else the raw string.
+    input: Any = None
+    output: Any = None
     stopped_at: Optional[str] = None
 
     @classmethod
@@ -2078,8 +2111,13 @@ class SfnEnqueueActivityTaskResponse:
 @dataclass
 class BedrockInvocation:
     model_id: str
-    input: str
-    output: str
+    # The request body: structured JSON when it parses as JSON, else the raw
+    # string. Kept verbatim (keys are not snake_cased).
+    input: Any
+    # The response the equivalent non-streaming call returns (provider JSON
+    # for InvokeModel / InvokeModelWithResponseStream, the Converse response
+    # for Converse / ConverseStream). Empty string for faulted calls.
+    output: Any
     timestamp: str
     error: Optional[str] = None
     # The call's requestMetadata key-value pairs (InvokeModel's
@@ -2090,8 +2128,14 @@ class BedrockInvocation:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> BedrockInvocation:
         metadata = data.get("requestMetadata")
-        d = _convert_keys({k: v for k, v in data.items() if k != "requestMetadata"})
-        return cls(**d, request_metadata=dict(metadata) if metadata else None)
+        return cls(
+            model_id=data["modelId"],
+            input=data.get("input"),
+            output=data.get("output"),
+            timestamp=data["timestamp"],
+            error=data.get("error"),
+            request_metadata=dict(metadata) if metadata else None,
+        )
 
 
 @dataclass

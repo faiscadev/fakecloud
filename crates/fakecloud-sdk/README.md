@@ -351,8 +351,9 @@ async fn classifier_branches_on_spam_vs_ham() {
 
     let invs = fc.bedrock().get_invocations().await.unwrap();
     assert_eq!(invs.invocations.len(), 2);
-    assert!(invs.invocations[0].output.contains("ham"));
-    assert!(invs.invocations[1].output.contains("spam"));
+    // `output` is the model's response body as structured JSON.
+    assert_eq!(invs.invocations[0].output["label"], "ham");
+    assert_eq!(invs.invocations[1].output["label"], "spam");
 }
 
 #[tokio::test]

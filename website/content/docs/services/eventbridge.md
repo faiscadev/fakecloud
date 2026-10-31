@@ -23,7 +23,7 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 
 ## Introspection
 
-- `GET /_fakecloud/events/history` — list all events and deliveries
+- `GET /_fakecloud/events/history` — list all events (with `detail` as structured JSON) and the payloads delivered to Lambda and CloudWatch Logs targets
 - `POST /_fakecloud/events/fire-rule` — fire a specific rule manually. Body: `{"busName": "...", "ruleName": "..."}`
 
 ## Cross-service delivery

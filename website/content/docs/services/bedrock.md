@@ -60,7 +60,7 @@ REST. Path-based routing for runtime operations, JSON bodies per provider.
 
 ## Introspection
 
-- `GET /_fakecloud/bedrock/invocations` — list runtime invocations with `modelId`, `input`, `output`, `timestamp`, `error`, and `requestMetadata` (the InvokeModel `X-Amzn-Bedrock-Request-Metadata` pairs or the Converse `requestMetadata` map, when supplied)
+- `GET /_fakecloud/bedrock/invocations` — list runtime invocations with `modelId`, `input` (the request body), `output`, `timestamp`, `error`, and `requestMetadata` (the InvokeModel `X-Amzn-Bedrock-Request-Metadata` pairs or the Converse `requestMetadata` map, when supplied). `input` and `output` are structured JSON; `output` is the body the equivalent non-streaming call returns, so InvokeModelWithResponseStream reads back as the InvokeModel response and ConverseStream as the Converse response
 - `POST /_fakecloud/bedrock/models/{model_id}/response` — set a single custom response for all calls to a model
 - `POST /_fakecloud/bedrock/models/{model_id}/responses` — set prompt-conditional response rules
 - `DELETE /_fakecloud/bedrock/models/{model_id}/responses` — clear response rules

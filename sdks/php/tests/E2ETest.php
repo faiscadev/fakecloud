@@ -359,6 +359,8 @@ final class E2ETest extends TestCase
             if ($event->source === 'php.test') {
                 $found = true;
                 $this->assertSame('PhpTestEvent', $event->detailType);
+                // The Detail document comes back decoded, not as a string.
+                $this->assertSame(['key' => 'value'], $event->detail);
             }
         }
         $this->assertTrue($found, 'Expected event not found');

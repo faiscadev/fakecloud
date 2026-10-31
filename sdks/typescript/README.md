@@ -410,8 +410,9 @@ test("classifier branches on spam vs ham", async () => {
 
   const { invocations } = await fc.bedrock.getInvocations();
   expect(invocations).toHaveLength(2);
-  expect(invocations[0].output).toContain("ham");
-  expect(invocations[1].output).toContain("spam");
+  // `output` is the model's response body as structured JSON.
+  expect(invocations[0].output).toEqual({ label: "ham" });
+  expect(invocations[1].output).toEqual({ label: "spam" });
 });
 
 test("retries on ThrottlingException", async () => {

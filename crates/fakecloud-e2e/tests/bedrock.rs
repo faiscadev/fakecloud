@@ -916,6 +916,8 @@ async fn bedrock_fault_injection_history_records_errors() {
     let invocations = resp["invocations"].as_array().unwrap();
     assert_eq!(invocations.len(), 1);
     assert_eq!(invocations[0]["modelId"], model_id);
+    // A faulted call has no response body: `output` is the empty string.
+    assert_eq!(invocations[0]["output"], "");
     let error = invocations[0]["error"]
         .as_str()
         .expect("error field should be populated for faulted call");
@@ -1587,6 +1589,159 @@ async fn bedrock_converse_stream_raw() {
         body_bytes.len() > 100,
         "converse stream should have multiple events"
     );
+}
+
+/// `/_fakecloud/bedrock/invocations` returns `input` / `output` as structured
+/// JSON, and a streamed call records the body the equivalent non-streaming
+/// call returns: InvokeModelWithResponseStream reads back as the provider's
+/// InvokeModel response and ConverseStream as the Converse response.
+#[tokio::test]
+async fn bedrock_introspection_input_output_are_structured_for_all_calls() {
+    let server = TestServer::start().await;
+    let runtime_client = server.bedrock_runtime_client().await;
+    let http_client = reqwest::Client::new();
+    let model_id = "anthropic.claude-3-5-sonnet-20241022-v2:0";
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let invoke_body = serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "Hello"}]
+    });
+    runtime_client
+        .invoke_model()
+        .model_id(model_id)
+        .content_type("application/json")
+        .accept("application/json")
+        .body(Blob::new(serde_json::to_vec(&invoke_body).unwrap()))
+        .send()
+        .await
+        .unwrap();
+    let stream = http_client
+        .post(format!(
+            "{}/model/{model_id}/invoke-with-response-stream",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&invoke_body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), 200);
+
+    let converse_body = serde_json::json!({
+        "messages": [{"role": "user", "content": [{"text": "Hello"}]}]
+    });
+    for path in ["converse", "converse-stream"] {
+        let resp = http_client
+            .post(format!("{}/model/{model_id}/{path}", server.endpoint()))
+            .header("content-type", "application/json")
+            .header("authorization", auth)
+            .body(serde_json::to_string(&converse_body).unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{path}");
+    }
+
+    let resp: serde_json::Value = reqwest::get(format!(
+        "{}/_fakecloud/bedrock/invocations",
+        server.endpoint()
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let invocations = resp["invocations"].as_array().unwrap();
+    assert_eq!(invocations.len(), 4);
+
+    // InvokeModel and InvokeModelWithResponseStream: the request body and an
+    // Anthropic Messages response, both structured.
+    for inv in &invocations[..2] {
+        assert_eq!(inv["input"], invoke_body);
+        assert_eq!(inv["output"]["type"], "message", "{inv}");
+        assert_eq!(inv["output"]["role"], "assistant");
+        assert!(inv["output"]["content"][0]["text"].is_string(), "{inv}");
+        assert!(inv["output"]["usage"]["output_tokens"].is_u64(), "{inv}");
+    }
+    assert_eq!(invocations[1]["output"]["stop_reason"], "end_turn");
+    assert_eq!(
+        invocations[0]["output"], invocations[1]["output"],
+        "the stream records the body InvokeModel returns"
+    );
+
+    // Converse and ConverseStream: the Converse response shape for both.
+    for inv in &invocations[2..] {
+        assert_eq!(inv["input"], converse_body);
+        assert_eq!(inv["output"]["output"]["message"]["role"], "assistant");
+        assert!(
+            inv["output"]["output"]["message"]["content"][0]["text"].is_string(),
+            "{inv}"
+        );
+        assert_eq!(inv["output"]["stopReason"], "end_turn");
+        assert!(inv["output"]["usage"]["totalTokens"].is_u64(), "{inv}");
+    }
+    assert_eq!(
+        invocations[2]["output"], invocations[3]["output"],
+        "ConverseStream records the same body as Converse"
+    );
+}
+
+/// A configured response override reads back verbatim for both InvokeModel
+/// and InvokeModelWithResponseStream.
+#[tokio::test]
+async fn bedrock_introspection_stream_records_override_like_invoke_model() {
+    let server = TestServer::start().await;
+    let runtime_client = server.bedrock_runtime_client().await;
+    let http_client = reqwest::Client::new();
+    let model_id = "anthropic.claude-3-haiku-20240307-v1:0";
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let fc = fakecloud_sdk::FakeCloud::new(server.endpoint());
+    fc.bedrock()
+        .set_response_rules(
+            model_id,
+            &[fakecloud_sdk::types::BedrockResponseRule {
+                prompt_contains: None,
+                response: r#"{"label":"ham"}"#.into(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "hello friend"}]
+    });
+    runtime_client
+        .invoke_model()
+        .model_id(model_id)
+        .content_type("application/json")
+        .body(Blob::new(serde_json::to_vec(&body).unwrap()))
+        .send()
+        .await
+        .unwrap();
+    let stream = http_client
+        .post(format!(
+            "{}/model/{model_id}/invoke-with-response-stream",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), 200);
+
+    let invocations = fc.bedrock().get_invocations().await.unwrap().invocations;
+    assert_eq!(invocations.len(), 2);
+    for inv in &invocations {
+        assert_eq!(inv.output, serde_json::json!({"label": "ham"}));
+    }
 }
 
 // Custom Models

@@ -517,21 +517,50 @@ pub(crate) fn stop_cohere(kind: StopKind) -> &'static str {
 /// body the caller expects for the given model, preserving real usage, the
 /// upstream stop reason, and any tool-use blocks.
 fn build_provider_response(model_id: &str, completion: &Completion) -> String {
-    let family = strip_region_prefix(model_id);
-    let text = completion.text.as_str();
-    let input_tokens = completion.input_tokens;
-    let output_tokens = completion.output_tokens;
     let stop = normalize_stop(
         completion.stop_reason.as_deref(),
         !completion.tool_calls.is_empty(),
     );
+    render_provider_response(
+        model_id,
+        &completion.text,
+        &completion.tool_calls,
+        stop,
+        completion.input_tokens,
+        completion.output_tokens,
+    )
+}
+
+/// The provider-native InvokeModel body equivalent to a streamed upstream
+/// reply of `text`. InvokeModelWithResponseStream records it for
+/// introspection so a streamed call reads back in the same shape as the
+/// equivalent upstream InvokeModel.
+pub(crate) fn provider_response_for_text(
+    model_id: &str,
+    text: &str,
+    stop: StopKind,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> String {
+    render_provider_response(model_id, text, &[], stop, input_tokens, output_tokens)
+}
+
+fn render_provider_response(
+    model_id: &str,
+    text: &str,
+    tool_calls: &[ToolCall],
+    stop: StopKind,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> String {
+    let family = strip_region_prefix(model_id);
 
     let value = if family.starts_with("anthropic.") {
         let mut content: Vec<Value> = Vec::new();
         if !text.is_empty() {
             content.push(json!({ "type": "text", "text": text }));
         }
-        for tc in &completion.tool_calls {
+        for tc in tool_calls {
             content.push(json!({
                 "type": "tool_use",
                 "id": tc.id,
@@ -1326,6 +1355,12 @@ pub(crate) async fn converse_upstream(
     cfg: &UpstreamConfig,
     request_metadata: Option<&RequestMetadata>,
 ) -> Result<AwsResponse, AwsServiceError> {
+    // Explicit simulation overrides keep working with an upstream configured,
+    // as on InvokeModel and ConverseStream. The offline path also handles
+    // fault injection.
+    if crate::prompt::resolve_override(state, req, model_id, body).is_some() {
+        return crate::converse::converse(state, req, model_id, body, request_metadata);
+    }
     if let Some(fault) = crate::faults::take_matching_fault(state, req, model_id, "Converse") {
         crate::faults::record_faulted_invocation(
             state,
@@ -1421,6 +1456,8 @@ pub(crate) async fn invoke_stream_upstream(
     // A configured simulation override wins over the live upstream, same as
     // the non-streaming path: stream the override text deterministically.
     if let Some(custom) = crate::prompt::resolve_override(state, req, model_id, body) {
+        // Recorded verbatim, as InvokeModel records the same override.
+        let output = custom.clone();
         let text = crate::streaming::override_text(model_id, custom);
         let input = serde_json::from_slice(body).unwrap_or(Value::Null);
         let in_t = crate::prompt::count_tokens(&crate::invoke::extract_input_text(&input));
@@ -1438,7 +1475,7 @@ pub(crate) async fn invoke_stream_upstream(
             req,
             model_id,
             body,
-            &deltas.concat(),
+            &output,
             None,
             request_metadata,
         );
@@ -1470,16 +1507,15 @@ pub(crate) async fn invoke_stream_upstream(
         result.input_tokens,
         result.output_tokens,
     );
-
-    crate::invoke::record_invocation(
-        state,
-        req,
+    let output = provider_response_for_text(
         model_id,
-        body,
         &result.deltas.concat(),
-        None,
-        request_metadata,
+        result.stop,
+        result.input_tokens,
+        result.output_tokens,
     );
+
+    crate::invoke::record_invocation(state, req, model_id, body, &output, None, request_metadata);
     Ok(eventstream_response(event_body))
 }
 
@@ -1501,28 +1537,16 @@ pub(crate) async fn converse_stream_upstream(
     cfg: &UpstreamConfig,
     request_metadata: Option<&RequestMetadata>,
 ) -> Result<AwsResponse, AwsServiceError> {
-    // A configured simulation override wins over the live upstream.
-    if let Some(custom) = crate::prompt::resolve_override(state, req, model_id, body) {
-        let text = crate::streaming::override_text(model_id, custom);
-        let in_t = crate::prompt::count_tokens(&crate::prompt::extract_prompt_text(model_id, body));
-        let out_t = crate::prompt::count_tokens(&text);
-        let deltas = vec![text];
-        let event_body = crate::streaming::build_converse_stream_from_deltas(
-            &deltas,
-            StopKind::EndTurn,
-            in_t,
-            out_t,
-        );
-        crate::invoke::record_invocation(
+    // A configured simulation override wins over the live upstream: reply
+    // exactly as offline ConverseStream (and Converse) would.
+    if crate::prompt::resolve_override(state, req, model_id, body).is_some() {
+        return Ok(crate::converse::converse_stream_offline(
             state,
             req,
             model_id,
             body,
-            &deltas.concat(),
-            None,
             request_metadata,
-        );
-        return Ok(eventstream_response(event_body));
+        ));
     }
 
     let input = parse_body(body)?;
@@ -1549,16 +1573,15 @@ pub(crate) async fn converse_stream_upstream(
         result.input_tokens,
         result.output_tokens,
     );
-
-    crate::invoke::record_invocation(
-        state,
-        req,
-        model_id,
-        body,
+    let output = crate::converse::response_json(
         &result.deltas.concat(),
         None,
-        request_metadata,
+        stop_converse(result.stop),
+        result.input_tokens,
+        result.output_tokens,
     );
+
+    crate::invoke::record_invocation(state, req, model_id, body, &output, None, request_metadata);
     Ok(eventstream_response(event_body))
 }
 
@@ -2015,6 +2038,14 @@ mod tests {
             }
         }
         assert_eq!(gens.concat(), "Llama!");
+
+        // Introspection records the InvokeModel-shaped body, not bare text.
+        let recorded = s.read().default_ref().invocations[0].output.clone();
+        let recorded: Value = serde_json::from_str(&recorded).unwrap();
+        assert_eq!(recorded["generation"], "Llama!");
+        assert_eq!(recorded["prompt_token_count"], 4);
+        assert_eq!(recorded["generation_token_count"], 2);
+        assert_eq!(recorded["stop_reason"], "stop");
     }
 
     #[tokio::test(flavor = "multi_thread")]

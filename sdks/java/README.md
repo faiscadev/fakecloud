@@ -451,8 +451,9 @@ classify("buy now cheap pills");
 
 var invocations = fc.bedrock().getInvocations().invocations();
 assertEquals(2, invocations.size());
-assertTrue(invocations.get(0).output().contains("ham"));
-assertTrue(invocations.get(1).output().contains("spam"));
+// output() is the model's response body as a JsonNode.
+assertEquals("ham", invocations.get(0).output().get("label").asText());
+assertEquals("spam", invocations.get(1).output().get("label").asText());
 ```
 
 ### Error handling

@@ -578,11 +578,8 @@ def lambda_handler(event, context):
         "CloudFormation should have recorded a Lambda delivery invocation for the custom resource",
     );
 
-    let invocation_event = if let Some(payload_str) = invocation_payload.as_str() {
-        serde_json::from_str::<serde_json::Value>(payload_str).unwrap()
-    } else {
-        invocation_payload
-    };
+    // The introspection endpoint returns the event as structured JSON.
+    let invocation_event = invocation_payload;
 
     assert_eq!(invocation_event["RequestType"], "Create");
     assert_eq!(invocation_event["ResourceType"], "Custom::MyResource");

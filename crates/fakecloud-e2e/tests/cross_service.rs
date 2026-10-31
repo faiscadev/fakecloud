@@ -610,8 +610,7 @@ async fn sqs_lambda_event_source_mapping() {
         .as_str()
         .unwrap()
         .contains("sqs-processor"));
-    let payload: serde_json::Value =
-        serde_json::from_str(inv["payload"].as_str().unwrap()).unwrap();
+    let payload = &inv["payload"];
     assert_eq!(payload["Records"][0]["body"], r#"{"order_id": "12345"}"#);
     assert_eq!(payload["Records"][0]["eventSource"], "aws:sqs");
 
@@ -703,12 +702,10 @@ async fn kinesis_lambda_event_source_mapping() {
     let (invocations, inv) = loop {
         let invocations = get_lambda_invocations(server.endpoint()).await;
         let inv_list = invocations["invocations"].as_array().unwrap().clone();
-        let kinesis_inv = inv_list.iter().rev().find(|inv| {
-            inv["payload"]
-                .as_str()
-                .unwrap_or("")
-                .contains("\"eventSource\":\"aws:kinesis\"")
-        });
+        let kinesis_inv = inv_list
+            .iter()
+            .rev()
+            .find(|inv| inv["payload"]["Records"][0]["eventSource"] == "aws:kinesis");
         if let Some(inv) = kinesis_inv {
             break (invocations, inv.clone());
         }
@@ -726,8 +723,7 @@ async fn kinesis_lambda_event_source_mapping() {
         .as_str()
         .unwrap()
         .contains("kinesis-processor"));
-    let payload: serde_json::Value =
-        serde_json::from_str(inv["payload"].as_str().unwrap()).unwrap();
+    let payload = &inv["payload"];
     assert_eq!(payload["Records"][0]["eventSource"], "aws:kinesis");
     assert_eq!(payload["Records"][0]["kinesis"]["partitionKey"], "key-1");
 
@@ -736,21 +732,11 @@ async fn kinesis_lambda_event_source_mapping() {
     let inv_list_again = invocations_again["invocations"].as_array().unwrap();
     let kinesis_invocation_count = inv_list
         .iter()
-        .filter(|inv| {
-            inv["payload"]
-                .as_str()
-                .unwrap_or("")
-                .contains("\"eventSource\":\"aws:kinesis\"")
-        })
+        .filter(|inv| inv["payload"]["Records"][0]["eventSource"] == "aws:kinesis")
         .count();
     let kinesis_invocation_count_again = inv_list_again
         .iter()
-        .filter(|inv| {
-            inv["payload"]
-                .as_str()
-                .unwrap_or("")
-                .contains("\"eventSource\":\"aws:kinesis\"")
-        })
+        .filter(|inv| inv["payload"]["Records"][0]["eventSource"] == "aws:kinesis")
         .count();
     assert_eq!(
         kinesis_invocation_count, 1,
@@ -1003,8 +989,7 @@ async fn s3_eventbridge_notification_invokes_lambda_target() {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     };
     assert_eq!(matched.len(), 1, "expected exactly one invocation");
-    let payload: serde_json::Value =
-        serde_json::from_str(matched[0]["payload"].as_str().unwrap()).unwrap();
+    let payload = &matched[0]["payload"];
     assert_eq!(payload["source"], "aws.s3");
     assert_eq!(payload["detail-type"], "Object Created");
     assert_eq!(payload["detail"]["bucket"]["name"], "eb-bucket");
@@ -1747,8 +1732,7 @@ async fn secretsmanager_rotation_invokes_lambda() {
 
     // Verify each rotation step was invoked in order
     for (inv, expected_step) in rotation_invocations.iter().zip(expected_steps.iter()) {
-        let payload: serde_json::Value =
-            serde_json::from_str(inv["payload"].as_str().unwrap()).unwrap();
+        let payload = &inv["payload"];
         assert!(
             payload["SecretId"]
                 .as_str()

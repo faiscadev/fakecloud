@@ -956,6 +956,11 @@ func TestE2EEventBridge(t *testing.T) {
 	for _, e := range resp.Events {
 		if e.Source == "my.app" && e.DetailType == "OrderCreated" {
 			found = true
+			// The Detail document comes back decoded, not as a string.
+			detail, ok := e.Detail.(map[string]interface{})
+			if !ok || detail["orderId"] != "123" {
+				t.Errorf("expected decoded detail {orderId: 123}, got %#v", e.Detail)
+			}
 		}
 	}
 	if !found {

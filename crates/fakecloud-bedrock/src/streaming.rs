@@ -480,18 +480,24 @@ pub(crate) fn get_response_text(
     model_id: &str,
     body: &[u8],
 ) -> String {
-    let Some(custom) = crate::prompt::resolve_override(state, req, model_id, body) else {
-        if crate::prompt::echo_enabled() {
-            let echoed = crate::prompt::extract_prompt_text(model_id, body);
-            return if echoed.is_empty() {
-                "(empty prompt)".to_string()
-            } else {
-                echoed
-            };
-        }
-        return default_stream_text().to_string();
-    };
-    override_text(model_id, custom)
+    match crate::prompt::resolve_override(state, req, model_id, body) {
+        Some(custom) => override_text(model_id, custom),
+        None => fallback_text(model_id, body),
+    }
+}
+
+/// The reply text when no override is configured: the caller's prompt in
+/// echo mode, else the canned phrase.
+pub(crate) fn fallback_text(model_id: &str, body: &[u8]) -> String {
+    if crate::prompt::echo_enabled() {
+        let echoed = crate::prompt::extract_prompt_text(model_id, body);
+        return if echoed.is_empty() {
+            "(empty prompt)".to_string()
+        } else {
+            echoed
+        };
+    }
+    default_stream_text().to_string()
 }
 
 /// Extract the assistant text from a configured simulation override. The

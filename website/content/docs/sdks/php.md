@@ -349,8 +349,8 @@ classify('buy now cheap pills');
 
 $invocations = $fc->bedrock()->getInvocations()->invocations;
 $this->assertCount(2, $invocations);
-$this->assertStringContainsString('ham', $invocations[0]->output);
-$this->assertStringContainsString('spam', $invocations[1]->output);
+$this->assertSame('ham', $invocations[0]->output['label']);
+$this->assertSame('spam', $invocations[1]->output['label']);
 
 // Test: retries on throttling
 $fc->reset();
