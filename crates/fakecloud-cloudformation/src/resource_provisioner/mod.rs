@@ -11567,6 +11567,132 @@ mod tests {
     }
 
     #[test]
+    fn update_stack_resets_removed_cognito_client_properties() {
+        let prov = make_provisioner();
+        let pool = prov
+            .create_resource(&make_resource(
+                "AWS::Cognito::UserPool",
+                "UP",
+                serde_json::json!({"PoolName": "pool"}),
+            ))
+            .expect("pool provisions");
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Cognito::UserPoolClient",
+                "Client",
+                serde_json::json!({
+                    "UserPoolId": pool.physical_id,
+                    "ClientName": "c1",
+                    "AllowedOAuthFlowsUserPoolClient": true,
+                    "PreventUserExistenceErrors": "ENABLED",
+                    "EnableTokenRevocation": false,
+                    "AuthSessionValidity": 10,
+                    "EnablePropagateAdditionalUserContextData": true,
+                    "AnalyticsConfiguration": {"ApplicationId": "app"},
+                    "RefreshTokenRotation": {"Feature": "ENABLED", "RetryGracePeriodSeconds": 10}
+                }),
+            ))
+            .expect("client provisions");
+        {
+            let cognito = prov.cognito_state.read();
+            let client =
+                &cognito.get("123456789012").unwrap().user_pool_clients[&created.physical_id];
+            let rotation = client
+                .refresh_token_rotation
+                .as_ref()
+                .expect("rotation set");
+            assert_eq!(rotation.feature, "ENABLED");
+            assert_eq!(rotation.retry_grace_period_seconds, Some(10));
+        }
+        // The template drops every optional property, the name included.
+        let updated = prov
+            .update_resource(
+                &created,
+                &make_resource(
+                    "AWS::Cognito::UserPoolClient",
+                    "Client",
+                    serde_json::json!({"UserPoolId": pool.physical_id}),
+                ),
+            )
+            .expect("update succeeds")
+            .expect("AWS::Cognito::UserPoolClient is updatable");
+        assert_eq!(updated.attributes["Name"], "c1");
+        let cognito = prov.cognito_state.read();
+        let client = &cognito.get("123456789012").unwrap().user_pool_clients[&created.physical_id];
+        assert_eq!(client.client_name, "c1");
+        assert!(!client.allowed_o_auth_flows_user_pool_client);
+        assert_eq!(client.prevent_user_existence_errors, None);
+        assert!(client.enable_token_revocation);
+        assert_eq!(client.auth_session_validity, Some(3));
+        assert!(!client.enable_propagate_additional_user_context_data);
+        assert_eq!(client.analytics_configuration, None);
+        assert!(client.refresh_token_rotation.is_none());
+    }
+
+    #[test]
+    fn update_stack_resets_removed_cognito_identity_pool_properties() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Cognito::IdentityPool",
+                "IdP",
+                serde_json::json!({
+                    "IdentityPoolName": "full",
+                    "AllowUnauthenticatedIdentities": true,
+                    "AllowClassicFlow": true,
+                    "DeveloperProviderName": "login.example.com",
+                    "SupportedLoginProviders": {"graph.facebook.com": "123"},
+                    "OpenIdConnectProviderARNs": ["arn:aws:iam::123456789012:oidc-provider/example.com"],
+                    "SamlProviderARNs": ["arn:aws:iam::123456789012:saml-provider/corp"],
+                    "CognitoIdentityProviders": [{
+                        "ProviderName": "cognito-idp.us-east-1.amazonaws.com/us-east-1_abc",
+                        "ClientId": "client"
+                    }],
+                    "CognitoStreams": {"StreamingStatus": "ENABLED"},
+                    "PushSync": {"RoleArn": "arn:aws:iam::123456789012:role/sync"},
+                    "IdentityPoolTags": [{"Key": "team", "Value": "a"}]
+                }),
+            ))
+            .expect("identity pool provisions");
+        let creation_date = {
+            let cognito = prov.cognito_state.read();
+            cognito.get("123456789012").unwrap().identity_pools[&created.physical_id].creation_date
+        };
+        let updated = prov
+            .update_resource(
+                &created,
+                &make_resource(
+                    "AWS::Cognito::IdentityPool",
+                    "IdP",
+                    serde_json::json!({"AllowUnauthenticatedIdentities": false}),
+                ),
+            )
+            .expect("update succeeds")
+            .expect("AWS::Cognito::IdentityPool is updatable");
+        assert_eq!(updated.physical_id, created.physical_id);
+        assert_eq!(updated.attributes["Name"], "full");
+        let cognito = prov.cognito_state.read();
+        let pool = &cognito.get("123456789012").unwrap().identity_pools[&created.physical_id];
+        assert_eq!(pool.identity_pool_id, created.physical_id);
+        assert_eq!(pool.creation_date, creation_date);
+        assert_eq!(pool.identity_pool_name, "full");
+        assert!(!pool.allow_unauthenticated_identities);
+        assert!(!pool.allow_classic_flow);
+        // A developer provider name cannot change once set.
+        assert_eq!(
+            pool.developer_provider_name.as_deref(),
+            Some("login.example.com")
+        );
+        assert!(pool.supported_login_providers.is_empty());
+        assert!(pool.open_id_connect_provider_arns.is_empty());
+        assert!(pool.saml_provider_arns.is_empty());
+        assert!(pool.cognito_identity_providers.is_empty());
+        assert_eq!(pool.cognito_streams, None);
+        assert_eq!(pool.push_sync, None);
+        assert!(pool.identity_pool_tags.is_empty());
+    }
+
+    #[test]
     fn cognito_user_pool_client_token_validity_honors_units_and_range() {
         let prov = make_provisioner();
         let pool = prov

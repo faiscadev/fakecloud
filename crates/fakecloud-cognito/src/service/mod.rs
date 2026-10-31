@@ -867,7 +867,10 @@ fn parse_token_validity_units(val: &Value) -> Option<TokenValidityUnits> {
     })
 }
 
-fn parse_refresh_token_rotation(val: &Value) -> Option<crate::state::RefreshTokenRotationConfig> {
+/// An app client's `RefreshTokenRotation` setting, `None` when absent.
+pub fn parse_refresh_token_rotation(
+    val: &Value,
+) -> Option<crate::state::RefreshTokenRotationConfig> {
     if !val.is_object() {
         return None;
     }

@@ -320,7 +320,7 @@ impl CognitoService {
         }
 
         // The shared dispatch checks USERNAME and a confidential client's
-        // SECRET_HASH once the session is known to be valid.
+        // SECRET_HASH value once the session is known to be valid.
         self.handle_auth_challenge_response(client_id, challenge_name, session, &body, req)
             .await
     }

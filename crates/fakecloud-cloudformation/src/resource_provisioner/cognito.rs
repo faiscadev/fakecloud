@@ -353,7 +353,11 @@ impl ResourceProvisioner {
             client_secrets: Vec::new(),
             primary_secret: None,
             last_secret_epoch_secs: 0,
-            refresh_token_rotation: None,
+            refresh_token_rotation: fakecloud_cognito::parse_refresh_token_rotation(
+                props
+                    .get("RefreshTokenRotation")
+                    .unwrap_or(&serde_json::Value::Null),
+            ),
             analytics_configuration: props
                 .get("AnalyticsConfiguration")
                 .filter(|v| !v.is_null())
@@ -410,9 +414,13 @@ impl ResourceProvisioner {
         client.access_token_validity = validity.access;
         client.id_token_validity = validity.id;
         client.refresh_token_validity = Some(validity.refresh);
+        // The name carries over when the template drops it, as it does when
+        // UpdateUserPoolClient omits ClientName.
         if let Some(name) = props.get("ClientName").and_then(|v| v.as_str()) {
             client.client_name = name.to_string();
         }
+        // Every other removed property goes back to the default it gets on
+        // create, as UpdateUserPoolClient resets what a request omits.
         client.explicit_auth_flows = parse_cognito_string_array(props.get("ExplicitAuthFlows"));
         client.callback_urls = parse_cognito_string_array(props.get("CallbackURLs"));
         client.logout_urls = parse_cognito_string_array(props.get("LogoutURLs"));
@@ -420,35 +428,39 @@ impl ResourceProvisioner {
             parse_cognito_string_array(props.get("SupportedIdentityProviders"));
         client.allowed_o_auth_flows = parse_cognito_string_array(props.get("AllowedOAuthFlows"));
         client.allowed_o_auth_scopes = parse_cognito_string_array(props.get("AllowedOAuthScopes"));
-        if let Some(b) = props
+        client.allowed_o_auth_flows_user_pool_client = props
             .get("AllowedOAuthFlowsUserPoolClient")
             .and_then(|v| v.as_bool())
-        {
-            client.allowed_o_auth_flows_user_pool_client = b;
-        }
-        if let Some(s) = props
+            .unwrap_or(false);
+        client.prevent_user_existence_errors = props
             .get("PreventUserExistenceErrors")
             .and_then(|v| v.as_str())
-        {
-            client.prevent_user_existence_errors = Some(s.to_string());
-        }
+            .map(|s| s.to_string());
         client.read_attributes = parse_cognito_string_array(props.get("ReadAttributes"));
         client.write_attributes = parse_cognito_string_array(props.get("WriteAttributes"));
-        if let Some(b) = props.get("EnableTokenRevocation").and_then(|v| v.as_bool()) {
-            client.enable_token_revocation = b;
-        }
-        if let Some(v) = props.get("AuthSessionValidity").and_then(|v| v.as_i64()) {
-            client.auth_session_validity = Some(v);
-        }
-        if let Some(b) = props
+        client.enable_token_revocation = props
+            .get("EnableTokenRevocation")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        client.auth_session_validity = Some(
+            props
+                .get("AuthSessionValidity")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(3),
+        );
+        client.enable_propagate_additional_user_context_data = props
             .get("EnablePropagateAdditionalUserContextData")
             .and_then(|v| v.as_bool())
-        {
-            client.enable_propagate_additional_user_context_data = b;
-        }
-        if let Some(v) = props.get("AnalyticsConfiguration") {
-            client.analytics_configuration = if v.is_null() { None } else { Some(v.clone()) };
-        }
+            .unwrap_or(false);
+        client.refresh_token_rotation = fakecloud_cognito::parse_refresh_token_rotation(
+            props
+                .get("RefreshTokenRotation")
+                .unwrap_or(&serde_json::Value::Null),
+        );
+        client.analytics_configuration = props
+            .get("AnalyticsConfiguration")
+            .filter(|v| !v.is_null())
+            .cloned();
         client.last_modified_date = Utc::now();
 
         let mut result = ProvisionResult::new(client_id.clone())
@@ -545,78 +557,15 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .unwrap_or(&generated_name)
             .to_string();
-        let allow_unauth = props
-            .get("AllowUnauthenticatedIdentities")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let allow_classic = props
-            .get("AllowClassicFlow")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let developer_provider_name = props
-            .get("DeveloperProviderName")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let cognito_identity_providers = props
-            .get("CognitoIdentityProviders")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|p| {
-                        let obj = p.as_object()?;
-                        let provider_name = obj
-                            .get("ProviderName")
-                            .and_then(|v| v.as_str())?
-                            .to_string();
-                        let client_id = obj.get("ClientId").and_then(|v| v.as_str())?.to_string();
-                        let server_side_token_check = obj
-                            .get("ServerSideTokenCheck")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        Some(CognitoIdentityProvider {
-                            provider_name,
-                            client_id,
-                            server_side_token_check,
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let open_id_connect_provider_arns =
-            parse_cognito_string_array(props.get("OpenIdConnectProviderARNs"));
-        let saml_provider_arns = parse_cognito_string_array(props.get("SamlProviderARNs"));
-        let supported_login_providers = props
-            .get("SupportedLoginProviders")
-            .and_then(|v| v.as_object())
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let identity_pool_tags = parse_cognito_tags(props.get("IdentityPoolTags"));
-        let cognito_streams = props.get("CognitoStreams").cloned();
-        let push_sync = props.get("PushSync").cloned();
-
         // Real Cognito identity pool ids look like `<region>:<uuid>`. Match
         // that shape so SDKs that parse it don't choke.
         let identity_pool_id = format!("{}:{}", self.region, Uuid::new_v4());
-
-        let pool = IdentityPool {
-            identity_pool_id: identity_pool_id.clone(),
+        let pool = identity_pool_from_props(
+            props,
+            identity_pool_id.clone(),
             identity_pool_name,
-            allow_unauthenticated_identities: allow_unauth,
-            allow_classic_flow: allow_classic,
-            developer_provider_name,
-            cognito_identity_providers,
-            open_id_connect_provider_arns,
-            saml_provider_arns,
-            supported_login_providers,
-            cognito_streams,
-            push_sync,
-            identity_pool_tags,
-            creation_date: Utc::now(),
-        };
+            Utc::now(),
+        );
 
         let name = pool.identity_pool_name.clone();
         let mut accounts = self.cognito_state.write();
@@ -653,67 +602,18 @@ impl ResourceProvisioner {
             .get_mut(pool_id)
             .ok_or_else(|| format!("Identity pool {pool_id} not yet provisioned"))?;
 
-        if let Some(name) = props.get("IdentityPoolName").and_then(|v| v.as_str()) {
-            pool.identity_pool_name = name.to_string();
-        }
-        if let Some(b) = props
-            .get("AllowUnauthenticatedIdentities")
-            .and_then(|v| v.as_bool())
-        {
-            pool.allow_unauthenticated_identities = b;
-        }
-        if let Some(b) = props.get("AllowClassicFlow").and_then(|v| v.as_bool()) {
-            pool.allow_classic_flow = b;
-        }
-        if let Some(dp) = props.get("DeveloperProviderName").and_then(|v| v.as_str()) {
-            pool.developer_provider_name = Some(dp.to_string());
-        }
-        if let Some(providers) = props
-            .get("CognitoIdentityProviders")
-            .and_then(|v| v.as_array())
-        {
-            pool.cognito_identity_providers = providers
-                .iter()
-                .filter_map(|p| {
-                    let obj = p.as_object()?;
-                    Some(CognitoIdentityProvider {
-                        provider_name: obj
-                            .get("ProviderName")
-                            .and_then(|v| v.as_str())?
-                            .to_string(),
-                        client_id: obj.get("ClientId").and_then(|v| v.as_str())?.to_string(),
-                        server_side_token_check: obj
-                            .get("ServerSideTokenCheck")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                    })
-                })
-                .collect();
-        }
-        if props.get("OpenIdConnectProviderARNs").is_some() {
-            pool.open_id_connect_provider_arns =
-                parse_cognito_string_array(props.get("OpenIdConnectProviderARNs"));
-        }
-        if props.get("SamlProviderARNs").is_some() {
-            pool.saml_provider_arns = parse_cognito_string_array(props.get("SamlProviderARNs"));
-        }
-        if let Some(m) = props
-            .get("SupportedLoginProviders")
-            .and_then(|v| v.as_object())
-        {
-            pool.supported_login_providers = m
-                .iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect();
-        }
-        if let Some(v) = props.get("CognitoStreams") {
-            pool.cognito_streams = Some(v.clone());
-        }
-        if let Some(v) = props.get("PushSync") {
-            pool.push_sync = Some(v.clone());
-        }
-        if props.get("IdentityPoolTags").is_some() {
-            pool.identity_pool_tags = parse_cognito_tags(props.get("IdentityPoolTags"));
+        // The name carries over when the template drops it: UpdateIdentityPool
+        // requires one, so the update sends the pool's current name.
+        let name = props
+            .get("IdentityPoolName")
+            .and_then(|v| v.as_str())
+            .map_or_else(|| pool.identity_pool_name.clone(), str::to_string);
+        let developer_provider_name = pool.developer_provider_name.clone();
+        *pool = identity_pool_from_props(props, pool_id.clone(), name, pool.creation_date);
+        // A set developer provider name is kept when the template drops it
+        // (AWS documents that it cannot change once set).
+        if pool.developer_provider_name.is_none() {
+            pool.developer_provider_name = developer_provider_name;
         }
 
         Ok(ProvisionResult::new(pool_id.clone())
@@ -805,4 +705,83 @@ fn parse_cfn_token_validity_units(
         id_token: field("IdToken"),
         refresh_token: field("RefreshToken"),
     })
+}
+
+/// The identity pool a template's properties describe. Create and update both
+/// build from it, so a property removed on update goes back to its create-time
+/// default, as UpdateIdentityPool resets what a request omits.
+fn identity_pool_from_props(
+    props: &serde_json::Value,
+    identity_pool_id: String,
+    identity_pool_name: String,
+    creation_date: chrono::DateTime<Utc>,
+) -> IdentityPool {
+    let allow_unauth = props
+        .get("AllowUnauthenticatedIdentities")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let allow_classic = props
+        .get("AllowClassicFlow")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let developer_provider_name = props
+        .get("DeveloperProviderName")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let cognito_identity_providers = props
+        .get("CognitoIdentityProviders")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    let obj = p.as_object()?;
+                    let provider_name = obj
+                        .get("ProviderName")
+                        .and_then(|v| v.as_str())?
+                        .to_string();
+                    let client_id = obj.get("ClientId").and_then(|v| v.as_str())?.to_string();
+                    let server_side_token_check = obj
+                        .get("ServerSideTokenCheck")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    Some(CognitoIdentityProvider {
+                        provider_name,
+                        client_id,
+                        server_side_token_check,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let open_id_connect_provider_arns =
+        parse_cognito_string_array(props.get("OpenIdConnectProviderARNs"));
+    let saml_provider_arns = parse_cognito_string_array(props.get("SamlProviderARNs"));
+    let supported_login_providers = props
+        .get("SupportedLoginProviders")
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let identity_pool_tags = parse_cognito_tags(props.get("IdentityPoolTags"));
+    let cognito_streams = props.get("CognitoStreams").cloned();
+    let push_sync = props.get("PushSync").cloned();
+
+    IdentityPool {
+        identity_pool_id,
+        identity_pool_name,
+        allow_unauthenticated_identities: allow_unauth,
+        allow_classic_flow: allow_classic,
+        developer_provider_name,
+        cognito_identity_providers,
+        open_id_connect_provider_arns,
+        saml_provider_arns,
+        supported_login_providers,
+        cognito_streams,
+        push_sync,
+        identity_pool_tags,
+        creation_date,
+    }
 }

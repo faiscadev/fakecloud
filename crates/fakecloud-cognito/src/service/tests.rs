@@ -12254,18 +12254,49 @@ fn new_password_challenge_secret_hash_over_email_alias() {
 }
 
 #[test]
-fn challenge_session_errors_win_over_missing_secret_hash() {
+fn missing_secret_hash_wins_over_challenge_session_errors() {
     for op in CHALLENGE_OPS {
         let fx = SecretClientFixture::new(json!({"PoolName": "p"}), true);
         fx.create_user("alice");
-        let responses = json!({"USERNAME": "alice", "NEW_PASSWORD": "NewPass1!"});
+        let no_hash = json!({"USERNAME": "alice", "NEW_PASSWORD": "NewPass1!"});
+        let with_hash = json!({
+            "USERNAME": "alice",
+            "NEW_PASSWORD": "NewPass1!",
+            "SECRET_HASH": fx.hash("alice"),
+        });
 
+        // A missing SECRET_HASH needs only the client, so it is refused
+        // before the session is looked at, as on InitiateAuth.
         assert_challenge_err(
             fx.respond(
                 op,
                 "NEW_PASSWORD_REQUIRED",
                 "no-such-session",
-                responses.clone(),
+                no_hash.clone(),
+            ),
+            "NotAuthorizedException",
+            &fx.missing_message(),
+            &format!("{op:?} unknown session, no hash"),
+        );
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "SOFTWARE_TOKEN_MFA",
+                "no-such-session",
+                json!({"SOFTWARE_TOKEN_MFA_CODE": "123456"}),
+            ),
+            "NotAuthorizedException",
+            &fx.missing_message(),
+            &format!("{op:?} unknown MFA session, no hash"),
+        );
+
+        // With a hash sent, the session errors come through unchanged.
+        assert_challenge_err(
+            fx.respond(
+                op,
+                "NEW_PASSWORD_REQUIRED",
+                "no-such-session",
+                with_hash.clone(),
             ),
             "NotAuthorizedException",
             "Invalid session.",
@@ -12276,7 +12307,7 @@ fn challenge_session_errors_win_over_missing_secret_hash() {
                 op,
                 "SOFTWARE_TOKEN_MFA",
                 "no-such-session",
-                json!({"SOFTWARE_TOKEN_MFA_CODE": "123456"}),
+                json!({"SOFTWARE_TOKEN_MFA_CODE": "123456", "SECRET_HASH": fx.hash("alice")}),
             ),
             "NotAuthorizedException",
             "Invalid session for the user, session is expired.",
@@ -12291,32 +12322,33 @@ fn challenge_session_errors_win_over_missing_secret_hash() {
                 op,
                 "SOFTWARE_TOKEN_MFA",
                 session,
-                json!({"SOFTWARE_TOKEN_MFA_CODE": "123456"}),
+                json!({"SOFTWARE_TOKEN_MFA_CODE": "123456", "SECRET_HASH": fx.hash("alice")}),
             ),
             "NotAuthorizedException",
             "Invalid session.",
             &format!("{op:?} challenge mismatch"),
         );
         if let ChallengeOp::Admin = op {
-            assert_challenge_err(
-                fx.respond_as(
-                    op,
-                    "us-east-1_other",
-                    "NEW_PASSWORD_REQUIRED",
-                    session,
-                    responses.clone(),
-                ),
-                "NotAuthorizedException",
-                "Invalid session.",
-                "admin pool mismatch",
-            );
+            // A session from another pool is refused before the client is
+            // looked at, so a mismatched pool reveals nothing about it.
+            for responses in [&no_hash, &with_hash] {
+                assert_challenge_err(
+                    fx.respond_as(
+                        op,
+                        "us-east-1_other",
+                        "NEW_PASSWORD_REQUIRED",
+                        session,
+                        responses.clone(),
+                    ),
+                    "NotAuthorizedException",
+                    "Invalid session.",
+                    "admin pool mismatch",
+                );
+            }
         }
-        // The same session, answered as its own challenge, reaches the
-        // secret check.
-        assert_challenge_err(
-            fx.respond(op, "NEW_PASSWORD_REQUIRED", session, responses.clone()),
-            "NotAuthorizedException",
-            &fx.missing_message(),
+        // The session is still good after the rejections above.
+        assert_tokens(
+            fx.respond(op, "NEW_PASSWORD_REQUIRED", session, with_hash),
             &format!("{op:?} valid session"),
         );
     }
