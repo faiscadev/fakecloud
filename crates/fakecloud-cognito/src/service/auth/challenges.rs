@@ -7,8 +7,9 @@ use super::*;
 /// every challenge response, so missing or malformed `ChallengeResponses`
 /// fail closed), computed over the supplied `USERNAME`, the sign-in
 /// identifier, or the stored username (`USER_ID_FOR_SRP`, which alias
-/// sign-ins hash over). Client authentication comes before the user check,
-/// as on `InitiateAuth`. A `USERNAME` in the responses must then name the
+/// sign-ins hash over; a missing one was already refused by
+/// [`refuse_missing_secret_hash`]). Client authentication comes before the
+/// user check, as on `InitiateAuth`. A `USERNAME` in the responses must then name the
 /// session's user: its stored username, the identifier the sign-in started
 /// with, or an alias resolving to it.
 fn check_challenge_identity(
@@ -64,7 +65,7 @@ fn check_challenge_identity(
 /// Refuse a challenge response from a confidential app client that sends no
 /// `SECRET_HASH`. This needs only the client, so it runs before any session
 /// check, as client authentication does on `InitiateAuth`.
-pub(super) fn refuse_missing_secret_hash(
+fn refuse_missing_secret_hash(
     state: &CognitoState,
     client_id: &str,
     body: &Value,

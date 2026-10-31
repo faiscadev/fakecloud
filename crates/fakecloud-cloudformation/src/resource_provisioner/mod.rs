@@ -11588,10 +11588,22 @@ mod tests {
                     "EnableTokenRevocation": false,
                     "AuthSessionValidity": 10,
                     "EnablePropagateAdditionalUserContextData": true,
-                    "AnalyticsConfiguration": {"ApplicationId": "app"}
+                    "AnalyticsConfiguration": {"ApplicationId": "app"},
+                    "RefreshTokenRotation": {"Feature": "ENABLED", "RetryGracePeriodSeconds": 10}
                 }),
             ))
             .expect("client provisions");
+        {
+            let cognito = prov.cognito_state.read();
+            let client =
+                &cognito.get("123456789012").unwrap().user_pool_clients[&created.physical_id];
+            let rotation = client
+                .refresh_token_rotation
+                .as_ref()
+                .expect("rotation set");
+            assert_eq!(rotation.feature, "ENABLED");
+            assert_eq!(rotation.retry_grace_period_seconds, Some(10));
+        }
         // The template drops every optional property, the name included.
         let updated = prov
             .update_resource(
@@ -11614,6 +11626,7 @@ mod tests {
         assert_eq!(client.auth_session_validity, Some(3));
         assert!(!client.enable_propagate_additional_user_context_data);
         assert_eq!(client.analytics_configuration, None);
+        assert!(client.refresh_token_rotation.is_none());
     }
 
     #[test]

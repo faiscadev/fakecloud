@@ -343,24 +343,28 @@ impl CognitoIdentityService {
         let pool_id = require_str(&body, "IdentityPoolId")?.to_string();
         // UpdateIdentityPool replaces the pool's configuration: AWS documents
         // that a parameter the request omits goes back to its default. Two
-        // exceptions carry over: the developer provider name, which cannot
-        // change once set, and the tags, which TagResource/UntagResource own.
+        // are kept when omitted: a set developer provider name (AWS documents
+        // that it cannot change once set) and the tags, which TagResource and
+        // UntagResource manage.
+        let identity_pool_name = require_str(&body, "IdentityPoolName")?.to_string();
+        validate_length("IdentityPoolName", &identity_pool_name, 1, 128)?;
+        let allow_unauth = body["AllowUnauthenticatedIdentities"]
+            .as_bool()
+            .ok_or_else(|| invalid_parameter("AllowUnauthenticatedIdentities is required"))?;
+        let developer_provider_name = body["DeveloperProviderName"].as_str();
+        if let Some(dpn) = developer_provider_name {
+            validate_length("DeveloperProviderName", dpn, 1, 128)?;
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         ensure_identity_pool_exists(state, &pool_id)?;
 
         let pool = state.identity_pools.get_mut(&pool_id).unwrap();
-        if let Some(name) = body["IdentityPoolName"].as_str() {
-            pool.identity_pool_name = name.to_string();
-        }
-        if let Some(b) = body["AllowUnauthenticatedIdentities"].as_bool() {
-            pool.allow_unauthenticated_identities = b;
-        }
+        pool.identity_pool_name = identity_pool_name;
+        pool.allow_unauthenticated_identities = allow_unauth;
         pool.allow_classic_flow = body["AllowClassicFlow"].as_bool().unwrap_or(false);
-        if body["DeveloperProviderName"].is_string() {
-            pool.developer_provider_name = body["DeveloperProviderName"]
-                .as_str()
-                .map(|s| s.to_string());
+        if let Some(dpn) = developer_provider_name {
+            pool.developer_provider_name = Some(dpn.to_string());
         }
         pool.cognito_identity_providers =
             parse_cognito_providers(&body["CognitoIdentityProviders"]);
@@ -1442,5 +1446,21 @@ mod merge_tests {
         .expect("describe identity pool");
         let db: Value = serde_json::from_slice(describe.body.expect_bytes()).unwrap();
         assert_eq!(db, ub);
+
+        // The required parameters stay required on update.
+        for body in [
+            json!({"IdentityPoolId": pool_id, "AllowUnauthenticatedIdentities": true}),
+            json!({"IdentityPoolId": pool_id, "IdentityPoolName": "bare"}),
+            json!({
+                "IdentityPoolId": pool_id,
+                "IdentityPoolName": "",
+                "AllowUnauthenticatedIdentities": true
+            }),
+        ] {
+            let err = block_on(svc.handle(req("UpdateIdentityPool", body.clone())))
+                .err()
+                .unwrap_or_else(|| panic!("{body} should be refused"));
+            assert_eq!(err.code(), "InvalidParameterException", "{body}");
+        }
     }
 }

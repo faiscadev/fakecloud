@@ -353,7 +353,11 @@ impl ResourceProvisioner {
             client_secrets: Vec::new(),
             primary_secret: None,
             last_secret_epoch_secs: 0,
-            refresh_token_rotation: None,
+            refresh_token_rotation: fakecloud_cognito::parse_refresh_token_rotation(
+                props
+                    .get("RefreshTokenRotation")
+                    .unwrap_or(&serde_json::Value::Null),
+            ),
             analytics_configuration: props
                 .get("AnalyticsConfiguration")
                 .filter(|v| !v.is_null())
@@ -448,6 +452,11 @@ impl ResourceProvisioner {
             .get("EnablePropagateAdditionalUserContextData")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        client.refresh_token_rotation = fakecloud_cognito::parse_refresh_token_rotation(
+            props
+                .get("RefreshTokenRotation")
+                .unwrap_or(&serde_json::Value::Null),
+        );
         client.analytics_configuration = props
             .get("AnalyticsConfiguration")
             .filter(|v| !v.is_null())
@@ -601,8 +610,8 @@ impl ResourceProvisioner {
             .map_or_else(|| pool.identity_pool_name.clone(), str::to_string);
         let developer_provider_name = pool.developer_provider_name.clone();
         *pool = identity_pool_from_props(props, pool_id.clone(), name, pool.creation_date);
-        // A developer provider name cannot change once set, so dropping it
-        // from the template keeps it.
+        // A set developer provider name is kept when the template drops it
+        // (AWS documents that it cannot change once set).
         if pool.developer_provider_name.is_none() {
             pool.developer_provider_name = developer_provider_name;
         }

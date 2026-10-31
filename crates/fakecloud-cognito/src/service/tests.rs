@@ -12329,30 +12329,22 @@ fn missing_secret_hash_wins_over_challenge_session_errors() {
             &format!("{op:?} challenge mismatch"),
         );
         if let ChallengeOp::Admin = op {
-            assert_challenge_err(
-                fx.respond_as(
-                    op,
-                    "us-east-1_other",
-                    "NEW_PASSWORD_REQUIRED",
-                    session,
-                    no_hash.clone(),
-                ),
-                "NotAuthorizedException",
-                &fx.missing_message(),
-                "admin pool mismatch, no hash",
-            );
-            assert_challenge_err(
-                fx.respond_as(
-                    op,
-                    "us-east-1_other",
-                    "NEW_PASSWORD_REQUIRED",
-                    session,
-                    with_hash.clone(),
-                ),
-                "NotAuthorizedException",
-                "Invalid session.",
-                "admin pool mismatch",
-            );
+            // A session from another pool is refused before the client is
+            // looked at, so a mismatched pool reveals nothing about it.
+            for responses in [&no_hash, &with_hash] {
+                assert_challenge_err(
+                    fx.respond_as(
+                        op,
+                        "us-east-1_other",
+                        "NEW_PASSWORD_REQUIRED",
+                        session,
+                        responses.clone(),
+                    ),
+                    "NotAuthorizedException",
+                    "Invalid session.",
+                    "admin pool mismatch",
+                );
+            }
         }
         // The session is still good after the rejections above.
         assert_tokens(
