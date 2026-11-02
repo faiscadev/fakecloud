@@ -9,7 +9,9 @@
 //!
 //! Each Firehose delivery stream reads its source stream from the position it
 //! was created at (AWS starts at LATEST) and hands every record's data to the
-//! Firehose engine, which buffers and delivers it like Direct PUT input.
+//! Firehose engine, which buffers and delivers it like Direct PUT input. Its
+//! persisted checkpoint moves only past records whose batch has committed, and
+//! reading pauses while the engine reports the stream backlogged.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,7 +22,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 use fakecloud_core::delivery::LambdaDelivery;
-use fakecloud_firehose::{FirehoseEngine, SharedFirehoseState};
+use fakecloud_firehose::{FirehoseEngine, SharedFirehoseState, SourceRead};
 use fakecloud_kinesis::{KinesisRecord, SharedKinesisState};
 use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
@@ -123,14 +125,15 @@ impl KinesisLambdaFirehosePoller {
     }
 
     /// Reads up to `limit` records from each shard of `stream_arn`, starting at
-    /// the shard's checkpoint under `checkpoint_id`. A shard with no checkpoint
-    /// yet is seeded at `seed(&shard.records)`. Also reports whether any
-    /// checkpoint was seeded.
+    /// the shard's checkpoint under `checkpoint_id`, or from `resume(shard_id)`
+    /// when that is further. A shard with no checkpoint yet is seeded at
+    /// `seed(&shard.records)`. Also reports whether any checkpoint was seeded.
     fn read_shards(
         &self,
         stream_arn: &str,
         checkpoint_id: &str,
         limit: usize,
+        resume: impl Fn(&str) -> Option<usize>,
         seed: impl Fn(&[KinesisRecord]) -> usize,
     ) -> (Vec<ShardRead>, bool) {
         let mut kinesis_accounts = self.kinesis_state.write();
@@ -156,6 +159,7 @@ impl KinesisLambdaFirehosePoller {
                     offset
                 }
             };
+            let start = start.max(resume(&shard.shard_id).unwrap_or(0));
             if start < shard.records.len() {
                 let end = shard.records.len().min(start.saturating_add(limit));
                 let records = shard.records[start..end].to_vec();
@@ -217,8 +221,12 @@ impl KinesisLambdaFirehosePoller {
 
     async fn process_mapping(&self, mapping: &Mapping) {
         let limit = mapping.batch_size.max(1) as usize;
-        let (deliveries, _) =
-            self.read_shards(&mapping.stream_arn, &mapping.uuid, limit, |records| {
+        let (deliveries, _) = self.read_shards(
+            &mapping.stream_arn,
+            &mapping.uuid,
+            limit,
+            |_| None,
+            |records| {
                 match mapping
                     .starting_position
                     .as_deref()
@@ -237,7 +245,8 @@ impl KinesisLambdaFirehosePoller {
                     }
                     _ => 0, // TRIM_HORIZON
                 }
-            });
+            },
+        );
 
         for (shard_id, start, end, records) in deliveries {
             // Build per-record JSON, then split into matched + dropped
@@ -367,36 +376,56 @@ impl KinesisLambdaFirehosePoller {
     }
 
     async fn process_source(&self, engine: &FirehoseEngine, source: &Source) {
-        let (reads, seeded) = self.read_shards(
-            &source.source_arn,
-            &source.checkpoint_id,
-            MAX_RECORDS_PER_READ,
-            |records| {
-                records
-                    .iter()
-                    .position(|r| r.approximate_arrival_timestamp >= source.created_at)
-                    .unwrap_or(records.len())
-            },
-        );
-        let mut advanced = false;
+        let progress = engine.source_progress(&source.account, &source.region, &source.name);
+        let (reads, seeded) = if progress.backlogged {
+            (Vec::new(), false)
+        } else {
+            self.read_shards(
+                &source.source_arn,
+                &source.checkpoint_id,
+                MAX_RECORDS_PER_READ,
+                |shard_id| progress.read.get(shard_id).copied(),
+                |records| {
+                    records
+                        .iter()
+                        .position(|r| r.approximate_arrival_timestamp >= source.created_at)
+                        .unwrap_or(records.len())
+                },
+            )
+        };
 
         for (shard_id, _, end, records) in reads {
-            let data = records
-                .iter()
-                .map(|r| Bytes::copy_from_slice(&r.data))
-                .collect::<Vec<_>>();
+            let read = SourceRead {
+                records: records
+                    .iter()
+                    .map(|r| Bytes::copy_from_slice(&r.data))
+                    .collect(),
+                document_ids: records
+                    .iter()
+                    .map(|r| format!("{shard_id}:{}", r.sequence_number))
+                    .collect(),
+                shard_id: shard_id.clone(),
+                end,
+            };
             if let Err(error) =
-                engine.enqueue_from_source(&source.account, &source.region, &source.name, data)
+                engine.enqueue_from_source(&source.account, &source.region, &source.name, read)
             {
-                // Leave the checkpoint so the next poll re-reads these records.
                 tracing::warn!(stream = ?source.name, source_arn = %source.source_arn,
                     shard_id = %shard_id, error = ?error.message(),
                     "Kinesis->Firehose: records not admitted; will retry");
-                continue;
             }
-            if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&source.source_arn) {
-                kinesis.set_lambda_checkpoint(&source.checkpoint_id, &shard_id, end);
-                advanced = true;
+        }
+
+        let committed = engine
+            .source_progress(&source.account, &source.region, &source.name)
+            .committed;
+        let mut advanced = false;
+        if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&source.source_arn) {
+            for (shard_id, end) in committed {
+                if end > kinesis.lambda_checkpoint(&source.checkpoint_id, &shard_id) {
+                    kinesis.set_lambda_checkpoint(&source.checkpoint_id, &shard_id, end);
+                    advanced = true;
+                }
             }
         }
         if seeded || advanced {

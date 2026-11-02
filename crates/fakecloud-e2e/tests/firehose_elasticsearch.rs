@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +19,8 @@ const ROLE: &str = "arn:aws:iam::123456789012:role/firehose";
 
 /// Minimal `_bulk` endpoint: records each request (path, body) and rejects
 /// any document containing `"bad"` with a 400 item, like a mapping error.
-async fn bulk_endpoint() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+/// While `down` is set it answers every request with 503.
+async fn bulk_endpoint(down: Arc<AtomicBool>) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -26,6 +28,7 @@ async fn bulk_endpoint() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
     tokio::spawn(async move {
         while let Ok((mut sock, _)) = listener.accept().await {
             let captured = captured.clone();
+            let down = down.clone();
             tokio::spawn(async move {
                 let mut acc = Vec::new();
                 let mut chunk = [0u8; 4096];
@@ -61,9 +64,16 @@ async fn bulk_endpoint() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
                     .collect();
                 let errors = items.iter().any(|i| i["index"]["status"] == 400);
                 captured.lock().await.push((path, body));
-                let reply = json!({"took": 1, "errors": errors, "items": items}).to_string();
+                let (status, reply) = if down.load(Ordering::SeqCst) {
+                    ("503 Service Unavailable", String::new())
+                } else {
+                    (
+                        "200 OK",
+                        json!({"took": 1, "errors": errors, "items": items}).to_string(),
+                    )
+                };
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
                     reply.len()
                 );
                 sock.write_all(response.as_bytes()).await.unwrap();
@@ -79,7 +89,7 @@ async fn kinesis_source_indexes_documents_and_backs_up_failures() {
     let kinesis = server.kinesis_client().await;
     let firehose = server.firehose_client().await;
     let s3 = server.s3_client().await;
-    let (endpoint, seen) = bulk_endpoint().await;
+    let (endpoint, seen) = bulk_endpoint(Arc::default()).await;
 
     kinesis
         .create_stream()
@@ -211,4 +221,152 @@ async fn kinesis_source_indexes_documents_and_backs_up_failures() {
         .decode(record["rawData"].as_str().unwrap())
         .unwrap();
     assert_eq!(raw, b"{\"bad\":true}");
+}
+
+/// Records read while the cluster is down are not lost by a restart: the
+/// Kinesis checkpoint stays behind them until delivery commits, so the
+/// restarted server reads them again and indexes them under the same IDs.
+#[tokio::test]
+async fn kinesis_source_redelivers_after_restart_while_cluster_down() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut server = TestServer::start_persistent(tmp.path()).await;
+    let down = Arc::new(AtomicBool::new(true));
+    let (endpoint, seen) = bulk_endpoint(down.clone()).await;
+
+    let kinesis = server.kinesis_client().await;
+    kinesis
+        .create_stream()
+        .stream_name("activity-dev")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+    let stream_arn = kinesis
+        .describe_stream_summary()
+        .stream_name("activity-dev")
+        .send()
+        .await
+        .unwrap()
+        .stream_description_summary()
+        .unwrap()
+        .stream_arn()
+        .to_owned();
+    server
+        .s3_client()
+        .await
+        .create_bucket()
+        .bucket("firehose-bucket")
+        .send()
+        .await
+        .unwrap();
+    server
+        .firehose_client()
+        .await
+        .create_delivery_stream()
+        .delivery_stream_name("activity-dev-elasticsearch")
+        .delivery_stream_type(DeliveryStreamType::KinesisStreamAsSource)
+        .kinesis_stream_source_configuration(
+            KinesisStreamSourceConfiguration::builder()
+                .kinesis_stream_arn(&stream_arn)
+                .role_arn(ROLE)
+                .build()
+                .unwrap(),
+        )
+        .elasticsearch_destination_configuration(
+            ElasticsearchDestinationConfiguration::builder()
+                .role_arn(ROLE)
+                .index_name("activity")
+                .cluster_endpoint(&endpoint)
+                .buffering_hints(
+                    ElasticsearchBufferingHints::builder()
+                        .size_in_mbs(1)
+                        .interval_in_seconds(0)
+                        .build(),
+                )
+                .s3_configuration(
+                    S3DestinationConfiguration::builder()
+                        .role_arn(ROLE)
+                        .bucket_arn("arn:aws:s3:::firehose-bucket")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    for n in 0..3 {
+        kinesis
+            .put_record()
+            .stream_name("activity-dev")
+            .partition_key("pk")
+            .data(Blob::new(format!("{{\"n\":{n}}}")))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let documents = |body: &str| -> Vec<(Value, Value)> {
+        let lines: Vec<Value> = body
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        lines
+            .chunks(2)
+            .map(|pair| (pair[0]["index"]["_id"].clone(), pair[1].clone()))
+            .collect()
+    };
+    let attempted = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let ids: Vec<_> = seen
+                .lock()
+                .await
+                .iter()
+                .flat_map(|(_, body)| documents(body))
+                .collect();
+            if ids.len() >= 3 {
+                return ids;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("records read and attempted while the cluster is down");
+
+    server.restart().await;
+    down.store(false, Ordering::SeqCst);
+    seen.lock().await.clear();
+
+    let mut delivered = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let docs: Vec<_> = seen
+                .lock()
+                .await
+                .iter()
+                .flat_map(|(_, body)| documents(body))
+                .collect();
+            if docs.len() >= 3 {
+                return docs;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("records re-read and delivered after restart");
+    delivered.sort_by_key(|(_, doc)| doc["n"].as_i64());
+    assert_eq!(
+        delivered
+            .iter()
+            .map(|(_, doc)| doc.clone())
+            .collect::<Vec<_>>(),
+        vec![json!({"n": 0}), json!({"n": 1}), json!({"n": 2})]
+    );
+    for (id, doc) in &delivered {
+        assert!(
+            attempted.iter().any(|(old, d)| old == id && d == doc),
+            "{doc} redelivered under a new ID {id}"
+        );
+    }
 }

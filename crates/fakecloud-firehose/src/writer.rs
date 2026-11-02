@@ -21,6 +21,8 @@ pub struct DeliveryBatch {
     pub version_id: String,
     pub destination: DeliveryConfig,
     pub records: Vec<Bytes>,
+    /// Source-derived document IDs, one per record; empty for Direct PUT.
+    pub document_ids: Vec<String>,
     pub oldest_arrival: DateTime<Utc>,
     pub delivery_time: DateTime<Utc>,
     pub object_key: String,
@@ -264,6 +266,7 @@ mod tests {
                 Bytes::from_static(b"first\n"),
                 Bytes::from_static(b"second\x00\xff"),
             ],
+            document_ids: Vec::new(),
             oldest_arrival: now,
             delivery_time: now,
             object_key: "captured/events-1.gz".into(),

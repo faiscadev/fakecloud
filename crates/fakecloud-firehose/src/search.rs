@@ -110,6 +110,9 @@ pub(crate) fn index_name(base: &str, rotation: &str, at: DateTime<Utc>) -> Strin
 }
 
 fn document_id(batch: &DeliveryBatch, position: usize) -> String {
+    if let Some(id) = batch.document_ids.get(position) {
+        return id.clone();
+    }
     // Stable across retries of the same batch, so a retried bulk request
     // overwrites the documents it already indexed instead of duplicating them.
     let object = batch.object_key.rsplit('/').next().unwrap_or_default();

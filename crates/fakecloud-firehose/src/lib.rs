@@ -15,7 +15,7 @@ pub mod writer;
 
 pub use config::{buffering_policy, delivery_config, BufferingPolicy, DeliveryConfig};
 pub use delivery::FirehoseDeliveryImpl;
-pub use engine::{DrainReport, FirehoseEngine, WorkerAlreadyStarted};
+pub use engine::{DrainReport, FirehoseEngine, SourceProgress, SourceRead, WorkerAlreadyStarted};
 pub use output::{Compression, OutputConfig};
 pub use search::SearchDelivery;
 pub use service::{validate_s3_destination_compression, FirehoseService};
