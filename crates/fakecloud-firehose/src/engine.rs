@@ -767,6 +767,9 @@ pub(crate) fn throughput_error() -> AwsServiceError {
 /// `Ok(None)`: no destination is configured, so nothing is written.
 fn stream_delivery(stream: &DeliveryStream) -> Result<Option<DeliveryConfig>, AwsServiceError> {
     crate::admission::validate_stream_destination(stream)?;
+    if let Some((kind, config)) = stream.extra_destinations.iter().next() {
+        return crate::search::delivery(kind, config).map(Some);
+    }
     stream.destination.as_ref().map(delivery_config).transpose()
 }
 

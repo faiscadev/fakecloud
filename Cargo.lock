@@ -5716,6 +5716,7 @@ dependencies = [
  "flate2",
  "http 1.4.0",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
  "snap",

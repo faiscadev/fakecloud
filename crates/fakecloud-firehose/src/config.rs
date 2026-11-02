@@ -24,9 +24,12 @@ pub struct DeliveryConfig {
     /// Captured with the rest of the configuration, so a batch keeps the key
     /// it was admitted under through retries.
     pub encryption: DeliveredEncryption,
+    /// Set for Elasticsearch / OpenSearch Service destinations, whose S3
+    /// fields describe the backup bucket.
+    pub search: Option<crate::search::SearchDelivery>,
 }
 
-fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
+pub(crate) fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidArgumentException", message)
 }
 
@@ -164,6 +167,7 @@ pub fn delivery_config(dest: &S3Destination) -> Result<DeliveryConfig, AwsServic
         },
         buffering,
         encryption: delivery_encryption(dest.encryption_configuration.as_ref()),
+        search: None,
     })
 }
 
