@@ -181,6 +181,7 @@ mod tests {
             tags: BTreeMap::new(),
             encryption: None,
             extra_destinations: BTreeMap::new(),
+            kinesis_source: None,
         };
         let batch = DeliveryBatch {
             stream: StreamKey {

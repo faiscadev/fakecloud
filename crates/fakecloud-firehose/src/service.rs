@@ -19,8 +19,8 @@ use fakecloud_s3::SharedS3State;
 use crate::config::{parse_buffering_hints, validate_destination_strings, validate_file_extension};
 use crate::engine::FirehoseEngine;
 use crate::state::{
-    DeliveryStream, EncryptionConfig, FirehoseAccounts, FirehoseSnapshot, S3Destination,
-    SharedFirehoseState, FIREHOSE_SNAPSHOT_SCHEMA_VERSION,
+    DeliveryStream, EncryptionConfig, FirehoseAccounts, FirehoseSnapshot, KinesisSource,
+    S3Destination, SharedFirehoseState, FIREHOSE_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// Actions that mutate persisted Firehose state and therefore must trigger a
@@ -675,6 +675,16 @@ impl FirehoseService {
             None => parse_s3_destination(&body["ExtendedS3DestinationConfiguration"])?,
         };
         let extra_destinations = extract_extra_destinations(&body, "Configuration");
+        let kinesis_source = body
+            .get("KinesisStreamSourceConfiguration")
+            .filter(|config| config.is_object())
+            .map(|config| KinesisSource {
+                kinesis_stream_arn: config["KinesisStreamARN"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                role_arn: config["RoleARN"].as_str().unwrap_or_default().to_string(),
+            });
 
         // Create-time Tags must be returned by ListTagsForDeliveryStream without
         // a follow-up TagDeliveryStream call (bug-hunt).
@@ -719,6 +729,7 @@ impl FirehoseService {
             tags: create_tags,
             encryption,
             extra_destinations,
+            kinesis_source,
         };
         streams.insert(name, stream);
         Ok(AwsResponse::ok_json(json!({
@@ -772,6 +783,15 @@ impl FirehoseService {
         });
         if let Some(enc) = &stream.encryption {
             description["DeliveryStreamEncryptionConfiguration"] = encryption_config_json(enc);
+        }
+        if let Some(source) = &stream.kinesis_source {
+            description["Source"] = json!({
+                "KinesisStreamSourceDescription": {
+                    "KinesisStreamARN": source.kinesis_stream_arn,
+                    "RoleARN": source.role_arn,
+                    "DeliveryStartTimestamp": stream.created_at.timestamp() as f64,
+                }
+            });
         }
 
         Ok(AwsResponse::ok_json(json!({
