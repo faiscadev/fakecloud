@@ -1,23 +1,44 @@
-//! Kinesis -> Lambda event source mapping poller.
+//! Kinesis poller for Lambda event source mappings and Firehose
+//! `KinesisStreamAsSource` delivery streams.
 //!
-//! Honors:
+//! Lambda mappings honor:
 //! - `FilterCriteria` — non-matching records are dropped (advanced past).
 //! - `StartingPosition` — `TRIM_HORIZON` (default), `LATEST`, or
 //!   `AT_TIMESTAMP` paired with `StartingPositionTimestamp` to seed
 //!   the per-shard checkpoint on first poll.
+//!
+//! Each Firehose delivery stream reads its source stream from the position it
+//! was created at (AWS starts at LATEST) and hands every record's data to the
+//! Firehose engine, which buffers and delivers it like Direct PUT input.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
-use chrono::Utc;
+use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 use fakecloud_core::delivery::LambdaDelivery;
-use fakecloud_kinesis::SharedKinesisState;
+use fakecloud_firehose::{FirehoseEngine, SharedFirehoseState};
+use fakecloud_kinesis::{KinesisRecord, SharedKinesisState};
 use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
 use fakecloud_persistence::SnapshotHook;
+
+/// AWS caps a single GetRecords call at 10,000 records.
+const MAX_RECORDS_PER_READ: usize = 10_000;
+
+type ShardRead = (String, usize, usize, Vec<KinesisRecord>);
+
+struct Source {
+    account: String,
+    region: String,
+    name: String,
+    source_arn: String,
+    checkpoint_id: String,
+    created_at: DateTime<Utc>,
+}
 
 #[derive(Clone)]
 struct Mapping {
@@ -39,7 +60,7 @@ struct Mapping {
     invoke_identity_arn: Option<String>,
 }
 
-pub struct KinesisLambdaPoller {
+pub struct KinesisLambdaFirehosePoller {
     kinesis_state: SharedKinesisState,
     lambda_state: SharedLambdaState,
     lambda_delivery: Option<Arc<dyn LambdaDelivery>>,
@@ -48,20 +69,31 @@ pub struct KinesisLambdaPoller {
     /// Kinesis API write, so a restart in the window re-delivered records the
     /// mapping had already consumed (bug-audit 4.5).
     snapshot_hook: Option<SnapshotHook>,
+    firehose: Option<(SharedFirehoseState, Arc<FirehoseEngine>)>,
 }
 
-impl KinesisLambdaPoller {
+impl KinesisLambdaFirehosePoller {
     pub fn new(kinesis_state: SharedKinesisState, lambda_state: SharedLambdaState) -> Self {
         Self {
             kinesis_state,
             lambda_state,
             lambda_delivery: None,
             snapshot_hook: None,
+            firehose: None,
         }
     }
 
     pub fn with_lambda_delivery(mut self, delivery: Arc<dyn LambdaDelivery>) -> Self {
         self.lambda_delivery = Some(delivery);
+        self
+    }
+
+    pub fn with_firehose(
+        mut self,
+        firehose_state: SharedFirehoseState,
+        engine: Arc<FirehoseEngine>,
+    ) -> Self {
+        self.firehose = Some((firehose_state, engine));
         self
     }
 
@@ -80,11 +112,61 @@ impl KinesisLambdaPoller {
     }
 
     pub async fn run(self) {
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        let mut lambda_interval = tokio::time::interval(Duration::from_millis(500));
+        let mut firehose_interval = tokio::time::interval(Duration::from_secs(1));
         loop {
-            interval.tick().await;
-            self.poll().await;
+            tokio::select! {
+                _ = lambda_interval.tick() => self.poll().await,
+                _ = firehose_interval.tick() => self.poll_firehose().await,
+            }
         }
+    }
+
+    /// Reads up to `limit` records from each shard of `stream_arn`, starting at
+    /// the shard's checkpoint under `checkpoint_id`. A shard with no checkpoint
+    /// yet is seeded at `seed(&shard.records)`. Also reports whether any
+    /// checkpoint was seeded.
+    fn read_shards(
+        &self,
+        stream_arn: &str,
+        checkpoint_id: &str,
+        limit: usize,
+        seed: impl Fn(&[KinesisRecord]) -> usize,
+    ) -> (Vec<ShardRead>, bool) {
+        let mut kinesis_accounts = self.kinesis_state.write();
+        let Some(kinesis) = kinesis_accounts.by_arn_mut(stream_arn) else {
+            return (Vec::new(), false);
+        };
+        let Some(stream) = kinesis
+            .streams
+            .values()
+            .find(|s| s.stream_arn == stream_arn)
+        else {
+            return (Vec::new(), false);
+        };
+        let mut reads = Vec::new();
+        let mut seeds = Vec::new();
+        for shard in &stream.shards {
+            let key = format!("{}:{}", checkpoint_id, shard.shard_id);
+            let start = match kinesis.lambda_checkpoints.get(&key) {
+                Some(offset) => *offset,
+                None => {
+                    let offset = seed(&shard.records);
+                    seeds.push((shard.shard_id.clone(), offset));
+                    offset
+                }
+            };
+            if start < shard.records.len() {
+                let end = shard.records.len().min(start.saturating_add(limit));
+                let records = shard.records[start..end].to_vec();
+                reads.push((shard.shard_id.clone(), start, end, records));
+            }
+        }
+        let seeded = !seeds.is_empty();
+        for (shard_id, offset) in seeds {
+            kinesis.set_lambda_checkpoint(checkpoint_id, &shard_id, offset);
+        }
+        (reads, seeded)
     }
 
     async fn poll(&self) {
@@ -134,89 +216,28 @@ impl KinesisLambdaPoller {
     }
 
     async fn process_mapping(&self, mapping: &Mapping) {
-        // Compute per-shard deliveries: snapshot current shard
-        // contents, seed missing checkpoints based on StartingPosition,
-        // then collect a batch from each shard up to batch_size.
-        let deliveries = {
-            let mut kinesis_accounts = self.kinesis_state.write();
-            // The stream lives in the account and region its ARN names.
-            let kinesis = match kinesis_accounts.by_arn_mut(&mapping.stream_arn) {
-                Some(k) => k,
-                None => return,
-            };
-            let stream_idx = kinesis
-                .streams
-                .iter()
-                .find(|(_, s)| s.stream_arn == mapping.stream_arn)
-                .map(|(name, _)| name.clone());
-            let Some(stream_name) = stream_idx else {
-                return;
-            };
-
-            // Initialize per-shard checkpoints once based on
-            // StartingPosition. Subsequent polls just read what's already
-            // there.
-            let init_pairs: Vec<(String, usize)> = {
-                let stream = kinesis
-                    .streams
-                    .get(&stream_name)
-                    .expect("stream exists, just looked up");
-                stream
-                    .shards
-                    .iter()
-                    .filter_map(|shard| {
-                        let key = format!("{}:{}", mapping.uuid, shard.shard_id);
-                        if kinesis.lambda_checkpoints.contains_key(&key) {
-                            return None;
-                        }
-                        let init = match mapping
-                            .starting_position
-                            .as_deref()
-                            .unwrap_or("TRIM_HORIZON")
-                        {
-                            "LATEST" => shard.records.len(),
-                            "AT_TIMESTAMP" => {
-                                let target = mapping
-                                    .starting_position_timestamp
-                                    .map(|t| t as i64)
-                                    .unwrap_or(0);
-                                shard
-                                    .records
-                                    .iter()
-                                    .position(|r| {
-                                        r.approximate_arrival_timestamp.timestamp() >= target
-                                    })
-                                    .unwrap_or(shard.records.len())
-                            }
-                            _ => 0, // TRIM_HORIZON
-                        };
-                        Some((shard.shard_id.clone(), init))
-                    })
-                    .collect()
-            };
-            for (shard_id, init) in init_pairs {
-                kinesis.set_lambda_checkpoint(&mapping.uuid, &shard_id, init);
-            }
-
-            let stream = kinesis
-                .streams
-                .get(&stream_name)
-                .expect("stream exists, just looked up");
-            let limit = mapping.batch_size.max(1) as usize;
-            stream
-                .shards
-                .iter()
-                .filter_map(|shard| {
-                    let start = kinesis.lambda_checkpoint(&mapping.uuid, &shard.shard_id);
-                    if start >= shard.records.len() {
-                        return None;
+        let limit = mapping.batch_size.max(1) as usize;
+        let (deliveries, _) =
+            self.read_shards(&mapping.stream_arn, &mapping.uuid, limit, |records| {
+                match mapping
+                    .starting_position
+                    .as_deref()
+                    .unwrap_or("TRIM_HORIZON")
+                {
+                    "LATEST" => records.len(),
+                    "AT_TIMESTAMP" => {
+                        let target = mapping
+                            .starting_position_timestamp
+                            .map(|t| t as i64)
+                            .unwrap_or(0);
+                        records
+                            .iter()
+                            .position(|r| r.approximate_arrival_timestamp.timestamp() >= target)
+                            .unwrap_or(records.len())
                     }
-                    let end = shard.records.len().min(start.saturating_add(limit));
-                    let records = shard.records[start..end].to_vec();
-                    Some((shard.shard_id.clone(), start, end, records))
-                })
-                .collect::<Vec<_>>()
-        };
+                    _ => 0, // TRIM_HORIZON
+                }
+            });
 
         for (shard_id, start, end, records) in deliveries {
             // Build per-record JSON, then split into matched + dropped
@@ -335,6 +356,85 @@ impl KinesisLambdaPoller {
             }
         }
     }
+
+    async fn poll_firehose(&self) {
+        let Some((firehose_state, engine)) = &self.firehose else {
+            return;
+        };
+        for source in collect_sources(firehose_state) {
+            self.process_source(engine, &source).await;
+        }
+    }
+
+    async fn process_source(&self, engine: &FirehoseEngine, source: &Source) {
+        let (reads, seeded) = self.read_shards(
+            &source.source_arn,
+            &source.checkpoint_id,
+            MAX_RECORDS_PER_READ,
+            |records| {
+                records
+                    .iter()
+                    .position(|r| r.approximate_arrival_timestamp >= source.created_at)
+                    .unwrap_or(records.len())
+            },
+        );
+        let mut advanced = false;
+
+        for (shard_id, _, end, records) in reads {
+            let data = records
+                .iter()
+                .map(|r| Bytes::copy_from_slice(&r.data))
+                .collect::<Vec<_>>();
+            if let Err(error) =
+                engine.enqueue_from_source(&source.account, &source.region, &source.name, data)
+            {
+                // Leave the checkpoint so the next poll re-reads these records.
+                tracing::warn!(stream = ?source.name, source_arn = %source.source_arn,
+                    shard_id = %shard_id, error = ?error.message(),
+                    "Kinesis->Firehose: records not admitted; will retry");
+                continue;
+            }
+            if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&source.source_arn) {
+                kinesis.set_lambda_checkpoint(&source.checkpoint_id, &shard_id, end);
+                advanced = true;
+            }
+        }
+        if seeded || advanced {
+            self.persist().await;
+        }
+    }
+}
+
+fn collect_sources(firehose_state: &SharedFirehoseState) -> Vec<Source> {
+    let accounts = firehose_state.read();
+    accounts
+        .accounts
+        .iter()
+        .flat_map(|(account, state)| {
+            state
+                .streams_by_region
+                .iter()
+                .flat_map(move |(region, streams)| {
+                    streams.values().filter_map(move |stream| {
+                        let source = stream.kinesis_source.as_ref()?;
+                        Some(Source {
+                            account: account.clone(),
+                            region: region.clone(),
+                            name: stream.name.clone(),
+                            source_arn: source.kinesis_stream_arn.clone(),
+                            // Keyed by creation time too, so a recreated stream
+                            // starts fresh instead of resuming the old position.
+                            checkpoint_id: format!(
+                                "{}@{}",
+                                stream.arn,
+                                stream.created_at.timestamp_millis()
+                            ),
+                            created_at: stream.created_at,
+                        })
+                    })
+                })
+        })
+        .collect()
 }
 
 /// Build the Lambda event record for one Kinesis record. `awsRegion` is the
@@ -542,7 +642,7 @@ mod tests {
         let kinesis: fakecloud_kinesis::SharedKinesisState = Arc::new(RwLock::new(
             MultiAccountState::new(account, region, "http://localhost:4566"),
         ));
-        let poller = KinesisLambdaPoller::new(kinesis, Arc::new(RwLock::new(lambda)));
+        let poller = KinesisLambdaFirehosePoller::new(kinesis, Arc::new(RwLock::new(lambda)));
 
         let mut mappings = poller.collect_mappings();
         mappings.sort_by(|a, b| a.uuid.cmp(&b.uuid));
@@ -630,7 +730,7 @@ mod tests {
             .put_record(&west_arn, "aGVsbG8=", "pk");
 
         let delivery = Arc::new(RecordingDelivery(parking_lot::Mutex::new(Vec::new())));
-        let poller = KinesisLambdaPoller::new(
+        let poller = KinesisLambdaFirehosePoller::new(
             kinesis.clone(),
             Arc::new(RwLock::new(MultiAccountState::new(
                 account,

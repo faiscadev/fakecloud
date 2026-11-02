@@ -22,7 +22,7 @@ mod ec2_imds;
 mod ecs_creds;
 mod imds;
 mod introspection;
-mod kinesis_lambda_poller;
+mod kinesis_lambda_firehose_poller;
 mod lambda_delivery;
 mod link_local;
 mod pipes_runner;
@@ -46,7 +46,7 @@ use introspection::{
     elbv2_target_group_response, json_document, organizations_accounts_snapshot,
     rds_instance_response,
 };
-use kinesis_lambda_poller::KinesisLambdaPoller;
+use kinesis_lambda_firehose_poller::KinesisLambdaFirehosePoller;
 use reset::ResetState;
 use runtime::{
     announce_bound_port, bind_listener, endpoint_url_from_addr, fatal_exit,
@@ -7537,15 +7537,17 @@ async fn main() {
         sqs_lambda_poller = sqs_lambda_poller.with_snapshot_hook(h);
     }
     tokio::spawn(sqs_lambda_poller.run());
-    let mut kinesis_lambda_poller =
-        KinesisLambdaPoller::new(kinesis_state.clone(), lambda_invocations_state.clone());
+    let mut kinesis_lambda_firehose_poller =
+        KinesisLambdaFirehosePoller::new(kinesis_state.clone(), lambda_invocations_state.clone())
+            .with_firehose(firehose_state.clone(), firehose_engine.clone());
     if let Some(ref ld) = lambda_delivery {
-        kinesis_lambda_poller = kinesis_lambda_poller.with_lambda_delivery(ld.clone());
+        kinesis_lambda_firehose_poller =
+            kinesis_lambda_firehose_poller.with_lambda_delivery(ld.clone());
     }
     if let Some(h) = kinesis_poller_snapshot_hook {
-        kinesis_lambda_poller = kinesis_lambda_poller.with_snapshot_hook(h);
+        kinesis_lambda_firehose_poller = kinesis_lambda_firehose_poller.with_snapshot_hook(h);
     }
-    tokio::spawn(kinesis_lambda_poller.run());
+    tokio::spawn(kinesis_lambda_firehose_poller.run());
     let mut dynamodb_streams_poller =
         DynamoDbStreamsLambdaPoller::new(dynamodb_state.clone(), lambda_invocations_state.clone());
     if let Some(ref ld) = lambda_delivery {

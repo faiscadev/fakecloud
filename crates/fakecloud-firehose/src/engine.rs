@@ -252,7 +252,20 @@ impl FirehoseEngine {
         name: &str,
         records: Vec<Bytes>,
     ) -> Result<(), AwsServiceError> {
-        self.enqueue_admission(account, region, name, records, None)
+        self.enqueue_admission(account, region, name, records, None, false)
+            .map(|_| ())
+    }
+
+    /// Hand off records a `KinesisStreamAsSource` stream read from its source
+    /// stream. Unmetered: the Direct PUT throughput quotas do not apply.
+    pub fn enqueue_from_source(
+        &self,
+        account: &str,
+        region: &str,
+        name: &str,
+        records: Vec<Bytes>,
+    ) -> Result<(), AwsServiceError> {
+        self.enqueue_admission(account, region, name, records, None, true)
             .map(|_| ())
     }
 
@@ -286,7 +299,7 @@ impl FirehoseEngine {
         });
         let limits =
             limits.filter(|l| l.requests.is_some() || l.records.is_some() || l.mib.is_some());
-        self.enqueue_admission(account, region, name, records, limits)
+        self.enqueue_admission(account, region, name, records, limits, false)
     }
 
     fn enqueue_admission(
@@ -296,6 +309,7 @@ impl FirehoseEngine {
         name: &str,
         records: Vec<Bytes>,
         limits: Option<ThroughputLimits>,
+        from_source: bool,
     ) -> Result<Vec<bool>, AwsServiceError> {
         // Every path holding both takes configuration before the registry. Keep
         // the read guard until admission and immediate detachment both commit.
@@ -321,7 +335,7 @@ impl FirehoseEngine {
             })?;
         // Public APIs and internal hooks are DirectPut producers, even without
         // an S3 destination/backend. Preserve the shared source admission guard.
-        if stream.stream_type == "KinesisStreamAsSource" {
+        if stream.stream_type == "KinesisStreamAsSource" && !from_source {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidArgumentException",
