@@ -323,6 +323,29 @@ fn validate_redshift_intermediate_compression(config: &Value) -> Result<(), AwsS
 /// carried them; an update can take either path (a full parse when the stream
 /// has no S3 destination yet), so it checks both. Shared with CloudFormation
 /// provisioning (`update == false`).
+/// The `KinesisStreamSourceConfiguration` of a `KinesisStreamAsSource`
+/// stream, which requires it. Other stream types have no source.
+pub fn parse_kinesis_source(
+    stream_type: &str,
+    body: &Value,
+) -> Result<Option<KinesisSource>, AwsServiceError> {
+    if stream_type != "KinesisStreamAsSource" {
+        return Ok(None);
+    }
+    let config = &body["KinesisStreamSourceConfiguration"];
+    let member = |name: &str| {
+        config[name]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| missing(&format!("KinesisStreamSourceConfiguration.{name}")))
+    };
+    Ok(Some(KinesisSource {
+        kinesis_stream_arn: member("KinesisStreamARN")?,
+        role_arn: member("RoleARN")?,
+    }))
+}
+
 pub fn validate_s3_destination_compression(
     config: &Value,
     update: bool,
@@ -675,16 +698,7 @@ impl FirehoseService {
             None => parse_s3_destination(&body["ExtendedS3DestinationConfiguration"])?,
         };
         let extra_destinations = extract_extra_destinations(&body, "Configuration");
-        let kinesis_source = body
-            .get("KinesisStreamSourceConfiguration")
-            .filter(|config| config.is_object())
-            .map(|config| KinesisSource {
-                kinesis_stream_arn: config["KinesisStreamARN"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string(),
-                role_arn: config["RoleARN"].as_str().unwrap_or_default().to_string(),
-            });
+        let kinesis_source = parse_kinesis_source(&stream_type, &body)?;
 
         // Create-time Tags must be returned by ListTagsForDeliveryStream without
         // a follow-up TagDeliveryStream call (bug-hunt).
@@ -3230,6 +3244,20 @@ mod tests {
             .is_empty());
     }
 
+    #[test]
+    fn kinesis_source_stream_requires_source_configuration() {
+        let svc = service();
+        let mut body = kinesis_source_body("no-source");
+        body["KinesisStreamSourceConfiguration"]["RoleARN"] = json!("");
+        let Err(err) = svc.create_delivery_stream(&request("CreateDeliveryStream", body)) else {
+            panic!("a source stream without RoleARN must be rejected");
+        };
+        assert_eq!(err.code(), "InvalidArgumentException");
+        assert!(err
+            .message()
+            .contains("KinesisStreamSourceConfiguration.RoleARN"));
+    }
+
     fn kinesis_source_body(name: &str) -> Value {
         json!({
             "DeliveryStreamName": name,
@@ -3434,7 +3462,14 @@ mod tests {
         for (account, region, stream_type) in scopes {
             let mut req = request(
                 "CreateDeliveryStream",
-                json!({ "DeliveryStreamName": "same-name", "DeliveryStreamType": stream_type }),
+                json!({
+                    "DeliveryStreamName": "same-name",
+                    "DeliveryStreamType": stream_type,
+                    "KinesisStreamSourceConfiguration": {
+                        "KinesisStreamARN": "arn:aws:kinesis:us-east-1:123456789012:stream/source",
+                        "RoleARN": "arn:aws:iam::123456789012:role/fh",
+                    },
+                }),
             );
             req.account_id = account.to_string();
             req.region = region.to_string();

@@ -249,7 +249,8 @@ impl ResourceProvisioner {
             tags,
             encryption: None,
             extra_destinations: std::collections::BTreeMap::new(),
-            kinesis_source: None,
+            kinesis_source: fakecloud_firehose::parse_kinesis_source(&stream_type, props)
+                .map_err(|err| err.to_string())?,
         };
 
         let mut state = self.firehose_state.write();

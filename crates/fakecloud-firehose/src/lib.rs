@@ -18,7 +18,7 @@ pub use delivery::FirehoseDeliveryImpl;
 pub use engine::{DrainReport, FirehoseEngine, SourceProgress, SourceRead, WorkerAlreadyStarted};
 pub use output::{Compression, OutputConfig};
 pub use search::SearchDelivery;
-pub use service::{validate_s3_destination_compression, FirehoseService};
+pub use service::{parse_kinesis_source, validate_s3_destination_compression, FirehoseService};
 pub use state::{
     DeliveryStream, FirehoseAccounts, FirehoseSnapshot, KinesisSource, S3Destination,
     SharedFirehoseState, StreamKey, FIREHOSE_SNAPSHOT_SCHEMA_VERSION,
