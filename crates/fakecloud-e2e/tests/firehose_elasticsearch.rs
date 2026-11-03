@@ -159,6 +159,7 @@ async fn kinesis_source_indexes_documents_and_backs_up_failures() {
             .build()
             .unwrap()
     };
+    let sent = chrono::Utc::now();
     kinesis
         .put_records()
         .stream_name("activity-dev")
@@ -189,13 +190,17 @@ async fn kinesis_source_indexes_documents_and_backs_up_failures() {
     assert_eq!(requests.len(), 1, "{requests:?}");
     let (path, body) = &requests[0];
     assert_eq!(path, "/_bulk");
-    let index = format!("activity-{}", chrono::Utc::now().format("%Y-%m-%d"));
     let lines: Vec<Value> = body
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     assert_eq!(lines.len(), 4);
-    assert_eq!(lines[0]["index"]["_index"], index.as_str());
+    let index = lines[0]["index"]["_index"].as_str().unwrap().to_owned();
+    let day = |at: chrono::DateTime<chrono::Utc>| format!("activity-{}", at.format("%Y-%m-%d"));
+    assert!(
+        [day(sent), day(chrono::Utc::now())].contains(&index),
+        "{index}"
+    );
     assert!(lines[0]["index"]["_id"].is_string());
     assert_eq!(lines[1], json!({"n": 1}));
     assert_eq!(lines[3], json!({"bad": true}));
