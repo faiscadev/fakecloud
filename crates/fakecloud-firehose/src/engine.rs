@@ -47,8 +47,8 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// Pending decoded bytes at which a stream stops reading its Kinesis source.
 const MAX_SOURCE_BACKLOG_BYTES: usize = 128 * 1024 * 1024;
 
-/// Records read from one Kinesis shard: `end` is the shard offset just past
-/// the last record, and `document_ids` holds one ID per record.
+/// Records read from one Kinesis shard: `end` is the reader's position just
+/// past the last record, and `document_ids` holds one ID per record.
 pub struct SourceRead {
     pub shard_id: String,
     pub end: usize,

@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 
 use fakecloud_core::delivery::LambdaDelivery;
 use fakecloud_firehose::{FirehoseEngine, SharedFirehoseState, SourceRead};
-use fakecloud_kinesis::{KinesisRecord, SharedKinesisState};
+use fakecloud_kinesis::{KinesisRecord, KinesisShard, SharedKinesisState};
 use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
 use fakecloud_persistence::SnapshotHook;
@@ -31,7 +31,21 @@ use fakecloud_persistence::SnapshotHook;
 /// AWS caps a single GetRecords call at 10,000 records.
 const MAX_RECORDS_PER_READ: usize = 10_000;
 
-type ShardRead = (String, usize, usize, Vec<KinesisRecord>);
+struct ShardRead {
+    shard_id: String,
+    start: usize,
+    end: usize,
+    records: Vec<KinesisRecord>,
+    trimmed: usize,
+}
+
+/// Records retention has removed from the front of `shard`. Adding it to a
+/// record index gives a position that trimming does not shift.
+fn trimmed(shard: &KinesisShard) -> usize {
+    usize::try_from(shard.next_sequence_number)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(shard.records.len())
+}
 
 struct Source {
     account: String,
@@ -125,15 +139,15 @@ impl KinesisLambdaFirehosePoller {
     }
 
     /// Reads up to `limit` records from each shard of `stream_arn`, starting at
-    /// the shard's checkpoint under `checkpoint_id`, or from `resume(shard_id)`
-    /// when that is further. A shard with no checkpoint yet is seeded at
+    /// the shard's checkpoint under `checkpoint_id`, or from the index
+    /// `resume(shard)` returns when that is further. A shard with no checkpoint yet is seeded at
     /// `seed(&shard.records)`. Also reports whether any checkpoint was seeded.
     fn read_shards(
         &self,
         stream_arn: &str,
         checkpoint_id: &str,
         limit: usize,
-        resume: impl Fn(&str) -> Option<usize>,
+        resume: impl Fn(&KinesisShard) -> Option<usize>,
         seed: impl Fn(&[KinesisRecord]) -> usize,
     ) -> (Vec<ShardRead>, bool) {
         let mut kinesis_accounts = self.kinesis_state.write();
@@ -159,11 +173,16 @@ impl KinesisLambdaFirehosePoller {
                     offset
                 }
             };
-            let start = start.max(resume(&shard.shard_id).unwrap_or(0));
+            let start = start.max(resume(shard).unwrap_or(0));
             if start < shard.records.len() {
                 let end = shard.records.len().min(start.saturating_add(limit));
-                let records = shard.records[start..end].to_vec();
-                reads.push((shard.shard_id.clone(), start, end, records));
+                reads.push(ShardRead {
+                    shard_id: shard.shard_id.clone(),
+                    start,
+                    end,
+                    records: shard.records[start..end].to_vec(),
+                    trimmed: trimmed(shard),
+                });
             }
         }
         let seeded = !seeds.is_empty();
@@ -248,7 +267,14 @@ impl KinesisLambdaFirehosePoller {
             },
         );
 
-        for (shard_id, start, end, records) in deliveries {
+        for ShardRead {
+            shard_id,
+            start,
+            end,
+            records,
+            ..
+        } in deliveries
+        {
             // Build per-record JSON, then split into matched + dropped
             // by FilterCriteria. Dropped records still advance the
             // checkpoint — AWS docs say filtered-out records "do not
@@ -384,7 +410,10 @@ impl KinesisLambdaFirehosePoller {
                 &source.source_arn,
                 &source.checkpoint_id,
                 MAX_RECORDS_PER_READ,
-                |shard_id| progress.read.get(shard_id).copied(),
+                |shard| {
+                    let read = progress.read.get(&shard.shard_id)?;
+                    Some(read.saturating_sub(trimmed(shard)))
+                },
                 |records| {
                     records
                         .iter()
@@ -394,7 +423,14 @@ impl KinesisLambdaFirehosePoller {
             )
         };
 
-        for (shard_id, _, end, records) in reads {
+        for ShardRead {
+            shard_id,
+            end,
+            records,
+            trimmed,
+            ..
+        } in reads
+        {
             let read = SourceRead {
                 records: records
                     .iter()
@@ -405,7 +441,7 @@ impl KinesisLambdaFirehosePoller {
                     .map(|r| format!("{shard_id}:{}", r.sequence_number))
                     .collect(),
                 shard_id: shard_id.clone(),
-                end,
+                end: end + trimmed,
             };
             if let Err(error) =
                 engine.enqueue_from_source(&source.account, &source.region, &source.name, read)
@@ -421,7 +457,22 @@ impl KinesisLambdaFirehosePoller {
             .committed;
         let mut advanced = false;
         if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&source.source_arn) {
-            for (shard_id, end) in committed {
+            let shards: Vec<(String, usize)> = kinesis
+                .streams
+                .values()
+                .find(|s| s.stream_arn == source.source_arn)
+                .map(|s| {
+                    s.shards
+                        .iter()
+                        .map(|shard| (shard.shard_id.clone(), trimmed(shard)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (shard_id, trimmed) in shards {
+                let Some(committed) = committed.get(&shard_id) else {
+                    continue;
+                };
+                let end = committed.saturating_sub(trimmed);
                 if end > kinesis.lambda_checkpoint(&source.checkpoint_id, &shard_id) {
                     kinesis.set_lambda_checkpoint(&source.checkpoint_id, &shard_id, end);
                     advanced = true;
@@ -792,6 +843,23 @@ mod tests {
         );
         let east = mas.regional(account, "us-east-1").unwrap();
         assert!(east.lambda_checkpoints.is_empty());
+    }
+
+    #[test]
+    fn trimmed_keeps_record_positions_stable_across_retention_trim() {
+        let mut shard = fakecloud_kinesis::build_stream_shards(1).remove(0);
+        for n in 0..3 {
+            shard.records.push(KinesisRecord {
+                sequence_number: n.to_string(),
+                partition_key: "pk".into(),
+                data: Vec::new(),
+                approximate_arrival_timestamp: Utc::now(),
+            });
+            shard.next_sequence_number += 1;
+        }
+        let third = 2 + trimmed(&shard);
+        shard.records.drain(0..2);
+        assert_eq!(trimmed(&shard), third);
     }
 
     #[test]
