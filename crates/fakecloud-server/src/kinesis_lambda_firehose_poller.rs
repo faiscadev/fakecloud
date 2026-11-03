@@ -181,7 +181,7 @@ impl KinesisLambdaFirehosePoller {
                 let mut end = shard.records.len().min(start.saturating_add(limit));
                 let mut bytes = 0;
                 if let Some(over) = shard.records[start..end].iter().position(|r| {
-                    bytes += r.data.len();
+                    bytes += r.data.len() + r.partition_key.len();
                     bytes > max_bytes
                 }) {
                     end = start + over.max(1);
