@@ -28,8 +28,9 @@ use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
 use fakecloud_persistence::SnapshotHook;
 
-/// AWS caps a single GetRecords call at 10,000 records.
+/// AWS caps a single GetRecords call at 10,000 records and 10 MiB.
 const MAX_RECORDS_PER_READ: usize = 10_000;
+const MAX_BYTES_PER_READ: usize = 10 * 1024 * 1024;
 
 struct ShardRead {
     shard_id: String,
@@ -138,7 +139,8 @@ impl KinesisLambdaFirehosePoller {
         }
     }
 
-    /// Reads up to `limit` records from each shard of `stream_arn`, starting at
+    /// Reads up to `limit` records and, past the first record, up to
+    /// `max_bytes` of data from each shard of `stream_arn`, starting at
     /// the shard's checkpoint under `checkpoint_id`, or from the index
     /// `resume(shard)` returns when that is further. A shard with no checkpoint yet is seeded at
     /// `seed(&shard.records)`. Also reports whether any checkpoint was seeded.
@@ -147,6 +149,7 @@ impl KinesisLambdaFirehosePoller {
         stream_arn: &str,
         checkpoint_id: &str,
         limit: usize,
+        max_bytes: usize,
         resume: impl Fn(&KinesisShard) -> Option<usize>,
         seed: impl Fn(&[KinesisRecord]) -> usize,
     ) -> (Vec<ShardRead>, bool) {
@@ -175,7 +178,14 @@ impl KinesisLambdaFirehosePoller {
             };
             let start = start.max(resume(shard).unwrap_or(0));
             if start < shard.records.len() {
-                let end = shard.records.len().min(start.saturating_add(limit));
+                let mut end = shard.records.len().min(start.saturating_add(limit));
+                let mut bytes = 0;
+                if let Some(over) = shard.records[start..end].iter().position(|r| {
+                    bytes += r.data.len();
+                    bytes > max_bytes
+                }) {
+                    end = start + over.max(1);
+                }
                 reads.push(ShardRead {
                     shard_id: shard.shard_id.clone(),
                     start,
@@ -244,6 +254,7 @@ impl KinesisLambdaFirehosePoller {
             &mapping.stream_arn,
             &mapping.uuid,
             limit,
+            usize::MAX,
             |_| None,
             |records| {
                 match mapping
@@ -410,6 +421,7 @@ impl KinesisLambdaFirehosePoller {
                 &source.source_arn,
                 &source.checkpoint_id,
                 MAX_RECORDS_PER_READ,
+                MAX_BYTES_PER_READ,
                 |shard| {
                     let read = progress.read.get(&shard.shard_id)?;
                     Some(read.saturating_sub(trimmed(shard)))
