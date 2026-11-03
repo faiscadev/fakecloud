@@ -42,7 +42,7 @@ const MAX_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 /// Delay before retrying a failed S3 delivery. AWS documents that Firehose
 /// retries delivery to S3 every 5 seconds until the 24-hour retention ends
 /// ([`MAX_RETENTION`]). Retries still start only on worker ticks.
-const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Pending decoded bytes at which a stream stops reading its Kinesis source.
 const MAX_SOURCE_BACKLOG_BYTES: usize = 128 * 1024 * 1024;
@@ -97,6 +97,7 @@ impl Clock for SystemClock {
 struct ActiveBuffer {
     records: Vec<Bytes>,
     document_ids: Vec<String>,
+    arrivals: Vec<DateTime<Utc>>,
     source_positions: BTreeMap<String, usize>,
     // Decoded record bytes only: size triggers and drain reports never count
     // an `AppendDelimiterToRecord` newline.
@@ -197,6 +198,7 @@ impl StreamBuffer {
                 destination: config,
                 records: active.records,
                 document_ids: active.document_ids,
+                arrivals: active.arrivals,
                 oldest_arrival: active.first.wall,
                 delivery_time: now.wall,
                 object_key,
@@ -474,6 +476,7 @@ impl FirehoseEngine {
             let active = buffer.active.get_or_insert_with(|| ActiveBuffer {
                 records: Vec::new(),
                 document_ids: Vec::new(),
+                arrivals: Vec::new(),
                 source_positions: BTreeMap::new(),
                 input_bytes: 0,
                 first: now.clone(),
@@ -486,6 +489,7 @@ impl FirehoseEngine {
                 }
                 active.input_bytes += record.len();
                 active.records.push(record);
+                active.arrivals.push(now.wall);
             }
             if active.is_empty(&destination) {
                 // Clear before invoking any codec or writer.

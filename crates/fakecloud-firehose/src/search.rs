@@ -192,10 +192,15 @@ pub(crate) fn failed_record(
     search: &SearchDelivery,
     index: &str,
     failure: &Failure,
+    attempts: u64,
 ) -> Vec<u8> {
+    let arrival = batch
+        .arrivals
+        .get(failure.index)
+        .unwrap_or(&batch.oldest_arrival);
     let mut line = json!({
-        "attemptsMade": 1,
-        "arrivalTimestamp": batch.oldest_arrival.timestamp_millis(),
+        "attemptsMade": attempts,
+        "arrivalTimestamp": arrival.timestamp_millis(),
         "errorCode": failure.code,
         "errorMessage": failure.message,
         "attemptEndingTimestamp": Utc::now().timestamp_millis(),

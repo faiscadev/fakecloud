@@ -1215,6 +1215,7 @@ mod tests {
             destination: delivery_config(before.destination.as_ref().unwrap()).unwrap(),
             records: vec![bytes::Bytes::from_static(b"captured-old")],
             document_ids: Vec::new(),
+            arrivals: Vec::new(),
             oldest_arrival: Utc::now(),
             delivery_time: Utc::now(),
             object_key: "stale".into(),

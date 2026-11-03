@@ -23,6 +23,8 @@ pub struct DeliveryBatch {
     pub records: Vec<Bytes>,
     /// Source-derived document IDs, one per record; empty for Direct PUT.
     pub document_ids: Vec<String>,
+    /// Arrival time of each record; may be empty in tests.
+    pub arrivals: Vec<DateTime<Utc>>,
     pub oldest_arrival: DateTime<Utc>,
     pub delivery_time: DateTime<Utc>,
     pub object_key: String,
@@ -103,6 +105,7 @@ impl S3BatchWriter {
         search: &SearchDelivery,
     ) -> Result<DeliveryWriteOutcome, String> {
         let index = search::index_name(&search.index_name, &search.rotation, batch.oldest_arrival);
+        let mut attempts = 1;
         let failures = match search::post_bulk(search, &index, batch) {
             Ok(failures) => failures,
             Err(error) => {
@@ -112,6 +115,7 @@ impl S3BatchWriter {
                 if elapsed < search.retry {
                     return Err(error);
                 }
+                attempts += elapsed.as_secs() / crate::engine::RETRY_INTERVAL.as_secs();
                 (0..batch.records.len())
                     .map(|index| search::Failure {
                         index,
@@ -128,7 +132,7 @@ impl S3BatchWriter {
         if !failures.is_empty() {
             let lines: Vec<Vec<u8>> = failures
                 .iter()
-                .map(|failure| search::failed_record(batch, search, &index, failure))
+                .map(|failure| search::failed_record(batch, search, &index, failure, attempts))
                 .collect();
             let suffix = &batch.object_key[batch.destination.output.prefix.len()..];
             outcome = self.put(batch, &format!("{}{suffix}", search.error_prefix), &lines)?;
@@ -267,6 +271,7 @@ mod tests {
                 Bytes::from_static(b"second\x00\xff"),
             ],
             document_ids: Vec::new(),
+            arrivals: Vec::new(),
             oldest_arrival: now,
             delivery_time: now,
             object_key: "captured/events-1.gz".into(),
