@@ -136,9 +136,28 @@ struct StreamBuffer {
     // configuration was last reported, so each update warns once rather than
     // on every one-second scan.
     blocked_version: Option<String>,
+    // Source positions of discarded empty batches. They must not commit
+    // before the batches queued ahead of them.
+    held_positions: BTreeMap<String, usize>,
 }
 
 impl StreamBuffer {
+    /// Returns the source positions that are ready to commit.
+    fn discard(&mut self, positions: BTreeMap<String, usize>) -> BTreeMap<String, usize> {
+        advance(&mut self.held_positions, &positions);
+        self.release_held()
+    }
+
+    fn release_held(&mut self) -> BTreeMap<String, usize> {
+        if self.queue.is_empty() {
+            std::mem::take(&mut self.held_positions)
+        } else {
+            BTreeMap::new()
+        }
+    }
+
+    /// Returns the source positions of an empty batch it discards instead,
+    /// when they are ready to commit.
     fn detach(
         &mut self,
         key: &StreamKey,
@@ -146,17 +165,19 @@ impl StreamBuffer {
         config: DeliveryConfig,
         now: &TimePoint,
         force: bool,
-    ) {
-        let Some(active) = &self.active else { return };
+    ) -> BTreeMap<String, usize> {
+        let Some(active) = &self.active else {
+            return BTreeMap::new();
+        };
         if !force
             && active.input_bytes < config.buffering.size_bytes
             && now.monotonic.duration_since(active.first.monotonic) < config.buffering.interval
         {
-            return;
+            return BTreeMap::new();
         }
         let active = self.active.take().unwrap();
         if active.is_empty(&config) {
-            return;
+            return self.discard(active.source_positions);
         }
         let object_key = object_key(
             &key.name,
@@ -181,6 +202,7 @@ impl StreamBuffer {
                 object_key,
             },
         }));
+        BTreeMap::new()
     }
 }
 
@@ -447,7 +469,7 @@ impl FirehoseEngine {
         };
         let mut document_ids = source.map(|read| read.document_ids).unwrap_or_default();
         let buffer = registry.streams.entry(key.clone()).or_default();
-        let mut dropped = None;
+        let mut ready = BTreeMap::new();
         if accepted.iter().any(|admitted| *admitted) {
             let active = buffer.active.get_or_insert_with(|| ActiveBuffer {
                 records: Vec::new(),
@@ -467,14 +489,13 @@ impl FirehoseEngine {
             }
             if active.is_empty(&destination) {
                 // Clear before invoking any codec or writer.
-                dropped = buffer.active.take().map(|a| a.source_positions);
+                let positions = buffer.active.take().unwrap().source_positions;
+                ready = buffer.discard(positions);
             } else {
-                buffer.detach(&key, stream, destination, &now, false);
+                ready = buffer.detach(&key, stream, destination, &now, false);
             }
         }
-        if let Some(positions) = dropped {
-            registry.commit_source(&key, &positions);
-        }
+        registry.commit_source(&key, &ready);
         drop(registry);
         drop(config);
         self.core.wake.notify_one();
@@ -717,6 +738,7 @@ impl EngineCore {
             return Vec::new();
         }
         let mut ready = Vec::new();
+        let mut discarded = Vec::new();
         let mut keys: Vec<_> = registry.streams.keys().cloned().collect();
         if let Some(cursor) = &registry.last_scheduled {
             let start = keys.partition_point(|key| key <= cursor);
@@ -735,7 +757,7 @@ impl EngineCore {
             match destination {
                 Ok(destination) => {
                     buffer.blocked_version = None;
-                    buffer.detach(key, stream, destination, &now, force);
+                    discarded.push((key, buffer.detach(key, stream, destination, &now, force)));
                 }
                 Err(reason) => {
                     if let Some(active) = &buffer.active {
@@ -781,6 +803,9 @@ impl EngineCore {
                 }
             }
         }
+        for (key, positions) in discarded {
+            registry.commit_source(key, &positions);
+        }
         if let Some(job) = ready.last() {
             registry.last_scheduled = Some(job.batch.batch.stream.clone());
         }
@@ -816,7 +841,9 @@ impl EngineCore {
                 buffer.queue.pop_front();
                 buffer.retry_not_before = None;
                 buffer.failures = 0;
+                let held = buffer.release_held();
                 registry.commit_source(key, &completion.batch.source_positions);
+                registry.commit_source(key, &held);
                 true
             }
             Err(error) => {
@@ -839,7 +866,9 @@ impl EngineCore {
                         ?object_key, records = completion.batch.batch.records.len(),
                         bytes = completion.batch.input_bytes, ?error,
                         "Firehose batch discarded after failing delivery for 24 hours");
+                    let held = buffer.release_held();
                     registry.commit_source(key, &completion.batch.source_positions);
+                    registry.commit_source(key, &held);
                     return true;
                 } else {
                     let delay = RETRY_INTERVAL;
@@ -1313,6 +1342,45 @@ mod tests {
         assert!(!progress().backlogged);
 
         f.schedule(&mut jobs, false);
+        next_attempt(&mut entered)
+            .await
+            .reply
+            .send(Action::Commit)
+            .unwrap();
+        f.finish(&mut jobs).await;
+        assert_eq!(progress().committed["shard-0"], 2);
+    }
+
+    #[tokio::test]
+    async fn discarded_empty_source_records_commit_after_queued_batches() {
+        let f = Fixture::new(0);
+        let mut entered = f.controlled();
+        let read = |end: usize, data: &'static [u8]| SourceRead {
+            shard_id: "shard-0".into(),
+            end,
+            records: vec![Bytes::from_static(data)],
+            document_ids: vec![format!("shard-0:{end}")],
+        };
+        let progress = || f.engine.source_progress(ACCOUNT, REGION, NAME);
+        f.engine
+            .enqueue_from_source(ACCOUNT, REGION, NAME, read(1, b"a"))
+            .unwrap();
+        let mut jobs = Writes::default();
+        f.schedule(&mut jobs, false);
+        next_attempt(&mut entered)
+            .await
+            .reply
+            .send(Action::Fail)
+            .unwrap();
+        f.finish(&mut jobs).await;
+
+        f.engine
+            .enqueue_from_source(ACCOUNT, REGION, NAME, read(2, b""))
+            .unwrap();
+        assert!(progress().committed.is_empty());
+
+        f.advance(RETRY_INTERVAL.as_secs());
+        f.schedule(&mut jobs, true);
         next_attempt(&mut entered)
             .await
             .reply
