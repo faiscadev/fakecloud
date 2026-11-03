@@ -1339,6 +1339,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn s3_plus_search_destination_is_rejected_at_admission() {
+        let svc = service();
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "mixed",
+                "ExtendedS3DestinationConfiguration": {
+                    "RoleARN": "role", "BucketARN": "arn:aws:s3:::fh-bucket",
+                },
+                "ElasticsearchDestinationConfiguration": {
+                    "IndexName": "activity", "ClusterEndpoint": "http://localhost:9200",
+                    "S3Configuration": {"RoleARN": "role", "BucketARN": "arn:aws:s3:::fh-bucket"},
+                },
+            }),
+        ))
+        .unwrap();
+        let error = svc
+            .put_record(&request(
+                "PutRecord",
+                json!({"DeliveryStreamName": "mixed", "Record": {"Data": "eA=="}}),
+            ))
+            .err()
+            .expect("mixed destinations are rejected");
+        assert_eq!(error.code(), "InvalidArgumentException");
+        assert!(error.message().contains("more than one destination"));
+    }
+
     #[tokio::test]
     async fn disabled_delivery_features_keep_verbatim_supported_output() {
         let (svc, s3_state, disk, _tmp) = firehose_with_disk_s3("admission");

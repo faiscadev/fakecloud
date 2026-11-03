@@ -28,6 +28,9 @@ pub(crate) fn validate_stream_destination(stream: &DeliveryStream) -> Result<(),
         let kind = setting.strip_suffix("Description").unwrap_or(setting);
         return Err(unsupported(format!("{kind}Configuration")));
     }
+    if stream.extra_destinations.len() + usize::from(stream.destination.is_some()) > 1 {
+        return Err(unsupported("more than one destination"));
+    }
     Ok(())
 }
 
