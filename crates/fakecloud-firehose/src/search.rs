@@ -68,7 +68,13 @@ pub(crate) fn delivery(kind: &str, config: &Value) -> Result<DeliveryConfig, Aws
         .ok_or_else(|| invalid_argument("S3Configuration is required"))?;
     let mut delivery = delivery_config(&s3)?;
     let (size, interval) = parse_buffering_hints(config)?;
-    delivery.buffering = buffering_policy(Some(size.unwrap_or(5)), Some(interval.unwrap_or(300)))?;
+    let size = size.unwrap_or(5);
+    if size > 100 {
+        return Err(invalid_argument(format!(
+            "BufferingHints.SizeInMBs must be between 1 and 100, got {size}"
+        )));
+    }
+    delivery.buffering = buffering_policy(Some(size), Some(interval.unwrap_or(300)))?;
     let failed_folder = if kind == OPENSEARCH {
         "AmazonOpenSearchService-failed/"
     } else {
@@ -258,5 +264,20 @@ mod tests {
         });
         let err = delivery(ELASTICSEARCH, &config).unwrap_err();
         assert!(err.message().contains("ClusterEndpoint"));
+    }
+
+    #[test]
+    fn buffering_size_is_capped_at_100_mib() {
+        let config = |size: i64| {
+            json!({
+                "IndexName": "activity",
+                "ClusterEndpoint": "http://localhost:9200",
+                "BufferingHints": {"SizeInMBs": size, "IntervalInSeconds": 60},
+                "S3Configuration": {"RoleARN": "r", "BucketARN": "arn:aws:s3:::b"},
+            })
+        };
+        assert!(delivery(OPENSEARCH, &config(100)).is_ok());
+        let err = delivery(OPENSEARCH, &config(101)).unwrap_err();
+        assert!(err.message().contains("between 1 and 100"));
     }
 }
