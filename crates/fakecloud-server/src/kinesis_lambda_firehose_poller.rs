@@ -519,7 +519,7 @@ fn collect_sources(firehose_state: &SharedFirehoseState) -> Vec<Source> {
                             checkpoint_id: format!(
                                 "{}@{}",
                                 stream.arn,
-                                stream.created_at.timestamp_millis()
+                                stream.created_at.timestamp_nanos_opt().unwrap_or_default()
                             ),
                             created_at: stream.created_at,
                         })
