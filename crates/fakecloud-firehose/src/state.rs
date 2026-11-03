@@ -98,6 +98,15 @@ pub struct DeliveryStream {
     /// silently dropping it.
     #[serde(default)]
     pub extra_destinations: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub kinesis_source: Option<KinesisSource>,
+}
+
+/// `KinesisStreamSourceConfiguration` of a `KinesisStreamAsSource` stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KinesisSource {
+    pub kinesis_stream_arn: String,
+    pub role_arn: String,
 }
 
 /// Server-side encryption (SSE) configuration persisted on a delivery stream.

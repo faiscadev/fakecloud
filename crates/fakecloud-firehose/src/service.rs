@@ -19,8 +19,8 @@ use fakecloud_s3::SharedS3State;
 use crate::config::{parse_buffering_hints, validate_destination_strings, validate_file_extension};
 use crate::engine::FirehoseEngine;
 use crate::state::{
-    DeliveryStream, EncryptionConfig, FirehoseAccounts, FirehoseSnapshot, S3Destination,
-    SharedFirehoseState, FIREHOSE_SNAPSHOT_SCHEMA_VERSION,
+    DeliveryStream, EncryptionConfig, FirehoseAccounts, FirehoseSnapshot, KinesisSource,
+    S3Destination, SharedFirehoseState, FIREHOSE_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// Actions that mutate persisted Firehose state and therefore must trigger a
@@ -323,6 +323,29 @@ fn validate_redshift_intermediate_compression(config: &Value) -> Result<(), AwsS
 /// carried them; an update can take either path (a full parse when the stream
 /// has no S3 destination yet), so it checks both. Shared with CloudFormation
 /// provisioning (`update == false`).
+/// The `KinesisStreamSourceConfiguration` of a `KinesisStreamAsSource`
+/// stream, which requires it. Other stream types have no source.
+pub fn parse_kinesis_source(
+    stream_type: &str,
+    body: &Value,
+) -> Result<Option<KinesisSource>, AwsServiceError> {
+    if stream_type != "KinesisStreamAsSource" {
+        return Ok(None);
+    }
+    let config = &body["KinesisStreamSourceConfiguration"];
+    let member = |name: &str| {
+        config[name]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| missing(&format!("KinesisStreamSourceConfiguration.{name}")))
+    };
+    Ok(Some(KinesisSource {
+        kinesis_stream_arn: member("KinesisStreamARN")?,
+        role_arn: member("RoleARN")?,
+    }))
+}
+
 pub fn validate_s3_destination_compression(
     config: &Value,
     update: bool,
@@ -675,6 +698,7 @@ impl FirehoseService {
             None => parse_s3_destination(&body["ExtendedS3DestinationConfiguration"])?,
         };
         let extra_destinations = extract_extra_destinations(&body, "Configuration");
+        let kinesis_source = parse_kinesis_source(&stream_type, &body)?;
 
         // Create-time Tags must be returned by ListTagsForDeliveryStream without
         // a follow-up TagDeliveryStream call (bug-hunt).
@@ -719,6 +743,7 @@ impl FirehoseService {
             tags: create_tags,
             encryption,
             extra_destinations,
+            kinesis_source,
         };
         streams.insert(name, stream);
         Ok(AwsResponse::ok_json(json!({
@@ -772,6 +797,15 @@ impl FirehoseService {
         });
         if let Some(enc) = &stream.encryption {
             description["DeliveryStreamEncryptionConfiguration"] = encryption_config_json(enc);
+        }
+        if let Some(source) = &stream.kinesis_source {
+            description["Source"] = json!({
+                "KinesisStreamSourceDescription": {
+                    "KinesisStreamARN": source.kinesis_stream_arn,
+                    "RoleARN": source.role_arn,
+                    "DeliveryStartTimestamp": stream.created_at.timestamp() as f64,
+                }
+            });
         }
 
         Ok(AwsResponse::ok_json(json!({
@@ -1303,6 +1337,34 @@ mod tests {
                 .message()
                 .contains("HttpEndpointDestinationConfiguration"));
         }
+    }
+
+    #[test]
+    fn s3_plus_search_destination_is_rejected_at_admission() {
+        let svc = service();
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "mixed",
+                "ExtendedS3DestinationConfiguration": {
+                    "RoleARN": "role", "BucketARN": "arn:aws:s3:::fh-bucket",
+                },
+                "ElasticsearchDestinationConfiguration": {
+                    "IndexName": "activity", "ClusterEndpoint": "http://localhost:9200",
+                    "S3Configuration": {"RoleARN": "role", "BucketARN": "arn:aws:s3:::fh-bucket"},
+                },
+            }),
+        ))
+        .unwrap();
+        let error = svc
+            .put_record(&request(
+                "PutRecord",
+                json!({"DeliveryStreamName": "mixed", "Record": {"Data": "eA=="}}),
+            ))
+            .err()
+            .expect("mixed destinations are rejected");
+        assert_eq!(error.code(), "InvalidArgumentException");
+        assert!(error.message().contains("more than one destination"));
     }
 
     #[tokio::test]
@@ -3210,6 +3272,20 @@ mod tests {
             .is_empty());
     }
 
+    #[test]
+    fn kinesis_source_stream_requires_source_configuration() {
+        let svc = service();
+        let mut body = kinesis_source_body("no-source");
+        body["KinesisStreamSourceConfiguration"]["RoleARN"] = json!("");
+        let Err(err) = svc.create_delivery_stream(&request("CreateDeliveryStream", body)) else {
+            panic!("a source stream without RoleARN must be rejected");
+        };
+        assert_eq!(err.code(), "InvalidArgumentException");
+        assert!(err
+            .message()
+            .contains("KinesisStreamSourceConfiguration.RoleARN"));
+    }
+
     fn kinesis_source_body(name: &str) -> Value {
         json!({
             "DeliveryStreamName": name,
@@ -3414,7 +3490,14 @@ mod tests {
         for (account, region, stream_type) in scopes {
             let mut req = request(
                 "CreateDeliveryStream",
-                json!({ "DeliveryStreamName": "same-name", "DeliveryStreamType": stream_type }),
+                json!({
+                    "DeliveryStreamName": "same-name",
+                    "DeliveryStreamType": stream_type,
+                    "KinesisStreamSourceConfiguration": {
+                        "KinesisStreamARN": "arn:aws:kinesis:us-east-1:123456789012:stream/source",
+                        "RoleARN": "arn:aws:iam::123456789012:role/fh",
+                    },
+                }),
             );
             req.account_id = account.to_string();
             req.region = region.to_string();

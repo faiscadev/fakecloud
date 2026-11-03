@@ -42,7 +42,36 @@ const MAX_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 /// Delay before retrying a failed S3 delivery. AWS documents that Firehose
 /// retries delivery to S3 every 5 seconds until the 24-hour retention ends
 /// ([`MAX_RETENTION`]). Retries still start only on worker ticks.
-const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Pending decoded bytes at which a stream stops reading its Kinesis source.
+const MAX_SOURCE_BACKLOG_BYTES: usize = 128 * 1024 * 1024;
+
+/// Records read from one Kinesis shard: `end` is the reader's position just
+/// past the last record, and `document_ids` holds one ID per record.
+pub struct SourceRead {
+    pub shard_id: String,
+    pub end: usize,
+    pub records: Vec<Bytes>,
+    pub document_ids: Vec<String>,
+}
+
+/// Per-shard offsets of a `KinesisStreamAsSource` stream: `read` is what the
+/// engine has accepted, `committed` what has been delivered or written to the
+/// failure location. `backlogged` asks the reader to pause.
+#[derive(Clone, Debug, Default)]
+pub struct SourceProgress {
+    pub read: BTreeMap<String, usize>,
+    pub committed: BTreeMap<String, usize>,
+    pub backlogged: bool,
+}
+
+fn advance(offsets: &mut BTreeMap<String, usize>, positions: &BTreeMap<String, usize>) {
+    for (shard, end) in positions {
+        let offset = offsets.entry(shard.clone()).or_default();
+        *offset = (*offset).max(*end);
+    }
+}
 
 #[derive(Clone)]
 struct TimePoint {
@@ -67,6 +96,9 @@ impl Clock for SystemClock {
 
 struct ActiveBuffer {
     records: Vec<Bytes>,
+    document_ids: Vec<String>,
+    arrivals: Vec<DateTime<Utc>>,
+    source_positions: BTreeMap<String, usize>,
     // Decoded record bytes only: size triggers and drain reports never count
     // an `AppendDelimiterToRecord` newline.
     input_bytes: usize,
@@ -90,6 +122,7 @@ struct DetachedBatch {
     input_bytes: usize,
     // Oldest record's arrival; bounds retries to `MAX_RETENTION`.
     first_arrival: Instant,
+    source_positions: BTreeMap<String, usize>,
 }
 
 #[derive(Default)]
@@ -104,9 +137,28 @@ struct StreamBuffer {
     // configuration was last reported, so each update warns once rather than
     // on every one-second scan.
     blocked_version: Option<String>,
+    // Source positions of discarded empty batches. They must not commit
+    // before the batches queued ahead of them.
+    held_positions: BTreeMap<String, usize>,
 }
 
 impl StreamBuffer {
+    /// Returns the source positions that are ready to commit.
+    fn discard(&mut self, positions: BTreeMap<String, usize>) -> BTreeMap<String, usize> {
+        advance(&mut self.held_positions, &positions);
+        self.release_held()
+    }
+
+    fn release_held(&mut self) -> BTreeMap<String, usize> {
+        if self.queue.is_empty() {
+            std::mem::take(&mut self.held_positions)
+        } else {
+            BTreeMap::new()
+        }
+    }
+
+    /// Returns the source positions of an empty batch it discards instead,
+    /// when they are ready to commit.
     fn detach(
         &mut self,
         key: &StreamKey,
@@ -114,17 +166,19 @@ impl StreamBuffer {
         config: DeliveryConfig,
         now: &TimePoint,
         force: bool,
-    ) {
-        let Some(active) = &self.active else { return };
+    ) -> BTreeMap<String, usize> {
+        let Some(active) = &self.active else {
+            return BTreeMap::new();
+        };
         if !force
             && active.input_bytes < config.buffering.size_bytes
             && now.monotonic.duration_since(active.first.monotonic) < config.buffering.interval
         {
-            return;
+            return BTreeMap::new();
         }
         let active = self.active.take().unwrap();
         if active.is_empty(&config) {
-            return;
+            return self.discard(active.source_positions);
         }
         let object_key = object_key(
             &key.name,
@@ -137,16 +191,20 @@ impl StreamBuffer {
         self.queue.push_back(Arc::new(DetachedBatch {
             input_bytes: active.input_bytes,
             first_arrival: active.first.monotonic,
+            source_positions: active.source_positions,
             batch: DeliveryBatch {
                 stream: key.clone(),
                 version_id: stream.version_id.clone(),
                 destination: config,
                 records: active.records,
+                document_ids: active.document_ids,
+                arrivals: active.arrivals,
                 oldest_arrival: active.first.wall,
                 delivery_time: now.wall,
                 object_key,
             },
         }));
+        BTreeMap::new()
     }
 }
 
@@ -156,6 +214,7 @@ struct Registry {
     // Ingestion accounting outlives a drained S3 buffer and also covers streams
     // with configuration-only destinations. Never used by delivery retries.
     windows: BTreeMap<StreamKey, ThroughputWindow>,
+    sources: BTreeMap<StreamKey, SourceProgress>,
     // Last assigned stream, not last scanned. A removed generation remains a
     // valid ordering cursor; range selection skips it and wraps naturally.
     last_scheduled: Option<StreamKey>,
@@ -252,8 +311,47 @@ impl FirehoseEngine {
         name: &str,
         records: Vec<Bytes>,
     ) -> Result<(), AwsServiceError> {
-        self.enqueue_admission(account, region, name, records, None)
+        self.enqueue_admission(account, region, name, records, None, None)
             .map(|_| ())
+    }
+
+    /// Hand off records a `KinesisStreamAsSource` stream read from its source
+    /// stream. Unmetered: the Direct PUT throughput quotas do not apply.
+    pub fn enqueue_from_source(
+        &self,
+        account: &str,
+        region: &str,
+        name: &str,
+        mut read: SourceRead,
+    ) -> Result<(), AwsServiceError> {
+        let records = std::mem::take(&mut read.records);
+        self.enqueue_admission(account, region, name, records, None, Some(read))
+            .map(|_| ())
+    }
+
+    pub fn source_progress(&self, account: &str, region: &str, name: &str) -> SourceProgress {
+        let config = self.core.state.read();
+        let Some(stream) = config
+            .get(account)
+            .and_then(|s| s.streams(region))
+            .and_then(|s| s.get(name))
+        else {
+            return SourceProgress::default();
+        };
+        let key = StreamKey {
+            account_id: account.into(),
+            region: region.into(),
+            name: name.into(),
+            instance_id: stream.instance_id,
+        };
+        let registry = self.core.registry.lock();
+        let mut progress = registry.sources.get(&key).cloned().unwrap_or_default();
+        if let Some(buffer) = registry.streams.get(&key) {
+            let pending = buffer.active.as_ref().map_or(0, |a| a.input_bytes)
+                + buffer.queue.iter().map(|b| b.input_bytes).sum::<usize>();
+            progress.backlogged = buffer.failures > 0 || pending >= MAX_SOURCE_BACKLOG_BYTES;
+        }
+        progress
     }
 
     pub(crate) fn enqueue_put(
@@ -286,7 +384,7 @@ impl FirehoseEngine {
         });
         let limits =
             limits.filter(|l| l.requests.is_some() || l.records.is_some() || l.mib.is_some());
-        self.enqueue_admission(account, region, name, records, limits)
+        self.enqueue_admission(account, region, name, records, limits, None)
     }
 
     fn enqueue_admission(
@@ -296,6 +394,7 @@ impl FirehoseEngine {
         name: &str,
         records: Vec<Bytes>,
         limits: Option<ThroughputLimits>,
+        source: Option<SourceRead>,
     ) -> Result<Vec<bool>, AwsServiceError> {
         // Every path holding both takes configuration before the registry. Keep
         // the read guard until admission and immediate detachment both commit.
@@ -321,7 +420,7 @@ impl FirehoseEngine {
             })?;
         // Public APIs and internal hooks are DirectPut producers, even without
         // an S3 destination/backend. Preserve the shared source admission guard.
-        if stream.stream_type == "KinesisStreamAsSource" {
+        if stream.stream_type == "KinesisStreamAsSource" && source.is_none() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidArgumentException",
@@ -354,30 +453,53 @@ impl FirehoseEngine {
         }
         // Non-S3 streams retain the configuration-only acknowledgement, but
         // public ingestion is still metered even without an S3 backend.
+        let position = source
+            .as_ref()
+            .map(|read| BTreeMap::from([(read.shard_id.clone(), read.end)]))
+            .unwrap_or_default();
+        if !position.is_empty() {
+            advance(
+                &mut registry.sources.entry(key.clone()).or_default().read,
+                &position,
+            );
+        }
         let Some(destination) = destination else {
+            if !position.is_empty() {
+                registry.commit_source(&key, &position);
+            }
             return Ok(accepted);
         };
+        let mut document_ids = source.map(|read| read.document_ids).unwrap_or_default();
         let buffer = registry.streams.entry(key.clone()).or_default();
+        let mut ready = BTreeMap::new();
         if accepted.iter().any(|admitted| *admitted) {
             let active = buffer.active.get_or_insert_with(|| ActiveBuffer {
                 records: Vec::new(),
+                document_ids: Vec::new(),
+                arrivals: Vec::new(),
+                source_positions: BTreeMap::new(),
                 input_bytes: 0,
                 first: now.clone(),
             });
+            advance(&mut active.source_positions, &position);
+            active.document_ids.append(&mut document_ids);
             for (record, admitted) in records.into_iter().zip(&accepted) {
                 if !admitted {
                     continue;
                 }
                 active.input_bytes += record.len();
                 active.records.push(record);
+                active.arrivals.push(now.wall);
             }
             if active.is_empty(&destination) {
                 // Clear before invoking any codec or writer.
-                buffer.active = None;
+                let positions = buffer.active.take().unwrap().source_positions;
+                ready = buffer.discard(positions);
             } else {
-                buffer.detach(&key, stream, destination, &now, false);
+                ready = buffer.detach(&key, stream, destination, &now, false);
             }
         }
+        registry.commit_source(&key, &ready);
         drop(registry);
         drop(config);
         self.core.wake.notify_one();
@@ -537,6 +659,17 @@ async fn run_worker(core: Weak<EngineCore>, wake: Arc<Notify>) {
     }
 }
 
+impl Registry {
+    fn commit_source(&mut self, key: &StreamKey, positions: &BTreeMap<String, usize>) {
+        if !positions.is_empty() {
+            advance(
+                &mut self.sources.entry(key.clone()).or_default().committed,
+                positions,
+            );
+        }
+    }
+}
+
 impl EngineCore {
     fn finish_shutdown(&self, blocked: &BTreeSet<StreamKey>) -> Option<DrainReport> {
         // Pin configuration through the final snapshot. A restoration between
@@ -548,6 +681,9 @@ impl EngineCore {
             .retain(|key, _| current(&config, key).is_some());
         registry
             .windows
+            .retain(|key, _| current(&config, key).is_some());
+        registry
+            .sources
             .retain(|key, _| current(&config, key).is_some());
         for (key, buffer) in &registry.streams {
             if blocked.contains(key) || buffer.in_flight {
@@ -599,10 +735,14 @@ impl EngineCore {
         registry
             .windows
             .retain(|key, _| current(&config, key).is_some());
+        registry
+            .sources
+            .retain(|key, _| current(&config, key).is_some());
         if registry.closed && !force {
             return Vec::new();
         }
         let mut ready = Vec::new();
+        let mut discarded = Vec::new();
         let mut keys: Vec<_> = registry.streams.keys().cloned().collect();
         if let Some(cursor) = &registry.last_scheduled {
             let start = keys.partition_point(|key| key <= cursor);
@@ -621,7 +761,7 @@ impl EngineCore {
             match destination {
                 Ok(destination) => {
                     buffer.blocked_version = None;
-                    buffer.detach(key, stream, destination, &now, force);
+                    discarded.push((key, buffer.detach(key, stream, destination, &now, force)));
                 }
                 Err(reason) => {
                     if let Some(active) = &buffer.active {
@@ -667,6 +807,9 @@ impl EngineCore {
                 }
             }
         }
+        for (key, positions) in discarded {
+            registry.commit_source(key, &positions);
+        }
         if let Some(job) = ready.last() {
             registry.last_scheduled = Some(job.batch.batch.stream.clone());
         }
@@ -702,6 +845,9 @@ impl EngineCore {
                 buffer.queue.pop_front();
                 buffer.retry_not_before = None;
                 buffer.failures = 0;
+                let held = buffer.release_held();
+                registry.commit_source(key, &completion.batch.source_positions);
+                registry.commit_source(key, &held);
                 true
             }
             Err(error) => {
@@ -724,6 +870,9 @@ impl EngineCore {
                         ?object_key, records = completion.batch.batch.records.len(),
                         bytes = completion.batch.input_bytes, ?error,
                         "Firehose batch discarded after failing delivery for 24 hours");
+                    let held = buffer.release_held();
+                    registry.commit_source(key, &completion.batch.source_positions);
+                    registry.commit_source(key, &held);
                     return true;
                 } else {
                     let delay = RETRY_INTERVAL;
@@ -753,6 +902,9 @@ pub(crate) fn throughput_error() -> AwsServiceError {
 /// `Ok(None)`: no destination is configured, so nothing is written.
 fn stream_delivery(stream: &DeliveryStream) -> Result<Option<DeliveryConfig>, AwsServiceError> {
     crate::admission::validate_stream_destination(stream)?;
+    if let Some((kind, config)) = stream.extra_destinations.iter().next() {
+        return crate::search::delivery(kind, config).map(Some);
+    }
     stream.destination.as_ref().map(delivery_config).transpose()
 }
 
@@ -1151,6 +1303,95 @@ mod tests {
                 .core
                 .complete(bounded(jobs.next()).await.unwrap());
         }
+    }
+
+    #[tokio::test]
+    async fn source_offsets_commit_in_order_and_failures_pause_reading() {
+        let f = Fixture::new(0);
+        let mut entered = f.controlled();
+        let read = |end: usize, data: &'static [u8]| SourceRead {
+            shard_id: "shard-0".into(),
+            end,
+            records: vec![Bytes::from_static(data)],
+            document_ids: vec![format!("shard-0:{end}")],
+        };
+        let progress = || f.engine.source_progress(ACCOUNT, REGION, NAME);
+        f.engine
+            .enqueue_from_source(ACCOUNT, REGION, NAME, read(1, b"a"))
+            .unwrap();
+        assert_eq!(progress().read["shard-0"], 1);
+        assert!(progress().committed.is_empty());
+
+        let mut jobs = Writes::default();
+        f.schedule(&mut jobs, false);
+        let first = next_attempt(&mut entered).await;
+        assert_eq!(first.batch.document_ids, vec!["shard-0:1".to_owned()]);
+        first.reply.send(Action::Fail).unwrap();
+        f.finish(&mut jobs).await;
+        assert!(progress().backlogged);
+        assert!(progress().committed.is_empty());
+
+        f.engine
+            .enqueue_from_source(ACCOUNT, REGION, NAME, read(2, b"b"))
+            .unwrap();
+        f.advance(RETRY_INTERVAL.as_secs());
+        f.schedule(&mut jobs, true);
+        next_attempt(&mut entered)
+            .await
+            .reply
+            .send(Action::Commit)
+            .unwrap();
+        f.finish(&mut jobs).await;
+        assert_eq!(progress().committed["shard-0"], 1);
+        assert!(!progress().backlogged);
+
+        f.schedule(&mut jobs, false);
+        next_attempt(&mut entered)
+            .await
+            .reply
+            .send(Action::Commit)
+            .unwrap();
+        f.finish(&mut jobs).await;
+        assert_eq!(progress().committed["shard-0"], 2);
+    }
+
+    #[tokio::test]
+    async fn discarded_empty_source_records_commit_after_queued_batches() {
+        let f = Fixture::new(0);
+        let mut entered = f.controlled();
+        let read = |end: usize, data: &'static [u8]| SourceRead {
+            shard_id: "shard-0".into(),
+            end,
+            records: vec![Bytes::from_static(data)],
+            document_ids: vec![format!("shard-0:{end}")],
+        };
+        let progress = || f.engine.source_progress(ACCOUNT, REGION, NAME);
+        f.engine
+            .enqueue_from_source(ACCOUNT, REGION, NAME, read(1, b"a"))
+            .unwrap();
+        let mut jobs = Writes::default();
+        f.schedule(&mut jobs, false);
+        next_attempt(&mut entered)
+            .await
+            .reply
+            .send(Action::Fail)
+            .unwrap();
+        f.finish(&mut jobs).await;
+
+        f.engine
+            .enqueue_from_source(ACCOUNT, REGION, NAME, read(2, b""))
+            .unwrap();
+        assert!(progress().committed.is_empty());
+
+        f.advance(RETRY_INTERVAL.as_secs());
+        f.schedule(&mut jobs, true);
+        next_attempt(&mut entered)
+            .await
+            .reply
+            .send(Action::Commit)
+            .unwrap();
+        f.finish(&mut jobs).await;
+        assert_eq!(progress().committed["shard-0"], 2);
     }
 
     #[tokio::test]

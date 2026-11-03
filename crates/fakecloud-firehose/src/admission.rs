@@ -7,7 +7,7 @@ use http::StatusCode;
 use crate::output::Compression;
 use crate::state::{DeliveryStream, S3Destination};
 
-fn unsupported(setting: impl Into<String>) -> AwsServiceError {
+pub(crate) fn unsupported(setting: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
         "InvalidArgumentException",
@@ -19,9 +19,17 @@ fn unsupported(setting: impl Into<String>) -> AwsServiceError {
 }
 
 pub(crate) fn validate_stream_destination(stream: &DeliveryStream) -> Result<(), AwsServiceError> {
-    if let Some(setting) = stream.extra_destinations.keys().next() {
+    if let Some(setting) = stream.extra_destinations.keys().find(|key| {
+        !matches!(
+            key.as_str(),
+            crate::search::ELASTICSEARCH | crate::search::OPENSEARCH
+        )
+    }) {
         let kind = setting.strip_suffix("Description").unwrap_or(setting);
         return Err(unsupported(format!("{kind}Configuration")));
+    }
+    if stream.extra_destinations.len() + usize::from(stream.destination.is_some()) > 1 {
+        return Err(unsupported("more than one destination"));
     }
     Ok(())
 }

@@ -249,6 +249,8 @@ impl ResourceProvisioner {
             tags,
             encryption: None,
             extra_destinations: std::collections::BTreeMap::new(),
+            kinesis_source: fakecloud_firehose::parse_kinesis_source(&stream_type, props)
+                .map_err(|err| err.to_string())?,
         };
 
         let mut state = self.firehose_state.write();
@@ -1212,6 +1214,8 @@ mod tests {
             version_id: "1".into(),
             destination: delivery_config(before.destination.as_ref().unwrap()).unwrap(),
             records: vec![bytes::Bytes::from_static(b"captured-old")],
+            document_ids: Vec::new(),
+            arrivals: Vec::new(),
             oldest_arrival: Utc::now(),
             delivery_time: Utc::now(),
             object_key: "stale".into(),

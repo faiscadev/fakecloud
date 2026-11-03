@@ -11,6 +11,7 @@ use fakecloud_s3::SharedS3State;
 use parking_lot::RwLock;
 
 use crate::output::encode_records;
+use crate::search::{self, SearchDelivery};
 use crate::{DeliveryConfig, SharedFirehoseState, StreamKey};
 
 /// An immutable destination/version snapshot and an already chosen, retry-stable key.
@@ -20,6 +21,10 @@ pub struct DeliveryBatch {
     pub version_id: String,
     pub destination: DeliveryConfig,
     pub records: Vec<Bytes>,
+    /// Source-derived document IDs, one per record; empty for Direct PUT.
+    pub document_ids: Vec<String>,
+    /// Arrival time of each record; may be empty in tests.
+    pub arrivals: Vec<DateTime<Utc>>,
     pub oldest_arrival: DateTime<Utc>,
     pub delivery_time: DateTime<Utc>,
     pub object_key: String,
@@ -45,8 +50,13 @@ impl S3BatchWriter {
     }
 }
 
-impl BatchWriter for S3BatchWriter {
-    fn write(&self, batch: &DeliveryBatch) -> Result<DeliveryWriteOutcome, String> {
+impl S3BatchWriter {
+    fn put(
+        &self,
+        batch: &DeliveryBatch,
+        key: &str,
+        records: &[impl AsRef<[u8]>],
+    ) -> Result<DeliveryWriteOutcome, String> {
         // A missing bucket is the common persistent failure; detect it before
         // spending a full encode (up to ~132 MiB) on every retry.
         ensure_delivery_bucket(
@@ -55,8 +65,8 @@ impl BatchWriter for S3BatchWriter {
             &batch.destination.bucket,
         )?;
         let compression = batch.destination.output.compression;
-        let body = encode_records(&batch.records, &batch.destination.output)
-            .map_err(|e| format!("failed to encode Firehose batch {}: {e}", batch.object_key))?;
+        let body = encode_records(records, &batch.destination.output)
+            .map_err(|e| format!("failed to encode Firehose batch {key}: {e}"))?;
         // Snapshot the backend before either configuration or S3 state is locked.
         let store = self.store.read().clone();
         put_object_via_store_guarded(
@@ -65,7 +75,7 @@ impl BatchWriter for S3BatchWriter {
             DeliveryObjectRequest {
                 account: &batch.stream.account_id,
                 bucket: &batch.destination.bucket,
-                key: &batch.object_key,
+                key,
                 body,
                 options: DeliveryObjectOptions {
                     content_type: Some("application/octet-stream".into()),
@@ -87,6 +97,56 @@ impl BatchWriter for S3BatchWriter {
                 Some(config)
             },
         )
+    }
+
+    fn write_search(
+        &self,
+        batch: &DeliveryBatch,
+        search: &SearchDelivery,
+    ) -> Result<DeliveryWriteOutcome, String> {
+        let index = search::index_name(&search.index_name, &search.rotation, batch.oldest_arrival);
+        let mut attempts = 1;
+        let failures = match search::post_bulk(search, &index, batch) {
+            Ok(failures) => failures,
+            Err(error) => {
+                let elapsed = (Utc::now() - batch.delivery_time)
+                    .to_std()
+                    .unwrap_or_default();
+                if elapsed < search.retry {
+                    return Err(error);
+                }
+                attempts += elapsed.as_secs() / crate::engine::RETRY_INTERVAL.as_secs();
+                (0..batch.records.len())
+                    .map(|index| search::Failure {
+                        index,
+                        code: "OS.ConnectionFailed".into(),
+                        message: error.clone(),
+                    })
+                    .collect()
+            }
+        };
+        let mut outcome = DeliveryWriteOutcome::Committed;
+        if search.backup_all {
+            outcome = self.put(batch, &batch.object_key, &batch.records)?;
+        }
+        if !failures.is_empty() {
+            let lines: Vec<Vec<u8>> = failures
+                .iter()
+                .map(|failure| search::failed_record(batch, search, &index, failure, attempts))
+                .collect();
+            let suffix = &batch.object_key[batch.destination.output.prefix.len()..];
+            outcome = self.put(batch, &format!("{}{suffix}", search.error_prefix), &lines)?;
+        }
+        Ok(outcome)
+    }
+}
+
+impl BatchWriter for S3BatchWriter {
+    fn write(&self, batch: &DeliveryBatch) -> Result<DeliveryWriteOutcome, String> {
+        if let Some(search) = &batch.destination.search {
+            return self.write_search(batch, search);
+        }
+        self.put(batch, &batch.object_key, &batch.records)
     }
 }
 
@@ -181,6 +241,7 @@ mod tests {
             tags: BTreeMap::new(),
             encryption: None,
             extra_destinations: BTreeMap::new(),
+            kinesis_source: None,
         };
         let batch = DeliveryBatch {
             stream: StreamKey {
@@ -203,11 +264,14 @@ mod tests {
                     interval: Duration::from_secs(60),
                 },
                 encryption: DeliveredEncryption::AsDelivered,
+                search: None,
             },
             records: vec![
                 Bytes::from_static(b"first\n"),
                 Bytes::from_static(b"second\x00\xff"),
             ],
+            document_ids: Vec::new(),
+            arrivals: Vec::new(),
             oldest_arrival: now,
             delivery_time: now,
             object_key: "captured/events-1.gz".into(),
