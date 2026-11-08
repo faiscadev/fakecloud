@@ -75,6 +75,9 @@ pub struct DistributionConfig {
 
 impl DistributionConfig {
     pub fn ensure_aws_defaults(&mut self) {
+        if self.cache_behaviors.is_none() {
+            self.cache_behaviors = Some(CacheBehaviors::default());
+        }
         if self.origin_groups.is_none() {
             self.origin_groups = Some(OriginGroups::default());
         }
