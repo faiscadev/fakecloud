@@ -32,9 +32,9 @@ fi
 # --- Performance metrics ---
 # These have no in-repo source of truth. When re-measurement establishes a new
 # number, update these constants and audit every page in FILES in the same PR.
-STARTUP_MS=300
-IDLE_MEM_MIB=10
-BINARY_MB=19
+STARTUP_MS=400
+IDLE_MEM_MIB=30
+BINARY_MB=120
 
 # --- Lambda runtime count ---
 # Canonical source: `runtime_to_image()` in
