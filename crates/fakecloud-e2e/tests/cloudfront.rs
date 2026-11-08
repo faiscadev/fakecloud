@@ -8,12 +8,13 @@
 
 mod helpers;
 
+use aws_sdk_cloudfront::types::builders::DistributionConfigBuilder;
 use aws_sdk_cloudfront::types::{
     CacheBehavior, CacheBehaviors, CachedMethods, CookiePreference, CustomErrorResponse,
     CustomErrorResponses, DefaultCacheBehavior, DistributionConfig, ForwardedValues,
-    GeoRestriction, GeoRestrictionType, Headers, HttpVersion, ItemSelection, Method,
-    MinimumProtocolVersion, Origin, Origins, Paths, PriceClass, Restrictions, ViewerCertificate,
-    ViewerProtocolPolicy,
+    GeoRestriction, GeoRestrictionType, Headers, HttpVersion, ItemSelection, LoggingConfig, Method,
+    MinimumProtocolVersion, Origin, Origins, Paths, PriceClass, Restrictions, SslSupportMethod,
+    ViewerCertificate, ViewerProtocolPolicy,
 };
 use helpers::TestServer;
 
@@ -459,4 +460,431 @@ async fn cloudfront_complex_config_roundtrips() {
         cfg.custom_error_responses().unwrap().items()[0].error_caching_min_ttl(),
         Some(10)
     );
+}
+
+/// The fewest members `CreateDistribution` accepts: every optional envelope is
+/// left for CloudFront to fill in.
+fn bare_config(caller_ref: &str) -> DistributionConfig {
+    bare_builder(caller_ref).build().unwrap()
+}
+
+fn bare_builder(caller_ref: &str) -> DistributionConfigBuilder {
+    DistributionConfig::builder()
+        .caller_reference(caller_ref)
+        .comment("")
+        .enabled(true)
+        .origins(
+            Origins::builder()
+                .quantity(1)
+                .items(
+                    Origin::builder()
+                        .id("primary")
+                        .domain_name("example.com")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .default_cache_behavior(
+            DefaultCacheBehavior::builder()
+                .target_origin_id("primary")
+                .viewer_protocol_policy(ViewerProtocolPolicy::AllowAll)
+                .build()
+                .unwrap(),
+        )
+}
+
+/// What the AWS provider for Terraform dereferences unguarded, and what the
+/// AWS CLI's `create-distribution` example shows CloudFront returning.
+fn assert_cloudfront_defaults(cfg: &DistributionConfig) {
+    assert_eq!(cfg.aliases().unwrap().quantity(), 0);
+    assert_eq!(cfg.origin_groups().unwrap().quantity(), 0);
+    assert_eq!(cfg.cache_behaviors().unwrap().quantity(), 0);
+    assert_eq!(cfg.custom_error_responses().unwrap().quantity(), 0);
+    let geo = cfg.restrictions().unwrap().geo_restriction().unwrap();
+    assert_eq!(geo.restriction_type(), &GeoRestrictionType::None);
+    assert_eq!(geo.quantity(), 0);
+    let vc = cfg.viewer_certificate().unwrap();
+    assert_eq!(vc.cloud_front_default_certificate(), Some(true));
+    assert_eq!(
+        vc.minimum_protocol_version(),
+        Some(&MinimumProtocolVersion::TlSv1)
+    );
+    assert_eq!(cfg.price_class(), Some(&PriceClass::PriceClassAll));
+    assert_eq!(cfg.http_version(), Some(&HttpVersion::Http2));
+    assert_eq!(cfg.is_ipv6_enabled(), Some(true));
+    assert_eq!(cfg.web_acl_id(), Some(""));
+    let logging = cfg.logging().unwrap();
+    assert!(!logging.enabled());
+
+    let dcb = cfg.default_cache_behavior().unwrap();
+    assert_eq!(dcb.trusted_signers().unwrap().quantity(), 0);
+    assert_eq!(dcb.trusted_key_groups().unwrap().quantity(), 0);
+    assert_eq!(dcb.lambda_function_associations().unwrap().quantity(), 0);
+    assert_eq!(dcb.function_associations().unwrap().quantity(), 0);
+    let allowed = dcb.allowed_methods().unwrap();
+    assert_eq!(allowed.items(), &[Method::Head, Method::Get]);
+    assert_eq!(
+        allowed.cached_methods().unwrap().items(),
+        &[Method::Head, Method::Get]
+    );
+
+    let origin = &cfg.origins().unwrap().items()[0];
+    assert_eq!(origin.custom_headers().unwrap().quantity(), 0);
+    assert_eq!(origin.connection_attempts(), Some(3));
+    assert_eq!(origin.connection_timeout(), Some(10));
+}
+
+#[tokio::test]
+async fn cloudfront_bare_config_reads_back_with_cloudfront_defaults() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(bare_config("e2e-defaults"))
+        .send()
+        .await
+        .expect("create_distribution");
+    let created = create.distribution().unwrap();
+    assert_cloudfront_defaults(created.distribution_config().unwrap());
+    let id = created.id().to_string();
+
+    let got = cf.get_distribution().id(&id).send().await.unwrap();
+    assert_cloudfront_defaults(got.distribution().unwrap().distribution_config().unwrap());
+
+    let got = cf.get_distribution_config().id(&id).send().await.unwrap();
+    assert_cloudfront_defaults(got.distribution_config().unwrap());
+
+    let list = cf.list_distributions().send().await.unwrap();
+    let summary = &list.distribution_list().unwrap().items()[0];
+    assert_eq!(summary.origin_groups().unwrap().quantity(), 0);
+    assert_eq!(summary.aliases().unwrap().quantity(), 0);
+    assert_eq!(
+        summary
+            .restrictions()
+            .unwrap()
+            .geo_restriction()
+            .unwrap()
+            .restriction_type(),
+        &GeoRestrictionType::None
+    );
+    assert_eq!(
+        summary
+            .viewer_certificate()
+            .unwrap()
+            .cloud_front_default_certificate(),
+        Some(true)
+    );
+    assert_eq!(summary.http_version(), &HttpVersion::Http2);
+    assert!(summary.is_ipv6_enabled());
+}
+
+#[tokio::test]
+async fn cloudfront_config_read_back_and_updated_is_a_no_op() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(bare_config("e2e-noop"))
+        .send()
+        .await
+        .unwrap();
+    let id = create.distribution().unwrap().id().to_string();
+
+    let got = cf.get_distribution_config().id(&id).send().await.unwrap();
+    let etag = got.e_tag().unwrap().to_string();
+    let updated = cf
+        .update_distribution()
+        .id(&id)
+        .if_match(&etag)
+        .distribution_config(got.distribution_config().unwrap().clone())
+        .send()
+        .await
+        .expect("the config GetDistributionConfig returns is accepted");
+    assert_eq!(updated.e_tag(), Some(etag.as_str()));
+    assert_cloudfront_defaults(
+        updated
+            .distribution()
+            .unwrap()
+            .distribution_config()
+            .unwrap(),
+    );
+
+    // So is the omitted form: it means the defaults, not a change.
+    let updated = cf
+        .update_distribution()
+        .id(&id)
+        .if_match(&etag)
+        .distribution_config(bare_config("e2e-noop"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.e_tag(), Some(etag.as_str()));
+}
+
+#[tokio::test]
+async fn cloudfront_update_omitting_a_member_resets_it_to_the_default() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let config = bare_builder("e2e-reset")
+        .price_class(PriceClass::PriceClass100)
+        .http_version(HttpVersion::Http3)
+        .is_ipv6_enabled(false)
+        .build()
+        .unwrap();
+    let create = cf
+        .create_distribution()
+        .distribution_config(config)
+        .send()
+        .await
+        .unwrap();
+    let dist = create.distribution().unwrap();
+    let kept = dist.distribution_config().unwrap();
+    assert_eq!(kept.price_class(), Some(&PriceClass::PriceClass100));
+    assert_eq!(kept.http_version(), Some(&HttpVersion::Http3));
+    assert_eq!(kept.is_ipv6_enabled(), Some(false));
+
+    let updated = cf
+        .update_distribution()
+        .id(dist.id())
+        .if_match(create.e_tag().unwrap())
+        .distribution_config(bare_config("e2e-reset"))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(updated.e_tag(), create.e_tag());
+    assert_cloudfront_defaults(
+        updated
+            .distribution()
+            .unwrap()
+            .distribution_config()
+            .unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn cloudfront_partial_viewer_certificates_are_completed() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+
+    let default_only = bare_builder("e2e-cert-default")
+        .viewer_certificate(
+            ViewerCertificate::builder()
+                .cloud_front_default_certificate(true)
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let create = cf
+        .create_distribution()
+        .distribution_config(default_only)
+        .send()
+        .await
+        .unwrap();
+    let vc = create
+        .distribution()
+        .unwrap()
+        .distribution_config()
+        .unwrap()
+        .viewer_certificate()
+        .unwrap();
+    assert_eq!(
+        vc.minimum_protocol_version(),
+        Some(&MinimumProtocolVersion::TlSv1)
+    );
+
+    let arn = "arn:aws:acm:us-east-1:123456789012:certificate/abc";
+    let acm = bare_builder("e2e-cert-acm")
+        .viewer_certificate(
+            ViewerCertificate::builder()
+                .acm_certificate_arn(arn)
+                .ssl_support_method(SslSupportMethod::SniOnly)
+                .minimum_protocol_version(MinimumProtocolVersion::TlSv122021)
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let create = cf
+        .create_distribution()
+        .distribution_config(acm)
+        .send()
+        .await
+        .unwrap();
+    let vc = create
+        .distribution()
+        .unwrap()
+        .distribution_config()
+        .unwrap()
+        .viewer_certificate()
+        .unwrap();
+    assert_eq!(vc.cloud_front_default_certificate(), Some(false));
+    assert_eq!(vc.acm_certificate_arn(), Some(arn));
+    assert_eq!(vc.ssl_support_method(), Some(&SslSupportMethod::SniOnly));
+    assert_eq!(
+        vc.minimum_protocol_version(),
+        Some(&MinimumProtocolVersion::TlSv122021)
+    );
+}
+
+#[tokio::test]
+async fn cloudfront_certificate_mirrors_follow_a_read_modify_write() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(bare_config("e2e-cert-rmw"))
+        .send()
+        .await
+        .unwrap();
+    let id = create.distribution().unwrap().id().to_string();
+
+    let got = cf.get_distribution_config().id(&id).send().await.unwrap();
+    let read = got.distribution_config().unwrap();
+    let arn = "arn:aws:acm:us-east-1:123456789012:certificate/abc";
+    let edited = bare_builder("e2e-cert-rmw")
+        .viewer_certificate(switched_to_acm(read.viewer_certificate().unwrap(), arn))
+        .build()
+        .unwrap();
+    let updated = cf
+        .update_distribution()
+        .id(&id)
+        .if_match(got.e_tag().unwrap())
+        .distribution_config(edited)
+        .send()
+        .await
+        .unwrap();
+    let vc = updated
+        .distribution()
+        .unwrap()
+        .distribution_config()
+        .unwrap()
+        .viewer_certificate()
+        .unwrap();
+    assert_eq!(vc.cloud_front_default_certificate(), Some(false));
+    assert_eq!(vc.certificate(), Some(arn));
+    assert_eq!(vc.certificate_source().map(|s| s.as_str()), Some("acm"));
+}
+
+/// The certificate as read back, with only the ACM ARN and policy edited.
+#[allow(deprecated)]
+fn switched_to_acm(read: &ViewerCertificate, arn: &str) -> ViewerCertificate {
+    ViewerCertificate::builder()
+        .set_cloud_front_default_certificate(read.cloud_front_default_certificate())
+        .set_certificate(read.certificate().map(str::to_string))
+        .set_certificate_source(read.certificate_source().cloned())
+        .acm_certificate_arn(arn)
+        .ssl_support_method(SslSupportMethod::SniOnly)
+        .minimum_protocol_version(MinimumProtocolVersion::TlSv122021)
+        .build()
+}
+
+#[tokio::test]
+async fn cloudfront_web_acl_operations_honor_if_match() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(bare_config("e2e-acl-if-match"))
+        .send()
+        .await
+        .unwrap();
+    let id = create.distribution().unwrap().id().to_string();
+    let acl = "arn:aws:wafv2:us-east-1:123456789012:global/webacl/e/abc";
+
+    let err = cf
+        .associate_distribution_web_acl()
+        .id(&id)
+        .web_acl_arn(acl)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidIfMatchVersion")
+    );
+    let err = cf
+        .associate_distribution_web_acl()
+        .id(&id)
+        .web_acl_arn(acl)
+        .if_match("stale")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("PreconditionFailed")
+    );
+    let associated = cf
+        .associate_distribution_web_acl()
+        .id(&id)
+        .web_acl_arn(acl)
+        .if_match(create.e_tag().unwrap())
+        .send()
+        .await
+        .unwrap();
+    let etag = associated.e_tag().expect("new ETag").to_string();
+    assert_ne!(Some(etag.as_str()), create.e_tag());
+
+    let err = cf
+        .disassociate_distribution_web_acl()
+        .id(&id)
+        .if_match(create.e_tag().unwrap())
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("PreconditionFailed")
+    );
+    cf.disassociate_distribution_web_acl()
+        .id(&id)
+        .if_match(&etag)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cloudfront_enabled_logging_without_a_bucket_is_rejected() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let config = bare_builder("e2e-logging")
+        .logging(LoggingConfig::builder().enabled(true).build())
+        .build()
+        .unwrap();
+    let err = cf
+        .create_distribution()
+        .distribution_config(config)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidArgument")
+    );
+}
+
+#[tokio::test]
+async fn cloudfront_explicit_staging_false_is_a_no_op_update() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(bare_config("e2e-staging"))
+        .send()
+        .await
+        .unwrap();
+    let dist = create.distribution().unwrap();
+    assert_eq!(dist.distribution_config().unwrap().staging(), Some(false));
+
+    let updated = cf
+        .update_distribution()
+        .id(dist.id())
+        .if_match(create.e_tag().unwrap())
+        .distribution_config(bare_builder("e2e-staging").staging(false).build().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.e_tag(), create.e_tag());
 }

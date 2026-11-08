@@ -887,13 +887,12 @@ impl CloudFrontService {
             .accounts
             .get(&route.account)
             .ok_or_else(|| no_such_distribution(id))?;
-        let mut dist = account
+        let dist = account
             .distributions
             .get(id)
             .ok_or_else(|| no_such_distribution(id))?
             .clone();
         drop(state);
-        dist.config.ensure_aws_defaults();
         let body = build_distribution_xml(&dist);
         let mut headers = HeaderMap::new();
         set_header(&mut headers, ETAG, &dist.etag);
@@ -910,13 +909,12 @@ impl CloudFrontService {
             .accounts
             .get(&route.account)
             .ok_or_else(|| no_such_distribution(id))?;
-        let mut dist = account
+        let dist = account
             .distributions
             .get(id)
             .ok_or_else(|| no_such_distribution(id))?
             .clone();
         drop(state);
-        dist.config.ensure_aws_defaults();
         let body = xml_io::to_xml_root("DistributionConfig", &dist.config)
             .map_err(|e| internal_error(format!("xml encode failed: {e}")))?;
         let mut headers = HeaderMap::new();
@@ -992,7 +990,7 @@ impl CloudFrontService {
         }
         let snapshot = dist.clone();
         drop(state);
-        
+
         if config_changed {
             self.schedule_distribution_deploy(id.to_string());
         }
@@ -1296,8 +1294,9 @@ impl CloudFrontService {
             *aliases = Default::default();
         }
         config.caller_reference = parsed.caller_reference;
-        config.enabled = parsed.enabled.unwrap_or(false);
+        config.enabled = parsed.enabled.unwrap_or(true);
         config.staging = parsed.staging;
+        config.ensure_aws_defaults();
         let now = Utc::now();
         let etag = generate_etag();
         let arn = distribution_arn(&req.region, &req.account_id, &new_id);
@@ -1605,6 +1604,7 @@ impl CloudFrontService {
             .id
             .as_deref()
             .ok_or_else(|| invalid_argument("missing distribution id"))?;
+        let if_match = crate::policies::require_if_match(req)?;
         let parsed: AssociateAliasRequest = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid request XML: {e}")))?;
         let mut state = self.state.write();
@@ -1616,8 +1616,12 @@ impl CloudFrontService {
             .distributions
             .get_mut(id)
             .ok_or_else(|| no_such_distribution(id))?;
+        if dist.etag != if_match {
+            return Err(crate::policies::precondition_failed());
+        }
         dist.config.web_acl_id = Some(parsed.web_acl_arn.clone());
-        dist.etag = generate_etag();
+        let etag = generate_etag();
+        dist.etag = etag.clone();
         dist.last_modified_time = Utc::now();
         let body = format!(
             "{XML_DECL}<AssociateDistributionWebACLResult xmlns=\"{NS}\"><Id>{}</Id><WebACLArn>{}</WebACLArn></AssociateDistributionWebACLResult>",
@@ -1625,7 +1629,9 @@ impl CloudFrontService {
             NS = crate::NAMESPACE,
             XML_DECL = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
         );
-        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+        let mut headers = HeaderMap::new();
+        set_header(&mut headers, ETAG, &etag);
+        Ok(xml_response(StatusCode::OK, body, headers))
     }
 
     fn disassociate_web_acl(
@@ -1637,6 +1643,7 @@ impl CloudFrontService {
             .id
             .as_deref()
             .ok_or_else(|| invalid_argument("missing distribution id"))?;
+        let if_match = crate::policies::require_if_match(req)?;
         // DisassociateDistributionWebACL's Smithy model declares EntityNotFound
         // (not NoSuchDistribution) for unknown distribution IDs.
         let entity_not_found = || {
@@ -1655,8 +1662,13 @@ impl CloudFrontService {
             .distributions
             .get_mut(id)
             .ok_or_else(entity_not_found)?;
-        dist.config.web_acl_id = None;
-        dist.etag = generate_etag();
+        if dist.etag != if_match {
+            return Err(crate::policies::precondition_failed());
+        }
+        // AWS spells "no web ACL" as the empty string.
+        dist.config.web_acl_id = Some(String::new());
+        let etag = generate_etag();
+        dist.etag = etag.clone();
         dist.last_modified_time = Utc::now();
         let body = format!(
             "{XML_DECL}<DisassociateDistributionWebACLResult xmlns=\"{NS}\"><Id>{}</Id></DisassociateDistributionWebACLResult>",
@@ -1664,7 +1676,9 @@ impl CloudFrontService {
             NS = crate::NAMESPACE,
             XML_DECL = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
         );
-        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+        let mut headers = HeaderMap::new();
+        set_header(&mut headers, ETAG, &etag);
+        Ok(xml_response(StatusCode::OK, body, headers))
     }
 }
 
@@ -1863,6 +1877,7 @@ fn build_distribution_list_xml(
         out.push_str("<DistributionSummary>");
         out.push_str(&format!("<Id>{}</Id>", esc(&d.id)));
         out.push_str(&format!("<ARN>{}</ARN>", esc(&d.arn)));
+        out.push_str(&format!("<ETag>{}</ETag>", esc(&d.etag)));
         out.push_str(&format!("<Status>{}</Status>", esc(&d.status)));
         out.push_str(&format!(
             "<LastModifiedTime>{}</LastModifiedTime>",
@@ -1873,6 +1888,8 @@ fn build_distribution_list_xml(
         out.push_str(&render_inline("Aliases", &aliases));
         let origins = d.config.origins.clone();
         out.push_str(&render_inline("Origins", &origins));
+        let origin_groups = d.config.origin_groups.clone().unwrap_or_default();
+        out.push_str(&render_inline("OriginGroups", &origin_groups));
         let dcb = d.config.default_cache_behavior.clone();
         out.push_str(&render_inline("DefaultCacheBehavior", &dcb));
         let cb = d.config.cache_behaviors.clone().unwrap_or_default();
@@ -1917,6 +1934,18 @@ fn build_distribution_list_xml(
             "<Staging>{}</Staging>",
             d.config.staging.unwrap_or(false)
         ));
+        if let Some(mode) = &d.config.connection_mode {
+            out.push_str(&format!("<ConnectionMode>{}</ConnectionMode>", esc(mode)));
+        }
+        if let Some(list) = &d.config.anycast_ip_list_id {
+            out.push_str(&format!("<AnycastIpListId>{}</AnycastIpListId>", esc(list)));
+        }
+        if let Some(mtls) = &d.config.viewer_mtls_config {
+            out.push_str(&render_inline("ViewerMtlsConfig", mtls));
+        }
+        if let Some(function) = &d.config.connection_function_association {
+            out.push_str(&render_inline("ConnectionFunctionAssociation", function));
+        }
         out.push_str("</DistributionSummary>");
     }
     out.push_str("</Items>");
@@ -2494,6 +2523,261 @@ mod tests {
   <Enabled>true</Enabled>
 </DistributionConfig>"#
         )
+    }
+
+    fn etag_of(resp: &AwsResponse) -> String {
+        resp.headers
+            .get(ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn id_in(resp: &AwsResponse) -> String {
+        std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .split("<Id>")
+            .nth(1)
+            .unwrap()
+            .split("</Id>")
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_config_read_back_and_put_unchanged_is_a_no_op() {
+        let svc = CloudFrontService::new(make_state())
+            .with_propagation_delay(std::time::Duration::from_secs(60));
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                &minimal_dist_config_xml("noop-ref"),
+            ))
+            .await
+            .unwrap();
+        let id = id_in(&create);
+        let etag = etag_of(&create);
+        assert!(svc.set_distribution_status(&id, "Deployed"));
+
+        let config = svc
+            .handle(make_request(
+                http::Method::GET,
+                &format!("/2020-05-31/distribution/{id}/config"),
+                "",
+                "",
+            ))
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(config.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert!(
+            body.contains("<RestrictionType>none</RestrictionType>"),
+            "{body}"
+        );
+
+        // The omitted form and the read-back form are the same config.
+        for put in [body, minimal_dist_config_xml("noop-ref")] {
+            let mut update = make_request(
+                http::Method::PUT,
+                &format!("/2020-05-31/distribution/{id}/config"),
+                "",
+                &put,
+            );
+            update
+                .headers
+                .insert(IF_MATCH, http::HeaderValue::from_str(&etag).unwrap());
+            let updated = svc.handle(update).await.unwrap();
+            assert_eq!(etag_of(&updated), etag);
+            assert_eq!(distribution_status(&svc, &id), "Deployed");
+        }
+    }
+
+    #[tokio::test]
+    async fn copying_and_disassociating_keep_the_stored_config_canonical() {
+        let svc = CloudFrontService::new(make_state())
+            .with_propagation_delay(std::time::Duration::from_secs(60));
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                &minimal_dist_config_xml("canon-ref"),
+            ))
+            .await
+            .unwrap();
+        let id = id_in(&create);
+
+        let mut copy = make_request(
+            http::Method::POST,
+            &format!("/2020-05-31/distribution/{id}/copy"),
+            "",
+            "<CopyDistributionRequest><CallerReference>canon-copy</CallerReference></CopyDistributionRequest>",
+        );
+        copy.headers.insert(
+            IF_MATCH,
+            http::HeaderValue::from_str(&etag_of(&create)).unwrap(),
+        );
+        let copied = svc.handle(copy).await.unwrap();
+        let copied_id = id_in(&copied);
+        let copied_body = std::str::from_utf8(copied.body.expect_bytes()).unwrap();
+        for tag in ["<OriginGroups>", "<Restrictions>", "<Aliases>", "<Logging>"] {
+            assert!(copied_body.contains(tag), "missing {tag} in {copied_body}");
+        }
+
+        {
+            let state = svc.state.read();
+            let account = state.get(DEFAULT_ACCOUNT).unwrap();
+            assert!(account.distributions[&copied_id]
+                .config
+                .origin_groups
+                .is_some());
+            assert!(
+                account.distributions[&copied_id].config.enabled,
+                "an omitted Enabled defaults to true on a copy"
+            );
+        }
+
+        let mut disassociate = make_request(
+            http::Method::PUT,
+            &format!("/2020-05-31/distribution/{id}/disassociate-web-acl"),
+            "",
+            "",
+        );
+        disassociate.headers.insert(
+            IF_MATCH,
+            http::HeaderValue::from_str(&etag_of(&create)).unwrap(),
+        );
+        svc.handle(disassociate).await.unwrap();
+        let state = svc.state.read();
+        let account = state.get(DEFAULT_ACCOUNT).unwrap();
+        assert_eq!(
+            account.distributions[&id].config.web_acl_id.as_deref(),
+            Some("")
+        );
+    }
+
+    #[tokio::test]
+    async fn web_acl_operations_honor_if_match() {
+        let svc = CloudFrontService::new(make_state())
+            .with_propagation_delay(std::time::Duration::from_secs(60));
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                &minimal_dist_config_xml("acl-if-match"),
+            ))
+            .await
+            .unwrap();
+        let id = id_in(&create);
+        let mut etag = etag_of(&create);
+        let body = "<AssociateDistributionWebACLRequest><WebACLArn>arn:acl</WebACLArn></AssociateDistributionWebACLRequest>";
+
+        for (op, body) in [("associate-web-acl", body), ("disassociate-web-acl", "")] {
+            let path = format!("/2020-05-31/distribution/{id}/{op}");
+
+            let missing = make_request(http::Method::PUT, &path, "", body);
+            let err = svc.handle(missing).await.err().expect("missing If-Match");
+            assert_eq!(err.code(), "InvalidIfMatchVersion");
+
+            let mut stale = make_request(http::Method::PUT, &path, "", body);
+            stale.headers.insert(IF_MATCH, "stale".parse().unwrap());
+            let err = svc.handle(stale).await.err().expect("stale If-Match");
+            assert_eq!(err.code(), "PreconditionFailed");
+
+            let mut current = make_request(http::Method::PUT, &path, "", body);
+            current.headers.insert(IF_MATCH, etag.parse().unwrap());
+            let done = svc.handle(current).await.unwrap();
+            assert_ne!(etag_of(&done), etag);
+            etag = etag_of(&done);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_copy_keeps_staging_true_and_defaults_it_to_false() {
+        let svc = CloudFrontService::new(make_state())
+            .with_propagation_delay(std::time::Duration::from_secs(60));
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                &minimal_dist_config_xml("copy-staging"),
+            ))
+            .await
+            .unwrap();
+        let id = id_in(&create);
+        for (caller_ref, staging, expected) in [
+            ("copy-staging-true", "<Staging>true</Staging>", true),
+            ("copy-staging-none", "", false),
+        ] {
+            let mut copy = make_request(
+                http::Method::POST,
+                &format!("/2020-05-31/distribution/{id}/copy"),
+                "",
+                &format!(
+                    "<CopyDistributionRequest><CallerReference>{caller_ref}</CallerReference>{staging}</CopyDistributionRequest>"
+                ),
+            );
+            copy.headers
+                .insert(IF_MATCH, etag_of(&create).parse().unwrap());
+            let copied = svc.handle(copy).await.unwrap();
+            let body = std::str::from_utf8(copied.body.expect_bytes()).unwrap();
+            assert!(
+                body.contains(&format!("<Staging>{expected}</Staging>")),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn removing_the_last_alias_leaves_the_canonical_empty_envelope() {
+        let mut config = DistributionConfig::default();
+        crate::extras2_service::add_alias(&mut config, "a.example.com");
+        crate::extras2_service::remove_alias(&mut config, "A.example.com");
+        let aliases = config.aliases.unwrap();
+        assert_eq!(aliases.quantity, 0);
+        assert!(aliases.items.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_list_summary_carries_the_defaults() {
+        let svc = CloudFrontService::new(make_state());
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                &minimal_dist_config_xml("summary-ref"),
+            ))
+            .await
+            .unwrap();
+        let list = svc
+            .handle(make_request(
+                http::Method::GET,
+                "/2020-05-31/distribution",
+                "",
+                "",
+            ))
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(list.body.expect_bytes()).unwrap();
+        for tag in [
+            "<OriginGroups><Quantity>0</Quantity></OriginGroups>".to_string(),
+            "<CertificateSource>cloudfront</CertificateSource>".to_string(),
+            "<RestrictionType>none</RestrictionType>".to_string(),
+            "<PriceClass>PriceClass_All</PriceClass>".to_string(),
+            "<HttpVersion>http2</HttpVersion>".to_string(),
+            "<IsIPV6Enabled>true</IsIPV6Enabled>".to_string(),
+            format!("<ETag>{}</ETag>", etag_of(&create)),
+        ] {
+            assert!(body.contains(&tag), "missing {tag} in {body}");
+        }
     }
 
     #[tokio::test]

@@ -46,7 +46,7 @@ CloudFront's `ETag` model is preserved. Every successful `Create`/`Get`/`Update`
 
 ### `DistributionConfig` round-trip
 
-`DistributionConfig` is parsed into typed Rust structs that cover the full standard surface — origins (S3, custom, VPC, OAC fields), cache behaviors (forwarded values, allowed methods, cached methods, function associations, lambda function associations, gRPC config), custom error responses, viewer certificates, geo restrictions, logging config, origin groups, tenant config — and is serialized back element-for-element. `GetDistributionConfig` returns exactly what `CreateDistribution`/`UpdateDistribution` accepted.
+`DistributionConfig` is parsed into typed Rust structs that cover the full standard surface — origins (S3, custom, VPC, OAC fields), cache behaviors (forwarded values, allowed methods, cached methods, function associations, lambda function associations, gRPC config), custom error responses, viewer certificates, geo restrictions, logging config, origin groups, tenant config — and is serialized back element-for-element. `GetDistributionConfig` returns what `CreateDistribution`/`UpdateDistribution` accepted, with the members a request omitted filled in as CloudFront does (`Quantity` 0 envelopes such as `Aliases` and `OriginGroups`, `Restrictions` of `none`, the default `ViewerCertificate`, `PriceClass_All`, `http2`, `IsIPV6Enabled` true). Values a request supplied are kept, except that the deprecated `Certificate`/`CertificateSource` pair always follows the certificate in use and the default CloudFront certificate always reports `TLSv1`. Putting the returned config back is a no-op that leaves the ETag unchanged.
 
 ### Idempotency
 
