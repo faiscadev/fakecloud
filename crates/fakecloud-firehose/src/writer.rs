@@ -105,26 +105,53 @@ impl S3BatchWriter {
         search: &SearchDelivery,
     ) -> Result<DeliveryWriteOutcome, String> {
         let index = search::index_name(&search.index_name, &search.rotation, batch.oldest_arrival);
-        let mut attempts = 1;
-        let failures = match search::post_bulk(search, &index, batch) {
-            Ok(failures) => failures,
-            Err(error) => {
-                let elapsed = (Utc::now() - batch.delivery_time)
-                    .to_std()
-                    .unwrap_or_default();
-                if elapsed < search.retry {
-                    return Err(error);
+        let search::BulkProgress {
+            rejected: mut failures,
+            pending,
+        } = search.attempts.progress(batch);
+        if !pending.is_empty() {
+            let first_attempt = search.attempts.begin();
+            let result = search::post_bulk(search, &index, batch, &pending);
+            let elapsed = (Utc::now() - first_attempt).to_std().unwrap_or_default();
+            let retrying = elapsed < search.retry;
+            match result {
+                Ok(items) => {
+                    let (retriable, rejected): (Vec<_>, Vec<_>) =
+                        items.into_iter().partition(search::Failure::retriable);
+                    failures.extend(rejected);
+                    if retrying && !retriable.is_empty() {
+                        let message = format!(
+                            "{} documents failed with a retriable status, first: {} {}",
+                            retriable.len(),
+                            retriable[0].code,
+                            retriable[0].message
+                        );
+                        search.attempts.save(search::BulkProgress {
+                            rejected: failures,
+                            pending: retriable.iter().map(|failure| failure.index).collect(),
+                        });
+                        return Err(message);
+                    }
+                    failures.extend(retriable);
                 }
-                attempts += elapsed.as_secs() / crate::engine::RETRY_INTERVAL.as_secs();
-                (0..batch.records.len())
-                    .map(|index| search::Failure {
+                Err(error) => {
+                    if retrying {
+                        return Err(error.message);
+                    }
+                    failures.extend(pending.iter().map(|&index| search::Failure {
                         index,
-                        code: "OS.ConnectionFailed".into(),
-                        message: error.clone(),
-                    })
-                    .collect()
+                        code: error.code.into(),
+                        message: error.message.clone(),
+                    }));
+                }
             }
-        };
+            failures.sort_by_key(|failure| failure.index);
+            // A failed S3 write below retries the write, not the indexing.
+            search.attempts.save(search::BulkProgress {
+                rejected: failures.clone(),
+                pending: Vec::new(),
+            });
+        }
         let mut outcome = DeliveryWriteOutcome::Committed;
         if search.backup_all {
             outcome = self.put(batch, &batch.object_key, &batch.records)?;
@@ -132,7 +159,7 @@ impl S3BatchWriter {
         if !failures.is_empty() {
             let lines: Vec<Vec<u8>> = failures
                 .iter()
-                .map(|failure| search::failed_record(batch, search, &index, failure, attempts))
+                .map(|failure| search::failed_record(batch, search, &index, failure))
                 .collect();
             let suffix = &batch.object_key[batch.destination.output.prefix.len()..];
             outcome = self.put(batch, &format!("{}{suffix}", search.error_prefix), &lines)?;
@@ -621,6 +648,199 @@ mod tests {
             ))
         );
         assert_eq!(std::fs::read_dir(spool).unwrap().count(), 0);
+    }
+
+    fn search_batch(batch: &mut DeliveryBatch, retry: Duration) -> Arc<search::BulkAttempts> {
+        let attempts = Arc::<search::BulkAttempts>::default();
+        batch.destination.output.compression = Compression::Uncompressed;
+        batch.records = vec![
+            Bytes::from_static(b"{\"n\":0}"),
+            Bytes::from_static(b"{\"n\":1}"),
+        ];
+        batch.destination.search = Some(SearchDelivery {
+            // Nothing listens on port 1, so the request is refused.
+            endpoint: "http://127.0.0.1:1".into(),
+            index_name: "activity".into(),
+            rotation: "NoRotation".into(),
+            type_name: None,
+            document_ids: true,
+            backup_all: false,
+            retry,
+            error_prefix: "failed/".into(),
+            attempts: attempts.clone(),
+        });
+        attempts
+    }
+
+    /// One response per bulk request, recording each request's document count.
+    async fn bulk_stub(
+        responses: Vec<serde_json::Value>,
+    ) -> (String, Arc<parking_lot::Mutex<Vec<usize>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let sent = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let seen = sent.clone();
+        tokio::spawn(async move {
+            for reply in responses {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap();
+                    buffer.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buffer).to_lowercase();
+                    let Some(end) = text.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let length: usize = text
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .map_or(0, |value| value.trim().parse().unwrap());
+                    if buffer.len() >= end + 4 + length {
+                        seen.lock().push(text[end + 4..].lines().count() / 2);
+                        break;
+                    }
+                }
+                let reply = reply.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                sock.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (endpoint, sent)
+    }
+
+    fn failure_lines(s3: &SharedS3State, key: &str) -> Vec<serde_json::Value> {
+        let suffix = &key["captured/".len()..];
+        let accounts = s3.read();
+        let object = &accounts.get(ACCOUNT).unwrap().buckets["logs-bucket"].objects
+            [&format!("failed/{suffix}")];
+        let BodyRef::Memory(body) = &object.body else {
+            panic!("memory writer")
+        };
+        std::str::from_utf8(body)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// Only the record that cannot be a line of a bulk body fails; the others
+    /// are indexed without it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn malformed_records_fail_alone() {
+        let (state, s3, mut batch) = fixture();
+        search_batch(&mut batch, Duration::from_secs(300));
+        batch.records = vec![
+            Bytes::from_static(b"{\"ok\":1}\n"),
+            Bytes::from_static(b"{\n\"multi\":\"line\"}"),
+            Bytes::from_static(b"not json"),
+            Bytes::from_static(b"{\"ok\":2}"),
+        ];
+        let (endpoint, sent) = bulk_stub(vec![serde_json::json!({
+            "errors": false,
+            "items": [{"index": {"status": 201}}, {"index": {"status": 201}}],
+        })])
+        .await;
+        batch.destination.search.as_mut().unwrap().endpoint = endpoint;
+        let writer = Arc::new(writer(&state, &s3, None));
+        let key = batch.object_key.clone();
+        tokio::task::spawn_blocking(move || writer.write(&batch))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*sent.lock(), vec![2]);
+        let lines = failure_lines(&s3, &key);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["errorCode"], "OS.MalformedData");
+        assert_eq!(lines[1]["errorCode"], "OS.MalformedData");
+    }
+
+    /// Retriable item statuses are resent alone until the retry duration ends;
+    /// a final rejection is recorded with the attempts really made.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retriable_items_are_resent_alone() {
+        let (state, s3, mut batch) = fixture();
+        let attempts = search_batch(&mut batch, Duration::from_secs(300));
+        batch.records = vec![
+            Bytes::from_static(b"{\"n\":0}"),
+            Bytes::from_static(b"{\"n\":1}"),
+            Bytes::from_static(b"{\"n\":2}"),
+        ];
+        let (endpoint, sent) = bulk_stub(vec![
+            serde_json::json!({"errors": true, "items": [
+                {"index": {"status": 201}},
+                {"index": {"status": 429, "error": {"type": "es_rejected_execution_exception"}}},
+                {"index": {"status": 400, "error": {"type": "mapper_parsing_exception"}}},
+            ]}),
+            serde_json::json!({"errors": false, "items": [{"index": {"status": 201}}]}),
+        ])
+        .await;
+        batch.destination.search.as_mut().unwrap().endpoint = endpoint;
+        let writer = Arc::new(writer(&state, &s3, None));
+        let key = batch.object_key.clone();
+        let write = |writer: Arc<S3BatchWriter>, batch: DeliveryBatch| {
+            tokio::task::spawn_blocking(move || writer.write(&batch))
+        };
+        assert!(write(writer.clone(), batch.clone()).await.unwrap().is_err());
+        write(writer, batch).await.unwrap().unwrap();
+        assert_eq!(*sent.lock(), vec![3, 1]);
+        assert_eq!(attempts.made(), 2);
+        let lines = failure_lines(&s3, &key);
+        assert_eq!(lines.len(), 1, "only the rejected document failed");
+        assert_eq!(lines[0]["errorCode"], "400");
+        assert_eq!(lines[0]["attemptsMade"], 2);
+    }
+
+    /// A batch that waited behind a failing one still gets its retry duration,
+    /// which starts at its own first request and not when it detached.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retry_duration_starts_at_the_first_bulk_request() {
+        let (state, s3, mut batch) = fixture();
+        batch.delivery_time = Utc::now() - chrono::Duration::hours(1);
+        let attempts = search_batch(&mut batch, Duration::from_secs(300));
+        let writer = Arc::new(writer(&state, &s3, None));
+        let write = |writer: Arc<S3BatchWriter>, batch: DeliveryBatch| {
+            tokio::task::spawn_blocking(move || writer.write(&batch))
+        };
+        assert!(write(writer.clone(), batch.clone()).await.unwrap().is_err());
+        assert_eq!(attempts.made(), 1);
+        assert!(s3.read().get(ACCOUNT).unwrap().buckets["logs-bucket"]
+            .objects
+            .is_empty());
+    }
+
+    /// Once the retry duration is spent, every record goes to the failure
+    /// location with the code of the failure and the real attempt count.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exhausted_retries_write_failure_records() {
+        let (state, s3, mut batch) = fixture();
+        let attempts = search_batch(&mut batch, Duration::ZERO);
+        let writer = Arc::new(writer(&state, &s3, None));
+        let key = batch.object_key.clone();
+        tokio::task::spawn_blocking(move || writer.write(&batch))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempts.made(), 1);
+        let suffix = &key["captured/".len()..];
+        let accounts = s3.read();
+        let object = &accounts.get(ACCOUNT).unwrap().buckets["logs-bucket"].objects
+            [&format!("failed/{suffix}")];
+        let BodyRef::Memory(body) = &object.body else {
+            panic!("memory writer")
+        };
+        let lines: Vec<serde_json::Value> = std::str::from_utf8(body)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["errorCode"], "OS.ConnectionFailed");
+        assert_eq!(lines[0]["attemptsMade"], 1);
     }
 
     const KEY_ARN: &str = "arn:aws:kms:us-east-1:123456789012:key/stream-key";

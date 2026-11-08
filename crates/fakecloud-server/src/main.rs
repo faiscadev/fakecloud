@@ -7547,7 +7547,8 @@ async fn main() {
     if let Some(h) = kinesis_poller_snapshot_hook {
         kinesis_lambda_firehose_poller = kinesis_lambda_firehose_poller.with_snapshot_hook(h);
     }
-    tokio::spawn(kinesis_lambda_firehose_poller.run());
+    let kinesis_lambda_firehose_poller = Arc::new(kinesis_lambda_firehose_poller);
+    tokio::spawn(kinesis_lambda_firehose_poller.clone().run());
     let mut dynamodb_streams_poller =
         DynamoDbStreamsLambdaPoller::new(dynamodb_state.clone(), lambda_invocations_state.clone());
     if let Some(ref ld) = lambda_delivery {
@@ -12853,6 +12854,9 @@ async fn main() {
     // Axum has finished active requests. Close internal admission and drain
     // before runtime cleanup can emit late logs or release S3 dependencies.
     let report = firehose_engine.shutdown().await;
+    kinesis_lambda_firehose_poller
+        .sync_firehose_checkpoints()
+        .await;
     if report.undelivered_records != 0 {
         tracing::warn!(
             delivered_batches = report.delivered_batches,

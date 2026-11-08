@@ -11,8 +11,11 @@
 //! was created at (AWS starts at LATEST) and hands every record's data to the
 //! Firehose engine, which buffers and delivers it like Direct PUT input. Its
 //! persisted checkpoint moves only past records whose batch has committed, and
-//! reading pauses while the engine reports the stream backlogged.
+//! reading pauses while the engine reports the stream backlogged or its
+//! destination refuses records. Positions are scoped to the source stream's
+//! creation time, so a source stream recreated under the same name starts over.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +25,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 use fakecloud_core::delivery::LambdaDelivery;
-use fakecloud_firehose::{FirehoseEngine, SharedFirehoseState, SourceRead};
+use fakecloud_firehose::{FirehoseEngine, SharedFirehoseState, SourceLimit, SourceRead};
 use fakecloud_kinesis::{KinesisRecord, KinesisShard, SharedKinesisState};
 use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
@@ -87,6 +90,9 @@ pub struct KinesisLambdaFirehosePoller {
     /// mapping had already consumed (bug-audit 4.5).
     snapshot_hook: Option<SnapshotHook>,
     firehose: Option<(SharedFirehoseState, Arc<FirehoseEngine>)>,
+    /// Why each delivery stream last refused records, so the reason is logged
+    /// once per change rather than on every poll.
+    firehose_refusals: parking_lot::Mutex<HashMap<String, String>>,
 }
 
 impl KinesisLambdaFirehosePoller {
@@ -97,6 +103,7 @@ impl KinesisLambdaFirehosePoller {
             lambda_delivery: None,
             snapshot_hook: None,
             firehose: None,
+            firehose_refusals: parking_lot::Mutex::default(),
         }
     }
 
@@ -128,15 +135,24 @@ impl KinesisLambdaFirehosePoller {
         }
     }
 
-    pub async fn run(self) {
-        let mut lambda_interval = tokio::time::interval(Duration::from_millis(500));
-        let mut firehose_interval = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            tokio::select! {
-                _ = lambda_interval.tick() => self.poll().await,
-                _ = firehose_interval.tick() => self.poll_firehose().await,
+    /// Polls Lambda mappings and Firehose sources side by side, so a Lambda
+    /// invocation awaiting its function does not hold up Firehose reads.
+    pub async fn run(self: Arc<Self>) {
+        let lambda = async {
+            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                self.poll().await;
             }
-        }
+        };
+        let firehose = async {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                self.poll_firehose().await;
+            }
+        };
+        tokio::join!(lambda, firehose);
     }
 
     /// Reads up to `limit` records and, past the first record, up to
@@ -196,8 +212,15 @@ impl KinesisLambdaFirehosePoller {
             }
         }
         let seeded = !seeds.is_empty();
+        for shard in &stream.shards {
+            // Entries from snapshots that predate stream ownership.
+            kinesis
+                .lambda_checkpoint_streams
+                .entry(format!("{}:{}", checkpoint_id, shard.shard_id))
+                .or_insert_with(|| stream_arn.to_string());
+        }
         for (shard_id, offset) in seeds {
-            kinesis.set_lambda_checkpoint(checkpoint_id, &shard_id, offset);
+            kinesis.set_lambda_checkpoint(stream_arn, checkpoint_id, &shard_id, offset);
         }
         (reads, seeded)
     }
@@ -316,7 +339,12 @@ impl KinesisLambdaFirehosePoller {
             // as consumed and never retries them.
             if matched.is_empty() {
                 if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&mapping.stream_arn) {
-                    kinesis.set_lambda_checkpoint(&mapping.uuid, &shard_id, end);
+                    kinesis.set_lambda_checkpoint(
+                        &mapping.stream_arn,
+                        &mapping.uuid,
+                        &shard_id,
+                        end,
+                    );
                 }
                 self.persist().await;
                 continue;
@@ -376,7 +404,12 @@ impl KinesisLambdaFirehosePoller {
             };
 
             if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&mapping.stream_arn) {
-                kinesis.set_lambda_checkpoint(&mapping.uuid, &shard_id, new_checkpoint);
+                kinesis.set_lambda_checkpoint(
+                    &mapping.stream_arn,
+                    &mapping.uuid,
+                    &shard_id,
+                    new_checkpoint,
+                );
             }
             // Persist the advanced checkpoint so a restart resumes past the
             // records this batch already delivered.
@@ -412,18 +445,84 @@ impl KinesisLambdaFirehosePoller {
         }
     }
 
+    /// Saves what the Firehose engine committed since the last poll. Run after
+    /// its shutdown drain too, or a graceful restart redelivers everything the
+    /// drain just delivered.
+    pub async fn sync_firehose_checkpoints(&self) {
+        let Some((firehose_state, engine)) = &self.firehose else {
+            return;
+        };
+        let mut advanced = false;
+        for source in collect_sources(firehose_state) {
+            if let Some((generation, _)) = self.source_stream(&source.source_arn) {
+                advanced |= self.commit_source(engine, &source, generation);
+            }
+        }
+        if advanced {
+            self.persist().await;
+        }
+    }
+
+    /// Identifies this incarnation of a source stream, and how long it retains
+    /// records. A recreated stream reuses its shard IDs and sequence numbers, so
+    /// positions must not carry over.
+    fn source_stream(&self, source_arn: &str) -> Option<(i64, Duration)> {
+        let accounts = self.kinesis_state.read();
+        let stream = accounts
+            .by_arn(source_arn)?
+            .streams
+            .values()
+            .find(|stream| stream.stream_arn == source_arn)?;
+        let generation = stream
+            .stream_creation_timestamp
+            .timestamp_nanos_opt()
+            .unwrap_or_default();
+        let hours = u64::try_from(stream.retention_period_hours).unwrap_or_default();
+        Some((generation, Duration::from_secs(hours * 60 * 60)))
+    }
+
+    fn note_refusal(&self, source: &Source, refused: Option<&String>) {
+        let key = format!("{}/{}/{}", source.account, source.region, source.name);
+        let mut refusals = self.firehose_refusals.lock();
+        let Some(reason) = refused else {
+            refusals.remove(&key);
+            return;
+        };
+        if refusals.get(&key) != Some(reason) {
+            tracing::warn!(stream = ?source.name, source_arn = %source.source_arn, ?reason,
+                "Kinesis->Firehose: not reading the source while the destination refuses records");
+            refusals.insert(key, reason.clone());
+        }
+    }
+
     async fn process_source(&self, engine: &FirehoseEngine, source: &Source) {
+        let stream = self.source_stream(&source.source_arn);
+        engine.limit_source_retries(
+            &source.account,
+            &source.region,
+            &source.name,
+            SourceLimit {
+                retention: stream.map_or(Duration::ZERO, |(_, retention)| retention),
+                current_prefix: stream.map(|(generation, _)| format!("{generation}/")),
+            },
+        );
+        let Some((generation, _)) = stream else {
+            return;
+        };
         let progress = engine.source_progress(&source.account, &source.region, &source.name);
-        let (reads, seeded) = if progress.backlogged {
+        self.note_refusal(source, progress.refused.as_ref());
+        let (reads, seeded) = if progress.backlogged || progress.refused.is_some() {
             (Vec::new(), false)
         } else {
             self.read_shards(
                 &source.source_arn,
-                &source.checkpoint_id,
+                &source_checkpoint_id(source, generation),
                 MAX_RECORDS_PER_READ,
                 MAX_BYTES_PER_READ,
                 |shard| {
-                    let read = progress.read.get(&shard.shard_id)?;
+                    let read = progress
+                        .read
+                        .get(&source_shard_key(generation, &shard.shard_id))?;
                     Some(read.saturating_sub(trimmed(shard)))
                 },
                 |records| {
@@ -450,9 +549,9 @@ impl KinesisLambdaFirehosePoller {
                     .collect(),
                 document_ids: records
                     .iter()
-                    .map(|r| format!("{shard_id}:{}", r.sequence_number))
+                    .map(|r| format!("{generation}:{shard_id}:{}", r.sequence_number))
                     .collect(),
-                shard_id: shard_id.clone(),
+                shard_id: source_shard_key(generation, &shard_id),
                 end: end + trimmed,
             };
             if let Err(error) =
@@ -464,9 +563,19 @@ impl KinesisLambdaFirehosePoller {
             }
         }
 
+        let advanced = self.commit_source(engine, source, generation);
+        if seeded || advanced {
+            self.persist().await;
+        }
+    }
+
+    /// Moves the source's checkpoints up to what the engine has committed and
+    /// reports whether any moved.
+    fn commit_source(&self, engine: &FirehoseEngine, source: &Source, generation: i64) -> bool {
         let committed = engine
             .source_progress(&source.account, &source.region, &source.name)
             .committed;
+        let checkpoint_id = source_checkpoint_id(source, generation);
         let mut advanced = false;
         if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&source.source_arn) {
             let shards: Vec<(String, usize)> = kinesis
@@ -481,20 +590,32 @@ impl KinesisLambdaFirehosePoller {
                 })
                 .unwrap_or_default();
             for (shard_id, trimmed) in shards {
-                let Some(committed) = committed.get(&shard_id) else {
+                let Some(committed) = committed.get(&source_shard_key(generation, &shard_id))
+                else {
                     continue;
                 };
                 let end = committed.saturating_sub(trimmed);
-                if end > kinesis.lambda_checkpoint(&source.checkpoint_id, &shard_id) {
-                    kinesis.set_lambda_checkpoint(&source.checkpoint_id, &shard_id, end);
+                if end > kinesis.lambda_checkpoint(&checkpoint_id, &shard_id) {
+                    kinesis.set_lambda_checkpoint(
+                        &source.source_arn,
+                        &checkpoint_id,
+                        &shard_id,
+                        end,
+                    );
                     advanced = true;
                 }
             }
         }
-        if seeded || advanced {
-            self.persist().await;
-        }
+        advanced
     }
+}
+
+fn source_checkpoint_id(source: &Source, generation: i64) -> String {
+    format!("{}@{generation}", source.checkpoint_id)
+}
+
+fn source_shard_key(generation: i64, shard_id: &str) -> String {
+    format!("{generation}/{shard_id}")
 }
 
 fn collect_sources(firehose_state: &SharedFirehoseState) -> Vec<Source> {
@@ -855,6 +976,373 @@ mod tests {
         );
         let east = mas.regional(account, "us-east-1").unwrap();
         assert!(east.lambda_checkpoints.is_empty());
+    }
+
+    mod firehose {
+        use super::*;
+        use fakecloud_core::delivery::KinesisDelivery;
+        use fakecloud_core::multi_account::MultiAccountState;
+        use parking_lot::RwLock;
+
+        const ACCOUNT: &str = "123456789012";
+        const REGION: &str = "us-east-1";
+        const SHARD: &str = "shardId-000000000000";
+
+        fn stream_arn() -> String {
+            format!("arn:aws:kinesis:{REGION}:{ACCOUNT}:stream/orders")
+        }
+
+        struct Fixture {
+            kinesis: SharedKinesisState,
+            firehose: SharedFirehoseState,
+            s3: fakecloud_s3::SharedS3State,
+            engine: Arc<FirehoseEngine>,
+            poller: KinesisLambdaFirehosePoller,
+        }
+
+        impl Fixture {
+            fn new(extra_destinations: Value) -> Self {
+                let kinesis: SharedKinesisState = Arc::new(RwLock::new(MultiAccountState::new(
+                    ACCOUNT,
+                    REGION,
+                    "http://localhost:4566",
+                )));
+                let firehose: SharedFirehoseState =
+                    Arc::new(RwLock::new(fakecloud_firehose::FirehoseAccounts::new()));
+                let mut s3 = fakecloud_s3::S3State::new(ACCOUNT, REGION);
+                s3.buckets.insert(
+                    "bucket".into(),
+                    fakecloud_s3::S3Bucket::new("bucket", REGION, "owner"),
+                );
+                let mut s3_accounts =
+                    MultiAccountState::new(ACCOUNT, REGION, "http://localhost:4566");
+                *s3_accounts.get_or_create(ACCOUNT) = s3;
+                let s3: fakecloud_s3::SharedS3State = Arc::new(RwLock::new(s3_accounts));
+                let engine = Arc::new(FirehoseEngine::new(firehose.clone()));
+                engine.set_s3(s3.clone());
+                let stream: fakecloud_firehose::DeliveryStream = serde_json::from_value(json!({
+                    "name": "fh",
+                    "arn": format!("arn:aws:firehose:{REGION}:{ACCOUNT}:deliverystream/fh"),
+                    "status": "ACTIVE",
+                    "stream_type": "KinesisStreamAsSource",
+                    "created_at": "2020-01-01T00:00:00Z",
+                    "last_update": "2020-01-01T00:00:00Z",
+                    "version_id": "1",
+                    "destination": {
+                        "destination_id": "destinationId-000000000001",
+                        "role_arn": "role",
+                        "bucket_arn": "arn:aws:s3:::bucket",
+                        "buffering_size_mb": 1,
+                        "buffering_interval_seconds": 300,
+                    },
+                    "tags": {},
+                    "extra_destinations": extra_destinations,
+                    "kinesis_source": {
+                        "kinesis_stream_arn": stream_arn(),
+                        "role_arn": "role",
+                    },
+                }))
+                .unwrap();
+                firehose
+                    .write()
+                    .get_or_create(ACCOUNT, REGION)
+                    .streams_mut(REGION)
+                    .insert("fh".into(), stream);
+                let lambda: SharedLambdaState = Arc::new(RwLock::new(MultiAccountState::new(
+                    ACCOUNT,
+                    REGION,
+                    "http://localhost:4566",
+                )));
+                let poller = KinesisLambdaFirehosePoller::new(kinesis.clone(), lambda)
+                    .with_firehose(firehose.clone(), engine.clone());
+                let fixture = Self {
+                    kinesis,
+                    firehose,
+                    s3,
+                    engine,
+                    poller,
+                };
+                fixture.create_kinesis_stream(Utc::now());
+                fixture
+            }
+
+            fn create_kinesis_stream(&self, created: DateTime<Utc>) {
+                self.kinesis
+                    .write()
+                    .regional_mut(ACCOUNT, REGION)
+                    .streams
+                    .insert(
+                        "orders".to_string(),
+                        fakecloud_kinesis::KinesisStream {
+                            stream_name: "orders".to_string(),
+                            stream_arn: stream_arn(),
+                            stream_status: "ACTIVE".to_string(),
+                            stream_creation_timestamp: created,
+                            retention_period_hours: 24,
+                            stream_mode: "PROVISIONED".to_string(),
+                            encryption_type: "NONE".to_string(),
+                            key_id: None,
+                            shard_count: 1,
+                            open_shard_count: 1,
+                            tags: Default::default(),
+                            shards: fakecloud_kinesis::build_stream_shards(1),
+                            next_shard_index: 1,
+                            enhanced_metrics: Vec::new(),
+                            warm_throughput_mibps: None,
+                            max_record_size_kib: None,
+                            record_distribution_strategy:
+                                fakecloud_kinesis::default_record_distribution_strategy(),
+                            auto_distribution_cursor: 0,
+                        },
+                    );
+            }
+
+            fn put(&self) {
+                fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(self.kinesis.clone())
+                    .put_record(&stream_arn(), "aGVsbG8=", "pk");
+            }
+
+            fn source(&self) -> Source {
+                collect_sources(&self.firehose).remove(0)
+            }
+
+            async fn poll(&self) {
+                self.poller
+                    .process_source(&self.engine, &self.source())
+                    .await;
+            }
+
+            fn generation(&self) -> i64 {
+                self.poller.source_stream(&stream_arn()).unwrap().0
+            }
+
+            fn checkpoint(&self) -> Option<usize> {
+                let id = source_checkpoint_id(&self.source(), self.generation());
+                self.kinesis
+                    .read()
+                    .regional(ACCOUNT, REGION)
+                    .unwrap()
+                    .lambda_checkpoints
+                    .get(&format!("{id}:{SHARD}"))
+                    .copied()
+            }
+
+            fn read_position(&self) -> Option<usize> {
+                self.engine
+                    .source_progress(ACCOUNT, REGION, "fh")
+                    .read
+                    .get(&source_shard_key(self.generation(), SHARD))
+                    .copied()
+            }
+
+            fn delivered_objects(&self) -> usize {
+                self.s3.read().get(ACCOUNT).unwrap().buckets["bucket"]
+                    .objects
+                    .len()
+            }
+        }
+
+        /// A source stream deleted and recreated under its name restarts its
+        /// shard IDs and sequence numbers: records in the new one must not be
+        /// skipped as if the old position still applied.
+        #[tokio::test]
+        async fn recreated_source_stream_is_read_from_its_start() {
+            let f = Fixture::new(json!({}));
+            for _ in 0..3 {
+                f.put();
+            }
+            f.poll().await;
+            assert_eq!(f.read_position(), Some(4), "three records past position 1");
+
+            f.create_kinesis_stream(Utc::now() + chrono::Duration::seconds(1));
+            f.put();
+            f.poll().await;
+            assert_eq!(
+                f.read_position(),
+                Some(2),
+                "the new stream's one record was read"
+            );
+
+            f.engine.shutdown().await;
+            let accounts = f.s3.read();
+            let objects = &accounts.get(ACCOUNT).unwrap().buckets["bucket"].objects;
+            assert_eq!(
+                objects.len(),
+                1,
+                "old and new records share the buffered batch"
+            );
+            let fakecloud_persistence::BodyRef::Memory(body) =
+                &objects.values().next().unwrap().body
+            else {
+                panic!("memory store");
+            };
+            assert_eq!(body.as_ref(), b"hellohellohellohello");
+        }
+
+        /// The shutdown drain's commits reach the checkpoint, or every graceful
+        /// restart would deliver the drained records a second time.
+        #[tokio::test]
+        async fn checkpoint_sync_after_shutdown_saves_the_drained_position() {
+            let f = Fixture::new(json!({}));
+            f.put();
+            f.poll().await;
+            assert_eq!(
+                f.checkpoint(),
+                Some(0),
+                "buffered records are not committed"
+            );
+
+            f.engine.shutdown().await;
+            assert_eq!(f.delivered_objects(), 1);
+            f.poller.sync_firehose_checkpoints().await;
+            assert_eq!(f.checkpoint(), Some(1));
+        }
+
+        /// A destination that refuses records leaves them unread and unseeded:
+        /// they are delivered once an update makes the destination usable.
+        #[tokio::test]
+        async fn refusing_destination_pauses_reading_without_seeding() {
+            let f = Fixture::new(json!({"SplunkDestinationDescription": {}}));
+            f.put();
+            f.poll().await;
+            assert_eq!(f.checkpoint(), None);
+            assert_eq!(f.read_position(), None);
+            assert_eq!(f.poller.firehose_refusals.lock().len(), 1);
+
+            f.firehose
+                .write()
+                .get_or_create(ACCOUNT, REGION)
+                .streams_mut(REGION)
+                .get_mut("fh")
+                .unwrap()
+                .extra_destinations
+                .clear();
+            f.poll().await;
+            assert_eq!(f.read_position(), Some(2));
+            assert!(f.poller.firehose_refusals.lock().is_empty());
+        }
+
+        struct HangingDelivery(Arc<tokio::sync::Notify>);
+
+        impl LambdaDelivery for HangingDelivery {
+            fn invoke_lambda(
+                &self,
+                _function_arn: &str,
+                _payload: &str,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>
+            {
+                self.0.notify_one();
+                Box::pin(std::future::pending())
+            }
+        }
+
+        /// A deleted source ends the retries of batches read from it, and a
+        /// recreated one ends those of its earlier incarnation.
+        #[tokio::test]
+        async fn source_stream_state_bounds_batch_retries() {
+            let f = Fixture::new(json!({}));
+            let limit = || {
+                f.engine
+                    .source_progress(ACCOUNT, REGION, "fh")
+                    .limit
+                    .unwrap()
+            };
+            f.poll().await;
+            let prefix = format!("{}/", f.generation());
+            assert_eq!(limit().current_prefix, Some(prefix.clone()));
+            assert_eq!(limit().retention, Duration::from_secs(24 * 60 * 60));
+
+            f.create_kinesis_stream(Utc::now() + chrono::Duration::seconds(1));
+            f.poll().await;
+            assert_ne!(limit().current_prefix, Some(prefix));
+
+            f.kinesis
+                .write()
+                .regional_mut(ACCOUNT, REGION)
+                .streams
+                .remove("orders");
+            f.poll().await;
+            assert_eq!(limit().current_prefix, None);
+        }
+
+        /// A checkpoint names the stream it reads even when restored from a
+        /// snapshot that predates that, so deleting the stream forgets it.
+        #[tokio::test]
+        async fn reading_claims_checkpoints_restored_without_a_stream() {
+            let f = Fixture::new(json!({}));
+            f.poll().await;
+            let key = format!(
+                "{}:{SHARD}",
+                source_checkpoint_id(&f.source(), f.generation())
+            );
+            f.kinesis
+                .write()
+                .regional_mut(ACCOUNT, REGION)
+                .lambda_checkpoint_streams
+                .clear();
+            f.poll().await;
+            let mut accounts = f.kinesis.write();
+            let state = accounts.regional_mut(ACCOUNT, REGION);
+            assert_eq!(state.lambda_checkpoint_streams[&key], stream_arn());
+            state.forget_stream_checkpoints(&stream_arn());
+            assert!(state.lambda_checkpoints.is_empty());
+        }
+
+        /// A function that never answers must not stop Firehose reading: a
+        /// record put once the invocation is hanging must still be read.
+        #[tokio::test]
+        async fn hung_lambda_invocation_does_not_block_firehose_reads() {
+            let Fixture {
+                kinesis,
+                firehose,
+                engine,
+                ..
+            } = Fixture::new(json!({}));
+            let lambda: SharedLambdaState = Arc::new(RwLock::new(MultiAccountState::new(
+                ACCOUNT,
+                REGION,
+                "http://localhost:4566",
+            )));
+            lambda
+                .write()
+                .regional_mut(ACCOUNT, REGION)
+                .event_source_mappings
+                .insert(
+                    "esm".to_string(),
+                    esm(
+                        "esm",
+                        &format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:f"),
+                        &stream_arn(),
+                    ),
+                );
+            let hanging = Arc::new(tokio::sync::Notify::new());
+            let poller = Arc::new(
+                KinesisLambdaFirehosePoller::new(kinesis.clone(), lambda)
+                    .with_lambda_delivery(Arc::new(HangingDelivery(hanging.clone())))
+                    .with_firehose(firehose, engine.clone()),
+            );
+            fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis).put_record(
+                &stream_arn(),
+                "aGVsbG8=",
+                "pk",
+            );
+            let running = tokio::spawn(poller.run());
+            let read = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if !engine
+                        .source_progress(ACCOUNT, REGION, "fh")
+                        .read
+                        .is_empty()
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await;
+            running.abort();
+            assert!(read.is_ok(), "Firehose read nothing behind a hung Lambda");
+        }
     }
 
     #[test]

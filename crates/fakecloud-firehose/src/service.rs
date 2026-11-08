@@ -282,6 +282,119 @@ fn extract_extra_destinations(body: &Value, suffix: &str) -> BTreeMap<String, Va
     out
 }
 
+fn is_search_destination(key: &str) -> bool {
+    matches!(
+        key,
+        crate::search::ELASTICSEARCH | crate::search::OPENSEARCH
+    )
+}
+
+/// `*DestinationDescription` of a stored Elasticsearch / OpenSearch Service
+/// destination: the bucket is `S3DestinationDescription`, and omitted settings
+/// report the values delivery uses.
+fn search_destination_json(stored: &Value) -> Value {
+    let mut description = stored.clone();
+    let Some(fields) = description.as_object_mut() else {
+        return description;
+    };
+    if let Some(mut s3) = fields.remove("S3Configuration") {
+        if let Some(s3_fields) = s3.as_object_mut() {
+            s3_fields
+                .entry("BufferingHints")
+                .or_insert_with(|| json!({"SizeInMBs": 5, "IntervalInSeconds": 300}));
+            s3_fields
+                .entry("CompressionFormat")
+                .or_insert_with(|| json!("UNCOMPRESSED"));
+            s3_fields
+                .entry("EncryptionConfiguration")
+                .or_insert_with(|| json!({"NoEncryptionConfig": "NoEncryption"}));
+        }
+        fields.insert("S3DestinationDescription".to_owned(), s3);
+    }
+    fields
+        .entry("BufferingHints")
+        .or_insert_with(|| json!({"SizeInMBs": 5, "IntervalInSeconds": 300}));
+    fields
+        .entry("RetryOptions")
+        .or_insert_with(|| json!({"DurationInSeconds": 300}));
+    fields
+        .entry("IndexRotationPeriod")
+        .or_insert_with(|| json!("OneDay"));
+    fields
+        .entry("S3BackupMode")
+        .or_insert_with(|| json!("FailedDocumentsOnly"));
+    description
+}
+
+fn search_update_config(mut update: Value) -> Value {
+    if let Some(fields) = update.as_object_mut() {
+        if let Some(s3) = fields.remove("S3Update") {
+            fields.insert("S3Configuration".to_owned(), s3);
+        }
+    }
+    update
+}
+
+/// Refuse a search update that names both types, or that starts a new type
+/// without every parameter delivery needs: AWS does not merge across types, so
+/// nothing would fill the gaps and the stream could not deliver.
+fn validate_search_updates(
+    stream: &DeliveryStream,
+    updates: &BTreeMap<String, Value>,
+) -> Result<(), AwsServiceError> {
+    let mut search_updates = updates.iter().filter(|(key, _)| is_search_destination(key));
+    let Some((key, update)) = search_updates.next() else {
+        return Ok(());
+    };
+    if search_updates.next().is_some() {
+        return Err(invalid_argument(
+            "You can specify only one destination in UpdateDestination.",
+        ));
+    }
+    if !stream.extra_destinations.contains_key(key) {
+        crate::search::delivery(key, &search_update_config(update.clone()))?;
+    }
+    Ok(())
+}
+
+/// Apply an `ElasticsearchDestinationUpdate` or
+/// `AmazonopensearchserviceDestinationUpdate`. AWS allows updating these only
+/// to another of the two: within a type the update merges, and between them
+/// nothing merges. Their `S3Update` member updates the stored `S3Configuration`.
+fn apply_search_update(stream: &mut DeliveryStream, key: String, update: Value) {
+    let update = search_update_config(update);
+    stream
+        .extra_destinations
+        .retain(|existing, _| *existing == key);
+    match stream.extra_destinations.get_mut(&key) {
+        Some(existing) => merge_json(existing, &update),
+        None => {
+            stream.extra_destinations.insert(key, update);
+        }
+    }
+}
+
+/// Whether an update would move a stream between the Elasticsearch / OpenSearch
+/// Service destinations and any other, which AWS does not support.
+fn switches_search_family(
+    stream: &DeliveryStream,
+    s3_update: bool,
+    extra_updates: &BTreeMap<String, Value>,
+) -> bool {
+    let has_search = stream
+        .extra_destinations
+        .keys()
+        .any(|key| is_search_destination(key));
+    let has_other = stream.destination.is_some()
+        || stream
+            .extra_destinations
+            .keys()
+            .any(|key| !is_search_destination(key));
+    let updates_search = extra_updates.keys().any(|key| is_search_destination(key));
+    let updates_other = s3_update || extra_updates.keys().any(|key| !is_search_destination(key));
+    (has_search && updates_other) || (has_other && updates_search)
+}
+
 /// Validate the optional CompressionFormat member of an S3 configuration or
 /// update object. Absence is allowed;
 /// a present value (including null) must be one of the exact AWS enum strings.
@@ -779,7 +892,11 @@ impl FirehoseService {
                     .map(s3_destination_json)
                     .unwrap_or_else(|| json!({ "DestinationId": "destinationId-000000000001" }));
                 for (key, value) in &stream.extra_destinations {
-                    dest[key] = value.clone();
+                    dest[key] = if is_search_destination(key) {
+                        search_destination_json(value)
+                    } else {
+                        value.clone()
+                    };
                 }
                 vec![dest]
             };
@@ -1061,6 +1178,8 @@ impl FirehoseService {
             .as_str()
             .ok_or_else(|| missing("DestinationId"))?;
         validate_destination_compression(&body, "Update")?;
+        let s3_update_given = body["S3DestinationUpdate"].is_object()
+            || body["ExtendedS3DestinationUpdate"].is_object();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
         let stream = state
@@ -1096,6 +1215,14 @@ impl FirehoseService {
             )));
         }
 
+        let extra_updates = extract_extra_destinations(&body, "Update");
+        if switches_search_family(stream, s3_update_given, &extra_updates) {
+            return Err(invalid_argument(
+                "Switching between Amazon OpenSearch Service and other services is not supported.",
+            ));
+        }
+        validate_search_updates(stream, &extra_updates)?;
+
         // Apply the S3 / ExtendedS3 update. The `*Update` shapes make every
         // member optional, so a partial update (e.g. only BufferingHints) must
         // merge onto the existing destination rather than being dropped, and
@@ -1125,7 +1252,11 @@ impl FirehoseService {
         // onto the stored `*DestinationDescription` instead of replacing the
         // whole object, so a partial update (e.g. only RetryOptions) does not
         // drop the other fields the caller omitted.
-        for (key, value) in extract_extra_destinations(&body, "Update") {
+        for (key, value) in extra_updates {
+            if is_search_destination(&key) {
+                apply_search_update(stream, key, value);
+                continue;
+            }
             match stream.extra_destinations.get_mut(&key) {
                 Some(existing) => merge_json(existing, &value),
                 None => {
@@ -1337,6 +1468,210 @@ mod tests {
                 .message()
                 .contains("HttpEndpointDestinationConfiguration"));
         }
+    }
+
+    fn search_stream(svc: &FirehoseService, name: &str) -> String {
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": name,
+                "ElasticsearchDestinationConfiguration": {
+                    "RoleARN": "role",
+                    "IndexName": "activity",
+                    "ClusterEndpoint": "http://localhost:9200",
+                    "S3Configuration": {
+                        "RoleARN": "role", "BucketARN": "arn:aws:s3:::before", "Prefix": "keep/",
+                    },
+                },
+            }),
+        ))
+        .unwrap();
+        describe(svc, name)["Destinations"][0]["DestinationId"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[test]
+    fn search_destination_describes_its_bucket_as_s3_destination_description() {
+        let svc = service();
+        search_stream(&svc, "described");
+        let description = describe(&svc, "described");
+        let dest = &description["Destinations"][0]["ElasticsearchDestinationDescription"];
+        assert!(dest.get("S3Configuration").is_none());
+        assert_eq!(
+            dest["S3DestinationDescription"]["BucketARN"],
+            "arn:aws:s3:::before"
+        );
+        assert_eq!(
+            dest["S3DestinationDescription"]["CompressionFormat"],
+            "UNCOMPRESSED"
+        );
+        assert_eq!(dest["IndexRotationPeriod"], "OneDay");
+        assert_eq!(dest["BufferingHints"]["SizeInMBs"], 5);
+        assert_eq!(dest["BufferingHints"]["IntervalInSeconds"], 300);
+        assert_eq!(dest["RetryOptions"]["DurationInSeconds"], 300);
+        assert_eq!(dest["S3BackupMode"], "FailedDocumentsOnly");
+    }
+
+    #[test]
+    fn search_update_merges_s3_update_into_the_delivered_bucket() {
+        let svc = service();
+        let id = search_stream(&svc, "merged");
+        svc.update_destination(&request(
+            "UpdateDestination",
+            json!({
+                "DeliveryStreamName": "merged",
+                "CurrentDeliveryStreamVersionId": "1",
+                "DestinationId": id,
+                "ElasticsearchDestinationUpdate": {
+                    "IndexName": "renamed",
+                    "S3Update": {"BucketARN": "arn:aws:s3:::after"},
+                },
+            }),
+        ))
+        .unwrap();
+        let description = describe(&svc, "merged");
+        let dest = &description["Destinations"][0]["ElasticsearchDestinationDescription"];
+        assert_eq!(dest["IndexName"], "renamed");
+        assert_eq!(dest["ClusterEndpoint"], "http://localhost:9200");
+        assert!(dest.get("S3Update").is_none());
+        assert_eq!(
+            dest["S3DestinationDescription"]["BucketARN"],
+            "arn:aws:s3:::after"
+        );
+        assert_eq!(dest["S3DestinationDescription"]["Prefix"], "keep/");
+
+        let accounts = svc.state.read();
+        let stream = &accounts
+            .get("123456789012")
+            .unwrap()
+            .streams("us-east-1")
+            .unwrap()["merged"];
+        let delivery = crate::search::delivery(
+            crate::search::ELASTICSEARCH,
+            &stream.extra_destinations[crate::search::ELASTICSEARCH],
+        )
+        .unwrap();
+        assert_eq!(delivery.bucket, "after");
+    }
+
+    #[test]
+    fn elasticsearch_to_opensearch_update_replaces_without_merging() {
+        let svc = service();
+        let id = search_stream(&svc, "switched");
+        svc.update_destination(&request(
+            "UpdateDestination",
+            json!({
+                "DeliveryStreamName": "switched",
+                "CurrentDeliveryStreamVersionId": "1",
+                "DestinationId": id,
+                "AmazonopensearchserviceDestinationUpdate": {
+                    "IndexName": "os",
+                    "ClusterEndpoint": "http://localhost:9201",
+                    "S3Update": {"RoleARN": "role", "BucketARN": "arn:aws:s3:::os"},
+                },
+            }),
+        ))
+        .unwrap();
+        let description = describe(&svc, "switched");
+        let dest = &description["Destinations"][0];
+        assert!(dest.get("ElasticsearchDestinationDescription").is_none());
+        let os = &dest["AmazonopensearchserviceDestinationDescription"];
+        assert_eq!(
+            os["S3DestinationDescription"]["BucketARN"],
+            "arn:aws:s3:::os"
+        );
+        assert!(os["S3DestinationDescription"].get("Prefix").is_none());
+    }
+
+    #[test]
+    fn incomplete_or_ambiguous_search_type_changes_are_refused() {
+        let svc = service();
+        let id = search_stream(&svc, "kept");
+        let full = json!({
+            "IndexName": "os",
+            "ClusterEndpoint": "http://localhost:9201",
+            "S3Update": {"RoleARN": "role", "BucketARN": "arn:aws:s3:::os"},
+        });
+        for update in [
+            json!({"AmazonopensearchserviceDestinationUpdate": {"IndexName": "os"}}),
+            json!({
+                "AmazonopensearchserviceDestinationUpdate": full,
+                "ElasticsearchDestinationUpdate": {"IndexName": "es"},
+            }),
+        ] {
+            let mut body = json!({
+                "DeliveryStreamName": "kept",
+                "CurrentDeliveryStreamVersionId": "1",
+                "DestinationId": id,
+            });
+            merge_json(&mut body, &update);
+            let Err(err) = svc.update_destination(&request("UpdateDestination", body)) else {
+                panic!("{update} must be refused");
+            };
+            assert_eq!(err.code(), "InvalidArgumentException");
+            let description = describe(&svc, "kept");
+            assert_eq!(description["VersionId"], "1");
+            assert_eq!(
+                description["Destinations"][0]["ElasticsearchDestinationDescription"]["IndexName"],
+                "activity"
+            );
+        }
+    }
+
+    #[test]
+    fn switching_between_search_and_other_destinations_is_refused() {
+        let svc = service();
+        let id = search_stream(&svc, "search");
+        for update in [
+            json!({"ExtendedS3DestinationUpdate": {"RoleARN": "r", "BucketARN": "arn:aws:s3:::b"}}),
+            json!({"HttpEndpointDestinationUpdate": {"RoleARN": "r"}}),
+        ] {
+            let mut body = json!({
+                "DeliveryStreamName": "search",
+                "CurrentDeliveryStreamVersionId": "1",
+                "DestinationId": id,
+            });
+            merge_json(&mut body, &update);
+            let Err(err) = svc.update_destination(&request("UpdateDestination", body)) else {
+                panic!("{update} must be refused");
+            };
+            assert_eq!(err.code(), "InvalidArgumentException");
+        }
+
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "plain",
+                "ExtendedS3DestinationConfiguration": {
+                    "RoleARN": "r", "BucketARN": "arn:aws:s3:::b",
+                },
+            }),
+        ))
+        .unwrap();
+        let id = describe(&svc, "plain")["Destinations"][0]["DestinationId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let Err(err) = svc.update_destination(&request(
+            "UpdateDestination",
+            json!({
+                "DeliveryStreamName": "plain",
+                "CurrentDeliveryStreamVersionId": "1",
+                "DestinationId": id,
+                "ElasticsearchDestinationUpdate": {"IndexName": "x"},
+            }),
+        )) else {
+            panic!("S3 to Elasticsearch must be refused");
+        };
+        assert_eq!(err.code(), "InvalidArgumentException");
+        // The refused update left the stream's version and destination alone.
+        let description = describe(&svc, "plain");
+        assert_eq!(description["VersionId"], "1");
+        assert!(description["Destinations"][0]
+            .get("ElasticsearchDestinationDescription")
+            .is_none());
     }
 
     #[test]

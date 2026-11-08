@@ -103,7 +103,7 @@ pub struct DeliveryStream {
 }
 
 /// `KinesisStreamSourceConfiguration` of a `KinesisStreamAsSource` stream.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KinesisSource {
     pub kinesis_stream_arn: String,
     pub role_arn: String,

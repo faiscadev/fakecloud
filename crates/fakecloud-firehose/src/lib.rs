@@ -15,9 +15,11 @@ pub mod writer;
 
 pub use config::{buffering_policy, delivery_config, BufferingPolicy, DeliveryConfig};
 pub use delivery::FirehoseDeliveryImpl;
-pub use engine::{DrainReport, FirehoseEngine, SourceProgress, SourceRead, WorkerAlreadyStarted};
+pub use engine::{
+    DrainReport, FirehoseEngine, SourceLimit, SourceProgress, SourceRead, WorkerAlreadyStarted,
+};
 pub use output::{Compression, OutputConfig};
-pub use search::SearchDelivery;
+pub use search::{BulkAttempts, SearchDelivery};
 pub use service::{parse_kinesis_source, validate_s3_destination_compression, FirehoseService};
 pub use state::{
     DeliveryStream, FirehoseAccounts, FirehoseSnapshot, KinesisSource, S3Destination,

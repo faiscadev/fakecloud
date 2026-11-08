@@ -36,7 +36,9 @@ pub struct DrainReport {
 pub struct WorkerAlreadyStarted;
 
 /// AWS keeps retrying DirectPut delivery to S3 for up to 24 hours after the
-/// data arrives, then discards it.
+/// data arrives, then discards it. Kinesis-source batches are bounded by
+/// [`SourceLimit`] instead: AWS retries them for as long as the source stream
+/// retains the records.
 const MAX_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Delay before retrying a failed S3 delivery. AWS documents that Firehose
@@ -58,12 +60,36 @@ pub struct SourceRead {
 
 /// Per-shard offsets of a `KinesisStreamAsSource` stream: `read` is what the
 /// engine has accepted, `committed` what has been delivered or written to the
-/// failure location. `backlogged` asks the reader to pause.
+/// failure location. `backlogged` asks the reader to pause, and `refused` says
+/// why the stream's destination cannot accept records now.
 #[derive(Clone, Debug, Default)]
 pub struct SourceProgress {
     pub read: BTreeMap<String, usize>,
     pub committed: BTreeMap<String, usize>,
     pub backlogged: bool,
+    pub refused: Option<String>,
+    pub limit: Option<SourceLimit>,
+}
+
+/// How long a failing batch read from a source may be retried: for the source
+/// stream's retention, and not after the records' stream is gone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceLimit {
+    pub retention: Duration,
+    /// Prefix of the source position keys of the stream existing now, or
+    /// `None` when it has been deleted.
+    pub current_prefix: Option<String>,
+}
+
+impl SourceLimit {
+    fn expired(&self, positions: &BTreeMap<String, usize>, age: Duration) -> bool {
+        let current = self.current_prefix.as_ref().is_some_and(|prefix| {
+            positions
+                .keys()
+                .any(|position| position.starts_with(prefix))
+        });
+        !current || age >= self.retention
+    }
 }
 
 fn advance(offsets: &mut BTreeMap<String, usize>, positions: &BTreeMap<String, usize>) {
@@ -344,14 +370,47 @@ impl FirehoseEngine {
             name: name.into(),
             instance_id: stream.instance_id,
         };
+        let refused = stream_delivery(stream).err().map(|error| error.message());
         let registry = self.core.registry.lock();
         let mut progress = registry.sources.get(&key).cloned().unwrap_or_default();
+        progress.refused = refused;
         if let Some(buffer) = registry.streams.get(&key) {
             let pending = buffer.active.as_ref().map_or(0, |a| a.input_bytes)
                 + buffer.queue.iter().map(|b| b.input_bytes).sum::<usize>();
             progress.backlogged = buffer.failures > 0 || pending >= MAX_SOURCE_BACKLOG_BYTES;
         }
         progress
+    }
+
+    /// Update what bounds the retries of batches read from this stream's source.
+    pub fn limit_source_retries(
+        &self,
+        account: &str,
+        region: &str,
+        name: &str,
+        limit: SourceLimit,
+    ) {
+        let config = self.core.state.read();
+        let Some(stream) = config
+            .get(account)
+            .and_then(|s| s.streams(region))
+            .and_then(|s| s.get(name))
+        else {
+            return;
+        };
+        let key = StreamKey {
+            account_id: account.into(),
+            region: region.into(),
+            name: name.into(),
+            instance_id: stream.instance_id,
+        };
+        self.core
+            .registry
+            .lock()
+            .sources
+            .entry(key)
+            .or_default()
+            .limit = Some(limit);
     }
 
     pub(crate) fn enqueue_put(
@@ -829,6 +888,17 @@ impl EngineCore {
         }
         let now = self.clock.now();
         let key = &completion.batch.batch.stream;
+        let age = now.monotonic.duration_since(completion.batch.first_arrival);
+        let positions = &completion.batch.source_positions;
+        let expired = if positions.is_empty() {
+            age >= MAX_RETENTION
+        } else {
+            registry
+                .sources
+                .get(key)
+                .and_then(|source| source.limit.as_ref())
+                .is_some_and(|limit| limit.expired(positions, age))
+        };
         let Some(buffer) = registry.streams.get_mut(key) else {
             return true;
         };
@@ -860,16 +930,14 @@ impl EngineCore {
                     tracing::warn!(stream = ?key.name, account = %key.account_id, region = %key.region,
                         ?object_key, attempt = buffer.failures, ?error,
                         "Firehose delivery attempt failed after admission closed");
-                } else if now.monotonic.duration_since(completion.batch.first_arrival)
-                    >= MAX_RETENTION
-                {
+                } else if expired {
                     buffer.queue.pop_front();
                     buffer.retry_not_before = None;
                     buffer.failures = 0;
                     tracing::warn!(stream = ?key.name, account = %key.account_id, region = %key.region,
                         ?object_key, records = completion.batch.batch.records.len(),
                         bytes = completion.batch.input_bytes, ?error,
-                        "Firehose batch discarded after failing delivery for 24 hours");
+                        "Firehose batch discarded after failing delivery past its retention");
                     let held = buffer.release_held();
                     registry.commit_source(key, &completion.batch.source_positions);
                     registry.commit_source(key, &held);
@@ -1866,6 +1934,102 @@ mod tests {
         fn write(&self, _: &DeliveryBatch) -> Result<DeliveryWriteOutcome, String> {
             Err("unavailable".into())
         }
+    }
+
+    /// AWS retries Kinesis-source batches for as long as the stream retains
+    /// them, so the 24-hour Direct PUT limit must not drop and commit them, but
+    /// the stream's retention or its deletion does end the retries.
+    #[tokio::test]
+    async fn source_batches_are_bound_by_the_source_stream() {
+        let queued = |f: &Fixture| {
+            f.engine
+                .core
+                .registry
+                .lock()
+                .streams
+                .values()
+                .map(|buffer| buffer.queue.len())
+                .sum::<usize>()
+        };
+        let limit = |retention_days: u64, prefix: Option<&str>| SourceLimit {
+            retention: Duration::from_secs(retention_days * 86_400),
+            current_prefix: prefix.map(str::to_owned),
+        };
+        for (expired_limit, age_days) in [
+            (limit(7, Some("g1/")), 8),
+            (limit(7, Some("g2/")), 0),
+            (limit(7, None), 0),
+        ] {
+            let f = Fixture::new(0);
+            *f.engine.core.writer.write() = Some(Arc::new(FailingWriter));
+            f.engine
+                .limit_source_retries(ACCOUNT, REGION, NAME, limit(7, Some("g1/")));
+            f.engine
+                .enqueue_from_source(
+                    ACCOUNT,
+                    REGION,
+                    NAME,
+                    SourceRead {
+                        shard_id: "g1/shard-0".into(),
+                        end: 1,
+                        records: vec![Bytes::from_static(b"kept")],
+                        document_ids: vec!["id".into()],
+                    },
+                )
+                .unwrap();
+            f.turn().await;
+            f.advance(2 * 86_400);
+            f.turn().await;
+            assert_eq!(queued(&f), 1, "past 24 hours, inside the retention");
+            f.engine
+                .limit_source_retries(ACCOUNT, REGION, NAME, expired_limit);
+            f.advance(age_days * 86_400 + RETRY_INTERVAL.as_secs());
+            f.turn().await;
+            assert_eq!(queued(&f), 0);
+            let progress = f.engine.source_progress(ACCOUNT, REGION, NAME);
+            assert_eq!(progress.committed["g1/shard-0"], 1);
+            assert!(!progress.backlogged);
+        }
+    }
+
+    #[tokio::test]
+    async fn source_batches_outlive_the_24_hour_retry_limit() {
+        let f = Fixture::new(0);
+        *f.engine.core.writer.write() = Some(Arc::new(FailingWriter));
+        f.engine
+            .enqueue_from_source(
+                ACCOUNT,
+                REGION,
+                NAME,
+                SourceRead {
+                    shard_id: "shard-0".into(),
+                    end: 1,
+                    records: vec![Bytes::from_static(b"kept")],
+                    document_ids: vec!["id".into()],
+                },
+            )
+            .unwrap();
+        f.turn().await;
+        f.advance(2 * 86_400);
+        f.turn().await;
+        let progress = f.engine.source_progress(ACCOUNT, REGION, NAME);
+        assert!(progress.committed.is_empty());
+        assert!(progress.backlogged);
+        let registry = f.engine.core.registry.lock();
+        assert_eq!(registry.streams.values().next().unwrap().queue.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn source_progress_reports_a_destination_that_refuses_records() {
+        let f = Fixture::new(0);
+        let progress = || f.engine.source_progress(ACCOUNT, REGION, NAME);
+        assert_eq!(progress().refused, None);
+        f.update(NAME, |stream| {
+            stream
+                .extra_destinations
+                .insert("SplunkDestinationDescription".into(), json!({}));
+        });
+        assert!(progress().refused.unwrap().contains("SplunkDestination"));
     }
 
     #[tokio::test]
