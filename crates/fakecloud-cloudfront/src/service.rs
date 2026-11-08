@@ -945,8 +945,9 @@ impl CloudFrontService {
                 )
             })?
             .to_string();
-        let new_config: DistributionConfig = xml_io::from_xml_root(&req.body)
+        let mut new_config: DistributionConfig = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid DistributionConfig XML: {e}")))?;
+        new_config.ensure_aws_defaults();
         validate_distribution_config(&new_config)?;
 
         let mut state = self.state.write();
@@ -989,10 +990,9 @@ impl CloudFrontService {
             // lands.
             dist.status = "InProgress".to_string();
         }
-        let mut snapshot = dist.clone();
+        let snapshot = dist.clone();
         drop(state);
-        snapshot.config.ensure_aws_defaults();
-
+        
         if config_changed {
             self.schedule_distribution_deploy(id.to_string());
         }
