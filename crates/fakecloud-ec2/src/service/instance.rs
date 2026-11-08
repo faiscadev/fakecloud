@@ -2452,23 +2452,52 @@ pub(crate) fn describe_instance_status(
     ))
 }
 
+fn instance_type_matches_filters(instance_type: &str, filters: &[Filter]) -> bool {
+    filters.iter().all(|f| {
+        let actual = match f.name.as_str() {
+            "instance-type" => instance_type.to_string(),
+            "processor-info.supported-architecture" => {
+                crate::instance_types::architecture(instance_type).to_string()
+            }
+            "vcpu-info.default-vcpus" => crate::instance_types::default_vcpus(instance_type)
+                .unwrap_or(2)
+                .to_string(),
+            "bare-metal" => instance_type.contains(".metal").to_string(),
+            // Attributes the table does not model are not filtered on.
+            _ => return true,
+        };
+        f.values
+            .iter()
+            .any(|v| crate::service_helpers::filter_value_matches(v, &actual))
+    })
+}
+
+fn instance_type_item(instance_type: &str) -> String {
+    let vcpus = crate::instance_types::default_vcpus(instance_type).unwrap_or(2);
+    let threads = crate::instance_types::default_threads_per_core(instance_type, vcpus);
+    let bare_metal = instance_type.contains(".metal");
+    let hypervisor = if bare_metal {
+        ""
+    } else {
+        "<hypervisor>nitro</hypervisor>"
+    };
+    format!(
+        "{}<currentGeneration>true</currentGeneration><bareMetal>{bare_metal}</bareMetal>         {hypervisor}<instanceStorageSupported>false</instanceStorageSupported>         <supportedUsageClasses><item>on-demand</item><item>spot</item></supportedUsageClasses>         <processorInfo><supportedArchitectures><item>{}</item></supportedArchitectures></processorInfo>         <vCpuInfo><defaultVCpus>{vcpus}</defaultVCpus><defaultCores>{}</defaultCores>         <defaultThreadsPerCore>{threads}</defaultThreadsPerCore></vCpuInfo>         <memoryInfo><sizeInMiB>1024</sizeInMiB></memoryInfo>         <ebsInfo><ebsOptimizedSupport>default</ebsOptimizedSupport><encryptionSupport>supported</encryptionSupport><nvmeSupport>required</nvmeSupport></ebsInfo>         <networkInfo><networkPerformance>Up to 5 Gigabit</networkPerformance><maximumNetworkInterfaces>3</maximumNetworkInterfaces><maximumNetworkCards>1</maximumNetworkCards><defaultNetworkCardIndex>0</defaultNetworkCardIndex><ipv4AddressesPerInterface>10</ipv4AddressesPerInterface><ipv6AddressesPerInterface>10</ipv6AddressesPerInterface><ipv6Supported>true</ipv6Supported><enaSupport>required</enaSupport><efaSupported>false</efaSupported></networkInfo>         <placementGroupInfo><supportedStrategies><item>cluster</item><item>partition</item><item>spread</item></supportedStrategies></placementGroupInfo>         <supportedVirtualizationTypes><item>hvm</item></supportedVirtualizationTypes>",
+        ec2_elem("instanceType", instance_type),
+        crate::instance_types::architecture(instance_type),
+        (vcpus / threads).max(1),
+    )
+}
+
 fn instance_type_items(req: &AwsRequest) -> Vec<String> {
     let wanted = indexed_list(&req.query_params, "InstanceType");
-    INSTANCE_TYPES
+    let filters = parse_filters(&req.query_params);
+    crate::instance_types::INSTANCE_TYPE_VCPUS
         .iter()
-        .filter(|t| wanted.is_empty() || wanted.iter().any(|w| w == *t))
-        .map(|t| {
-            format!(
-                "{}<currentGeneration>true</currentGeneration><bareMetal>false</bareMetal>\
-                 <hypervisor>nitro</hypervisor><instanceStorageSupported>false</instanceStorageSupported>\
-                 <processorInfo><supportedArchitectures><item>x86_64</item></supportedArchitectures></processorInfo>\
-                 <vCpuInfo><defaultVCpus>{}</defaultVCpus></vCpuInfo>\
-                 <memoryInfo><sizeInMiB>1024</sizeInMiB></memoryInfo>\
-                 <supportedVirtualizationTypes><item>hvm</item></supportedVirtualizationTypes>",
-                ec2_elem("instanceType", t),
-                crate::instance_types::default_vcpus(t).unwrap_or(2),
-            )
-        })
+        .map(|(t, _)| *t)
+        .filter(|t| wanted.is_empty() || wanted.iter().any(|w| w == t))
+        .filter(|t| instance_type_matches_filters(t, &filters))
+        .map(instance_type_item)
         .collect()
 }
 

@@ -1452,9 +1452,66 @@ pub(crate) fn default_vcpus(instance_type: &str) -> Option<u32> {
         .map(|i| INSTANCE_TYPE_VCPUS[i].1)
 }
 
+/// The CPU architecture of `instance_type`: `arm64` for Graviton (and Apple
+/// silicon `mac2`) families, `x86_64` otherwise.
+///
+/// A family name is `<letters><generation digits><attribute letters>`. AWS puts
+/// a `g` in the attribute letters of every Graviton family (`m7g`, `c6gn`,
+/// `x2gd`, `im4gn`, `is4gen`, `i8ge`, `g5g`, `hpc7g`). The GPU families `g4dn`,
+/// `g5`, `g6` and `gr6` have the `g` in the leading letters, so they stay
+/// `x86_64`. `a1` is the one Graviton family with no `g`.
+pub(crate) fn architecture(instance_type: &str) -> &'static str {
+    let family = instance_type.split('.').next().unwrap_or(instance_type);
+    let attributes = family
+        .trim_start_matches(|c: char| c.is_ascii_lowercase())
+        .trim_start_matches(|c: char| c.is_ascii_digit());
+    if family == "a1" || family.starts_with("mac2") || attributes.contains('g') {
+        "arm64"
+    } else {
+        "x86_64"
+    }
+}
+
+/// Threads per core: 1 for Graviton, single-vCPU types and the AMD families
+/// that turn off SMT, 2 for the rest.
+pub(crate) fn default_threads_per_core(instance_type: &str, vcpus: u32) -> u32 {
+    let family = instance_type.split('.').next().unwrap_or(instance_type);
+    let no_smt = ["c7a", "c8a", "m7a", "m8a", "r7a", "r8a", "hpc6a", "hpc7a"];
+    if vcpus < 2 || architecture(instance_type) == "arm64" || no_smt.contains(&family) {
+        1
+    } else {
+        2
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn architecture_follows_the_graviton_naming_rule() {
+        for t in [
+            "a1.large", "t4g.micro", "m7g.large", "c6gn.xlarge", "x2gd.metal", "im4gn.large",
+            "is4gen.large", "i8ge.large", "g5g.xlarge", "hpc7g.16xlarge", "mac2.metal",
+        ] {
+            assert_eq!(architecture(t), "arm64", "{t}");
+        }
+        for t in [
+            "t3a.large", "m5.large", "g4dn.xlarge", "g5.xlarge", "g6e.xlarge", "gr6.4xlarge",
+            "i3en.large", "p4d.24xlarge", "inf2.xlarge", "mac1.metal", "u-6tb1.112xlarge",
+            "m6idn.large", "c6in.large",
+        ] {
+            assert_eq!(architecture(t), "x86_64", "{t}");
+        }
+    }
+
+    #[test]
+    fn threads_per_core() {
+        assert_eq!(default_threads_per_core("t2.micro", 1), 1);
+        assert_eq!(default_threads_per_core("m7g.large", 2), 1);
+        assert_eq!(default_threads_per_core("c7a.large", 2), 1);
+        assert_eq!(default_threads_per_core("t3.large", 2), 2);
+    }
 
     #[test]
     fn table_is_sorted_and_unique() {

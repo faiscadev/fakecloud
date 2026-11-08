@@ -695,6 +695,30 @@ fn describe_instance_types_reports_real_vcpus() {
 }
 
 #[test]
+fn describe_instance_types_serves_the_full_catalog_and_filters() {
+    let describe = |params: &[(&str, &str)]| {
+        body(instance::describe_instance_types(
+            &Ec2Service::new(),
+            &req("DescribeInstanceTypes", params),
+        ))
+    };
+    let graviton = describe(&[("InstanceType.1", "m7g.large")]);
+    assert!(graviton.contains("<item>arm64</item>"), "{graviton}");
+    assert!(graviton.contains("<defaultThreadsPerCore>1</defaultThreadsPerCore>"));
+    let amd = describe(&[("InstanceType.1", "t3a.large")]);
+    assert!(amd.contains("<item>x86_64</item>"), "{amd}");
+    assert!(amd.contains("<defaultCores>1</defaultCores>"));
+    let filtered = describe(&[
+        ("Filter.1.Name", "instance-type"),
+        ("Filter.1.Value.1", "m7g.*"),
+        ("Filter.2.Name", "processor-info.supported-architecture"),
+        ("Filter.2.Value.1", "arm64"),
+    ]);
+    assert!(filtered.contains("<instanceType>m7g.large</instanceType>"));
+    assert!(!filtered.contains("<instanceType>m5.large</instanceType>"));
+}
+
+#[test]
 fn an_account_ec2_has_not_stored_reports_its_default_network() {
     let usage = Ec2QuotaUsage::new(Ec2Service::new().state.clone());
     let of = |q: CountQuota| {
