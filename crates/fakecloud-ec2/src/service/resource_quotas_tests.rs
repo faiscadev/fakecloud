@@ -694,21 +694,52 @@ fn describe_instance_types_reports_real_vcpus() {
     assert!(out.contains("<defaultVCpus>1</defaultVCpus>"), "{out}");
 }
 
+fn items_of(out: &str) -> Vec<String> {
+    out.split("<instanceType>")
+        .skip(1)
+        .map(|s| s.split("</instanceType>").next().unwrap().to_string())
+        .collect()
+}
+
+fn describe_types(params: &[(&str, &str)]) -> String {
+    body(instance::describe_instance_types(
+        &Ec2Service::new(),
+        &req("DescribeInstanceTypes", params),
+    ))
+}
+
+fn types_from_requirements(params: &[(&str, &str)]) -> Vec<String> {
+    let mut all = vec![
+        ("ArchitectureType.1", "x86_64"),
+        ("ArchitectureType.2", "arm64"),
+        ("VirtualizationType.1", "hvm"),
+        ("VirtualizationType.2", "paravirtual"),
+        ("InstanceRequirements.VCpuCount.Min", "1"),
+        ("InstanceRequirements.MemoryMiB.Min", "0"),
+    ];
+    all.extend_from_slice(params);
+    items_of(&body(instance::get_instance_types_from_requirements(
+        &Ec2Service::new(),
+        &req("GetInstanceTypesFromInstanceRequirements", &all),
+    )))
+}
+
 #[test]
 fn describe_instance_types_serves_the_full_catalog_and_filters() {
-    let describe = |params: &[(&str, &str)]| {
-        body(instance::describe_instance_types(
-            &Ec2Service::new(),
-            &req("DescribeInstanceTypes", params),
-        ))
-    };
-    let graviton = describe(&[("InstanceType.1", "m7g.large")]);
+    let graviton = describe_types(&[("InstanceType.1", "m7g.large")]);
     assert!(graviton.contains("<item>arm64</item>"), "{graviton}");
+    assert!(
+        graviton.contains("<sizeInMiB>8192</sizeInMiB>"),
+        "{graviton}"
+    );
     assert!(graviton.contains("<defaultThreadsPerCore>1</defaultThreadsPerCore>"));
-    let amd = describe(&[("InstanceType.1", "t3a.large")]);
+    assert!(graviton.contains("<hypervisor>nitro</hypervisor>"));
+    assert!(graviton.contains("<baselineThroughputInMBps>78.75</baselineThroughputInMBps>"));
+    assert!(graviton.contains("<maximumThroughputInMBps>1250.0</maximumThroughputInMBps>"));
+    let amd = describe_types(&[("InstanceType.1", "t3a.large")]);
     assert!(amd.contains("<item>x86_64</item>"), "{amd}");
     assert!(amd.contains("<defaultCores>1</defaultCores>"));
-    let filtered = describe(&[
+    let filtered = describe_types(&[
         ("Filter.1.Name", "instance-type"),
         ("Filter.1.Value.1", "m7g.*"),
         ("Filter.2.Name", "processor-info.supported-architecture"),
@@ -716,6 +747,478 @@ fn describe_instance_types_serves_the_full_catalog_and_filters() {
     ]);
     assert!(filtered.contains("<instanceType>m7g.large</instanceType>"));
     assert!(!filtered.contains("<instanceType>m5.large</instanceType>"));
+}
+
+#[test]
+fn describe_instance_types_reports_real_per_type_values() {
+    let t2 = describe_types(&[("InstanceType.1", "t2.micro")]);
+    assert!(t2.contains("<hypervisor>xen</hypervisor>"), "{t2}");
+    assert!(t2.contains("<item>i386</item>"), "{t2}");
+    assert!(t2.contains("<burstablePerformanceSupported>true"), "{t2}");
+    assert!(!t2.contains("<item>cluster</item>"), "{t2}");
+    let c1 = describe_types(&[("InstanceType.1", "c1.medium")]);
+    assert!(c1.contains("<currentGeneration>false"), "{c1}");
+    assert!(c1.contains("<instanceStorageSupported>true"), "{c1}");
+    assert!(c1.contains("<totalSizeInGB>350</totalSizeInGB>"), "{c1}");
+    assert!(c1.contains("<type>hdd</type>"), "{c1}");
+    assert!(c1.contains("<ipv6AddressesPerInterface>0<"), "{c1}");
+}
+
+#[test]
+fn an_unknown_value_is_left_out_but_the_required_blocks_exist() {
+    let sparse = describe_types(&[("InstanceType.1", "p3.8xlarge")]);
+    for present in ["<ebsInfo>", "<networkInfo>", "<placementGroupInfo>"] {
+        assert!(sparse.contains(present), "{present}: {sparse}");
+    }
+    for absent in [
+        "<hypervisor>",
+        "<defaultCores>",
+        "<instanceStorageSupported>",
+        "<ebsOptimizedSupport>",
+        "<maximumNetworkInterfaces>",
+        "<ipv6AddressesPerInterface>",
+    ] {
+        assert!(!sparse.contains(absent), "{absent}: {sparse}");
+    }
+    assert!(
+        sparse.contains("<placementGroupInfo></placementGroupInfo>"),
+        "{sparse}"
+    );
+    assert!(!sparse.contains("<ipv6Supported>"), "{sparse}");
+    let all = describe_types(&[]);
+    for never in [
+        "<efaSupported>",
+        "<encryptionSupport>",
+        "<maximumNetworkCards>",
+    ] {
+        assert!(!all.contains(never), "{never}");
+    }
+}
+
+#[test]
+fn every_evaluated_filter_narrows_the_catalog() {
+    let m7g_large = |filter: &str, value: &str| {
+        items_of(&describe_types(&[
+            ("Filter.1.Name", filter),
+            ("Filter.1.Value.1", value),
+        ]))
+        .contains(&"m7g.large".to_string())
+    };
+    for (filter, hit, miss) in [
+        ("memory-info.size-in-mib", "8192", "4096"),
+        ("current-generation", "true", "false"),
+        ("hypervisor", "nitro", "xen"),
+        ("instance-storage-supported", "false", "true"),
+        ("bare-metal", "false", "true"),
+        ("burstable-performance-supported", "false", "true"),
+        ("vcpu-info.default-cores", "2", "1"),
+        ("vcpu-info.default-threads-per-core", "1", "2"),
+        ("ebs-info.ebs-optimized-support", "default", "unsupported"),
+        ("ebs-info.nvme-support", "required", "unsupported"),
+        ("ebs-info.ebs-optimized-info.maximum-iops", "40000", "1"),
+        (
+            "ebs-info.ebs-optimized-info.maximum-throughput-in-mbps",
+            "1250.0",
+            "1",
+        ),
+        ("network-info.ena-support", "required", "unsupported"),
+        ("network-info.ipv4-addresses-per-interface", "10", "1"),
+        ("network-info.ipv6-supported", "true", "false"),
+        ("network-info.maximum-network-interfaces", "3", "1"),
+        ("network-info.network-performance", "Up to *", "1 Gigabit"),
+        ("nitro-enclaves-support", "supported", "unsupported"),
+        ("supported-usage-class", "spot", "capacity-block"),
+        ("supported-virtualization-type", "hvm", "paravirtual"),
+    ] {
+        assert!(m7g_large(filter, hit), "{filter}={hit}");
+        assert!(!m7g_large(filter, miss), "{filter}={miss}");
+    }
+    let hdd = items_of(&describe_types(&[
+        ("Filter.1.Name", "instance-storage-info.disk.type"),
+        ("Filter.1.Value.1", "hdd"),
+    ]));
+    assert!(hdd.contains(&"d3.xlarge".to_string()));
+    assert!(!hdd.contains(&"i3.large".to_string()));
+}
+
+#[test]
+fn a_filter_with_no_data_behind_it_is_refused() {
+    let r = instance::describe_instance_types(
+        &Ec2Service::new(),
+        &req(
+            "DescribeInstanceTypes",
+            &[
+                ("Filter.1.Name", "network-info.efa-supported"),
+                ("Filter.1.Value.1", "true"),
+            ],
+        ),
+    );
+    assert_eq!(code(r), "UnsupportedOperation");
+    let r = instance::describe_instance_types(
+        &Ec2Service::new(),
+        &req(
+            "DescribeInstanceTypes",
+            &[("Filter.1.Name", "nope"), ("Filter.1.Value.1", "x")],
+        ),
+    );
+    assert_eq!(code(r), "InvalidParameterValue");
+}
+
+#[test]
+fn requirements_honor_vcpus_memory_and_architecture() {
+    let found = |params: &[(&str, &str)]| {
+        let mut all = vec![
+            ("ArchitectureType.1", "arm64"),
+            ("VirtualizationType.1", "hvm"),
+            ("InstanceRequirements.VCpuCount.Min", "2"),
+            ("InstanceRequirements.VCpuCount.Max", "2"),
+            ("InstanceRequirements.MemoryMiB.Min", "8192"),
+            ("InstanceRequirements.MemoryMiB.Max", "8192"),
+        ];
+        all.extend_from_slice(params);
+        items_of(&body(instance::get_instance_types_from_requirements(
+            &Ec2Service::new(),
+            &req("GetInstanceTypesFromInstanceRequirements", &all),
+        )))
+    };
+    let arm = found(&[]);
+    assert!(arm.contains(&"m7g.large".to_string()), "{arm:?}");
+    assert!(!arm.contains(&"m5.large".to_string()), "{arm:?}");
+    assert!(!arm.contains(&"m7g.xlarge".to_string()), "{arm:?}");
+    assert!(
+        !arm.contains(&"t4g.large".to_string()),
+        "burstable: {arm:?}"
+    );
+    let with_burstable = found(&[("InstanceRequirements.BurstablePerformance", "included")]);
+    assert!(with_burstable.contains(&"t4g.large".to_string()));
+    let only_burstable = found(&[("InstanceRequirements.BurstablePerformance", "required")]);
+    assert_eq!(only_burstable, ["t4g.large"]);
+}
+
+#[test]
+fn requirements_honor_the_other_catalog_backed_fields() {
+    let has =
+        |params: &[(&str, &str)], t: &str| types_from_requirements(params).contains(&t.to_string());
+    assert!(!has(&[], "m5.metal"), "bare metal is excluded by default");
+    assert!(has(
+        &[("InstanceRequirements.BareMetal", "included")],
+        "m5.metal"
+    ));
+    assert!(has(&[], "c1.medium"));
+    assert!(!has(
+        &[("InstanceRequirements.InstanceGeneration.1", "current")],
+        "c1.medium"
+    ));
+    assert!(!has(
+        &[("InstanceRequirements.CpuManufacturer.1", "amd")],
+        "m5.large"
+    ));
+    assert!(has(
+        &[("InstanceRequirements.CpuManufacturer.1", "intel")],
+        "m5.large"
+    ));
+    assert!(!has(
+        &[("InstanceRequirements.ExcludedInstanceType.1", "m5.*")],
+        "m5.large"
+    ));
+    assert_eq!(
+        types_from_requirements(&[("InstanceRequirements.AllowedInstanceType.1", "m7g.large")]),
+        ["m7g.large"]
+    );
+    assert!(!has(
+        &[("InstanceRequirements.LocalStorage", "required")],
+        "m5.large"
+    ));
+    assert!(has(
+        &[("InstanceRequirements.LocalStorage", "excluded")],
+        "m5.large"
+    ));
+    assert!(!has(
+        &[("InstanceRequirements.LocalStorage", "excluded")],
+        "p3.8xlarge"
+    ));
+    assert!(!has(
+        &[("InstanceRequirements.LocalStorageType.1", "ssd")],
+        "d3.xlarge"
+    ));
+    assert!(!has(
+        &[("InstanceRequirements.NetworkInterfaceCount.Min", "8")],
+        "m5.large"
+    ));
+    assert!(!has(
+        &[("InstanceRequirements.MemoryGiBPerVCpu.Min", "8")],
+        "m5.large"
+    ));
+    assert!(has(
+        &[("InstanceRequirements.BaselineEbsBandwidthMbps.Min", "100")],
+        "m7g.large"
+    ));
+    assert!(!has(
+        &[("InstanceRequirements.NetworkBandwidthGbps.Min", "100")],
+        "m7g.large"
+    ));
+    assert!(has(
+        &[("InstanceRequirements.TotalLocalStorageGB.Min", "1000")],
+        "d3.xlarge"
+    ));
+    assert!(!has(
+        &[("InstanceRequirements.TotalLocalStorageGB.Min", "1000")],
+        "m7g.large"
+    ));
+}
+
+#[test]
+fn requirements_need_the_modeled_required_members() {
+    let run = |params: &[(&str, &str)]| {
+        instance::get_instance_types_from_requirements(
+            &Ec2Service::new(),
+            &req("GetInstanceTypesFromInstanceRequirements", params),
+        )
+    };
+    let vcpu = ("InstanceRequirements.VCpuCount.Min", "1");
+    let mem = ("InstanceRequirements.MemoryMiB.Min", "1");
+    let arch = ("ArchitectureType.1", "x86_64");
+    let virt = ("VirtualizationType.1", "hvm");
+    assert_eq!(code(run(&[vcpu, mem, virt])), "MissingParameter");
+    assert_eq!(code(run(&[vcpu, mem, arch])), "MissingParameter");
+    assert_eq!(code(run(&[mem, arch, virt])), "MissingParameter");
+    assert_eq!(code(run(&[vcpu, arch, virt])), "MissingParameter");
+    assert_eq!(
+        code(run(&[
+            vcpu,
+            mem,
+            arch,
+            virt,
+            ("InstanceRequirements.BareMetal", "maybe"),
+        ])),
+        "InvalidParameterValue"
+    );
+    assert!(run(&[vcpu, mem, arch, virt]).is_ok());
+}
+
+#[test]
+fn requirements_honor_the_accelerator_fields() {
+    let has =
+        |params: &[(&str, &str)], t: &str| types_from_requirements(params).contains(&t.to_string());
+    let count_max_0 = ("InstanceRequirements.AcceleratorCount.Max", "0");
+    assert!(has(&[count_max_0], "m5.large"));
+    assert!(!has(&[count_max_0], "g4dn.xlarge"));
+    // An inference chip count is unknown, so it does not pass for 0.
+    assert!(!has(&[count_max_0], "inf1.xlarge"));
+    let gpu = ("InstanceRequirements.AcceleratorType.1", "gpu");
+    assert!(has(&[gpu], "g4dn.xlarge"));
+    assert!(!has(&[gpu], "f2.12xlarge"));
+    assert!(!has(&[gpu], "m5.large"));
+    let inference = ("InstanceRequirements.AcceleratorType.1", "inference");
+    assert!(has(&[inference], "inf1.xlarge"));
+    let nvidia = ("InstanceRequirements.AcceleratorManufacturer.1", "nvidia");
+    assert!(has(&[nvidia], "g4dn.xlarge"));
+    assert!(!has(&[nvidia], "g4ad.xlarge"));
+    let t4 = ("InstanceRequirements.AcceleratorName.1", "t4");
+    assert!(has(&[t4], "g4dn.xlarge"));
+    assert!(!has(&[t4], "g5g.xlarge"));
+    let memory = (
+        "InstanceRequirements.AcceleratorTotalMemoryMiB.Min",
+        "16384",
+    );
+    assert!(has(&[memory], "g4dn.xlarge"));
+    assert!(!has(&[memory], "m5.large"));
+    assert!(!has(&[memory], "f2.12xlarge"));
+}
+
+#[test]
+fn a_known_diskless_type_has_zero_local_storage() {
+    let none = ("InstanceRequirements.TotalLocalStorageGB.Max", "0");
+    let found = types_from_requirements(&[none]);
+    assert!(found.contains(&"m5.large".to_string()));
+    assert!(!found.contains(&"i3.large".to_string()));
+    assert!(
+        !found.contains(&"p3.8xlarge".to_string()),
+        "unknown storage"
+    );
+}
+
+#[test]
+fn requirements_validate_their_lists() {
+    let base = [
+        ("ArchitectureType.1", "x86_64"),
+        ("VirtualizationType.1", "hvm"),
+        ("InstanceRequirements.VCpuCount.Min", "1"),
+        ("InstanceRequirements.MemoryMiB.Min", "1"),
+    ];
+    let run = |extra: &[(&str, &str)]| {
+        let mut all = base.to_vec();
+        all.extend_from_slice(extra);
+        instance::get_instance_types_from_requirements(
+            &Ec2Service::new(),
+            &req("GetInstanceTypesFromInstanceRequirements", &all),
+        )
+    };
+    for bad in [
+        "InstanceRequirements.CpuManufacturer.1",
+        "InstanceRequirements.InstanceGeneration.1",
+        "InstanceRequirements.LocalStorageType.1",
+        "InstanceRequirements.AcceleratorType.1",
+        "InstanceRequirements.AcceleratorManufacturer.1",
+        "InstanceRequirements.AcceleratorName.1",
+    ] {
+        assert_eq!(
+            code(run(&[(bad, "nope")])),
+            "InvalidParameterValue",
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        code(instance::get_instance_types_from_requirements(
+            &Ec2Service::new(),
+            &req(
+                "GetInstanceTypesFromInstanceRequirements",
+                &[
+                    ("ArchitectureType.1", "nope"),
+                    ("VirtualizationType.1", "hvm"),
+                    ("InstanceRequirements.VCpuCount.Min", "1"),
+                    ("InstanceRequirements.MemoryMiB.Min", "1"),
+                ],
+            ),
+        )),
+        "InvalidParameterValue"
+    );
+    assert_eq!(
+        code(run(&[
+            ("InstanceRequirements.AllowedInstanceType.1", "m5.*"),
+            ("InstanceRequirements.ExcludedInstanceType.1", "c5.*"),
+        ])),
+        "InvalidParameterCombination"
+    );
+}
+
+#[test]
+fn requirements_with_no_data_are_accepted_without_narrowing() {
+    let base = types_from_requirements(&[]);
+    for param in [
+        ("InstanceRequirements.RequireHibernateSupport", "true"),
+        ("InstanceRequirements.RequireEncryptionInTransit", "true"),
+        (
+            "InstanceRequirements.SpotMaxPricePercentageOverLowestPrice",
+            "50",
+        ),
+        (
+            "InstanceRequirements.OnDemandMaxPricePercentageOverLowestPrice",
+            "50",
+        ),
+        (
+            "InstanceRequirements.MaxSpotPriceAsPercentageOfOptimalOnDemandPrice",
+            "50",
+        ),
+    ] {
+        assert_eq!(types_from_requirements(&[param]), base, "{}", param.0);
+    }
+}
+
+#[test]
+fn the_three_catalog_operations_agree_on_the_region() {
+    let in_region = |action: &str, region: &str, params: &[(&str, &str)]| {
+        let mut r = req(action, params);
+        r.region = region.to_string();
+        r
+    };
+    let svc = Ec2Service::new();
+    let only_gov = [("InstanceType.1", "i3p.16xlarge")];
+
+    // Not sold in this Region: unknown here, unless the caller asks for it.
+    let r = in_region("DescribeInstanceTypes", "us-east-1", &only_gov);
+    assert_eq!(
+        code(instance::describe_instance_types(&svc, &r)),
+        "InvalidInstanceType"
+    );
+    let r = in_region(
+        "DescribeInstanceTypes",
+        "us-east-1",
+        &[
+            ("InstanceType.1", "i3p.16xlarge"),
+            ("IncludeUnsupportedInRegion", "true"),
+        ],
+    );
+    let out = body(instance::describe_instance_types(&svc, &r));
+    assert!(out.contains("<supportedInRegion>false<"), "{out}");
+    let r = in_region("DescribeInstanceTypes", "us-gov-west-1", &only_gov);
+    let out = body(instance::describe_instance_types(&svc, &r));
+    assert!(out.contains("<supportedInRegion>true<"), "{out}");
+
+    let requirements = [
+        ("ArchitectureType.1", "x86_64"),
+        ("VirtualizationType.1", "hvm"),
+        ("InstanceRequirements.VCpuCount.Min", "1"),
+        ("InstanceRequirements.MemoryMiB.Min", "1"),
+    ];
+    let names = |region: &str| {
+        let types = items_of(&body(instance::describe_instance_types(
+            &svc,
+            &in_region("DescribeInstanceTypes", region, &[]),
+        )));
+        let offerings = items_of(&body(
+            crate::service::rest::describe_instance_type_offerings(
+                &svc,
+                &in_region("DescribeInstanceTypeOfferings", region, &[]),
+            ),
+        ));
+        let from_requirements = items_of(&body(instance::get_instance_types_from_requirements(
+            &svc,
+            &in_region(
+                "GetInstanceTypesFromInstanceRequirements",
+                region,
+                &requirements,
+            ),
+        )));
+        (types, offerings, from_requirements)
+    };
+    for region in ["us-east-1", "eu-west-1", "cn-north-1"] {
+        let (types, offerings, from_requirements) = names(region);
+        assert_eq!(types, offerings, "{region}");
+        assert!(
+            from_requirements.iter().all(|t| types.contains(t)),
+            "{region}"
+        );
+        assert!(types.contains(&"m5.large".to_string()), "{region}");
+    }
+    // A Region the dataset does not know gets the whole catalog on all three.
+    let (types, offerings, _) = names("cn-north-1");
+    assert_eq!(types.len(), crate::instance_types::catalog().len());
+    assert_eq!(offerings.len(), types.len());
+    assert!(names("us-east-1").0.len() < types.len());
+    assert!(!names("us-east-1").0.contains(&"i3p.16xlarge".to_string()));
+}
+
+#[test]
+fn instance_type_offerings_follow_the_catalog() {
+    let offerings = |params: &[(&str, &str)]| {
+        body(crate::service::rest::describe_instance_type_offerings(
+            &Ec2Service::new(),
+            &req("DescribeInstanceTypeOfferings", params),
+        ))
+    };
+    let in_region = offerings(&[]);
+    assert!(in_region.contains("<instanceType>m7g.large</instanceType>"));
+    assert!(in_region.contains("<locationType>region</locationType>"));
+    let one = offerings(&[
+        ("LocationType", "availability-zone"),
+        ("Filter.1.Name", "instance-type"),
+        ("Filter.1.Value.1", "m7g.large"),
+        ("Filter.2.Name", "location"),
+        ("Filter.2.Value.1", "*b"),
+    ]);
+    assert_eq!(items_of(&one), ["m7g.large"], "{one}");
+    assert!(one.contains("<locationType>availability-zone</locationType>"));
+    assert!(one.contains("b</location>"), "{one}");
+    assert!(items_of(&offerings(&[("LocationType", "outpost")])).is_empty());
+    let r = crate::service::rest::describe_instance_type_offerings(
+        &Ec2Service::new(),
+        &req(
+            "DescribeInstanceTypeOfferings",
+            &[("Filter.1.Name", "nope"), ("Filter.1.Value.1", "x")],
+        ),
+    );
+    assert_eq!(code(r), "InvalidParameterValue");
 }
 
 #[test]

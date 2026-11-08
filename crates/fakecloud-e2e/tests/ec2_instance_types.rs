@@ -4,7 +4,11 @@
 
 mod helpers;
 
-use aws_sdk_ec2::types::{ArchitectureType, Filter};
+use aws_sdk_ec2::types::{
+    ArchitectureType, EbsOptimizedSupport, Filter, InstanceTypeHypervisor, InstanceTypeInfo,
+    LocationType, MemoryMiBRequest, PlacementGroupStrategy, VCpuCountRangeRequest,
+    VirtualizationType,
+};
 use helpers::TestServer;
 
 async fn describe(
@@ -175,12 +179,12 @@ async fn unknown_and_unsupported_filters_are_rejected() {
 
     let err = c
         .describe_instance_types()
-        .filters(filter("memory-info.size-in-mib", "8192"))
+        .filters(filter("network-info.efa-supported", "true"))
         .send()
         .await
         .expect_err("unsupported filter should fail");
     let text = format!("{err:?}");
-    assert!(text.contains("memory-info.size-in-mib"), "{text}");
+    assert!(text.contains("network-info.efa-supported"), "{text}");
 }
 
 #[tokio::test]
@@ -201,4 +205,183 @@ async fn mac_types_report_the_mac_architectures() {
     };
     assert_eq!(arch("mac1.metal"), ArchitectureType::X8664Mac);
     assert_eq!(arch("mac2.metal"), ArchitectureType::Arm64Mac);
+}
+
+async fn one(c: &aws_sdk_ec2::Client, name: &str) -> InstanceTypeInfo {
+    describe(c, &[name], vec![]).await.remove(0)
+}
+
+#[tokio::test]
+async fn reports_the_real_values_of_each_type() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+
+    let m7g = one(&c, "m7g.large").await;
+    assert_eq!(m7g.memory_info().unwrap().size_in_mib(), Some(8192));
+    assert_eq!(m7g.hypervisor(), Some(&InstanceTypeHypervisor::Nitro));
+    assert_eq!(m7g.current_generation(), Some(true));
+    assert_eq!(m7g.v_cpu_info().unwrap().default_cores(), Some(2));
+    assert_eq!(
+        m7g.v_cpu_info().unwrap().default_threads_per_core(),
+        Some(1)
+    );
+    let ebs = m7g.ebs_info().unwrap();
+    assert_eq!(
+        ebs.ebs_optimized_support(),
+        Some(&EbsOptimizedSupport::Default)
+    );
+    let optimized = ebs.ebs_optimized_info().unwrap();
+    assert_eq!(optimized.baseline_throughput_in_m_bps(), Some(78.75));
+    assert_eq!(optimized.maximum_iops(), Some(40000));
+    let net = m7g.network_info().unwrap();
+    assert_eq!(net.network_performance(), Some("Up to 12.5 Gigabit"));
+    assert_eq!(net.maximum_network_interfaces(), Some(3));
+    assert_eq!(net.ipv4_addresses_per_interface(), Some(10));
+
+    let t2 = one(&c, "t2.micro").await;
+    assert_eq!(t2.hypervisor(), Some(&InstanceTypeHypervisor::Xen));
+    assert_eq!(t2.memory_info().unwrap().size_in_mib(), Some(1024));
+    assert_eq!(t2.burstable_performance_supported(), Some(true));
+    assert!(!t2
+        .placement_group_info()
+        .unwrap()
+        .supported_strategies()
+        .contains(&PlacementGroupStrategy::Cluster));
+
+    let c1 = one(&c, "c1.medium").await;
+    assert_eq!(c1.current_generation(), Some(false));
+    assert_eq!(c1.memory_info().unwrap().size_in_mib(), Some(1740));
+    assert_eq!(
+        c1.supported_virtualization_types(),
+        &[VirtualizationType::Paravirtual]
+    );
+    assert_eq!(c1.instance_storage_supported(), Some(true));
+    let storage = c1.instance_storage_info().unwrap();
+    assert_eq!(storage.total_size_in_gb(), Some(350));
+
+    // No published values for this one: the blocks exist, the unknowns do not.
+    let p3 = one(&c, "p3.8xlarge").await;
+    assert_eq!(p3.hypervisor(), None);
+    assert!(p3.ebs_info().is_some());
+    assert!(p3.network_info().is_some());
+    assert!(p3.placement_group_info().is_some());
+    assert_eq!(p3.ebs_info().unwrap().ebs_optimized_support(), None);
+}
+
+#[tokio::test]
+async fn data_backed_filters_narrow_the_catalog() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+
+    let items = describe(
+        &c,
+        &[],
+        vec![
+            filter("memory-info.size-in-mib", "8192"),
+            filter("vcpu-info.default-vcpus", "2"),
+            filter("hypervisor", "xen"),
+        ],
+    )
+    .await;
+    let names: Vec<_> = items
+        .iter()
+        .map(|i| i.instance_type().unwrap().as_str())
+        .collect();
+    assert!(names.contains(&"m4.large"), "{names:?}");
+    assert!(!names.contains(&"m7g.large"), "{names:?}");
+    assert!(!names.contains(&"m5.large"), "{names:?}");
+
+    let previous = describe(&c, &[], vec![filter("current-generation", "false")]).await;
+    let names: Vec<_> = previous
+        .iter()
+        .map(|i| i.instance_type().unwrap().as_str())
+        .collect();
+    assert!(names.contains(&"c1.medium"), "{names:?}");
+    assert!(!names.contains(&"t2.micro"), "{names:?}");
+}
+
+#[tokio::test]
+async fn get_instance_types_from_requirements_evaluates_the_catalog() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+
+    let requirements = aws_sdk_ec2::types::InstanceRequirementsRequest::builder()
+        .v_cpu_count(VCpuCountRangeRequest::builder().min(2).max(2).build())
+        .memory_mib(MemoryMiBRequest::builder().min(8192).max(8192).build())
+        .build();
+    let mut pages = c
+        .get_instance_types_from_instance_requirements()
+        .architecture_types(ArchitectureType::Arm64)
+        .virtualization_types(VirtualizationType::Hvm)
+        .instance_requirements(requirements)
+        .into_paginator()
+        .send();
+    let mut names = Vec::new();
+    while let Some(page) = pages.next().await {
+        for t in page.unwrap().instance_types() {
+            names.push(t.instance_type().unwrap().to_string());
+        }
+    }
+    assert!(names.contains(&"m7g.large".to_string()), "{names:?}");
+    assert!(!names.contains(&"m5.large".to_string()), "{names:?}");
+    assert!(!names.contains(&"t3.large".to_string()), "{names:?}");
+}
+
+#[tokio::test]
+async fn instance_type_offerings_list_the_catalog_in_the_region() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+
+    let mut pages = c
+        .describe_instance_type_offerings()
+        .location_type(LocationType::Region)
+        .max_results(100)
+        .into_paginator()
+        .send();
+    let mut count = 0;
+    let mut saw_m7g = false;
+    while let Some(page) = pages.next().await {
+        for o in page.unwrap().instance_type_offerings() {
+            count += 1;
+            saw_m7g |= o.instance_type().unwrap().as_str() == "m7g.large";
+            assert_eq!(o.location_type(), Some(&LocationType::Region));
+        }
+    }
+    assert!(count > 100, "{count}");
+    assert!(saw_m7g);
+}
+
+#[tokio::test]
+async fn the_catalog_follows_the_request_region() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let config = c
+        .config()
+        .to_builder()
+        .region(aws_sdk_ec2::config::Region::new("eu-west-1"))
+        .build();
+    let eu = aws_sdk_ec2::Client::from_conf(config);
+
+    assert!(one(&eu, "m5.large").await.ebs_info().is_some());
+    let err = c
+        .describe_instance_types()
+        .instance_types("i3p.16xlarge".parse().unwrap())
+        .send()
+        .await
+        .expect_err("not sold in us-east-1");
+    assert!(
+        format!("{err:?}").contains("InvalidInstanceType"),
+        "{err:?}"
+    );
+    let included = c
+        .describe_instance_types()
+        .instance_types("i3p.16xlarge".parse().unwrap())
+        .include_unsupported_in_region(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        included.instance_types()[0].supported_in_region(),
+        Some(false)
+    );
 }

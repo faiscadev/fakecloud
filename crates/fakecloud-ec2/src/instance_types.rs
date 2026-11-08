@@ -1,1494 +1,227 @@
-//! Default vCPU count of every EC2 instance type, as `DescribeInstanceTypes`
-//! reports it in `VCpuInfo.DefaultVCpus`. Sorted by type name (byte order) so
-//! [`default_vcpus`] can binary-search it.
+//! The EC2 instance type catalog behind `DescribeInstanceTypes`,
+//! `DescribeInstanceTypeOfferings`, `GetInstanceTypesFromInstanceRequirements`
+//! and the vCPU quotas: 1,430 types (current and previous generation).
 //!
-//! Values are AWS's `DefaultVCpus` for 1,432 types (current and previous
-//! generation), taken from the public EC2 instance catalog at
-//! instances.vantage.sh, which mirrors `DescribeInstanceTypes`. A type AWS
-//! adds later is missing until it is added here.
+//! Vendored from the public catalog at instances.vantage.sh, which mirrors
+//! `DescribeInstanceTypes`, by `scripts/generate-ec2-instance-catalog.py`. That
+//! script documents where each value comes from and what the dataset does not
+//! hold. An `Option` here is `None` when the value is genuinely unknown for that
+//! type, and the element is then left out of the response. A type AWS adds later
+//! is missing until the catalog is regenerated.
 
-/// `(instance type, default vCPUs)`, sorted by type name.
-pub(crate) const INSTANCE_TYPE_VCPUS: &[(&str, u32)] = &[
-    ("a1.2xlarge", 8),
-    ("a1.4xlarge", 16),
-    ("a1.large", 2),
-    ("a1.medium", 1),
-    ("a1.metal", 16),
-    ("a1.xlarge", 4),
-    ("c1.medium", 2),
-    ("c1.xlarge", 8),
-    ("c3.2xlarge", 8),
-    ("c3.4xlarge", 16),
-    ("c3.8xlarge", 32),
-    ("c3.large", 2),
-    ("c3.xlarge", 4),
-    ("c4.2xlarge", 8),
-    ("c4.4xlarge", 16),
-    ("c4.8xlarge", 36),
-    ("c4.large", 2),
-    ("c4.xlarge", 4),
-    ("c5.12xlarge", 48),
-    ("c5.18xlarge", 72),
-    ("c5.24xlarge", 96),
-    ("c5.2xlarge", 8),
-    ("c5.4xlarge", 16),
-    ("c5.9xlarge", 36),
-    ("c5.large", 2),
-    ("c5.metal", 96),
-    ("c5.xlarge", 4),
-    ("c5a.12xlarge", 48),
-    ("c5a.16xlarge", 64),
-    ("c5a.24xlarge", 96),
-    ("c5a.2xlarge", 8),
-    ("c5a.4xlarge", 16),
-    ("c5a.8xlarge", 32),
-    ("c5a.large", 2),
-    ("c5a.xlarge", 4),
-    ("c5ad.12xlarge", 48),
-    ("c5ad.16xlarge", 64),
-    ("c5ad.24xlarge", 96),
-    ("c5ad.2xlarge", 8),
-    ("c5ad.4xlarge", 16),
-    ("c5ad.8xlarge", 32),
-    ("c5ad.large", 2),
-    ("c5ad.xlarge", 4),
-    ("c5d.12xlarge", 48),
-    ("c5d.18xlarge", 72),
-    ("c5d.24xlarge", 96),
-    ("c5d.2xlarge", 8),
-    ("c5d.4xlarge", 16),
-    ("c5d.9xlarge", 36),
-    ("c5d.large", 2),
-    ("c5d.metal", 96),
-    ("c5d.xlarge", 4),
-    ("c5n.18xlarge", 72),
-    ("c5n.2xlarge", 8),
-    ("c5n.4xlarge", 16),
-    ("c5n.9xlarge", 36),
-    ("c5n.large", 2),
-    ("c5n.metal", 72),
-    ("c5n.xlarge", 4),
-    ("c6a.12xlarge", 48),
-    ("c6a.16xlarge", 64),
-    ("c6a.24xlarge", 96),
-    ("c6a.2xlarge", 8),
-    ("c6a.32xlarge", 128),
-    ("c6a.48xlarge", 192),
-    ("c6a.4xlarge", 16),
-    ("c6a.8xlarge", 32),
-    ("c6a.large", 2),
-    ("c6a.metal", 192),
-    ("c6a.xlarge", 4),
-    ("c6g.12xlarge", 48),
-    ("c6g.16xlarge", 64),
-    ("c6g.2xlarge", 8),
-    ("c6g.4xlarge", 16),
-    ("c6g.8xlarge", 32),
-    ("c6g.large", 2),
-    ("c6g.medium", 1),
-    ("c6g.metal", 64),
-    ("c6g.xlarge", 4),
-    ("c6gd.12xlarge", 48),
-    ("c6gd.16xlarge", 64),
-    ("c6gd.2xlarge", 8),
-    ("c6gd.4xlarge", 16),
-    ("c6gd.8xlarge", 32),
-    ("c6gd.large", 2),
-    ("c6gd.medium", 1),
-    ("c6gd.metal", 64),
-    ("c6gd.xlarge", 4),
-    ("c6gn.12xlarge", 48),
-    ("c6gn.16xlarge", 64),
-    ("c6gn.2xlarge", 8),
-    ("c6gn.4xlarge", 16),
-    ("c6gn.8xlarge", 32),
-    ("c6gn.large", 2),
-    ("c6gn.medium", 1),
-    ("c6gn.metal", 64),
-    ("c6gn.xlarge", 4),
-    ("c6i.12xlarge", 48),
-    ("c6i.16xlarge", 64),
-    ("c6i.24xlarge", 96),
-    ("c6i.2xlarge", 8),
-    ("c6i.32xlarge", 128),
-    ("c6i.4xlarge", 16),
-    ("c6i.8xlarge", 32),
-    ("c6i.large", 2),
-    ("c6i.metal", 128),
-    ("c6i.xlarge", 4),
-    ("c6id.12xlarge", 48),
-    ("c6id.16xlarge", 64),
-    ("c6id.24xlarge", 96),
-    ("c6id.2xlarge", 8),
-    ("c6id.32xlarge", 128),
-    ("c6id.4xlarge", 16),
-    ("c6id.8xlarge", 32),
-    ("c6id.large", 2),
-    ("c6id.metal", 128),
-    ("c6id.xlarge", 4),
-    ("c6in.12xlarge", 48),
-    ("c6in.16xlarge", 64),
-    ("c6in.24xlarge", 96),
-    ("c6in.2xlarge", 8),
-    ("c6in.32xlarge", 128),
-    ("c6in.4xlarge", 16),
-    ("c6in.8xlarge", 32),
-    ("c6in.large", 2),
-    ("c6in.metal", 128),
-    ("c6in.xlarge", 4),
-    ("c7a.12xlarge", 48),
-    ("c7a.16xlarge", 64),
-    ("c7a.24xlarge", 96),
-    ("c7a.2xlarge", 8),
-    ("c7a.32xlarge", 128),
-    ("c7a.48xlarge", 192),
-    ("c7a.4xlarge", 16),
-    ("c7a.8xlarge", 32),
-    ("c7a.large", 2),
-    ("c7a.medium", 1),
-    ("c7a.metal-48xl", 192),
-    ("c7a.xlarge", 4),
-    ("c7g.12xlarge", 48),
-    ("c7g.16xlarge", 64),
-    ("c7g.2xlarge", 8),
-    ("c7g.4xlarge", 16),
-    ("c7g.8xlarge", 32),
-    ("c7g.large", 2),
-    ("c7g.medium", 1),
-    ("c7g.metal", 64),
-    ("c7g.xlarge", 4),
-    ("c7gd.12xlarge", 48),
-    ("c7gd.16xlarge", 64),
-    ("c7gd.2xlarge", 8),
-    ("c7gd.4xlarge", 16),
-    ("c7gd.8xlarge", 32),
-    ("c7gd.large", 2),
-    ("c7gd.medium", 1),
-    ("c7gd.metal", 64),
-    ("c7gd.xlarge", 4),
-    ("c7gn.12xlarge", 48),
-    ("c7gn.16xlarge", 64),
-    ("c7gn.2xlarge", 8),
-    ("c7gn.4xlarge", 16),
-    ("c7gn.8xlarge", 32),
-    ("c7gn.large", 2),
-    ("c7gn.medium", 1),
-    ("c7gn.metal", 64),
-    ("c7gn.xlarge", 4),
-    ("c7i-flex.12xlarge", 48),
-    ("c7i-flex.16xlarge", 64),
-    ("c7i-flex.2xlarge", 8),
-    ("c7i-flex.4xlarge", 16),
-    ("c7i-flex.8xlarge", 32),
-    ("c7i-flex.large", 2),
-    ("c7i-flex.xlarge", 4),
-    ("c7i.12xlarge", 48),
-    ("c7i.16xlarge", 64),
-    ("c7i.24xlarge", 96),
-    ("c7i.2xlarge", 8),
-    ("c7i.48xlarge", 192),
-    ("c7i.4xlarge", 16),
-    ("c7i.8xlarge", 32),
-    ("c7i.large", 2),
-    ("c7i.metal-24xl", 96),
-    ("c7i.metal-48xl", 192),
-    ("c7i.xlarge", 4),
-    ("c8a.12xlarge", 48),
-    ("c8a.16xlarge", 64),
-    ("c8a.24xlarge", 96),
-    ("c8a.2xlarge", 8),
-    ("c8a.48xlarge", 192),
-    ("c8a.4xlarge", 16),
-    ("c8a.8xlarge", 32),
-    ("c8a.large", 2),
-    ("c8a.medium", 1),
-    ("c8a.metal-24xl", 96),
-    ("c8a.metal-48xl", 192),
-    ("c8a.xlarge", 4),
-    ("c8g.12xlarge", 48),
-    ("c8g.16xlarge", 64),
-    ("c8g.24xlarge", 96),
-    ("c8g.2xlarge", 8),
-    ("c8g.48xlarge", 192),
-    ("c8g.4xlarge", 16),
-    ("c8g.8xlarge", 32),
-    ("c8g.large", 2),
-    ("c8g.medium", 1),
-    ("c8g.metal-24xl", 96),
-    ("c8g.metal-48xl", 192),
-    ("c8g.xlarge", 4),
-    ("c8gb.12xlarge", 48),
-    ("c8gb.16xlarge", 64),
-    ("c8gb.24xlarge", 96),
-    ("c8gb.2xlarge", 8),
-    ("c8gb.48xlarge", 192),
-    ("c8gb.4xlarge", 16),
-    ("c8gb.8xlarge", 32),
-    ("c8gb.large", 2),
-    ("c8gb.medium", 1),
-    ("c8gb.metal-24xl", 96),
-    ("c8gb.metal-48xl", 192),
-    ("c8gb.xlarge", 4),
-    ("c8gd.12xlarge", 48),
-    ("c8gd.16xlarge", 64),
-    ("c8gd.24xlarge", 96),
-    ("c8gd.2xlarge", 8),
-    ("c8gd.48xlarge", 192),
-    ("c8gd.4xlarge", 16),
-    ("c8gd.8xlarge", 32),
-    ("c8gd.large", 2),
-    ("c8gd.medium", 1),
-    ("c8gd.metal-24xl", 96),
-    ("c8gd.metal-48xl", 192),
-    ("c8gd.xlarge", 4),
-    ("c8gn.12xlarge", 48),
-    ("c8gn.16xlarge", 64),
-    ("c8gn.24xlarge", 96),
-    ("c8gn.2xlarge", 8),
-    ("c8gn.48xlarge", 192),
-    ("c8gn.4xlarge", 16),
-    ("c8gn.8xlarge", 32),
-    ("c8gn.large", 2),
-    ("c8gn.medium", 1),
-    ("c8gn.metal-24xl", 96),
-    ("c8gn.metal-48xl", 192),
-    ("c8gn.xlarge", 4),
-    ("c8i-flex.12xlarge", 48),
-    ("c8i-flex.16xlarge", 64),
-    ("c8i-flex.2xlarge", 8),
-    ("c8i-flex.4xlarge", 16),
-    ("c8i-flex.8xlarge", 32),
-    ("c8i-flex.large", 2),
-    ("c8i-flex.xlarge", 4),
-    ("c8i.12xlarge", 48),
-    ("c8i.16xlarge", 64),
-    ("c8i.24xlarge", 96),
-    ("c8i.2xlarge", 8),
-    ("c8i.32xlarge", 128),
-    ("c8i.48xlarge", 192),
-    ("c8i.4xlarge", 16),
-    ("c8i.8xlarge", 32),
-    ("c8i.96xlarge", 384),
-    ("c8i.large", 2),
-    ("c8i.metal-48xl", 192),
-    ("c8i.metal-96xl", 384),
-    ("c8i.xlarge", 4),
-    ("c8ib.12xlarge", 48),
-    ("c8ib.16xlarge", 64),
-    ("c8ib.24xlarge", 96),
-    ("c8ib.2xlarge", 8),
-    ("c8ib.32xlarge", 128),
-    ("c8ib.48xlarge", 192),
-    ("c8ib.4xlarge", 16),
-    ("c8ib.8xlarge", 32),
-    ("c8ib.96xlarge", 384),
-    ("c8ib.large", 2),
-    ("c8ib.metal-48xl", 192),
-    ("c8ib.metal-96xl", 384),
-    ("c8ib.xlarge", 4),
-    ("c8id.12xlarge", 48),
-    ("c8id.16xlarge", 64),
-    ("c8id.24xlarge", 96),
-    ("c8id.2xlarge", 8),
-    ("c8id.32xlarge", 128),
-    ("c8id.48xlarge", 192),
-    ("c8id.4xlarge", 16),
-    ("c8id.8xlarge", 32),
-    ("c8id.96xlarge", 384),
-    ("c8id.large", 2),
-    ("c8id.metal-48xl", 192),
-    ("c8id.metal-96xl", 384),
-    ("c8id.xlarge", 4),
-    ("c8in.12xlarge", 48),
-    ("c8in.16xlarge", 64),
-    ("c8in.24xlarge", 96),
-    ("c8in.2xlarge", 8),
-    ("c8in.32xlarge", 128),
-    ("c8in.48xlarge", 192),
-    ("c8in.4xlarge", 16),
-    ("c8in.8xlarge", 32),
-    ("c8in.96xlarge", 384),
-    ("c8in.large", 2),
-    ("c8in.metal-48xl", 192),
-    ("c8in.metal-96xl", 384),
-    ("c8in.xlarge", 4),
-    ("c8ine.12xlarge", 48),
-    ("c8ine.2xlarge", 8),
-    ("c8ine.4xlarge", 16),
-    ("c8ine.8xlarge", 32),
-    ("c8ine.large", 2),
-    ("c8ine.xlarge", 4),
-    ("c9g.12xlarge", 48),
-    ("c9g.16xlarge", 64),
-    ("c9g.24xlarge", 96),
-    ("c9g.2xlarge", 8),
-    ("c9g.48xlarge", 192),
-    ("c9g.4xlarge", 16),
-    ("c9g.8xlarge", 32),
-    ("c9g.large", 2),
-    ("c9g.medium", 1),
-    ("c9g.metal-48xl", 192),
-    ("c9g.xlarge", 4),
-    ("c9gd.12xlarge", 48),
-    ("c9gd.16xlarge", 64),
-    ("c9gd.24xlarge", 96),
-    ("c9gd.2xlarge", 8),
-    ("c9gd.48xlarge", 192),
-    ("c9gd.4xlarge", 16),
-    ("c9gd.8xlarge", 32),
-    ("c9gd.large", 2),
-    ("c9gd.medium", 1),
-    ("c9gd.metal-48xl", 192),
-    ("c9gd.xlarge", 4),
-    ("cc2.8xlarge", 32),
-    ("cr1.8xlarge", 32),
-    ("d2.2xlarge", 8),
-    ("d2.4xlarge", 16),
-    ("d2.8xlarge", 36),
-    ("d2.xlarge", 4),
-    ("d3.2xlarge", 8),
-    ("d3.4xlarge", 16),
-    ("d3.8xlarge", 32),
-    ("d3.xlarge", 4),
-    ("d3en.12xlarge", 48),
-    ("d3en.2xlarge", 8),
-    ("d3en.4xlarge", 16),
-    ("d3en.6xlarge", 24),
-    ("d3en.8xlarge", 32),
-    ("d3en.large", 2),
-    ("d3en.xlarge", 4),
-    ("dl1.24xlarge", 96),
-    ("dl2q.24xlarge", 96),
-    ("f1.16xlarge", 64),
-    ("f1.2xlarge", 8),
-    ("f1.4xlarge", 16),
-    ("f2.12xlarge", 48),
-    ("f2.48xlarge", 192),
-    ("f2.6xlarge", 24),
-    ("g2.2xlarge", 8),
-    ("g2.8xlarge", 32),
-    ("g3.16xlarge", 64),
-    ("g3.4xlarge", 16),
-    ("g3.8xlarge", 32),
-    ("g3s.xlarge", 4),
-    ("g4ad.16xlarge", 64),
-    ("g4ad.2xlarge", 8),
-    ("g4ad.4xlarge", 16),
-    ("g4ad.8xlarge", 32),
-    ("g4ad.xlarge", 4),
-    ("g4dn.12xlarge", 48),
-    ("g4dn.16xlarge", 64),
-    ("g4dn.2xlarge", 8),
-    ("g4dn.4xlarge", 16),
-    ("g4dn.8xlarge", 32),
-    ("g4dn.metal", 96),
-    ("g4dn.xlarge", 4),
-    ("g5.12xlarge", 48),
-    ("g5.16xlarge", 64),
-    ("g5.24xlarge", 96),
-    ("g5.2xlarge", 8),
-    ("g5.48xlarge", 192),
-    ("g5.4xlarge", 16),
-    ("g5.8xlarge", 32),
-    ("g5.xlarge", 4),
-    ("g5g.16xlarge", 64),
-    ("g5g.2xlarge", 8),
-    ("g5g.4xlarge", 16),
-    ("g5g.8xlarge", 32),
-    ("g5g.metal", 64),
-    ("g5g.xlarge", 4),
-    ("g6.12xlarge", 48),
-    ("g6.16xlarge", 64),
-    ("g6.24xlarge", 96),
-    ("g6.2xlarge", 8),
-    ("g6.48xlarge", 192),
-    ("g6.4xlarge", 16),
-    ("g6.8xlarge", 32),
-    ("g6.xlarge", 4),
-    ("g6e.12xlarge", 48),
-    ("g6e.16xlarge", 64),
-    ("g6e.24xlarge", 96),
-    ("g6e.2xlarge", 8),
-    ("g6e.48xlarge", 192),
-    ("g6e.4xlarge", 16),
-    ("g6e.8xlarge", 32),
-    ("g6e.xlarge", 4),
-    ("g6f.2xlarge", 8),
-    ("g6f.4xlarge", 16),
-    ("g6f.large", 2),
-    ("g6f.xlarge", 4),
-    ("g7.12xlarge", 48),
-    ("g7.24xlarge", 96),
-    ("g7.2xlarge", 8),
-    ("g7.48xlarge", 192),
-    ("g7.4xlarge", 16),
-    ("g7.8xlarge", 32),
-    ("g7e.12xlarge", 48),
-    ("g7e.24xlarge", 96),
-    ("g7e.2xlarge", 8),
-    ("g7e.48xlarge", 192),
-    ("g7e.4xlarge", 16),
-    ("g7e.8xlarge", 32),
-    ("gr6.4xlarge", 16),
-    ("gr6.8xlarge", 32),
-    ("gr6f.4xlarge", 16),
-    ("h1.16xlarge", 64),
-    ("h1.2xlarge", 8),
-    ("h1.4xlarge", 16),
-    ("h1.8xlarge", 32),
-    ("hpc6a.48xlarge", 96),
-    ("hpc6id.32xlarge", 64),
-    ("hpc7a.12xlarge", 24),
-    ("hpc7a.24xlarge", 48),
-    ("hpc7a.48xlarge", 96),
-    ("hpc7a.96xlarge", 192),
-    ("hpc7g.16xlarge", 64),
-    ("hpc7g.4xlarge", 16),
-    ("hpc7g.8xlarge", 32),
-    ("hpc8a.96xlarge", 192),
-    ("hs1.8xlarge", 16),
-    ("i2.2xlarge", 8),
-    ("i2.4xlarge", 16),
-    ("i2.8xlarge", 32),
-    ("i2.large", 2),
-    ("i2.xlarge", 4),
-    ("i3.16xlarge", 64),
-    ("i3.2xlarge", 8),
-    ("i3.4xlarge", 16),
-    ("i3.8xlarge", 32),
-    ("i3.large", 2),
-    ("i3.metal", 64),
-    ("i3.xlarge", 4),
-    ("i3en.12xlarge", 48),
-    ("i3en.24xlarge", 96),
-    ("i3en.2xlarge", 8),
-    ("i3en.3xlarge", 12),
-    ("i3en.6xlarge", 24),
-    ("i3en.large", 2),
-    ("i3en.metal", 96),
-    ("i3en.xlarge", 4),
-    ("i3p.16xlarge", 64),
-    ("i4g.16xlarge", 64),
-    ("i4g.2xlarge", 8),
-    ("i4g.4xlarge", 16),
-    ("i4g.8xlarge", 32),
-    ("i4g.large", 2),
-    ("i4g.xlarge", 4),
-    ("i4i.12xlarge", 48),
-    ("i4i.16xlarge", 64),
-    ("i4i.24xlarge", 96),
-    ("i4i.2xlarge", 8),
-    ("i4i.32xlarge", 128),
-    ("i4i.4xlarge", 16),
-    ("i4i.8xlarge", 32),
-    ("i4i.large", 2),
-    ("i4i.metal", 128),
-    ("i4i.xlarge", 4),
-    ("i7i.12xlarge", 48),
-    ("i7i.16xlarge", 64),
-    ("i7i.24xlarge", 96),
-    ("i7i.2xlarge", 8),
-    ("i7i.48xlarge", 192),
-    ("i7i.4xlarge", 16),
-    ("i7i.8xlarge", 32),
-    ("i7i.large", 2),
-    ("i7i.metal-24xl", 96),
-    ("i7i.metal-48xl", 192),
-    ("i7i.xlarge", 4),
-    ("i7ie.12xlarge", 48),
-    ("i7ie.18xlarge", 72),
-    ("i7ie.24xlarge", 96),
-    ("i7ie.2xlarge", 8),
-    ("i7ie.3xlarge", 12),
-    ("i7ie.48xlarge", 192),
-    ("i7ie.6xlarge", 24),
-    ("i7ie.large", 2),
-    ("i7ie.metal-24xl", 96),
-    ("i7ie.metal-48xl", 192),
-    ("i7ie.xlarge", 4),
-    ("i8g.12xlarge", 48),
-    ("i8g.16xlarge", 64),
-    ("i8g.24xlarge", 96),
-    ("i8g.2xlarge", 8),
-    ("i8g.48xlarge", 192),
-    ("i8g.4xlarge", 16),
-    ("i8g.8xlarge", 32),
-    ("i8g.large", 2),
-    ("i8g.metal-24xl", 96),
-    ("i8g.metal-48xl", 192),
-    ("i8g.xlarge", 4),
-    ("i8ge.12xlarge", 48),
-    ("i8ge.18xlarge", 72),
-    ("i8ge.24xlarge", 96),
-    ("i8ge.2xlarge", 8),
-    ("i8ge.3xlarge", 12),
-    ("i8ge.48xlarge", 192),
-    ("i8ge.6xlarge", 24),
-    ("i8ge.large", 2),
-    ("i8ge.metal-24xl", 96),
-    ("i8ge.metal-48xl", 192),
-    ("i8ge.xlarge", 4),
-    ("im4gn.16xlarge", 64),
-    ("im4gn.2xlarge", 8),
-    ("im4gn.4xlarge", 16),
-    ("im4gn.8xlarge", 32),
-    ("im4gn.large", 2),
-    ("im4gn.xlarge", 4),
-    ("inf1.24xlarge", 96),
-    ("inf1.2xlarge", 8),
-    ("inf1.6xlarge", 24),
-    ("inf1.xlarge", 4),
-    ("inf2.24xlarge", 96),
-    ("inf2.48xlarge", 192),
-    ("inf2.8xlarge", 32),
-    ("inf2.xlarge", 4),
-    ("is4gen.2xlarge", 8),
-    ("is4gen.4xlarge", 16),
-    ("is4gen.8xlarge", 32),
-    ("is4gen.large", 2),
-    ("is4gen.medium", 1),
-    ("is4gen.xlarge", 4),
-    ("m1.large", 2),
-    ("m1.medium", 1),
-    ("m1.small", 1),
-    ("m1.xlarge", 4),
-    ("m2.2xlarge", 4),
-    ("m2.4xlarge", 8),
-    ("m2.xlarge", 2),
-    ("m3.2xlarge", 8),
-    ("m3.large", 2),
-    ("m3.medium", 1),
-    ("m3.xlarge", 4),
-    ("m4.10xlarge", 40),
-    ("m4.16xlarge", 64),
-    ("m4.2xlarge", 8),
-    ("m4.4xlarge", 16),
-    ("m4.large", 2),
-    ("m4.xlarge", 4),
-    ("m5.12xlarge", 48),
-    ("m5.16xlarge", 64),
-    ("m5.24xlarge", 96),
-    ("m5.2xlarge", 8),
-    ("m5.4xlarge", 16),
-    ("m5.8xlarge", 32),
-    ("m5.large", 2),
-    ("m5.metal", 96),
-    ("m5.xlarge", 4),
-    ("m5a.12xlarge", 48),
-    ("m5a.16xlarge", 64),
-    ("m5a.24xlarge", 96),
-    ("m5a.2xlarge", 8),
-    ("m5a.4xlarge", 16),
-    ("m5a.8xlarge", 32),
-    ("m5a.large", 2),
-    ("m5a.xlarge", 4),
-    ("m5ad.12xlarge", 48),
-    ("m5ad.16xlarge", 64),
-    ("m5ad.24xlarge", 96),
-    ("m5ad.2xlarge", 8),
-    ("m5ad.4xlarge", 16),
-    ("m5ad.8xlarge", 32),
-    ("m5ad.large", 2),
-    ("m5ad.xlarge", 4),
-    ("m5d.12xlarge", 48),
-    ("m5d.16xlarge", 64),
-    ("m5d.24xlarge", 96),
-    ("m5d.2xlarge", 8),
-    ("m5d.4xlarge", 16),
-    ("m5d.8xlarge", 32),
-    ("m5d.large", 2),
-    ("m5d.metal", 96),
-    ("m5d.xlarge", 4),
-    ("m5dn.12xlarge", 48),
-    ("m5dn.16xlarge", 64),
-    ("m5dn.24xlarge", 96),
-    ("m5dn.2xlarge", 8),
-    ("m5dn.4xlarge", 16),
-    ("m5dn.8xlarge", 32),
-    ("m5dn.large", 2),
-    ("m5dn.metal", 96),
-    ("m5dn.xlarge", 4),
-    ("m5n.12xlarge", 48),
-    ("m5n.16xlarge", 64),
-    ("m5n.24xlarge", 96),
-    ("m5n.2xlarge", 8),
-    ("m5n.4xlarge", 16),
-    ("m5n.8xlarge", 32),
-    ("m5n.large", 2),
-    ("m5n.metal", 96),
-    ("m5n.xlarge", 4),
-    ("m5zn.12xlarge", 48),
-    ("m5zn.2xlarge", 8),
-    ("m5zn.3xlarge", 12),
-    ("m5zn.6xlarge", 24),
-    ("m5zn.large", 2),
-    ("m5zn.metal", 48),
-    ("m5zn.xlarge", 4),
-    ("m6a.12xlarge", 48),
-    ("m6a.16xlarge", 64),
-    ("m6a.24xlarge", 96),
-    ("m6a.2xlarge", 8),
-    ("m6a.32xlarge", 128),
-    ("m6a.48xlarge", 192),
-    ("m6a.4xlarge", 16),
-    ("m6a.8xlarge", 32),
-    ("m6a.large", 2),
-    ("m6a.metal", 192),
-    ("m6a.xlarge", 4),
-    ("m6g.12xlarge", 48),
-    ("m6g.16xlarge", 64),
-    ("m6g.2xlarge", 8),
-    ("m6g.4xlarge", 16),
-    ("m6g.8xlarge", 32),
-    ("m6g.large", 2),
-    ("m6g.medium", 1),
-    ("m6g.metal", 64),
-    ("m6g.xlarge", 4),
-    ("m6gd.12xlarge", 48),
-    ("m6gd.16xlarge", 64),
-    ("m6gd.2xlarge", 8),
-    ("m6gd.4xlarge", 16),
-    ("m6gd.8xlarge", 32),
-    ("m6gd.large", 2),
-    ("m6gd.medium", 1),
-    ("m6gd.metal", 64),
-    ("m6gd.xlarge", 4),
-    ("m6i.12xlarge", 48),
-    ("m6i.16xlarge", 64),
-    ("m6i.24xlarge", 96),
-    ("m6i.2xlarge", 8),
-    ("m6i.32xlarge", 128),
-    ("m6i.4xlarge", 16),
-    ("m6i.8xlarge", 32),
-    ("m6i.large", 2),
-    ("m6i.metal", 128),
-    ("m6i.xlarge", 4),
-    ("m6id.12xlarge", 48),
-    ("m6id.16xlarge", 64),
-    ("m6id.24xlarge", 96),
-    ("m6id.2xlarge", 8),
-    ("m6id.32xlarge", 128),
-    ("m6id.4xlarge", 16),
-    ("m6id.8xlarge", 32),
-    ("m6id.large", 2),
-    ("m6id.metal", 128),
-    ("m6id.xlarge", 4),
-    ("m6idn.12xlarge", 48),
-    ("m6idn.16xlarge", 64),
-    ("m6idn.24xlarge", 96),
-    ("m6idn.2xlarge", 8),
-    ("m6idn.32xlarge", 128),
-    ("m6idn.4xlarge", 16),
-    ("m6idn.8xlarge", 32),
-    ("m6idn.large", 2),
-    ("m6idn.metal", 128),
-    ("m6idn.xlarge", 4),
-    ("m6in.12xlarge", 48),
-    ("m6in.16xlarge", 64),
-    ("m6in.24xlarge", 96),
-    ("m6in.2xlarge", 8),
-    ("m6in.32xlarge", 128),
-    ("m6in.4xlarge", 16),
-    ("m6in.8xlarge", 32),
-    ("m6in.large", 2),
-    ("m6in.metal", 128),
-    ("m6in.xlarge", 4),
-    ("m7a.12xlarge", 48),
-    ("m7a.16xlarge", 64),
-    ("m7a.24xlarge", 96),
-    ("m7a.2xlarge", 8),
-    ("m7a.32xlarge", 128),
-    ("m7a.48xlarge", 192),
-    ("m7a.4xlarge", 16),
-    ("m7a.8xlarge", 32),
-    ("m7a.large", 2),
-    ("m7a.medium", 1),
-    ("m7a.metal-48xl", 192),
-    ("m7a.xlarge", 4),
-    ("m7g.12xlarge", 48),
-    ("m7g.16xlarge", 64),
-    ("m7g.2xlarge", 8),
-    ("m7g.4xlarge", 16),
-    ("m7g.8xlarge", 32),
-    ("m7g.large", 2),
-    ("m7g.medium", 1),
-    ("m7g.metal", 64),
-    ("m7g.xlarge", 4),
-    ("m7gd.12xlarge", 48),
-    ("m7gd.16xlarge", 64),
-    ("m7gd.2xlarge", 8),
-    ("m7gd.4xlarge", 16),
-    ("m7gd.8xlarge", 32),
-    ("m7gd.large", 2),
-    ("m7gd.medium", 1),
-    ("m7gd.metal", 64),
-    ("m7gd.xlarge", 4),
-    ("m7i-flex.12xlarge", 48),
-    ("m7i-flex.16xlarge", 64),
-    ("m7i-flex.2xlarge", 8),
-    ("m7i-flex.4xlarge", 16),
-    ("m7i-flex.8xlarge", 32),
-    ("m7i-flex.large", 2),
-    ("m7i-flex.xlarge", 4),
-    ("m7i.12xlarge", 48),
-    ("m7i.16xlarge", 64),
-    ("m7i.24xlarge", 96),
-    ("m7i.2xlarge", 8),
-    ("m7i.48xlarge", 192),
-    ("m7i.4xlarge", 16),
-    ("m7i.8xlarge", 32),
-    ("m7i.large", 2),
-    ("m7i.metal-24xl", 96),
-    ("m7i.metal-48xl", 192),
-    ("m7i.xlarge", 4),
-    ("m8a.12xlarge", 48),
-    ("m8a.16xlarge", 64),
-    ("m8a.24xlarge", 96),
-    ("m8a.2xlarge", 8),
-    ("m8a.48xlarge", 192),
-    ("m8a.4xlarge", 16),
-    ("m8a.8xlarge", 32),
-    ("m8a.large", 2),
-    ("m8a.medium", 1),
-    ("m8a.metal-24xl", 96),
-    ("m8a.metal-48xl", 192),
-    ("m8a.xlarge", 4),
-    ("m8azn.12xlarge", 48),
-    ("m8azn.24xlarge", 96),
-    ("m8azn.3xlarge", 12),
-    ("m8azn.6xlarge", 24),
-    ("m8azn.large", 2),
-    ("m8azn.medium", 1),
-    ("m8azn.metal-12xl", 48),
-    ("m8azn.metal-24xl", 96),
-    ("m8azn.xlarge", 4),
-    ("m8g.12xlarge", 48),
-    ("m8g.16xlarge", 64),
-    ("m8g.24xlarge", 96),
-    ("m8g.2xlarge", 8),
-    ("m8g.48xlarge", 192),
-    ("m8g.4xlarge", 16),
-    ("m8g.8xlarge", 32),
-    ("m8g.large", 2),
-    ("m8g.medium", 1),
-    ("m8g.metal-24xl", 96),
-    ("m8g.metal-48xl", 192),
-    ("m8g.xlarge", 4),
-    ("m8gb.12xlarge", 48),
-    ("m8gb.16xlarge", 64),
-    ("m8gb.24xlarge", 96),
-    ("m8gb.2xlarge", 8),
-    ("m8gb.48xlarge", 192),
-    ("m8gb.4xlarge", 16),
-    ("m8gb.8xlarge", 32),
-    ("m8gb.large", 2),
-    ("m8gb.medium", 1),
-    ("m8gb.metal-24xl", 96),
-    ("m8gb.metal-48xl", 192),
-    ("m8gb.xlarge", 4),
-    ("m8gd.12xlarge", 48),
-    ("m8gd.16xlarge", 64),
-    ("m8gd.24xlarge", 96),
-    ("m8gd.2xlarge", 8),
-    ("m8gd.48xlarge", 192),
-    ("m8gd.4xlarge", 16),
-    ("m8gd.8xlarge", 32),
-    ("m8gd.large", 2),
-    ("m8gd.medium", 1),
-    ("m8gd.metal-24xl", 96),
-    ("m8gd.metal-48xl", 192),
-    ("m8gd.xlarge", 4),
-    ("m8gn.12xlarge", 48),
-    ("m8gn.16xlarge", 64),
-    ("m8gn.24xlarge", 96),
-    ("m8gn.2xlarge", 8),
-    ("m8gn.48xlarge", 192),
-    ("m8gn.4xlarge", 16),
-    ("m8gn.8xlarge", 32),
-    ("m8gn.large", 2),
-    ("m8gn.medium", 1),
-    ("m8gn.metal-24xl", 96),
-    ("m8gn.metal-48xl", 192),
-    ("m8gn.xlarge", 4),
-    ("m8i-flex.12xlarge", 48),
-    ("m8i-flex.16xlarge", 64),
-    ("m8i-flex.2xlarge", 8),
-    ("m8i-flex.4xlarge", 16),
-    ("m8i-flex.8xlarge", 32),
-    ("m8i-flex.large", 2),
-    ("m8i-flex.xlarge", 4),
-    ("m8i.12xlarge", 48),
-    ("m8i.16xlarge", 64),
-    ("m8i.24xlarge", 96),
-    ("m8i.2xlarge", 8),
-    ("m8i.32xlarge", 128),
-    ("m8i.48xlarge", 192),
-    ("m8i.4xlarge", 16),
-    ("m8i.8xlarge", 32),
-    ("m8i.96xlarge", 384),
-    ("m8i.large", 2),
-    ("m8i.metal-48xl", 192),
-    ("m8i.metal-96xl", 384),
-    ("m8i.xlarge", 4),
-    ("m8ib.12xlarge", 48),
-    ("m8ib.16xlarge", 64),
-    ("m8ib.24xlarge", 96),
-    ("m8ib.2xlarge", 8),
-    ("m8ib.32xlarge", 128),
-    ("m8ib.48xlarge", 192),
-    ("m8ib.4xlarge", 16),
-    ("m8ib.8xlarge", 32),
-    ("m8ib.96xlarge", 384),
-    ("m8ib.large", 2),
-    ("m8ib.metal-48xl", 192),
-    ("m8ib.metal-96xl", 384),
-    ("m8ib.xlarge", 4),
-    ("m8id.12xlarge", 48),
-    ("m8id.16xlarge", 64),
-    ("m8id.24xlarge", 96),
-    ("m8id.2xlarge", 8),
-    ("m8id.32xlarge", 128),
-    ("m8id.48xlarge", 192),
-    ("m8id.4xlarge", 16),
-    ("m8id.8xlarge", 32),
-    ("m8id.96xlarge", 384),
-    ("m8id.large", 2),
-    ("m8id.metal-48xl", 192),
-    ("m8id.metal-96xl", 384),
-    ("m8id.xlarge", 4),
-    ("m8idb.12xlarge", 48),
-    ("m8idb.16xlarge", 64),
-    ("m8idb.24xlarge", 96),
-    ("m8idb.2xlarge", 8),
-    ("m8idb.32xlarge", 128),
-    ("m8idb.48xlarge", 192),
-    ("m8idb.4xlarge", 16),
-    ("m8idb.8xlarge", 32),
-    ("m8idb.96xlarge", 384),
-    ("m8idb.large", 2),
-    ("m8idb.metal-48xl", 192),
-    ("m8idb.metal-96xl", 384),
-    ("m8idb.xlarge", 4),
-    ("m8idn.12xlarge", 48),
-    ("m8idn.16xlarge", 64),
-    ("m8idn.24xlarge", 96),
-    ("m8idn.2xlarge", 8),
-    ("m8idn.32xlarge", 128),
-    ("m8idn.48xlarge", 192),
-    ("m8idn.4xlarge", 16),
-    ("m8idn.8xlarge", 32),
-    ("m8idn.96xlarge", 384),
-    ("m8idn.large", 2),
-    ("m8idn.metal-48xl", 192),
-    ("m8idn.metal-96xl", 384),
-    ("m8idn.xlarge", 4),
-    ("m8in.12xlarge", 48),
-    ("m8in.16xlarge", 64),
-    ("m8in.24xlarge", 96),
-    ("m8in.2xlarge", 8),
-    ("m8in.32xlarge", 128),
-    ("m8in.48xlarge", 192),
-    ("m8in.4xlarge", 16),
-    ("m8in.8xlarge", 32),
-    ("m8in.96xlarge", 384),
-    ("m8in.large", 2),
-    ("m8in.metal-48xl", 192),
-    ("m8in.metal-96xl", 384),
-    ("m8in.xlarge", 4),
-    ("m8ine.12xlarge", 48),
-    ("m8ine.2xlarge", 8),
-    ("m8ine.4xlarge", 16),
-    ("m8ine.8xlarge", 32),
-    ("m8ine.large", 2),
-    ("m8ine.xlarge", 4),
-    ("m9g.12xlarge", 48),
-    ("m9g.16xlarge", 64),
-    ("m9g.24xlarge", 96),
-    ("m9g.2xlarge", 8),
-    ("m9g.48xlarge", 192),
-    ("m9g.4xlarge", 16),
-    ("m9g.8xlarge", 32),
-    ("m9g.large", 2),
-    ("m9g.medium", 1),
-    ("m9g.metal-48xl", 192),
-    ("m9g.xlarge", 4),
-    ("m9gd.12xlarge", 48),
-    ("m9gd.16xlarge", 64),
-    ("m9gd.24xlarge", 96),
-    ("m9gd.2xlarge", 8),
-    ("m9gd.48xlarge", 192),
-    ("m9gd.4xlarge", 16),
-    ("m9gd.8xlarge", 32),
-    ("m9gd.large", 2),
-    ("m9gd.medium", 1),
-    ("m9gd.metal-48xl", 192),
-    ("m9gd.xlarge", 4),
-    ("mac-m3ultra.metal", 28),
-    ("mac-m4.metal", 10),
-    ("mac-m4max.metal", 16),
-    ("mac-m4pro.metal", 14),
-    ("mac1.metal", 12),
-    ("mac2-m1ultra.metal", 20),
-    ("mac2-m2.metal", 8),
-    ("mac2-m2pro.metal", 12),
-    ("mac2.metal", 8),
-    ("p2.16xlarge", 64),
-    ("p2.8xlarge", 32),
-    ("p2.xlarge", 4),
-    ("p3.16xlarge", 64),
-    ("p3.2xlarge", 8),
-    ("p3.8xlarge", 32),
-    ("p3dn.24xlarge", 96),
-    ("p4d.24xlarge", 96),
-    ("p4de.24xlarge", 96),
-    ("p5.48xlarge", 192),
-    ("p5.4xlarge", 16),
-    ("p5e.48xlarge", 192),
-    ("p5en.48xlarge", 192),
-    ("p6-b200.48xlarge", 192),
-    ("p6-b300.48xlarge", 192),
-    ("p6e-gb200.36xlarge", 144),
-    ("r3.2xlarge", 8),
-    ("r3.4xlarge", 16),
-    ("r3.8xlarge", 32),
-    ("r3.large", 2),
-    ("r3.xlarge", 4),
-    ("r4.16xlarge", 64),
-    ("r4.2xlarge", 8),
-    ("r4.4xlarge", 16),
-    ("r4.8xlarge", 32),
-    ("r4.large", 2),
-    ("r4.xlarge", 4),
-    ("r5.12xlarge", 48),
-    ("r5.16xlarge", 64),
-    ("r5.24xlarge", 96),
-    ("r5.2xlarge", 8),
-    ("r5.4xlarge", 16),
-    ("r5.8xlarge", 32),
-    ("r5.large", 2),
-    ("r5.metal", 96),
-    ("r5.xlarge", 4),
-    ("r5a.12xlarge", 48),
-    ("r5a.16xlarge", 64),
-    ("r5a.24xlarge", 96),
-    ("r5a.2xlarge", 8),
-    ("r5a.4xlarge", 16),
-    ("r5a.8xlarge", 32),
-    ("r5a.large", 2),
-    ("r5a.xlarge", 4),
-    ("r5ad.12xlarge", 48),
-    ("r5ad.16xlarge", 64),
-    ("r5ad.24xlarge", 96),
-    ("r5ad.2xlarge", 8),
-    ("r5ad.4xlarge", 16),
-    ("r5ad.8xlarge", 32),
-    ("r5ad.large", 2),
-    ("r5ad.xlarge", 4),
-    ("r5b.12xlarge", 48),
-    ("r5b.16xlarge", 64),
-    ("r5b.24xlarge", 96),
-    ("r5b.2xlarge", 8),
-    ("r5b.4xlarge", 16),
-    ("r5b.8xlarge", 32),
-    ("r5b.large", 2),
-    ("r5b.metal", 96),
-    ("r5b.xlarge", 4),
-    ("r5d.12xlarge", 48),
-    ("r5d.16xlarge", 64),
-    ("r5d.24xlarge", 96),
-    ("r5d.2xlarge", 8),
-    ("r5d.4xlarge", 16),
-    ("r5d.8xlarge", 32),
-    ("r5d.large", 2),
-    ("r5d.metal", 96),
-    ("r5d.xlarge", 4),
-    ("r5dn.12xlarge", 48),
-    ("r5dn.16xlarge", 64),
-    ("r5dn.24xlarge", 96),
-    ("r5dn.2xlarge", 8),
-    ("r5dn.4xlarge", 16),
-    ("r5dn.8xlarge", 32),
-    ("r5dn.large", 2),
-    ("r5dn.metal", 96),
-    ("r5dn.xlarge", 4),
-    ("r5n.12xlarge", 48),
-    ("r5n.16xlarge", 64),
-    ("r5n.24xlarge", 96),
-    ("r5n.2xlarge", 8),
-    ("r5n.4xlarge", 16),
-    ("r5n.8xlarge", 32),
-    ("r5n.large", 2),
-    ("r5n.metal", 96),
-    ("r5n.xlarge", 4),
-    ("r6a.12xlarge", 48),
-    ("r6a.16xlarge", 64),
-    ("r6a.24xlarge", 96),
-    ("r6a.2xlarge", 8),
-    ("r6a.32xlarge", 128),
-    ("r6a.48xlarge", 192),
-    ("r6a.4xlarge", 16),
-    ("r6a.8xlarge", 32),
-    ("r6a.large", 2),
-    ("r6a.metal", 192),
-    ("r6a.xlarge", 4),
-    ("r6g.12xlarge", 48),
-    ("r6g.16xlarge", 64),
-    ("r6g.2xlarge", 8),
-    ("r6g.4xlarge", 16),
-    ("r6g.8xlarge", 32),
-    ("r6g.large", 2),
-    ("r6g.medium", 1),
-    ("r6g.metal", 64),
-    ("r6g.xlarge", 4),
-    ("r6gd.12xlarge", 48),
-    ("r6gd.16xlarge", 64),
-    ("r6gd.2xlarge", 8),
-    ("r6gd.4xlarge", 16),
-    ("r6gd.8xlarge", 32),
-    ("r6gd.large", 2),
-    ("r6gd.medium", 1),
-    ("r6gd.metal", 64),
-    ("r6gd.xlarge", 4),
-    ("r6i.12xlarge", 48),
-    ("r6i.16xlarge", 64),
-    ("r6i.24xlarge", 96),
-    ("r6i.2xlarge", 8),
-    ("r6i.32xlarge", 128),
-    ("r6i.4xlarge", 16),
-    ("r6i.8xlarge", 32),
-    ("r6i.large", 2),
-    ("r6i.metal", 128),
-    ("r6i.xlarge", 4),
-    ("r6id.12xlarge", 48),
-    ("r6id.16xlarge", 64),
-    ("r6id.24xlarge", 96),
-    ("r6id.2xlarge", 8),
-    ("r6id.32xlarge", 128),
-    ("r6id.4xlarge", 16),
-    ("r6id.8xlarge", 32),
-    ("r6id.large", 2),
-    ("r6id.metal", 128),
-    ("r6id.xlarge", 4),
-    ("r6idn.12xlarge", 48),
-    ("r6idn.16xlarge", 64),
-    ("r6idn.24xlarge", 96),
-    ("r6idn.2xlarge", 8),
-    ("r6idn.32xlarge", 128),
-    ("r6idn.4xlarge", 16),
-    ("r6idn.8xlarge", 32),
-    ("r6idn.large", 2),
-    ("r6idn.metal", 128),
-    ("r6idn.xlarge", 4),
-    ("r6in.12xlarge", 48),
-    ("r6in.16xlarge", 64),
-    ("r6in.24xlarge", 96),
-    ("r6in.2xlarge", 8),
-    ("r6in.32xlarge", 128),
-    ("r6in.4xlarge", 16),
-    ("r6in.8xlarge", 32),
-    ("r6in.large", 2),
-    ("r6in.metal", 128),
-    ("r6in.xlarge", 4),
-    ("r7a.12xlarge", 48),
-    ("r7a.16xlarge", 64),
-    ("r7a.24xlarge", 96),
-    ("r7a.2xlarge", 8),
-    ("r7a.32xlarge", 128),
-    ("r7a.48xlarge", 192),
-    ("r7a.4xlarge", 16),
-    ("r7a.8xlarge", 32),
-    ("r7a.large", 2),
-    ("r7a.medium", 1),
-    ("r7a.metal-48xl", 192),
-    ("r7a.xlarge", 4),
-    ("r7g.12xlarge", 48),
-    ("r7g.16xlarge", 64),
-    ("r7g.2xlarge", 8),
-    ("r7g.4xlarge", 16),
-    ("r7g.8xlarge", 32),
-    ("r7g.large", 2),
-    ("r7g.medium", 1),
-    ("r7g.metal", 64),
-    ("r7g.xlarge", 4),
-    ("r7gd.12xlarge", 48),
-    ("r7gd.16xlarge", 64),
-    ("r7gd.2xlarge", 8),
-    ("r7gd.4xlarge", 16),
-    ("r7gd.8xlarge", 32),
-    ("r7gd.large", 2),
-    ("r7gd.medium", 1),
-    ("r7gd.metal", 64),
-    ("r7gd.xlarge", 4),
-    ("r7i.12xlarge", 48),
-    ("r7i.16xlarge", 64),
-    ("r7i.24xlarge", 96),
-    ("r7i.2xlarge", 8),
-    ("r7i.48xlarge", 192),
-    ("r7i.4xlarge", 16),
-    ("r7i.8xlarge", 32),
-    ("r7i.large", 2),
-    ("r7i.metal-24xl", 96),
-    ("r7i.metal-48xl", 192),
-    ("r7i.xlarge", 4),
-    ("r7iz.12xlarge", 48),
-    ("r7iz.16xlarge", 64),
-    ("r7iz.2xlarge", 8),
-    ("r7iz.32xlarge", 128),
-    ("r7iz.4xlarge", 16),
-    ("r7iz.8xlarge", 32),
-    ("r7iz.large", 2),
-    ("r7iz.metal-16xl", 64),
-    ("r7iz.metal-32xl", 128),
-    ("r7iz.xlarge", 4),
-    ("r8a.12xlarge", 48),
-    ("r8a.16xlarge", 64),
-    ("r8a.24xlarge", 96),
-    ("r8a.2xlarge", 8),
-    ("r8a.48xlarge", 192),
-    ("r8a.4xlarge", 16),
-    ("r8a.8xlarge", 32),
-    ("r8a.large", 2),
-    ("r8a.medium", 1),
-    ("r8a.metal-24xl", 96),
-    ("r8a.metal-48xl", 192),
-    ("r8a.xlarge", 4),
-    ("r8g.12xlarge", 48),
-    ("r8g.16xlarge", 64),
-    ("r8g.24xlarge", 96),
-    ("r8g.2xlarge", 8),
-    ("r8g.48xlarge", 192),
-    ("r8g.4xlarge", 16),
-    ("r8g.8xlarge", 32),
-    ("r8g.large", 2),
-    ("r8g.medium", 1),
-    ("r8g.metal-24xl", 96),
-    ("r8g.metal-48xl", 192),
-    ("r8g.xlarge", 4),
-    ("r8gb.12xlarge", 48),
-    ("r8gb.16xlarge", 64),
-    ("r8gb.24xlarge", 96),
-    ("r8gb.2xlarge", 8),
-    ("r8gb.48xlarge", 192),
-    ("r8gb.4xlarge", 16),
-    ("r8gb.8xlarge", 32),
-    ("r8gb.large", 2),
-    ("r8gb.medium", 1),
-    ("r8gb.metal-24xl", 96),
-    ("r8gb.metal-48xl", 192),
-    ("r8gb.xlarge", 4),
-    ("r8gd.12xlarge", 48),
-    ("r8gd.16xlarge", 64),
-    ("r8gd.24xlarge", 96),
-    ("r8gd.2xlarge", 8),
-    ("r8gd.48xlarge", 192),
-    ("r8gd.4xlarge", 16),
-    ("r8gd.8xlarge", 32),
-    ("r8gd.large", 2),
-    ("r8gd.medium", 1),
-    ("r8gd.metal-24xl", 96),
-    ("r8gd.metal-48xl", 192),
-    ("r8gd.xlarge", 4),
-    ("r8gn.12xlarge", 48),
-    ("r8gn.16xlarge", 64),
-    ("r8gn.24xlarge", 96),
-    ("r8gn.2xlarge", 8),
-    ("r8gn.48xlarge", 192),
-    ("r8gn.4xlarge", 16),
-    ("r8gn.8xlarge", 32),
-    ("r8gn.large", 2),
-    ("r8gn.medium", 1),
-    ("r8gn.metal-24xl", 96),
-    ("r8gn.metal-48xl", 192),
-    ("r8gn.xlarge", 4),
-    ("r8i-flex.12xlarge", 48),
-    ("r8i-flex.16xlarge", 64),
-    ("r8i-flex.2xlarge", 8),
-    ("r8i-flex.4xlarge", 16),
-    ("r8i-flex.8xlarge", 32),
-    ("r8i-flex.large", 2),
-    ("r8i-flex.xlarge", 4),
-    ("r8i.12xlarge", 48),
-    ("r8i.16xlarge", 64),
-    ("r8i.24xlarge", 96),
-    ("r8i.2xlarge", 8),
-    ("r8i.32xlarge", 128),
-    ("r8i.48xlarge", 192),
-    ("r8i.4xlarge", 16),
-    ("r8i.8xlarge", 32),
-    ("r8i.96xlarge", 384),
-    ("r8i.large", 2),
-    ("r8i.metal-48xl", 192),
-    ("r8i.metal-96xl", 384),
-    ("r8i.xlarge", 4),
-    ("r8ib.12xlarge", 48),
-    ("r8ib.16xlarge", 64),
-    ("r8ib.24xlarge", 96),
-    ("r8ib.2xlarge", 8),
-    ("r8ib.32xlarge", 128),
-    ("r8ib.48xlarge", 192),
-    ("r8ib.4xlarge", 16),
-    ("r8ib.8xlarge", 32),
-    ("r8ib.96xlarge", 384),
-    ("r8ib.large", 2),
-    ("r8ib.metal-48xl", 192),
-    ("r8ib.metal-96xl", 384),
-    ("r8ib.xlarge", 4),
-    ("r8id.12xlarge", 48),
-    ("r8id.16xlarge", 64),
-    ("r8id.24xlarge", 96),
-    ("r8id.2xlarge", 8),
-    ("r8id.32xlarge", 128),
-    ("r8id.48xlarge", 192),
-    ("r8id.4xlarge", 16),
-    ("r8id.8xlarge", 32),
-    ("r8id.96xlarge", 384),
-    ("r8id.large", 2),
-    ("r8id.metal-48xl", 192),
-    ("r8id.metal-96xl", 384),
-    ("r8id.xlarge", 4),
-    ("r8idb.12xlarge", 48),
-    ("r8idb.16xlarge", 64),
-    ("r8idb.24xlarge", 96),
-    ("r8idb.2xlarge", 8),
-    ("r8idb.32xlarge", 128),
-    ("r8idb.48xlarge", 192),
-    ("r8idb.4xlarge", 16),
-    ("r8idb.8xlarge", 32),
-    ("r8idb.96xlarge", 384),
-    ("r8idb.large", 2),
-    ("r8idb.metal-48xl", 192),
-    ("r8idb.metal-96xl", 384),
-    ("r8idb.xlarge", 4),
-    ("r8idn.12xlarge", 48),
-    ("r8idn.16xlarge", 64),
-    ("r8idn.24xlarge", 96),
-    ("r8idn.2xlarge", 8),
-    ("r8idn.32xlarge", 128),
-    ("r8idn.48xlarge", 192),
-    ("r8idn.4xlarge", 16),
-    ("r8idn.8xlarge", 32),
-    ("r8idn.96xlarge", 384),
-    ("r8idn.large", 2),
-    ("r8idn.metal-48xl", 192),
-    ("r8idn.metal-96xl", 384),
-    ("r8idn.xlarge", 4),
-    ("r8in.12xlarge", 48),
-    ("r8in.16xlarge", 64),
-    ("r8in.24xlarge", 96),
-    ("r8in.2xlarge", 8),
-    ("r8in.32xlarge", 128),
-    ("r8in.48xlarge", 192),
-    ("r8in.4xlarge", 16),
-    ("r8in.8xlarge", 32),
-    ("r8in.96xlarge", 384),
-    ("r8in.large", 2),
-    ("r8in.metal-48xl", 192),
-    ("r8in.metal-96xl", 384),
-    ("r8in.xlarge", 4),
-    ("r9g.12xlarge", 48),
-    ("r9g.16xlarge", 64),
-    ("r9g.24xlarge", 96),
-    ("r9g.2xlarge", 8),
-    ("r9g.48xlarge", 192),
-    ("r9g.4xlarge", 16),
-    ("r9g.8xlarge", 32),
-    ("r9g.large", 2),
-    ("r9g.medium", 1),
-    ("r9g.metal-48xl", 192),
-    ("r9g.xlarge", 4),
-    ("r9gd.12xlarge", 48),
-    ("r9gd.16xlarge", 64),
-    ("r9gd.24xlarge", 96),
-    ("r9gd.2xlarge", 8),
-    ("r9gd.48xlarge", 192),
-    ("r9gd.4xlarge", 16),
-    ("r9gd.8xlarge", 32),
-    ("r9gd.large", 2),
-    ("r9gd.medium", 1),
-    ("r9gd.metal-48xl", 192),
-    ("r9gd.xlarge", 4),
-    ("t1.micro", 1),
-    ("t2.2xlarge", 8),
-    ("t2.large", 2),
-    ("t2.medium", 2),
-    ("t2.micro", 1),
-    ("t2.nano", 1),
-    ("t2.small", 1),
-    ("t2.xlarge", 4),
-    ("t3.2xlarge", 8),
-    ("t3.large", 2),
-    ("t3.medium", 2),
-    ("t3.micro", 2),
-    ("t3.nano", 2),
-    ("t3.small", 2),
-    ("t3.xlarge", 4),
-    ("t3a.2xlarge", 8),
-    ("t3a.large", 2),
-    ("t3a.medium", 2),
-    ("t3a.micro", 2),
-    ("t3a.nano", 2),
-    ("t3a.small", 2),
-    ("t3a.xlarge", 4),
-    ("t4g.2xlarge", 8),
-    ("t4g.large", 2),
-    ("t4g.medium", 2),
-    ("t4g.micro", 2),
-    ("t4g.nano", 2),
-    ("t4g.small", 2),
-    ("t4g.xlarge", 4),
-    ("t8i.medium", 2),
-    ("t8i.micro", 2),
-    ("t8i.nano", 2),
-    ("t8i.small", 2),
-    ("trn1.2xlarge", 8),
-    ("trn1.32xlarge", 128),
-    ("trn1n.32xlarge", 128),
-    ("trn2.48xlarge", 192),
-    ("u-12tb1.112xlarge", 448),
-    ("u-12tb1.metal", 448),
-    ("u-18tb1.112xlarge", 448),
-    ("u-18tb1.metal", 448),
-    ("u-24tb1.112xlarge", 448),
-    ("u-24tb1.metal", 448),
-    ("u-3tb1.56xlarge", 224),
-    ("u-6tb1.112xlarge", 448),
-    ("u-6tb1.56xlarge", 224),
-    ("u-6tb1.metal", 448),
-    ("u-9tb1.112xlarge", 448),
-    ("u-9tb1.metal", 448),
-    ("u7i-12tb.224xlarge", 896),
-    ("u7i-6tb.112xlarge", 448),
-    ("u7i-8tb.112xlarge", 448),
-    ("u7in-16tb.224xlarge", 896),
-    ("u7in-24tb.224xlarge", 896),
-    ("u7in-32tb.224xlarge", 896),
-    ("vt1.24xlarge", 96),
-    ("vt1.3xlarge", 12),
-    ("vt1.6xlarge", 24),
-    ("x1.16xlarge", 64),
-    ("x1.32xlarge", 128),
-    ("x1e.16xlarge", 64),
-    ("x1e.2xlarge", 8),
-    ("x1e.32xlarge", 128),
-    ("x1e.4xlarge", 16),
-    ("x1e.8xlarge", 32),
-    ("x1e.xlarge", 4),
-    ("x2gd.12xlarge", 48),
-    ("x2gd.16xlarge", 64),
-    ("x2gd.2xlarge", 8),
-    ("x2gd.4xlarge", 16),
-    ("x2gd.8xlarge", 32),
-    ("x2gd.large", 2),
-    ("x2gd.medium", 1),
-    ("x2gd.metal", 64),
-    ("x2gd.xlarge", 4),
-    ("x2idn.16xlarge", 64),
-    ("x2idn.24xlarge", 96),
-    ("x2idn.32xlarge", 128),
-    ("x2idn.metal", 128),
-    ("x2iedn.16xlarge", 64),
-    ("x2iedn.24xlarge", 96),
-    ("x2iedn.2xlarge", 8),
-    ("x2iedn.32xlarge", 128),
-    ("x2iedn.4xlarge", 16),
-    ("x2iedn.8xlarge", 32),
-    ("x2iedn.metal", 128),
-    ("x2iedn.xlarge", 4),
-    ("x2iezn.12xlarge", 48),
-    ("x2iezn.2xlarge", 8),
-    ("x2iezn.4xlarge", 16),
-    ("x2iezn.6xlarge", 24),
-    ("x2iezn.8xlarge", 32),
-    ("x2iezn.metal", 48),
-    ("x8aedz.12xlarge", 48),
-    ("x8aedz.24xlarge", 96),
-    ("x8aedz.3xlarge", 12),
-    ("x8aedz.6xlarge", 24),
-    ("x8aedz.large", 2),
-    ("x8aedz.metal-12xl", 48),
-    ("x8aedz.metal-24xl", 96),
-    ("x8aedz.xlarge", 4),
-    ("x8g.12xlarge", 48),
-    ("x8g.16xlarge", 64),
-    ("x8g.24xlarge", 96),
-    ("x8g.2xlarge", 8),
-    ("x8g.48xlarge", 192),
-    ("x8g.4xlarge", 16),
-    ("x8g.8xlarge", 32),
-    ("x8g.large", 2),
-    ("x8g.medium", 1),
-    ("x8g.metal-24xl", 96),
-    ("x8g.metal-48xl", 192),
-    ("x8g.xlarge", 4),
-    ("x8i.12xlarge", 48),
-    ("x8i.16xlarge", 64),
-    ("x8i.24xlarge", 96),
-    ("x8i.2xlarge", 8),
-    ("x8i.32xlarge", 128),
-    ("x8i.48xlarge", 192),
-    ("x8i.4xlarge", 16),
-    ("x8i.64xlarge", 256),
-    ("x8i.8xlarge", 32),
-    ("x8i.96xlarge", 384),
-    ("x8i.large", 2),
-    ("x8i.metal-48xl", 192),
-    ("x8i.metal-96xl", 384),
-    ("x8i.xlarge", 4),
-    ("z1d.12xlarge", 48),
-    ("z1d.2xlarge", 8),
-    ("z1d.3xlarge", 12),
-    ("z1d.6xlarge", 24),
-    ("z1d.large", 2),
-    ("z1d.metal", 48),
-    ("z1d.xlarge", 4),
+use std::collections::HashSet;
+use std::io::Read;
+use std::sync::OnceLock;
+
+use flate2::read::GzDecoder;
+use serde::Deserialize;
+
+/// Instance types sold as Capacity Blocks (EC2 User Guide, "Capacity Blocks
+/// for ML": supported instance types). The dataset has no such usage class.
+pub(crate) const CAPACITY_BLOCK_INSTANCE_TYPES: &[&str] = &[
+    "p4d.24xlarge",
+    "p4de.24xlarge",
+    "p5.4xlarge",
+    "p5.48xlarge",
+    "p5e.48xlarge",
+    "p5en.48xlarge",
+    "p6-b200.48xlarge",
+    "trn1.32xlarge",
+    "trn2.48xlarge",
 ];
 
-/// The default vCPU count of `instance_type`, `None` for a type EC2 does not
-/// offer.
-pub(crate) fn default_vcpus(instance_type: &str) -> Option<u32> {
-    INSTANCE_TYPE_VCPUS
-        .binary_search_by(|(t, _)| (*t).cmp(instance_type))
+/// One entry of the vendored catalog.
+#[derive(Debug, Deserialize)]
+pub(crate) struct InstanceTypeSpec {
+    pub name: String,
+    pub vcpus: u32,
+    pub memory_mib: u64,
+    pub cores: Option<u32>,
+    pub threads_per_core: Option<u32>,
+    pub architectures: Vec<String>,
+    pub manufacturer: Option<String>,
+    pub hypervisor: Option<String>,
+    pub current_generation: bool,
+    pub bare_metal: bool,
+    pub burstable: bool,
+    pub instance_storage_supported: Option<bool>,
+    pub instance_storage: Option<InstanceStorage>,
+    pub ebs_optimized_support: Option<String>,
+    pub ebs_nvme_support: Option<String>,
+    pub ebs_optimized_info: Option<EbsOptimizedInfo>,
+    pub network_performance: String,
+    pub max_network_interfaces: Option<u32>,
+    pub ipv4_per_interface: Option<u32>,
+    pub ipv6_supported: Option<bool>,
+    pub ena_support: Option<String>,
+    pub network_bandwidth_gbps: Option<f64>,
+    pub nitro_enclaves_support: Option<String>,
+    pub placement_strategies: Vec<String>,
+    usage_classes: Vec<String>,
+    pub virtualization_types: Vec<String>,
+    pub accelerator: Option<Accelerator>,
+    regions: Vec<String>,
+}
+
+/// The accelerators of a type, for `InstanceRequirements`. `None` members are
+/// not in the dataset for this type.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Accelerator {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub count: Option<u32>,
+    pub manufacturer: Option<String>,
+    pub name: Option<String>,
+    pub total_memory_mib: Option<u64>,
+}
+
+/// `InstanceStorageInfo`, the single disk group every EC2 type has.
+#[derive(Debug, Deserialize)]
+pub(crate) struct InstanceStorage {
+    pub total_gb: u64,
+    pub disk_count: u32,
+    pub disk_size_gb: u64,
+    pub disk_type: String,
+    pub nvme_support: String,
+}
+
+/// `EbsOptimizedInfo`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct EbsOptimizedInfo {
+    pub baseline_bandwidth_mbps: u64,
+    pub baseline_throughput_mbps: f64,
+    pub baseline_iops: u64,
+    pub max_bandwidth_mbps: u64,
+    pub max_throughput_mbps: f64,
+    pub max_iops: u64,
+}
+
+#[derive(Deserialize)]
+struct RawCatalog {
+    instance_types: Vec<InstanceTypeSpec>,
+}
+
+/// The vendored dataset, see `scripts/generate-ec2-instance-catalog.py`.
+const DATA_GZ: &[u8] = include_bytes!("../data/instance_types.json.gz");
+
+/// Every instance type, sorted by name (byte order), decoded once at first use.
+pub(crate) fn catalog() -> &'static [InstanceTypeSpec] {
+    static CATALOG: OnceLock<Vec<InstanceTypeSpec>> = OnceLock::new();
+    CATALOG.get_or_init(|| {
+        let mut json = String::new();
+        GzDecoder::new(DATA_GZ)
+            .read_to_string(&mut json)
+            .expect("vendored instance type catalog is valid gzip");
+        let raw: RawCatalog =
+            serde_json::from_str(&json).expect("vendored instance type catalog is valid JSON");
+        raw.instance_types
+    })
+}
+
+/// The catalog entry of `instance_type`, `None` for a type EC2 does not offer.
+pub(crate) fn lookup(instance_type: &str) -> Option<&'static InstanceTypeSpec> {
+    let types = catalog();
+    types
+        .binary_search_by(|t| t.name.as_str().cmp(instance_type))
         .ok()
-        .map(|i| INSTANCE_TYPE_VCPUS[i].1)
+        .map(|i| &types[i])
 }
 
-/// The `ArchitectureType` of `instance_type`: `arm64` for Graviton families,
-/// `arm64_mac` for Apple silicon Mac types, `x86_64_mac` for Intel Mac types and
-/// `x86_64` otherwise.
-///
-/// A family name is `<letters><generation digits><attribute letters>`. AWS puts
-/// a `g` in the attribute letters of every Graviton family (`m7g`, `c6gn`,
-/// `x2gd`, `im4gn`, `is4gen`, `i8ge`, `g5g`, `hpc7g`). The GPU families `g4dn`,
-/// `g5`, `g6` and `gr6` have the `g` in the leading letters, so they stay
-/// `x86_64`. `a1` is the one Graviton family with no `g`. Mac types are `mac1`
-/// (Intel), `mac2*` and `mac-*` (Apple silicon).
-pub(crate) fn architecture(instance_type: &str) -> &'static str {
-    let family = instance_type.split('.').next().unwrap_or(instance_type);
-    if family == "mac1" {
-        return "x86_64_mac";
-    }
-    if family.starts_with("mac2") || family.starts_with("mac-") {
-        return "arm64_mac";
-    }
-    let attributes = family
-        .trim_start_matches(|c: char| c.is_ascii_lowercase())
-        .trim_start_matches(|c: char| c.is_ascii_digit());
-    if family == "a1" || attributes.contains('g') {
-        "arm64"
-    } else {
-        "x86_64"
-    }
+/// Every Region the dataset knows, which sells at least one type.
+fn dataset_regions() -> &'static HashSet<&'static str> {
+    static REGIONS: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    REGIONS.get_or_init(|| {
+        catalog()
+            .iter()
+            .flat_map(|t| t.regions.iter().map(String::as_str))
+            .collect()
+    })
 }
 
-/// Threads per core: 1 for Graviton, single-vCPU types and the AMD families
-/// that turn off SMT, 2 for the rest.
-pub(crate) fn default_threads_per_core(instance_type: &str, vcpus: u32) -> u32 {
-    let family = instance_type.split('.').next().unwrap_or(instance_type);
-    let no_smt = ["c7a", "c8a", "m7a", "m8a", "r7a", "r8a", "hpc6a", "hpc7a"];
-    if vcpus < 2 || architecture(instance_type).starts_with("arm64") || no_smt.contains(&family) {
-        1
-    } else {
-        2
+/// The default vCPU count of `instance_type` in any Region, `None` for a type
+/// EC2 does not offer anywhere.
+pub(crate) fn default_vcpus(instance_type: &str) -> Option<u32> {
+    lookup(instance_type).map(|t| t.vcpus)
+}
+
+fn one(value: impl ToString) -> Vec<String> {
+    vec![value.to_string()]
+}
+
+fn known(value: Option<impl ToString>) -> Vec<String> {
+    value.map(|v| v.to_string()).into_iter().collect()
+}
+
+impl InstanceTypeSpec {
+    /// Whether `region` sells this type. The dataset has no prices for a Region
+    /// it does not list at all (the China Regions, say), which says nothing about
+    /// what is sold there, so such a Region is served the whole catalog rather
+    /// than an empty one. `DescribeInstanceTypes`,
+    /// `DescribeInstanceTypeOfferings` and
+    /// `GetInstanceTypesFromInstanceRequirements` all scope through this.
+    pub(crate) fn offered_in(&self, region: &str) -> bool {
+        !dataset_regions().contains(region) || self.regions.iter().any(|r| r == region)
+    }
+
+    /// `SupportedUsageClasses`: the dataset's on-demand / spot, plus
+    /// capacity-block for the types sold that way.
+    pub(crate) fn usage_classes(&self) -> Vec<String> {
+        let mut classes = self.usage_classes.clone();
+        if CAPACITY_BLOCK_INSTANCE_TYPES.contains(&self.name.as_str()) {
+            classes.push("capacity-block".to_string());
+        }
+        classes
+    }
+
+    /// The values `filter` compares against on this type, `None` when the
+    /// catalog has no data behind that filter. An empty list never matches: the
+    /// attribute is absent from this type, or unknown for it.
+    pub(crate) fn filter_values(&self, filter: &str) -> Option<Vec<String>> {
+        let ebs = self.ebs_optimized_info.as_ref();
+        let storage = self.instance_storage.as_ref();
+        Some(match filter {
+            "instance-type" => one(&self.name),
+            "bare-metal" => one(self.bare_metal),
+            "burstable-performance-supported" => one(self.burstable),
+            "current-generation" => one(self.current_generation),
+            "hypervisor" => known(self.hypervisor.as_ref()),
+            "memory-info.size-in-mib" => one(self.memory_mib),
+            "nitro-enclaves-support" => known(self.nitro_enclaves_support.as_ref()),
+            "processor-info.supported-architecture" => self.architectures.clone(),
+            "supported-usage-class" => self.usage_classes(),
+            "supported-virtualization-type" => self.virtualization_types.clone(),
+            "vcpu-info.default-vcpus" => one(self.vcpus),
+            "vcpu-info.default-cores" => known(self.cores),
+            "vcpu-info.default-threads-per-core" => known(self.threads_per_core),
+            "instance-storage-supported" => known(self.instance_storage_supported),
+            "instance-storage-info.disk.count" => known(storage.map(|s| s.disk_count)),
+            "instance-storage-info.disk.size-in-gb" => known(storage.map(|s| s.disk_size_gb)),
+            "instance-storage-info.disk.type" => known(storage.map(|s| &s.disk_type)),
+            "instance-storage-info.nvme-support" => known(storage.map(|s| &s.nvme_support)),
+            "instance-storage-info.total-size-in-gb" => known(storage.map(|s| s.total_gb)),
+            "ebs-info.ebs-optimized-support" => known(self.ebs_optimized_support.as_ref()),
+            "ebs-info.nvme-support" => known(self.ebs_nvme_support.as_ref()),
+            "ebs-info.ebs-optimized-info.baseline-bandwidth-in-mbps" => {
+                known(ebs.map(|e| e.baseline_bandwidth_mbps))
+            }
+            "ebs-info.ebs-optimized-info.baseline-iops" => known(ebs.map(|e| e.baseline_iops)),
+            "ebs-info.ebs-optimized-info.baseline-throughput-in-mbps" => {
+                known(ebs.map(|e| e.baseline_throughput_mbps))
+            }
+            "ebs-info.ebs-optimized-info.maximum-bandwidth-in-mbps" => {
+                known(ebs.map(|e| e.max_bandwidth_mbps))
+            }
+            "ebs-info.ebs-optimized-info.maximum-iops" => known(ebs.map(|e| e.max_iops)),
+            "ebs-info.ebs-optimized-info.maximum-throughput-in-mbps" => {
+                known(ebs.map(|e| e.max_throughput_mbps))
+            }
+            "network-info.ena-support" => known(self.ena_support.as_ref()),
+            "network-info.ipv4-addresses-per-interface" => known(self.ipv4_per_interface),
+            "network-info.ipv6-supported" => known(self.ipv6_supported),
+            "network-info.maximum-network-interfaces" => known(self.max_network_interfaces),
+            "network-info.network-performance" => one(&self.network_performance),
+            _ => return None,
+        })
     }
 }
 
@@ -1496,68 +229,35 @@ pub(crate) fn default_threads_per_core(instance_type: &str, vcpus: u32) -> u32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn architecture_follows_the_graviton_naming_rule() {
-        for t in [
-            "a1.large",
-            "t4g.micro",
-            "m7g.large",
-            "c6gn.xlarge",
-            "x2gd.metal",
-            "im4gn.large",
-            "is4gen.large",
-            "i8ge.large",
-            "g5g.xlarge",
-            "hpc7g.16xlarge",
-        ] {
-            assert_eq!(architecture(t), "arm64", "{t}");
-        }
-        for t in [
-            "t3a.large",
-            "m5.large",
-            "g4dn.xlarge",
-            "g5.xlarge",
-            "g6e.xlarge",
-            "gr6.4xlarge",
-            "i3en.xlarge",
-            "u-6tb1.112xlarge",
-            "p4d.24xlarge",
-            "inf2.xlarge",
-            "m6idn.large",
-            "c6in.large",
-        ] {
-            assert_eq!(architecture(t), "x86_64", "{t}");
-        }
+    fn spec(name: &str) -> &'static InstanceTypeSpec {
+        lookup(name).unwrap_or_else(|| panic!("{name} is in the catalog"))
     }
 
     #[test]
-    fn mac_types_use_the_mac_architectures() {
-        assert_eq!(architecture("mac1.metal"), "x86_64_mac");
-        for t in [
-            "mac2.metal",
-            "mac2-m1ultra.metal",
-            "mac2-m2.metal",
-            "mac2-m2pro.metal",
-            "mac-m3ultra.metal",
-            "mac-m4.metal",
-            "mac-m4max.metal",
-            "mac-m4pro.metal",
-        ] {
-            assert_eq!(architecture(t), "arm64_mac", "{t}");
+    fn catalog_is_sorted_and_unique() {
+        assert_eq!(catalog().len(), 1430);
+        assert!(catalog().windows(2).all(|w| w[0].name < w[1].name));
+    }
+
+    #[test]
+    fn every_entry_has_the_core_attributes() {
+        for t in catalog() {
+            assert!(t.vcpus > 0, "{}", t.name);
+            assert!(t.memory_mib > 0, "{}", t.name);
+            assert!(!t.architectures.is_empty(), "{}", t.name);
+            assert!(!t.virtualization_types.is_empty(), "{}", t.name);
+            // The sparse records, whose placement data is a placeholder, have
+            // no strategies and no cores.
+            assert_eq!(
+                t.placement_strategies.is_empty(),
+                t.cores.is_none(),
+                "{}",
+                t.name
+            );
+            if let (Some(cores), Some(threads)) = (t.cores, t.threads_per_core) {
+                assert_eq!(cores * threads, t.vcpus, "{}", t.name);
+            }
         }
-    }
-
-    #[test]
-    fn threads_per_core() {
-        assert_eq!(default_threads_per_core("t2.micro", 1), 1);
-        assert_eq!(default_threads_per_core("m7g.large", 2), 1);
-        assert_eq!(default_threads_per_core("c7a.large", 2), 1);
-        assert_eq!(default_threads_per_core("t3.large", 2), 2);
-    }
-
-    #[test]
-    fn table_is_sorted_and_unique() {
-        assert!(INSTANCE_TYPE_VCPUS.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]
@@ -1568,5 +268,155 @@ mod tests {
         assert_eq!(default_vcpus("c7i.48xlarge"), Some(192));
         assert_eq!(default_vcpus("u7i-12tb.224xlarge"), Some(896));
         assert_eq!(default_vcpus("m5.huge"), None);
+    }
+
+    #[test]
+    fn graviton_type_has_its_real_values() {
+        let t = spec("m7g.large");
+        assert_eq!(t.memory_mib, 8192);
+        assert_eq!(t.architectures, ["arm64"]);
+        assert_eq!(t.manufacturer.as_deref(), Some("AWS"));
+        assert_eq!(t.hypervisor.as_deref(), Some("nitro"));
+        assert_eq!((t.cores, t.threads_per_core), (Some(2), Some(1)));
+        assert_eq!(t.ebs_optimized_support.as_deref(), Some("default"));
+        assert_eq!(t.ebs_nvme_support.as_deref(), Some("required"));
+        assert_eq!(t.ena_support.as_deref(), Some("required"));
+        assert_eq!(t.ebs_optimized_info.as_ref().unwrap().max_iops, 40000);
+        assert_eq!(t.max_network_interfaces, Some(3));
+        assert_eq!(t.ipv4_per_interface, Some(10));
+        assert_eq!(t.network_performance, "Up to 12.5 Gigabit");
+        assert_eq!(t.placement_strategies, ["cluster", "partition", "spread"]);
+    }
+
+    #[test]
+    fn old_xen_types_are_not_reported_as_nitro() {
+        let t2 = spec("t2.micro");
+        assert_eq!(t2.hypervisor.as_deref(), Some("xen"));
+        assert_eq!(t2.memory_mib, 1024);
+        assert_eq!(t2.architectures, ["i386", "x86_64"]);
+        assert!(t2.burstable);
+        assert_eq!(t2.ena_support.as_deref(), Some("unsupported"));
+        assert_eq!(t2.placement_strategies, ["partition", "spread"]);
+
+        let c1 = spec("c1.medium");
+        assert!(!c1.current_generation);
+        assert_eq!(c1.memory_mib, 1740);
+        assert_eq!(c1.virtualization_types, ["paravirtual"]);
+        assert_eq!(c1.ipv6_supported, Some(false));
+        let disk = c1.instance_storage.as_ref().unwrap();
+        assert_eq!((disk.disk_count, disk.disk_size_gb), (1, 350));
+        assert_eq!(disk.disk_type, "hdd");
+    }
+
+    #[test]
+    fn a_xen_type_does_not_claim_what_the_data_cannot_tell() {
+        let m4 = spec("m4.large");
+        assert_eq!(m4.ebs_optimized_support, None);
+        assert_eq!(m4.ena_support, None);
+        assert!(m4.ebs_optimized_info.is_some());
+    }
+
+    #[test]
+    fn sparse_records_leave_unknown_values_out() {
+        let t = spec("p3.8xlarge");
+        assert_eq!(t.vcpus, 32);
+        assert_eq!(t.memory_mib, 249_856);
+        assert_eq!(t.cores, None);
+        assert_eq!(t.hypervisor, None);
+        assert_eq!(t.instance_storage_supported, None);
+        assert_eq!(t.ebs_optimized_support, None);
+        assert_eq!(t.max_network_interfaces, None);
+        assert!(t.placement_strategies.is_empty());
+        assert_eq!(t.ena_support, None);
+        assert_eq!(t.ipv6_supported, None);
+        // The placeholders the review caught, not reported as facts.
+        let u = spec("u-12tb1.112xlarge");
+        assert_eq!(u.ena_support, None);
+        assert!(u.placement_strategies.is_empty());
+        assert_eq!(spec("i2.large").ena_support, None);
+    }
+
+    #[test]
+    fn rows_sold_nowhere_are_not_vendored() {
+        assert!(lookup("d3en.large").is_none());
+        assert!(lookup("p6e-gb200.36xlarge").is_none());
+    }
+
+    #[test]
+    fn a_type_is_offered_where_the_dataset_sells_it() {
+        let only_gov = spec("i3p.16xlarge");
+        assert!(only_gov.offered_in("us-gov-west-1"));
+        assert!(!only_gov.offered_in("us-east-1"));
+        // A Region the dataset does not know says nothing: whole catalog.
+        assert!(only_gov.offered_in("cn-north-1"));
+        assert!(catalog().iter().all(|t| t.offered_in("cn-north-1")));
+        // The vCPU lookup quotas use does not depend on the Region.
+        assert_eq!(default_vcpus("i3p.16xlarge"), Some(64));
+    }
+
+    #[test]
+    fn a_missing_spot_price_is_not_a_claim_about_spot() {
+        assert_eq!(spec("mac1.metal").usage_classes(), ["on-demand"]);
+        assert_eq!(spec("m7g.large").usage_classes(), ["on-demand", "spot"]);
+    }
+
+    #[test]
+    fn accelerators_come_from_the_dataset() {
+        let g4 = spec("g4dn.xlarge").accelerator.as_ref().unwrap();
+        assert_eq!(g4.kind, "gpu");
+        assert_eq!(g4.count, Some(1));
+        assert_eq!(g4.manufacturer.as_deref(), Some("nvidia"));
+        assert_eq!(g4.name.as_deref(), Some("t4"));
+        assert_eq!(g4.total_memory_mib, Some(16384));
+        // A fractional GPU is the one device it shares.
+        let g6f = spec("g6f.2xlarge").accelerator.as_ref().unwrap();
+        assert_eq!(g6f.count, Some(1));
+        let f2 = spec("f2.12xlarge").accelerator.as_ref().unwrap();
+        assert_eq!((f2.kind.as_str(), f2.count), ("fpga", Some(2)));
+        let vt1 = spec("vt1.3xlarge").accelerator.as_ref().unwrap();
+        assert_eq!(vt1.kind, "media");
+        let inf = spec("inf1.xlarge").accelerator.as_ref().unwrap();
+        assert_eq!((inf.kind.as_str(), inf.count), ("inference", None));
+        assert!(spec("m5.large").accelerator.is_none());
+    }
+
+    #[test]
+    fn bare_metal_has_no_hypervisor() {
+        let t = spec("mac1.metal");
+        assert!(t.bare_metal);
+        assert_eq!(t.hypervisor, None);
+        assert_eq!(t.architectures, ["x86_64_mac"]);
+        assert_eq!(spec("mac2.metal").architectures, ["arm64_mac"]);
+    }
+
+    #[test]
+    fn capacity_block_types_are_in_the_catalog_and_report_the_class() {
+        for name in CAPACITY_BLOCK_INSTANCE_TYPES {
+            assert!(
+                spec(name)
+                    .usage_classes()
+                    .contains(&"capacity-block".into()),
+                "{name}"
+            );
+        }
+        assert!(!spec("m5.large")
+            .usage_classes()
+            .contains(&"capacity-block".into()));
+    }
+
+    #[test]
+    fn filter_values_expose_the_catalog() {
+        let t = spec("i3.large");
+        let v = |f: &str| t.filter_values(f).unwrap();
+        assert_eq!(v("memory-info.size-in-mib"), ["15616"]);
+        assert_eq!(v("instance-storage-supported"), ["true"]);
+        assert_eq!(v("instance-storage-info.disk.type"), ["ssd"]);
+        assert_eq!(v("hypervisor"), ["xen"]);
+        assert_eq!(v("current-generation"), ["true"]);
+        assert_eq!(t.filter_values("hibernation-supported"), None);
+        assert!(spec("m5.large")
+            .filter_values("instance-storage-info.disk.type")
+            .unwrap()
+            .is_empty());
     }
 }
