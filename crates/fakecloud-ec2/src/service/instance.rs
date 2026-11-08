@@ -2452,6 +2452,95 @@ pub(crate) fn describe_instance_status(
     ))
 }
 
+/// Filter names `DescribeInstanceTypes` accepts that this emulator evaluates.
+const EVALUATED_INSTANCE_TYPE_FILTERS: &[&str] = &[
+    "instance-type",
+    "processor-info.supported-architecture",
+    "vcpu-info.default-vcpus",
+    "bare-metal",
+];
+
+/// Every filter name in the Smithy model's `DescribeInstanceTypes` filter list.
+const KNOWN_INSTANCE_TYPE_FILTERS: &[&str] = &[
+    "auto-recovery-supported",
+    "bare-metal",
+    "burstable-performance-supported",
+    "current-generation",
+    "dedicated-hosts-supported",
+    "ebs-info.attachment-limit-type",
+    "ebs-info.maximum-ebs-attachments",
+    "ebs-info.ebs-optimized-info.baseline-bandwidth-in-mbps",
+    "ebs-info.ebs-optimized-info.baseline-iops",
+    "ebs-info.ebs-optimized-info.baseline-throughput-in-mbps",
+    "ebs-info.ebs-optimized-info.maximum-bandwidth-in-mbps",
+    "ebs-info.ebs-optimized-info.maximum-iops",
+    "ebs-info.ebs-optimized-info.maximum-throughput-in-mbps",
+    "ebs-info.ebs-optimized-support",
+    "ebs-info.encryption-support",
+    "ebs-info.nvme-support",
+    "free-tier-eligible",
+    "hibernation-supported",
+    "hypervisor",
+    "instance-storage-info.disk.count",
+    "instance-storage-info.disk.size-in-gb",
+    "instance-storage-info.disk.type",
+    "instance-storage-info.encryption-support",
+    "instance-storage-info.nvme-support",
+    "instance-storage-info.total-size-in-gb",
+    "instance-storage-supported",
+    "instance-type",
+    "memory-info.size-in-mib",
+    "network-info.bandwidth-weightings",
+    "network-info.efa-info.maximum-efa-interfaces",
+    "network-info.efa-supported",
+    "network-info.ena-support",
+    "network-info.flexible-ena-queues-support",
+    "network-info.encryption-in-transit-supported",
+    "network-info.ipv4-addresses-per-interface",
+    "network-info.ipv6-addresses-per-interface",
+    "network-info.ipv6-supported",
+    "network-info.maximum-network-cards",
+    "network-info.maximum-network-interfaces",
+    "network-info.network-performance",
+    "nitro-enclaves-support",
+    "nitro-tpm-support",
+    "nitro-tpm-info.supported-versions",
+    "processor-info.supported-architecture",
+    "processor-info.sustained-clock-speed-in-ghz",
+    "processor-info.supported-features",
+    "reboot-migration-support",
+    "supported-boot-mode",
+    "supported-root-device-type",
+    "supported-usage-class",
+    "supported-virtualization-type",
+    "vcpu-info.default-cores",
+    "vcpu-info.default-threads-per-core",
+    "vcpu-info.default-vcpus",
+    "vcpu-info.valid-cores",
+    "vcpu-info.valid-threads-per-core",
+];
+
+fn validate_instance_type_filters(filters: &[Filter]) -> Result<(), AwsServiceError> {
+    for f in filters {
+        let name = f.name.as_str();
+        if !KNOWN_INSTANCE_TYPE_FILTERS.contains(&name) {
+            return Err(AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!("The filter '{name}' is invalid"),
+            ));
+        }
+        if !EVALUATED_INSTANCE_TYPE_FILTERS.contains(&name) {
+            return Err(AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "UnsupportedOperation",
+                format!("The filter '{name}' is not supported by this emulator"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn instance_type_matches_filters(instance_type: &str, filters: &[Filter]) -> bool {
     filters.iter().all(|f| {
         let actual = match f.name.as_str() {
@@ -2463,8 +2552,7 @@ fn instance_type_matches_filters(instance_type: &str, filters: &[Filter]) -> boo
                 .unwrap_or(2)
                 .to_string(),
             "bare-metal" => instance_type.contains(".metal").to_string(),
-            // Attributes the table does not model are not filtered on.
-            _ => return true,
+            _ => return false,
         };
         f.values
             .iter()
@@ -2482,23 +2570,28 @@ fn instance_type_item(instance_type: &str) -> String {
         "<hypervisor>nitro</hypervisor>"
     };
     format!(
-        "{}<currentGeneration>true</currentGeneration><bareMetal>{bare_metal}</bareMetal>         {hypervisor}<instanceStorageSupported>false</instanceStorageSupported>         <supportedUsageClasses><item>on-demand</item><item>spot</item></supportedUsageClasses>         <processorInfo><supportedArchitectures><item>{}</item></supportedArchitectures></processorInfo>         <vCpuInfo><defaultVCpus>{vcpus}</defaultVCpus><defaultCores>{}</defaultCores>         <defaultThreadsPerCore>{threads}</defaultThreadsPerCore></vCpuInfo>         <memoryInfo><sizeInMiB>1024</sizeInMiB></memoryInfo>         <ebsInfo><ebsOptimizedSupport>default</ebsOptimizedSupport><encryptionSupport>supported</encryptionSupport><nvmeSupport>required</nvmeSupport></ebsInfo>         <networkInfo><networkPerformance>Up to 5 Gigabit</networkPerformance><maximumNetworkInterfaces>3</maximumNetworkInterfaces><maximumNetworkCards>1</maximumNetworkCards><defaultNetworkCardIndex>0</defaultNetworkCardIndex><ipv4AddressesPerInterface>10</ipv4AddressesPerInterface><ipv6AddressesPerInterface>10</ipv6AddressesPerInterface><ipv6Supported>true</ipv6Supported><enaSupport>required</enaSupport><efaSupported>false</efaSupported></networkInfo>         <placementGroupInfo><supportedStrategies><item>cluster</item><item>partition</item><item>spread</item></supportedStrategies></placementGroupInfo>         <supportedVirtualizationTypes><item>hvm</item></supportedVirtualizationTypes>",
+        "{}<currentGeneration>true</currentGeneration><bareMetal>{bare_metal}</bareMetal>\
+         {hypervisor}<instanceStorageSupported>false</instanceStorageSupported>\
+         <supportedUsageClasses><item>on-demand</item><item>spot</item></supportedUsageClasses>\
+         <processorInfo><supportedArchitectures><item>{}</item></supportedArchitectures></processorInfo>\
+         <vCpuInfo><defaultVCpus>{vcpus}</defaultVCpus><defaultCores>{}</defaultCores>\
+         <defaultThreadsPerCore>{threads}</defaultThreadsPerCore></vCpuInfo>\
+         <memoryInfo><sizeInMiB>1024</sizeInMiB></memoryInfo>\
+         <ebsInfo><ebsOptimizedSupport>default</ebsOptimizedSupport>\
+         <encryptionSupport>supported</encryptionSupport><nvmeSupport>required</nvmeSupport></ebsInfo>\
+         <networkInfo><networkPerformance>Up to 5 Gigabit</networkPerformance>\
+         <maximumNetworkInterfaces>3</maximumNetworkInterfaces><maximumNetworkCards>1</maximumNetworkCards>\
+         <defaultNetworkCardIndex>0</defaultNetworkCardIndex>\
+         <ipv4AddressesPerInterface>10</ipv4AddressesPerInterface>\
+         <ipv6AddressesPerInterface>10</ipv6AddressesPerInterface><ipv6Supported>true</ipv6Supported>\
+         <enaSupport>required</enaSupport><efaSupported>false</efaSupported></networkInfo>\
+         <placementGroupInfo><supportedStrategies><item>cluster</item><item>partition</item>\
+         <item>spread</item></supportedStrategies></placementGroupInfo>\
+         <supportedVirtualizationTypes><item>hvm</item></supportedVirtualizationTypes>",
         ec2_elem("instanceType", instance_type),
         crate::instance_types::architecture(instance_type),
         (vcpus / threads).max(1),
     )
-}
-
-fn instance_type_items(req: &AwsRequest) -> Vec<String> {
-    let wanted = indexed_list(&req.query_params, "InstanceType");
-    let filters = parse_filters(&req.query_params);
-    crate::instance_types::INSTANCE_TYPE_VCPUS
-        .iter()
-        .map(|(t, _)| *t)
-        .filter(|t| wanted.is_empty() || wanted.iter().any(|w| w == t))
-        .filter(|t| instance_type_matches_filters(t, &filters))
-        .map(instance_type_item)
-        .collect()
 }
 
 pub(crate) fn describe_instance_types(
@@ -2506,10 +2599,40 @@ pub(crate) fn describe_instance_types(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     crate::service_helpers::validate_max_results(&req.query_params, 5, 100)?;
+    let wanted = indexed_list(&req.query_params, "InstanceType");
+    let filters = parse_filters(&req.query_params);
+    let unknown: Vec<&str> = wanted
+        .iter()
+        .map(String::as_str)
+        .filter(|w| {
+            crate::instance_types::INSTANCE_TYPE_VCPUS
+                .binary_search_by(|(name, _)| (*name).cmp(w))
+                .is_err()
+        })
+        .collect();
+    if !unknown.is_empty() {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "InvalidInstanceType",
+            format!(
+                "The following supplied instance types do not exist: [{}]",
+                unknown.join(",")
+            ),
+        ));
+    }
+    validate_instance_type_filters(&filters)?;
+    let matching: Vec<&str> = crate::instance_types::INSTANCE_TYPE_VCPUS
+        .iter()
+        .map(|(t, _)| *t)
+        .filter(|t| wanted.is_empty() || wanted.iter().any(|w| w == t))
+        .filter(|t| instance_type_matches_filters(t, &filters))
+        .collect();
+    // MaxResults / NextToken are applied to the rendered set by `pagination`.
+    let items: Vec<String> = matching.iter().map(|t| instance_type_item(t)).collect();
     Ok(Ec2Service::respond(
         "DescribeInstanceTypes",
         &req.request_id,
-        &ec2_list("instanceTypeSet", &instance_type_items(req)),
+        &ec2_list("instanceTypeSet", &items),
     ))
 }
 

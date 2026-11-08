@@ -1452,20 +1452,28 @@ pub(crate) fn default_vcpus(instance_type: &str) -> Option<u32> {
         .map(|i| INSTANCE_TYPE_VCPUS[i].1)
 }
 
-/// The CPU architecture of `instance_type`: `arm64` for Graviton (and Apple
-/// silicon `mac2`) families, `x86_64` otherwise.
+/// The `ArchitectureType` of `instance_type`: `arm64` for Graviton families,
+/// `arm64_mac` for Apple silicon Mac types, `x86_64_mac` for Intel Mac types and
+/// `x86_64` otherwise.
 ///
 /// A family name is `<letters><generation digits><attribute letters>`. AWS puts
 /// a `g` in the attribute letters of every Graviton family (`m7g`, `c6gn`,
 /// `x2gd`, `im4gn`, `is4gen`, `i8ge`, `g5g`, `hpc7g`). The GPU families `g4dn`,
 /// `g5`, `g6` and `gr6` have the `g` in the leading letters, so they stay
-/// `x86_64`. `a1` is the one Graviton family with no `g`.
+/// `x86_64`. `a1` is the one Graviton family with no `g`. Mac types are `mac1`
+/// (Intel), `mac2*` and `mac-*` (Apple silicon).
 pub(crate) fn architecture(instance_type: &str) -> &'static str {
     let family = instance_type.split('.').next().unwrap_or(instance_type);
+    if family == "mac1" {
+        return "x86_64_mac";
+    }
+    if family.starts_with("mac2") || family.starts_with("mac-") {
+        return "arm64_mac";
+    }
     let attributes = family
         .trim_start_matches(|c: char| c.is_ascii_lowercase())
         .trim_start_matches(|c: char| c.is_ascii_digit());
-    if family == "a1" || family.starts_with("mac2") || attributes.contains('g') {
+    if family == "a1" || attributes.contains('g') {
         "arm64"
     } else {
         "x86_64"
@@ -1477,7 +1485,7 @@ pub(crate) fn architecture(instance_type: &str) -> &'static str {
 pub(crate) fn default_threads_per_core(instance_type: &str, vcpus: u32) -> u32 {
     let family = instance_type.split('.').next().unwrap_or(instance_type);
     let no_smt = ["c7a", "c8a", "m7a", "m8a", "r7a", "r8a", "hpc6a", "hpc7a"];
-    if vcpus < 2 || architecture(instance_type) == "arm64" || no_smt.contains(&family) {
+    if vcpus < 2 || architecture(instance_type).starts_with("arm64") || no_smt.contains(&family) {
         1
     } else {
         2
@@ -1501,7 +1509,6 @@ mod tests {
             "i8ge.large",
             "g5g.xlarge",
             "hpc7g.16xlarge",
-            "mac2.metal",
         ] {
             assert_eq!(architecture(t), "arm64", "{t}");
         }
@@ -1512,15 +1519,31 @@ mod tests {
             "g5.xlarge",
             "g6e.xlarge",
             "gr6.4xlarge",
-            "i3en.large",
+            "i3en.xlarge",
+            "u-6tb1.112xlarge",
             "p4d.24xlarge",
             "inf2.xlarge",
-            "mac1.metal",
-            "u-6tb1.112xlarge",
             "m6idn.large",
             "c6in.large",
         ] {
             assert_eq!(architecture(t), "x86_64", "{t}");
+        }
+    }
+
+    #[test]
+    fn mac_types_use_the_mac_architectures() {
+        assert_eq!(architecture("mac1.metal"), "x86_64_mac");
+        for t in [
+            "mac2.metal",
+            "mac2-m1ultra.metal",
+            "mac2-m2.metal",
+            "mac2-m2pro.metal",
+            "mac-m3ultra.metal",
+            "mac-m4.metal",
+            "mac-m4max.metal",
+            "mac-m4pro.metal",
+        ] {
+            assert_eq!(architecture(t), "arm64_mac", "{t}");
         }
     }
 

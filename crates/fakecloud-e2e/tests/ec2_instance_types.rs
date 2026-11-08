@@ -103,3 +103,102 @@ async fn architecture_filter_separates_arm64_from_x86_64() {
         );
     }
 }
+
+#[tokio::test]
+async fn pages_with_max_results_and_visits_every_type_once() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+
+    let first = c
+        .describe_instance_types()
+        .max_results(5)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.instance_types().len(), 5);
+    let token = first.next_token().expect("a next token").to_string();
+
+    let second = c
+        .describe_instance_types()
+        .max_results(5)
+        .next_token(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.instance_types().len(), 5);
+    assert_ne!(
+        first.instance_types()[0].instance_type(),
+        second.instance_types()[0].instance_type()
+    );
+
+    let walked = describe(&c, &[], vec![]).await;
+    let mut names: Vec<_> = walked
+        .iter()
+        .map(|i| i.instance_type().unwrap().as_str().to_string())
+        .collect();
+    let total = names.len();
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), total, "a type was returned twice");
+    assert!(total > 100);
+}
+
+#[tokio::test]
+async fn unknown_instance_type_is_rejected() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+
+    let err = c
+        .describe_instance_types()
+        .instance_types("m7g.large".parse().unwrap())
+        .instance_types("nope.large".parse().unwrap())
+        .send()
+        .await
+        .expect_err("unknown type should fail");
+    let text = format!("{err:?}");
+    assert!(text.contains("InvalidInstanceType"), "{text}");
+    assert!(text.contains("nope.large"), "{text}");
+}
+
+#[tokio::test]
+async fn unknown_and_unsupported_filters_are_rejected() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+
+    let err = c
+        .describe_instance_types()
+        .filters(filter("no-such-filter", "x"))
+        .send()
+        .await
+        .expect_err("unknown filter should fail");
+    assert!(format!("{err:?}").contains("InvalidParameterValue"));
+
+    let err = c
+        .describe_instance_types()
+        .filters(filter("memory-info.size-in-mib", "8192"))
+        .send()
+        .await
+        .expect_err("unsupported filter should fail");
+    let text = format!("{err:?}");
+    assert!(text.contains("memory-info.size-in-mib"), "{text}");
+}
+
+#[tokio::test]
+async fn mac_types_report_the_mac_architectures() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+
+    let items = describe(&c, &["mac1.metal", "mac2.metal"], vec![]).await;
+    let arch = |name: &str| {
+        items
+            .iter()
+            .find(|i| i.instance_type().unwrap().as_str() == name)
+            .unwrap()
+            .processor_info()
+            .unwrap()
+            .supported_architectures()[0]
+            .clone()
+    };
+    assert_eq!(arch("mac1.metal"), ArchitectureType::X8664Mac);
+    assert_eq!(arch("mac2.metal"), ArchitectureType::Arm64Mac);
+}
