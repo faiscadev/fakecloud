@@ -73,6 +73,35 @@ pub struct DistributionConfig {
     pub cache_tag_config: Option<CacheTagConfig>,
 }
 
+impl DistributionConfig {
+    pub fn ensure_aws_defaults(&mut self) {
+        if self.origin_groups.is_none() {
+            self.origin_groups = Some(OriginGroups::default());
+        }
+        if self.restrictions.is_none() {
+            self.restrictions = Some(Restrictions::default());
+        }
+        if self.custom_error_responses.is_none() {
+            self.custom_error_responses = Some(CustomErrorResponses::default());
+        }
+        if self.aliases.is_none() {
+            self.aliases = Some(Aliases::default());
+        }
+        if self.viewer_certificate.is_none() {
+            self.viewer_certificate = Some(ViewerCertificate::default());
+        }
+        if self.price_class.is_none() {
+            self.price_class = Some("PriceClass_All".to_string());
+        }
+        if self.http_version.is_none() {
+            self.http_version = Some("http2".to_string());
+        }
+        if self.is_ipv6_enabled.is_none() {
+            self.is_ipv6_enabled = Some(true);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct ViewerMtlsConfig {
@@ -687,13 +716,11 @@ pub struct LoggingConfig {
     pub prefix: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ViewerCertificate {
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub cloud_front_default_certificate: Option<bool>,
-    // AWS spells these `IAMCertificateId` / `ACMCertificateArn` /
-    // `SSLSupportMethod`, not the PascalCase `IamCertificateId` etc.
     #[serde(
         default,
         rename = "IAMCertificateId",
@@ -720,19 +747,51 @@ pub struct ViewerCertificate {
     pub certificate_source: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+impl Default for ViewerCertificate {
+    fn default() -> Self {
+        Self {
+            cloud_front_default_certificate: Some(true),
+            minimum_protocol_version: Some("TLSv1".to_string()),
+            certificate_source: Some("cloudfront".to_string()),
+            iam_certificate_id: None,
+            acm_certificate_arn: None,
+            ssl_support_method: None,
+            certificate: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Restrictions {
     pub geo_restriction: GeoRestriction,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+impl Default for Restrictions {
+    fn default() -> Self {
+        Self {
+            geo_restriction: GeoRestriction::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct GeoRestriction {
     pub restriction_type: String,
     pub quantity: i32,
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub items: Option<LocationList>,
+}
+
+impl Default for GeoRestriction {
+    fn default() -> Self {
+        Self {
+            restriction_type: "none".to_string(),
+            quantity: 0,
+            items: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

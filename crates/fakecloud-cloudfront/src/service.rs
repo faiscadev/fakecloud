@@ -677,7 +677,7 @@ impl CloudFrontService {
         req: &AwsRequest,
         with_tags: bool,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let (config, tags) = if with_tags {
+        let (mut config, tags) = if with_tags {
             let parsed: DistributionConfigWithTags = xml_io::from_xml_root(&req.body)
                 .map_err(|e| invalid_argument(format!("invalid request XML: {e}")))?;
             let tags = parsed
@@ -699,6 +699,8 @@ impl CloudFrontService {
                 .map_err(|e| invalid_argument(format!("invalid request XML: {e}")))?;
             (parsed, Vec::new())
         };
+
+        config.ensure_aws_defaults();
 
         validate_distribution_config(&config)?;
 
@@ -885,12 +887,13 @@ impl CloudFrontService {
             .accounts
             .get(&route.account)
             .ok_or_else(|| no_such_distribution(id))?;
-        let dist = account
+        let mut dist = account
             .distributions
             .get(id)
             .ok_or_else(|| no_such_distribution(id))?
             .clone();
         drop(state);
+        dist.config.ensure_aws_defaults();
         let body = build_distribution_xml(&dist);
         let mut headers = HeaderMap::new();
         set_header(&mut headers, ETAG, &dist.etag);
@@ -907,12 +910,13 @@ impl CloudFrontService {
             .accounts
             .get(&route.account)
             .ok_or_else(|| no_such_distribution(id))?;
-        let dist = account
+        let mut dist = account
             .distributions
             .get(id)
             .ok_or_else(|| no_such_distribution(id))?
             .clone();
         drop(state);
+        dist.config.ensure_aws_defaults();
         let body = xml_io::to_xml_root("DistributionConfig", &dist.config)
             .map_err(|e| internal_error(format!("xml encode failed: {e}")))?;
         let mut headers = HeaderMap::new();
@@ -985,8 +989,9 @@ impl CloudFrontService {
             // lands.
             dist.status = "InProgress".to_string();
         }
-        let snapshot = dist.clone();
+        let mut snapshot = dist.clone();
         drop(state);
+        snapshot.config.ensure_aws_defaults();
 
         if config_changed {
             self.schedule_distribution_deploy(id.to_string());
