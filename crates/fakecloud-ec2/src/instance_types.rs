@@ -1491,15 +1491,34 @@ mod tests {
     #[test]
     fn architecture_follows_the_graviton_naming_rule() {
         for t in [
-            "a1.large", "t4g.micro", "m7g.large", "c6gn.xlarge", "x2gd.metal", "im4gn.large",
-            "is4gen.large", "i8ge.large", "g5g.xlarge", "hpc7g.16xlarge", "mac2.metal",
+            "a1.large",
+            "t4g.micro",
+            "m7g.large",
+            "c6gn.xlarge",
+            "x2gd.metal",
+            "im4gn.large",
+            "is4gen.large",
+            "i8ge.large",
+            "g5g.xlarge",
+            "hpc7g.16xlarge",
+            "mac2.metal",
         ] {
             assert_eq!(architecture(t), "arm64", "{t}");
         }
         for t in [
-            "t3a.large", "m5.large", "g4dn.xlarge", "g5.xlarge", "g6e.xlarge", "gr6.4xlarge",
-            "i3en.large", "p4d.24xlarge", "inf2.xlarge", "mac1.metal", "u-6tb1.112xlarge",
-            "m6idn.large", "c6in.large",
+            "t3a.large",
+            "m5.large",
+            "g4dn.xlarge",
+            "g5.xlarge",
+            "g6e.xlarge",
+            "gr6.4xlarge",
+            "i3en.large",
+            "p4d.24xlarge",
+            "inf2.xlarge",
+            "mac1.metal",
+            "u-6tb1.112xlarge",
+            "m6idn.large",
+            "c6in.large",
         ] {
             assert_eq!(architecture(t), "x86_64", "{t}");
         }

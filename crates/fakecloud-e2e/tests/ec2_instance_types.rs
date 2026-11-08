@@ -4,7 +4,7 @@
 
 mod helpers;
 
-use aws_sdk_ec2::types::{Filter, ArchitectureType};
+use aws_sdk_ec2::types::{ArchitectureType, Filter};
 use helpers::TestServer;
 
 async fn describe(
