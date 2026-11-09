@@ -26,7 +26,7 @@ As of April 2026, per [docs.localstack.cloud/aws/services/bedrock](https://docs.
 | **Backend** | Ollama (real local LLM) | Configurable responses per prompt rule |
 | **Determinism** | No — real inference, different output each run | Yes — returns exactly what you configured |
 | **Speed** | 1-30s per call (Ollama CPU inference) | Milliseconds |
-| **Disk** | GBs (Ollama model weights) | ~19 MB binary |
+| **Disk** | GBs (Ollama model weights) | ~120 MB binary |
 | **Guardrails** | Not supported | Full CRUD + versioning + `ApplyGuardrail` content evaluation |
 | **Custom models** | Not supported | `CreateModelCustomizationJob`, imported models, model copy jobs |
 | **Async invoke / batch** | Partial (CreateModelInvocationJob only) | Full flow, S3-backed |

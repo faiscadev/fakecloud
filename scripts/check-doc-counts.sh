@@ -32,9 +32,14 @@ fi
 # --- Performance metrics ---
 # These have no in-repo source of truth. When re-measurement establishes a new
 # number, update these constants and audit every page in FILES in the same PR.
+# Measured on an Apple M1 Max release build, 2026-11-08: a first SQS request
+# answered in a median 274 ms over 12 runs, idle RSS 30 MiB, 124 MB on disk
+# (118 MiB). The size is rounded to the nearest 10 MB. Measure startup with a
+# polling client that does not fork per probe, since forking curl and python
+# added about 130 ms.
 STARTUP_MS=300
-IDLE_MEM_MIB=10
-BINARY_MB=19
+IDLE_MEM_MIB=30
+BINARY_MB=120
 
 # --- Lambda runtime count ---
 # Canonical source: `runtime_to_image()` in
@@ -263,7 +268,7 @@ EXCEPTIONS=(
     # The metric checks extract every number on the line and can't attribute it,
     # so a competitor's figure that collides with one of our metric kinds is
     # whitelisted here. "~150 MiB idle" is LocalStack's idle RSS in the README
-    # footprint-comparison row (ours is ~10 MiB, stated in the same row and in
+    # footprint-comparison row (ours is ~30 MiB, stated in the same row and in
     # "Why fakecloud").
     "README.md:idle_mem_mib:150"
     # "AWS AppConfig: 58 operations" is a DIFFERENT service from AWS Config; the
@@ -407,7 +412,7 @@ for f in "${FILES[@]}"; do
     )
 
     # --- Idle memory claims ---
-    # "~10 MiB", "10 MiB idle", "10 MiB idle memory". Avoids false positives by
+    # "~30 MiB", "30 MiB idle", "30 MiB idle memory". Avoids false positives by
     # only firing on lines that mention "idle" or "memory" alongside the number.
     while read -r hit; do
         [ -z "$hit" ] && continue
@@ -423,7 +428,7 @@ for f in "${FILES[@]}"; do
     )
 
     # --- Binary size claims ---
-    # "~19 MB binary", "19MB binary", "19 MB static binary", "binary (~19 MB)".
+    # "~120 MB binary", "120MB binary", "120 MB static binary", "binary (~120 MB)".
     # Restricted to lines mentioning "binary" to avoid catching unrelated MB
     # mentions (e.g. install size for competitors).
     while read -r hit; do

@@ -23,7 +23,7 @@ MinIO is excellent for these. It's not primarily a testing tool; it's real infra
 - Your tests exercise S3 **plus** Lambda / SNS / SQS / DynamoDB / any other AWS service.
 - You need S3 notifications to actually fire Lambda end-to-end (MinIO emits events but has no Lambda service).
 - You want the full AWS API surface (S3 + IAM + STS + KMS + everything else) against one endpoint.
-- You want a lightweight local-dev experience (~300ms startup, ~10 MiB idle memory) rather than a production storage daemon.
+- You want a lightweight local-dev experience (~300ms startup, ~30 MiB idle memory) rather than a production storage daemon.
 
 ## Feature-level comparison
 
