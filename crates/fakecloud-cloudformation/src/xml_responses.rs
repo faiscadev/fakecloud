@@ -237,8 +237,9 @@ pub fn list_stack_resources_response(resources: &[StackResource], request_id: &s
     )
 }
 
-/// A resource whose create failed has no physical id, and the member is left out.
-fn physical_id_xml(physical_id: &str) -> String {
+/// The `<PhysicalResourceId>` element of a resource, or nothing when the id is
+/// empty, as it is for a failed create. Includes its own line ending.
+pub(crate) fn physical_id_xml(physical_id: &str) -> String {
     if physical_id.is_empty() {
         String::new()
     } else {
@@ -321,6 +322,32 @@ pub fn get_template_response(template_body: &str, request_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_physical_id_leaves_the_element_out() {
+        assert_eq!(physical_id_xml(""), "");
+        assert_eq!(
+            physical_id_xml("a&b"),
+            "        <PhysicalResourceId>a&amp;b</PhysicalResourceId>\n"
+        );
+        let failed = StackResource {
+            logical_id: "Bad".to_string(),
+            physical_id: String::new(),
+            resource_type: "AWS::SQS::Queue".to_string(),
+            status: "CREATE_FAILED".to_string(),
+            service_token: None,
+            attributes: Default::default(),
+            deletion_policy: None,
+            update_replace_policy: None,
+        };
+        for response in [
+            list_stack_resources_response(std::slice::from_ref(&failed), "r"),
+            describe_stack_resources_response(std::slice::from_ref(&failed), "s", "r"),
+        ] {
+            assert!(!response.contains("PhysicalResourceId"), "{response}");
+            assert!(response.contains("CREATE_FAILED"), "{response}");
+        }
+    }
     use chrono::Utc;
     use fakecloud_aws::arn::Arn;
     use std::collections::BTreeMap;

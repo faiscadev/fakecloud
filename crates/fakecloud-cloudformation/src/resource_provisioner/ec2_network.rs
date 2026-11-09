@@ -404,7 +404,12 @@ impl ResourceProvisioner {
                 self.ec2_dispatch("AssociateAddress", params)?;
             }
         }
-        if let Some(domain) = prop_str(props, "Domain").filter(|d| *d != eip.domain) {
+        // Neither is create-only in the registry, so the address stays and the
+        // record follows the template, an omitted property going back to the
+        // default create gives it.
+        let domain = prop_str(props, "Domain").unwrap_or("vpc");
+        let pool = prop_str(props, "PublicIpv4Pool").unwrap_or("amazon");
+        if domain != eip.domain || pool != eip.public_ipv4_pool {
             let mut accounts = self.ec2_state.write();
             if let Some(record) = accounts
                 .regional_mut(&self.account_id, &self.region)
@@ -413,6 +418,7 @@ impl ResourceProvisioner {
                 .find(|e| e.allocation_id == eip.allocation_id)
             {
                 record.domain = domain.to_string();
+                record.public_ipv4_pool = pool.to_string();
             }
         }
         self.replace_ec2_tags(&eip.allocation_id, props)?;

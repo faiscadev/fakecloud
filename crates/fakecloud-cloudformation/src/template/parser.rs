@@ -213,7 +213,10 @@ fn expanded_template(template_body: &str, parameters: &BTreeMap<String, String>)
 
 /// The names this template imports with `Fn::ImportValue`.
 pub fn imported_names(template_body: &str, parameters: &BTreeMap<String, String>) -> Vec<String> {
-    fakecloud_core::cfn_template::parse_template_body(template_body)
+    // Expanded, for what a `Fn::ForEach` generates. A template that does not expand
+    // fails elsewhere; what it spells out itself still counts until then.
+    expanded_template(template_body, parameters)
+        .or_else(|| fakecloud_core::cfn_template::parse_template_body(template_body).ok())
         .map(|value| collect_import_value_names(&value, parameters))
         .unwrap_or_default()
 }

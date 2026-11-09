@@ -7296,7 +7296,10 @@ async fn main() {
     // Keep a concrete handle: Cloud Control API drives the same resource
     // provisioners one resource at a time via this service.
     let cloudformation_arc = Arc::new(cloudformation_service);
-    let cloudformation_resume = cloudformation_arc.clone();
+    // Every service's state is restored by now. Before the pollers, which could
+    // act on a resource this is about to delete, and before anything else can
+    // reach a stack: the org ticks below, then the requests.
+    cloudformation_arc.resume_interrupted_cleanups().await;
     registry.register(cloudformation_arc.clone());
     // StackSets auto-deployment: an account added to (or removed from) an OU a
     // service-managed stack set targets gains (or loses) its stack instances.
@@ -12846,9 +12849,6 @@ async fn main() {
     firehose_engine
         .start()
         .expect("Firehose engine starts once after stores and snapshots load");
-    // Every service's state is restored by now, and nothing can reach a stack yet.
-    cloudformation_resume.resume_interrupted_cleanups().await;
-
     let serve_result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

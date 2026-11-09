@@ -375,6 +375,54 @@ pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
 }
 
 impl CloudFormationService {
+    /// Mark a finished change set and record its hook results.
+    #[allow(clippy::too_many_arguments)]
+    fn record_change_set_execution(
+        &self,
+        account_id: &str,
+        region: &str,
+        change_set_id: &str,
+        stack_id: &str,
+        stack_name: &str,
+        hooks: &[Value],
+        succeeded: bool,
+    ) {
+        let mut accounts = self.state.write();
+        let Some(state) = accounts.regional_get_mut(account_id, region) else {
+            return;
+        };
+        if let Some(m) = state.extras.get_mut("change_sets") {
+            if let Some(e) = m.get_mut(change_set_id) {
+                e["ExecutionStatus"] = json!(if succeeded {
+                    "EXECUTE_COMPLETE"
+                } else {
+                    "EXECUTE_FAILED"
+                });
+            }
+            if succeeded {
+                retire_sibling_change_sets(m, change_set_id, stack_id);
+            }
+        }
+        // Record a hook result per configured hook. A FAIL-mode hook reflects the
+        // op's outcome; a successful provision records HOOK_COMPLETE_SUCCEEDED
+        // (bug-audit 2026-06-13, 1.8).
+        if !hooks.is_empty() {
+            record_hook_results(
+                &mut state.extras,
+                hooks,
+                &HookTarget {
+                    account_id,
+                    region,
+                    target_type: "CLOUD_FORMATION",
+                    target_id: stack_id,
+                    logical_resource_id: stack_name,
+                    invocation_point: "PRE_PROVISION",
+                    op_failed: !succeeded,
+                },
+            );
+        }
+    }
+
     /// Run the rollback a stack's stored journal still owes: after
     /// `UPDATE_ROLLBACK_FAILED` (`ContinueUpdateRollback`) or after a
     /// `DisableRollback` failure (`RollbackStack`). A stack that does not exist
@@ -1500,11 +1548,6 @@ impl CloudFormationService {
                     })?
                 };
 
-                // `provisioner_deferred`: nothing about the execution may block
-                // on a custom-resource Lambda's cold image pull. Those invokes
-                // wait in a queue, and a rollback throws them away unfired.
-                let provisioner = self.provisioner_deferred(&found_stack_id, &aid, &req.region);
-
                 // Cross-stack exports for `Fn::ImportValue` in resource
                 // properties (1.5).
                 let cs_imports = CloudFormationService::collect_account_imports(
@@ -1540,86 +1583,57 @@ impl CloudFormationService {
                 } else {
                     crate::stack_update::OperationKind::Update
                 };
-                let engine = crate::stack_update::UpdateEngine::new(
-                    &self.state,
-                    &provisioner,
-                    &aid,
-                    &region,
-                    &found_stack_id,
-                    &stack_name_owned,
-                );
-                engine.begin(kind).map_err(|message| {
-                    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", message)
-                })?;
                 let flag = |name: &str| {
                     params
                         .get(name)
                         .is_some_and(|value| value.eq_ignore_ascii_case("true"))
                 };
+                let imported_names = template::imported_names(&template_body, &cs_params);
+                let export_names = template::export_names(&template_body, &cs_params);
+                let update = crate::service::StackUpdate {
+                    kind,
+                    account_id: aid.clone(),
+                    region: region.clone(),
+                    stack_id: found_stack_id.clone(),
+                    stack_name: stack_name_owned.clone(),
+                    template_body,
+                    parsed,
+                    parameters: cs_params,
+                    tags: cs_tags,
+                    notification_arns: cs_notif,
+                    imports: cs_imports,
+                    imported_names,
+                    export_names,
+                    disable_rollback: flag("DisableRollback"),
+                    retain_except_on_create: flag("RetainExceptOnCreate"),
+                };
                 // A failure from here on is not this call's failure: it was
                 // accepted, the stack rolls back, and DescribeStackEvents tells
                 // why, as on AWS.
-                let outcome = engine.run(crate::stack_update::UpdateInput {
-                    kind,
-                    template_body: &template_body,
-                    parsed: &parsed,
-                    parameters: &cs_params,
-                    tags: cs_tags,
-                    notification_arns: cs_notif,
-                    imports: &cs_imports,
-                    imported_names: template::imported_names(&template_body, &cs_params),
-                    export_names: template::export_names(&template_body, &cs_params),
-                    disable_rollback: flag("DisableRollback"),
-                    retain_except_on_create: flag("RetainExceptOnCreate"),
-                    nested: false,
-                });
-
-                {
-                    let mut accounts = self.state.write();
-                    if let Some(state) = accounts.regional_get_mut(&aid, &region) {
-                        if let Some(m) = state.extras.get_mut("change_sets") {
-                            if let Some(e) = m.get_mut(&cs_id) {
-                                e["ExecutionStatus"] = json!(if outcome.succeeded {
-                                    "EXECUTE_COMPLETE"
-                                } else {
-                                    "EXECUTE_FAILED"
-                                });
-                            }
-                            if outcome.succeeded {
-                                retire_sibling_change_sets(m, &cs_id, &found_stack_id);
-                            }
-                        }
-
-                        // Record a hook result per configured hook. A FAIL-mode
-                        // hook reflects the op's outcome; a successful provision
-                        // records HOOK_COMPLETE_SUCCEEDED (bug-audit 2026-06-13,
-                        // 1.8).
-                        if !cs_hooks.is_empty() {
-                            record_hook_results(
-                                &mut state.extras,
-                                &cs_hooks,
-                                &HookTarget {
-                                    account_id: &aid,
-                                    region: &req.region,
-                                    target_type: "CLOUD_FORMATION",
-                                    target_id: &found_stack_id,
-                                    logical_resource_id: &stack_name_owned,
-                                    invocation_point: "PRE_PROVISION",
-                                    op_failed: !outcome.succeeded,
-                                },
-                            );
-                        }
-                    }
-                }
-
-                self.finish_stack_operation(
-                    &provisioner,
-                    &found_stack_id,
-                    &stack_name_owned,
-                    &aid,
-                    &region,
-                    &outcome,
+                let recording = self.clone();
+                let (record_account, record_region, record_stack, record_name) = (
+                    aid.clone(),
+                    req.region.clone(),
+                    found_stack_id.clone(),
+                    stack_name_owned.clone(),
                 );
+                self.run_stack_update(
+                    update,
+                    Box::new(move |outcome| {
+                        recording.record_change_set_execution(
+                            &record_account,
+                            &record_region,
+                            &cs_id,
+                            &record_stack,
+                            &record_name,
+                            &cs_hooks,
+                            outcome.succeeded,
+                        );
+                    }),
+                )
+                .map_err(|message| {
+                    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", message)
+                })?;
 
                 Ok(xml_response("ExecuteChangeSet", String::new(), &rid))
             }
@@ -2267,11 +2281,11 @@ impl CloudFormationService {
                         )
                     });
                 let inner = format!(
-                    "    <StackResourceDetail>\n      <StackName>{}</StackName>{}\n      <LogicalResourceId>{}</LogicalResourceId>\n      <PhysicalResourceId>{}</PhysicalResourceId>\n      <ResourceType>{}</ResourceType>\n      <ResourceStatus>{}</ResourceStatus>\n      <LastUpdatedTimestamp>{}</LastUpdatedTimestamp>\n    </StackResourceDetail>",
+                    "    <StackResourceDetail>\n      <StackName>{}</StackName>{}\n      <LogicalResourceId>{}</LogicalResourceId>\n{}      <ResourceType>{}</ResourceType>\n      <ResourceStatus>{}</ResourceStatus>\n      <LastUpdatedTimestamp>{}</LastUpdatedTimestamp>\n    </StackResourceDetail>",
                     xml_escape(shown_name),
                     stack_id_el,
                     xml_escape(&logical),
-                    xml_escape(&detail.0),
+                    crate::xml_responses::physical_id_xml(&detail.0).replacen("        ", "      ", 1),
                     xml_escape(&detail.1),
                     xml_escape(&detail.2),
                     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),

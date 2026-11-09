@@ -105,7 +105,11 @@ pub(crate) fn classify(resource_type: &str, old: &Value, new: &Value) -> Classif
     };
     let hard = changed_paths(&facts.create_only);
     let mut conditional = changed_paths(&facts.conditional_create_only);
-    conditional.retain(|path| conditional_replaces(resource_type, path));
+    conditional.retain(|path| {
+        conditional_replaces(resource_type, path)
+            && (!identity_scopes(resource_type).contains(&path.as_str())
+                || scope_value(resource_type, path, old) != scope_value(resource_type, path, new))
+    });
     if hard.is_empty() && conditional.is_empty() {
         return Classification::InPlace;
     }
@@ -182,6 +186,19 @@ fn identity_scopes(resource_type: &str) -> Vec<&'static str> {
     scopes
 }
 
+/// A scope as the identity it selects. A rule with no `EventBusName` is on the
+/// default bus, and the bus can be named by its ARN.
+fn scope_value(resource_type: &str, scope: &str, props: &Value) -> String {
+    let value = props.get(scope).and_then(scalar_text).unwrap_or_default();
+    if resource_type == "AWS::Events::Rule" && scope == "EventBusName" {
+        let name = value
+            .rsplit_once(":event-bus/")
+            .map_or(value.as_str(), |(_, name)| name);
+        return if name.is_empty() { "default" } else { name }.to_string();
+    }
+    value
+}
+
 /// Whether two resources of this type can hold one name without colliding.
 pub(crate) fn name_is_scoped(resource_type: &str) -> bool {
     !identity_scopes(resource_type).is_empty()
@@ -201,7 +218,7 @@ pub(crate) fn custom_name(resource_type: &str, props: &Value) -> Option<String> 
         parts.push(scalar_text(props.get(name)?).filter(|text| !text.is_empty())?);
     }
     for scope in identity_scopes(resource_type) {
-        parts.push(props.get(scope).and_then(scalar_text).unwrap_or_default());
+        parts.push(scope_value(resource_type, scope, props));
     }
     Some(parts.join("|"))
 }
@@ -613,6 +630,19 @@ mod tests {
             .as_deref(),
             Some("s")
         );
+    }
+
+    #[test]
+    fn spelling_the_default_bus_changes_nothing() {
+        let rule = "AWS::Events::Rule";
+        let omitted = json!({"Name": "r"});
+        for same in [
+            json!({"Name": "r", "EventBusName": "default"}),
+            json!({"Name": "r", "EventBusName": "arn:aws:events:us-east-1:1:event-bus/default"}),
+        ] {
+            assert_eq!(classify(rule, &omitted, &same), Classification::InPlace);
+            assert_eq!(custom_name(rule, &omitted), custom_name(rule, &same));
+        }
     }
 
     #[test]

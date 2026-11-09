@@ -3,10 +3,10 @@
 
 Source of truth: the CloudFormation registry. `DescribeType` returns every
 public AWS resource type's schema, and four of its lists decide what a stack
-update does to a resource: `createOnlyProperties` and
-`conditionalCreateOnlyProperties` (changing one replaces the resource),
-`primaryIdentifier` and `readOnlyProperties` (which properties name the
-resource). fakecloud vendors them as
+update does to a resource: `createOnlyProperties` (changing one replaces the
+resource), `conditionalCreateOnlyProperties` (changing one may; the crate's
+allowlist says which do), `primaryIdentifier` and `readOnlyProperties` (which
+properties name the resource). fakecloud vendors them as
 `crates/fakecloud-cloudformation/data/resource_schema_facts.json.gz`, which
 `fakecloud_cloudformation`'s `replacement` module decodes on first use. CI never
 calls AWS.

@@ -2474,10 +2474,15 @@ impl<'a> UpdateEngine<'a> {
         #[cfg(test)]
         test_hooks::fire(&format!("undo:{}", before.logical_id));
         let definition = previous.to_definition(&before.logical_id, &before.resource_type);
+        // What the handler holds now, which the undo is an update away from.
+        let in_flight = journal
+            .applied
+            .get(&before.logical_id)
+            .map(|saved| saved.properties.clone());
         let result = guarded(|| {
             if is_custom(&before.resource_type) {
                 self.provisioner
-                    .update_custom_resource(current, &definition, None)
+                    .update_custom_resource(current, &definition, in_flight.as_ref())
                     .map(Some)
             } else {
                 self.provisioner.update_resource(current, &definition)
@@ -2507,6 +2512,9 @@ impl<'a> UpdateEngine<'a> {
                     "UPDATE_COMPLETE",
                     None,
                 );
+                journal
+                    .applied
+                    .insert(before.logical_id.clone(), previous.clone());
                 journal
                     .restored
                     .insert(restored.logical_id.clone(), restored);
@@ -4811,6 +4819,180 @@ mod tests {
                 std::task::Poll::Ready(output) => output,
                 std::task::Poll::Pending => panic!("the handler should not suspend"),
             }
+        }
+
+        /// A rollback's `Update` request tells the handler what it is moving from.
+        #[tokio::test]
+        async fn a_custom_resources_undo_names_its_in_flight_properties() {
+            let svc = make_service();
+            create(
+                &svc,
+                "s",
+                &json!({"Resources": {"Anchor": {"Type": "AWS::SNS::Topic"}}}),
+            )
+            .await;
+            let anchor = json!({"Type": "AWS::SNS::Topic"});
+            run_on(
+                &svc,
+                "s",
+                &json!({"Resources": {"Anchor": anchor, "Thing": custom("a")}}),
+            );
+            run_held(
+                &svc,
+                "s",
+                &json!({"Resources": {
+                    "Anchor": anchor,
+                    "Thing": custom("b"),
+                    "Bad": failing_queue("Thing"),
+                }}),
+            );
+            let held = stack(&svc, "s");
+            assert_eq!(held.status, "UPDATE_FAILED");
+
+            let provisioner = svc.provisioner_deferred(&held.stack_id, ACCOUNT, REGION);
+            let engine = UpdateEngine::new(
+                &svc.state,
+                &provisioner,
+                ACCOUNT,
+                REGION,
+                &held.stack_id,
+                "s",
+            );
+            let outcome = engine.roll_back(
+                held.pending_update.clone().unwrap(),
+                RollbackOptions::default(),
+                None,
+            );
+            assert_eq!(outcome.status, "UPDATE_ROLLBACK_COMPLETE");
+            let invokes = provisioner.pending_custom_invokes.lock();
+            assert_eq!(invokes.len(), 1, "{invokes:?}");
+            let event: Value = serde_json::from_str(&invokes[0].payload).unwrap();
+            assert_eq!(event["RequestType"], "Update");
+            assert_eq!(event["ResourceProperties"]["Value"], "a");
+            assert_eq!(event["OldResourceProperties"]["Value"], "b");
+        }
+
+        /// The floating versions are refused wherever a group names a template,
+        /// and on update as on create.
+        #[tokio::test]
+        async fn floating_launch_template_versions_are_refused_everywhere() {
+            let lt = json!({"Type": "AWS::EC2::LaunchTemplate", "Properties": {
+                "LaunchTemplateData": {"ImageId": "ami-1"}
+            }});
+            let template = |group: Value| {
+                json!({"Resources": {"L": lt, "R": {
+                    "Type": "AWS::AutoScaling::AutoScalingGroup",
+                    "Properties": group
+                }}})
+            };
+            let base =
+                || json!({"MinSize": "0", "MaxSize": "1", "AvailabilityZones": ["us-east-1a"]});
+            let spec =
+                |version: &str| json!({"LaunchTemplateId": {"Ref": "L"}, "Version": version});
+            let mixed = |version: &str, override_version: &str| {
+                let mut group = base();
+                group["MixedInstancesPolicy"] = json!({"LaunchTemplate": {
+                    "LaunchTemplateSpecification": spec(version),
+                    "Overrides": [{"LaunchTemplateSpecification": spec(override_version)}]
+                }});
+                group
+            };
+            let plain = |version: &str| {
+                let mut group = base();
+                group["LaunchTemplate"] = spec(version);
+                group
+            };
+            let reason = "CloudFormation does not support using $Latest or $Default";
+            for bad in [mixed("$Latest", "1"), mixed("1", "$Default")] {
+                let svc = make_service();
+                create(&svc, "s", &json!({"Resources": {"L": lt}})).await;
+                update(&svc, "s", &template(bad)).await;
+                let after = stack(&svc, "s");
+                assert_eq!(after.status, "UPDATE_ROLLBACK_COMPLETE");
+                assert!(
+                    crate::service::tests::failure_reasons(&svc, &after.stack_id)
+                        .iter()
+                        .any(|r| r.contains(reason))
+                );
+            }
+            // An existing group's update.
+            let svc = make_service();
+            create(&svc, "s", &template(plain("1"))).await;
+            assert_eq!(stack(&svc, "s").status, "CREATE_COMPLETE");
+            update(&svc, "s", &template(plain("$Latest"))).await;
+            let after = stack(&svc, "s");
+            assert_eq!(after.status, "UPDATE_ROLLBACK_COMPLETE");
+            assert!(
+                crate::service::tests::failure_reasons(&svc, &after.stack_id)
+                    .iter()
+                    .any(|r| r.contains(reason))
+            );
+        }
+
+        /// A delete that fails during a created stack's rollback is not reported as
+        /// done: the stack says so and keeps the resource.
+        #[tokio::test]
+        async fn a_failed_delete_leaves_a_created_stacks_rollback_failed() {
+            let svc = make_service();
+            create(
+                &svc,
+                "s",
+                &json!({"Resources": {"T": {"Type": "AWS::SNS::Topic"}}}),
+            )
+            .await;
+            let current = stack(&svc, "s");
+            let resource = current.resources[0].clone();
+            let status = CloudFormationService::finish_created_rollback(
+                &svc.state,
+                ACCOUNT,
+                REGION,
+                "s",
+                &current.stack_id,
+                vec![(resource, Some(Err("still attached".to_string())))],
+            );
+            assert_eq!(status, "ROLLBACK_FAILED");
+            let after = stack(&svc, "s");
+            assert_eq!(after.status, "ROLLBACK_FAILED");
+            assert_eq!(after.resources.len(), 1);
+            assert_eq!(
+                after.status_reason.as_deref(),
+                Some("The following resource(s) failed to delete: [T]. ")
+            );
+            assert!(statuses(&svc, "s", "T").contains(&"DELETE_FAILED".to_string()));
+            call(&svc, "DeleteStack", &[("StackName", "s")]).await;
+            assert_eq!(stack(&svc, "s").status, "DELETE_COMPLETE");
+        }
+
+        /// An import a `Fn::ForEach` generates counts as an import.
+        #[tokio::test]
+        async fn imports_generated_by_for_each_are_recorded() {
+            let svc = make_service();
+            create(
+                &svc,
+                "exporter",
+                &json!({
+                    "Resources": {"T": {"Type": "AWS::SNS::Topic"}},
+                    "Outputs": {"O": {"Value": "x", "Export": {"Name": "made-a"}}}
+                }),
+            )
+            .await;
+            let importer = json!({
+                "Transform": "AWS::LanguageExtensions",
+                "Resources": {"Fn::ForEach::Queues": ["Which", ["a"], {
+                    "Q${Which}": {
+                        "Type": "AWS::SQS::Queue",
+                        "Properties": {"Tags": [{"Key": "k", "Value": {
+                            "Fn::ImportValue": {"Fn::Sub": "made-${Which}"}
+                        }}]}
+                    }
+                }]}
+            });
+            create(&svc, "importer", &importer).await;
+            assert_eq!(stack(&svc, "importer").status, "CREATE_COMPLETE");
+            assert_eq!(
+                svc.state.read().regional(ACCOUNT, REGION).unwrap().imports["made-a"],
+                ["importer"]
+            );
         }
 
         /// Recorded: updates of conditional create-only properties that keep the

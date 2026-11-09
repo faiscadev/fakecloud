@@ -1133,6 +1133,19 @@ fn ec2_eip_and_nat_gateway_tag_updates_are_in_place() {
             .unwrap();
         assert_eq!(record.domain, "standard");
     }
+    // An omitted Domain or pool goes back to its default; a set pool applies.
+    update(&prov, &standalone, json!({"PublicIpv4Pool": "pool-1"}));
+    {
+        let ec2 = prov.ec2_state.read();
+        let st = ec2.regional(ACCT, "us-east-1").unwrap();
+        let record = st
+            .elastic_ips
+            .values()
+            .find(|e| e.public_ip == standalone.physical_id)
+            .unwrap();
+        assert_eq!(record.domain, "vpc");
+        assert_eq!(record.public_ipv4_pool, "pool-1");
+    }
     // NetworkBorderGroup is create-only: the update engine replaces on it.
     assert!(crate::replacement::classify(
         "AWS::EC2::EIP",

@@ -2282,3 +2282,63 @@ async fn a_restart_finishes_an_interrupted_cleanup() {
     let cfn = server.cloudformation_client().await;
     assert_eq!(status(&cfn, "cfn-rs-update").await, "UPDATE_COMPLETE");
 }
+
+/// A custom resource's invocation failing fails the update, which runs in the
+/// background so a slow handler cannot hold the call open. There is no such function
+/// here, which needs no container runtime.
+#[tokio::test]
+async fn a_failed_custom_resource_invoke_rolls_the_update_back() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let stack = "cfn-custom";
+
+    create(&cfn, stack, &resources(json!({"Keep": queue(30)}))).await;
+    update(
+        &cfn,
+        stack,
+        &resources(json!({
+            "Keep": queue(60),
+            "Thing": {
+                "Type": "Custom::Thing",
+                "DependsOn": "Keep",
+                "Properties": {
+                    "ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:no-such-function"
+                }
+            }
+        })),
+    )
+    .await;
+    let settled = helpers::wait_until(std::time::Duration::from_secs(30), || {
+        let cfn = cfn.clone();
+        async move {
+            let current = status(&cfn, stack).await;
+            (!current.ends_with("_IN_PROGRESS")).then_some(current)
+        }
+    })
+    .await;
+    assert_eq!(settled.as_deref(), Some("UPDATE_ROLLBACK_COMPLETE"));
+    let rows = last_operation(&cfn, stack).await;
+    assert!(
+        rows.iter().any(|r| r.0 == "Thing"
+            && r.1 == "CREATE_FAILED"
+            && r.3.contains("Lambda invocation failed")),
+        "{rows:#?}"
+    );
+    let keep = physical_ids(&cfn, stack).await[0].1.clone();
+    let sqs = server.sqs_client().await;
+    let attrs = sqs
+        .get_queue_attributes()
+        .queue_url(&keep)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::VisibilityTimeout)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        attrs
+            .attributes()
+            .unwrap()
+            .get(&aws_sdk_sqs::types::QueueAttributeName::VisibilityTimeout)
+            .map(String::as_str),
+        Some("30")
+    );
+}
