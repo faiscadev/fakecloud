@@ -2597,8 +2597,20 @@ impl ResourceProvisioner {
         self.delete_resource(resource)
     }
 
-    /// Delete a previously created resource.
+    /// Delete a previously created resource. One that is already gone counts as
+    /// deleted, as on AWS: a resource removed out of band never fails a stack's
+    /// delete.
     pub fn delete_resource(&self, resource: &StackResource) -> Result<(), String> {
+        self.delete_resource_unchecked(resource).or_else(|e| {
+            if is_not_found_error(&e) {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+    }
+
+    fn delete_resource_unchecked(&self, resource: &StackResource) -> Result<(), String> {
         match resource.resource_type.as_str() {
             "AWS::SQS::Queue" => self.delete_sqs_queue(&resource.physical_id),
             "AWS::SQS::QueuePolicy" => self.delete_sqs_queue_policy(&resource.physical_id),
@@ -4233,6 +4245,21 @@ fn parse_firehose_s3_destination(
     Ok(destination)
 }
 
+/// Whether a delete failed only because the resource is already gone: an AWS
+/// not-found code (`...NotFound`, `NoSuch...`, `ResourceNotFoundException`) or a
+/// service's not-found message. Every provisioner reports failures as text, so
+/// this is the one place that decides it.
+pub(crate) fn is_not_found_error(error: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "NotFound",
+        "NoSuch",
+        "not found",
+        "does not exist",
+        "doesn't exist",
+    ];
+    MARKERS.iter().any(|m| error.contains(m))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5701,6 +5728,42 @@ mod tests {
             Some("allViewer".to_string()),
             "origin request policy config updated in place"
         );
+    }
+
+    /// A resource already gone counts as deleted, whichever service reports it:
+    /// an EC2 `*.NotFound` code, a `NoSuch*` code, or a not-found message.
+    #[test]
+    fn deleting_a_resource_already_gone_succeeds() {
+        for gone in [
+            "EC2 DeleteNatGateway failed (InvalidNatGatewayID.NotFound): no such gateway",
+            "NoSuchBucket: The specified bucket does not exist",
+            "ResourceNotFoundException: Requested resource not found",
+            "Database db not found",
+            "Job queue q does not exist",
+        ] {
+            assert!(is_not_found_error(gone), "{gone}");
+        }
+        for real in [
+            "Resource handler returned message: \"The specified public key is in use.\"",
+            "The user pool cannot be deleted because deletion protection is activated.",
+            "Invalid Glue table physical id: x",
+        ] {
+            assert!(!is_not_found_error(real), "{real}");
+        }
+
+        let prov = make_provisioner();
+        let table = StackResource {
+            logical_id: "Table".into(),
+            physical_id: "removed-out-of-band|t".into(),
+            resource_type: "AWS::Glue::Table".into(),
+            status: "CREATE_COMPLETE".into(),
+            service_token: None,
+            attributes: Default::default(),
+            deletion_policy: None,
+            update_replace_policy: None,
+        };
+        prov.delete_resource(&table)
+            .expect("a table whose database is gone is already deleted");
     }
 
     /// A CloudFront resource something still names fails to delete with
