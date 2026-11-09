@@ -26,6 +26,7 @@ impl LambdaService {
                 )
             })?
             .to_string();
+        crate::extras::check_length(&event_source_arn, "eventSourceArn", 0, 10000)?;
 
         let function_name = body["FunctionName"]
             .as_str()

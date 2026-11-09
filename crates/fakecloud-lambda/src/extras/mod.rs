@@ -188,6 +188,107 @@ pub(crate) fn constraint_violation(value: &str, member: &str, constraint: &str) 
     )
 }
 
+/// Lambda's input-validation refusal for a required member the request
+/// left out.
+pub(crate) fn null_member(member: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ValidationException",
+        format!(
+            "1 validation error detected: Value null at '{member}' failed to satisfy constraint: \
+             Member must not be null"
+        ),
+    )
+}
+
+/// A string member's Smithy `@length`, checked the way Lambda's input
+/// validation does before the operation runs. `member` is the wire name the
+/// message quotes (`statementId`, `functionVersion`).
+pub(crate) fn check_length(
+    value: &str,
+    member: &str,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    let len = value.chars().count();
+    if len < min {
+        return Err(constraint_violation(
+            value,
+            member,
+            &format!("Member must have length greater than or equal to {min}"),
+        ));
+    }
+    if len > max {
+        return Err(constraint_violation(
+            value,
+            member,
+            &format!("Member must have length less than or equal to {max}"),
+        ));
+    }
+    Ok(())
+}
+
+/// [`check_length`] for an optional body member: absent is fine.
+pub(crate) fn check_optional_length(
+    body: &Value,
+    field: &str,
+    member: &str,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    match body[field].as_str() {
+        Some(v) => check_length(v, member, 0, max),
+        None => Ok(()),
+    }
+}
+
+/// Smithy `CodeSigningConfigArn` `@pattern`, quoted in the validation message.
+const CSC_ARN_PATTERN: &str = "arn:(aws[a-zA-Z-]*)?:lambda:(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}:\\d{12}:code-signing-config:csc-[a-z0-9]{17}";
+
+/// A `CodeSigningConfigArn` path label: `@length` max 200 and the ARN
+/// `@pattern` (`...:code-signing-config:csc-` plus 17 lowercase letters or
+/// digits).
+pub(crate) fn validate_csc_arn(arn: &str) -> Result<(), AwsServiceError> {
+    check_length(arn, "codeSigningConfigArn", 0, 200)?;
+    let parts: Vec<&str> = arn.split(':').collect();
+    let ok = match parts.as_slice() {
+        [prefix, partition, service, region, account, kind, id] => {
+            *prefix == "arn"
+                && (partition.is_empty()
+                    || partition
+                        .strip_prefix("aws")
+                        .is_some_and(|r| r.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-')))
+                && *service == "lambda"
+                && is_layer_arn_region(region)
+                && account.len() == 12
+                && account.bytes().all(|b| b.is_ascii_digit())
+                && *kind == "code-signing-config"
+                && id.strip_prefix("csc-").is_some_and(|rest| {
+                    rest.len() == 17
+                        && rest
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                })
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(constraint_violation(
+            arn,
+            "codeSigningConfigArn",
+            &format!("Member must satisfy regular expression pattern: {CSC_ARN_PATTERN}"),
+        ))
+    }
+}
+
+/// A new code signing config id: `csc-` and 17 lowercase letters or digits,
+/// the shape AWS issues and `CodeSigningConfigArn`'s pattern requires.
+fn new_csc_id() -> String {
+    let hex = uuid::Uuid::new_v4().simple().to_string();
+    format!("csc-{}", &hex[..17])
+}
+
 /// `[a-zA-Z0-9-_]+`: a bare layer name.
 fn is_bare_layer_name(s: &str) -> bool {
     !s.is_empty()
@@ -453,6 +554,8 @@ impl LambdaService {
         // Validate before taking the write lock and before any mutation:
         // an invalid EphemeralStorage.Size on an otherwise valid request
         // must not silently apply the surrounding fields.
+        check_optional_length(&body, "KMSKeyArn", "kMSKeyArn", 10000)?;
+        check_optional_length(&body, "Role", "role", 10000)?;
         let validated_ephemeral = match body["EphemeralStorage"]["Size"].as_i64() {
             Some(size) => Some(crate::service::validate_ephemeral_storage(size)?),
             None => None,
@@ -645,6 +748,16 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        check_optional_length(&body, "SourceKMSKeyArn", "sourceKMSKeyArn", 10000)?;
+        if let Some(mode) = body["S3ObjectStorageMode"].as_str() {
+            if mode != "Copy" && mode != "Reference" {
+                return Err(constraint_violation(
+                    mode,
+                    "s3ObjectStorageMode",
+                    "Member must satisfy enum value set: [Copy, Reference]",
+                ));
+            }
+        }
 
         // ZipFile / ImageUri / S3Bucket+S3Key are mutually exclusive; AWS
         // rejects the request when more than one is present. The handler

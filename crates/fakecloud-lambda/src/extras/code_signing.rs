@@ -10,9 +10,13 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
+        if body.get("AllowedPublishers").is_none_or(Value::is_null) {
+            return Err(null_member("allowedPublishers"));
+        }
+        check_optional_length(&body, "Description", "description", 256)?;
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
-        let id = id_from_time("csc-");
+        let id = new_csc_id();
         let arn = fakecloud_aws::arn::Arn::regional(
             "lambda",
             &req.region,
@@ -92,10 +96,13 @@ impl LambdaService {
         account_id: &str,
         region: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        validate_csc_arn(csc_id)?;
         let id = extract_csc_id(csc_id);
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(account_id, region);
-        state.code_signing_configs.remove(&id);
+        if state.code_signing_configs.remove(&id).is_none() {
+            return Err(not_found("CodeSigningConfig", &id));
+        }
         empty()
     }
 
@@ -183,9 +190,13 @@ impl LambdaService {
         account_id: &str,
         region: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        validate_csc_arn(csc_id)?;
         let id = extract_csc_id(csc_id);
         let region = region.to_string();
         self.with_state_read(account_id, &region, |state| {
+            if !state.code_signing_configs.contains_key(&id) {
+                return Err(not_found("CodeSigningConfig", &id));
+            }
             // Exact id match — substring matching would surface
             // functions bound to a different csc that happens to share
             // a prefix/suffix.

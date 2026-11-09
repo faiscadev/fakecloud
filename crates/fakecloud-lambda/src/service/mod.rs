@@ -141,6 +141,82 @@ fn check_optional_enum(
     Ok(())
 }
 
+/// The `@httpHeader` members of Invoke / InvokeWithResponseStream, checked
+/// against their Smithy constraints the way Lambda's input validation does:
+/// `X-Amz-Invocation-Type` and `X-Amz-Log-Type` are closed enums,
+/// `X-Amz-Tenant-Id` is `@length(1, 256)` and `X-Amz-Durable-Execution-Name`
+/// `@length(1, 64)`.
+fn validate_invoke_headers(action: &str, req: &AwsRequest) -> Result<(), AwsServiceError> {
+    use crate::extras::{check_length, constraint_violation};
+    let header = |name: &str| req.headers.get(name).and_then(|v| v.to_str().ok());
+    let invocation_types: &[&str] = if action == "Invoke" {
+        &["Event", "RequestResponse", "DryRun"]
+    } else {
+        &["RequestResponse", "DryRun"]
+    };
+    if let Some(v) = header("x-amz-invocation-type") {
+        if !invocation_types.contains(&v) {
+            return Err(constraint_violation(
+                v,
+                "invocationType",
+                &format!(
+                    "Member must satisfy enum value set: [{}]",
+                    invocation_types.join(", ")
+                ),
+            ));
+        }
+    }
+    if let Some(v) = header("x-amz-log-type") {
+        if v != "None" && v != "Tail" {
+            return Err(constraint_violation(
+                v,
+                "logType",
+                "Member must satisfy enum value set: [None, Tail]",
+            ));
+        }
+    }
+    if let Some(v) = header("x-amz-tenant-id") {
+        check_length(v, "tenantId", 1, 256)?;
+    }
+    if let Some(v) = header("x-amz-durable-execution-name") {
+        check_length(v, "durableExecutionName", 1, 64)?;
+    }
+    Ok(())
+}
+
+/// Smithy `CapacityProviderArn`: `@length(1, 140)` and the
+/// `...:lambda:<region>:<account>:capacity-provider:<name>` `@pattern`.
+fn validate_capacity_provider_arn(arn: &str) -> Result<(), AwsServiceError> {
+    crate::extras::check_length(arn, "capacityProviderArn", 1, 140)?;
+    let parts: Vec<&str> = arn.split(':').collect();
+    let ok = match parts.as_slice() {
+        ["arn", partition, "lambda", region, account, "capacity-provider", name] => {
+            partition
+                .strip_prefix("aws")
+                .is_some_and(|r| r.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-'))
+                && !region.is_empty()
+                && account.len() == 12
+                && account.bytes().all(|b| b.is_ascii_digit())
+                && !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(crate::extras::constraint_violation(
+            arn,
+            "capacityProviderArn",
+            "Member must satisfy regular expression pattern: arn:aws[a-zA-Z-]*:lambda:\
+             (eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}:\\d{12}:capacity-provider:\
+             [a-zA-Z0-9-_]+",
+        ))
+    }
+}
+
 fn prevalidate_lambda(action: &str, req: &AwsRequest) -> Result<(), AwsServiceError> {
     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
     match action {
@@ -169,7 +245,25 @@ fn prevalidate_lambda(action: &str, req: &AwsRequest) -> Result<(), AwsServiceEr
             check_optional_len("S3Key", body["S3Key"].as_str(), 1, 1024)?;
             check_optional_len("S3ObjectVersion", body["S3ObjectVersion"].as_str(), 1, 1024)?;
         }
+        "Invoke" | "InvokeWithResponseStream" => validate_invoke_headers(action, req)?,
+        // `InvokeArgs` is the required `@httpPayload`. Recorded against
+        // Lambda (us-east-1, 2026-11-09): an empty body is refused with this
+        // ValidationException, while `{}` is accepted (202).
+        "InvokeAsync" if req.body.is_empty() => {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "1 validation error detected: Value at 'invokeArgs' failed to satisfy \
+                 constraint: Member must not be null",
+            ));
+        }
         "UpdateFunctionConfiguration" => {
+            if let Some(arn) = body["CapacityProviderConfig"]
+                ["LambdaManagedInstancesCapacityProviderConfig"]["CapacityProviderArn"]
+                .as_str()
+            {
+                validate_capacity_provider_arn(arn)?;
+            }
             check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
             check_optional_len("Handler", body["Handler"].as_str(), 0, 128)?;
             check_optional_int_range("MemorySize", body["MemorySize"].as_i64(), 128, 32768)?;
