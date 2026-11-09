@@ -592,3 +592,79 @@ async fn cfn_rejects_a_custom_error_response_without_an_error_code() {
     let reason = stack.stack_status_reason().unwrap_or_default();
     assert!(reason.contains("ErrorCode is required"), "reason: {reason}");
 }
+
+/// `aws_cloudfront_distribution` reads and imports a stack-created distribution
+/// the same way as an API-created one, so it needs the same envelopes.
+#[tokio::test]
+async fn cfn_distribution_with_a_minimal_template_reads_back_with_defaults() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let cf = aws_sdk_cloudfront::Client::new(&server.aws_config().await);
+    let template = r#"{
+  "Resources": {
+    "Dist": {
+      "Type": "AWS::CloudFront::Distribution",
+      "Properties": {
+        "DistributionConfig": {
+          "Enabled": true,
+          "Origins": [{"Id": "o", "DomainName": "o.example.com", "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}}],
+          "DefaultCacheBehavior": {"TargetOriginId": "o", "ViewerProtocolPolicy": "allow-all"}
+        }
+      }
+    }
+  },
+  "Outputs": {"DistId": {"Value": {"Ref": "Dist"}}}
+}"#;
+    cfn.create_stack()
+        .stack_name("cf-minimal")
+        .template_body(template)
+        .send()
+        .await
+        .expect("create_stack");
+    let described = cfn
+        .describe_stacks()
+        .stack_name("cf-minimal")
+        .send()
+        .await
+        .expect("describe_stacks");
+    let stack = described.stacks().first().unwrap();
+    assert_eq!(
+        stack.stack_status().unwrap().as_str(),
+        "CREATE_COMPLETE",
+        "{:?}",
+        stack.stack_status_reason()
+    );
+    let dist_id = stack
+        .outputs()
+        .iter()
+        .find(|o| o.output_key() == Some("DistId"))
+        .and_then(|o| o.output_value())
+        .expect("DistId");
+
+    let got = cf.get_distribution().id(dist_id).send().await.unwrap();
+    let cfg = got.distribution().unwrap().distribution_config().unwrap();
+    assert_eq!(cfg.aliases().unwrap().quantity(), 0);
+    assert_eq!(cfg.origin_groups().unwrap().quantity(), 0);
+    assert_eq!(cfg.cache_behaviors().unwrap().quantity(), 0);
+    assert_eq!(cfg.custom_error_responses().unwrap().quantity(), 0);
+    assert_eq!(
+        cfg.restrictions()
+            .unwrap()
+            .geo_restriction()
+            .unwrap()
+            .restriction_type()
+            .as_str(),
+        "none"
+    );
+    assert_eq!(
+        cfg.viewer_certificate()
+            .unwrap()
+            .cloud_front_default_certificate(),
+        Some(true)
+    );
+    // AWS::CloudFront::Distribution documents http1.1, unlike the API's http2.
+    assert_eq!(cfg.http_version().unwrap().as_str(), "http1.1");
+    let dcb = cfg.default_cache_behavior().unwrap();
+    assert_eq!(dcb.trusted_signers().unwrap().quantity(), 0);
+    assert_eq!(dcb.function_associations().unwrap().quantity(), 0);
+}

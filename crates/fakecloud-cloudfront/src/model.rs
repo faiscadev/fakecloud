@@ -13,6 +13,92 @@ fn skip_if_none<T>(x: &Option<T>) -> bool {
     x.is_none()
 }
 
+/// CloudFront leaves `Items` out of an empty list, however the list got empty.
+fn drop_empty<T>(items: &mut Option<T>, is_empty: impl FnOnce(&T) -> bool) {
+    if items.as_ref().is_some_and(is_empty) {
+        *items = None;
+    }
+}
+
+/// Fill the members CloudFront defaults on a cache behavior.
+/// `DefaultCacheBehavior` and `CacheBehavior` share these fields but no type.
+macro_rules! fill_behavior_defaults {
+    ($behavior:expr, $multi_tenant:expr) => {{
+        let b = $behavior;
+        let head_get = || MethodList {
+            method: vec!["HEAD".to_string(), "GET".to_string()],
+        };
+        drop_empty(
+            &mut b
+                .trusted_key_groups
+                .get_or_insert_with(Default::default)
+                .items,
+            |i| i.key_group.is_empty(),
+        );
+        b.allowed_methods
+            .get_or_insert_with(|| AllowedMethods {
+                quantity: 2,
+                items: head_get(),
+                cached_methods: None,
+            })
+            .cached_methods
+            .get_or_insert_with(|| CachedMethods {
+                quantity: 2,
+                items: head_get(),
+            });
+        b.compress.get_or_insert(false);
+        drop_empty(
+            &mut b
+                .lambda_function_associations
+                .get_or_insert_with(Default::default)
+                .items,
+            |i| i.lambda_function_association.is_empty(),
+        );
+        drop_empty(
+            &mut b
+                .function_associations
+                .get_or_insert_with(Default::default)
+                .items,
+            |i| i.function_association.is_empty(),
+        );
+        b.field_level_encryption_id.get_or_insert_with(String::new);
+        b.grpc_config.get_or_insert_with(Default::default);
+        if !$multi_tenant {
+            drop_empty(
+                &mut b.trusted_signers.get_or_insert_with(Default::default).items,
+                |i| i.aws_account_number.is_empty(),
+            );
+            b.smooth_streaming.get_or_insert(false);
+        }
+        if let Some(forwarded) = b.forwarded_values.as_mut() {
+            drop_empty(
+                &mut forwarded.headers.get_or_insert_with(Default::default).items,
+                |i| i.name.is_empty(),
+            );
+            drop_empty(
+                &mut forwarded
+                    .query_string_cache_keys
+                    .get_or_insert_with(Default::default)
+                    .items,
+                |i| i.name.is_empty(),
+            );
+            if let Some(names) = forwarded.cookies.whitelisted_names.as_mut() {
+                drop_empty(&mut names.items, |i| i.name.is_empty());
+            }
+            // The legacy cache settings, standard-only: a behavior on a cache
+            // policy has no TTLs.
+            // A day and a year, unless the bounds supplied exceed them: AWS
+            // documents that the default `DefaultTTL` then follows `MinTTL`,
+            // and the default `MaxTTL` follows `DefaultTTL`.
+            if !$multi_tenant {
+                let min = *b.min_ttl.get_or_insert(0);
+                let default = *b.default_ttl.get_or_insert(min.max(86_400));
+                b.max_ttl.get_or_insert(default.max(31_536_000));
+            }
+        }
+    }};
+}
+
 // ─── DistributionConfig ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -71,6 +157,86 @@ pub struct DistributionConfig {
     pub connection_function_association: Option<ConnectionFunctionAssociation>,
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub cache_tag_config: Option<CacheTagConfig>,
+}
+
+impl DistributionConfig {
+    /// Make the config canonical: fill in what CloudFront fills in for members
+    /// a request left out, so `GetDistribution` / `GetDistributionConfig` carry
+    /// the same envelopes AWS returns. What a request supplied is kept, except
+    /// the viewer certificate members CloudFront itself derives. This is
+    /// idempotent, so a config read back and PUT unchanged compares equal to the
+    /// stored one.
+    ///
+    /// Applied wherever a config enters state (the API, CloudFormation, snapshot
+    /// load); the read paths rely on it.
+    ///
+    /// Members AWS documents as standard-distribution only stay absent on a
+    /// multi-tenant (`tenant-only`) distribution.
+    pub fn ensure_aws_defaults(&mut self) {
+        let multi_tenant = self.connection_mode.as_deref() == Some("tenant-only");
+
+        self.default_root_object.get_or_insert_with(String::new);
+        drop_empty(
+            &mut self
+                .origin_groups
+                .get_or_insert_with(Default::default)
+                .items,
+            |i| i.origin_group.is_empty(),
+        );
+        drop_empty(
+            &mut self
+                .cache_behaviors
+                .get_or_insert_with(Default::default)
+                .items,
+            |i| i.cache_behavior.is_empty(),
+        );
+        drop_empty(
+            &mut self
+                .custom_error_responses
+                .get_or_insert_with(Default::default)
+                .items,
+            |i| i.custom_error_response.is_empty(),
+        );
+        drop_empty(
+            &mut self
+                .restrictions
+                .get_or_insert_with(Default::default)
+                .geo_restriction
+                .items,
+            |i| i.location.is_empty(),
+        );
+        self.web_acl_id.get_or_insert_with(String::new);
+        self.http_version.get_or_insert_with(|| "http2".to_string());
+        if !multi_tenant {
+            drop_empty(
+                &mut self.aliases.get_or_insert_with(Default::default).items,
+                |i| i.cname.is_empty(),
+            );
+            self.price_class
+                .get_or_insert_with(|| "PriceClass_All".to_string());
+            self.is_ipv6_enabled.get_or_insert(true);
+            self.staging.get_or_insert(false);
+            // No documented default to report: empty means no policy.
+            drop_empty(&mut self.continuous_deployment_policy_id, String::is_empty);
+        }
+        self.logging.get_or_insert_with(Default::default);
+        self.viewer_certificate
+            .get_or_insert_with(Default::default)
+            .ensure_aws_defaults(multi_tenant);
+
+        for origin in self.origins.items.iter_mut().flat_map(|i| &mut i.origin) {
+            origin.ensure_aws_defaults();
+        }
+        fill_behavior_defaults!(&mut self.default_cache_behavior, multi_tenant);
+        for behavior in self
+            .cache_behaviors
+            .iter_mut()
+            .filter_map(|b| b.items.as_mut())
+            .flat_map(|i| &mut i.cache_behavior)
+        {
+            fill_behavior_defaults!(behavior, multi_tenant);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -165,6 +331,35 @@ pub struct Origin {
     pub origin_access_control_id: Option<String>,
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub response_completion_timeout: Option<i32>,
+}
+
+impl Origin {
+    fn ensure_aws_defaults(&mut self) {
+        self.origin_path.get_or_insert_with(String::new);
+        drop_empty(
+            &mut self
+                .custom_headers
+                .get_or_insert_with(Default::default)
+                .items,
+            |i| i.origin_custom_header.is_empty(),
+        );
+        self.connection_attempts.get_or_insert(3);
+        self.connection_timeout.get_or_insert(10);
+        self.origin_shield.get_or_insert_with(Default::default);
+        self.origin_access_control_id
+            .get_or_insert_with(String::new);
+        if let Some(custom) = self.custom_origin_config.as_mut() {
+            custom.origin_read_timeout.get_or_insert(30);
+            custom.origin_keepalive_timeout.get_or_insert(5);
+        }
+        if let Some(s3) = self.s3_origin_config.as_mut() {
+            s3.origin_read_timeout.get_or_insert(30);
+        }
+        if let Some(vpc) = self.vpc_origin_config.as_mut() {
+            vpc.origin_read_timeout.get_or_insert(30);
+            vpc.origin_keepalive_timeout.get_or_insert(5);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -681,9 +876,13 @@ pub struct CustomErrorResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct LoggingConfig {
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
     pub include_cookies: bool,
+    #[serde(default)]
     pub bucket: String,
+    #[serde(default)]
     pub prefix: String,
 }
 
@@ -720,19 +919,87 @@ pub struct ViewerCertificate {
     pub certificate_source: Option<String>,
 }
 
+impl ViewerCertificate {
+    /// Settle which certificate is in use and derive what follows from it, so a
+    /// config edited after being read back carries no stale mirror.
+    ///
+    /// `multi_tenant` selects the security policy a custom certificate gets when
+    /// none was given; a standard distribution has no documented one, so it
+    /// stays absent there.
+    fn ensure_aws_defaults(&mut self, multi_tenant: bool) {
+        // An empty element names no certificate.
+        drop_empty(&mut self.acm_certificate_arn, String::is_empty);
+        drop_empty(&mut self.iam_certificate_id, String::is_empty);
+        drop_empty(&mut self.certificate, String::is_empty);
+
+        // A request naming the certificate only through the deprecated pair.
+        // An explicit `CloudFrontDefaultCertificate` outranks that pair, which
+        // may just be left over from an earlier read.
+        if self.acm_certificate_arn.is_none()
+            && self.iam_certificate_id.is_none()
+            && self.cloud_front_default_certificate != Some(true)
+        {
+            match (self.certificate_source.as_deref(), self.certificate.take()) {
+                (Some("acm"), Some(certificate)) => self.acm_certificate_arn = Some(certificate),
+                (Some("iam"), Some(certificate)) => self.iam_certificate_id = Some(certificate),
+                (None, Some(certificate)) if certificate.starts_with("arn:") => {
+                    self.acm_certificate_arn = Some(certificate);
+                }
+                (None, Some(certificate)) => self.iam_certificate_id = Some(certificate),
+                _ => {}
+            }
+        }
+
+        let custom = match (&self.acm_certificate_arn, &self.iam_certificate_id) {
+            (Some(arn), _) => Some(("acm", arn.clone())),
+            (None, Some(id)) => Some(("iam", id.clone())),
+            (None, None) => None,
+        };
+        if let Some((source, certificate)) = custom {
+            self.cloud_front_default_certificate = Some(false);
+            self.certificate = Some(certificate);
+            self.certificate_source = Some(source.to_string());
+            if multi_tenant {
+                self.minimum_protocol_version
+                    .get_or_insert_with(|| "TLSv1.2_2021".to_string());
+            }
+        } else if self.cloud_front_default_certificate == Some(false) {
+            self.certificate = None;
+            self.certificate_source = None;
+        } else {
+            self.cloud_front_default_certificate = Some(true);
+            self.certificate = None;
+            self.certificate_source = Some("cloudfront".to_string());
+            // "CloudFront automatically sets the security policy to TLSv1
+            // regardless of the value that you set here."
+            self.minimum_protocol_version = Some("TLSv1".to_string());
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct Restrictions {
     pub geo_restriction: GeoRestriction,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct GeoRestriction {
     pub restriction_type: String,
     pub quantity: i32,
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub items: Option<LocationList>,
+}
+
+impl Default for GeoRestriction {
+    fn default() -> Self {
+        Self {
+            restriction_type: "none".to_string(),
+            quantity: 0,
+            items: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -932,6 +1199,538 @@ mod tests {
         ] {
             assert!(xml.contains(tag), "missing {tag} in {xml}");
         }
+    }
+
+    /// Close to what the AWS CLI's `--origin-domain-name` template sends: everything
+    /// optional is left for CloudFront to fill in.
+    fn sparse_config_xml() -> String {
+        r#"<DistributionConfig>
+  <CallerReference>ref</CallerReference>
+  <Origins><Quantity>1</Quantity><Items><Origin>
+    <Id>o1</Id><DomainName>o.example.com</DomainName>
+    <CustomOriginConfig>
+      <HTTPPort>80</HTTPPort><HTTPSPort>443</HTTPSPort>
+      <OriginProtocolPolicy>http-only</OriginProtocolPolicy>
+    </CustomOriginConfig>
+  </Origin></Items></Origins>
+  <DefaultCacheBehavior>
+    <TargetOriginId>o1</TargetOriginId>
+    <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+    <ForwardedValues>
+      <QueryString>false</QueryString><Cookies><Forward>none</Forward></Cookies>
+    </ForwardedValues>
+  </DefaultCacheBehavior>
+  <Comment></Comment>
+  <Enabled>true</Enabled>
+</DistributionConfig>"#
+            .to_string()
+    }
+
+    fn parse(xml: &str) -> DistributionConfig {
+        quick_xml::de::from_str(xml).unwrap()
+    }
+
+    fn render(config: &DistributionConfig) -> String {
+        quick_xml::se::to_string_with_root("DistributionConfig", config).unwrap()
+    }
+
+    #[test]
+    fn a_sparse_config_gets_the_values_cloudfront_fills_in() {
+        let mut config = parse(&sparse_config_xml());
+        config.ensure_aws_defaults();
+
+        assert_eq!(config.aliases.as_ref().unwrap().quantity, 0);
+        assert_eq!(config.default_root_object.as_deref(), Some(""));
+        assert_eq!(config.origin_groups.as_ref().unwrap().quantity, 0);
+        assert_eq!(config.cache_behaviors.as_ref().unwrap().quantity, 0);
+        assert_eq!(config.custom_error_responses.as_ref().unwrap().quantity, 0);
+        assert_eq!(config.price_class.as_deref(), Some("PriceClass_All"));
+        assert_eq!(config.http_version.as_deref(), Some("http2"));
+        assert_eq!(config.is_ipv6_enabled, Some(true));
+        assert_eq!(config.web_acl_id.as_deref(), Some(""));
+
+        let logging = config.logging.as_ref().unwrap();
+        assert!(!logging.enabled && !logging.include_cookies);
+        assert_eq!((logging.bucket.as_str(), logging.prefix.as_str()), ("", ""));
+
+        let vc = config.viewer_certificate.as_ref().unwrap();
+        assert_eq!(vc.cloud_front_default_certificate, Some(true));
+        assert_eq!(vc.minimum_protocol_version.as_deref(), Some("TLSv1"));
+        assert_eq!(vc.certificate_source.as_deref(), Some("cloudfront"));
+        assert_eq!(vc.acm_certificate_arn, None);
+
+        let geo = &config.restrictions.as_ref().unwrap().geo_restriction;
+        assert_eq!(geo.restriction_type, "none");
+        assert_eq!(geo.quantity, 0);
+        assert!(geo.items.is_none());
+
+        let origin = &config.origins.items.as_ref().unwrap().origin[0];
+        assert_eq!(origin.origin_path.as_deref(), Some(""));
+        assert_eq!(origin.custom_headers.as_ref().unwrap().quantity, 0);
+        assert_eq!(origin.connection_attempts, Some(3));
+        assert_eq!(origin.connection_timeout, Some(10));
+        assert!(!origin.origin_shield.as_ref().unwrap().enabled);
+        assert_eq!(origin.origin_access_control_id.as_deref(), Some(""));
+        let custom = origin.custom_origin_config.as_ref().unwrap();
+        assert_eq!(custom.origin_read_timeout, Some(30));
+        assert_eq!(custom.origin_keepalive_timeout, Some(5));
+
+        let dcb = &config.default_cache_behavior;
+        let signers = dcb.trusted_signers.as_ref().unwrap();
+        assert_eq!((signers.enabled, signers.quantity), (false, 0));
+        let groups = dcb.trusted_key_groups.as_ref().unwrap();
+        assert_eq!((groups.enabled, groups.quantity), (false, 0));
+        let allowed = dcb.allowed_methods.as_ref().unwrap();
+        assert_eq!(allowed.quantity, 2);
+        assert_eq!(allowed.items.method, ["HEAD", "GET"]);
+        let cached = allowed.cached_methods.as_ref().unwrap();
+        assert_eq!(cached.quantity, 2);
+        assert_eq!(cached.items.method, ["HEAD", "GET"]);
+        assert_eq!(dcb.smooth_streaming, Some(false));
+        assert_eq!(dcb.compress, Some(false));
+        assert_eq!(
+            dcb.lambda_function_associations.as_ref().unwrap().quantity,
+            0
+        );
+        assert_eq!(dcb.function_associations.as_ref().unwrap().quantity, 0);
+        assert_eq!(dcb.field_level_encryption_id.as_deref(), Some(""));
+        assert!(!dcb.grpc_config.as_ref().unwrap().enabled);
+        let forwarded = dcb.forwarded_values.as_ref().unwrap();
+        assert_eq!(forwarded.headers.as_ref().unwrap().quantity, 0);
+        assert_eq!(
+            forwarded.query_string_cache_keys.as_ref().unwrap().quantity,
+            0
+        );
+        assert_eq!(
+            (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl),
+            (Some(0), Some(86_400), Some(31_536_000))
+        );
+    }
+
+    #[test]
+    fn defaults_are_stable_across_a_serialize_parse_cycle() {
+        let mut config = parse(&sparse_config_xml());
+        config.ensure_aws_defaults();
+        let first = render(&config);
+
+        let mut reread = parse(&first);
+        reread.ensure_aws_defaults();
+        assert_eq!(render(&reread), first);
+    }
+
+    #[test]
+    fn values_the_caller_supplied_are_never_replaced() {
+        let xml = sparse_config_xml().replace(
+            "<Comment></Comment>",
+            r#"<Aliases><Quantity>1</Quantity><Items><CNAME>a.example.com</CNAME></Items></Aliases>
+  <Comment></Comment>
+  <PriceClass>PriceClass_100</PriceClass>
+  <HttpVersion>http3</HttpVersion>
+  <IsIPV6Enabled>false</IsIPV6Enabled>
+  <Logging><Enabled>true</Enabled><IncludeCookies>true</IncludeCookies><Bucket>b</Bucket><Prefix>p</Prefix></Logging>
+  <Restrictions><GeoRestriction><RestrictionType>whitelist</RestrictionType><Quantity>1</Quantity><Items><Location>BR</Location></Items></GeoRestriction></Restrictions>
+  <WebACLId>acl-1</WebACLId>"#,
+        );
+        let mut config = parse(&xml);
+        config.default_cache_behavior.compress = Some(true);
+        config.default_cache_behavior.max_ttl = Some(5);
+        config.ensure_aws_defaults();
+
+        assert_eq!(config.aliases.as_ref().unwrap().quantity, 1);
+        assert_eq!(config.price_class.as_deref(), Some("PriceClass_100"));
+        assert_eq!(config.http_version.as_deref(), Some("http3"));
+        assert_eq!(config.is_ipv6_enabled, Some(false));
+        let logging = config.logging.as_ref().unwrap();
+        assert_eq!(
+            (logging.bucket.as_str(), logging.prefix.as_str()),
+            ("b", "p")
+        );
+        let geo = &config.restrictions.as_ref().unwrap().geo_restriction;
+        assert_eq!(geo.restriction_type, "whitelist");
+        assert_eq!(geo.items.as_ref().unwrap().location, ["BR"]);
+        assert_eq!(config.web_acl_id.as_deref(), Some("acl-1"));
+        assert_eq!(config.default_cache_behavior.compress, Some(true));
+        assert_eq!(config.default_cache_behavior.max_ttl, Some(5));
+    }
+
+    #[test]
+    fn logging_values_the_caller_supplied_survive_when_enabled_is_omitted() {
+        let xml = sparse_config_xml().replace(
+            "<Comment></Comment>",
+            "<Comment></Comment><Logging><Bucket>b</Bucket><Prefix>p</Prefix></Logging>",
+        );
+        let mut config = parse(&xml);
+        config.ensure_aws_defaults();
+        let logging = config.logging.unwrap();
+        assert!(!logging.enabled);
+        assert_eq!(
+            (logging.bucket.as_str(), logging.prefix.as_str()),
+            ("b", "p")
+        );
+    }
+
+    #[test]
+    fn a_partial_logging_block_parses() {
+        let xml = sparse_config_xml().replace(
+            "<Comment></Comment>",
+            "<Comment></Comment><Logging><Enabled>false</Enabled></Logging>",
+        );
+        assert!(!parse(&xml).logging.unwrap().enabled);
+    }
+
+    #[test]
+    fn the_default_certificate_always_gets_the_tlsv1_policy() {
+        for given in [None, Some("TLSv1.2_2021")] {
+            let mut vc = ViewerCertificate {
+                cloud_front_default_certificate: Some(true),
+                minimum_protocol_version: given.map(Into::into),
+                ..Default::default()
+            };
+            vc.ensure_aws_defaults(false);
+            assert_eq!(vc.minimum_protocol_version.as_deref(), Some("TLSv1"));
+            assert_eq!(vc.certificate_source.as_deref(), Some("cloudfront"));
+        }
+    }
+
+    #[test]
+    fn certificate_mirrors_follow_the_certificate_in_use() {
+        let arn_a = "arn:aws:acm:us-east-1:1:certificate/a";
+        let arn_b = "arn:aws:acm:us-east-1:1:certificate/b";
+
+        // Default -> ACM, editing what was read back.
+        let mut vc = ViewerCertificate::default();
+        vc.ensure_aws_defaults(false);
+        vc.acm_certificate_arn = Some(arn_a.into());
+        vc.minimum_protocol_version = Some("TLSv1.2_2021".into());
+        vc.ensure_aws_defaults(false);
+        assert_eq!(vc.cloud_front_default_certificate, Some(false));
+        assert_eq!(vc.certificate.as_deref(), Some(arn_a));
+        assert_eq!(vc.certificate_source.as_deref(), Some("acm"));
+        assert_eq!(vc.minimum_protocol_version.as_deref(), Some("TLSv1.2_2021"));
+
+        // ACM A -> ACM B.
+        vc.acm_certificate_arn = Some(arn_b.into());
+        vc.ensure_aws_defaults(false);
+        assert_eq!(vc.certificate.as_deref(), Some(arn_b));
+
+        // ACM -> default.
+        vc.acm_certificate_arn = None;
+        vc.cloud_front_default_certificate = Some(true);
+        vc.ensure_aws_defaults(false);
+        assert_eq!(vc.acm_certificate_arn, None);
+        assert_eq!(vc.certificate, None);
+        assert_eq!(vc.certificate_source.as_deref(), Some("cloudfront"));
+        assert_eq!(vc.minimum_protocol_version.as_deref(), Some("TLSv1"));
+    }
+
+    #[test]
+    fn the_deprecated_certificate_pair_maps_onto_the_current_members() {
+        let cases = [
+            (Some("acm"), Some("arn:c"), Some("arn:c"), None, Some(false)),
+            (Some("iam"), Some("iam-1"), None, Some("iam-1"), Some(false)),
+            (None, Some("arn:c"), Some("arn:c"), None, Some(false)),
+            (None, Some("iam-1"), None, Some("iam-1"), Some(false)),
+            (Some("cloudfront"), None, None, None, Some(true)),
+        ];
+        for (source, certificate, acm, iam, default_certificate) in cases {
+            let mut vc = ViewerCertificate {
+                certificate_source: source.map(Into::into),
+                certificate: certificate.map(Into::into),
+                ..Default::default()
+            };
+            vc.ensure_aws_defaults(false);
+            assert_eq!(vc.acm_certificate_arn.as_deref(), acm, "{source:?}");
+            assert_eq!(vc.iam_certificate_id.as_deref(), iam, "{source:?}");
+            assert_eq!(vc.cloud_front_default_certificate, default_certificate);
+        }
+    }
+
+    #[test]
+    fn empty_certificate_members_name_no_certificate() {
+        let mut vc = ViewerCertificate {
+            acm_certificate_arn: Some(String::new()),
+            iam_certificate_id: Some(String::new()),
+            certificate: Some(String::new()),
+            ..Default::default()
+        };
+        vc.ensure_aws_defaults(false);
+        assert_eq!(vc.acm_certificate_arn, None);
+        assert_eq!(vc.iam_certificate_id, None);
+        assert_eq!(vc.cloud_front_default_certificate, Some(true));
+        assert_eq!(vc.certificate_source.as_deref(), Some("cloudfront"));
+    }
+
+    #[test]
+    fn staging_and_an_empty_policy_id_have_one_canonical_form() {
+        let mut omitted = parse(&sparse_config_xml());
+        omitted.ensure_aws_defaults();
+        assert_eq!(omitted.staging, Some(false));
+
+        let mut explicit = parse(&sparse_config_xml());
+        explicit.staging = Some(false);
+        explicit.continuous_deployment_policy_id = Some(String::new());
+        explicit.ensure_aws_defaults();
+        assert_eq!(render(&explicit), render(&omitted));
+
+        let mut staging = parse(&sparse_config_xml());
+        staging.staging = Some(true);
+        staging.ensure_aws_defaults();
+        assert_eq!(staging.staging, Some(true));
+    }
+
+    #[test]
+    fn an_empty_items_element_matches_an_omitted_one() {
+        let mut omitted = parse(&sparse_config_xml());
+        omitted.ensure_aws_defaults();
+
+        let xml = sparse_config_xml().replace(
+            "<Comment></Comment>",
+            r#"<Aliases><Quantity>0</Quantity><Items/></Aliases>
+  <OriginGroups><Quantity>0</Quantity><Items/></OriginGroups>
+  <CacheBehaviors><Quantity>0</Quantity><Items/></CacheBehaviors>
+  <CustomErrorResponses><Quantity>0</Quantity><Items/></CustomErrorResponses>
+  <Comment></Comment>
+  <Restrictions><GeoRestriction><RestrictionType>none</RestrictionType><Quantity>0</Quantity><Items/></GeoRestriction></Restrictions>"#,
+        );
+        let mut explicit = parse(&xml);
+        let dcb = &mut explicit.default_cache_behavior;
+        dcb.function_associations = Some(FunctionAssociations {
+            quantity: 0,
+            items: Some(FunctionAssociationItems::default()),
+        });
+        dcb.trusted_signers = Some(TrustedSigners {
+            items: Some(AwsAccountNumberList::default()),
+            ..Default::default()
+        });
+        explicit.ensure_aws_defaults();
+        assert_eq!(render(&explicit), render(&omitted));
+    }
+
+    #[test]
+    fn s3_and_vpc_origins_get_their_documented_timeouts() {
+        let mut origin = Origin {
+            s3_origin_config: Some(S3OriginConfig::default()),
+            vpc_origin_config: Some(VpcOriginConfig::default()),
+            ..Default::default()
+        };
+        origin.ensure_aws_defaults();
+        let s3 = origin.s3_origin_config.as_ref().unwrap();
+        assert_eq!(s3.origin_read_timeout, Some(30));
+        let vpc = origin.vpc_origin_config.as_ref().unwrap();
+        assert_eq!(vpc.origin_read_timeout, Some(30));
+        assert_eq!(vpc.origin_keepalive_timeout, Some(5));
+
+        let mut origin = Origin {
+            vpc_origin_config: Some(VpcOriginConfig {
+                origin_read_timeout: Some(60),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        origin.ensure_aws_defaults();
+        assert_eq!(
+            origin.vpc_origin_config.unwrap().origin_read_timeout,
+            Some(60)
+        );
+    }
+
+    #[test]
+    fn an_acm_certificate_is_never_turned_into_the_default_one() {
+        let arn = "arn:aws:acm:us-east-1:123456789012:certificate/abc";
+        let mut vc = ViewerCertificate {
+            acm_certificate_arn: Some(arn.into()),
+            ssl_support_method: Some("sni-only".into()),
+            minimum_protocol_version: Some("TLSv1.2_2021".into()),
+            ..Default::default()
+        };
+        vc.ensure_aws_defaults(false);
+        assert_eq!(vc.cloud_front_default_certificate, Some(false));
+        assert_eq!(vc.acm_certificate_arn.as_deref(), Some(arn));
+        assert_eq!(vc.certificate.as_deref(), Some(arn));
+        assert_eq!(vc.certificate_source.as_deref(), Some("acm"));
+        assert_eq!(vc.ssl_support_method.as_deref(), Some("sni-only"));
+        assert_eq!(vc.minimum_protocol_version.as_deref(), Some("TLSv1.2_2021"));
+    }
+
+    #[test]
+    fn an_iam_certificate_is_reported_as_the_iam_source() {
+        let mut vc = ViewerCertificate {
+            iam_certificate_id: Some("iam-1".into()),
+            ..Default::default()
+        };
+        vc.ensure_aws_defaults(false);
+        assert_eq!(vc.cloud_front_default_certificate, Some(false));
+        assert_eq!(vc.certificate.as_deref(), Some("iam-1"));
+        assert_eq!(vc.certificate_source.as_deref(), Some("iam"));
+        // No documented security policy for a standard distribution.
+        assert_eq!(vc.minimum_protocol_version, None);
+    }
+
+    #[test]
+    fn an_explicit_opt_out_of_the_default_certificate_is_left_alone() {
+        let mut vc = ViewerCertificate {
+            cloud_front_default_certificate: Some(false),
+            ..Default::default()
+        };
+        vc.ensure_aws_defaults(false);
+        assert_eq!(vc.cloud_front_default_certificate, Some(false));
+        assert_eq!(vc.certificate_source, None);
+    }
+
+    #[test]
+    fn a_multi_tenant_distribution_keeps_standard_only_members_absent() {
+        let xml = sparse_config_xml().replace(
+            "<Enabled>true</Enabled>",
+            "<Enabled>true</Enabled><ConnectionMode>tenant-only</ConnectionMode>",
+        );
+        let mut config = parse(&xml);
+        config.viewer_certificate = Some(ViewerCertificate {
+            acm_certificate_arn: Some("arn:aws:acm:us-east-1:1:certificate/abc".into()),
+            ..Default::default()
+        });
+        config.ensure_aws_defaults();
+
+        assert!(config.aliases.is_none());
+        assert_eq!(config.price_class, None);
+        assert_eq!(config.is_ipv6_enabled, None);
+        assert_eq!(config.staging, None);
+        let dcb = &config.default_cache_behavior;
+        assert!(dcb.trusted_signers.is_none());
+        assert_eq!(dcb.smooth_streaming, None);
+        assert_eq!(
+            (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl),
+            (None, None, None)
+        );
+        assert!(dcb.trusted_key_groups.is_some());
+        let vc = config.viewer_certificate.as_ref().unwrap();
+        assert_eq!(vc.minimum_protocol_version.as_deref(), Some("TLSv1.2_2021"));
+    }
+
+    #[test]
+    fn omitted_ttls_follow_the_bounds_the_request_supplied() {
+        const DAY: i64 = 86_400;
+        const YEAR: i64 = 31_536_000;
+        const LONG: i64 = 40_000_000;
+        for (supplied, expected) in [
+            ((None, None, None), (0, DAY, YEAR)),
+            // A MinTTL above a day raises the default DefaultTTL to it.
+            ((Some(172_800), None, None), (172_800, 172_800, YEAR)),
+            // A MinTTL or DefaultTTL above a year raises the default MaxTTL.
+            ((None, Some(LONG), None), (0, LONG, LONG)),
+            ((Some(LONG), None, None), (LONG, LONG, LONG)),
+            // Below those thresholds the fixed defaults stand.
+            ((Some(10), None, None), (10, DAY, YEAR)),
+            ((None, Some(10), None), (0, 10, YEAR)),
+            // What a request supplied is kept.
+            ((Some(1), Some(2), Some(3)), (1, 2, 3)),
+            ((None, None, Some(600)), (0, DAY, 600)),
+        ] {
+            let mut config = parse(&sparse_config_xml());
+            let dcb = &mut config.default_cache_behavior;
+            (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl) = supplied;
+            config.cache_behaviors = Some(CacheBehaviors {
+                quantity: 1,
+                items: Some(CacheBehaviorItems {
+                    cache_behavior: vec![CacheBehavior {
+                        path_pattern: "/x".into(),
+                        target_origin_id: "o1".into(),
+                        viewer_protocol_policy: "allow-all".into(),
+                        forwarded_values: dcb.forwarded_values.clone(),
+                        min_ttl: supplied.0,
+                        default_ttl: supplied.1,
+                        max_ttl: supplied.2,
+                        ..Default::default()
+                    }],
+                }),
+            });
+            config.ensure_aws_defaults();
+            let expected = (Some(expected.0), Some(expected.1), Some(expected.2));
+            let dcb = &config.default_cache_behavior;
+            assert_eq!((dcb.min_ttl, dcb.default_ttl, dcb.max_ttl), expected);
+            let b = &config
+                .cache_behaviors
+                .as_ref()
+                .unwrap()
+                .items
+                .as_ref()
+                .unwrap()
+                .cache_behavior[0];
+            assert_eq!((b.min_ttl, b.default_ttl, b.max_ttl), expected);
+
+            // Read back and sent again, the derived values do not move.
+            let mut again = config.clone();
+            again.ensure_aws_defaults();
+            assert_eq!(render(&again), render(&config));
+        }
+    }
+
+    #[test]
+    fn a_behavior_on_a_cache_policy_gets_no_legacy_ttls() {
+        let mut config = parse(&sparse_config_xml());
+        config.default_cache_behavior.forwarded_values = None;
+        config.default_cache_behavior.cache_policy_id = Some("cp".into());
+        config.ensure_aws_defaults();
+        let dcb = &config.default_cache_behavior;
+        assert_eq!(
+            (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl),
+            (None, None, None)
+        );
+        assert!(dcb.forwarded_values.is_none());
+    }
+
+    #[test]
+    fn additional_cache_behaviors_get_the_same_defaults() {
+        let mut config = parse(&sparse_config_xml());
+        config.cache_behaviors = Some(CacheBehaviors {
+            quantity: 1,
+            items: Some(CacheBehaviorItems {
+                cache_behavior: vec![CacheBehavior {
+                    path_pattern: "/x".into(),
+                    target_origin_id: "o1".into(),
+                    viewer_protocol_policy: "allow-all".into(),
+                    ..Default::default()
+                }],
+            }),
+        });
+        config.ensure_aws_defaults();
+        let b = &config
+            .cache_behaviors
+            .unwrap()
+            .items
+            .unwrap()
+            .cache_behavior[0];
+        assert!(b.trusted_signers.is_some() && b.trusted_key_groups.is_some());
+        assert!(b.function_associations.is_some() && b.allowed_methods.is_some());
+    }
+
+    #[test]
+    fn an_allowed_methods_block_without_cached_methods_caches_get_and_head() {
+        let mut config = parse(&sparse_config_xml());
+        config.default_cache_behavior.allowed_methods = Some(AllowedMethods {
+            quantity: 3,
+            items: MethodList {
+                method: vec!["GET".into(), "HEAD".into(), "OPTIONS".into()],
+            },
+            cached_methods: None,
+        });
+        config.ensure_aws_defaults();
+        let allowed = config.default_cache_behavior.allowed_methods.unwrap();
+        assert_eq!(allowed.quantity, 3);
+        assert_eq!(
+            allowed.cached_methods.unwrap().items.method,
+            ["HEAD", "GET"]
+        );
+    }
+
+    #[test]
+    fn struct_defaults_stay_neutral_for_partial_construction() {
+        // `Default` backs `..Default::default()` and a parsed struct's absent
+        // members: a bare certificate must not claim the CloudFront default.
+        assert_eq!(
+            ViewerCertificate::default().cloud_front_default_certificate,
+            None
+        );
+        assert_eq!(GeoRestriction::default().restriction_type, "none");
     }
 
     #[test]

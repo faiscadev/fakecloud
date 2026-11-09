@@ -91,6 +91,15 @@ pub fn validate_distribution_config(config: &DistributionConfig) -> Result<(), A
     {
         validate_acm_certificate_region(arn)?;
     }
+    if config
+        .logging
+        .as_ref()
+        .is_some_and(|l| l.enabled && l.bucket.is_empty())
+    {
+        return Err(invalid_argument(
+            "Logging.Bucket is required when Logging.Enabled is true",
+        ));
+    }
     Ok(())
 }
 
@@ -256,6 +265,38 @@ mod tests {
             ),
             ..Default::default()
         });
+        validate_distribution_config(&c).unwrap();
+    }
+
+    #[test]
+    fn a_deprecated_acm_certificate_outside_us_east_1_is_rejected() {
+        let mut c = config();
+        c.viewer_certificate = Some(crate::model::ViewerCertificate {
+            certificate: Some("arn:aws:acm:eu-west-1:123456789012:certificate/abc".into()),
+            certificate_source: Some("acm".into()),
+            ..Default::default()
+        });
+        c.ensure_aws_defaults();
+        assert_eq!(
+            validate_distribution_config(&c).unwrap_err().code(),
+            "InvalidViewerCertificate"
+        );
+    }
+
+    #[test]
+    fn enabled_logging_needs_a_bucket() {
+        let mut c = config();
+        c.logging = Some(crate::model::LoggingConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            validate_distribution_config(&c).unwrap_err().code(),
+            "InvalidArgument"
+        );
+        c.logging.as_mut().unwrap().bucket = "logs.s3.amazonaws.com".into();
+        validate_distribution_config(&c).unwrap();
+        c.logging = Some(crate::model::LoggingConfig::default());
         validate_distribution_config(&c).unwrap();
     }
 

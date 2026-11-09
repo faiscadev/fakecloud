@@ -91,7 +91,21 @@ pub fn parse_cloudfront_snapshot(
     if version < 3 {
         migrate_legacy_bucket(&mut value, default_account);
     }
-    serde_json::from_value(value)
+    let mut snapshot: CloudFrontSnapshot = serde_json::from_value(value)?;
+    // A snapshot written before configs were made canonical on the way in must
+    // read back like any other distribution, and an unchanged config PUT over
+    // it must still compare equal. Filling only absent members is idempotent,
+    // so this needs no schema bump.
+    for account in snapshot
+        .accounts
+        .iter_mut()
+        .flat_map(|a| a.accounts.values_mut())
+    {
+        for dist in account.distributions.values_mut() {
+            dist.config.ensure_aws_defaults();
+        }
+    }
+    Ok(snapshot)
 }
 
 /// Split the pre-v3 shared bucket back out by owner.
@@ -518,6 +532,32 @@ mod snapshot_migration_tests {
         assert_eq!(vc.acm_certificate_arn.as_deref(), Some("arn:c"));
         assert_eq!(vc.ssl_support_method.as_deref(), Some("sni-only"));
         assert_eq!(config.is_ipv6_enabled, Some(false));
+    }
+
+    #[test]
+    fn a_snapshot_with_a_sparse_config_loads_with_the_cloudfront_defaults() {
+        let mut accounts = CloudFrontAccounts::new();
+        accounts
+            .entry("000000000000")
+            .distributions
+            .insert("E1".to_string(), legacy_distribution("E1", "000000000000"));
+        let bytes = serde_json::to_vec(&CloudFrontSnapshot {
+            schema_version: CLOUDFRONT_SNAPSHOT_SCHEMA_VERSION,
+            accounts: Some(accounts),
+        })
+        .unwrap();
+        // The struct-built config above carries none of the optional members.
+        assert!(!String::from_utf8_lossy(&bytes).contains("OriginGroups"));
+
+        let snapshot = parse_cloudfront_snapshot(&bytes, LEGACY_ACCOUNT).unwrap();
+        let accounts = snapshot.accounts.unwrap();
+        let config = &accounts.get("000000000000").unwrap().distributions["E1"].config;
+        assert_eq!(config.origin_groups.as_ref().unwrap().quantity, 0);
+        assert_eq!(config.aliases.as_ref().unwrap().quantity, 0);
+        assert_eq!(config.http_version.as_deref(), Some("http2"));
+        let geo = &config.restrictions.as_ref().unwrap().geo_restriction;
+        assert_eq!(geo.restriction_type, "none");
+        assert!(config.default_cache_behavior.trusted_signers.is_some());
     }
 
     #[test]

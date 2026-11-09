@@ -50,6 +50,8 @@ pub(crate) const HANDLER_PAGED: &[&str] = &[
     "DescribeCapacityReservationDateChangeQuotes",
     "DescribeImages",
     "DescribeInstanceStatus",
+    "DescribeInstanceTypeOfferings",
+    "DescribeInstanceTypes",
     "DescribeInstances",
     "DescribeIpamInternetRegistryAssociations",
     "DescribeNetworkInterfaces",
@@ -59,6 +61,7 @@ pub(crate) const HANDLER_PAGED: &[&str] = &[
     "DescribeTags",
     "DescribeVolumes",
     "DescribeVpcs",
+    "GetInstanceTypesFromInstanceRequirements",
     "GetIpamDiscoveredRoutes",
     "GetIpamInternetRegistryAssociationAsns",
     "GetIpamInternetRegistryAssociationCidrs",
@@ -678,7 +681,6 @@ mod dispatch_tests {
             "DescribeNetworkAcls",
             "DescribeRouteTables",
             "DescribeTransitGateways",
-            "DescribeInstanceTypes",
             "DescribeVpcEndpointServices",
         ] {
             assert!(
@@ -821,6 +823,60 @@ mod dispatch_tests {
             "{second}"
         );
         assert!(next_token(&second).is_none(), "{second}");
+    }
+
+    /// The instance type catalog renders only the page asked for, so a walk
+    /// at the smallest page size stays cheap, and it loses nothing.
+    #[tokio::test]
+    async fn instance_type_catalog_listings_page_losslessly() {
+        let svc = Ec2Service::new();
+        let requirements = [
+            ("ArchitectureType.1", "x86_64"),
+            ("VirtualizationType.1", "hvm"),
+            ("InstanceRequirements.VCpuCount.Min", "1"),
+            ("InstanceRequirements.MemoryMiB.Min", "1"),
+        ];
+        for (action, params, size) in [
+            ("DescribeInstanceTypes", &[][..], "5"),
+            ("DescribeInstanceTypeOfferings", &[][..], "5"),
+            (
+                "GetInstanceTypesFromInstanceRequirements",
+                &requirements[..],
+                "1",
+            ),
+        ] {
+            let names = |xml: &str| -> Vec<String> {
+                xml.split("<instanceType>")
+                    .skip(1)
+                    .map(|s| s.split('<').next().unwrap().to_string())
+                    .collect()
+            };
+            let full_xml = ok(&svc, action, params).await;
+            assert!(next_token(&full_xml).is_none(), "{action}");
+            let full = names(&full_xml);
+            assert!(full.len() > 100, "{action}: {}", full.len());
+            let mut walked = Vec::new();
+            let mut token: Option<String> = None;
+            loop {
+                let mut request = params.to_vec();
+                request.push(("MaxResults", size));
+                if let Some(t) = &token {
+                    request.push(("NextToken", t));
+                }
+                let xml = ok(&svc, action, &request).await;
+                let page = names(&xml);
+                let size: usize = size.parse().unwrap();
+                assert!(page.len() <= size, "{action}");
+                let page_len = page.len();
+                walked.extend(page);
+                token = next_token(&xml);
+                if token.is_none() {
+                    break;
+                }
+                assert_eq!(page_len, size, "{action}: a short page with a token");
+            }
+            assert_eq!(walked, full, "{action}");
+        }
     }
 
     /// The reservations of both families page as one sequence.

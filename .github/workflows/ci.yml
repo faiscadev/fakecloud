@@ -63,6 +63,8 @@ jobs:
         run: bash scripts/publish-crates.sh --check
       - name: crates.io rate-limit handling
         run: bash scripts/tests/publish-crates-test.sh
+      - name: EC2 instance catalog generator
+        run: bash scripts/tests/generate-ec2-instance-catalog-test.sh
 
   clippy:
     runs-on: ubuntu-latest

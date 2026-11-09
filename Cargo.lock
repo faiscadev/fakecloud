@@ -5464,6 +5464,7 @@ dependencies = [
  "fakecloud-k8s",
  "fakecloud-kms",
  "fakecloud-persistence",
+ "flate2",
  "http 1.4.0",
  "k8s-openapi",
  "kube",
