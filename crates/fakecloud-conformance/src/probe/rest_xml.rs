@@ -428,7 +428,20 @@ fn write_map_pair(
         &Value::String(key.to_string()),
         None,
     );
-    write_element(model, out, value_name, None, value_target, value, None);
+    // `@timestampFormat` on the map's value applies to every value.
+    let value_traits = ShapeTraits {
+        timestamp_format: map_traits.and_then(|t| t.map_value_timestamp_format.clone()),
+        ..ShapeTraits::default()
+    };
+    write_element(
+        model,
+        out,
+        value_name,
+        None,
+        value_target,
+        value,
+        Some(&value_traits),
+    );
 }
 
 /// Serialize a JSON value with no model shape behind it (an input key the
@@ -491,7 +504,7 @@ fn scalar_text(
     value: &Value,
     member_traits: Option<&ShapeTraits>,
 ) -> Option<String> {
-    if is_timestamp(model, shape_id) {
+    if crate::smithy::is_timestamp(model, shape_id) {
         let format = member_traits
             .and_then(|t| t.timestamp_format.clone())
             .or_else(|| {
@@ -505,15 +518,6 @@ fn scalar_text(
         }
     }
     json_scalar_text(value)
-}
-
-/// Whether `shape_id` is a timestamp (the prelude shape or a modelled one).
-pub(super) fn is_timestamp(model: &ServiceModel, shape_id: &str) -> bool {
-    shape_id == "smithy.api#Timestamp"
-        || matches!(
-            model.shapes.get(shape_id).map(|s| &s.shape_type),
-            Some(ShapeType::Timestamp)
-        )
 }
 
 fn json_scalar_text(value: &Value) -> Option<String> {
@@ -535,24 +539,40 @@ struct Instant {
 /// Render an RFC 3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.f+](Z|+HH:MM|-HH:MM)`,
 /// the form the generators emit) in `format`.
 ///
-/// - `date-time` (the default): the input is already that format and is sent
-///   unchanged, byte for byte.
+/// - `date-time` (the default): normalized to UTC with uppercase `T` and
+///   `Z`, the fraction digits copied verbatim
+///   (`2024-01-01T02:00:00.5+02:00` -> `2024-01-01T00:00:00.5Z`).
 /// - `epoch-seconds`: decimal seconds built as text, the fraction digits
 ///   copied from the input.
 /// - `http-date`: IMF-fixdate, whole seconds (the format has no fraction).
 ///
-/// A value that does not parse as a real instant (bad syntax, 2024-02-30, a
-/// :60 second) is sent unchanged, so a deliberately malformed value still
-/// reaches the handler as written.
+/// A value that does not parse as a real instant (bad syntax, signed
+/// components, 2024-02-30, a :60 second) is sent unchanged, so a
+/// deliberately malformed value still reaches the handler as written.
 pub(super) fn format_timestamp(s: &str, format: Option<&str>) -> String {
-    let convert = matches!(format, Some("epoch-seconds") | Some("http-date"));
-    let Some(t) = convert.then(|| parse_rfc3339(s)).flatten() else {
+    let Some(t) = parse_rfc3339(s) else {
         return s.to_string();
     };
     match format {
         Some("epoch-seconds") => epoch_seconds_text(&t),
-        _ => http_date(t.epoch),
+        Some("http-date") => http_date(t.epoch),
+        _ => {
+            let (y, mo, d, h, mi, sec) = civil(t.epoch);
+            let frac = if t.fraction.is_empty() {
+                String::new()
+            } else {
+                format!(".{}", t.fraction)
+            };
+            format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{sec:02}{frac}Z")
+        }
     }
+}
+
+/// A fixed-width run of ASCII digits: no sign, no whitespace.
+fn digits(s: &str, width: usize) -> Option<i64> {
+    (s.len() == width && s.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| s.parse().ok())
+        .flatten()
 }
 
 /// `t` as decimal epoch seconds, without going through floating point.
@@ -585,9 +605,9 @@ fn epoch_seconds_text(t: &Instant) -> String {
 fn parse_rfc3339(s: &str) -> Option<Instant> {
     let (date, time) = s.split_once(['T', 't'])?;
     let mut d = date.splitn(3, '-');
-    let year: i64 = d.next()?.parse().ok()?;
-    let month: i64 = d.next()?.parse().ok()?;
-    let day: i64 = d.next()?.parse().ok()?;
+    let year = digits(d.next()?, 4)?;
+    let month = digits(d.next()?, 2)?;
+    let day = digits(d.next()?, 2)?;
     // Split the UTC offset off the time of day.
     let (clock, offset_secs) = if let Some(c) = time.strip_suffix(['Z', 'z']) {
         (c, 0)
@@ -596,8 +616,8 @@ fn parse_rfc3339(s: &str) -> Option<Instant> {
         let (c, off) = time.split_at(idx);
         let sign = if off.starts_with('-') { -1 } else { 1 };
         let (oh, om) = off[1..].split_once(':')?;
-        let oh: i64 = oh.parse().ok()?;
-        let om: i64 = om.parse().ok()?;
+        let oh = digits(oh, 2)?;
+        let om = digits(om, 2)?;
         if oh > 23 || om > 59 {
             return None;
         }
@@ -611,9 +631,9 @@ fn parse_rfc3339(s: &str) -> Option<Instant> {
         None => (clock, String::new()),
     };
     let mut t = hms.splitn(3, ':');
-    let hour: i64 = t.next()?.parse().ok()?;
-    let minute: i64 = t.next()?.parse().ok()?;
-    let second: i64 = t.next()?.parse().ok()?;
+    let hour = digits(t.next()?, 2)?;
+    let minute = digits(t.next()?, 2)?;
+    let second = digits(t.next()?, 2)?;
     if !(1..=12).contains(&month)
         || day < 1
         || day > days_in_month(year, month)
@@ -991,16 +1011,86 @@ mod tests {
             format_timestamp("2023-12-31T19:00:00-05:00", Some("http-date")),
             "Mon, 01 Jan 2024 00:00:00 GMT"
         );
-        // date-time input is already the wire form and goes out unchanged.
-        for s in ["2024-01-01T02:00:00.5+02:00", "2024-01-01T00:00:00Z"] {
-            assert_eq!(format_timestamp(s, None), s);
-            assert_eq!(format_timestamp(s, Some("date-time")), s);
+        // date-time is normalized to UTC, uppercase T/Z, fraction verbatim.
+        for (input, want) in [
+            ("2024-01-01T02:00:00.5+02:00", "2024-01-01T00:00:00.5Z"),
+            ("2024-01-01t00:00:00.120z", "2024-01-01T00:00:00.120Z"),
+            ("2023-12-31T19:00:00-05:00", "2024-01-01T00:00:00Z"),
+        ] {
+            assert_eq!(format_timestamp(input, None), want);
+            assert_eq!(format_timestamp(input, Some("date-time")), want);
         }
-        // Not a real instant: unchanged, never re-rendered as another one.
-        for s in ["2024-02-30T00:00:00Z", "2024-01-01T00:00:60Z", "garbage"] {
+        // Not a real instant: unchanged in every format, never re-rendered
+        // as another one.
+        for s in [
+            "2024-02-30T00:00:00Z",
+            "2024-01-01T00:00:60Z",
+            "2024-01-01T-1:00:00Z",
+            "2024-01-01T00:+1:00Z",
+            "2024-01-01T00:00:-1Z",
+            "+2024-01-01T00:00:00Z",
+            "2024-+1-01T00:00:00Z",
+            "2024-01-01T00:00:00+-1:00",
+            "garbage",
+        ] {
             assert_eq!(epoch(s), s);
             assert_eq!(format_timestamp(s, Some("http-date")), s);
+            assert_eq!(format_timestamp(s, None), s);
         }
+    }
+
+    #[test]
+    fn member_order_pass_tolerates_odd_shapes_and_reports_bad_json() {
+        let m = parse_model_str(
+            r##"{
+                "smithy": "2.0",
+                "metadata": {"x": 1},
+                "shapes": {
+                    "t#Svc": {"type": "service", "operations": [], "extra": [1, 2]},
+                    "t#Odd": {"type": "structure", "members": "not an object"},
+                    "t#S": {"type": "structure", "members": {"B": {"target": "t#Str"},
+                                                             "A": {"target": "t#Str"}}},
+                    "t#Str": {"type": "string"}
+                }
+            }"##,
+        )
+        .expect("odd shapes are skipped, not fatal");
+        assert_eq!(
+            m.member_order["t#S"],
+            vec!["B".to_string(), "A".to_string()]
+        );
+        assert!(!m.member_order.contains_key("t#Odd"));
+        assert!(parse_model_str("{ not json").is_err());
+    }
+
+    #[test]
+    fn xml_map_values_honor_map_value_timestamp_format() {
+        let m = parse_model_str(
+            r##"{
+                "smithy": "2.0",
+                "shapes": {
+                    "t#Svc": {"type": "service", "operations": [{"target": "t#Put"}],
+                              "traits": {"aws.protocols#restXml": {}}},
+                    "t#Put": {"type": "operation", "input": {"target": "t#PutRequest"},
+                              "traits": {"smithy.api#http": {"method": "PUT", "uri": "/o"}}},
+                    "t#PutRequest": {"type": "structure", "members": {
+                        "Times": {"target": "t#TimeMap"}}},
+                    "t#TimeMap": {"type": "map", "key": {"target": "t#Str"},
+                              "value": {"target": "t#Time",
+                                        "traits": {"smithy.api#timestampFormat": "epoch-seconds"}}},
+                    "t#Str": {"type": "string"},
+                    "t#Time": {"type": "timestamp"}
+                }
+            }"##,
+        )
+        .unwrap();
+        let op = m.operations.iter().find(|o| o.name == "Put").unwrap();
+        let input = json!({"Times": {"a": "1970-01-01T00:00:03Z"}});
+        let body = String::from_utf8(rest_xml_body(op, &m, &input).0.unwrap()).unwrap();
+        assert!(
+            body.contains("<Times><entry><key>a</key><value>3</value></entry></Times>"),
+            "{body}"
+        );
     }
 
     #[test]

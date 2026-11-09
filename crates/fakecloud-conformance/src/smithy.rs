@@ -195,6 +195,8 @@ pub struct ShapeTraits {
     pub xml_map_value_name: Option<String>,
     /// `smithy.api#timestampFormat` on a list's `member`.
     pub list_member_timestamp_format: Option<String>,
+    /// `smithy.api#timestampFormat` on a map's `value`.
+    pub map_value_timestamp_format: Option<String>,
 }
 
 /// A `smithy.api#xmlNamespace` value.
@@ -223,7 +225,8 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
 pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
     let root: Value =
         serde_json::from_str(content).map_err(|e| format!("Failed to parse model: {}", e))?;
-    let mut member_order = declared_member_orders(content);
+    let mut member_order = declared_member_orders(content)
+        .map_err(|e| format!("Failed to read member order: {}", e))?;
 
     let smithy_version = root
         .get("smithy")
@@ -387,7 +390,9 @@ pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
 /// `shapes.*.members` keys is skipped with `IgnoredAny`, so the order does
 /// not depend on serde_json's `preserve_order` feature (the main parse into
 /// `Value` loses it without that feature).
-fn declared_member_orders(content: &str) -> HashMap<String, Vec<String>> {
+fn declared_member_orders(
+    content: &str,
+) -> Result<HashMap<String, Vec<String>>, serde_json::Error> {
     use serde::de::{IgnoredAny, MapAccess, Visitor};
 
     /// The keys of a JSON object, in order, values ignored.
@@ -412,10 +417,18 @@ fn declared_member_orders(content: &str) -> HashMap<String, Vec<String>> {
         }
     }
 
+    /// `members` when it is an object; anything else is skipped.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Members {
+        Keys(Keys),
+        Other(IgnoredAny),
+    }
+    // Unknown fields are ignored (serde's default).
     #[derive(Deserialize)]
     struct RawShape {
         #[serde(default)]
-        members: Option<Keys>,
+        members: Option<Members>,
     }
     #[derive(Deserialize)]
     struct RawModel {
@@ -423,14 +436,15 @@ fn declared_member_orders(content: &str) -> HashMap<String, Vec<String>> {
         shapes: HashMap<String, RawShape>,
     }
 
-    serde_json::from_str::<RawModel>(content)
-        .map(|m| {
-            m.shapes
-                .into_iter()
-                .filter_map(|(id, shape)| shape.members.map(|k| (id, k.0)))
-                .collect()
+    let model: RawModel = serde_json::from_str(content)?;
+    Ok(model
+        .shapes
+        .into_iter()
+        .filter_map(|(id, shape)| match shape.members {
+            Some(Members::Keys(k)) => Some((id, k.0)),
+            _ => None,
         })
-        .unwrap_or_default()
+        .collect())
 }
 
 fn collect_resource_operations(
@@ -491,12 +505,15 @@ fn parse_shape(shape_id: &str, def: &Value) -> Option<Shape> {
     traits.xml_list_member_name = element_xml_name("member");
     traits.xml_map_key_name = element_xml_name("key");
     traits.xml_map_value_name = element_xml_name("value");
-    traits.list_member_timestamp_format = def
-        .get("member")
-        .and_then(|v| v.get("traits"))
-        .and_then(|t| t.get("smithy.api#timestampFormat"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let element_timestamp_format = |part: &str| {
+        def.get(part)
+            .and_then(|v| v.get("traits"))
+            .and_then(|t| t.get("smithy.api#timestampFormat"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+    traits.list_member_timestamp_format = element_timestamp_format("member");
+    traits.map_value_timestamp_format = element_timestamp_format("value");
 
     let shape_type = match type_str {
         "structure" => {
@@ -801,6 +818,15 @@ impl ServiceModel {
     pub fn is_rest_xml(&self) -> bool {
         self.rest_xml
     }
+}
+
+/// Whether `shape_id` is a timestamp (the prelude shape or a modelled one).
+pub fn is_timestamp(model: &ServiceModel, shape_id: &str) -> bool {
+    shape_id == "smithy.api#Timestamp"
+        || matches!(
+            model.shapes.get(shape_id).map(|s| &s.shape_type),
+            Some(ShapeType::Timestamp)
+        )
 }
 
 /// Resolve a shape ID to its short name (after the `#`).

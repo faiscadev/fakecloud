@@ -226,6 +226,7 @@ fn merged_traits(target: &ShapeTraits, member: &ShapeTraits) -> ShapeTraits {
         xml_map_key_name: target.xml_map_key_name.clone(),
         xml_map_value_name: target.xml_map_value_name.clone(),
         list_member_timestamp_format: target.list_member_timestamp_format.clone(),
+        map_value_timestamp_format: target.map_value_timestamp_format.clone(),
     }
 }
 

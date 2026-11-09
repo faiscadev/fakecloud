@@ -947,10 +947,15 @@ pub(super) fn build_http_request_from_model(
             .http_query
             .clone()
             .or_else(|| target_traits.and_then(|t| t.http_query.clone()));
-        let header_name = member_traits
-            .http_header
-            .clone()
-            .or_else(|| target_traits.and_then(|t| t.http_header.clone()));
+        // restXml: `bind_headers` reads header members straight from `input`.
+        let header_name = if rest_xml {
+            None
+        } else {
+            member_traits
+                .http_header
+                .clone()
+                .or_else(|| target_traits.and_then(|t| t.http_header.clone()))
+        };
         let is_payload =
             member_traits.http_payload || target_traits.map(|t| t.http_payload).unwrap_or(false);
 
@@ -959,10 +964,8 @@ pub(super) fn build_http_request_from_model(
                 if let Some(qk) = query_name {
                     append_query(&mut query_parts, &qk, &val);
                 } else if let Some(hk) = header_name {
-                    if !rest_xml {
-                        if let Some(hv) = value_to_header_string(&val) {
-                            headers.push((hk, hv));
-                        }
+                    if let Some(hv) = value_to_header_string(&val) {
+                        headers.push((hk, hv));
                     }
                 } else if is_payload {
                     payload_value = Some(val);

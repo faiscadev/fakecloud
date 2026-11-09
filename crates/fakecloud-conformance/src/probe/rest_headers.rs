@@ -226,7 +226,7 @@ fn header_value(model: &ServiceModel, member: &Member, value: &Value) -> Option<
                     .and_then(|t| t.traits.list_member_timestamp_format.clone()),
                 ..ShapeTraits::default()
             };
-            let item_is_timestamp = super::rest_xml::is_timestamp(model, member_target);
+            let item_is_timestamp = crate::smithy::is_timestamp(model, member_target);
             let rendered: Vec<String> = items
                 .iter()
                 .filter_map(|item| scalar_header(model, member_target, Some(&item_traits), item))
@@ -253,7 +253,7 @@ fn scalar_header(
     value: &Value,
 ) -> Option<String> {
     let shape = model.shapes.get(shape_id);
-    if super::rest_xml::is_timestamp(model, shape_id) {
+    if crate::smithy::is_timestamp(model, shape_id) {
         let format = member_traits
             .and_then(|t| t.timestamp_format.clone())
             .or_else(|| shape.and_then(|s| s.traits.timestamp_format.clone()))
