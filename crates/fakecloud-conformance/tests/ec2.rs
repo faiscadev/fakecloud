@@ -5762,14 +5762,22 @@ async fn ec2_describe_reserved_instances_offerings() {
 async fn ec2_purchase_reserved_instances_offering() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
-    let r = c
-        .purchase_reserved_instances_offering()
-        .instance_count(1)
-        .reserved_instances_offering_id("offering-1")
+    let offerings = c
+        .describe_reserved_instances_offerings()
         .send()
         .await
         .unwrap();
-    assert!(r.reserved_instances_id().unwrap().starts_with("ri-"));
+    let offering = offerings.reserved_instances_offerings()[0]
+        .reserved_instances_offering_id()
+        .unwrap();
+    let r = c
+        .purchase_reserved_instances_offering()
+        .instance_count(1)
+        .reserved_instances_offering_id(offering)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.reserved_instances_id().unwrap().len(), 36);
 }
 
 #[test_action("ec2", "DescribeReservedInstancesListings", checksum = "3ef7be7d")]

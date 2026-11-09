@@ -285,6 +285,11 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             // A RunInstances secondary interface naming an interface that is
             // already attached.
             "InvalidNetworkInterface.InUse",
+            // PurchaseReservedInstancesOffering resolves the offering id it is
+            // given; the probe's synthetic ids name no offering, which AWS
+            // answers with this code (EC2 "Error codes" reference: "The
+            // specified Reserved Instances offering does not exist.").
+            "InvalidReservedInstancesOfferingId",
             // A request with `DryRun=true` that would have succeeded: EC2's
             // documented common client error (HTTP 412), answered from the
             // permission check before the request is validated

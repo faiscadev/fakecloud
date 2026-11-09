@@ -1150,6 +1150,40 @@ pub struct ReservedInstances {
     pub duration: i64,
     pub fixed_price: String,
     pub usage_price: String,
+    /// `Availability Zone` or `Region` (then `availability_zone` is empty).
+    #[serde(default = "ri_default_scope")]
+    pub scope: String,
+    #[serde(default = "ri_default_offering_class")]
+    pub offering_class: String,
+    #[serde(default = "ri_default_offering_type")]
+    pub offering_type: String,
+    #[serde(default = "ri_default_tenancy")]
+    pub instance_tenancy: String,
+    /// When the reservation started and ends, `start` plus `duration`.
+    #[serde(default = "ri_default_start")]
+    pub start: String,
+    #[serde(default = "ri_default_end")]
+    pub end: String,
+}
+
+// What a reservation persisted before these were recorded reported.
+fn ri_default_scope() -> String {
+    "Availability Zone".to_string()
+}
+fn ri_default_offering_class() -> String {
+    "standard".to_string()
+}
+fn ri_default_offering_type() -> String {
+    "No Upfront".to_string()
+}
+fn ri_default_tenancy() -> String {
+    "default".to_string()
+}
+fn ri_default_start() -> String {
+    "2024-01-01T00:00:00.000Z".to_string()
+}
+fn ri_default_end() -> String {
+    "2025-01-01T00:00:00.000Z".to_string()
 }
 
 /// A Reserved Instances listing in the Reserved Instance Marketplace.
