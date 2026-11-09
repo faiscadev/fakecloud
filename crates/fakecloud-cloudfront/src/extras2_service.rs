@@ -346,9 +346,10 @@ impl CloudFrontService {
             Target::Distribution(did) => account.distributions.contains_key(did),
         };
         if !target_ok {
-            return Err(crate::policies::entity_not_found(
-                "target resource",
-                target.id(),
+            return Err(aws_error(
+                StatusCode::NOT_FOUND,
+                "EntityNotFound",
+                format!("The target resource {} was not found", target.id()),
             ));
         }
 
@@ -426,10 +427,7 @@ impl CloudFrontService {
         // declared error shapes are AccessDenied / EntityNotFound, so return
         // EntityNotFound rather than a fabricated 200.
         if crate::service::is_placeholder_label(&id) {
-            return Err(crate::policies::entity_not_found(
-                "managed certificate",
-                &id,
-            ));
+            return Err(crate::policies::not_found("ManagedCertificate", &id));
         }
         let mut body = String::with_capacity(256);
         body.push_str(XML_DECL);

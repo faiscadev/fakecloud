@@ -769,7 +769,8 @@ fn not_found_code(kind: &str) -> &'static str {
         "KeyGroup" => "NoSuchResource",
         "FieldLevelEncryption" => "NoSuchFieldLevelEncryptionConfig",
         "AnycastIpList" | "ConnectionFunction" | "ConnectionGroup" | "DistributionTenant"
-        | "KeyValueStore" | "ResourcePolicy" | "TrustStore" | "VpcOrigin" => "EntityNotFound",
+        | "KeyValueStore" | "ManagedCertificate" | "ResourcePolicy" | "TrustStore"
+        | "VpcOrigin" => "EntityNotFound",
         _ => "",
     }
 }
@@ -790,18 +791,6 @@ pub(crate) fn not_found(kind: &str, id: &str) -> AwsServiceError {
     aws_error(
         StatusCode::NOT_FOUND,
         code,
-        format!("The specified {kind} does not exist: {id}"),
-    )
-}
-
-/// `EntityNotFound` (404): the code the newer CloudFront operations
-/// (tenants, connection functions/groups, web ACL association, domain
-/// association, managed certificates) declare for a missing resource, in
-/// place of the per-type `NoSuch*` codes.
-pub(crate) fn entity_not_found(kind: &str, id: &str) -> AwsServiceError {
-    aws_error(
-        StatusCode::NOT_FOUND,
-        "EntityNotFound",
         format!("The specified {kind} does not exist: {id}"),
     )
 }

@@ -301,7 +301,7 @@ impl CloudFrontService {
                 .accounts
                 .get(&req.account_id)
                 .and_then(|a| a.connection_functions.get(&name).cloned())
-                .ok_or_else(|| crate::policies::entity_not_found("ConnectionFunction", &name))?
+                .ok_or_else(|| not_found("ConnectionFunction", &name))?
         };
         if f.etag != if_match {
             return Err(precondition_failed());
