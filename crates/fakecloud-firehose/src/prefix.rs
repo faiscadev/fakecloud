@@ -1,7 +1,7 @@
 //! Custom S3 prefixes: `!{timestamp:<pattern>}`, `!{firehose:random-string}` and
 //! `!{firehose:error-output-type}`, evaluated when a batch is cut.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use fakecloud_core::service::AwsServiceError;
 
 use crate::config::invalid_argument;
@@ -83,6 +83,13 @@ fn validate_expressions(prefix: &str, error_prefix: bool) -> Result<(), AwsServi
     Ok(())
 }
 
+/// Whether a stored prefix can be evaluated. Admission asks only this: the rule on
+/// `ErrorOutputPrefix` and anything about a prefix delivery does not read were
+/// never required of streams already stored, which must keep delivering.
+pub(crate) fn validate_evaluable(prefix: &str) -> Result<(), AwsServiceError> {
+    validate_expressions(prefix, false)
+}
+
 /// What `CreateDeliveryStream` and `UpdateDestination` require of a destination's
 /// two prefixes. Expressions in `Prefix` need an `ErrorOutputPrefix`, which need
 /// not hold any itself.
@@ -133,58 +140,169 @@ pub(crate) fn render(prefix: &str, at: DateTime<Utc>, error_output_type: Option<
 }
 
 /// A Java `DateTimeFormatter` pattern, the kind AWS documents for this namespace,
-/// over the fields a date in UTC has. Other letters are refused.
+/// formatted as Java does in `Locale.US` and UTC. A pattern Java would refuse is
+/// refused, as is `B` (the day-period letter), whose text this does not model.
 fn render_timestamp(pattern: &str, at: DateTime<Utc>) -> Result<String, ()> {
     let mut output = String::new();
     let mut chars = pattern.chars().peekable();
+    let mut optional_depth = 0usize;
+    let mut pad_next = None;
     while let Some(c) = chars.next() {
-        if c == '\'' {
-            if chars.peek() == Some(&'\'') {
-                chars.next();
-                output.push('\'');
+        let item = match c {
+            '\'' => quoted_text(&mut chars)?,
+            '[' => {
+                optional_depth += 1;
                 continue;
             }
-            loop {
-                match chars.next() {
-                    Some('\'') => break,
-                    Some(quoted) => output.push(quoted),
-                    None => return Err(()),
+            ']' => {
+                optional_depth = optional_depth.checked_sub(1).ok_or(())?;
+                continue;
+            }
+            '{' | '}' | '#' => return Err(()),
+            c if c.is_ascii_alphabetic() => {
+                let mut count = 1;
+                while chars.peek() == Some(&c) {
+                    chars.next();
+                    count += 1;
                 }
+                if c == 'p' {
+                    pad_next = Some(count);
+                    continue;
+                }
+                date_field(c, count, at)?
             }
-        } else if c.is_ascii_alphabetic() {
-            let mut run = 1;
-            while chars.peek() == Some(&c) {
-                chars.next();
-                run += 1;
-            }
-            let format = match (c, run) {
-                ('y' | 'u', 2) => "%y",
-                ('y' | 'u', _) => "%Y",
-                ('M', 1) => "%-m",
-                ('M', 2) => "%m",
-                ('M', 3) => "%b",
-                ('M', 4) => "%B",
-                ('d', 1) => "%-d",
-                ('d', 2) => "%d",
-                ('H', 1) => "%-H",
-                ('H', 2) => "%H",
-                ('m', 1) => "%-M",
-                ('m', 2) => "%M",
-                ('s', 1) => "%-S",
-                ('s', 2) => "%S",
-                ('S', 3) => "%3f",
-                ('D', 1..=3) => "%j",
-                ('E', 1..=3) => "%a",
-                ('E', 4) => "%A",
-                ('a', 1) => "%p",
-                _ => return Err(()),
-            };
-            output.push_str(&at.format(format).to_string());
-        } else {
-            output.push(c);
+            c => c.to_string(),
+        };
+        match pad_next.take() {
+            Some(width) => output.push_str(&format!("{item:>width$}")),
+            None => output.push_str(&item),
         }
     }
+    if pad_next.is_some() {
+        return Err(());
+    }
     Ok(output)
+}
+
+/// The text of a quote whose opening `'` was read. `''` alone is one quote mark,
+/// and so is `''` inside a quote.
+fn quoted_text(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<String, ()> {
+    if chars.peek() == Some(&'\'') {
+        chars.next();
+        return Ok("'".to_owned());
+    }
+    let mut text = String::new();
+    loop {
+        match chars.next().ok_or(())? {
+            '\'' if chars.peek() == Some(&'\'') => {
+                chars.next();
+                text.push('\'');
+            }
+            '\'' => return Ok(text),
+            other => text.push(other),
+        }
+    }
+}
+
+/// One pattern letter repeated `count` times. Numbers are zero padded to `count`,
+/// and each letter has its own limit, past which Java refuses the pattern.
+fn date_field(letter: char, count: usize, at: DateTime<Utc>) -> Result<String, ()> {
+    let number = |value: i64, max_count: usize| {
+        (count <= max_count)
+            .then(|| format!("{value:0count$}"))
+            .ok_or(())
+    };
+    let year = |value: i32| {
+        if count == 2 {
+            Ok(format!("{:02}", value.rem_euclid(100)))
+        } else {
+            number(i64::from(value), 19)
+        }
+    };
+    let text = |short: &str, long: &str, narrow: &str| match count {
+        1..=3 => Ok(short.to_owned()),
+        4 => Ok(long.to_owned()),
+        5 => Ok(narrow.to_owned()),
+        _ => Err(()),
+    };
+    let short_month = at.format("%b").to_string();
+    let long_month = at.format("%B").to_string();
+    let short_day = at.format("%a").to_string();
+    let long_day = at.format("%A").to_string();
+    let month_text = || text(&short_month, &long_month, &short_month[..1]);
+    let day_text = || text(&short_day, &long_day, &short_day[..1]);
+    let day_of_week = i64::from(at.weekday().num_days_from_sunday());
+    // Week fields follow Locale.US: weeks start on Sunday, and the one holding
+    // January 1 is week 1, of the year its Saturday falls in.
+    let saturday = at.date_naive() + chrono::Duration::days(6 - day_of_week);
+    let first_of_month_weekday = (i64::from(at.day0()) - day_of_week).rem_euclid(7);
+    let first_of_month_weekday = (7 - first_of_month_weekday) % 7;
+    let hour = i64::from(at.hour());
+    let quarter = i64::from(at.month0() / 3 + 1);
+    let nanos_of_second = i64::from(at.nanosecond() % 1_000_000_000);
+    let nanos_of_day = i64::from(at.num_seconds_from_midnight()) * 1_000_000_000 + nanos_of_second;
+    match letter {
+        'G' => text("AD", "Anno Domini", "A"),
+        'y' | 'u' => year(at.year()),
+        'Y' => year(saturday.year()),
+        'D' => number(i64::from(at.ordinal()), 3),
+        'M' | 'L' if count <= 2 => number(i64::from(at.month()), 2),
+        'M' | 'L' => month_text(),
+        'd' => number(i64::from(at.day()), 2),
+        'Q' | 'q' => match count {
+            1 | 5 => Ok(quarter.to_string()),
+            2 => Ok(format!("{quarter:02}")),
+            3 => Ok(format!("Q{quarter}")),
+            4 => Ok(format!(
+                "{quarter}{} quarter",
+                ["st", "nd", "rd", "th"][quarter as usize - 1]
+            )),
+            _ => Err(()),
+        },
+        'w' => number(i64::from(saturday.ordinal0() / 7 + 1), 2),
+        'W' => number((i64::from(at.day0()) + first_of_month_weekday) / 7 + 1, 1),
+        'E' => day_text(),
+        'e' if count <= 2 => number(day_of_week + 1, 2),
+        'e' => day_text(),
+        'c' if count == 1 => Ok((day_of_week + 1).to_string()),
+        'c' if count == 2 => Err(()),
+        'c' => day_text(),
+        'F' => number(i64::from(at.day0() % 7) + 1, 1),
+        'a' if count == 1 => Ok(at.format("%p").to_string()),
+        'a' => Err(()),
+        'H' => number(hour, 2),
+        'k' => number(if hour == 0 { 24 } else { hour }, 2),
+        'K' => number(hour % 12, 2),
+        'h' => number(if hour % 12 == 0 { 12 } else { hour % 12 }, 2),
+        'm' => number(i64::from(at.minute()), 2),
+        's' => number(i64::from(at.second()), 2),
+        'S' if count <= 9 => Ok(format!("{nanos_of_second:09}")[..count].to_owned()),
+        'S' => Err(()),
+        'A' => number(nanos_of_day / 1_000_000, 19),
+        'n' => number(nanos_of_second, 19),
+        'N' => number(nanos_of_day, 19),
+        // Days since the Modified Julian Day epoch, 1858-11-17.
+        'g' => number(i64::from(at.date_naive().num_days_from_ce()) - 678_576, 19),
+        'V' if count == 2 => Ok("UTC".to_owned()),
+        'v' if count == 1 => Ok("UTC".to_owned()),
+        'z' if count <= 3 => Ok("UTC".to_owned()),
+        'z' if count == 4 => Ok("Coordinated Universal Time".to_owned()),
+        'O' if count == 1 || count == 4 => Ok("GMT".to_owned()),
+        'X' if count <= 5 => Ok("Z".to_owned()),
+        'x' => match count {
+            1 => Ok("+00".to_owned()),
+            2 | 4 => Ok("+0000".to_owned()),
+            3 | 5 => Ok("+00:00".to_owned()),
+            _ => Err(()),
+        },
+        'Z' => match count {
+            1..=3 => Ok("+0000".to_owned()),
+            4 => Ok("GMT".to_owned()),
+            5 => Ok("Z".to_owned()),
+            _ => Err(()),
+        },
+        _ => Err(()),
+    }
 }
 
 #[cfg(test)]
@@ -249,12 +367,48 @@ mod tests {
         );
     }
 
+    /// Outputs of `DateTimeFormatter.ofPattern(pattern, Locale.US)` on JDK 17, the
+    /// JDK bundled with OpenSearch 2.11, in zone UTC, for four instants. `ERR` is a
+    /// pattern it refuses.
+    #[test]
+    fn timestamps_match_java_date_time_formatter() {
+        let instants = [
+            "2026-11-09T14:19:56.123456789Z",
+            "2026-12-27T00:05:06.007Z",
+            "2027-01-01T12:00:00Z",
+            "2024-02-29T23:59:59Z",
+        ]
+        .map(|at| {
+            DateTime::parse_from_rfc3339(at)
+                .unwrap()
+                .with_timezone(&Utc)
+        });
+        let golden = include_str!("../tests/fixtures/java_date_patterns.tsv");
+        for row in golden.lines() {
+            let mut columns = row.split('\t');
+            let pattern = columns.next().unwrap();
+            let first = columns.next().unwrap();
+            if first == "ERR" {
+                assert_eq!(render_timestamp(pattern, instants[0]), Err(()), "{pattern}");
+                continue;
+            }
+            let expected = std::iter::once(first).chain(columns.take(3));
+            for (at, expected) in instants.iter().zip(expected) {
+                assert_eq!(
+                    render_timestamp(pattern, *at).as_deref(),
+                    Ok(expected),
+                    "{pattern} at {at}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn malformed_expressions_are_refused() {
         for prefix in [
             "!{timestamp:yyyy",
             "!{timestamp}",
-            "!{timestamp:QQ}",
+            "!{timestamp:ddd}",
             "!{firehose:other}",
             "!{firehose:error-output-type}",
         ] {

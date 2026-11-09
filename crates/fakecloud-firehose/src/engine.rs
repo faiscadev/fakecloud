@@ -186,6 +186,19 @@ struct ActiveBuffer {
 }
 
 impl ActiveBuffer {
+    /// IDs for records admitted while the destination needed none, so that IDs
+    /// stay aligned with records by position once it does.
+    fn backfill_document_ids(&mut self) {
+        if self.document_ids.len() >= self.records.len() {
+            return;
+        }
+        let prefix = crate::search::direct_put_id_prefix();
+        let missing = self.document_ids.len()..self.records.len();
+        for subsequence in missing.clone().map(|position| position - missing.start) {
+            self.document_ids.push(format!("{prefix}.{subsequence}"));
+        }
+    }
+
     /// Nothing to write: no records, or only empty records for a destination
     /// that adds no delimiter. Judged on the payload before any codec runs,
     /// since even GZIP encodes an empty payload into nonempty bytes, while
@@ -261,9 +274,12 @@ impl StreamBuffer {
         {
             return BTreeMap::new();
         }
-        let active = self.active.take().unwrap();
+        let mut active = self.active.take().unwrap();
         if active.is_empty(&config) {
             return self.discard(active.source_positions);
+        }
+        if config.search.is_some() {
+            active.backfill_document_ids();
         }
         let oldest_arrival = active
             .arrivals
@@ -444,11 +460,14 @@ impl FirehoseEngine {
 
     /// A `ClusterEndpoint` must answer, as AWS checks when it is named. Not
     /// checked without a topology: nothing else about the world is known then.
-    pub(crate) fn require_cluster_endpoint(&self, endpoint: &str) -> Result<(), AwsServiceError> {
+    pub(crate) async fn require_cluster_endpoint(
+        &self,
+        endpoint: &str,
+    ) -> Result<(), AwsServiceError> {
         if self.core.topology.read().is_none() {
             return Ok(());
         }
-        crate::search::probe_cluster_endpoint(endpoint)
+        crate::search::probe_cluster_endpoint(endpoint).await
     }
 
     pub(crate) fn require_kinesis_stream(
@@ -713,6 +732,9 @@ impl FirehoseEngine {
             // The records of one Direct PUT call share an ID prefix.
             let direct_put = (source_generation.is_none() && destination.search.is_some())
                 .then(crate::search::direct_put_id_prefix);
+            if direct_put.is_some() {
+                active.backfill_document_ids();
+            }
             let mut subsequence = 0;
             for (position, (record, admitted)) in records.into_iter().zip(&accepted).enumerate() {
                 if !admitted {
@@ -1424,6 +1446,32 @@ mod tests {
         f.advance(5);
         f.turn().await;
         assert_eq!(f.queued(), 0, "past the newest record's retention");
+    }
+
+    /// Records buffered before a destination needed IDs get their own, so the IDs
+    /// of later records do not shift onto them.
+    #[test]
+    fn document_ids_stay_aligned_with_records_admitted_without_them() {
+        let now = TimePoint {
+            monotonic: Instant::now(),
+            wall: Utc::now(),
+        };
+        let mut active = ActiveBuffer {
+            records: vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
+            document_ids: Vec::new(),
+            arrivals: vec![now.wall; 2],
+            source_generation: None,
+            source_positions: BTreeMap::new(),
+            input_bytes: 2,
+            first: now,
+        };
+        active.backfill_document_ids();
+        assert_eq!(active.document_ids.len(), 2);
+        assert!(active.document_ids[0].ends_with(".0"));
+        assert!(active.document_ids[1].ends_with(".1"));
+        let before = active.document_ids.clone();
+        active.backfill_document_ids();
+        assert_eq!(active.document_ids, before, "nothing more to fill");
     }
 
     #[tokio::test]
@@ -3285,12 +3333,24 @@ mod tests {
         );
     }
 
+    /// A stored prefix that delivered before prefixes were validated still does: an
+    /// `ErrorOutputPrefix` delivery never reads cannot stop it.
+    #[test]
+    fn stored_streams_are_not_refused_for_rules_only_create_applies() {
+        let mut destination = destination(60);
+        destination.error_output_prefix = Some("!{bogus:x}/".into());
+        assert!(delivery_config(&destination).is_ok());
+        destination.prefix = Some("!{timestamp:yyyy}/".into());
+        destination.error_output_prefix = None;
+        assert!(delivery_config(&destination).is_ok());
+    }
+
     #[tokio::test]
     async fn unsupported_shutdown_counts_paused_active() {
         let f = Fixture::new(60);
         f.enqueue(vec![Bytes::from_static(b"accepted"), Bytes::new()]);
         f.update(NAME, |s| {
-            s.destination.as_mut().unwrap().prefix = Some("!{timestamp:yyyy}/".into())
+            s.destination.as_mut().unwrap().prefix = Some("!{partitionKeyFromQuery:id}/".into())
         });
         assert_eq!(
             f.engine.shutdown().await,

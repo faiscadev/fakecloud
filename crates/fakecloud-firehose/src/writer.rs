@@ -197,9 +197,27 @@ impl S3BatchWriter {
             }
         }
         progress.pending.clear();
-        search::apply_parse_exception(search.family, progress);
-        progress.failed.sort_by_key(|failure| failure.index);
         Ok(())
+    }
+
+    /// The object of the records refused before sending, if any are still live.
+    fn put_rejected(
+        &self,
+        batch: &DeliveryBatch,
+        search: &SearchDelivery,
+        progress: &search::BulkProgress,
+    ) -> Result<DeliveryWriteOutcome, String> {
+        let lines: Vec<String> = progress
+            .rejected
+            .iter()
+            .filter(|failure| !batch.destination.expired.contains(&failure.index))
+            .map(|failure| search::rejected_record(batch, failure))
+            .collect();
+        if lines.is_empty() {
+            return Ok(DeliveryWriteOutcome::Committed);
+        }
+        let key = search::rejected_object_key(batch, search);
+        self.put(batch, &key, &[lines.join("\n")])
     }
 
     fn write_search(
@@ -218,21 +236,20 @@ impl S3BatchWriter {
             .retain(|index| !batch.destination.expired.contains(index));
         let live = |failure: &&search::Failure| !batch.destination.expired.contains(&failure.index);
         let mut outcome = DeliveryWriteOutcome::Committed;
+        // Written when first seen, as recorded, but a failed S3 write must not hold
+        // back the valid records: indexing goes on, and it is tried again below.
+        let mut rejected_failure = None;
         if !progress.rejected_written {
-            let lines: Vec<String> = progress
-                .rejected
-                .iter()
-                .filter(live)
-                .map(|failure| search::rejected_record(batch, failure))
-                .collect();
-            if !lines.is_empty() {
-                let key = search::rejected_object_key(batch, search);
-                outcome = self.put(batch, &key, &[lines.join("\n")])?;
-                if outcome == DeliveryWriteOutcome::Cancelled {
-                    return Ok(outcome);
+            match self.put_rejected(batch, search, &progress) {
+                Ok(DeliveryWriteOutcome::Cancelled) => {
+                    return Ok(DeliveryWriteOutcome::Cancelled);
                 }
+                Ok(written) => {
+                    outcome = written;
+                    progress.rejected_written = true;
+                }
+                Err(error) => rejected_failure = Some(error),
             }
-            progress.rejected_written = true;
         }
         if !progress.pending.is_empty() {
             if let Err(message) = self.index_pending(batch, search, &mut progress) {
@@ -241,8 +258,14 @@ impl S3BatchWriter {
                 return Err(message);
             }
         }
+        // Also when the last pending records expired and nothing was sent.
+        search::apply_parse_exception(search.family, &mut progress);
+        progress.failed.sort_by_key(|failure| failure.index);
         // A failed S3 write below retries the write, not the indexing.
         search.attempts.save(progress.clone());
+        if let Some(error) = rejected_failure {
+            return Err(error);
+        }
         if search.backup_all {
             outcome = self.put(batch, &batch.object_key, &batch.live_records())?;
         }
@@ -996,6 +1019,96 @@ mod tests {
             assert_eq!(lines[0]["errorCode"], code);
             assert_eq!(lines[0]["attemptsMade"], 2);
         }
+    }
+
+    /// A failed S3 write of refused records does not hold back the valid ones: they
+    /// are indexed, and only the write is tried again, not the indexing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_refused_write_does_not_stop_indexing() {
+        let (state, s3, mut batch) = fixture();
+        search_batch(&mut batch, Duration::from_secs(300));
+        batch.records = vec![Bytes::from_static(b"{\"ok\":1}"), Bytes::new()];
+        let (endpoint, sent) = bulk_stub(vec![serde_json::json!({
+            "errors": false, "items": [{"index": {"status": 201}}],
+        })])
+        .await;
+        batch.destination.search.as_mut().unwrap().target = SearchTarget::Cluster(endpoint);
+        batch.destination.bucket = "missing-for-now".into();
+        let writer = Arc::new(writer(&state, &s3, None));
+        let (first_writer, first_batch) = (writer.clone(), batch.clone());
+        let error = tokio::task::spawn_blocking(move || first_writer.write(&first_batch))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("missing-for-now"), "{error}");
+        assert_eq!(*sent.lock(), vec![1], "indexed despite the failed write");
+        assert_eq!(
+            batch
+                .destination
+                .search
+                .as_ref()
+                .unwrap()
+                .attempts
+                .retry_delay(Duration::from_secs(300)),
+            None,
+            "retries on S3's interval, not the bulk schedule"
+        );
+
+        s3.write().get_or_create(ACCOUNT).buckets.insert(
+            "missing-for-now".into(),
+            S3Bucket::new("missing-for-now", REGION, "owner"),
+        );
+        tokio::task::spawn_blocking(move || writer.write(&batch))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*sent.lock(), vec![1], "not indexed a second time");
+        let accounts = s3.read();
+        let objects = &accounts.get(ACCOUNT).unwrap().buckets["missing-for-now"].objects;
+        assert_eq!(objects.len(), 1);
+    }
+
+    /// Failures collected before the last pending records expired are still
+    /// finished: sorted, with the code the batch's outcome gives them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failures_are_finished_when_the_last_pending_records_expire() {
+        let (state, s3, mut batch) = fixture();
+        search_batch(&mut batch, Duration::from_secs(300));
+        batch.records = vec![
+            Bytes::from_static(b"{\"n\":0}"),
+            Bytes::from_static(b"{\"n\":1}"),
+            Bytes::from_static(b"{\"n\":2}"),
+            Bytes::from_static(b"{\"n\":3}"),
+        ];
+        let search = batch.destination.search.clone().unwrap();
+        let bad = |index| search::Failure {
+            index,
+            code: "OS.ServiceException".into(),
+            message: "m".into(),
+            retriable: false,
+            bad_request_item: true,
+        };
+        search.attempts.save(search::BulkProgress {
+            failed: vec![bad(2), bad(0)],
+            pending: vec![3],
+            rejected_written: true,
+            any_indexed: true,
+            ..Default::default()
+        });
+        batch.destination.expired.insert(3);
+        let key = batch.object_key.clone();
+        let writer = Arc::new(writer(&state, &s3, None));
+        tokio::task::spawn_blocking(move || writer.write(&batch))
+            .await
+            .unwrap()
+            .unwrap();
+        let lines = failure_lines(&s3, &key);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["rawData"], "eyJuIjowfQ==", "sorted by position");
+        assert_eq!(
+            lines[0]["errorCode"],
+            "OS.AmazonOpenSearchServiceParseException"
+        );
     }
 
     /// A record that aged out while its batch retried is not delivered, while the

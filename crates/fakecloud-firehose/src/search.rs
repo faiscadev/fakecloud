@@ -299,35 +299,50 @@ pub(crate) fn apply_parse_exception(family: SearchFamily, progress: &mut BulkPro
     }
 }
 
-/// How long a `ClusterEndpoint` check may hold up a request. The lookup and
-/// connection run on their own thread so that a resolver or peer that never
-/// answers cannot hang the request past this.
+/// How long a `ClusterEndpoint` check may hold up a request. It runs on the async
+/// path with no lock held, so it costs a worker nothing while it waits. A resolver
+/// that never answers leaves its lookup on Tokio's bounded blocking pool, not on a
+/// thread of its own.
 const ENDPOINT_PROBE_LIMIT: Duration = Duration::from_secs(3);
 
+#[derive(Debug, PartialEq)]
 enum EndpointProbe {
     NoSuchName,
     Unreachable,
     Reachable,
 }
 
-fn probe_endpoint(host: String, port: u16) -> EndpointProbe {
-    use std::net::{TcpStream, ToSocketAddrs};
-    let Ok(addresses) = (host.as_str(), port).to_socket_addrs() else {
-        return EndpointProbe::NoSuchName;
-    };
-    let reached = addresses
-        .into_iter()
-        .any(|address| TcpStream::connect_timeout(&address, ENDPOINT_PROBE_LIMIT).is_ok());
-    if reached {
-        EndpointProbe::Reachable
-    } else {
+/// Resolves, then connects to every address at once for the time left, so one
+/// that never answers cannot use up another's chance. A resolver slower than the
+/// limit has said nothing about the name, so that counts as failing to connect.
+async fn probe_addresses<L>(lookup: L, limit: Duration) -> EndpointProbe
+where
+    L: std::future::Future<Output = std::io::Result<Vec<std::net::SocketAddr>>>,
+{
+    let probe = async {
+        let addresses = match lookup.await {
+            Ok(addresses) if !addresses.is_empty() => addresses,
+            _ => return EndpointProbe::NoSuchName,
+        };
+        let mut connections = tokio::task::JoinSet::new();
+        for address in addresses {
+            connections.spawn(tokio::net::TcpStream::connect(address));
+        }
+        while let Some(connection) = connections.join_next().await {
+            if matches!(connection, Ok(Ok(_))) {
+                return EndpointProbe::Reachable;
+            }
+        }
         EndpointProbe::Unreachable
-    }
+    };
+    tokio::time::timeout(limit, probe)
+        .await
+        .unwrap_or(EndpointProbe::Unreachable)
 }
 
 /// Checks a `ClusterEndpoint` as AWS does when it is named: a name that does not
 /// resolve and a cluster that cannot be connected to each have their own message.
-pub(crate) fn probe_cluster_endpoint(endpoint: &str) -> Result<(), AwsServiceError> {
+pub(crate) async fn probe_cluster_endpoint(endpoint: &str) -> Result<(), AwsServiceError> {
     let invalid = || {
         invalid_argument(format!(
             "Invalid Elasticsearch Cluster Endpoint {endpoint}. If this Elasticsearch domain is \
@@ -341,14 +356,15 @@ pub(crate) fn probe_cluster_endpoint(endpoint: &str) -> Result<(), AwsServiceErr
         .trim_matches(['[', ']'])
         .to_owned();
     let port = url.port_or_known_default().ok_or_else(invalid)?;
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = sender.send(probe_endpoint(host, port));
-    });
-    match receiver.recv_timeout(ENDPOINT_PROBE_LIMIT) {
-        Ok(EndpointProbe::Reachable) => Ok(()),
-        Ok(EndpointProbe::NoSuchName) => Err(invalid()),
-        Ok(EndpointProbe::Unreachable) | Err(_) => Err(invalid_argument(
+    let lookup = async move {
+        tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map(Iterator::collect)
+    };
+    match probe_addresses(lookup, ENDPOINT_PROBE_LIMIT).await {
+        EndpointProbe::Reachable => Ok(()),
+        EndpointProbe::NoSuchName => Err(invalid()),
+        EndpointProbe::Unreachable => Err(invalid_argument(
             "Error connecting to the provided ElasticSearch cluster endpoint.  Ensure that the \
              ElasticSearch cluster endpoint is valid.",
         )),
@@ -1149,14 +1165,17 @@ mod tests {
     }
 
     /// The two recorded refusals of a `ClusterEndpoint`, and one that answers.
-    #[test]
-    fn cluster_endpoints_are_probed() {
+    #[tokio::test]
+    async fn cluster_endpoints_are_probed() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        probe_cluster_endpoint(&format!("http://127.0.0.1:{port}")).unwrap();
+        probe_cluster_endpoint(&format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
         drop(listener);
         assert_eq!(
             probe_cluster_endpoint(&format!("http://127.0.0.1:{port}"))
+                .await
                 .unwrap_err()
                 .message(),
             "Error connecting to the provided ElasticSearch cluster endpoint.  Ensure that the \
@@ -1164,10 +1183,39 @@ mod tests {
         );
         assert_eq!(
             probe_cluster_endpoint("https://no-such-host.invalid")
+                .await
                 .unwrap_err()
                 .message(),
             "Invalid Elasticsearch Cluster Endpoint https://no-such-host.invalid. If this \
              Elasticsearch domain is in VPC, please specify VpcConfiguration."
+        );
+    }
+
+    /// An address that never answers does not cost a later one its chance, and a
+    /// resolver that never answers cannot hold the request past the limit.
+    #[tokio::test]
+    async fn a_silent_address_or_resolver_cannot_use_up_the_probe() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let working = listener.local_addr().unwrap();
+        // Reserved for documentation, so nothing answers it.
+        let silent: std::net::SocketAddr = "192.0.2.1:9200".parse().unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe_addresses(
+                async move { Ok(vec![silent, working]) },
+                Duration::from_secs(30)
+            )
+            .await,
+            EndpointProbe::Reachable
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(
+            probe_addresses(std::future::pending(), Duration::from_millis(50)).await,
+            EndpointProbe::Unreachable
+        );
+        assert_eq!(
+            probe_addresses(async { Ok(Vec::new()) }, Duration::from_secs(1)).await,
+            EndpointProbe::NoSuchName
         );
     }
 
