@@ -470,9 +470,6 @@ pub(crate) enum StopKind {
     ContentFiltered,
 }
 
-/// Map an upstream finish/stop reason onto [`StopKind`]. A model that emitted a
-/// tool call is `ToolUse` regardless of the raw string, unless the token limit
-/// cut the reply off.
 /// Whether a provider's stop reason means the reply ran out of tokens.
 fn is_token_limit(upstream: Option<&str>) -> bool {
     upstream.is_some_and(|reason| {
@@ -483,6 +480,9 @@ fn is_token_limit(upstream: Option<&str>) -> bool {
     })
 }
 
+/// Map an upstream finish/stop reason onto [`StopKind`]. A model that emitted a
+/// tool call is `ToolUse` regardless of the raw string, unless the token limit
+/// cut the reply off.
 pub(crate) fn normalize_stop(upstream: Option<&str>, has_tool_calls: bool) -> StopKind {
     if is_token_limit(upstream) {
         return StopKind::MaxTokens;

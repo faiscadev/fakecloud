@@ -491,10 +491,18 @@ pub(crate) fn parse_override(custom: &str) -> OverrideReply {
         },
     };
 
+    // Anthropic's and Converse's content blocks are objects; an array of
+    // anything else is no provider's reply.
+    let blocks_of = |value: &Value| {
+        value
+            .as_array()
+            .filter(|blocks| blocks.iter().all(Value::is_object))
+            .cloned()
+    };
     let mut text = String::new();
     let mut tools = Vec::new();
     let reason;
-    if let Some(blocks) = parsed["content"].as_array() {
+    if let Some(blocks) = blocks_of(&parsed["content"]) {
         for block in blocks {
             text.push_str(block["text"].as_str().unwrap_or_default());
             if block["type"] == "tool_use" {
@@ -507,7 +515,7 @@ pub(crate) fn parse_override(custom: &str) -> OverrideReply {
             }
         }
         reason = &parsed["stop_reason"];
-    } else if let Some(blocks) = parsed["output"]["message"]["content"].as_array() {
+    } else if let Some(blocks) = blocks_of(&parsed["output"]["message"]["content"]) {
         for block in blocks {
             text.push_str(block["text"].as_str().unwrap_or_default());
             let call = &block["toolUse"];
@@ -536,11 +544,8 @@ pub(crate) fn parse_override(custom: &str) -> OverrideReply {
     } else {
         return opaque();
     }
-    // Content that holds nothing readable (an image block, say) isn't a reply
-    // this can stream, so the body itself stays the text.
-    if text.is_empty() && tools.is_empty() && !reason.is_string() {
-        return opaque();
-    }
+    // A provider's body is its reply even with nothing to read in it (an empty
+    // generation, or only an image block): that reply is empty.
     let reason = reason.as_str();
     let stop = (reason.is_some() || !tools.is_empty())
         .then(|| crate::upstream::normalize_stop(reason, !tools.is_empty()));
@@ -735,11 +740,27 @@ mod tests {
     }
 
     #[test]
+    fn a_provider_body_with_no_text_is_an_empty_reply() {
+        for custom in [
+            r#"{"content":[{"type":"image"}]}"#,
+            r#"{"content":[]}"#,
+            r#"{"generation":""}"#,
+            r#"{"outputs":[{"text":""}]}"#,
+            r#"{"output":{"message":{"content":[]}}}"#,
+        ] {
+            let reply = parse_override(custom);
+            assert_eq!(reply.text, "", "{custom}");
+            assert!(reply.tools.is_empty());
+            assert_eq!(reply.stop, None);
+        }
+    }
+
+    #[test]
     fn an_override_without_a_readable_reply_is_opaque_text() {
         for custom in [
             "plain words",
             r#"{"label":"ham"}"#,
-            r#"{"content":[{"type":"image"}]}"#,
+            r#"{"content":["not", "blocks"]}"#,
         ] {
             let reply = parse_override(custom);
             assert_eq!(reply.text, custom);

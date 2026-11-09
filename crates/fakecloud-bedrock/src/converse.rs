@@ -120,14 +120,15 @@ pub(crate) fn offline_reply(
     // An override that says which tools were called has already decided.
     let forced_tool = forced_tool_name(tool_config).filter(|_| tools.is_empty());
 
-    let stop_reason = if let (false, Some(stop)) = (tools.is_empty(), override_stop) {
+    // A reply maxTokens cut off ended on the token limit, whatever else it
+    // holds: tool/agent loops have to see the truncation, as the upstream path's
+    // `normalize_stop` reports it.
+    let stop_reason = if truncated {
+        "max_tokens"
+    } else if let (false, Some(stop)) = (tools.is_empty(), override_stop) {
         crate::upstream::stop_converse(stop)
     } else if forced_tool.is_some() {
         "tool_use"
-    } else if truncated {
-        // Report the real reason the reply ended so tool/agent loops see the
-        // truncation, matching the upstream path's `normalize_stop`.
-        "max_tokens"
     } else if let Some(stop) = override_stop {
         crate::upstream::stop_converse(stop)
     } else {
@@ -439,7 +440,33 @@ mod tests {
         assert_eq!(invs.len(), 2);
         let streamed: Value = serde_json::from_str(&invs[1].output).unwrap();
         assert_eq!(streamed, converse_body);
-        assert_eq!(streamed["stopReason"], "tool_use");
+        // maxTokens cut the reply off before the forced tool call ended it.
+        assert_eq!(streamed["stopReason"], "max_tokens");
+    }
+
+    #[test]
+    fn a_truncated_override_with_tool_calls_stops_on_max_tokens() {
+        let s = shared();
+        s.write().default_mut().custom_responses.insert(
+            "m".to_string(),
+            json!({
+                "output": {"message": {"content": [
+                    {"text": "a reply long enough to run past the limit"},
+                    {"toolUse": {"toolUseId": "t", "name": "calc", "input": {}}}
+                ]}},
+                "stopReason": "tool_use"
+            })
+            .to_string(),
+        );
+        let truncated = br#"{"messages":[], "inferenceConfig": {"maxTokens": 2}}"#;
+        let reply = offline_reply(&s, &req(), "m", truncated);
+        assert_eq!(reply.stop_reason, "max_tokens");
+        assert_eq!(reply.tools.len(), 1);
+        let whole = br#"{"messages":[]}"#;
+        assert_eq!(
+            offline_reply(&s, &req(), "m", whole).stop_reason,
+            "tool_use"
+        );
     }
 
     #[test]
