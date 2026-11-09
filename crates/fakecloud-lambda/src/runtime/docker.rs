@@ -187,6 +187,10 @@ impl DockerBackend {
 
         let tmpfs_arg = ephemeral_storage_tmpfs_arg(func.ephemeral_storage_size);
         cmd.arg("--tmpfs").arg(tmpfs_arg);
+        cmd.args(memory_limit_args(
+            func.memory_size,
+            func.ephemeral_storage_size,
+        ));
 
         cmd.arg(&run_image);
 
@@ -271,6 +275,10 @@ impl DockerBackend {
 
         let tmpfs_arg = ephemeral_storage_tmpfs_arg(func.ephemeral_storage_size);
         cmd.arg("--tmpfs").arg(tmpfs_arg);
+        cmd.args(memory_limit_args(
+            func.memory_size,
+            func.ephemeral_storage_size,
+        ));
 
         cmd.arg(&image).arg(&func.handler);
 
@@ -527,6 +535,25 @@ impl LambdaBackend for DockerBackend {
         })?;
         Ok(())
     }
+}
+
+/// `--memory` and `--memory-swap` for a function's container. Without a limit a
+/// runtime sizes itself from the host: a JVM takes a quarter of host memory for
+/// its heap, so a few warm functions can starve the whole machine.
+///
+/// The `/tmp` tmpfs is charged to the same cgroup, unlike real Lambda where
+/// ephemeral storage is separate from function memory, so its size is added.
+/// A function that fills `/tmp` is never killed for it, at the price of one
+/// that overruns `MemorySize` surviving by up to the size of `/tmp`.
+fn memory_limit_args(memory_size_mb: i64, ephemeral_storage_mb: Option<i64>) -> [String; 4] {
+    let tmp_mb = ephemeral_storage_mb.unwrap_or(512).max(64);
+    let limit = format!("{}m", memory_size_mb.max(128) + tmp_mb);
+    [
+        "--memory".to_string(),
+        limit.clone(),
+        "--memory-swap".to_string(),
+        limit,
+    ]
 }
 
 /// `-e` arguments for a container environment, plus the variables to set on
@@ -900,6 +927,19 @@ mod tests {
         // clamping to a 64 MiB floor that Docker still accepts.
         assert_eq!(ephemeral_storage_tmpfs_arg(Some(0)), "/tmp:size=64m,exec");
         assert_eq!(ephemeral_storage_tmpfs_arg(Some(32)), "/tmp:size=64m,exec");
+    }
+
+    #[test]
+    fn memory_limit_covers_function_memory_and_tmp_with_no_swap() {
+        assert_eq!(
+            memory_limit_args(1024, Some(2048)),
+            ["--memory", "3072m", "--memory-swap", "3072m"]
+        );
+        // Out-of-range stored values still get a usable limit.
+        assert_eq!(
+            memory_limit_args(0, None),
+            ["--memory", "640m", "--memory-swap", "640m"]
+        );
     }
 
     #[test]
