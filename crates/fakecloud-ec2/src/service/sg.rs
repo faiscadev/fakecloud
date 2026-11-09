@@ -1261,11 +1261,7 @@ pub(crate) fn validate_security_group_quotas_for_interface(
     // A DryRun runs the same validation -- including the quota arithmetic, so a
     // set that would be rejected is still rejected -- and reports nothing back,
     // matching how the rest of EC2 treats one.
-    if req
-        .query_params
-        .get("DryRun")
-        .is_some_and(|v| v.eq_ignore_ascii_case("true"))
-    {
+    if crate::service_helpers::is_dry_run(&req.query_params) {
         return Ok(Ec2Service::respond(
             "ValidateSecurityGroupQuotasForInterface",
             &req.request_id,

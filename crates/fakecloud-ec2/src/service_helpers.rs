@@ -314,6 +314,25 @@ pub fn validate_enum(
 /// Reject an out-of-range `MaxResults` (the harness's `negative_below_min` /
 /// `negative_above_max` variants). EC2 describe pages bound MaxResults to
 /// [5, 1000] unless documented otherwise.
+/// Whether the request is a `DryRun`.
+pub(crate) fn is_dry_run(params: &HashMap<String, String>) -> bool {
+    params
+        .get("DryRun")
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+}
+
+/// `DryRunOperation`: the request would have succeeded without `DryRun`.
+pub(crate) fn refuse_dry_run(params: &HashMap<String, String>) -> Result<(), AwsServiceError> {
+    if is_dry_run(params) {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::PRECONDITION_FAILED,
+            "DryRunOperation",
+            "Request would have succeeded, but DryRun flag is set.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_max_results(
     params: &HashMap<String, String>,
     min: i64,

@@ -164,22 +164,13 @@ fn subnets_per_vpc_are_scoped_to_the_vpc() {
 #[test]
 fn a_new_default_subnet_counts_toward_the_default_vpc() {
     let svc = seeded(enforcing(&[(SUBNETS_PER_VPC, 0.0)]));
-    // The default VPC has default subnets in its first zones only.
-    let unseeded = {
-        let accounts = svc.state.read();
-        let state = accounts.regional(ACCT, "us-east-1").unwrap();
-        let zones: Vec<String> = state
-            .subnets
-            .values()
-            .filter(|s| s.default_for_az)
-            .map(|s| s.availability_zone.clone())
-            .collect();
-        crate::defaults::region_zones("us-east-1")
-            .into_iter()
-            .map(|(name, _)| name)
-            .find(|z| !zones.contains(z))
-            .expect("a zone without a default subnet")
-    };
+    // Every zone starts with a default subnet: delete one to recreate it.
+    let unseeded = "us-east-1f".to_string();
+    svc.state
+        .write()
+        .regional_mut(ACCT, "us-east-1")
+        .subnets
+        .retain(|_, s| !(s.default_for_az && s.availability_zone == unseeded));
     // The zone's existing default subnet is returned, not created.
     body(subnet::create_default_subnet(
         &svc,
@@ -1493,6 +1484,28 @@ async fn a_launch_naming_no_zone_lands_where_the_type_is_sold() {
     );
 }
 
+/// A dry run refuses what the real launch would, quotas included.
+#[tokio::test]
+async fn a_dry_run_is_refused_over_quota_like_the_launch() {
+    let svc = seeded(enforcing(&[(ON_DEMAND_STANDARD, 1.0)]));
+    let launch = [
+        ("InstanceType", "m5.large"),
+        ("MinCount", "1"),
+        ("MaxCount", "1"),
+    ];
+    let real = crate::test_support::err_of(run(&svc, &launch).await);
+    let mut dry = launch.to_vec();
+    dry.push(("DryRun", "true"));
+    let dry = crate::test_support::err_of(run(&svc, &dry).await);
+    assert_eq!(
+        (dry.code(), dry.message()),
+        (real.code(), real.message()),
+        "{}",
+        real.code()
+    );
+    assert_ne!(real.code(), "DryRunOperation");
+}
+
 /// The instance and its subnet are in the same zone, whatever default subnets exist.
 #[tokio::test]
 async fn a_zone_without_a_default_subnet_does_not_borrow_another_zones() {
@@ -1506,11 +1519,11 @@ async fn a_zone_without_a_default_subnet_does_not_borrow_another_zones() {
             ("Placement.AvailabilityZone", zone),
         ]
     };
-    // Past the three default subnets: the zone it asked for, and no other's subnet.
+    // Every zone has its default subnet, us-east-1f too.
     let out = body(run(&svc, &params("us-east-1f")).await);
     assert_eq!(in_zone(&out), "us-east-1f");
-    assert!(!out.contains("<subnetId>"), "{out}");
-    // A deleted default subnet behaves the same.
+    assert!(out.contains("<subnetId>"), "{out}");
+    // A deleted one is refused, not replaced by another zone's.
     let default_b = {
         let accounts = svc.state.read();
         accounts
@@ -1528,10 +1541,14 @@ async fn a_zone_without_a_default_subnet_does_not_borrow_another_zones() {
         .regional_mut(ACCT, "us-east-1")
         .subnets
         .remove(&default_b);
-    let out = body(run(&svc, &params("us-east-1b")).await);
-    assert_eq!(in_zone(&out), "us-east-1b");
-    assert!(!out.contains(&default_b), "{out}");
-    assert!(!out.contains("<subnetId>"), "{out}");
+    let e = crate::test_support::err_of(run(&svc, &params("us-east-1b")).await);
+    assert_eq!(
+        (e.code(), e.message().as_str()),
+        (
+            "MissingInput",
+            "No default subnet for availability zone: 'us-east-1b'."
+        )
+    );
     // With one, it uses it.
     let out = body(run(&svc, &params("us-east-1a")).await);
     assert_eq!(in_zone(&out), "us-east-1a");
@@ -1549,6 +1566,49 @@ async fn a_zone_without_a_default_subnet_does_not_borrow_another_zones() {
         .await,
     );
     assert_eq!(in_zone(&out), "us-east-1c", "{out}");
+}
+
+/// As recorded from real us-east-1.
+#[test]
+fn reserved_instance_offerings_follow_the_catalog() {
+    let offerings = |params: &[(&str, &str)]| {
+        crate::service::reserved::describe_reserved_instances_offerings(
+            &Ec2Service::new(),
+            &req("DescribeReservedInstancesOfferings", params),
+        )
+    };
+    for bogus in ["m5.bogus", "nodot"] {
+        let e = crate::test_support::err_of(offerings(&[("InstanceType", bogus)]));
+        assert_eq!(
+            (e.code(), e.message()),
+            (
+                "InvalidParameterValue",
+                format!("The following supplied instance types do not exist: [{bogus}]")
+            )
+        );
+    }
+    let out = body(offerings(&[("InstanceType", "m5.large")]));
+    let zones: Vec<&str> = out
+        .split("<availabilityZone>")
+        .skip(1)
+        .map(|s| s.split('<').next().unwrap())
+        .collect();
+    assert_eq!(
+        zones,
+        [
+            "us-east-1a",
+            "us-east-1b",
+            "us-east-1c",
+            "us-east-1d",
+            "us-east-1f"
+        ]
+    );
+    assert_eq!(out.matches("<scope>Region</scope>").count(), 1);
+    let none = body(offerings(&[
+        ("InstanceType", "m5.large"),
+        ("AvailabilityZone", "us-east-1e"),
+    ]));
+    assert!(!none.contains("<item>"), "{none}");
 }
 
 /// A dry run validates everything but the zone, and changes nothing.

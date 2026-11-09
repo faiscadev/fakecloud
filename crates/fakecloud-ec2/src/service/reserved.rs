@@ -117,46 +117,87 @@ pub(crate) fn describe_reserved_instances_offerings(
             "All Upfront",
         ],
     )?;
-    // InstanceType is an ~850-member enum; rather than enumerate it, reject any
-    // value that isn't a `family.size` token (catches the harness sentinel).
-    if let Some(v) = req
+    let region = crate::service::instance::request_region(req);
+    let instance_type = req
         .query_params
         .get("InstanceType")
         .filter(|v| !v.is_empty())
-    {
-        if !v.contains('.') {
-            return Err(crate::service_helpers::invalid_parameter_value(format!(
-                "Invalid instance type '{v}'"
-            )));
-        }
+        .map_or("t3.micro", String::as_str);
+    // Recorded from real EC2 for both `m5.bogus` and `nodot`.
+    let spec = crate::instance_types::lookup(instance_type).ok_or_else(|| {
+        crate::service_helpers::invalid_parameter_value(format!(
+            "The following supplied instance types do not exist: [{instance_type}]"
+        ))
+    })?;
+    let product = req
+        .query_params
+        .get("ProductDescription")
+        .filter(|v| !v.is_empty())
+        .map_or("Linux/UNIX", String::as_str);
+    let class = req
+        .query_params
+        .get("OfferingClass")
+        .filter(|v| !v.is_empty())
+        .map_or("standard", String::as_str);
+    let offering_type = req
+        .query_params
+        .get("OfferingType")
+        .filter(|v| !v.is_empty())
+        .map_or("No Upfront", String::as_str);
+    let tenancy = req
+        .query_params
+        .get("InstanceTenancy")
+        .filter(|v| !v.is_empty())
+        .map_or("default", String::as_str);
+    // A Region-scoped offering, and one per zone selling the type, as real EC2
+    // lists them (m5.large in us-east-1: the Region plus every zone but 1e). A
+    // requested zone keeps only its own.
+    let wanted_zone = req
+        .query_params
+        .get("AvailabilityZone")
+        .filter(|v| !v.is_empty());
+    let mut locations: Vec<Option<String>> = vec![None];
+    locations.extend(spec.zones_selling(region).into_iter().map(Some));
+    if let Some(zone) = wanted_zone {
+        locations.retain(|l| l.as_ref() == Some(zone));
     }
-    let az = format!(
-        "{}a",
-        if req.region.is_empty() {
-            "us-east-1"
-        } else {
-            &req.region
-        }
-    );
-    let item = format!(
-        "{}{}{}<duration>31536000</duration><fixedPrice>0.0</fixedPrice><usagePrice>0.02</usagePrice>{}{}{}{}{}{}",
-        ec2_elem("reservedInstancesOfferingId", &crate::service_helpers::stable_id(
-                "offering",
-                &format!("{az}|t3.micro|Linux/UNIX|standard|No Upfront|default"),
-            )),
-        ec2_elem("instanceType", "t3.micro"),
-        ec2_elem("availabilityZone", &az),
-        ec2_elem("productDescription", "Linux/UNIX"),
-        ec2_elem("offeringClass", "standard"),
-        ec2_elem("offeringType", "No Upfront"),
-        ec2_elem("instanceTenancy", "default"),
-        ec2_elem("currencyCode", "USD"),
-        ec2_list("recurringCharges", &[]),
-    );
+    let items: Vec<String> = locations
+        .iter()
+        .map(|zone| {
+            let key = format!(
+                "{}|{instance_type}|{product}|{class}|{offering_type}|{tenancy}",
+                zone.as_deref().unwrap_or(region)
+            );
+            format!(
+                "{}{}{}<duration>31536000</duration><fixedPrice>0.0</fixedPrice><usagePrice>0.02</usagePrice>{}{}{}{}{}{}{}",
+                ec2_elem(
+                    "reservedInstancesOfferingId",
+                    &crate::service_helpers::stable_id("offering", &key),
+                ),
+                ec2_elem("instanceType", instance_type),
+                zone.as_ref()
+                    .map_or_else(String::new, |z| ec2_elem("availabilityZone", z)),
+                ec2_elem("productDescription", product),
+                ec2_elem("offeringClass", class),
+                ec2_elem("offeringType", offering_type),
+                ec2_elem("instanceTenancy", tenancy),
+                ec2_elem("currencyCode", "USD"),
+                ec2_elem(
+                    "scope",
+                    if zone.is_some() {
+                        "Availability Zone"
+                    } else {
+                        "Region"
+                    },
+                ),
+                ec2_list("recurringCharges", &[]),
+            )
+        })
+        .collect();
     Ok(Ec2Service::respond(
         "DescribeReservedInstancesOfferings",
         &req.request_id,
-        &ec2_list("reservedInstancesOfferingsSet", &[item]),
+        &ec2_list("reservedInstancesOfferingsSet", &items),
     ))
 }
 

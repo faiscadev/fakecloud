@@ -454,7 +454,7 @@ pub(crate) fn launch_instances(
     validate_enum_instance_type(params)?;
     // Recorded: a dry run refuses an unknown type, but passes a type the requested
     // zone does not sell. Everything else is checked, up to changing any state.
-    let dry_run = crate::service::capacity::is_dry_run(params);
+    let dry_run = crate::service_helpers::is_dry_run(params);
     validate_enum(
         params,
         "InstanceInitiatedShutdownBehavior",
@@ -590,16 +590,20 @@ pub(crate) fn launch_instances(
         // requested `Placement.AvailabilityZone`, else in a zone selling the type.
         let explicit_subnet = subnet_id.is_some();
         let zone_named = explicit_subnet || placement_az.is_some();
-        let wanted_az = placement_az
-            .clone()
-            .or_else(|| launch_zone(state, &instance_type, region))
-            .unwrap_or_else(|| format!("{region}a"));
+        // Only a launch naming neither a subnet nor a zone picks one.
+        let wanted_az = match (&subnet_id, &placement_az) {
+            (_, Some(zone)) => zone.clone(),
+            (Some(_), None) => String::new(),
+            (None, None) => {
+                launch_zone(state, &instance_type, region).unwrap_or_else(|| format!("{region}a"))
+            }
+        };
         // No explicit subnet: land in the default VPC's default subnet for the
-        // target AZ. This fills `subnet_id`/`vpc_id` so DescribeInstances reports
-        // a real subnet/VPC and phase-2 per-subnet networking has something to
-        // key on. A zone without one (deleted, or past the three this emulator
-        // creates) launches with no subnet, rather than reporting a subnet in
-        // another zone than the instance.
+        // target AZ, as AWS does. This fills `subnet_id`/`vpc_id` so
+        // DescribeInstances reports a real subnet/VPC and phase-2 per-subnet
+        // networking has something to key on. A zone of this Region whose
+        // default subnet is gone is refused rather than launched elsewhere
+        // (inferred: AWS's message for it was not recorded).
         if subnet_id.is_none() {
             subnet_id = state
                 .subnets
@@ -607,6 +611,19 @@ pub(crate) fn launch_instances(
                 .filter(|s| s.default_for_az)
                 .find(|s| s.availability_zone == wanted_az)
                 .map(|s| s.subnet_id.clone());
+            // A state with no default subnets at all (migrated from before they
+            // were seeded) still launches into its default VPC.
+            let has_default_subnets = state.subnets.values().any(|s| s.default_for_az);
+            if subnet_id.is_none()
+                && has_default_subnets
+                && crate::defaults::zone_in_region(region, &wanted_az)
+            {
+                return Err(AwsServiceError::aws_error(
+                    http::StatusCode::BAD_REQUEST,
+                    "MissingInput",
+                    format!("No default subnet for availability zone: '{wanted_az}'."),
+                ));
+            }
         }
         let subnet = subnet_id.as_ref().and_then(|sid| state.subnets.get(sid));
         let az = subnet
@@ -759,9 +776,6 @@ pub(crate) fn launch_instances(
         None => 0,
     };
     let eni_limit = svc.enforced_count_quota(account_id, region, rq::NETWORK_INTERFACES_PER_REGION);
-    if dry_run {
-        crate::service::capacity::refuse_dry_run(params)?;
-    }
     let mut rendered = Vec::new();
     {
         let mut accounts = svc.state.write();
@@ -883,6 +897,11 @@ pub(crate) fn launch_instances(
                     ));
                 }
             }
+        }
+        // Everything above is checked as the real launch checks it, quotas
+        // included; a dry run stops here, before anything is inserted.
+        if dry_run {
+            crate::service_helpers::refuse_dry_run(params)?;
         }
         let sg_names = sg_name_map(state);
         for (idx, id) in ids.iter().enumerate() {
@@ -1675,8 +1694,8 @@ fn validate_enum_instance_type(params: &HashMap<String, String>) -> Result<(), A
     Ok(())
 }
 
-/// Where a launch naming no zone lands: a zone selling the type, preferably with a
-/// default subnet. `None` when the Region sells it nowhere.
+/// Where a launch naming neither a subnet nor a zone lands: a zone selling the
+/// type, preferably with a default subnet. `None` when the Region sells it nowhere.
 fn launch_zone(state: &Ec2State, instance_type: &str, region: &str) -> Option<String> {
     let selling = crate::instance_types::lookup(instance_type)?.zones_selling(region);
     selling

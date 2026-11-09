@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::io::BufReader;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use flate2::read::GzDecoder;
 use serde::de::{Deserializer, MapAccess, SeqAccess, Visitor};
@@ -345,17 +345,25 @@ impl Node {
     }
 }
 
-/// Decoding happens once, and what is interned lives as long as the catalog does.
+thread_local! {
+    /// The strings interned so far, only while [`raw_catalog`] decodes on this
+    /// thread: it is emptied when the decode is done.
+    static INTERNED: std::cell::RefCell<HashSet<&'static str>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+/// Each distinct string once. They live as long as the catalog, which is the
+/// life of the process.
 fn intern(text: &str) -> &'static str {
-    static STRINGS: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
-    let mut guard = STRINGS.lock().unwrap_or_else(|e| e.into_inner());
-    let strings = guard.get_or_insert_with(HashSet::new);
-    if let Some(known) = strings.get(text) {
-        return known;
-    }
-    let leaked: &'static str = Box::leak(text.to_owned().into_boxed_str());
-    strings.insert(leaked);
-    leaked
+    INTERNED.with(|interned| {
+        let mut interned = interned.borrow_mut();
+        if let Some(known) = interned.get(text) {
+            return *known;
+        }
+        let leaked: &'static str = Box::leak(text.to_owned().into_boxed_str());
+        interned.insert(leaked);
+        leaked
+    })
 }
 
 impl<'de> Deserialize<'de> for Node {
@@ -418,7 +426,9 @@ fn raw_catalog() -> &'static RawCatalog {
     static CATALOG: OnceLock<RawCatalog> = OnceLock::new();
     CATALOG.get_or_init(|| {
         let json = BufReader::new(GzDecoder::new(DATA_GZ));
-        serde_json::from_reader(json).expect("vendored instance type catalog is valid")
+        let raw = serde_json::from_reader(json).expect("vendored instance type catalog is valid");
+        INTERNED.with(|interned| interned.take());
+        raw
     })
 }
 

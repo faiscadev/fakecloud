@@ -1,5 +1,6 @@
 //! EC2 Auto Scaling (`autoscaling`) Query-protocol service.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -60,6 +61,24 @@ pub struct AutoScalingService {
     /// Service Quotas, so launched instances are held to the account's
     /// applied security-group quotas.
     quota_provider: Option<Arc<dyn fakecloud_core::quota::QuotaProvider>>,
+}
+
+/// Where a group can launch an instance.
+enum LaunchPlace {
+    Subnet(String),
+    Zone(String),
+}
+
+/// The usable place whose zone holds the fewest of the group's instances, the
+/// first such in the group's order on a tie.
+fn least_loaded_place(
+    place_zones: &[String],
+    zone_counts: &HashMap<String, usize>,
+    usable: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    (0..place_zones.len())
+        .filter(|&i| usable(i))
+        .min_by_key(|&i| zone_counts.get(&place_zones[i]).copied().unwrap_or(0))
 }
 
 /// Why one `RunInstances` of a group failed.
@@ -141,6 +160,25 @@ impl AutoScalingService {
         self.ec2_state = Some(state);
         self.ec2_runtime = runtime;
         self
+    }
+
+    /// The zone of a launch place: a subnet's, from EC2, or the zone itself.
+    fn place_zone(&self, place: &LaunchPlace, account: &str, region: &str) -> String {
+        match place {
+            LaunchPlace::Zone(zone) => zone.clone(),
+            LaunchPlace::Subnet(subnet) => self
+                .ec2_state
+                .as_ref()
+                .and_then(|state| {
+                    let accounts = state.read();
+                    accounts
+                        .regional(account, region)?
+                        .subnets
+                        .get(subnet)
+                        .map(|s| s.availability_zone.clone())
+                })
+                .unwrap_or_else(|| subnet.clone()),
+        }
     }
 
     /// Launch one EC2 instance for a group through `RunInstances` with the
@@ -1429,7 +1467,7 @@ impl AutoScalingService {
     }
 
     async fn apply_capacity(&self, account: &str, name: &str, req: &AwsRequest) {
-        let (target, current, azs, subnets, source, instance_tags) = {
+        let (target, current, azs, subnets, source, instance_tags, mut zone_counts) = {
             let accounts = self.state.read();
             let Some(st) = accounts.accounts.get(account) else {
                 return;
@@ -1469,8 +1507,33 @@ impl AutoScalingService {
                     .unwrap_or_default(),
                 crate::launch::LaunchSource::for_group(g, &st.launch_configurations),
                 instance_tags,
+                g.instances
+                    .iter()
+                    .fold(HashMap::<String, usize>::new(), |mut counts, i| {
+                        *counts.entry(i.availability_zone.clone()).or_default() += 1;
+                        counts
+                    }),
             )
         };
+        // Where the group launches: its subnets, else its zones. A place EC2
+        // refuses the type in is remembered for the rest of this pass and not
+        // tried again, and every launch goes to the usable place whose zone has
+        // the fewest of the group's instances, as Auto Scaling balances them.
+        let places: Vec<LaunchPlace> = if subnets.is_empty() {
+            let zones = if azs.is_empty() {
+                vec![format!("{}a", req.region)]
+            } else {
+                azs.clone()
+            };
+            zones.into_iter().map(LaunchPlace::Zone).collect()
+        } else {
+            subnets.iter().cloned().map(LaunchPlace::Subnet).collect()
+        };
+        let place_zones: Vec<String> = places
+            .iter()
+            .map(|p| self.place_zone(p, account, &req.region))
+            .collect();
+        let mut refused: HashSet<(usize, Option<String>)> = HashSet::new();
         let capacity: i64 = current.iter().map(|(_, w, _, _)| weight_of(w)).sum();
 
         let mut launched: Vec<AsgInstance> = Vec::new();
@@ -1503,7 +1566,7 @@ impl AutoScalingService {
                             .collect(),
                     };
                     let mut cap = capacity;
-                    let mut slot = current.len();
+                    let mut last_refusal: Option<String> = None;
                     while cap < target {
                         let (plan, spot) = match &plans {
                             LaunchPlans::Single(plan) => (plan, false),
@@ -1531,90 +1594,79 @@ impl AutoScalingService {
                             LaunchPlans::Single(_) => None,
                         };
                         let is_spot = spot || plan.spot;
-                        // Spread across the group's subnets (or, without a
-                        // VPC zone identifier, its availability zones).
-                        let az_hint = azs
-                            .get(slot % azs.len().max(1))
-                            .cloned()
-                            .unwrap_or_else(|| format!("{}a", req.region));
-                        let placed = match &ec2 {
-                            // No EC2 backend wired (unit tests): synthesize the
-                            // instance so the group still reports its capacity.
-                            None => Ok((gen_instance_id(), az_hint.clone())),
-                            Some(svc) => {
-                                let mut params = plan.params.clone();
-                                if spot {
-                                    params.insert(
-                                        "InstanceMarketOptions.MarketType".to_string(),
-                                        "spot".to_string(),
-                                    );
-                                    if let Some(price) = &spot_max_price {
-                                        params.insert(
-                                            "InstanceMarketOptions.SpotOptions.MaxPrice"
-                                                .to_string(),
-                                            price.clone(),
-                                        );
-                                    }
-                                }
+                        let type_key = plan
+                            .instance_type
+                            .clone()
+                            .or_else(|| plan.params.get("InstanceType").cloned());
+                        let mut params = plan.params.clone();
+                        if spot {
+                            params.insert(
+                                "InstanceMarketOptions.MarketType".to_string(),
+                                "spot".to_string(),
+                            );
+                            if let Some(price) = &spot_max_price {
                                 params.insert(
-                                    "TagSpecification.1.ResourceType".to_string(),
-                                    "instance".to_string(),
+                                    "InstanceMarketOptions.SpotOptions.MaxPrice".to_string(),
+                                    price.clone(),
                                 );
-                                for (i, (k, v)) in instance_tags.iter().enumerate() {
-                                    let n = i + 1;
-                                    params.insert(
-                                        format!("TagSpecification.1.Tag.{n}.Key"),
-                                        k.clone(),
-                                    );
-                                    params.insert(
-                                        format!("TagSpecification.1.Tag.{n}.Value"),
-                                        v.clone(),
-                                    );
+                            }
+                        }
+                        params.insert(
+                            "TagSpecification.1.ResourceType".to_string(),
+                            "instance".to_string(),
+                        );
+                        for (i, (k, v)) in instance_tags.iter().enumerate() {
+                            let n = i + 1;
+                            params.insert(format!("TagSpecification.1.Tag.{n}.Key"), k.clone());
+                            params.insert(format!("TagSpecification.1.Tag.{n}.Value"), v.clone());
+                        }
+                        let placed = loop {
+                            let Some(at) = least_loaded_place(&place_zones, &zone_counts, |i| {
+                                !refused.contains(&(i, type_key.clone()))
+                            }) else {
+                                break Err(last_refusal.clone().unwrap_or_else(|| {
+                                    "No usable Availability Zone sells the instance type"
+                                        .to_string()
+                                }));
+                            };
+                            let Some(svc) = &ec2 else {
+                                // No EC2 backend wired (unit tests): synthesize the
+                                // instance so the group still reports its capacity.
+                                break Ok((gen_instance_id(), place_zones[at].clone()));
+                            };
+                            let mut params = params.clone();
+                            match &places[at] {
+                                LaunchPlace::Subnet(subnet) => {
+                                    params.insert("SubnetId".to_string(), subnet.clone())
                                 }
-                                ec2_touched = true;
-                                // From this slot's subnet or zone, on past any that
-                                // does not sell the type, as a group does.
-                                let places = subnets.len().max(azs.len()).max(1);
-                                let mut placed = None;
-                                for offset in 0..places {
-                                    let mut params = params.clone();
-                                    if let Some(subnet) =
-                                        subnets.get((slot + offset) % subnets.len().max(1))
-                                    {
-                                        params.insert("SubnetId".to_string(), subnet.clone());
-                                    } else if let Some(zone) =
-                                        azs.get((slot + offset) % azs.len().max(1))
-                                    {
-                                        params.insert(
-                                            "Placement.AvailabilityZone".to_string(),
-                                            zone.clone(),
-                                        );
-                                    }
-                                    let attempt = self.run_ec2_instance(svc, params, req).await;
-                                    let next_place = matches!(
-                                        &attempt,
-                                        Err(failure) if failure.zone_does_not_sell_type
-                                    );
-                                    placed = Some(attempt.map_err(|f| f.message));
-                                    if !next_place {
-                                        break;
-                                    }
+                                LaunchPlace::Zone(zone) => params
+                                    .insert("Placement.AvailabilityZone".to_string(), zone.clone()),
+                            };
+                            ec2_touched = true;
+                            match self.run_ec2_instance(svc, params, req).await {
+                                Ok(placed) => break Ok(placed),
+                                Err(f) if f.zone_does_not_sell_type => {
+                                    refused.insert((at, type_key.clone()));
+                                    last_refusal = Some(f.message);
                                 }
-                                placed.expect("at least one place is tried")
+                                Err(f) => break Err(f.message),
                             }
                         };
                         match placed {
-                            Ok((id, az)) => launched.push(AsgInstance {
-                                instance_id: id,
-                                availability_zone: if az.is_empty() { az_hint } else { az },
-                                lifecycle_state: "InService".to_string(),
-                                health_status: "Healthy".to_string(),
-                                launch_configuration_name: None,
-                                protected_from_scale_in: false,
-                                instance_type: plan.instance_type.clone(),
-                                launch_template: plan.launch_template.clone(),
-                                weighted_capacity: plan.weighted_capacity.clone(),
-                                lifecycle: is_spot.then(|| "spot".to_string()),
+                            Ok((id, az)) => launched.push({
+                                *zone_counts.entry(az.clone()).or_default() += 1;
+                                AsgInstance {
+                                    instance_id: id,
+                                    availability_zone: az,
+                                    lifecycle_state: "InService".to_string(),
+                                    health_status: "Healthy".to_string(),
+                                    launch_configuration_name: None,
+                                    protected_from_scale_in: false,
+                                    instance_type: plan.instance_type.clone(),
+                                    launch_template: plan.launch_template.clone(),
+                                    weighted_capacity: plan.weighted_capacity.clone(),
+                                    lifecycle: is_spot.then(|| "spot".to_string()),
+                                }
                             }),
                             Err(reason) => {
                                 failures.push(reason);
@@ -1622,7 +1674,6 @@ impl AutoScalingService {
                             }
                         }
                         cap += weight;
-                        slot += 1;
                     }
                 }
             }
@@ -2541,6 +2592,9 @@ mod tests {
             .collect();
         assert_eq!(zones.len(), 6, "{zones:?}");
         assert!(!zones.iter().any(|z| z == "us-east-1e"), "{zones:?}");
+        // Balanced across the two zones that sell it.
+        let in_a = zones.iter().filter(|z| *z == "us-east-1a").count();
+        assert_eq!((in_a, zones.len() - in_a), (3, 3), "{zones:?}");
 
         // None of its zones sells the type: nothing launches, and the refusal is kept.
         s.handle(req(
@@ -2556,6 +2610,21 @@ mod tests {
         .await
         .unwrap();
         assert!(group_instance_ids(&s, "h").is_empty());
+    }
+
+    #[test]
+    fn least_loaded_place_balances_over_the_usable_places() {
+        let zones = ["a", "e", "b"].map(String::from);
+        let mut counts = HashMap::new();
+        let usable = |i: usize| i != 1;
+        let mut picked = Vec::new();
+        for _ in 0..6 {
+            let at = least_loaded_place(&zones, &counts, usable).unwrap();
+            *counts.entry(zones[at].clone()).or_default() += 1;
+            picked.push(zones[at].as_str().to_string());
+        }
+        assert_eq!(picked, ["a", "b", "a", "b", "a", "b"]);
+        assert_eq!(least_loaded_place(&zones, &counts, |_| false), None);
     }
 
     #[tokio::test]

@@ -1003,27 +1003,7 @@ fn unsupported_operation(message: String) -> AwsServiceError {
 
 /// `DryRunOperation`: the request would have succeeded without `DryRun`.
 fn dry_run_succeeded(req: &AwsRequest) -> Result<(), AwsServiceError> {
-    refuse_dry_run(&req.query_params)
-}
-
-pub(crate) fn is_dry_run(params: &std::collections::HashMap<String, String>) -> bool {
-    params
-        .get("DryRun")
-        .is_some_and(|v| v.eq_ignore_ascii_case("true"))
-}
-
-/// [`dry_run_succeeded`] over a flattened parameter map.
-pub(crate) fn refuse_dry_run(
-    params: &std::collections::HashMap<String, String>,
-) -> Result<(), AwsServiceError> {
-    if is_dry_run(params) {
-        return Err(AwsServiceError::aws_error(
-            http::StatusCode::PRECONDITION_FAILED,
-            "DryRunOperation",
-            "Request would have succeeded, but DryRun flag is set.",
-        ));
-    }
-    Ok(())
+    crate::service_helpers::refuse_dry_run(&req.query_params)
 }
 
 /// The required `InstanceCount` of a split / move: an integer of at least 1.

@@ -37,9 +37,7 @@ fn now_rfc3339() -> String {
 }
 
 fn dry_run(req: &AwsRequest) -> bool {
-    req.query_params
-        .get("DryRun")
-        .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+    crate::service_helpers::is_dry_run(&req.query_params)
 }
 
 /// `TargetTagAssociation.N.Key` / `.Value` pairs. The member is

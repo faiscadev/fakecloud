@@ -366,12 +366,11 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
     );
 
     // --- default subnets, one per AZ ---
-    // Placed in the region's first (up to) three listed zones, so every
-    // default subnet sits in a zone DescribeAvailabilityZones reports. AWS
-    // creates one per AZ; three covers the cardinality realistic tests
-    // exercise and keeps the deterministic CIDR layout simple.
+    // One in every zone DescribeAvailabilityZones reports, as AWS creates them,
+    // each a /20 of 172.31.0.0/16 in zone order: 172.31.0.0/20, 172.31.16.0/20,
+    // 172.31.32.0/20 and on.
     let mut subnet_ids = Vec::new();
-    for (idx, (az, zone_id)) in region_zones(&region).into_iter().take(3).enumerate() {
+    for (idx, (az, zone_id)) in region_zones(&region).into_iter().enumerate() {
         let suffix = az.chars().last().unwrap_or('a');
         let subnet_id = deterministic_id(
             "subnet",
@@ -846,8 +845,25 @@ mod tests {
         let vpc = state.vpcs.values().next().unwrap();
         assert!(vpc.is_default);
         assert_eq!(vpc.cidr_block, "172.31.0.0/16");
-        // one subnet per AZ suffix, all default_for_az + public
-        assert_eq!(state.subnets.len(), 3);
+        // one subnet per zone, all default_for_az + public, /20s in zone order
+        assert_eq!(state.subnets.len(), 6);
+        let mut by_zone: Vec<(&str, &str)> = state
+            .subnets
+            .values()
+            .map(|s| (s.availability_zone.as_str(), s.cidr_block.as_str()))
+            .collect();
+        by_zone.sort();
+        assert_eq!(
+            by_zone,
+            [
+                ("us-east-1a", "172.31.0.0/20"),
+                ("us-east-1b", "172.31.16.0/20"),
+                ("us-east-1c", "172.31.32.0/20"),
+                ("us-east-1d", "172.31.48.0/20"),
+                ("us-east-1e", "172.31.64.0/20"),
+                ("us-east-1f", "172.31.80.0/20"),
+            ]
+        );
         assert!(state.subnets.values().all(|s| s.default_for_az));
         assert!(state.subnets.values().all(|s| s.map_public_ip_on_launch));
         // IGW attached to the default VPC
