@@ -371,6 +371,60 @@ pub(crate) fn create_guardrail_version(
 }
 
 /// Handle the ApplyGuardrail API — evaluate content against a guardrail.
+/// Evaluate `text` against a guardrail for another service: `Some` with the text
+/// to reply with when the guardrail intervened.
+pub fn check_text(
+    state: &SharedBedrockState,
+    account_id: &str,
+    region: &str,
+    guardrail_id: &str,
+    guardrail_version: &str,
+    source: &str,
+    text: &str,
+) -> Result<Option<String>, AwsServiceError> {
+    let body = json!({ "content": [{ "text": { "text": text } }], "source": source }).to_string();
+    let req = AwsRequest {
+        service: "bedrock".to_string(),
+        action: "ApplyGuardrail".to_string(),
+        region: region.to_string(),
+        account_id: account_id.to_string(),
+        request_id: uuid::Uuid::new_v4().to_string(),
+        headers: http::HeaderMap::new(),
+        query_params: std::collections::HashMap::new(),
+        body: bytes::Bytes::new(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: Vec::new(),
+        raw_path: "/".to_string(),
+        raw_query: String::new(),
+        method: http::Method::POST,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    };
+    let response = apply_guardrail(
+        state,
+        &req,
+        guardrail_id,
+        guardrail_version,
+        body.as_bytes(),
+    )?;
+    let parsed: Value = match &response.body {
+        fakecloud_core::service::ResponseBody::Bytes(bytes) => {
+            serde_json::from_slice(bytes).unwrap_or_default()
+        }
+        fakecloud_core::service::ResponseBody::File { .. } => Value::Null,
+    };
+    if parsed["action"] != "GUARDRAIL_INTERVENED" {
+        return Ok(None);
+    }
+    Ok(Some(
+        parsed["outputs"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    ))
+}
+
 pub(crate) fn apply_guardrail(
     state: &SharedBedrockState,
     req: &AwsRequest,
@@ -1111,6 +1165,31 @@ mod tests {
         let body = br#"{"content":[{"text":{"text":"hello"}}],"source":"INPUT"}"#;
         let resp = apply_guardrail(&state, &req, "g", "DRAFT", body).unwrap();
         assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn check_text_reports_interventions_and_missing_guardrails() {
+        let state = shared_state();
+        let mut g = empty_guardrail("g");
+        g.word_policy = Some(json!({"wordsConfig": [{"text": "forbidden"}]}));
+        let account = "123456789012";
+        state
+            .write()
+            .default_mut()
+            .guardrails
+            .insert("g".to_string(), g);
+        let check = |text: &str, id: &str| {
+            check_text(&state, account, "us-east-1", id, "DRAFT", "INPUT", text)
+        };
+        assert_eq!(check("fine", "g").unwrap(), None);
+        assert!(check("this is forbidden", "g")
+            .unwrap()
+            .unwrap()
+            .contains("blocked"));
+        assert_eq!(
+            check("x", "nope").unwrap_err().status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[test]

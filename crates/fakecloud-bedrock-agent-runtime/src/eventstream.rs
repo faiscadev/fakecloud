@@ -82,7 +82,7 @@ pub fn chunk_frame(text: &str) -> Vec<u8> {
 /// Build a `flowOutputEvent` frame for `InvokeFlow`: `nodeName` and the
 /// `content.document` envelope. The model marks `nodeType` required, but AWS was
 /// recorded not sending it.
-pub fn flow_output_frame(node_name: &str, document: &str) -> Vec<u8> {
+pub fn flow_output_frame(node_name: &str, document: &serde_json::Value) -> Vec<u8> {
     let body = serde_json::to_vec(&serde_json::json!({
         "nodeName": node_name,
         "content": { "document": document },
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn flow_output_frame_roundtrips() {
-        let frame = flow_output_frame("StartNode", "document text");
+        let frame = flow_output_frame("StartNode", &serde_json::json!("document text"));
         let (headers, payload) = decode_frame(&frame);
         let event_type = headers.iter().find(|(k, _)| k == ":event-type").unwrap();
         assert_eq!(event_type.1, "flowOutputEvent");

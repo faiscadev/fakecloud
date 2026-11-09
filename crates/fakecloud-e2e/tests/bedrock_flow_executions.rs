@@ -545,6 +545,49 @@ async fn invoke_flow_trace_matches_the_recording() {
     );
 }
 
+/// Bad inputs are refused rather than answered with empty trace fields.
+#[tokio::test]
+async fn invoke_flow_validates_its_input() {
+    let server = TestServer::start().await;
+    let agent = server.bedrock_agent_client().await;
+    let endpoint = server.endpoint().to_string();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let flow_id = agent
+        .create_flow()
+        .name("validated-flow")
+        .execution_role_arn(ROLE)
+        .definition(definition("Input"))
+        .send()
+        .await
+        .expect("create flow")
+        .id;
+    agent
+        .prepare_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("prepare flow");
+
+    let http = reqwest::Client::new();
+    for inputs in [
+        serde_json::json!([]),
+        serde_json::json!([{"nodeName": "Input"}]),
+        serde_json::json!([{"nodeName": "Input", "nodeOutputName": "document"}]),
+        serde_json::json!([{"nodeName": "Nope", "nodeOutputName": "document", "content": {"document": "x"}}]),
+    ] {
+        let response = http
+            .post(format!("{endpoint}/flows/{flow_id}/aliases/TSTALIASID"))
+            .header("content-type", "application/json")
+            .header("authorization", auth)
+            .body(serde_json::json!({ "inputs": inputs }).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400, "{inputs}");
+    }
+}
+
 /// Each event-stream frame's `:event-type` and JSON payload.
 fn decode_events(mut buf: &[u8]) -> Vec<(String, serde_json::Value)> {
     let mut out = Vec::new();

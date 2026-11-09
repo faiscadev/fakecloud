@@ -88,6 +88,28 @@ fn push_event(body: &mut Vec<u8>, event_type: &str, members: &Value) {
     body.extend(encode_event(event_type, "application/json", &payload));
 }
 
+/// A `toolUse` content block: its start, its input as one delta, its stop.
+fn push_tool_use_block(body: &mut Vec<u8>, index: usize, id: &str, name: &str, input: &str) {
+    push_event(
+        body,
+        "contentBlockStart",
+        &json!({
+            "contentBlockIndex": index,
+            "start": { "toolUse": { "toolUseId": id, "name": name } }
+        }),
+    );
+    push_event(
+        body,
+        "contentBlockDelta",
+        &json!({ "contentBlockIndex": index, "delta": { "toolUse": { "input": input } } }),
+    );
+    push_event(
+        body,
+        "contentBlockStop",
+        &json!({ "contentBlockIndex": index }),
+    );
+}
+
 /// The `metadata` event closing a ConverseStream.
 fn push_converse_metadata(body: &mut Vec<u8>, input_tokens: u64, output_tokens: u64) {
     push_event(
@@ -141,24 +163,7 @@ pub(crate) fn build_converse_stream_response(
 
     // Optional forced toolUse content block (index 1), mirroring Converse.
     if let Some(tool_name) = forced_tool {
-        push_event(
-            &mut body,
-            "contentBlockStart",
-            &json!({
-                "contentBlockIndex": 1,
-                "start": { "toolUse": { "toolUseId": "tooluse_fakecloud_01", "name": tool_name } }
-            }),
-        );
-        push_event(
-            &mut body,
-            "contentBlockDelta",
-            &json!({ "contentBlockIndex": 1, "delta": { "toolUse": { "input": "{}" } } }),
-        );
-        push_event(
-            &mut body,
-            "contentBlockStop",
-            &json!({ "contentBlockIndex": 1 }),
-        );
+        push_tool_use_block(&mut body, 1, "tooluse_fakecloud_01", tool_name, "{}");
     }
 
     push_event(
@@ -184,6 +189,7 @@ pub(crate) fn build_converse_stream_response(
 pub(crate) fn build_invoke_stream_from_deltas(
     model_id: &str,
     deltas: &[String],
+    tool_calls: &[crate::upstream::ToolCall],
     stop: crate::upstream::StopKind,
     input_tokens: u64,
     output_tokens: u64,
@@ -208,28 +214,55 @@ pub(crate) fn build_invoke_stream_from_deltas(
                 }
             }),
         );
-        push_bytes_chunk(
-            &mut body,
-            &json!({
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": { "type": "text", "text": "" }
-            }),
-        );
-        for delta in deltas {
+        // A reply of only tool calls has no text block.
+        let has_text = !deltas.is_empty() || tool_calls.is_empty();
+        if has_text {
+            push_bytes_chunk(
+                &mut body,
+                &json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": { "type": "text", "text": "" }
+                }),
+            );
+            for delta in deltas {
+                push_bytes_chunk(
+                    &mut body,
+                    &json!({
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": { "type": "text_delta", "text": delta }
+                    }),
+                );
+            }
+            push_bytes_chunk(
+                &mut body,
+                &json!({ "type": "content_block_stop", "index": 0 }),
+            );
+        }
+        for (offset, tool) in tool_calls.iter().enumerate() {
+            let index = offset + usize::from(has_text);
+            push_bytes_chunk(
+                &mut body,
+                &json!({
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": { "type": "tool_use", "id": tool.id, "name": tool.name, "input": {} }
+                }),
+            );
             push_bytes_chunk(
                 &mut body,
                 &json!({
                     "type": "content_block_delta",
-                    "index": 0,
-                    "delta": { "type": "text_delta", "text": delta }
+                    "index": index,
+                    "delta": { "type": "input_json_delta", "partial_json": tool.input.to_string() }
                 }),
             );
+            push_bytes_chunk(
+                &mut body,
+                &json!({ "type": "content_block_stop", "index": index }),
+            );
         }
-        push_bytes_chunk(
-            &mut body,
-            &json!({ "type": "content_block_stop", "index": 0 }),
-        );
         push_bytes_chunk(
             &mut body,
             &json!({
@@ -324,20 +357,13 @@ fn push_bytes_chunk(body: &mut Vec<u8>, chunk: &Value) {
     body.extend(encode_event("chunk", "application/json", &payload));
 }
 
-/// A tool call to stream as a `toolUse` content block; `input` is its JSON text.
-pub(crate) struct StreamedToolUse<'a> {
-    pub(crate) id: &'a str,
-    pub(crate) name: &'a str,
-    pub(crate) input: String,
-}
-
 /// Re-encode a sequence of real upstream token deltas as a Bedrock
 /// `ConverseStream` event stream: one `contentBlockDelta` event per token, a
 /// `toolUse` block per tool the model called, terminated with real usage figures
 /// in the `metadata` event.
 pub(crate) fn build_converse_stream_from_deltas(
     deltas: &[String],
-    tools: &[StreamedToolUse<'_>],
+    tools: &[crate::upstream::ToolCall],
     stop: crate::upstream::StopKind,
     input_tokens: u64,
     output_tokens: u64,
@@ -371,23 +397,12 @@ pub(crate) fn build_converse_stream_from_deltas(
     }
     for (offset, tool) in tools.iter().enumerate() {
         let index = next_index + offset;
-        push_event(
+        push_tool_use_block(
             &mut body,
-            "contentBlockStart",
-            &json!({
-                "contentBlockIndex": index,
-                "start": { "toolUse": { "toolUseId": tool.id, "name": tool.name } }
-            }),
-        );
-        push_event(
-            &mut body,
-            "contentBlockDelta",
-            &json!({ "contentBlockIndex": index, "delta": { "toolUse": { "input": tool.input } } }),
-        );
-        push_event(
-            &mut body,
-            "contentBlockStop",
-            &json!({ "contentBlockIndex": index }),
+            index,
+            &tool.id,
+            &tool.name,
+            &tool.input.to_string(),
         );
     }
     push_event(

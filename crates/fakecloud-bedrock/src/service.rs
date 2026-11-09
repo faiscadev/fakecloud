@@ -1758,6 +1758,7 @@ impl AwsService for BedrockService {
                 let body = crate::streaming::build_invoke_stream_from_deltas(
                     &model_id,
                     std::slice::from_ref(&response_text),
+                    &[],
                     crate::upstream::StopKind::EndTurn,
                     input_tokens,
                     output_tokens,

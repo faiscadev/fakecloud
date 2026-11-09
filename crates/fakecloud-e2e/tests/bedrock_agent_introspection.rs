@@ -194,29 +194,182 @@ async fn bedrock_agent_runtime_retrieve_and_generate_stream_delivers_text() {
     assert_eq!(citations, 1);
 }
 
-#[tokio::test]
-async fn bedrock_agent_runtime_retrieve_and_generate_stream_reports_a_guardrail() {
+async fn create_word_guardrail(server: &TestServer, word: &str) -> (String, String) {
+    use aws_sdk_bedrock::types::{GuardrailWordConfig, GuardrailWordPolicyConfig};
+    let created = server
+        .bedrock_client()
+        .await
+        .create_guardrail()
+        .name(format!("g-{word}"))
+        .blocked_input_messaging("blocked input")
+        .blocked_outputs_messaging("blocked output")
+        .word_policy_config(
+            GuardrailWordPolicyConfig::builder()
+                .words_config(GuardrailWordConfig::builder().text(word).build().unwrap())
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    (created.guardrail_id().to_string(), "DRAFT".to_string())
+}
+
+fn knowledge_base_config(
+    guardrail: Option<(&str, &str)>,
+) -> aws_sdk_bedrockagentruntime::types::RetrieveAndGenerateConfiguration {
     use aws_sdk_bedrockagentruntime::types::{
-        GenerationConfiguration, GuadrailAction, GuardrailConfiguration,
+        GenerationConfiguration, GuardrailConfiguration,
         KnowledgeBaseRetrieveAndGenerateConfiguration, RetrieveAndGenerateConfiguration,
-        RetrieveAndGenerateInput, RetrieveAndGenerateStreamResponseOutput, RetrieveAndGenerateType,
+        RetrieveAndGenerateType,
     };
-
-    let server = TestServer::start().await;
-    let client = server.bedrock_agent_runtime_client().await;
-
-    let config = RetrieveAndGenerateConfiguration::builder()
+    let generation = GenerationConfiguration::builder()
+        .set_guardrail_configuration(guardrail.map(|(id, version)| {
+            GuardrailConfiguration::builder()
+                .guardrail_id(id)
+                .guardrail_version(version)
+                .build()
+                .unwrap()
+        }))
+        .build();
+    RetrieveAndGenerateConfiguration::builder()
         .r#type(RetrieveAndGenerateType::KnowledgeBase)
         .knowledge_base_configuration(
             KnowledgeBaseRetrieveAndGenerateConfiguration::builder()
                 .knowledge_base_id("ABCDEFGHIJ")
                 .model_arn("arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-v2")
+                .generation_configuration(generation)
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap()
+}
+
+fn rag_input(text: &str) -> aws_sdk_bedrockagentruntime::types::RetrieveAndGenerateInput {
+    aws_sdk_bedrockagentruntime::types::RetrieveAndGenerateInput::builder()
+        .text(text)
+        .build()
+        .unwrap()
+}
+
+/// The guardrail really runs, on the streaming and non-streaming calls alike.
+#[tokio::test]
+async fn bedrock_agent_runtime_retrieve_and_generate_applies_the_guardrail() {
+    use aws_sdk_bedrockagentruntime::types::{
+        GuadrailAction, RetrieveAndGenerateStreamResponseOutput,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.bedrock_agent_runtime_client().await;
+    let (id, version) = create_word_guardrail(&server, "forbidden").await;
+    let config = knowledge_base_config(Some((&id, &version)));
+
+    for (query, action, text, citations) in [
+        (
+            "fine",
+            GuadrailAction::None,
+            "Generated response for: fine",
+            1,
+        ),
+        (
+            "this is forbidden",
+            GuadrailAction::Intervened,
+            "blocked input",
+            0,
+        ),
+    ] {
+        let response = client
+            .retrieve_and_generate()
+            .input(rag_input(query))
+            .retrieve_and_generate_configuration(config.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.guardrail_action(), Some(&action));
+        assert_eq!(response.output().map(|o| o.text()), Some(text));
+        assert_eq!(response.citations().len(), citations);
+
+        let mut stream = client
+            .retrieve_and_generate_stream()
+            .input(rag_input(query))
+            .retrieve_and_generate_configuration(config.clone())
+            .send()
+            .await
+            .unwrap()
+            .stream;
+        let mut streamed_action = None;
+        let mut streamed_text = String::new();
+        let mut streamed_citations = 0;
+        while let Some(event) = stream.recv().await.expect("decode stream event") {
+            match event {
+                RetrieveAndGenerateStreamResponseOutput::Guardrail(event) => {
+                    streamed_action = event.action().cloned();
+                }
+                RetrieveAndGenerateStreamResponseOutput::Output(event) => {
+                    streamed_text.push_str(event.text());
+                }
+                RetrieveAndGenerateStreamResponseOutput::Citation(_) => streamed_citations += 1,
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+        assert_eq!(streamed_action, Some(action));
+        assert_eq!(streamed_text, text);
+        assert_eq!(streamed_citations, citations);
+    }
+}
+
+#[tokio::test]
+async fn bedrock_agent_runtime_guardrail_blocks_model_output_too() {
+    use aws_sdk_bedrockagentruntime::types::GuadrailAction;
+
+    let server = TestServer::start().await;
+    let client = server.bedrock_agent_runtime_client().await;
+    // Every generated answer contains this phrase, so the output check trips.
+    let (id, version) = create_word_guardrail(&server, "Generated").await;
+
+    let response = client
+        .retrieve_and_generate()
+        .input(rag_input("hello"))
+        .retrieve_and_generate_configuration(knowledge_base_config(Some((&id, &version))))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.guardrail_action(),
+        Some(&GuadrailAction::Intervened)
+    );
+    assert_eq!(response.output().map(|o| o.text()), Some("blocked output"));
+}
+
+#[tokio::test]
+async fn bedrock_agent_runtime_guardrail_on_external_sources() {
+    use aws_sdk_bedrockagentruntime::types::{
+        ExternalSource, ExternalSourceType, ExternalSourcesGenerationConfiguration,
+        ExternalSourcesRetrieveAndGenerateConfiguration, GuadrailAction, GuardrailConfiguration,
+        RetrieveAndGenerateConfiguration, RetrieveAndGenerateType,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.bedrock_agent_runtime_client().await;
+    let (id, version) = create_word_guardrail(&server, "forbidden").await;
+
+    let config = RetrieveAndGenerateConfiguration::builder()
+        .r#type(RetrieveAndGenerateType::ExternalSources)
+        .external_sources_configuration(
+            ExternalSourcesRetrieveAndGenerateConfiguration::builder()
+                .model_arn("arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-v2")
+                .sources(
+                    ExternalSource::builder()
+                        .source_type(ExternalSourceType::S3)
+                        .build()
+                        .unwrap(),
+                )
                 .generation_configuration(
-                    GenerationConfiguration::builder()
+                    ExternalSourcesGenerationConfiguration::builder()
                         .guardrail_configuration(
                             GuardrailConfiguration::builder()
-                                .guardrail_id("abcdefghijkl")
-                                .guardrail_version("1")
+                                .guardrail_id(&id)
+                                .guardrail_version(&version)
                                 .build()
                                 .unwrap(),
                         )
@@ -227,25 +380,32 @@ async fn bedrock_agent_runtime_retrieve_and_generate_stream_reports_a_guardrail(
         )
         .build()
         .unwrap();
-    let mut stream = client
-        .retrieve_and_generate_stream()
-        .input(
-            RetrieveAndGenerateInput::builder()
-                .text("q")
-                .build()
-                .unwrap(),
-        )
+    let response = client
+        .retrieve_and_generate()
+        .input(rag_input("forbidden"))
         .retrieve_and_generate_configuration(config)
         .send()
         .await
-        .expect("RetrieveAndGenerateStream")
-        .stream;
+        .unwrap();
+    assert_eq!(
+        response.guardrail_action(),
+        Some(&GuadrailAction::Intervened)
+    );
+}
 
-    let mut action = None;
-    while let Some(event) = stream.recv().await.expect("decode stream event") {
-        if let RetrieveAndGenerateStreamResponseOutput::Guardrail(guardrail) = event {
-            action = guardrail.action().cloned();
-        }
-    }
-    assert_eq!(action, Some(GuadrailAction::None));
+#[tokio::test]
+async fn bedrock_agent_runtime_missing_guardrail_is_a_validation_error() {
+    use aws_sdk_bedrockagentruntime::error::ProvideErrorMetadata;
+
+    let server = TestServer::start().await;
+    let client = server.bedrock_agent_runtime_client().await;
+
+    let err = client
+        .retrieve_and_generate()
+        .input(rag_input("q"))
+        .retrieve_and_generate_configuration(knowledge_base_config(Some(("abcdefghijkl", "1"))))
+        .send()
+        .await
+        .expect_err("no such guardrail");
+    assert_eq!(err.code(), Some("ValidationException"), "{err:?}");
 }
