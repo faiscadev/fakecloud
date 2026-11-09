@@ -65,7 +65,7 @@ This is why fakecloud runs real Lambda code in real runtime containers, runs rea
 | EMR (Elastic MapReduce) | 65 ops, full control plane free (clusters/job flows, steps, instance groups/fleets, Studio, notebooks, scaling policies) | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | AWS Shield / Shield Advanced | 36 ops, full control plane free (protections, protection groups, subscription, emergency contacts, DRT access, proactive engagement, app-layer auto response, tags) | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 
-Performance numbers measured on Apple M1 via `time fakecloud`, `ps -o rss`, `ls -lh`. LocalStack numbers from a fresh `localstack start` on the same hardware.
+Performance numbers measured on Apple M1: startup as the time from launch to the first answered SQS request, memory via `ps -o rss`, size via `ls -lh`. LocalStack numbers from a fresh `localstack start` on the same hardware.
 
 ## Migrating from LocalStack
 

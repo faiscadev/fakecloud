@@ -84,7 +84,7 @@ Since March 2026, LocalStack's Community image requires an account and token, an
 
 Full feature-by-feature comparison: [fakecloud.dev/vs/localstack](https://fakecloud.dev/vs/localstack/).
 
-> Performance numbers measured on Apple M1 via `time fakecloud`, `ps -o rss`, `ls -lh`.
+> Performance numbers measured on Apple M1: startup as the time from launch to the first answered SQS request, memory via `ps -o rss`, size via `ls -lh`.
 
 ## First-party SDKs
 
