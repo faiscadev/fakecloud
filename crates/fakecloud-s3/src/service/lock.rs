@@ -199,6 +199,7 @@ impl S3Service {
             .buckets
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
+        require_object_lock(b)?;
         let obj = resolve_object(b, key, req.query_params.get("versionId"))?;
 
         match (&obj.lock_mode, &obj.lock_retain_until) {
@@ -322,6 +323,7 @@ impl S3Service {
             .buckets
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
+        require_object_lock(b)?;
         let obj = resolve_object(b, key, req.query_params.get("versionId"))?;
 
         match &obj.lock_legal_hold {
@@ -342,6 +344,20 @@ impl S3Service {
             )),
         }
     }
+}
+
+/// GetObjectRetention / GetObjectLegalHold on a bucket created without Object
+/// Lock. Recorded against S3: 400 InvalidRequest "Bucket is missing Object
+/// Lock Configuration", whether or not the object exists.
+fn require_object_lock(b: &crate::state::S3Bucket) -> Result<(), AwsServiceError> {
+    if b.object_lock_config.is_some() {
+        return Ok(());
+    }
+    Err(AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidRequest",
+        "Bucket is missing Object Lock Configuration",
+    ))
 }
 
 /// Build a `MalformedXML` error for an object-lock field whose value isn't a

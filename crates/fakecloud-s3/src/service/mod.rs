@@ -31,6 +31,7 @@ pub(crate) use objects::{
     commit_object_version, commit_object_version_with, is_null_version, run_blocking_io,
 };
 pub(crate) mod replication;
+mod request_checks;
 mod tags;
 
 // Re-export notification helpers for use in sub-modules
@@ -992,6 +993,13 @@ impl AwsService for S3Service {
         let caller_account = req.account_id.as_str();
         let owner_account = bucket.and_then(|b| self.bucket_owner_account(b));
         let account_id = owner_account.as_deref().unwrap_or(caller_account);
+
+        if !is_control && bucket.is_some() {
+            request_checks::check_request(&req, key.as_deref())?;
+            if owner_account.is_some() {
+                request_checks::check_existing_bucket_request(&req, key.as_deref())?;
+            }
+        }
 
         // Integrity of buffered request bodies (PutBucketCors, DeleteObjects,
         // PutObjectTagging, ...): S3 verifies a `Content-MD5` or
@@ -2999,7 +3007,10 @@ pub(crate) fn check_get_conditionals(
             .get("if-modified-since")
             .and_then(|v| v.to_str().ok())
         {
-            if let Some(dt) = parse_http_date(since) {
+            // A date in the future is not a valid condition (RFC 7232
+            // §3.3) and S3 ignores it: GetObject with an If-Modified-Since
+            // decades ahead answers 200 with the object (recorded).
+            if let Some(dt) = parse_http_date(since).filter(|dt| *dt <= Utc::now()) {
                 if obj_time <= dt {
                     return Err(not_modified());
                 }
@@ -3020,11 +3031,7 @@ pub(crate) fn check_head_conditionals(
     // If-Match
     if let Some(if_match) = req.headers.get("if-match").and_then(|v| v.to_str().ok()) {
         if !etag_matches(if_match, &obj_etag) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::PRECONDITION_FAILED,
-                "412",
-                "Precondition Failed",
-            ));
+            return Err(precondition_failed("If-Match"));
         }
     }
 
@@ -3048,11 +3055,7 @@ pub(crate) fn check_head_conditionals(
         {
             if let Some(dt) = parse_http_date(since) {
                 if obj_time > dt {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::PRECONDITION_FAILED,
-                        "412",
-                        "Precondition Failed",
-                    ));
+                    return Err(precondition_failed("If-Unmodified-Since"));
                 }
             }
         }
@@ -3065,7 +3068,10 @@ pub(crate) fn check_head_conditionals(
             .get("if-modified-since")
             .and_then(|v| v.to_str().ok())
         {
-            if let Some(dt) = parse_http_date(since) {
+            // A date in the future is not a valid condition (RFC 7232
+            // §3.3) and S3 ignores it: GetObject with an If-Modified-Since
+            // decades ahead answers 200 with the object (recorded).
+            if let Some(dt) = parse_http_date(since).filter(|dt| *dt <= Utc::now()) {
                 if obj_time <= dt {
                     return Err(not_modified());
                 }

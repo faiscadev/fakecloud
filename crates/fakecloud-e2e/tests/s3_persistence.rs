@@ -40,24 +40,16 @@ async fn persistence_round_trip_objects_with_metadata() {
     let mut server = TestServer::start_persistent(tmp.path()).await;
     let client = server.s3_client().await;
 
+    // Created with Object Lock: S3 answers the legal-hold reads below with
+    // InvalidRequest ("Bucket is missing Object Lock Configuration") on a
+    // bucket without it.
     client
         .create_bucket()
         .bucket("meta-bucket")
+        .object_lock_enabled_for_bucket(true)
         .send()
         .await
         .unwrap();
-
-    client
-        .put_object_lock_configuration()
-        .bucket("meta-bucket")
-        .object_lock_configuration(
-            ObjectLockConfiguration::builder()
-                .object_lock_enabled(ObjectLockEnabled::Enabled)
-                .build(),
-        )
-        .send()
-        .await
-        .ok();
 
     let objects: Vec<(&str, Vec<u8>, &str)> = vec![
         ("plain.txt", b"hello world".to_vec(), "text/plain"),

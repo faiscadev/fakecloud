@@ -10,10 +10,17 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
-        // Use the Id from the XML body if available, otherwise fall back to query param
-        let inv_id = extract_xml_value(&body_str, "Id")
-            .or_else(|| req.query_params.get("id").cloned())
-            .unwrap_or_default();
+        // The `id` query parameter names the configuration, as for the
+        // sibling analytics / metrics / intelligent-tiering configurations.
+        // (Real S3 answers a PUT without it with a 500 InternalError,
+        // recorded; this refuses it as the siblings do instead.)
+        let inv_id = req.query_params.get("id").cloned().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "Missing required query parameter: id",
+            )
+        })?;
         let payload = {
             let mut accts = self.state.write();
             let state = accts.get_or_create(account_id);
@@ -98,14 +105,16 @@ impl S3Service {
         req: &AwsRequest,
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let inv_id = req.query_params.get("id").cloned().unwrap_or_default();
+        let inv_id = super::delete_config_id(req)?;
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
         let b = state
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        b.inventory_configs.remove(&inv_id);
+        if b.inventory_configs.remove(&inv_id).is_none() {
+            return Err(super::no_such_configuration());
+        }
         if b.inventory_configs.is_empty() {
             self.store
                 .delete_bucket_subresource(bucket, BucketSubresource::Inventory)

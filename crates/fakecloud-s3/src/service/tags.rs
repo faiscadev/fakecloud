@@ -85,15 +85,25 @@ impl S3Service {
         let mut response_headers = HeaderMap::new();
 
         if let Some(ref vid) = version_id {
-            // Version-specific tagging
+            // Version-specific tagging. `null` names the version of an
+            // object written while versioning was off (or never on), the
+            // same as `resolve_object` reads it: GetObjectTagging and
+            // PutObjectTagging both accept `versionId=null` on an unversioned
+            // bucket (recorded against S3).
             let mut found = false;
+            let is_version = |o: &crate::state::S3Object| {
+                o.version_id.as_deref() == Some(vid.as_str())
+                    || (vid == "null" && o.version_id.is_none())
+            };
 
-            // Check versioned objects
+            // Check versioned objects. A live object wins over a delete
+            // marker holding the same (null) version id.
             if let Some(versions) = b.object_versions.get_mut(key) {
-                if let Some(obj) = versions
-                    .iter_mut()
-                    .find(|o| o.version_id.as_deref() == Some(vid.as_str()))
-                {
+                let pos = versions
+                    .iter()
+                    .position(|o| is_version(o) && !o.is_delete_marker)
+                    .or_else(|| versions.iter().position(is_version));
+                if let Some(obj) = pos.map(|i| &mut versions[i]) {
                     if obj.is_delete_marker {
                         return Err(AwsServiceError::aws_error_with_fields(
                             StatusCode::METHOD_NOT_ALLOWED,
@@ -114,7 +124,7 @@ impl S3Service {
             // Also check current object
             if !found {
                 if let Some(obj) = b.objects.get_mut(key) {
-                    if obj.version_id.as_deref() == Some(vid.as_str()) {
+                    if is_version(obj) {
                         if obj.is_delete_marker {
                             return Err(AwsServiceError::aws_error_with_fields(
                                 StatusCode::METHOD_NOT_ALLOWED,
@@ -133,6 +143,18 @@ impl S3Service {
                 }
             }
 
+            // As `resolve_object` reads it: an unknown version id is
+            // NoSuchVersion in a bucket that has (or had) versioning, and a
+            // malformed one -- every id but `null` -- elsewhere (recorded:
+            // PutObjectTagging `versionId=t` on an unversioned bucket is 400
+            // InvalidArgument "Invalid version id specified").
+            if !found && b.versioning.is_none() && vid != "null" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "Invalid version id specified",
+                ));
+            }
             if !found {
                 return Err(AwsServiceError::aws_error_with_fields(
                     StatusCode::NOT_FOUND,

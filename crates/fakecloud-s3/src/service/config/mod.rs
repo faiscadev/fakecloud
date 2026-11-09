@@ -186,6 +186,24 @@ impl S3Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
 
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+
+        // Versioning must be enabled. Checked before the body: S3 answers an
+        // unversioned bucket with InvalidBucketState even when the body is
+        // empty (recorded).
+        if b.versioning.as_deref() != Some("Enabled") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "InvalidBucketState",
+                "Versioning must be 'Enabled' on the bucket to apply a Object Lock configuration",
+            ));
+        }
+
         // Validate: body must not be empty
         if body_str.trim().is_empty() {
             return Err(AwsServiceError::aws_error(
@@ -204,22 +222,6 @@ impl S3Service {
             ));
         }
         validate_default_retention(&body_str)?;
-
-        let mut accts = self.state.write();
-        let state = accts.get_or_create(account_id);
-        let b = state
-            .buckets
-            .get_mut(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-
-        // Versioning must be enabled
-        if b.versioning.as_deref() != Some("Enabled") {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::CONFLICT,
-                "InvalidBucketState",
-                "Versioning must be 'Enabled' on the bucket to apply a Object Lock configuration",
-            ));
-        }
 
         b.object_lock_config = Some(body_str.clone());
         self.store
@@ -688,6 +690,26 @@ impl S3Service {
                 }
             }
         }
+        // This listing never hands out a continuation token, so any token is
+        // one S3 did not issue. Recorded against S3: a token of at most 1024
+        // characters is 400 InvalidRequest "Invalid Token", a longer one 400
+        // InvalidRequest "Request invalid".
+        if let Some(token) = req
+            .query_params
+            .get("continuation-token")
+            .filter(|t| !t.is_empty())
+        {
+            let message = if token.chars().count() > 1024 {
+                "Request invalid"
+            } else {
+                "Invalid Token"
+            };
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidRequest",
+                message,
+            ));
+        }
         // S3 Express directory buckets are not modeled separately in
         // fakecloud; return an empty list per the documented schema so
         // SDK calls succeed.
@@ -699,14 +721,38 @@ impl S3Service {
     pub(super) fn create_session(
         &self,
         account_id: &str,
-        _req: &AwsRequest,
+        req: &AwsRequest,
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // A session is for a bucket that exists: S3 answers CreateSession
+        // for a missing one with NoSuchBucket (recorded).
+        if !self
+            .state
+            .read()
+            .get(account_id)
+            .is_some_and(|s| s.buckets.contains_key(bucket))
+        {
+            return Err(no_such_bucket(bucket));
+        }
+        // The session's default encryption: AES256 or aws:kms. Anything
+        // else is refused the way PutObject refuses an unknown method.
+        if let Some(sse) = req
+            .headers
+            .get("x-amz-server-side-encryption")
+            .and_then(|v| v.to_str().ok())
+        {
+            if sse != "AES256" && sse != "aws:kms" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "The encryption method specified is not supported",
+                ));
+            }
+        }
         // Issue ephemeral credentials scoped to the directory bucket. These
         // are not usable for actual SigV4 in the emulator (the S3 Express
         // session-token flow isn't enforced) but the response shape is
         // what SDKs expect.
-        let _ = account_id;
         let body = format!(
             "<CreateSessionResult><Credentials><AccessKeyId>FAKEACCESSKEY</AccessKeyId><SecretAccessKey>FAKESECRET</SecretAccessKey><SessionToken>FAKESESSION-{}</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials></CreateSessionResult>",
             xml_escape(bucket)
@@ -1314,6 +1360,31 @@ fn store_named_config(
     Ok(empty_response(StatusCode::OK))
 }
 
+/// S3's message for a configuration id the bucket does not have (recorded).
+const NO_SUCH_CONFIGURATION_MESSAGE: &str = "The specified configuration does not exist.";
+
+pub(super) fn no_such_configuration() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::NOT_FOUND,
+        "NoSuchConfiguration",
+        NO_SUCH_CONFIGURATION_MESSAGE,
+    )
+}
+
+/// The `id` of a Delete{Analytics,Metrics,Inventory,IntelligentTiering}
+/// configuration request. Recorded against S3: without one, the request is
+/// 400 InvalidConfigurationId; an id the bucket does not have is 404
+/// NoSuchConfiguration.
+pub(super) fn delete_config_id(req: &AwsRequest) -> Result<String, AwsServiceError> {
+    req.query_params.get("id").cloned().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidConfigurationId",
+            "The specified configuration id is invalid.",
+        )
+    })
+}
+
 fn get_named_config(
     svc: &S3Service,
     account_id: &str,
@@ -1339,7 +1410,7 @@ fn get_named_config(
         AwsServiceError::aws_error(
             StatusCode::NOT_FOUND,
             "NoSuchConfiguration",
-            format!("Configuration {id} not found."),
+            NO_SUCH_CONFIGURATION_MESSAGE,
         )
     })?;
     Ok(s3_xml(StatusCode::OK, body))
@@ -1352,13 +1423,7 @@ fn delete_named_config(
     bucket: &str,
     kind: ConfigKind,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let id = req.query_params.get("id").cloned().ok_or_else(|| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "InvalidArgument",
-            "Missing required query parameter: id",
-        )
-    })?;
+    let id = delete_config_id(req)?;
     let (empty, payload) = {
         let mut accts = svc.state.write();
         let state = accts.get_or_create(account_id);
@@ -1366,7 +1431,9 @@ fn delete_named_config(
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        config_map(b, kind).remove(&id);
+        if config_map(b, kind).remove(&id).is_none() {
+            return Err(no_such_configuration());
+        }
         let map = config_map(b, kind);
         let is_empty = map.is_empty();
         // Not `unwrap_or_default`: writing an empty document in the non-empty

@@ -2795,7 +2795,7 @@ fn get_bucket_website_nonexistent() {
 #[test]
 fn put_and_get_object_retention() {
     let svc = make_service();
-    seed_bucket(&svc, "lock-b");
+    seed_lock_bucket(&svc, "lock-b", None);
     seed_object(&svc, "lock-b", "retained.txt", b"data");
 
     let body = b"<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>2030-01-01T00:00:00Z</RetainUntilDate></Retention>";
@@ -2834,7 +2834,7 @@ fn get_object_retention_nonexistent_bucket() {
 #[test]
 fn get_object_retention_nonexistent_key() {
     let svc = make_service();
-    seed_bucket(&svc, "lock-b2");
+    seed_lock_bucket(&svc, "lock-b2", None);
     let req = make_request(Method::GET, "/lock-b2/missing", &[("retention", "")], b"");
     assert_aws_err(
         svc.get_object_retention("123456789012", &req, "lock-b2", "missing"),
@@ -2845,7 +2845,7 @@ fn get_object_retention_nonexistent_key() {
 #[test]
 fn put_and_get_object_legal_hold() {
     let svc = make_service();
-    seed_bucket(&svc, "hold-b");
+    seed_lock_bucket(&svc, "hold-b", None);
     seed_object(&svc, "hold-b", "held.txt", b"data");
 
     let body = b"<LegalHold><Status>ON</Status></LegalHold>";
@@ -12706,4 +12706,322 @@ fn delete_bucket_encryption_resets_to_the_bucket_own_default() {
             .unwrap(),
     );
     assert_eq!(fresh, crate::state::DEFAULT_BUCKET_ENCRYPTION_XML);
+}
+
+// ---- Behaviors recorded against real S3 (us-east-1, 2026-11-09) ----
+
+fn with_headers(mut req: AwsRequest, headers: &[(&str, &str)]) -> AwsRequest {
+    for (k, v) in headers {
+        req.headers.insert(
+            http::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+            v.parse().unwrap(),
+        );
+    }
+    req
+}
+
+#[tokio::test]
+async fn recorded_key_too_long_on_multipart_and_delete() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    let path = format!("/b/{}", "k".repeat(1025));
+    assert_aws_err(
+        svc.handle(make_request(Method::POST, &path, &[("uploads", "")], b""))
+            .await,
+        "KeyTooLongError",
+    );
+    assert_aws_err(
+        svc.handle(make_request(Method::DELETE, &path, &[], b""))
+            .await,
+        "KeyTooLongError",
+    );
+}
+
+#[tokio::test]
+async fn recorded_header_enum_refusals() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    let put = with_headers(
+        make_request(Method::PUT, "/b/k", &[], b"x"),
+        &[("x-amz-server-side-encryption", "bogus")],
+    );
+    let err = assert_aws_err(svc.handle(put).await, "InvalidArgument");
+    assert_eq!(
+        err.message(),
+        "The encryption method specified is not supported"
+    );
+    assert_aws_err(
+        svc.handle(make_request(
+            Method::GET,
+            "/b",
+            &[("encoding-type", "bogus")],
+            b"",
+        ))
+        .await,
+        "InvalidArgument",
+    );
+    let get = with_headers(
+        make_request(Method::GET, "/b/k", &[], b""),
+        &[("x-amz-checksum-mode", "bogus")],
+    );
+    assert_aws_err(svc.handle(get).await, "InvalidRequest");
+    // An unrecognized request-payer value is ignored.
+    seed_object(&svc, "b", "k", b"body");
+    let get = with_headers(
+        make_request(Method::GET, "/b/k", &[], b""),
+        &[("x-amz-request-payer", "bogus")],
+    );
+    assert_eq!(svc.handle(get).await.unwrap().status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn recorded_empty_configuration_body() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    assert_aws_err(
+        svc.handle(make_request(Method::PUT, "/b", &[("encryption", "")], b""))
+            .await,
+        "MissingRequestBodyError",
+    );
+    assert_aws_err(
+        svc.handle(make_request(
+            Method::PUT,
+            "/b",
+            &[("metrics", ""), ("id", "m")],
+            b"",
+        ))
+        .await,
+        "MalformedXML",
+    );
+    // A missing bucket still answers NoSuchBucket.
+    assert_aws_err(
+        svc.handle(make_request(
+            Method::PUT,
+            "/nope",
+            &[("encryption", "")],
+            b"",
+        ))
+        .await,
+        "NoSuchBucket",
+    );
+}
+
+#[tokio::test]
+async fn recorded_half_an_upload_part_address() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    assert_aws_err(
+        svc.handle(make_request(
+            Method::PUT,
+            "/b/k",
+            &[("partNumber", "1")],
+            b"x",
+        ))
+        .await,
+        "InvalidArgument",
+    );
+    let err = assert_aws_err(
+        svc.handle(make_request(
+            Method::PUT,
+            "/b/k",
+            &[("uploadId", "u")],
+            b"x",
+        ))
+        .await,
+        "MethodNotAllowed",
+    );
+    assert_eq!(err.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn recorded_retention_reads_need_object_lock() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    seed_object(&svc, "b", "k", b"body");
+    for q in ["retention", "legal-hold"] {
+        let err = assert_aws_err(
+            svc.handle(make_request(Method::GET, "/b/k", &[(q, "")], b""))
+                .await,
+            "InvalidRequest",
+        );
+        assert_eq!(err.message(), "Bucket is missing Object Lock Configuration");
+    }
+}
+
+#[tokio::test]
+async fn recorded_object_lock_config_checks_versioning_before_body() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    assert_aws_err(
+        svc.handle(make_request(Method::PUT, "/b", &[("object-lock", "")], b""))
+            .await,
+        "InvalidBucketState",
+    );
+    svc.state
+        .write()
+        .default_mut()
+        .buckets
+        .get_mut("b")
+        .unwrap()
+        .versioning = Some("Enabled".to_string());
+    assert_aws_err(
+        svc.handle(make_request(Method::PUT, "/b", &[("object-lock", "")], b""))
+            .await,
+        "MissingRequestBodyError",
+    );
+}
+
+#[tokio::test]
+async fn recorded_delete_configuration_ids() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    for kind in ["analytics", "metrics", "inventory", "intelligent-tiering"] {
+        assert_aws_err(
+            svc.handle(make_request(Method::DELETE, "/b", &[(kind, "")], b""))
+                .await,
+            "InvalidConfigurationId",
+        );
+        let err = assert_aws_err(
+            svc.handle(make_request(
+                Method::DELETE,
+                "/b",
+                &[(kind, ""), ("id", "nope")],
+                b"",
+            ))
+            .await,
+            "NoSuchConfiguration",
+        );
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+    // PutBucketInventoryConfiguration names the configuration by its query id.
+    assert_aws_err(
+        svc.handle(make_request(
+            Method::PUT,
+            "/b",
+            &[("inventory", "")],
+            b"<InventoryConfiguration><Id>i</Id></InventoryConfiguration>",
+        ))
+        .await,
+        "InvalidArgument",
+    );
+}
+
+#[tokio::test]
+async fn recorded_object_tagging_version_ids() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    seed_object(&svc, "b", "k", b"body");
+    let tagging = b"<Tagging><TagSet><Tag><Key>a</Key><Value>b</Value></Tag></TagSet></Tagging>";
+    let ok = svc
+        .handle(make_request(
+            Method::PUT,
+            "/b/k",
+            &[("tagging", ""), ("versionId", "null")],
+            tagging,
+        ))
+        .await
+        .expect("versionId=null on an unversioned bucket");
+    assert_eq!(ok.status, StatusCode::OK);
+    let err = assert_aws_err(
+        svc.handle(make_request(
+            Method::PUT,
+            "/b/k",
+            &[("tagging", ""), ("versionId", "t")],
+            tagging,
+        ))
+        .await,
+        "InvalidArgument",
+    );
+    assert_eq!(err.message(), "Invalid version id specified");
+}
+
+#[tokio::test]
+async fn recorded_conditional_reads() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    seed_object(&svc, "b", "k", b"body");
+    let future = with_headers(
+        make_request(Method::GET, "/b/k", &[], b""),
+        &[("if-modified-since", "Mon, 01 Jan 2091 00:00:00 GMT")],
+    );
+    assert_eq!(svc.handle(future).await.unwrap().status, StatusCode::OK);
+    let head = with_headers(
+        make_request(Method::HEAD, "/b/k", &[], b""),
+        &[("if-match", "\"nomatch\"")],
+    );
+    let err = assert_aws_err(svc.handle(head).await, "PreconditionFailed");
+    assert_eq!(err.status(), StatusCode::PRECONDITION_FAILED);
+}
+
+#[tokio::test]
+async fn recorded_create_session_and_directory_listing() {
+    let svc = make_service();
+    assert_aws_err(
+        svc.handle(make_request(Method::GET, "/nope", &[("session", "")], b""))
+            .await,
+        "NoSuchBucket",
+    );
+    seed_bucket(&svc, "b");
+    let sse = with_headers(
+        make_request(Method::GET, "/b", &[("session", "")], b""),
+        &[("x-amz-server-side-encryption", "bogus")],
+    );
+    assert_aws_err(svc.handle(sse).await, "InvalidArgument");
+    let ok = svc
+        .handle(make_request(Method::GET, "/b", &[("session", "")], b""))
+        .await
+        .expect("CreateSession");
+    assert_eq!(ok.status, StatusCode::OK);
+
+    let req = make_request(
+        Method::GET,
+        "/",
+        &[
+            ("x-id", "ListDirectoryBuckets"),
+            ("continuation-token", "abc"),
+        ],
+        b"",
+    );
+    let err = assert_aws_err(
+        svc.list_directory_buckets("123456789012", &req),
+        "InvalidRequest",
+    );
+    assert_eq!(err.message(), "Invalid Token");
+    let long = "a".repeat(1025);
+    let req = make_request(
+        Method::GET,
+        "/",
+        &[("continuation-token", long.as_str())],
+        b"",
+    );
+    let err = assert_aws_err(
+        svc.list_directory_buckets("123456789012", &req),
+        "InvalidRequest",
+    );
+    assert_eq!(err.message(), "Request invalid");
+}
+
+#[tokio::test]
+async fn recorded_unknown_parts_are_invalid_part_before_order() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    let created = svc
+        .handle(make_request(Method::POST, "/b/k", &[("uploads", "")], b""))
+        .await
+        .expect("CreateMultipartUpload");
+    let xml = String::from_utf8(created.body.expect_bytes().to_vec()).unwrap();
+    let upload_id = extract_xml_value(&xml, "UploadId").unwrap();
+    let body =
+        b"<CompleteMultipartUpload><Part><PartNumber>2</PartNumber><ETag>\"t\"</ETag></Part>\
+<Part><PartNumber>1</PartNumber><ETag>\"t\"</ETag></Part></CompleteMultipartUpload>";
+    assert_aws_err(
+        svc.handle(make_request(
+            Method::POST,
+            "/b/k",
+            &[("uploadId", upload_id.as_str())],
+            body,
+        ))
+        .await,
+        "InvalidPart",
+    );
 }
