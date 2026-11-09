@@ -24,7 +24,7 @@ Since LocalStack replaced its open-source Community Edition with a proprietary i
 | Account / auth token | No | **Required** | Required |
 | Commercial use | Free | **Not allowed** | Paid plans only |
 | Docker required | No (single binary) | Yes | Yes |
-| Startup | ~400ms | ~3s | ~3s |
+| Startup | ~300ms | ~3s | ~3s |
 | Idle memory | ~30 MiB | ~150 MiB | ~150 MiB |
 | Install size | ~120 MB | ~1 GB Docker image | ~1 GB Docker image |
 | Conformance methodology | Smithy-validated, 258,545/258,545 test variants pass on every commit | Not published | Not published |

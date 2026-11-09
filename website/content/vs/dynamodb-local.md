@@ -36,7 +36,7 @@ DynamoDB Local is focused and battle-tested. For pure DynamoDB tests, nothing wr
 | S3 writes trigger DynamoDB updates via Lambda | **Yes** | **No** |
 | Other AWS services available | 106 more | None |
 | Runtime | Single Rust binary (~120 MB) | Java JAR or Docker image |
-| Startup | ~400ms | ~2s |
+| Startup | ~300ms | ~2s |
 | Install size | ~120 MB | ~60 MB JAR + JVM |
 
 ## Same DynamoDB call works against both

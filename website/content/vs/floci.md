@@ -30,7 +30,7 @@ Run your actual test suite against both. Numbers published on landing pages are 
 |---|---|
 | Language | Rust |
 | Distribution | Single static binary (~120 MB) + Docker image |
-| Startup | ~400ms |
+| Startup | ~300ms |
 | Idle memory | ~30 MiB |
 | Services covered today | 107 (7,657 ops) at true 100% conformance (258,545/258,545 variants), incl. ECR + ECS + ELBv2 |
 | Lambda execution | Real code in 31 Docker runtime containers |
