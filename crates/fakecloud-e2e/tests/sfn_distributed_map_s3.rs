@@ -186,8 +186,8 @@ async fn item_reader_feeds_item_batcher() {
 
     let batches = output.as_array().unwrap();
     assert_eq!(batches.len(), 2, "{output}");
-    assert_eq!(batches[0]["items"], json!([1, 2]));
-    assert_eq!(batches[1]["items"], json!([3]));
+    assert_eq!(batches[0], json!({"Items": [1, 2]}));
+    assert_eq!(batches[1], json!({"Items": [3]}));
 }
 
 #[tokio::test]
@@ -351,6 +351,39 @@ async fn item_reader_parses_the_documented_csv_example() {
             "MyLetters": "abc",
             "MyArray": [1, 2, 3]
         }])
+    );
+}
+
+#[tokio::test]
+async fn item_reader_parses_the_recorded_csv() {
+    let server = TestServer::start().await;
+    create_bucket(&server).await;
+    put(
+        &server,
+        "c.csv",
+        "a,b\n\"\"\"x,y\"\"\",1\n\"plain\",2\n\"\",3\n{\"\"K\"\":\"\"V\"\"},4\n\"\"lead,5\n",
+    )
+    .await;
+
+    let output = run_ok(
+        &server,
+        map_definition(get_object_reader(
+            "c.csv",
+            json!({"InputType": "CSV", "CSVHeaderLocation": "FIRST_ROW"}),
+        )),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(
+        output,
+        json!([
+            {"a": "\"x,y\"", "b": "1"},
+            {"a": "plain", "b": "2"},
+            {"a": "", "b": "3"},
+            {"a": "{\"K\":\"V\"}", "b": "4"},
+            {"a": "lead", "b": "5"}
+        ])
     );
 }
 
@@ -818,6 +851,29 @@ async fn result_writer_writes_a_manifest_and_result_files() {
 
     let body = read_object(&server, results_key).await;
     assert_eq!(succeeded[0]["Size"], body.len());
+    // The recorded stored types.
+    let s3 = server.s3_client().await;
+    let head = |key: String| {
+        let s3 = s3.clone();
+        async move {
+            s3.head_object()
+                .bucket(BUCKET)
+                .key(key)
+                .send()
+                .await
+                .unwrap()
+                .content_type()
+                .map(String::from)
+        }
+    };
+    assert_eq!(
+        head(results_key.to_string()).await.as_deref(),
+        Some("binary/octet-stream")
+    );
+    assert_eq!(
+        head(manifest_key.to_string()).await.as_deref(),
+        Some("application/octet-stream")
+    );
     let results: Value = serde_json::from_slice(&body).unwrap();
     let results = results.as_array().unwrap();
     assert_eq!(results.len(), 2);
@@ -1125,6 +1181,16 @@ async fn aws_sdk_s3_put_serializes_an_object_body() {
     .await;
 
     assert_eq!(read_object(&server, "put.json").await, b"{\"x\":1}");
+    let stored = server
+        .s3_client()
+        .await
+        .head_object()
+        .bucket(BUCKET)
+        .key("put.json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stored.content_type(), Some("text/plain; charset=UTF-8"));
 }
 
 #[tokio::test]

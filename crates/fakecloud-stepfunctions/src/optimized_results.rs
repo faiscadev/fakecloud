@@ -155,6 +155,35 @@ pub(crate) fn glue_start_job_run_result(
     result
 }
 
+/// `ecs:runTask`: its headers carry no `connection`.
+pub(crate) fn ecs_run_task_result(service: &SdkService, response: &Value) -> Value {
+    let mut result = service.result_json("RunTask", response, DateStyle::EpochMillis);
+    let request_id = uuid::Uuid::new_v4().to_string();
+    add_metadata(
+        &mut result,
+        &request_id,
+        vec![
+            ("x-amzn-RequestId", request_id.clone()),
+            ("Content-Length", response.to_string().len().to_string()),
+            ("Date", http_date()),
+            ("Content-Type", "application/x-amz-json-1.1".to_string()),
+        ],
+    );
+    result
+}
+
+/// The result of `ecs:runTask.sync`: the task itself.
+pub(crate) fn ecs_sync_result(service: &SdkService, described: &Value) -> Value {
+    let result = service.result_json("DescribeTasks", described, DateStyle::EpochMillis);
+    result["Tasks"][0].clone()
+}
+
+/// The result of `glue:startJobRun.sync`: the job run itself.
+pub(crate) fn glue_sync_result(service: &SdkService, described: &Value) -> Value {
+    let result = service.result_json("GetJobRun", described, DateStyle::EpochMillis);
+    result["JobRun"].clone()
+}
+
 /// The result of `states:startExecution`.
 pub(crate) fn start_execution_result(service: &SdkService, response: &Value) -> Value {
     let mut result = service.result_json("StartExecution", response, DateStyle::EpochMillis);

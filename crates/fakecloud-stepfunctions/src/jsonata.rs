@@ -31,6 +31,10 @@ pub(crate) fn propagate_query_language(def: &mut Value, inherited: Option<&str>)
         return;
     };
     for state in states.values_mut() {
+        // Refused at creation; a stored definition must still not panic here.
+        if !state.is_object() {
+            continue;
+        }
         if state.get("QueryLanguage").is_none() {
             if let Some(language) = &language {
                 state["QueryLanguage"] = json!(language);
@@ -70,6 +74,21 @@ fn expression_of(text: &str) -> Option<&str> {
 
 fn host_error(message: String) -> jsonata_core::evaluator::EvaluatorError {
     jsonata_core::evaluator::EvaluatorError::EvaluationError(message)
+}
+
+/// `$random(seed)`: as recorded, what `new java.util.Random(seed).nextDouble()`
+/// returns, the same value for the same seed.
+fn seeded_random(seed: i64) -> f64 {
+    const MULTIPLIER: i64 = 0x5_DEEC_E66D;
+    const MASK: i64 = (1 << 48) - 1;
+    let mut state = (seed ^ MULTIPLIER) & MASK;
+    let mut next = |bits: u32| {
+        state = state.wrapping_mul(MULTIPLIER).wrapping_add(0xB) & MASK;
+        state >> (48 - bits)
+    };
+    let high = next(26);
+    let low = next(27);
+    ((high << 27) + low) as f64 / (1_i64 << 53) as f64
 }
 
 fn register_step_functions_functions(evaluator: &mut Evaluator) -> Result<(), StateError> {
@@ -141,8 +160,11 @@ fn register_step_functions_functions(evaluator: &mut Evaluator) -> Result<(), St
         .map_err(bad)?;
     // Step Functions' `$random` takes an optional seed the language's does not.
     evaluator
-        .register_fn_override("random", |_: &[JValue]| {
-            Ok(JValue::from(rand::random::<f64>()))
+        .register_fn_override("random", |args: &[JValue]| {
+            Ok(JValue::from(match args.first().and_then(|v| v.as_f64()) {
+                Some(seed) => seeded_random(seed as i64),
+                None => rand::random::<f64>(),
+            }))
         })
         .map_err(bad)?;
     Ok(())
@@ -181,25 +203,33 @@ fn evaluate(expression: &str, scope: &Scope<'_>) -> Result<Option<Value>, StateE
         .map_err(|e| query_error(format!("'{expression}' has no JSON value: {e}")))
 }
 
-/// Evaluate every `{% %}` string inside a value.
-pub(crate) fn eval_template(template: &Value, scope: &Scope<'_>) -> Result<Value, StateError> {
+/// Evaluate every `{% %}` string inside the value of a state's `field`.
+pub(crate) fn eval_template(
+    field: &str,
+    template: &Value,
+    scope: &Scope<'_>,
+) -> Result<Value, StateError> {
     match template {
         Value::String(text) => match expression_of(text) {
-            Some(expression) => evaluate(expression, scope)?.ok_or_else(|| {
-                query_error(format!(
-                    "The JSONata expression '{expression}' returned nothing (undefined)"
-                ))
-            }),
+            Some(expression) => {
+                let expression = expression.trim();
+                evaluate(expression, scope)?.ok_or_else(|| {
+                    query_error(format!(
+                        "The JSONata expression '{expression}' specified for the field \
+                         '{field}' returned nothing (undefined)."
+                    ))
+                })
+            }
             None => Ok(template.clone()),
         },
         Value::Object(object) => object
             .iter()
-            .map(|(key, value)| Ok((key.clone(), eval_template(value, scope)?)))
+            .map(|(key, value)| Ok((key.clone(), eval_template(field, value, scope)?)))
             .collect::<Result<Map<_, _>, StateError>>()
             .map(Value::Object),
         Value::Array(items) => items
             .iter()
-            .map(|item| eval_template(item, scope))
+            .map(|item| eval_template(field, item, scope))
             .collect::<Result<Vec<_>, StateError>>()
             .map(Value::Array),
         other => Ok(other.clone()),
@@ -209,9 +239,88 @@ pub(crate) fn eval_template(template: &Value, scope: &Scope<'_>) -> Result<Value
 fn eval_fields(object: &mut Value, fields: &[&str], scope: &Scope<'_>) -> Result<(), StateError> {
     for field in fields {
         if let Some(template) = object.get(*field) {
-            let value = eval_template(template, scope)?;
+            let value = eval_template(field, template, scope)?;
             object[*field] = value;
         }
+    }
+    Ok(())
+}
+
+/// The cause of a query failure as AWS words it, naming the state and when it
+/// was entered.
+pub(crate) fn in_state_cause(state: &str, entered_event_id: i64, cause: &str) -> String {
+    format!(
+        "An error occurred while executing the state '{state}' (entered at the event id \
+         #{entered_event_id}). {cause}"
+    )
+}
+
+/// The field a query failure's cause names, for its `EvaluationFailed` event.
+pub(crate) fn failed_field(cause: &str) -> Option<&str> {
+    if let Some((_, rest)) = cause.split_once("for the field '") {
+        return rest.split('\'').next();
+    }
+    if cause.starts_with("Seconds ") {
+        return Some("Seconds");
+    }
+    if cause.starts_with("The Timestamp field") {
+        return Some("Timestamp");
+    }
+    None
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// A Wait state's expressions, checked as recorded.
+fn prepare_wait(
+    state_def: &Value,
+    prepared: &mut Value,
+    scope: &Scope<'_>,
+) -> Result<(), StateError> {
+    if let Some(template) = state_def.get("Seconds") {
+        let seconds = eval_template("Seconds", template, scope)?;
+        if !seconds.is_number() {
+            let expression = template
+                .as_str()
+                .and_then(expression_of)
+                .unwrap_or_default()
+                .trim();
+            return Err(query_error(format!(
+                "The JSONata expression '{expression}' specified for the field 'Seconds' \
+                 returned an unexpected result type. Expected 'number', but was '{}' for \
+                 value: {seconds}",
+                json_type_name(&seconds)
+            )));
+        }
+        if seconds.as_f64().is_some_and(|n| n < 0.0) {
+            return Err(query_error(format!(
+                "Seconds cannot be negative but was: {seconds}"
+            )));
+        }
+        prepared["Seconds"] = seconds;
+    }
+    if let Some(template) = state_def.get("Timestamp") {
+        let timestamp = eval_template("Timestamp", template, scope)?;
+        let text = match &timestamp {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        if chrono::DateTime::parse_from_rfc3339(&text).is_err() {
+            return Err(query_error(format!(
+                "The Timestamp field cannot be parsed as an ISO-8601 extended offset date-time \
+                 format string: {text}"
+            )));
+        }
+        prepared["Timestamp"] = timestamp;
     }
     Ok(())
 }
@@ -232,7 +341,7 @@ pub(crate) fn prepare_state(
     let mut prepared = state_def.clone();
     let mut run_input = input.clone();
     match state_def["Type"].as_str() {
-        Some("Wait") => eval_fields(&mut prepared, &["Seconds", "Timestamp"], &scope)?,
+        Some("Wait") => prepare_wait(state_def, &mut prepared, &scope)?,
         Some("Fail") => eval_fields(&mut prepared, &["Error", "Cause"], &scope)?,
         Some("Task") => eval_fields(
             &mut prepared,
@@ -241,7 +350,7 @@ pub(crate) fn prepare_state(
         )?,
         Some("Parallel") => {
             if let Some(arguments) = state_def.get("Arguments") {
-                run_input = eval_template(arguments, &scope)?;
+                run_input = eval_template("Arguments", arguments, &scope)?;
             }
         }
         Some("Map") => {
@@ -256,11 +365,11 @@ pub(crate) fn prepare_state(
             )?;
             // `Items` stays apart from the input: `$states.input` in `ItemSelector`
             // is still the state's input.
-            eval_fields(&mut prepared, &["Items"], &scope)?;
+            eval_fields(&mut prepared, &["Items", "ItemBatcher"], &scope)?;
             for field in ["ItemReader", "ResultWriter"] {
                 if let Some(part) = prepared.get_mut(field) {
                     if let Some(arguments) = part.get("Arguments").cloned() {
-                        part["Parameters"] = eval_template(&arguments, &scope)?;
+                        part["Parameters"] = eval_template("Arguments", &arguments, &scope)?;
                     }
                     if let Some(config) = part.get_mut("ReaderConfig") {
                         eval_fields(config, &["MaxItems"], &scope)?;
@@ -281,7 +390,7 @@ fn apply_assign(assign: &Value, scope: &Scope<'_>) -> Result<(), StateError> {
     // state. All of them evaluate before any is staged.
     let evaluated = pairs
         .iter()
-        .map(|(name, template)| Ok((name.clone(), eval_template(template, scope)?)))
+        .map(|(name, template)| Ok((name.clone(), eval_template("Assign", template, scope)?)))
         .collect::<Result<Vec<_>, StateError>>()?;
     for (name, value) in evaluated {
         crate::variables::stage(name, value);
@@ -307,7 +416,7 @@ pub(crate) fn finish_state(
     // Nothing is staged unless both fields evaluate: a state failing here keeps
     // none of its assignments.
     let output = match holder.get("Output") {
-        Some(output) => Some(eval_template(output, &scope)?),
+        Some(output) => Some(eval_template("Output", output, &scope)?),
         None => None,
     };
     if let Some(assign) = holder.get("Assign") {
@@ -330,7 +439,7 @@ pub(crate) fn choose(
     };
     for rule in state_def["Choices"].as_array().into_iter().flatten() {
         let condition = rule.get("Condition").unwrap_or(&Value::Null);
-        match eval_template(condition, &scope)? {
+        match eval_template("Condition", condition, &scope)? {
             Value::Bool(true) => {
                 let Some(next) = rule["Next"].as_str() else {
                     continue;
@@ -373,6 +482,7 @@ mod tests {
         let input = json!({"n": 2});
         let context = json!({"Execution": {"Name": "e"}});
         let out = eval_template(
+            "Output",
             &json!({
                 "a": "{% 1 + 1 %}",
                 "b": {"c": ["{% $states.input.n * 2 %}", "plain"]},
@@ -393,8 +503,12 @@ mod tests {
         let input = json!({});
         let context = json!({});
         for template in ["{% $states.input.missing %}", "{% 1 + %}"] {
-            let (error, _) =
-                eval_template(&json!(template), &scope(&input, &context, "arn:t2")).unwrap_err();
+            let (error, _) = eval_template(
+                "Output",
+                &json!(template),
+                &scope(&input, &context, "arn:t2"),
+            )
+            .unwrap_err();
             assert_eq!(error, QUERY_ERROR);
         }
     }
@@ -403,8 +517,9 @@ mod tests {
     fn step_functions_functions_are_available() {
         let input = json!({});
         let context = json!({});
-        let eval =
-            |text: &str| eval_template(&json!(text), &scope(&input, &context, "arn:t3")).unwrap();
+        let eval = |text: &str| {
+            eval_template("Output", &json!(text), &scope(&input, &context, "arn:t3")).unwrap()
+        };
         assert_eq!(eval("{% $parse('{\"a\":1}') %}"), json!({"a": 1}));
         assert_eq!(eval("{% $partition([1,2,3], 2) %}"), json!([[1, 2], [3]]));
         assert_eq!(eval("{% $range(0, 4, 2) %}"), json!([0, 2, 4]));
@@ -444,8 +559,12 @@ mod tests {
             .unwrap();
             assert_eq!(out, json!([1, "r"]));
             crate::variables::commit();
-            let after =
-                eval_template(&json!("{% [$x, $y] %}"), &scope(&input, &context, "")).unwrap();
+            let after = eval_template(
+                "Output",
+                &json!("{% [$x, $y] %}"),
+                &scope(&input, &context, ""),
+            )
+            .unwrap();
             assert_eq!(after, json!([2, 1]));
         };
         tokio::runtime::Builder::new_current_thread()
@@ -498,6 +617,107 @@ mod tests {
         assert_eq!(
             choose(&state, &small, &context).unwrap(),
             Some(("Small".to_string(), small.clone()))
+        );
+    }
+
+    #[test]
+    fn non_object_states_are_left_alone() {
+        let mut def = json!({"QueryLanguage": "JSONata", "States": {"Bad": 1, "Worse": [2]}});
+        propagate_query_language(&mut def, None);
+        assert_eq!(def["States"]["Bad"], 1);
+    }
+
+    #[test]
+    fn item_batcher_expressions_evaluate() {
+        let input = json!({"size": 2});
+        let context = json!({});
+        let (prepared, _) = prepare_state(
+            &json!({
+                "Type": "Map",
+                "ItemBatcher": {
+                    "MaxItemsPerBatch": "{% $states.input.size %}",
+                    "BatchInput": {"from": "{% $states.input.size + 1 %}"}
+                }
+            }),
+            &input,
+            &context,
+        )
+        .unwrap();
+        assert_eq!(prepared["ItemBatcher"]["MaxItemsPerBatch"], 2);
+        assert_eq!(prepared["ItemBatcher"]["BatchInput"]["from"], 3);
+    }
+
+    /// Recorded: `$random(42)` from `java.util.Random(42).nextDouble()`.
+    #[test]
+    fn seeded_random_matches_the_recording() {
+        assert_eq!(seeded_random(42), 0.7275636800328681);
+        let input = json!({});
+        let context = json!({});
+        let out = eval_template(
+            "Output",
+            &json!("{% [$random(42) = $random(42), $random(42)] %}"),
+            &scope(&input, &context, ""),
+        )
+        .unwrap();
+        assert_eq!(out, json!([true, 0.7275636800328681]));
+    }
+
+    fn wait_error(state: Value) -> String {
+        let input = json!({});
+        let context = json!({});
+        let (error, cause) = prepare_state(&state, &input, &context).unwrap_err();
+        assert_eq!(error, QUERY_ERROR);
+        cause
+    }
+
+    #[test]
+    fn wait_values_fail_as_recorded() {
+        assert_eq!(
+            wait_error(json!({"Type": "Wait", "Seconds": "{% '5' %}"})),
+            "The JSONata expression ''5'' specified for the field 'Seconds' returned an \
+             unexpected result type. Expected 'number', but was 'string' for value: \"5\""
+        );
+        assert_eq!(
+            wait_error(json!({"Type": "Wait", "Seconds": "{% -1 %}"})),
+            "Seconds cannot be negative but was: -1"
+        );
+        assert_eq!(
+            wait_error(json!({"Type": "Wait", "Timestamp": "{% 'not-a-date' %}"})),
+            "The Timestamp field cannot be parsed as an ISO-8601 extended offset date-time \
+             format string: not-a-date"
+        );
+        let input = json!({});
+        let context = json!({});
+        let (prepared, _) = prepare_state(
+            &json!({"Type": "Wait", "Seconds": "{% 0 %}"}),
+            &input,
+            &context,
+        )
+        .unwrap();
+        assert_eq!(prepared["Seconds"], 0);
+    }
+
+    #[test]
+    fn undefined_output_names_its_field() {
+        let input = json!({});
+        let context = json!({});
+        let (_, cause) = finish_state(
+            &json!({"Output": "{% $states.input.missing %}"}),
+            &input,
+            &context,
+            json!({}),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            cause,
+            "The JSONata expression '$states.input.missing' specified for the field 'Output' \
+             returned nothing (undefined)."
+        );
+        assert_eq!(failed_field(&cause), Some("Output"));
+        assert_eq!(
+            in_state_cause("A", 2, "x"),
+            "An error occurred while executing the state 'A' (entered at the event id #2). x"
         );
     }
 }

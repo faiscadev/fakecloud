@@ -564,8 +564,28 @@ async fn sfn_sync_glue_start_job_run_returns_real_job_run() {
         desc.cause()
     );
     let output: Value = serde_json::from_str(desc.output().expect("output")).unwrap();
-    let jr = &output["JobRun"];
+    // Recorded: the job run itself, with no wrapper.
+    assert!(output.get("JobRun").is_none(), "{output}");
+    let jr = &output;
     assert_eq!(jr["JobRunState"].as_str(), Some("SUCCEEDED"));
+    for field in [
+        "AllocatedCapacity",
+        "Attempt",
+        "CompletedOn",
+        "ExecutionTime",
+        "JobMode",
+        "LastModifiedOn",
+        "LogGroupName",
+        "PredecessorRuns",
+        "Timeout",
+    ] {
+        assert!(jr.get(field).is_some(), "{field}: {output}");
+    }
+    assert_eq!(jr["Attempt"], 0);
+    assert!(
+        jr["StartedOn"].as_i64() > Some(1_000_000_000_000),
+        "{output}"
+    );
     // Real GetJobRun shape carries the run Id (the synthetic stub had it too,
     // but also JobName/StartedOn which the real shape includes).
     assert!(jr["Id"].is_string(), "real JobRun has an Id: {output}");
@@ -649,6 +669,17 @@ async fn sfn_ecs_run_task_converts_nested_parameters_and_results() {
     let task_arn = output["Tasks"][0]["TaskArn"]
         .as_str()
         .unwrap_or_else(|| panic!("PascalCase task result: {output}"));
+    // Recorded for the plain integration.
+    assert_eq!(output["Failures"], json!([]));
+    assert!(output["SdkResponseMetadata"]["RequestId"].is_string());
+    assert_eq!(
+        output["SdkHttpMetadata"]["HttpHeaders"]["Content-Type"],
+        "application/x-amz-json-1.1"
+    );
+    assert!(
+        output["Tasks"][0]["CreatedAt"].as_i64() > Some(1_000_000_000_000),
+        "{output}"
+    );
 
     let described = ecs
         .describe_tasks()

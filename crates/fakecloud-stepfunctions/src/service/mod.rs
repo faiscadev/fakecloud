@@ -611,6 +611,7 @@ fn validate_definition(definition: &str) -> Result<(), AwsServiceError> {
         ));
     }
 
+    validate_states_are_objects("", &parsed)?;
     validate_timeout_field("<root>", &parsed, "TimeoutSeconds")?;
 
     // Reject malformed JSONPath reference fields. AWS rejects bad reference
@@ -707,6 +708,48 @@ const READER_CONFIG_FIELDS: &[&str] = &[
     "MaxItems",
     "MaxItemsPath",
 ];
+
+/// Every state is a JSON object, nested ones too, worded as recorded. A
+/// definition reaching this far has a valid `StartAt`.
+fn validate_states_are_objects(at: &str, def: &Value) -> Result<(), AwsServiceError> {
+    let Some(states) = def["States"].as_object() else {
+        return Ok(());
+    };
+    for (name, state) in states {
+        let path = format!("{at}/States/{name}");
+        if !state.is_object() {
+            let mut detail = format!("Expected value of type [OBJECT] at {path}");
+            let targeted = def["StartAt"] == name.as_str()
+                || states.values().any(|other| {
+                    other["Next"] == name.as_str()
+                        || other["Default"] == name.as_str()
+                        || ["Choices", "Catch"].iter().any(|list| {
+                            other[*list].as_array().is_some_and(|items| {
+                                items.iter().any(|i| i["Next"] == name.as_str())
+                            })
+                        })
+                });
+            if !targeted {
+                detail.push_str(&format!(
+                    ", MISSING_TRANSITION_TARGET: State \"{name}\" is not reachable. at {path}"
+                ));
+            }
+            return Err(schema_error(detail));
+        }
+        for key in ["ItemProcessor", "Iterator"] {
+            validate_states_are_objects(&format!("{path}/{key}"), &state[key])?;
+        }
+        for (index, branch) in state["Branches"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            validate_states_are_objects(&format!("{path}/Branches/{index}"), branch)?;
+        }
+    }
+    Ok(())
+}
 
 fn schema_error(detail: String) -> AwsServiceError {
     AwsServiceError::aws_error(
@@ -852,6 +895,11 @@ fn validate_state_paths(state_name: &str, state: &Value) -> Result<(), AwsServic
     for field in ["Parameters", "ResultSelector", "ItemSelector", "Assign"] {
         if let Some(template) = state.get(field) {
             validate_payload_template(state_name, field, template)?;
+        }
+    }
+    for field in ["ErrorPath", "CausePath"] {
+        if let Some(path) = state.get(field) {
+            validate_payload_template(state_name, field, &serde_json::json!({ "value.$": path }))?;
         }
     }
 
@@ -1422,6 +1470,52 @@ mod integration_schema_tests {
         assert!(is_valid_path("$order.items[0]"));
         assert!(is_valid_path("$x"));
         assert!(!is_valid_path("$x["));
+    }
+
+    #[test]
+    fn a_non_object_state_is_refused_as_recorded() {
+        let unreachable = serde_json::json!({"StartAt": "A", "States": {
+            "A": {"Type": "Pass", "End": true},
+            "B": 1
+        }});
+        assert_eq!(
+            message(unreachable),
+            Some(
+                "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: Expected value of \
+                 type [OBJECT] at /States/B, MISSING_TRANSITION_TARGET: State \"B\" is not \
+                 reachable. at /States/B'"
+                    .to_string()
+            )
+        );
+        let start = serde_json::json!({"StartAt": "S", "States": {"S": 1}});
+        assert_eq!(
+            message(start),
+            Some(
+                "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: Expected value of \
+                 type [OBJECT] at /States/S'"
+                    .to_string()
+            )
+        );
+        let nested = serde_json::json!({"StartAt": "M", "States": {"M": {
+            "Type": "Map",
+            "ItemProcessor": {"StartAt": "S", "States": {"S": "nope"}},
+            "End": true
+        }}});
+        assert!(message(nested)
+            .unwrap()
+            .contains("at /States/M/ItemProcessor/States/S"));
+    }
+
+    #[test]
+    fn fail_state_paths_must_be_references_or_intrinsics() {
+        let fail = |path: serde_json::Value| serde_json::json!({"StartAt": "F", "States": {"F": {"Type": "Fail", "ErrorPath": path}}});
+        assert_eq!(message(fail(serde_json::json!("$.error"))), None);
+        assert_eq!(
+            message(fail(serde_json::json!("States.Format('{}', $.a)"))),
+            None
+        );
+        assert!(message(fail(serde_json::json!("not a path"))).is_some());
+        assert!(message(fail(serde_json::json!(5))).is_some());
     }
 
     #[test]

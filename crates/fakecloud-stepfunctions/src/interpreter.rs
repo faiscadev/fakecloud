@@ -12,8 +12,9 @@ use fakecloud_dynamodb::SharedDynamoDbState;
 use crate::error_handling::should_retry;
 use crate::io_processing::{apply_input_path, apply_output_path, apply_result_path};
 use crate::optimized_results::{
-    dynamodb_metadata, glue_start_job_run_result, lambda_invoke_metadata, sns_metadata,
-    sqs_metadata, start_execution_result, sync_execution_result, sync_failure_cause, SyncForm,
+    dynamodb_metadata, ecs_run_task_result, ecs_sync_result, glue_start_job_run_result,
+    glue_sync_result, lambda_invoke_metadata, sns_metadata, sqs_metadata, start_execution_result,
+    sync_execution_result, sync_failure_cause, SyncForm,
 };
 use crate::sdk_protocol::{Caller, DateStyle};
 use crate::service::SharedServiceRegistry;
@@ -69,7 +70,6 @@ pub async fn execute_state_machine(
     // which leaves the execution stuck in Running and leaks the panic to
     // tokio's default hook.
     let mut def_owned = def;
-    crate::jsonata::propagate_query_language(&mut def_owned, None);
     let state_clone = state.clone();
     let execution_arn_clone = execution_arn.clone();
     let delivery_clone = delivery.clone();
@@ -78,6 +78,7 @@ pub async fn execute_state_machine(
     let handle = tokio::spawn(crate::variables::in_scope(
         crate::variables::VariableScope::root(),
         async move {
+            crate::jsonata::propagate_query_language(&mut def_owned, None);
             run_states(
                 &def_owned,
                 raw_input,
@@ -184,7 +185,10 @@ async fn run_wait_state(
 
     let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
     if let Err((error, cause)) = execute_wait_state(state_def, &input, &ctx).await {
-        return Advance::Fail(error, cause);
+        return Advance::Fail(
+            error,
+            crate::jsonata::in_state_cause(name, entered_event_id, &cause),
+        );
     }
     if let Err((error, cause)) =
         assign_wait_variables(name, state_def, &input, shared_state, execution_arn)
@@ -192,7 +196,8 @@ async fn run_wait_state(
         return Advance::Fail(error, cause);
     }
 
-    add_event(
+    add_state_exit_event(
+        state_def,
         shared_state,
         execution_arn,
         "WaitStateExited",
@@ -243,7 +248,8 @@ async fn run_task_state(
 
     match result {
         Ok(output) => {
-            add_event(
+            add_state_exit_event(
+                state_def,
                 shared_state,
                 execution_arn,
                 "TaskStateExited",
@@ -256,7 +262,17 @@ async fn run_task_state(
             advance_from_next(state_def, output)
         }
         // Task-originated error → the States.TaskFailed wildcard applies.
-        Err((error, cause)) => advance_from_error(state_def, &input, error, cause, true),
+        Err((error, cause)) => {
+            let cause = note_query_failure(
+                shared_state,
+                execution_arn,
+                name,
+                entered_event_id,
+                &error,
+                cause,
+            );
+            advance_from_error(state_def, &input, error, cause, true)
+        }
     }
 }
 
@@ -297,7 +313,8 @@ async fn run_parallel_state(
 
     match result {
         Ok(output) => {
-            add_event(
+            add_state_exit_event(
+                state_def,
                 shared_state,
                 execution_arn,
                 "ParallelStateExited",
@@ -311,7 +328,17 @@ async fn run_parallel_state(
         }
         // A Parallel branch failure is not itself a task error; the
         // States.TaskFailed wildcard must not swallow branch-level errors.
-        Err((error, cause)) => advance_from_error(state_def, &input, error, cause, false),
+        Err((error, cause)) => {
+            let cause = note_query_failure(
+                shared_state,
+                execution_arn,
+                name,
+                entered_event_id,
+                &error,
+                cause,
+            );
+            advance_from_error(state_def, &input, error, cause, false)
+        }
     }
 }
 
@@ -352,7 +379,8 @@ async fn run_map_state(
 
     match result {
         Ok(output) => {
-            add_event(
+            add_state_exit_event(
+                state_def,
                 shared_state,
                 execution_arn,
                 "MapStateExited",
@@ -366,7 +394,17 @@ async fn run_map_state(
         }
         // A Map iteration failure is not itself a task error; the
         // States.TaskFailed wildcard must not swallow iteration-level errors.
-        Err((error, cause)) => advance_from_error(state_def, &input, error, cause, false),
+        Err((error, cause)) => {
+            let cause = note_query_failure(
+                shared_state,
+                execution_arn,
+                name,
+                entered_event_id,
+                &error,
+                cause,
+            );
+            advance_from_error(state_def, &input, error, cause, false)
+        }
     }
 }
 
@@ -378,7 +416,17 @@ async fn execute_wait_state(
     input: &Value,
     ctx: &Value,
 ) -> Result<(), (String, String)> {
-    if let Some(seconds) = state_def["Seconds"].as_u64() {
+    let text_of = |value: &Value| match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+
+    if let Some(seconds) = state_def.get("Seconds") {
+        let seconds = seconds.as_u64().ok_or_else(|| {
+            crate::io_processing::runtime_error(format!(
+                "The Seconds field must be a non-negative integer but was: {seconds}"
+            ))
+        })?;
         tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
         return Ok(());
     }
@@ -387,30 +435,33 @@ async fn execute_wait_state(
         let val = crate::io_processing::resolve_reference_with_context(input, Some(ctx), path)?;
         let seconds = val.as_u64().ok_or_else(|| {
             crate::io_processing::runtime_error(format!(
-                "The SecondsPath parameter does not reference a valid integer value: '{path}'"
+                "The SecondsPath parameter cannot be parsed as a long value: {path} == {}",
+                text_of(&val)
             ))
         })?;
         tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
         return Ok(());
     }
 
-    let target = if let Some(ts_str) = state_def["Timestamp"].as_str() {
-        chrono::DateTime::parse_from_rfc3339(ts_str).ok()
+    let target = if let Some(timestamp) = state_def.get("Timestamp") {
+        let text = text_of(timestamp);
+        Some(chrono::DateTime::parse_from_rfc3339(&text).map_err(|_| {
+            crate::io_processing::runtime_error(format!(
+                "The Timestamp field cannot be parsed as an ISO-8601 extended offset date-time \
+                 format string: {text}"
+            ))
+        })?)
     } else if let Some(path) = state_def["TimestampPath"].as_str() {
         let val = crate::io_processing::resolve_reference_with_context(input, Some(ctx), path)?;
-        let parsed = val
-            .as_str()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
-        if parsed.is_none() {
-            return Err(crate::io_processing::runtime_error(format!(
-                "The TimestampPath parameter does not reference a valid ISO-8601 extended offset date-time format string: '{path}'"
-            )));
-        }
-        parsed
+        let text = text_of(&val);
+        Some(chrono::DateTime::parse_from_rfc3339(&text).map_err(|_| {
+            crate::io_processing::runtime_error(format!(
+                "The TimestampPath parameter does not reference a valid ISO-8601 extended offset \
+                 date-time format string: {path} == {text}"
+            ))
+        })?)
     } else {
-        warn!(
-            "Wait state has no valid Seconds, SecondsPath, Timestamp, or TimestampPath — skipping wait"
-        );
+        warn!("Wait state has no Seconds, SecondsPath, Timestamp, or TimestampPath: skipping wait");
         return Ok(());
     };
 
@@ -543,6 +594,7 @@ async fn execute_task_state(
                 ctx["Task"] = token_ctx["Task"].clone();
             }
             crate::jsonata::eval_template(
+                "Arguments",
                 arguments,
                 &crate::jsonata::Scope {
                     input: &effective_input,
@@ -1015,7 +1067,7 @@ async fn run_map_iterations(
     // Apply ItemBatcher if present
     let batch_config = state_def.get("ItemBatcher").cloned();
     let batched_items = if let Some(ref batcher) = batch_config {
-        apply_item_batcher(&items, batcher, &effective_input)
+        apply_item_batcher(&items, batcher, &effective_input, ctx)?
     } else {
         items
     };
@@ -1057,6 +1109,7 @@ async fn run_map_iterations(
                 item_ctx["Map"] = json!({"Item": {"Value": batch_item, "Index": index}});
                 let selected = if crate::jsonata::is_jsonata(state_def) {
                     crate::jsonata::eval_template(
+                        "ItemSelector",
                         selector,
                         &crate::jsonata::Scope {
                             input: &effective_input,
@@ -1490,10 +1543,41 @@ async fn write_map_results(
 }
 
 /// Apply ItemBatcher configuration to group items into batches.
-fn apply_item_batcher(items: &[Value], batcher: &Value, _effective_input: &Value) -> Vec<Value> {
-    let max_per_batch = batcher["MaxItemsPerBatch"].as_u64().unwrap_or(u64::MAX) as usize;
-    let max_bytes = batcher["MaxInputBytesPerBatch"].as_u64().unwrap_or(0) as usize;
-    let batch_input = batcher.get("BatchInput").cloned();
+fn apply_item_batcher(
+    items: &[Value],
+    batcher: &Value,
+    effective_input: &Value,
+    ctx: &Value,
+) -> Result<Vec<Value>, (String, String)> {
+    // A limit is a literal (a JSONata expression has been evaluated by now) or a
+    // reference path, and must come out a positive integer.
+    let limit = |field: &str| -> Result<Option<u64>, (String, String)> {
+        let path_field = format!("{field}Path");
+        let value = match batcher[path_field.as_str()].as_str() {
+            Some(path) => Some(crate::io_processing::resolve_reference_with_context(
+                effective_input,
+                Some(ctx),
+                path,
+            )?),
+            None => batcher.get(field).cloned(),
+        };
+        match value {
+            None => Ok(None),
+            Some(value) => match value.as_u64().filter(|n| *n > 0) {
+                Some(n) => Ok(Some(n)),
+                None => Err(crate::io_processing::runtime_error(format!(
+                    "The ItemBatcher field '{field}' must be a positive integer, got {value}"
+                ))),
+            },
+        }
+    };
+    let max_per_batch = limit("MaxItemsPerBatch")?.unwrap_or(u64::MAX) as usize;
+    let max_bytes = limit("MaxInputBytesPerBatch")?.unwrap_or(0) as usize;
+    let batch_input = match batcher.get("BatchInput") {
+        // A JSONata state's has been evaluated already, and holds no `.$` keys.
+        Some(template) => Some(apply_parameters(template, effective_input, Some(ctx))?),
+        None => None,
+    };
 
     let mut batches: Vec<Vec<Value>> = Vec::new();
     let mut current_batch: Vec<Value> = Vec::new();
@@ -1516,21 +1600,17 @@ fn apply_item_batcher(items: &[Value], batcher: &Value, _effective_input: &Value
         batches.push(current_batch);
     }
 
-    batches
+    Ok(batches
         .into_iter()
-        .enumerate()
-        .map(|(index, batch)| {
+        .map(|batch| {
             let mut map = serde_json::Map::new();
-            map.insert("index".to_string(), json!(index));
-            map.insert("items".to_string(), Value::Array(batch));
-            if let Some(Value::Object(ref obj)) = batch_input {
-                for (k, v) in obj {
-                    map.insert(k.clone(), v.clone());
-                }
+            if let Some(batch_input) = &batch_input {
+                map.insert("BatchInput".to_string(), batch_input.clone());
             }
+            map.insert("Items".to_string(), Value::Array(batch));
             Value::Object(map)
         })
-        .collect()
+        .collect())
 }
 
 /// The full function ARN a `lambda:invoke` task's `FunctionName` refers to.
@@ -1952,7 +2032,11 @@ async fn invoke_aws_sdk_integration(
 
     // Optimized integrations: the waiters below read the camelCase wire shapes
     // of ECS and Step Functions, and results present dates in epoch millis.
-    let wire_input = service.request_json(&operation, input);
+    let mut wire_input = service.request_json(&operation, input);
+    // As recorded, a task a `.sync` integration waits on says who started it.
+    if sync_form.is_some() && service_name == "ecs" && wire_input.get("startedBy").is_none() {
+        wire_input["startedBy"] = json!("AWS Step Functions");
+    }
     let initial = call_sdk_action(
         &registry_arc,
         &service_name,
@@ -1966,6 +2050,7 @@ async fn invoke_aws_sdk_integration(
     let Some(form) = sync_form else {
         return Ok(match (service_name.as_str(), operation.as_str()) {
             ("states", "StartExecution") => start_execution_result(&service, &initial),
+            ("ecs", "RunTask") => ecs_run_task_result(&service, &initial),
             ("glue", "StartJobRun") => {
                 glue_start_job_run_result(&service, &initial, &wire_input["JobName"])
             }
@@ -1990,11 +2075,11 @@ async fn invoke_aws_sdk_integration(
     .await?;
     Ok(match (service_name.as_str(), operation.as_str()) {
         ("states", _) => sync_execution_result(&service, &described, form),
-        ("ecs", _) => service.result_json("DescribeTasks", &described, DateStyle::EpochMillis),
+        ("ecs", _) => ecs_sync_result(&service, &described),
         ("athena", _) => {
             service.result_json("GetQueryExecution", &described, DateStyle::EpochMillis)
         }
-        ("glue", _) => service.result_json("GetJobRun", &described, DateStyle::EpochMillis),
+        ("glue", _) => glue_sync_result(&service, &described),
         ("codebuild", _) => service.result_json("StartBuild", &described, DateStyle::EpochMillis),
         _ => described,
     })

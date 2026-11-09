@@ -941,7 +941,22 @@ impl SdkService {
             Some((name, member, value)) => {
                 let target = member["t"].as_str().unwrap_or("~b");
                 match self.shape(target) {
-                    None => Bytes::from(scalar_text(value)),
+                    None => {
+                        // As recorded, an object uploaded by a Task with no type of
+                        // its own is stored as text.
+                        if !headers.contains_key(http::header::CONTENT_TYPE) {
+                            let content_type = if operation == "PutObject" {
+                                "text/plain; charset=UTF-8"
+                            } else {
+                                "application/octet-stream"
+                            };
+                            headers.insert(
+                                http::header::CONTENT_TYPE,
+                                HeaderValue::from_static(content_type),
+                            );
+                        }
+                        Bytes::from(scalar_text(value))
+                    }
                     Some(shape) if xml => {
                         let root = member["x"]
                             .as_str()

@@ -1161,3 +1161,371 @@ async fn a_state_failing_after_its_result_assigns_nothing() {
     .await;
     assert_eq!(output, json!({"x": "before", "y": "from-catcher"}));
 }
+
+// A state failing before it runs still reaches its catcher's Assign.
+#[tokio::test]
+async fn a_catcher_of_a_preparation_failure_assigns() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let output = run_parent(
+        &client,
+        json!({"QueryLanguage":"JSONata","StartAt":"M","States":{
+            "M":{
+                "Type":"Map",
+                "Items":"{% $states.input.missing %}",
+                "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                "Catch":[{
+                    "ErrorEquals":["States.QueryEvaluationError"],
+                    "Assign":{"caught":"{% $states.errorOutput.Error %}"},
+                    "Next":"Done"
+                }],
+                "End":true
+            },
+            "Done":{"Type":"Pass","Output":"{% $caught %}","End":true}
+        }}),
+    )
+    .await;
+    assert_eq!(output, json!("States.QueryEvaluationError"));
+}
+
+// History reports the output a JSONata state actually produced, and a state whose
+// `Output` fails never exited.
+#[tokio::test]
+async fn jsonata_exit_events_record_the_evaluated_output() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let machine = create_machine(
+        &client,
+        "exit-output",
+        json!({"QueryLanguage":"JSONata","StartAt":"P","States":{
+            "P":{"Type":"Pass","Output":{"v":"{% 1 + 1 %}"},"End":true}
+        }}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(machine)
+        .send()
+        .await
+        .unwrap();
+    wait_terminal(&client, started.execution_arn()).await;
+    let history = client
+        .get_execution_history()
+        .execution_arn(started.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let exited = history
+        .events()
+        .iter()
+        .find(|e| e.r#type().as_str() == "PassStateExited")
+        .expect("exit event");
+    let details = exited.state_exited_event_details().unwrap();
+    let output: Value = serde_json::from_str(details.output().unwrap()).unwrap();
+    assert_eq!(output, json!({"v": 2}));
+
+    let machine = create_machine(
+        &client,
+        "exit-fail",
+        json!({"QueryLanguage":"JSONata","StartAt":"P","States":{
+            "P":{"Type":"Pass","Output":"{% $states.input.missing %}","End":true}
+        }}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(machine)
+        .send()
+        .await
+        .unwrap();
+    wait_terminal(&client, started.execution_arn()).await;
+    let history = client
+        .get_execution_history()
+        .execution_arn(started.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let types: Vec<&str> = history
+        .events()
+        .iter()
+        .map(|e| e.r#type().as_str())
+        .collect();
+    assert!(!types.contains(&"PassStateExited"), "{types:?}");
+    assert!(types.contains(&"EvaluationFailed"), "{types:?}");
+}
+
+#[tokio::test]
+async fn fail_state_reads_error_and_cause_from_paths() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let machine = create_machine(
+        &client,
+        "fail-paths",
+        json!({"StartAt":"F","States":{"F":{
+            "Type":"Fail",
+            "ErrorPath":"$.error",
+            "CausePath":"States.Format('because {}', $.why)"
+        }}}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(&machine)
+        .input(json!({"error": "Custom", "why": "reasons"}).to_string())
+        .send()
+        .await
+        .unwrap();
+    let desc = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(desc.error(), Some("Custom"));
+    assert_eq!(desc.cause(), Some("because reasons"));
+
+    let started = client
+        .start_execution()
+        .state_machine_arn(&machine)
+        .input(json!({"error": 5, "why": "x"}).to_string())
+        .send()
+        .await
+        .unwrap();
+    let desc = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(desc.error(), Some("States.Runtime"));
+}
+
+#[tokio::test]
+async fn jsonata_item_batcher_evaluates_its_limits() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let output = run_parent(
+        &client,
+        json!({"QueryLanguage":"JSONata","StartAt":"Seed","States":{
+            "Seed":{"Type":"Pass","Output":{"size":2},"Next":"M"},
+            "M":{
+                "Type":"Map",
+                "Items":[1,2,3],
+                "ItemBatcher":{"MaxItemsPerBatch":"{% $states.input.size %}"},
+                "ItemProcessor":{
+                    "ProcessorConfig":{"Mode":"DISTRIBUTED"},
+                    "StartAt":"P",
+                    "States":{"P":{"Type":"Pass","End":true}}
+                },
+                "End":true
+            }
+        }}),
+    )
+    .await;
+    assert_eq!(output.as_array().unwrap().len(), 2, "{output}");
+}
+
+#[tokio::test]
+async fn a_bad_item_batcher_limit_fails_the_state() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let machine = create_machine(
+        &client,
+        "bad-batcher",
+        json!({"QueryLanguage":"JSONata","StartAt":"M","States":{"M":{
+            "Type":"Map",
+            "Items":[1],
+            "ItemBatcher":{"MaxItemsPerBatch":"{% 'many' %}"},
+            "ItemProcessor":{
+                "ProcessorConfig":{"Mode":"DISTRIBUTED"},
+                "StartAt":"P",
+                "States":{"P":{"Type":"Pass","End":true}}
+            },
+            "End":true
+        }}}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(machine)
+        .send()
+        .await
+        .unwrap();
+    let desc = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(desc.status().as_str(), "FAILED");
+    assert!(
+        desc.cause().unwrap().contains("MaxItemsPerBatch"),
+        "{desc:?}"
+    );
+}
+
+async fn failing_cause(
+    client: &aws_sdk_sfn::Client,
+    name: &str,
+    definition: Value,
+    input: Value,
+) -> (String, String) {
+    let machine = create_machine(client, name, definition).await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(machine)
+        .input(input.to_string())
+        .send()
+        .await
+        .unwrap();
+    let desc = wait_terminal(client, started.execution_arn()).await;
+    assert_eq!(desc.status().as_str(), "FAILED", "{name}: {desc:?}");
+    (
+        desc.error().unwrap_or_default().to_string(),
+        desc.cause().unwrap_or_default().to_string(),
+    )
+}
+
+// Every message here is as recorded.
+#[tokio::test]
+async fn wait_failures_read_as_recorded() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    const PREFIX: &str =
+        "An error occurred while executing the state 'A' (entered at the event id #2). ";
+    let wait = |language: &str, field: &str, value: &str| {
+        json!({"QueryLanguage": language, "StartAt":"A","States":{"A":{
+            "Type":"Wait", field: value, "End":true
+        }}})
+    };
+
+    for (name, definition, input, error, cause) in [
+        (
+            "w1",
+            wait("JSONata", "Seconds", "{% '5' %}"),
+            json!({}),
+            "States.QueryEvaluationError",
+            "The JSONata expression ''5'' specified for the field 'Seconds' returned an unexpected result type. Expected 'number', but was 'string' for value: \"5\"",
+        ),
+        (
+            "w2",
+            wait("JSONata", "Seconds", "{% -1 %}"),
+            json!({}),
+            "States.QueryEvaluationError",
+            "Seconds cannot be negative but was: -1",
+        ),
+        (
+            "w3",
+            wait("JSONata", "Timestamp", "{% 'not-a-date' %}"),
+            json!({}),
+            "States.QueryEvaluationError",
+            "The Timestamp field cannot be parsed as an ISO-8601 extended offset date-time format string: not-a-date",
+        ),
+        (
+            "w4",
+            wait("JSONPath", "SecondsPath", "$.s"),
+            json!({"s": "nope"}),
+            "States.Runtime",
+            "The SecondsPath parameter cannot be parsed as a long value: $.s == nope",
+        ),
+        (
+            "w5",
+            wait("JSONPath", "TimestampPath", "$.s"),
+            json!({"s": "nope"}),
+            "States.Runtime",
+            "The TimestampPath parameter does not reference a valid ISO-8601 extended offset date-time format string: $.s == nope",
+        ),
+    ] {
+        let (got_error, got_cause) = failing_cause(&client, name, definition, input).await;
+        assert_eq!(got_error, error, "{name}");
+        assert_eq!(got_cause, format!("{PREFIX}{cause}"), "{name}");
+    }
+
+    let zero = run_parent(
+        &client,
+        json!({"QueryLanguage":"JSONata","StartAt":"A","States":{"A":{
+            "Type":"Wait","Seconds":"{% 0 %}","End":true
+        }}}),
+    )
+    .await;
+    assert_eq!(zero, json!({}));
+}
+
+#[tokio::test]
+async fn an_undefined_output_is_recorded_with_its_location() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let machine = create_machine(
+        &client,
+        "undefined-output",
+        json!({"QueryLanguage":"JSONata","StartAt":"A","States":{"A":{
+            "Type":"Pass","Output":"{% $states.input.missing %}","End":true
+        }}}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(machine)
+        .send()
+        .await
+        .unwrap();
+    let desc = wait_terminal(&client, started.execution_arn()).await;
+    let expected = "An error occurred while executing the state 'A' (entered at the event id #2). The JSONata expression '$states.input.missing' specified for the field 'Output' returned nothing (undefined).";
+    assert_eq!(desc.error(), Some("States.QueryEvaluationError"));
+    assert_eq!(desc.cause(), Some(expected));
+
+    let history = client
+        .get_execution_history()
+        .execution_arn(started.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let failed = history
+        .events()
+        .iter()
+        .find(|e| e.r#type().as_str() == "EvaluationFailed")
+        .expect("EvaluationFailed");
+    assert_eq!(failed.previous_event_id(), 2);
+    let details = failed.evaluation_failed_event_details().expect("details");
+    assert_eq!(details.error(), Some("States.QueryEvaluationError"));
+    assert_eq!(details.cause(), Some(expected));
+    assert_eq!(details.location(), Some("Output"));
+    assert_eq!(details.state(), "A");
+}
+
+#[tokio::test]
+async fn seeded_random_matches_the_recording() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let output = run_parent(
+        &client,
+        json!({"QueryLanguage":"JSONata","StartAt":"A","States":{"A":{
+            "Type":"Pass",
+            "Output":"{% [$random(42) = $random(42), $random(42)] %}",
+            "End":true
+        }}}),
+    )
+    .await;
+    assert_eq!(output, json!([true, 0.7275636800328681]));
+}
+
+#[tokio::test]
+async fn item_batcher_shape_matches_the_recording() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let output = run_parent(
+        &client,
+        json!({"QueryLanguage":"JSONata","StartAt":"M","States":{"M":{
+            "Type":"Map",
+            "Items":[1,2,3],
+            "ItemBatcher":{"MaxItemsPerBatch":"{% 2 %}","BatchInput":{"k":"v"}},
+            "ItemProcessor":{
+                "ProcessorConfig":{"Mode":"DISTRIBUTED"},
+                "StartAt":"P",
+                "States":{"P":{"Type":"Pass","End":true}}
+            },
+            "End":true
+        }}}),
+    )
+    .await;
+    assert_eq!(
+        output,
+        json!([
+            {"BatchInput": {"k": "v"}, "Items": [1, 2]},
+            {"BatchInput": {"k": "v"}, "Items": [3]}
+        ])
+    );
+}

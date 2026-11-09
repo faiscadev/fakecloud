@@ -95,7 +95,7 @@ pub(crate) fn run_states<'a>(
                 Err((error, cause)) => {
                     // The state was entered, and failed before it could run.
                     let input = states_input.as_ref().unwrap_or(&Value::Null);
-                    add_event(
+                    let entered = add_event(
                         shared_state,
                         execution_arn,
                         &format!("{state_type}StateEntered"),
@@ -105,12 +105,13 @@ pub(crate) fn run_states<'a>(
                             "input": serde_json::to_string(input).expect("serde_json::Value serialization is infallible"),
                         }),
                     );
-                    add_evaluation_failure(
+                    let cause = note_query_failure(
                         shared_state,
                         execution_arn,
                         &current_state,
+                        entered,
                         &error,
-                        &cause,
+                        cause,
                     );
                     let advance = advance_from_error(&original_def, input, error, cause, false);
                     match settle_advance(
@@ -122,6 +123,8 @@ pub(crate) fn run_states<'a>(
                         execution_arn,
                     ) {
                         Advance::Next(next, new_input) => {
+                            // The catcher's `Assign` applies to the next state.
+                            crate::variables::commit();
                             effective_input = new_input;
                             current_state = next;
                             continue;
@@ -263,20 +266,74 @@ pub(crate) fn run_states<'a>(
     })
 }
 
-fn add_evaluation_failure(
+/// The id of the latest event of a type in an execution's history.
+fn entered_event_id(
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+    event_type: &str,
+) -> i64 {
+    shared_state
+        .read()
+        .by_arn(execution_arn)
+        .and_then(|s| s.executions.get(execution_arn))
+        .and_then(|exec| {
+            exec.history_events
+                .iter()
+                .rev()
+                .find(|event| event.event_type == event_type)
+                .map(|event| event.id)
+        })
+        .unwrap_or(0)
+}
+
+/// A JSONPath state's exit event. A JSONata state exits once its `Output` has
+/// evaluated, which is what `finish_jsonata_state` records.
+pub(crate) fn add_state_exit_event(
+    state_def: &Value,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+    event_type: &str,
+    previous_event_id: i64,
+    details: Value,
+) {
+    if !crate::jsonata::is_jsonata(state_def) {
+        add_event(
+            shared_state,
+            execution_arn,
+            event_type,
+            previous_event_id,
+            details,
+        );
+    }
+}
+
+/// Record a JSONata failure against the state it happened in, returning the
+/// cause as AWS words it. A failure from a nested state has been recorded there.
+pub(crate) fn note_query_failure(
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
     state: &str,
+    entered_event_id: i64,
     error: &str,
-    cause: &str,
-) {
+    cause: String,
+) -> String {
+    if error != "States.QueryEvaluationError" || cause.starts_with("An error occurred") {
+        return cause;
+    }
+    let location = crate::jsonata::failed_field(&cause).map(String::from);
+    let cause = crate::jsonata::in_state_cause(state, entered_event_id, &cause);
+    let mut details = json!({ "error": error, "cause": cause, "state": state });
+    if let Some(location) = location {
+        details["location"] = json!(location);
+    }
     add_event(
         shared_state,
         execution_arn,
         "EvaluationFailed",
-        0,
-        json!({ "error": error, "cause": cause, "state": state }),
+        entered_event_id,
+        details,
     );
+    cause
 }
 
 /// Resolve a catcher's transition: a failed state keeps none of its own
@@ -337,18 +394,47 @@ fn finish_jsonata_state(
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
+    let exited = |output: &Value| {
+        let state_type = state_def["Type"].as_str().unwrap_or_default();
+        let entered = entered_event_id(
+            shared_state,
+            execution_arn,
+            &format!("{state_type}StateEntered"),
+        );
+        add_event(
+            shared_state,
+            execution_arn,
+            &format!("{state_type}StateExited"),
+            entered,
+            json!({
+                "name": name,
+                "output": serde_json::to_string(output).expect("serde_json::Value serialization is infallible"),
+            }),
+        );
+    };
     let finished = match advance {
         Advance::Next(next, produced) => {
-            crate::jsonata::finish_state(state_def, input, ctx, produced, false)
-                .map(|output| Advance::Next(next, output))
+            crate::jsonata::finish_state(state_def, input, ctx, produced, false).map(|output| {
+                exited(&output);
+                Advance::Next(next, output)
+            })
         }
         Advance::End(produced) => {
-            crate::jsonata::finish_state(state_def, input, ctx, produced, false).map(Advance::End)
+            crate::jsonata::finish_state(state_def, input, ctx, produced, false).map(|output| {
+                exited(&output);
+                Advance::End(output)
+            })
         }
         other => Ok(other),
     };
     finished.unwrap_or_else(|(error, cause)| {
-        add_evaluation_failure(shared_state, execution_arn, name, &error, &cause);
+        let state_type = state_def["Type"].as_str().unwrap_or_default();
+        let entered = entered_event_id(
+            shared_state,
+            execution_arn,
+            &format!("{state_type}StateEntered"),
+        );
+        let cause = note_query_failure(shared_state, execution_arn, name, entered, &error, cause);
         advance_from_error(state_def, input, error, cause, false)
     })
 }
@@ -390,7 +476,17 @@ fn run_jsonata_choice_state(
             "States.NoChoiceMatched".to_string(),
             format!("No choice rule matched and no Default in state '{name}'"),
         ),
-        Err((error, cause)) => Advance::Fail(error, cause),
+        Err((error, cause)) => {
+            let cause = note_query_failure(
+                shared_state,
+                execution_arn,
+                name,
+                entered_event_id,
+                &error,
+                cause,
+            );
+            Advance::Fail(error, cause)
+        }
     }
 }
 
@@ -504,7 +600,8 @@ pub(crate) fn run_pass_state(
         Err((error, cause)) => return Advance::Fail(error, cause),
     };
 
-    add_event(
+    add_state_exit_event(
+        state_def,
         shared_state,
         execution_arn,
         "PassStateExited",
@@ -557,7 +654,8 @@ pub(crate) fn run_succeed_state(
         }
     };
 
-    add_event(
+    add_state_exit_event(
+        state_def,
         shared_state,
         execution_arn,
         "SucceedStateExited",
@@ -571,6 +669,31 @@ pub(crate) fn run_succeed_state(
     Advance::End(output)
 }
 
+/// A Fail state's `Error` or `Cause`: the literal field, or its `*Path` form, a
+/// reference path or intrinsic that must produce a string.
+fn fail_field(
+    state_def: &Value,
+    field: &str,
+    path_field: &str,
+    input: &Value,
+    ctx: &Value,
+) -> Result<Option<String>, (String, String)> {
+    let Some(path) = state_def.get(path_field) else {
+        return Ok(state_def[field].as_str().map(String::from));
+    };
+    let resolved = apply_parameters(&json!({ "value.$": path }), input, Some(ctx))?;
+    match resolved["value"].as_str() {
+        Some(text) => Ok(Some(text.to_string())),
+        None => Err((
+            "States.Runtime".to_string(),
+            format!(
+                "The value for the field '{path_field}' must be a STRING, got {}",
+                resolved["value"]
+            ),
+        )),
+    }
+}
+
 pub(crate) fn run_fail_state(
     name: &str,
     state_def: &Value,
@@ -578,12 +701,6 @@ pub(crate) fn run_fail_state(
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let error = state_def["Error"]
-        .as_str()
-        .unwrap_or("States.Fail")
-        .to_string();
-    let cause = state_def["Cause"].as_str().unwrap_or("").to_string();
-
     add_event(
         shared_state,
         execution_arn,
@@ -594,6 +711,16 @@ pub(crate) fn run_fail_state(
             "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
         }),
     );
+
+    let ctx = context_object(shared_state, execution_arn, name, chrono::Utc::now(), 0);
+    let error = match fail_field(state_def, "Error", "ErrorPath", &input, &ctx) {
+        Ok(error) => error.unwrap_or_else(|| "States.Fail".to_string()),
+        Err((error, cause)) => return Advance::Fail(error, cause),
+    };
+    let cause = match fail_field(state_def, "Cause", "CausePath", &input, &ctx) {
+        Ok(cause) => cause.unwrap_or_default(),
+        Err((error, cause)) => return Advance::Fail(error, cause),
+    };
 
     Advance::Fail(error, cause)
 }

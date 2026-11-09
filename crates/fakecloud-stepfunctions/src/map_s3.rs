@@ -346,8 +346,9 @@ fn csv_item(headers: &[String], row: Vec<String>) -> Value {
 /// Rows of a delimited file under the Step Functions rules:
 ///
 /// - A field opening with `"` may hold delimiters and line breaks until its
-///   closing `"`; `""` alone is an empty field.
-/// - `""` is a literal `"` anywhere, quoted or not.
+///   closing `"`, and text after that closing quote joins the field: recorded,
+///   `""` is an empty field and `""lead` is `lead`.
+/// - `""` is a literal `"` inside quotes or in the middle of unquoted text.
 /// - `\` escapes `\`, `"` and the delimiter; before anything else it is removed.
 /// - Records end in LF or CRLF. Blank lines are not records.
 fn parse_csv(text: &str, delimiter: char) -> Vec<Vec<String>> {
@@ -386,20 +387,7 @@ fn parse_csv(text: &str, delimiter: char) -> Vec<Vec<String>> {
             '"' if at_field_start => {
                 in_record = true;
                 at_field_start = false;
-                if chars.peek() != Some(&'"') {
-                    quoted = true;
-                    continue;
-                }
-                chars.next();
-                // `""` alone is an empty field; otherwise it opens unquoted text
-                // with a literal quote.
-                let ends_field = match chars.peek() {
-                    None | Some('\n' | '\r') => true,
-                    Some(next) => *next == delimiter,
-                };
-                if !ends_field {
-                    field.push('"');
-                }
+                quoted = true;
             }
             '"' => {
                 if chars.peek() == Some(&'"') {
@@ -543,6 +531,10 @@ fn iteration_record(run: &MapRunIdentity<'_>, record: &IterationRecord) -> Value
     out
 }
 
+/// The types a map run's files are stored with, as recorded.
+const RESULT_FILE_CONTENT_TYPE: &str = "binary/octet-stream";
+const MANIFEST_CONTENT_TYPE: &str = "application/octet-stream";
+
 /// The `WriterConfig` settings, once checked.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WriterConfig<'a> {
@@ -654,7 +646,7 @@ pub(crate) async fn write_results(
             let key = format!("{base}/{status}_0.json");
             let body = config.encode(config.transform(run, &group));
             let size = body.len();
-            put(s3, bucket, &key, body).await?;
+            put(s3, bucket, &key, RESULT_FILE_CONTENT_TYPE, body).await?;
             entries.push(json!({"Key": key, "Size": size}));
         }
         files.insert(status.to_string(), Value::Array(entries));
@@ -666,7 +658,14 @@ pub(crate) async fn write_results(
         "MapRunArn": run.map_run_arn,
         "ResultFiles": files,
     });
-    put(s3, bucket, &manifest_key, json_text(&manifest).into_bytes()).await?;
+    put(
+        s3,
+        bucket,
+        &manifest_key,
+        MANIFEST_CONTENT_TYPE,
+        json_text(&manifest).into_bytes(),
+    )
+    .await?;
 
     Ok(json!({
         "MapRunArn": run.map_run_arn,
@@ -674,12 +673,20 @@ pub(crate) async fn write_results(
     }))
 }
 
-async fn put(s3: &S3Caller<'_>, bucket: &str, key: &str, body: Vec<u8>) -> Result<(), StateError> {
+async fn put(
+    s3: &S3Caller<'_>,
+    bucket: &str,
+    key: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> Result<(), StateError> {
     let text = String::from_utf8(body).expect("result files are JSON text");
-    s3.put_object(bucket, key, text).await.map_err(|err| {
-        let (_, detail) = crate::sdk_protocol::task_error(s3.service(), &err);
-        writer_failed(detail)
-    })
+    s3.put_object(bucket, key, content_type, text)
+        .await
+        .map_err(|err| {
+            let (_, detail) = crate::sdk_protocol::task_error(s3.service(), &err);
+            writer_failed(detail)
+        })
 }
 
 #[cfg(test)]
@@ -728,9 +735,23 @@ mod tests {
         assert_eq!(rows("\"\"\r\nx\n", ','), vec![vec![""], vec!["x"]]);
     }
 
+    /// The recorded file, row for row.
     #[test]
-    fn csv_doubled_quote_opening_unquoted_text_is_literal() {
-        assert_eq!(rows("\"\"k\"\"\n", ','), vec![vec!["\"k\""]]);
+    fn csv_matches_the_recording() {
+        assert_eq!(
+            rows(
+                "a,b\n\"\"\"x,y\"\"\",1\n\"plain\",2\n\"\",3\n{\"\"K\"\":\"\"V\"\"},4\n\"\"lead,5\n",
+                ','
+            ),
+            vec![
+                vec!["a", "b"],
+                vec!["\"x,y\"", "1"],
+                vec!["plain", "2"],
+                vec!["", "3"],
+                vec!["{\"K\":\"V\"}", "4"],
+                vec!["lead", "5"],
+            ]
+        );
     }
 
     #[test]

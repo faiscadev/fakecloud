@@ -47,9 +47,11 @@ impl<'a> S3Caller<'a> {
         &self,
         bucket: &str,
         key: &str,
+        content_type: &str,
         body: String,
     ) -> Result<(), SdkFailure> {
-        let params = json!({"Bucket": bucket, "Key": key, "Body": body});
+        let params =
+            json!({"Bucket": bucket, "Key": key, "ContentType": content_type, "Body": body});
         self.service
             .send(&self.caller, "PutObject", &params)
             .await?;

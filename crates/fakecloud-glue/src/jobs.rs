@@ -87,18 +87,35 @@ fn opt_value(v: &Value) -> Option<Value> {
     }
 }
 
-fn job_run_to_json(r: &JobRun) -> Value {
-    json!({
+/// A job run, with what it takes from its job: the job's settings as they stand,
+/// since a run keeps no copy of its own.
+fn job_run_to_json(r: &JobRun, job: Option<&Job>) -> Value {
+    let mut run = json!({
         "Id": r.id,
         "JobName": r.job_name,
         "StartedOn": r.started_on.timestamp(),
         "CompletedOn": r.completed_on.map(|d| d.timestamp()),
+        "LastModifiedOn": r.completed_on.unwrap_or(r.started_on).timestamp(),
         "JobRunState": r.state,
         "Arguments": r.arguments,
         "ErrorMessage": r.error_message,
         "ExecutionTime": r.execution_time,
         "Attempt": r.attempt,
-    })
+        "AllocatedCapacity": 0,
+        "JobMode": "SCRIPT",
+        "PredecessorRuns": [],
+    });
+    if let Some(job) = job {
+        run["GlueVersion"] = json!(job.glue_version);
+        run["Timeout"] = json!(job.timeout);
+        run["MaxCapacity"] = json!(job.max_capacity);
+        run["LogGroupName"] = json!(if job.command["Name"] == "pythonshell" {
+            "/aws-glue/python-jobs"
+        } else {
+            "/aws-glue/jobs"
+        });
+    }
+    run
 }
 
 impl GlueService {
@@ -326,7 +343,8 @@ impl GlueService {
             arguments: parse_string_map(&body["Arguments"]),
             error_message: None,
             execution_time: 0,
-            attempt: 1,
+            // The first attempt is number 0, as recorded.
+            attempt: 0,
         };
         state.job_runs.insert(id.clone(), run);
         Ok(AwsResponse::ok_json(json!({ "JobRunId": id })))
@@ -337,13 +355,14 @@ impl GlueService {
         let job_name = body["JobName"].as_str().ok_or_else(|| missing("JobName"))?;
         let run_id = body["RunId"].as_str().ok_or_else(|| missing("RunId"))?;
         let accounts = self.state.read();
-        let run = accounts
-            .get(&req.account_id)
+        let state = accounts.get(&req.account_id);
+        let run = state
             .and_then(|s| s.job_runs.get(run_id))
             .filter(|r| r.job_name == job_name)
             .ok_or_else(|| entity_not_found(format!("JobRun {run_id} not found")))?;
+        let job = state.and_then(|s| s.jobs.get(job_name));
         Ok(AwsResponse::ok_json(
-            json!({ "JobRun": job_run_to_json(run) }),
+            json!({ "JobRun": job_run_to_json(run, job) }),
         ))
     }
 
@@ -383,7 +402,10 @@ impl GlueService {
                     .filter(|r| r.job_name == job_name)
                     .collect();
                 matching.sort_by_key(|r| std::cmp::Reverse(r.started_on));
-                matching.into_iter().map(job_run_to_json).collect()
+                matching
+                    .into_iter()
+                    .map(|run| job_run_to_json(run, s.jobs.get(job_name)))
+                    .collect()
             })
             .unwrap_or_default();
         Ok(AwsResponse::ok_json(json!({ "JobRuns": runs })))
