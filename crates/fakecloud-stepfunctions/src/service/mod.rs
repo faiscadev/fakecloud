@@ -619,7 +619,187 @@ fn validate_definition(definition: &str) -> Result<(), AwsServiceError> {
     for (state_name, state_val) in states_obj {
         validate_state_paths(state_name, state_val)?;
     }
+    validate_integration_schemas("", states_obj)?;
+    validate_variable_scopes("", states_obj, &[])?;
 
+    Ok(())
+}
+
+/// Variables one state assigns, through its own, its Choice rules' and its
+/// catchers' `Assign`, with `.$` stripped.
+fn assigned_variables(state: &Value) -> Vec<String> {
+    let mut holders = vec![state];
+    for list in ["Choices", "Catch"] {
+        holders.extend(state[list].as_array().into_iter().flatten());
+    }
+    holders
+        .into_iter()
+        .filter_map(|holder| holder["Assign"].as_object())
+        .flat_map(|assign| assign.keys())
+        .map(|key| key.strip_suffix(".$").unwrap_or(key).to_string())
+        .collect()
+}
+
+/// A variable name is an identifier of at most 80 characters, and `states` is
+/// reserved. Parts of a variable (`x.y`, `x[2]`) cannot be assigned.
+fn is_valid_variable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name != "states"
+        && name.chars().count() <= 80
+        && chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Variables are valid names, and a scope can't assign one an outer scope assigns.
+fn validate_variable_scopes(
+    at: &str,
+    states: &serde_json::Map<String, Value>,
+    outer: &[String],
+) -> Result<(), AwsServiceError> {
+    let mut assigned: Vec<String> = Vec::new();
+    for (name, state) in states {
+        for variable in assigned_variables(state) {
+            let path = format!("{at}/States/{name}/Assign");
+            if !is_valid_variable_name(&variable) {
+                return Err(schema_error(format!(
+                    "The variable name '{variable}' is not valid at {path}"
+                )));
+            }
+            if outer.contains(&variable) {
+                return Err(schema_error(format!(
+                    "The variable '{variable}' is already assigned in an outer scope at {path}"
+                )));
+            }
+            assigned.push(variable);
+        }
+    }
+    let visible: Vec<String> = outer.iter().cloned().chain(assigned).collect();
+    for (name, state) in states {
+        let path = format!("{at}/States/{name}");
+        for key in ["ItemProcessor", "Iterator"] {
+            if let Some(nested) = state[key]["States"].as_object() {
+                validate_variable_scopes(&format!("{path}/{key}"), nested, &visible)?;
+            }
+        }
+        for (index, branch) in state["Branches"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            if let Some(nested) = branch["States"].as_object() {
+                validate_variable_scopes(&format!("{path}/Branches/{index}"), nested, &visible)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The fields a `ReaderConfig` may hold.
+const READER_CONFIG_FIELDS: &[&str] = &[
+    "InputType",
+    "Transformation",
+    "ManifestType",
+    "CSVDelimiter",
+    "CSVHeaderLocation",
+    "CSVHeaders",
+    "ItemsPointer",
+    "MaxItems",
+    "MaxItemsPath",
+];
+
+fn schema_error(detail: String) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidDefinition",
+        format!("Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: {detail}'"),
+    )
+}
+
+/// The integration tail of a `Resource`: `s3:getObject` for
+/// `arn:aws:states:::s3:getObject`.
+fn integration_of(resource: &str) -> Option<&str> {
+    fakecloud_aws::arn::arn_resource(resource, "states").and_then(|r| r.strip_prefix("::"))
+}
+
+/// The required fields of optimized integrations, which AWS checks when the
+/// definition is created rather than when the Task runs. `at` is the JSON
+/// pointer of the enclosing `States`' owner.
+fn validate_integration_schemas(
+    at: &str,
+    states: &serde_json::Map<String, Value>,
+) -> Result<(), AwsServiceError> {
+    for (name, state) in states {
+        let path = format!("{at}/States/{name}");
+        match state["Type"].as_str() {
+            Some("Task") => {
+                let is_nested_start = state["Resource"]
+                    .as_str()
+                    .and_then(integration_of)
+                    .is_some_and(|tail| tail.starts_with("states:startExecution"));
+                let template = ["Parameters", "Arguments"]
+                    .iter()
+                    .find_map(|field| state[*field].as_object().map(|o| (*field, o)));
+                if let (true, Some((field, template))) = (is_nested_start, template) {
+                    if !template.contains_key("StateMachineArn")
+                        && !template.contains_key("StateMachineArn.$")
+                    {
+                        return Err(schema_error(format!(
+                            "The field 'StateMachineArn' is required but was missing at \
+                             {path}/{field}"
+                        )));
+                    }
+                }
+            }
+            Some("Map") => {
+                let reader = &state["ItemReader"];
+                if reader["Resource"].as_str().and_then(integration_of) == Some("s3:getObject")
+                    && reader.get("ReaderConfig").is_none()
+                {
+                    return Err(schema_error(format!(
+                        "These fields are required: [ReaderConfig] at {path}/ItemReader"
+                    )));
+                }
+                if let Some(config) = reader["ReaderConfig"].as_object() {
+                    let at = format!("{path}/ItemReader/ReaderConfig");
+                    // As recorded: `InputType: MANIFEST` already names an inventory.
+                    if config.contains_key("ManifestType")
+                        && config.get("InputType") == Some(&Value::from("MANIFEST"))
+                    {
+                        return Err(schema_error(format!(
+                            "Field 'ManifestType' is not supported at {at}"
+                        )));
+                    }
+                    if let Some(unknown) = config
+                        .keys()
+                        .find(|field| !READER_CONFIG_FIELDS.contains(&field.as_str()))
+                    {
+                        return Err(schema_error(format!(
+                            "Field '{unknown}' is not supported at {at}"
+                        )));
+                    }
+                }
+                for key in ["ItemProcessor", "Iterator"] {
+                    if let Some(nested) = state[key]["States"].as_object() {
+                        validate_integration_schemas(&format!("{path}/{key}"), nested)?;
+                    }
+                }
+            }
+            Some("Parallel") => {
+                for (index, branch) in state["Branches"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    if let Some(nested) = branch["States"].as_object() {
+                        validate_integration_schemas(&format!("{path}/Branches/{index}"), nested)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 
@@ -669,7 +849,7 @@ fn validate_state_paths(state_name: &str, state: &Value) -> Result<(), AwsServic
     // Payload templates: every key ending in `.$` must carry a string value
     // that is either a JSONPath reference (`$`/`$$`) or an intrinsic call. AWS
     // rejects non-string and bare-literal `.$` values at CreateStateMachine.
-    for field in ["Parameters", "ResultSelector", "ItemSelector"] {
+    for field in ["Parameters", "ResultSelector", "ItemSelector", "Assign"] {
         if let Some(template) = state.get(field) {
             validate_payload_template(state_name, field, template)?;
         }
@@ -719,6 +899,12 @@ fn validate_timeout_field(
     let Some(v) = state.get(field) else {
         return Ok(());
     };
+    // In a JSONata state the value may be an expression, checked when it runs.
+    if v.as_str()
+        .is_some_and(|text| text.trim_start().starts_with("{%"))
+    {
+        return Ok(());
+    }
     match v.as_u64() {
         Some(n) if (1..=MAX_TIMEOUT_SECONDS).contains(&n) => Ok(()),
         _ => Err(AwsServiceError::aws_error(
@@ -848,7 +1034,9 @@ fn is_valid_reference_path(path: &str) -> bool {
 /// JSONPath the interpreter can evaluate, including wildcards, slices and
 /// filters.
 fn is_valid_path(path: &str) -> bool {
-    crate::jsonpath::JsonPath::parse(path).is_ok()
+    // A variable reference is a path within that variable.
+    let within = crate::variables::split_reference(path).map(|(_, within)| within);
+    crate::jsonpath::JsonPath::parse(within.as_deref().unwrap_or(path)).is_ok()
 }
 
 fn invalid_reference_path(state_name: &str, field: &str, path: &str) -> AwsServiceError {
@@ -876,7 +1064,7 @@ fn execution_to_json(exec: &Execution) -> Value {
         "stateMachineArn": exec.state_machine_arn,
         "name": exec.name,
         "status": exec.status.as_str(),
-        "startDate": exec.start_date.timestamp() as f64,
+        "startDate": exec.start_date.timestamp_millis() as f64 / 1000.0,
         "redriveCount": exec.redrive_count,
     });
 
@@ -887,7 +1075,7 @@ fn execution_to_json(exec: &Execution) -> Value {
         resp["output"] = json!(output);
     }
     if let Some(stop) = exec.stop_date {
-        resp["stopDate"] = json!(stop.timestamp() as f64);
+        resp["stopDate"] = json!(stop.timestamp_millis() as f64 / 1000.0);
     }
     if let Some(ref error) = exec.error {
         resp["error"] = json!(error);
@@ -1103,6 +1291,155 @@ pub fn start_execution_from_delivery(
         )
         .await;
     });
+}
+
+#[cfg(test)]
+mod integration_schema_tests {
+    use super::*;
+
+    fn message(definition: serde_json::Value) -> Option<String> {
+        validate_definition(&definition.to_string())
+            .err()
+            .map(|e| e.message())
+    }
+
+    #[test]
+    fn nested_start_requires_the_definition_casing() {
+        assert_eq!(
+            message(serde_json::json!({"StartAt":"T","States":{"T":{
+                "Type":"Task",
+                "Resource":"arn:aws:states:::states:startExecution.sync:2",
+                "Parameters":{"stateMachineArn":"arn"},
+                "End":true
+            }}})),
+            Some(
+                "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: The field \
+                 'StateMachineArn' is required but was missing at /States/T/Parameters'"
+                    .to_string()
+            )
+        );
+        for key in ["StateMachineArn", "StateMachineArn.$"] {
+            let definition = serde_json::json!({"StartAt":"T","States":{"T":{
+                "Type":"Task",
+                "Resource":"arn:aws:states:::states:startExecution",
+                "Parameters":{key:"$.arn"},
+                "End":true
+            }}});
+            assert_eq!(message(definition), None);
+        }
+    }
+
+    #[test]
+    fn get_object_item_reader_requires_reader_config() {
+        let map = |reader: serde_json::Value| {
+            serde_json::json!({"StartAt":"M","States":{"M":{
+                "Type":"Map",
+                "ItemProcessor":{"ProcessorConfig":{"Mode":"DISTRIBUTED"},"StartAt":"P",
+                    "States":{"P":{"Type":"Pass","End":true}}},
+                "ItemReader":reader,
+                "End":true
+            }}})
+        };
+        assert_eq!(
+            message(map(serde_json::json!({
+                "Resource":"arn:aws:states:::s3:getObject",
+                "Parameters":{"Bucket":"b","Key":"k"}
+            }))),
+            Some(
+                "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: These fields are \
+                 required: [ReaderConfig] at /States/M/ItemReader'"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            message(map(serde_json::json!({
+                "Resource":"arn:aws:states:::s3:listObjectsV2",
+                "Parameters":{"Bucket":"b"}
+            }))),
+            None
+        );
+    }
+
+    #[test]
+    fn reader_config_fields_are_checked() {
+        let map = |config: serde_json::Value| {
+            serde_json::json!({"StartAt":"M","States":{"M":{
+                "Type":"Map",
+                "ItemProcessor":{"ProcessorConfig":{"Mode":"DISTRIBUTED"},"StartAt":"P",
+                    "States":{"P":{"Type":"Pass","End":true}}},
+                "ItemReader":{
+                    "Resource":"arn:aws:states:::s3:getObject",
+                    "ReaderConfig":config,
+                    "Parameters":{"Bucket":"b","Key":"k"}
+                },
+                "End":true
+            }}})
+        };
+        assert_eq!(
+            message(map(serde_json::json!({"InputType":"MANIFEST","ManifestType":"S3_INVENTORY"}))),
+            Some(
+                "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: Field 'ManifestType' \
+                 is not supported at /States/M/ItemReader/ReaderConfig'"
+                    .to_string()
+            )
+        );
+        assert!(
+            message(map(serde_json::json!({"InputType":"JSON","Bogus":1})))
+                .unwrap()
+                .contains("Field 'Bogus' is not supported")
+        );
+        assert_eq!(
+            message(map(
+                serde_json::json!({"InputType":"CSV","CSVHeaderLocation":"FIRST_ROW","MaxItems":1})
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn variable_names_and_scopes_are_checked() {
+        let with_assign = |assign: serde_json::Value| serde_json::json!({"StartAt":"P","States":{"P":{"Type":"Pass","Assign":assign,"End":true}}});
+        for bad in ["x.y", "x[2]", "states", "1x"] {
+            let error = message(with_assign(serde_json::json!({ bad: 1 }))).unwrap();
+            assert!(error.contains("is not valid"), "{bad}: {error}");
+        }
+        assert_eq!(
+            message(with_assign(serde_json::json!({"ok_1": 1, "p.$": "$.a"}))),
+            None
+        );
+
+        let nested = serde_json::json!({"StartAt":"M","States":{"M":{
+            "Type":"Map",
+            "Assign":{"x":1},
+            "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","Assign":{"x":2},"End":true}}},
+            "End":true
+        }}});
+        assert!(message(nested).unwrap().contains("outer scope"));
+    }
+
+    #[test]
+    fn variable_references_are_valid_paths() {
+        assert!(is_valid_path("$order.items[0]"));
+        assert!(is_valid_path("$x"));
+        assert!(!is_valid_path("$x["));
+    }
+
+    #[test]
+    fn nested_states_report_their_full_path() {
+        let definition = serde_json::json!({"StartAt":"M","States":{"M":{
+            "Type":"Map",
+            "ItemProcessor":{"StartAt":"T","States":{"T":{
+                "Type":"Task",
+                "Resource":"arn:aws:states:::states:startExecution",
+                "Parameters":{},
+                "End":true
+            }}},
+            "End":true
+        }}});
+        assert!(message(definition)
+            .unwrap()
+            .contains("/States/M/ItemProcessor/States/T/Parameters"));
+    }
 }
 
 #[cfg(test)]
@@ -2373,8 +2710,8 @@ mod tests {
             .contains("express:sync-sm"));
         assert_eq!(b["stateMachineArn"], arn);
         assert_eq!(b["status"], "SUCCEEDED");
-        assert!(b["startDate"].as_i64().is_some());
-        assert!(b["stopDate"].as_i64().is_some());
+        assert!(b["startDate"].as_f64().is_some());
+        assert!(b["stopDate"].as_f64().is_some());
         assert!(b["output"].as_str().is_some());
         assert!(b["billingDetails"]["billedDurationInMilliseconds"]
             .as_i64()

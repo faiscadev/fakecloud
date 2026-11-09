@@ -841,17 +841,36 @@ fn query_execution_json(q: &QueryExecution) -> Value {
         "WorkGroup": q.work_group,
         "Status": {
             "State": q.state,
-            "SubmissionDateTime": q.submission_time.timestamp() as f64,
+            "SubmissionDateTime": q.submission_time.timestamp_millis() as f64 / 1000.0,
+        },
+        "QueryExecutionContext": {},
+        "EngineVersion": {
+            "EffectiveEngineVersion": "Athena engine version 3",
+            "SelectedEngineVersion": "AUTO",
+        },
+        "ResultReuseConfiguration": {
+            "ResultReuseByAgeConfiguration": { "Enabled": false },
         },
         "Statistics": {
             "DataScannedInBytes": q.data_scanned_bytes,
             "EngineExecutionTimeInMillis": q.engine_execution_time_ms,
             "QueryPlanningTimeInMillis": q.query_planning_time_ms,
+            "QueryQueueTimeInMillis": 0,
+            "ServicePreProcessingTimeInMillis": 0,
+            "ServiceProcessingTimeInMillis": 0,
             "TotalExecutionTimeInMillis": q.total_execution_time_ms,
             // Every query runs fresh; no prior result is ever served from cache.
             "ResultReuseInformation": { "ReusedPreviousResult": false },
         },
     });
+    if let Some(keyword) = q
+        .query
+        .split_whitespace()
+        .next()
+        .filter(|_| q.statement_type == "DML")
+    {
+        obj["SubstatementType"] = json!(keyword.to_ascii_uppercase());
+    }
     if let Some(c) = &q.result_reuse_configuration {
         obj.as_object_mut()
             .unwrap()
@@ -878,7 +897,7 @@ fn query_execution_json(q: &QueryExecution) -> Value {
             .insert("EngineVersion".to_string(), v.clone());
     }
     if let Some(t) = q.completion_time {
-        obj["Status"]["CompletionDateTime"] = json!(t.timestamp() as f64);
+        obj["Status"]["CompletionDateTime"] = json!(t.timestamp_millis() as f64 / 1000.0);
     }
     if let Some(reason) = &q.state_change_reason {
         obj["Status"].as_object_mut().unwrap().insert(

@@ -4302,7 +4302,6 @@ async fn sfn_introspection_sync_executions_endpoint() {
 }
 
 #[tokio::test]
-#[ignore = "execution tree state propagation timing flaky; introspection covered by unit tests"]
 async fn sfn_introspection_execution_tree_endpoint() {
     let server = TestServer::start().await;
     let sfn = server.sfn_client().await;

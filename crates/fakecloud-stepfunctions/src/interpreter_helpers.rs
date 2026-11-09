@@ -69,32 +69,66 @@ pub(crate) fn run_states<'a>(
                 "Executing state"
             );
 
+            // A JSONata state runs as the literal state its expressions evaluate
+            // to; its `Assign` and `Output` apply to what comes out.
+            let jsonata_state = crate::jsonata::is_jsonata(&state_def);
+            let current_input = std::mem::take(&mut effective_input);
+            let states_input = jsonata_state.then(|| current_input.clone());
+            let jsonata_ctx = jsonata_state.then(|| {
+                context_object(
+                    shared_state,
+                    execution_arn,
+                    &current_state,
+                    chrono::Utc::now(),
+                    0,
+                )
+            });
+            let original_def = state_def.clone();
+            let (state_def, run_input) =
+                if let (Some(input), Some(ctx)) = (&states_input, &jsonata_ctx) {
+                    if state_type == "Choice" {
+                        (state_def, current_input)
+                    } else {
+                        crate::jsonata::prepare_state(&state_def, input, ctx)?
+                    }
+                } else {
+                    (state_def, current_input)
+                };
+
             let advance = match state_type.as_str() {
+                "Choice" if jsonata_state => run_jsonata_choice_state(
+                    &current_state,
+                    &state_def,
+                    run_input,
+                    jsonata_ctx.as_ref().unwrap_or(&Value::Null),
+                    shared_state,
+                    execution_arn,
+                ),
                 "Pass" => run_pass_state(
                     &current_state,
                     &state_def,
-                    effective_input,
+                    run_input,
                     shared_state,
                     execution_arn,
                 ),
                 "Succeed" => run_succeed_state(
                     &current_state,
                     &state_def,
-                    effective_input,
+                    run_input,
                     shared_state,
                     execution_arn,
                 ),
                 "Fail" => run_fail_state(
                     &current_state,
                     &state_def,
-                    effective_input,
+                    run_input,
                     shared_state,
                     execution_arn,
                 ),
                 "Choice" => run_choice_state(
                     &current_state,
                     &state_def,
-                    effective_input,
+                    run_input,
                     shared_state,
                     execution_arn,
                 ),
@@ -102,7 +136,7 @@ pub(crate) fn run_states<'a>(
                     run_wait_state(
                         &current_state,
                         &state_def,
-                        effective_input,
+                        run_input,
                         shared_state,
                         execution_arn,
                     )
@@ -112,7 +146,7 @@ pub(crate) fn run_states<'a>(
                     run_task_state(
                         &current_state,
                         &state_def,
-                        effective_input,
+                        run_input,
                         delivery,
                         dynamodb_state,
                         registry,
@@ -125,7 +159,7 @@ pub(crate) fn run_states<'a>(
                     run_parallel_state(
                         &current_state,
                         &state_def,
-                        effective_input,
+                        run_input,
                         delivery,
                         dynamodb_state,
                         registry,
@@ -138,7 +172,7 @@ pub(crate) fn run_states<'a>(
                     run_map_state(
                         &current_state,
                         &state_def,
-                        effective_input,
+                        run_input,
                         delivery,
                         dynamodb_state,
                         registry,
@@ -153,6 +187,15 @@ pub(crate) fn run_states<'a>(
                 ),
             };
 
+            let advance = match (&states_input, &jsonata_ctx) {
+                (Some(input), Some(ctx)) if state_type != "Choice" => {
+                    finish_jsonata_state(&original_def, input, ctx, advance)
+                }
+                _ => advance,
+            };
+
+            crate::variables::commit();
+
             match advance {
                 Advance::Next(next, new_input) => {
                     effective_input = new_input;
@@ -163,6 +206,70 @@ pub(crate) fn run_states<'a>(
             }
         }
     })
+}
+
+/// Apply a JSONata state's `Assign` and `Output`, or its catcher's when the state
+/// was caught, to where the state ended up.
+fn finish_jsonata_state(
+    state_def: &Value,
+    input: &Value,
+    ctx: &Value,
+    advance: Advance,
+) -> Advance {
+    let finish = |holder: &Value, produced: Value, error_output: bool| {
+        crate::jsonata::finish_state(holder, input, ctx, produced, error_output)
+    };
+    let finished = match advance {
+        Advance::Next(next, produced) => match crate::jsonata::catcher_for(state_def, &next) {
+            Some(catcher) => finish(catcher, produced, true),
+            None => finish(state_def, produced, false),
+        }
+        .map(|output| Advance::Next(next, output)),
+        Advance::End(produced) => finish(state_def, produced, false).map(Advance::End),
+        failed => Ok(failed),
+    };
+    finished.unwrap_or_else(|(error, cause)| Advance::Fail(error, cause))
+}
+
+/// A JSONata Choice state: its rules are `Condition` expressions.
+fn run_jsonata_choice_state(
+    name: &str,
+    state_def: &Value,
+    input: Value,
+    ctx: &Value,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Advance {
+    let entered_event_id = add_event(
+        shared_state,
+        execution_arn,
+        "ChoiceStateEntered",
+        0,
+        json!({
+            "name": name,
+            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
+        }),
+    );
+    match crate::jsonata::choose(state_def, &input, ctx) {
+        Ok(Some((next, output))) => {
+            add_event(
+                shared_state,
+                execution_arn,
+                "ChoiceStateExited",
+                entered_event_id,
+                json!({
+                    "name": name,
+                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
+                }),
+            );
+            Advance::Next(next, output)
+        }
+        Ok(None) => Advance::Fail(
+            "States.NoChoiceMatched".to_string(),
+            format!("No choice rule matched and no Default in state '{name}'"),
+        ),
+        Err((error, cause)) => Advance::Fail(error, cause),
+    }
 }
 
 /// Build the Step Functions context object (`$$`) for a state of
@@ -404,6 +511,18 @@ pub(crate) fn run_choice_state(
     };
     match chosen {
         Some(next) => {
+            // `Assign` belongs to the rule taken, or the state for its Default.
+            let rule = state_def["Choices"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|rule| rule["Next"].as_str() == Some(next.as_str()))
+                .unwrap_or(state_def);
+            if let Err((error, cause)) =
+                crate::variables::assign_jsonpath(rule.get("Assign"), &processed_input, Some(&ctx))
+            {
+                return Advance::Fail(error, cause);
+            }
             // A Choice state has no Parameters/ResultPath, so its effective
             // result is the InputPath-filtered input; OutputPath then filters
             // what flows to the next state. Previously the raw input was
@@ -466,6 +585,9 @@ pub(crate) fn execute_pass_state(
     } else {
         transformed
     };
+    if !crate::jsonata::is_jsonata(state_def) {
+        crate::variables::assign_jsonpath(state_def.get("Assign"), &result, context)?;
+    }
 
     let after_result = if result_path == Some("null") {
         input.clone()
@@ -1441,6 +1563,14 @@ pub(crate) fn apply_state_catcher(
         "Error": error,
         "Cause": cause,
     });
+    if !crate::jsonata::is_jsonata(state_def) {
+        let catcher = catchers
+            .iter()
+            .find(|c| c["Next"].as_str() == Some(next.as_str()));
+        if let Some(assign) = catcher.and_then(|c| c.get("Assign")) {
+            let _ = crate::variables::assign_jsonpath(Some(assign), &error_output, None);
+        }
+    }
     let new_input = apply_result_path(effective_input, &error_output, result_path.as_deref());
     Some((next, new_input))
 }

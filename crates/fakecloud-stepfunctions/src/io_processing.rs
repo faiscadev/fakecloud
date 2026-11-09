@@ -68,6 +68,11 @@ pub fn resolve_with_context(
     context: Option<&Value>,
     path: &str,
 ) -> Result<Value, PathError> {
+    if let Some((name, within)) = crate::variables::split_reference(path) {
+        let value = crate::variables::lookup(name)
+            .ok_or_else(|| PathError::Invalid(format!("the variable '{name}' is not defined")))?;
+        return resolve_path(&value, &within);
+    }
     match path.strip_prefix("$$") {
         Some(rest) => match context {
             Some(ctx) => resolve_path(ctx, &format!("${rest}")),
