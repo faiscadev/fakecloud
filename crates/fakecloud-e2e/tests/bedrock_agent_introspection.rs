@@ -143,3 +143,109 @@ async fn bedrock_agent_runtime_introspection_records_retrieve_and_rag() {
         .unwrap()
         .contains("intro rag query"));
 }
+
+/// The `output` event's payload is `{"text": ...}`; wrapped in the event name
+/// it decodes as an event with no text.
+#[tokio::test]
+async fn bedrock_agent_runtime_retrieve_and_generate_stream_delivers_text() {
+    use aws_sdk_bedrockagentruntime::types::{
+        RetrieveAndGenerateInput, RetrieveAndGenerateStreamResponseOutput,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.bedrock_agent_runtime_client().await;
+
+    let mut stream = client
+        .retrieve_and_generate_stream()
+        .input(
+            RetrieveAndGenerateInput::builder()
+                .text("stream query")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("RetrieveAndGenerateStream")
+        .stream;
+
+    let mut text = String::new();
+    let mut citations = 0;
+    while let Some(event) = stream.recv().await.expect("decode stream event") {
+        match event {
+            RetrieveAndGenerateStreamResponseOutput::Output(output) => {
+                text.push_str(output.text());
+            }
+            RetrieveAndGenerateStreamResponseOutput::Citation(citation) => {
+                citations += 1;
+                let part = citation.generated_response_part().expect("response part");
+                assert_eq!(
+                    part.text_response_part().and_then(|p| p.text()),
+                    Some(text.as_str())
+                );
+                assert_eq!(citation.retrieved_references().len(), 1);
+            }
+            RetrieveAndGenerateStreamResponseOutput::Guardrail(_) => {
+                panic!("no guardrail was configured")
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+    assert_eq!(text, "Generated response for: stream query");
+    assert_eq!(citations, 1);
+}
+
+#[tokio::test]
+async fn bedrock_agent_runtime_retrieve_and_generate_stream_reports_a_guardrail() {
+    use aws_sdk_bedrockagentruntime::types::{
+        GenerationConfiguration, GuadrailAction, GuardrailConfiguration,
+        KnowledgeBaseRetrieveAndGenerateConfiguration, RetrieveAndGenerateConfiguration,
+        RetrieveAndGenerateInput, RetrieveAndGenerateStreamResponseOutput, RetrieveAndGenerateType,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.bedrock_agent_runtime_client().await;
+
+    let config = RetrieveAndGenerateConfiguration::builder()
+        .r#type(RetrieveAndGenerateType::KnowledgeBase)
+        .knowledge_base_configuration(
+            KnowledgeBaseRetrieveAndGenerateConfiguration::builder()
+                .knowledge_base_id("ABCDEFGHIJ")
+                .model_arn("arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-v2")
+                .generation_configuration(
+                    GenerationConfiguration::builder()
+                        .guardrail_configuration(
+                            GuardrailConfiguration::builder()
+                                .guardrail_id("abcdefghijkl")
+                                .guardrail_version("1")
+                                .build()
+                                .unwrap(),
+                        )
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    let mut stream = client
+        .retrieve_and_generate_stream()
+        .input(
+            RetrieveAndGenerateInput::builder()
+                .text("q")
+                .build()
+                .unwrap(),
+        )
+        .retrieve_and_generate_configuration(config)
+        .send()
+        .await
+        .expect("RetrieveAndGenerateStream")
+        .stream;
+
+    let mut action = None;
+    while let Some(event) = stream.recv().await.expect("decode stream event") {
+        if let RetrieveAndGenerateStreamResponseOutput::Guardrail(guardrail) = event {
+            action = guardrail.action().cloned();
+        }
+    }
+    assert_eq!(action, Some(GuadrailAction::None));
+}

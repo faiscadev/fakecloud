@@ -14,13 +14,13 @@ For the control plane (CreateAgent, knowledge bases, action groups, flows), see 
 
 - **InvokeAgent** — `POST /agents/{agentId}/agentAliases/{agentAliasId}/sessions/{sessionId}/text`. Returns `application/vnd.amazon.eventstream` with real framed events: `chunk` (assistant text), `trace` (orchestration / pre-processing / post-processing / knowledge-base lookup / action-group invocation), and optional `returnControl` (when an action group is declared `RETURN_CONTROL`).
 - **InvokeInlineAgent** — pass the agent definition in the request, no `agentId` needed. Same eventstream contract as InvokeAgent.
-- **InvokeFlow** — execute a prepared flow. Eventstream of `flowOutputEvent`, `flowTraceEvent`, `flowCompletionEvent`.
+- **InvokeFlow**: execute a prepared flow. Eventstream of `flowTraceEvent` with `enableTrace`, `flowOutputEvent` from each `Output` node, then `flowCompletionEvent`.
 
 ### Retrieval
 
 - **Retrieve** — query a knowledge base, returns `retrievalResults[]` with `content`, `location`, `score`, `metadata`.
 - **RetrieveAndGenerate** — non-streaming RAG. Combines retrieval with a model call and returns `output.text`, `citations[]`, `sessionId`, `guardrailAction`.
-- **RetrieveAndGenerateStream** — streaming variant. Eventstream of `output`, `citation`, and `guardrail` events.
+- **RetrieveAndGenerateStream**: streaming variant. Eventstream of `output` and `citation` events, plus `guardrail` when a guardrail is configured.
 - **Rerank** — re-score a list of sources against a query using a reranker model.
 
 ### Flow execution (long-running flows)

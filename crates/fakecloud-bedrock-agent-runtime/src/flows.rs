@@ -92,6 +92,99 @@ pub(crate) fn flow_and_alias(
     Some((flow_id, alias_id))
 }
 
+/// The name output events carry when a definition has no output node of its own.
+const DEFAULT_OUTPUT_NODE: &str = "FlowOutputNode";
+
+/// An output node a run reaches, and how its input field is wired.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RunTarget {
+    pub node: String,
+    pub input: String,
+    pub expression: String,
+    pub data_type: String,
+}
+
+/// What a run of a flow definition reports: the input node's output field and
+/// the output nodes it feeds.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RunPlan {
+    pub source_output: String,
+    pub source_type: String,
+    pub targets: Vec<RunTarget>,
+    pub is_pass_through: bool,
+}
+
+impl RunPlan {
+    pub(crate) fn of(definition: Option<&Value>, source_node: &str, source_output: &str) -> Self {
+        let empty = Vec::new();
+        let nodes = definition
+            .and_then(|d| d["nodes"].as_array())
+            .unwrap_or(&empty);
+        let connections = definition
+            .and_then(|d| d["connections"].as_array())
+            .unwrap_or(&empty);
+        let source = nodes.iter().find(|n| n["name"] == source_node);
+        let source_type = source
+            .and_then(|n| n["outputs"].as_array())
+            .and_then(|outputs| outputs.iter().find(|o| o["name"] == source_output))
+            .and_then(|o| o["type"].as_str())
+            .unwrap_or("String");
+
+        let targets: Vec<RunTarget> = nodes
+            .iter()
+            .filter(|node| node["type"] == "Output")
+            .map(|node| {
+                let name = node["name"].as_str().unwrap_or_default();
+                let wired = connections.iter().find(|c| c["target"] == name);
+                let input = wired
+                    .and_then(|c| c["configuration"]["data"]["targetInput"].as_str())
+                    .unwrap_or("document");
+                let declared = node["inputs"]
+                    .as_array()
+                    .and_then(|inputs| inputs.iter().find(|i| i["name"] == input));
+                RunTarget {
+                    node: name.to_string(),
+                    input: input.to_string(),
+                    expression: declared
+                        .and_then(|i| i["expression"].as_str())
+                        .unwrap_or("$.data")
+                        .to_string(),
+                    data_type: wire_data_type(
+                        declared
+                            .and_then(|i| i["type"].as_str())
+                            .unwrap_or("String"),
+                    ),
+                }
+            })
+            .collect();
+        let is_pass_through = !nodes.is_empty()
+            && nodes
+                .iter()
+                .all(|node| node["type"] == "Input" || node["type"] == "Output");
+        let targets = if targets.is_empty() {
+            vec![RunTarget {
+                node: DEFAULT_OUTPUT_NODE.to_string(),
+                input: "document".to_string(),
+                expression: "$.data".to_string(),
+                data_type: wire_data_type("String"),
+            }]
+        } else {
+            targets
+        };
+        Self {
+            source_output: source_output.to_string(),
+            source_type: wire_data_type(source_type),
+            targets,
+            is_pass_through,
+        }
+    }
+}
+
+/// A definition's `String`, `Number`, ... as a trace's `FlowNodeIODataType` value.
+fn wire_data_type(declared: &str) -> String {
+    declared.to_ascii_uppercase()
+}
+
 /// The `flow_executions` map key of an execution.
 pub(crate) fn execution_map_key(flow_id: &str, alias_id: &str, execution_id: &str) -> String {
     format!("{flow_id}/{alias_id}/{execution_id}")

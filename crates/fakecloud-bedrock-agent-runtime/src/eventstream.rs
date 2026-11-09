@@ -79,8 +79,9 @@ pub fn chunk_frame(text: &str) -> Vec<u8> {
     )
 }
 
-/// Build a `flowOutputEvent` frame for `InvokeFlow`. Carries the same
-/// JSON shape AWS does — `nodeName` + `content.document` envelope.
+/// Build a `flowOutputEvent` frame for `InvokeFlow`: `nodeName` and the
+/// `content.document` envelope. The model marks `nodeType` required, but AWS was
+/// recorded not sending it.
 pub fn flow_output_frame(node_name: &str, document: &str) -> Vec<u8> {
     let body = serde_json::to_vec(&serde_json::json!({
         "nodeName": node_name,
@@ -90,6 +91,34 @@ pub fn flow_output_frame(node_name: &str, document: &str) -> Vec<u8> {
     encode_frame(
         &[
             (":event-type", "flowOutputEvent"),
+            (":content-type", "application/json"),
+            (":message-type", "event"),
+        ],
+        &body,
+    )
+}
+
+/// Build a `flowTraceEvent` frame carrying one `FlowTrace` union value.
+pub fn flow_trace_frame(trace: serde_json::Value) -> Vec<u8> {
+    let body = serde_json::to_vec(&serde_json::json!({ "trace": trace }))
+        .expect("static JSON shape never fails");
+    encode_frame(
+        &[
+            (":event-type", "flowTraceEvent"),
+            (":content-type", "application/json"),
+            (":message-type", "event"),
+        ],
+        &body,
+    )
+}
+
+/// Build the `flowCompletionEvent` frame that ends a finished `InvokeFlow`.
+pub fn flow_completion_frame() -> Vec<u8> {
+    let body = serde_json::to_vec(&serde_json::json!({ "completionReason": "SUCCESS" }))
+        .expect("static JSON shape never fails");
+    encode_frame(
+        &[
+            (":event-type", "flowCompletionEvent"),
             (":content-type", "application/json"),
             (":message-type", "event"),
         ],
@@ -158,6 +187,16 @@ mod tests {
         assert_eq!(event_type.1, "flowOutputEvent");
         let body: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(body["nodeName"], "StartNode");
+        assert!(body.get("nodeType").is_none());
         assert_eq!(body["content"]["document"], "document text");
+    }
+
+    #[test]
+    fn flow_completion_frame_reports_success() {
+        let (headers, payload) = decode_frame(&flow_completion_frame());
+        let event_type = headers.iter().find(|(k, _)| k == ":event-type").unwrap();
+        assert_eq!(event_type.1, "flowCompletionEvent");
+        let body: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(body, serde_json::json!({"completionReason": "SUCCESS"}));
     }
 }

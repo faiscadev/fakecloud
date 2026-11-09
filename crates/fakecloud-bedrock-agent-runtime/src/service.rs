@@ -802,10 +802,25 @@ async fn handle_invoke_flow(
     // A caller-supplied executionId continues that execution (a multi-turn
     // conversation); otherwise the service mints one.
     let execution_id = execution_id_opt.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let input = req_str(body, "input").unwrap_or_default();
+    let first_input = &body["inputs"][0];
+    let input = match &first_input["content"]["document"] {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    };
 
     let start = std::time::Instant::now();
-    let document = format!("Flow output for input: {}", input);
+    let plan = crate::flows::RunPlan::of(
+        flow.definition.as_ref(),
+        first_input["nodeName"].as_str().unwrap_or_default(),
+        first_input["nodeOutputName"].as_str().unwrap_or("document"),
+    );
+    // A flow of only input and output nodes hands its input straight through.
+    let document = if plan.is_pass_through {
+        input.clone()
+    } else {
+        format!("Flow output for input: {}", input)
+    };
 
     {
         let mut accts = svc.state.write();
@@ -844,7 +859,51 @@ async fn handle_invoke_flow(
         });
     }
 
-    let frame = crate::eventstream::flow_output_frame("StartNode", &document);
+    // Trace events, then outputs, then completion, as recorded from AWS.
+    let mut frame = Vec::new();
+    if body["enableTrace"].as_bool() == Some(true) {
+        let timestamp = || Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        frame.extend(crate::eventstream::flow_trace_frame(json!({
+            "nodeOutputTrace": {
+                "nodeName": first_input["nodeName"],
+                "timestamp": timestamp(),
+                "fields": [{
+                    "nodeOutputName": plan.source_output,
+                    "content": { "document": input },
+                    "next": plan.targets.iter().map(|target| json!({
+                        "nodeName": target.node,
+                        "inputFieldName": target.input,
+                    })).collect::<Vec<_>>(),
+                    "type": plan.source_type,
+                }],
+            }
+        })));
+        for target in &plan.targets {
+            frame.extend(crate::eventstream::flow_trace_frame(json!({
+                "nodeInputTrace": {
+                    "nodeName": target.node,
+                    "timestamp": timestamp(),
+                    "fields": [{
+                        "nodeInputName": target.input,
+                        "content": { "document": input },
+                        "source": {
+                            "nodeName": first_input["nodeName"],
+                            "outputFieldName": plan.source_output,
+                            "expression": target.expression,
+                        },
+                        "type": target.data_type,
+                    }],
+                }
+            })));
+        }
+    }
+    for target in &plan.targets {
+        frame.extend(crate::eventstream::flow_output_frame(
+            &target.node,
+            &document,
+        ));
+    }
+    frame.extend(crate::eventstream::flow_completion_frame());
     let mut headers = http::HeaderMap::new();
     if let Ok(value) = http::HeaderValue::from_str(&execution_id) {
         headers.insert("x-amz-bedrock-flow-execution-id", value);
@@ -1082,23 +1141,7 @@ async fn handle_retrieve_and_generate(
         .to_string();
     let start = std::time::Instant::now();
     let output_text = format!("Generated response for: {}", input);
-    let citation = json!({
-        "generatedResponsePart": {
-            "textResponsePart": {
-                "text": output_text,
-                "span": { "start": 0, "end": 30 }
-            }
-        },
-        "retrievedReferences": [
-            {
-                "content": { "text": "Reference text from knowledge base" },
-                "location": {
-                    "type": "CONFLUENCE",
-                    "confluenceLocation": { "url": "https://example.com/doc" }
-                }
-            }
-        ]
-    });
+    let citation = rag_citation(&output_text);
     {
         let mut accts = svc.state.write();
         let s = accts.get_or_create(&req.account_id);
@@ -1123,6 +1166,28 @@ async fn handle_retrieve_and_generate(
         "output": { "text": output_text },
         "citations": [citation]
     })))
+}
+
+/// The citation a knowledge-base answer carries: the answer's text span and the
+/// reference it came from.
+fn rag_citation(output_text: &str) -> Value {
+    json!({
+        "generatedResponsePart": {
+            "textResponsePart": {
+                "text": output_text,
+                "span": { "start": 0, "end": output_text.chars().count().saturating_sub(1) }
+            }
+        },
+        "retrievedReferences": [
+            {
+                "content": { "text": "Reference text from knowledge base" },
+                "location": {
+                    "type": "CONFLUENCE",
+                    "confluenceLocation": { "url": "https://example.com/doc" }
+                }
+            }
+        ]
+    })
 }
 
 async fn handle_retrieve_and_generate_stream(
@@ -1152,6 +1217,7 @@ async fn handle_retrieve_and_generate_stream(
         .unwrap_or_default()
         .to_string();
     let output_text = format!("Generated response for: {}", input);
+    let citation = rag_citation(&output_text);
     {
         let mut accts = svc.state.write();
         let s = accts.get_or_create(&req.account_id);
@@ -1165,22 +1231,37 @@ async fn handle_retrieve_and_generate_stream(
             output: output_text.clone(),
             output_chunks: 1,
             trace: None,
-            citations: Vec::new(),
+            citations: vec![citation.clone()],
             timestamp: Utc::now(),
             duration_ms: 0,
         });
     }
 
     // Emit a single output event frame (eventstream payload).
-    let event_body = serde_json::to_vec(&json!({ "output": { "text": output_text } })).unwrap();
-    let frame = crate::eventstream::encode_frame(
-        &[
-            (":event-type", "output"),
-            (":content-type", "application/json"),
-            (":message-type", "event"),
-        ],
-        &event_body,
-    );
+    // The payload is the event's own members; `:event-type` names the event.
+    let event_body = serde_json::to_vec(&json!({ "text": output_text })).unwrap();
+    let event = |event_type: &str, payload: &[u8]| {
+        crate::eventstream::encode_frame(
+            &[
+                (":event-type", event_type),
+                (":content-type", "application/json"),
+                (":message-type", "event"),
+            ],
+            payload,
+        )
+    };
+    let mut frame = event("output", &event_body);
+    frame.extend(event("citation", &serde_json::to_vec(&citation).unwrap()));
+    // A configured guardrail reports what it did; this model output passes it.
+    let has_guardrail = body
+        .pointer("/retrieveAndGenerateConfiguration/knowledgeBaseConfiguration/generationConfiguration/guardrailConfiguration")
+        .is_some();
+    if has_guardrail {
+        frame.extend(event(
+            "guardrail",
+            &serde_json::to_vec(&json!({ "action": "NONE" })).unwrap(),
+        ));
+    }
 
     let mut headers = http::HeaderMap::new();
     if let Ok(value) = http::HeaderValue::from_str(&session_id) {

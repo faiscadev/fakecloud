@@ -79,41 +79,29 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-/// Build the complete event stream body for InvokeModelWithResponseStream.
-/// Returns the full body as a single chunk containing all events.
-pub(crate) fn build_invoke_stream_response(model_id: &str, response_text: &str) -> Vec<u8> {
-    let mut body = Vec::new();
+/// Append one event to a stream. An event-stream message's payload holds the
+/// event's own members; its type travels only in the `:event-type` header, so
+/// wrapping the members in the event name leaves a decoder with an empty event.
+fn push_event(body: &mut Vec<u8>, event_type: &str, members: &Value) {
+    let payload =
+        serde_json::to_vec(members).expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event(event_type, "application/json", &payload));
+}
 
-    // For Anthropic models, emit message_start, content_block_start, content_block_delta,
-    // content_block_stop, message_delta, message_stop
-    if model_id.starts_with("anthropic.") {
-        // chunk event with the response
-        let chunk = json!({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {
-                "type": "text_delta",
-                "text": response_text
-            }
-        });
-        let payload = serde_json::to_vec(
-            &json!({ "bytes": base64_encode(&serde_json::to_vec(&chunk).expect("serde_json::Value serialization is infallible")) }),
-        )
-        .expect("serde_json::Value serialization is infallible");
-        body.extend(encode_event("chunk", "application/json", &payload));
-    } else {
-        // Generic: single chunk with the full response
-        let chunk = json!({
-            "outputText": response_text
-        });
-        let payload = serde_json::to_vec(
-            &json!({ "bytes": base64_encode(&serde_json::to_vec(&chunk).expect("serde_json::Value serialization is infallible")) }),
-        )
-        .expect("serde_json::Value serialization is infallible");
-        body.extend(encode_event("chunk", "application/json", &payload));
-    }
-
-    body
+/// The `metadata` event closing a ConverseStream.
+fn push_converse_metadata(body: &mut Vec<u8>, input_tokens: u64, output_tokens: u64) {
+    push_event(
+        body,
+        "metadata",
+        &json!({
+            "usage": {
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "totalTokens": input_tokens + output_tokens
+            },
+            "metrics": { "latencyMs": 100 }
+        }),
+    );
 }
 
 /// Build the complete event stream body for ConverseStream.
@@ -136,105 +124,49 @@ pub(crate) fn build_converse_stream_response(
 ) -> Vec<u8> {
     let mut body = Vec::new();
 
-    // messageStart event
-    let start = json!({ "role": "assistant" });
-    let payload = serde_json::to_vec(&json!({ "messageStart": start }))
-        .expect("serde_json::Value serialization is infallible");
-    body.extend(encode_event("messageStart", "application/json", &payload));
+    push_event(&mut body, "messageStart", &json!({ "role": "assistant" }));
 
-    // Text content block (index 0).
-    let block_start = json!({ "contentBlockIndex": 0, "start": {} });
-    let payload = serde_json::to_vec(&json!({ "contentBlockStart": block_start }))
-        .expect("serde_json::Value serialization is infallible");
-    body.extend(encode_event(
-        "contentBlockStart",
-        "application/json",
-        &payload,
-    ));
-
-    // contentBlockDelta event with the text
-    let delta = json!({
-        "contentBlockIndex": 0,
-        "delta": {
-            "text": response_text
-        }
-    });
-    let payload = serde_json::to_vec(&json!({ "contentBlockDelta": delta }))
-        .expect("serde_json::Value serialization is infallible");
-    body.extend(encode_event(
+    // A text block opens with its first delta: `ContentBlockStart` is a union
+    // with no text member, so there is nothing a start event could say.
+    push_event(
+        &mut body,
         "contentBlockDelta",
-        "application/json",
-        &payload,
-    ));
-
-    // contentBlockStop event
-    let block_stop = json!({ "contentBlockIndex": 0 });
-    let payload = serde_json::to_vec(&json!({ "contentBlockStop": block_stop }))
-        .expect("serde_json::Value serialization is infallible");
-    body.extend(encode_event(
+        &json!({ "contentBlockIndex": 0, "delta": { "text": response_text } }),
+    );
+    push_event(
+        &mut body,
         "contentBlockStop",
-        "application/json",
-        &payload,
-    ));
+        &json!({ "contentBlockIndex": 0 }),
+    );
 
     // Optional forced toolUse content block (index 1), mirroring Converse.
     if let Some(tool_name) = forced_tool {
-        let tool_start = json!({
-            "contentBlockIndex": 1,
-            "start": { "toolUse": { "toolUseId": "tooluse_fakecloud_01", "name": tool_name } }
-        });
-        let payload = serde_json::to_vec(&json!({ "contentBlockStart": tool_start }))
-            .expect("serde_json::Value serialization is infallible");
-        body.extend(encode_event(
+        push_event(
+            &mut body,
             "contentBlockStart",
-            "application/json",
-            &payload,
-        ));
-
-        let tool_delta = json!({
-            "contentBlockIndex": 1,
-            "delta": { "toolUse": { "input": "{}" } }
-        });
-        let payload = serde_json::to_vec(&json!({ "contentBlockDelta": tool_delta }))
-            .expect("serde_json::Value serialization is infallible");
-        body.extend(encode_event(
+            &json!({
+                "contentBlockIndex": 1,
+                "start": { "toolUse": { "toolUseId": "tooluse_fakecloud_01", "name": tool_name } }
+            }),
+        );
+        push_event(
+            &mut body,
             "contentBlockDelta",
-            "application/json",
-            &payload,
-        ));
-
-        let tool_stop = json!({ "contentBlockIndex": 1 });
-        let payload = serde_json::to_vec(&json!({ "contentBlockStop": tool_stop }))
-            .expect("serde_json::Value serialization is infallible");
-        body.extend(encode_event(
+            &json!({ "contentBlockIndex": 1, "delta": { "toolUse": { "input": "{}" } } }),
+        );
+        push_event(
+            &mut body,
             "contentBlockStop",
-            "application/json",
-            &payload,
-        ));
+            &json!({ "contentBlockIndex": 1 }),
+        );
     }
 
-    // messageStop event
-    let stop = json!({
-        "stopReason": stop_reason
-    });
-    let payload = serde_json::to_vec(&json!({ "messageStop": stop }))
-        .expect("serde_json::Value serialization is infallible");
-    body.extend(encode_event("messageStop", "application/json", &payload));
-
-    // metadata event
-    let metadata = json!({
-        "usage": {
-            "inputTokens": input_tokens,
-            "outputTokens": output_tokens,
-            "totalTokens": input_tokens + output_tokens
-        },
-        "metrics": {
-            "latencyMs": 100
-        }
-    });
-    let payload = serde_json::to_vec(&json!({ "metadata": metadata }))
-        .expect("serde_json::Value serialization is infallible");
-    body.extend(encode_event("metadata", "application/json", &payload));
+    push_event(
+        &mut body,
+        "messageStop",
+        &json!({ "stopReason": stop_reason }),
+    );
+    push_converse_metadata(&mut body, input_tokens, output_tokens);
 
     body
 }
@@ -392,70 +324,78 @@ fn push_bytes_chunk(body: &mut Vec<u8>, chunk: &Value) {
     body.extend(encode_event("chunk", "application/json", &payload));
 }
 
+/// A tool call to stream as a `toolUse` content block; `input` is its JSON text.
+pub(crate) struct StreamedToolUse<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) name: &'a str,
+    pub(crate) input: String,
+}
+
 /// Re-encode a sequence of real upstream token deltas as a Bedrock
-/// `ConverseStream` event stream: one `contentBlockDelta` event per token,
-/// terminated with real usage figures in the `metadata` event.
+/// `ConverseStream` event stream: one `contentBlockDelta` event per token, a
+/// `toolUse` block per tool the model called, terminated with real usage figures
+/// in the `metadata` event.
 pub(crate) fn build_converse_stream_from_deltas(
     deltas: &[String],
+    tools: &[StreamedToolUse<'_>],
     stop: crate::upstream::StopKind,
     input_tokens: u64,
     output_tokens: u64,
 ) -> Vec<u8> {
     let mut body = Vec::new();
 
-    let start = json!({ "role": "assistant" });
-    let payload = serde_json::to_vec(&json!({ "messageStart": start }))
-        .expect("serde_json::Value serialization is infallible");
-    body.extend(encode_event("messageStart", "application/json", &payload));
-
-    let block_start = json!({ "contentBlockIndex": 0, "start": {} });
-    let payload = serde_json::to_vec(&json!({ "contentBlockStart": block_start }))
-        .expect("serde_json::Value serialization is infallible");
-    body.extend(encode_event(
-        "contentBlockStart",
-        "application/json",
-        &payload,
-    ));
-
+    push_event(&mut body, "messageStart", &json!({ "role": "assistant" }));
+    // A delta is what opens a text block, so an empty reply with no tool calls
+    // still needs one for its `contentBlockStop` to close something.
+    let empty = [String::new()];
+    let deltas = if deltas.is_empty() && tools.is_empty() {
+        &empty[..]
+    } else {
+        deltas
+    };
     for delta in deltas {
-        let block_delta = json!({
-            "contentBlockIndex": 0,
-            "delta": { "text": delta }
-        });
-        let payload = serde_json::to_vec(&json!({ "contentBlockDelta": block_delta }))
-            .expect("serde_json::Value serialization is infallible");
-        body.extend(encode_event(
+        push_event(
+            &mut body,
             "contentBlockDelta",
-            "application/json",
-            &payload,
-        ));
+            &json!({ "contentBlockIndex": 0, "delta": { "text": delta } }),
+        );
     }
-
-    let block_stop = json!({ "contentBlockIndex": 0 });
-    let payload = serde_json::to_vec(&json!({ "contentBlockStop": block_stop }))
-        .expect("serde_json::Value serialization is infallible");
-    body.extend(encode_event(
-        "contentBlockStop",
-        "application/json",
-        &payload,
-    ));
-
-    let stop_event = json!({ "stopReason": crate::upstream::stop_converse(stop) });
-    let payload = serde_json::to_vec(&json!({ "messageStop": stop_event }))
-        .expect("serde_json::Value serialization is infallible");
-    body.extend(encode_event("messageStop", "application/json", &payload));
-
-    let metadata = json!({
-        "usage": {
-            "inputTokens": input_tokens,
-            "outputTokens": output_tokens,
-            "totalTokens": input_tokens + output_tokens
-        },
-        "metrics": { "latencyMs": 100 }
-    });
-    let payload = serde_json::to_vec(&json!({ "metadata": metadata }))
-        .expect("serde_json::Value serialization is infallible");
-    body.extend(encode_event("metadata", "application/json", &payload));
+    let mut next_index = 0;
+    if !deltas.is_empty() {
+        push_event(
+            &mut body,
+            "contentBlockStop",
+            &json!({ "contentBlockIndex": 0 }),
+        );
+        next_index = 1;
+    }
+    for (offset, tool) in tools.iter().enumerate() {
+        let index = next_index + offset;
+        push_event(
+            &mut body,
+            "contentBlockStart",
+            &json!({
+                "contentBlockIndex": index,
+                "start": { "toolUse": { "toolUseId": tool.id, "name": tool.name } }
+            }),
+        );
+        push_event(
+            &mut body,
+            "contentBlockDelta",
+            &json!({ "contentBlockIndex": index, "delta": { "toolUse": { "input": tool.input } } }),
+        );
+        push_event(
+            &mut body,
+            "contentBlockStop",
+            &json!({ "contentBlockIndex": index }),
+        );
+    }
+    push_event(
+        &mut body,
+        "messageStop",
+        &json!({ "stopReason": crate::upstream::stop_converse(stop) }),
+    );
+    push_converse_metadata(&mut body, input_tokens, output_tokens);
 
     body
 }
@@ -589,66 +529,122 @@ mod tests {
         assert_eq!(&buf[start..start + payload.len()], payload);
     }
 
-    fn decode_inner_chunk(frame: &[u8]) -> Value {
-        use base64::Engine;
-        let s = String::from_utf8_lossy(frame);
-        let bytes_start = s.find("\"bytes\":").unwrap() + "\"bytes\":".len();
-        let after = &s[bytes_start..];
-        let quote = after.find('"').unwrap();
-        let end = after[quote + 1..].find('"').unwrap();
-        let b64 = &after[quote + 1..quote + 1 + end];
-        let raw = base64::engine::general_purpose::STANDARD
-            .decode(b64)
-            .unwrap();
-        serde_json::from_slice(&raw).unwrap()
-    }
-
-    #[test]
-    fn build_invoke_stream_response_anthropic_uses_content_block_delta() {
-        let out = build_invoke_stream_response("anthropic.claude-3", "hello");
-        let inner = decode_inner_chunk(&out);
-        assert_eq!(inner["type"], "content_block_delta");
-        assert_eq!(inner["delta"]["text"], "hello");
-    }
-
-    #[test]
-    fn build_invoke_stream_response_generic_uses_output_text() {
-        let out = build_invoke_stream_response("amazon.titan-text-lite", "hi");
-        let inner = decode_inner_chunk(&out);
-        assert_eq!(inner["outputText"], "hi");
-    }
-
-    #[test]
-    fn build_converse_stream_emits_all_events() {
-        let out = build_converse_stream_response("hello world", "end_turn", None, 5, 7);
-        let s = String::from_utf8_lossy(&out);
-        for marker in [
-            "messageStart",
-            "contentBlockStart",
-            "contentBlockDelta",
-            "contentBlockStop",
-            "messageStop",
-            "metadata",
-            "end_turn",
-        ] {
-            assert!(s.contains(marker), "missing marker {marker}");
+    /// Each frame's `:event-type` header and JSON payload.
+    fn frames(mut buf: &[u8]) -> Vec<(String, Value)> {
+        let mut out = Vec::new();
+        while !buf.is_empty() {
+            let (total, headers_len) = parse_prelude(buf);
+            let (total, headers_len) = (total as usize, headers_len as usize);
+            let mut headers = &buf[12..12 + headers_len];
+            let mut event_type = None;
+            while !headers.is_empty() {
+                let name_len = headers[0] as usize;
+                let name = &headers[1..1 + name_len];
+                let value_start = 1 + name_len + 1;
+                let value_len =
+                    u16::from_be_bytes([headers[value_start], headers[value_start + 1]]) as usize;
+                let value = &headers[value_start + 2..value_start + 2 + value_len];
+                if name == b":event-type" {
+                    event_type = Some(String::from_utf8(value.to_vec()).unwrap());
+                }
+                headers = &headers[value_start + 2 + value_len..];
+            }
+            let payload = &buf[12 + headers_len..total - 4];
+            out.push((
+                event_type.expect(":event-type header"),
+                serde_json::from_slice(payload).unwrap(),
+            ));
+            buf = &buf[total..];
         }
-        // Token counts surface via metadata, not a hardcoded 10/20.
-        assert!(s.contains("\"inputTokens\":5"));
-        assert!(s.contains("\"outputTokens\":7"));
-        assert!(s.contains("\"totalTokens\":12"));
+        out
     }
 
     #[test]
-    fn build_converse_stream_emits_forced_tool_block() {
+    fn converse_stream_payloads_are_the_events_own_members() {
+        let out = build_converse_stream_response("hello world", "end_turn", None, 5, 7);
+        assert_eq!(
+            frames(&out),
+            vec![
+                ("messageStart".to_string(), json!({ "role": "assistant" })),
+                (
+                    "contentBlockDelta".to_string(),
+                    json!({ "contentBlockIndex": 0, "delta": { "text": "hello world" } })
+                ),
+                (
+                    "contentBlockStop".to_string(),
+                    json!({ "contentBlockIndex": 0 })
+                ),
+                (
+                    "messageStop".to_string(),
+                    json!({ "stopReason": "end_turn" })
+                ),
+                (
+                    "metadata".to_string(),
+                    json!({
+                        "usage": { "inputTokens": 5, "outputTokens": 7, "totalTokens": 12 },
+                        "metrics": { "latencyMs": 100 }
+                    })
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn converse_stream_forced_tool_block_has_the_modeled_shape() {
         let out = build_converse_stream_response("", "tool_use", Some("calculator"), 3, 0);
-        let s = String::from_utf8_lossy(&out);
-        // A second (index 1) toolUse content block is streamed and the message
-        // stops with tool_use — matching non-streaming Converse.
-        assert!(s.contains("\"contentBlockIndex\":1"));
-        assert!(s.contains("calculator"));
-        assert!(s.contains("tooluse_fakecloud_01"));
-        assert!(s.contains("tool_use"));
+        let frames = frames(&out);
+        let start = frames
+            .iter()
+            .find(|(event, _)| event == "contentBlockStart")
+            .expect("toolUse block start");
+        assert_eq!(
+            start.1,
+            json!({
+                "contentBlockIndex": 1,
+                "start": { "toolUse": { "toolUseId": "tooluse_fakecloud_01", "name": "calculator" } }
+            })
+        );
+        assert!(frames.contains(&(
+            "contentBlockDelta".to_string(),
+            json!({ "contentBlockIndex": 1, "delta": { "toolUse": { "input": "{}" } } })
+        )));
+        assert!(frames.contains(&(
+            "messageStop".to_string(),
+            json!({ "stopReason": "tool_use" })
+        )));
+    }
+
+    #[test]
+    fn converse_stream_from_deltas_emits_one_event_per_delta() {
+        let deltas = vec!["foo".to_string(), "bar".to_string()];
+        let out = build_converse_stream_from_deltas(
+            &deltas,
+            &[],
+            crate::upstream::StopKind::EndTurn,
+            5,
+            2,
+        );
+        let frames = frames(&out);
+        let texts: Vec<&Value> = frames
+            .iter()
+            .filter(|(event, _)| event == "contentBlockDelta")
+            .map(|(_, members)| &members["delta"]["text"])
+            .collect();
+        assert_eq!(texts, [&json!("foo"), &json!("bar")]);
+        let (event, metadata) = frames.last().unwrap();
+        assert_eq!(event, "metadata");
+        assert_eq!(metadata["usage"]["inputTokens"], 5);
+        assert_eq!(metadata["usage"]["outputTokens"], 2);
+    }
+
+    #[test]
+    fn converse_stream_from_no_deltas_still_opens_the_block_it_stops() {
+        let out =
+            build_converse_stream_from_deltas(&[], &[], crate::upstream::StopKind::EndTurn, 1, 0);
+        let events: Vec<(String, Value)> = frames(&out);
+        assert_eq!(events[1].0, "contentBlockDelta");
+        assert_eq!(events[1].1["delta"]["text"], "");
+        assert_eq!(events[2].0, "contentBlockStop");
     }
 
     #[test]

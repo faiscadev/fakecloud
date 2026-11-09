@@ -1750,8 +1750,18 @@ impl AwsService for BedrockService {
                     Some(c) => crate::streaming::override_text(&model_id, c.clone()),
                     None => crate::streaming::fallback_text(&model_id, &req.body),
                 };
-                let body =
-                    crate::streaming::build_invoke_stream_response(&model_id, &response_text);
+                let input_tokens = crate::prompt::count_tokens(
+                    &crate::prompt::extract_prompt_text(&model_id, &req.body),
+                )
+                .max(1);
+                let output_tokens = crate::prompt::count_tokens(&response_text).max(1);
+                let body = crate::streaming::build_invoke_stream_from_deltas(
+                    &model_id,
+                    std::slice::from_ref(&response_text),
+                    crate::upstream::StopKind::EndTurn,
+                    input_tokens,
+                    output_tokens,
+                );
                 let input: serde_json::Value =
                     serde_json::from_slice(&req.body).unwrap_or_default();
                 let output = crate::invoke::offline_response_body(&model_id, custom, &input);

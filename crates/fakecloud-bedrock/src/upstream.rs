@@ -946,9 +946,33 @@ async fn call_chat(
 /// Accumulator for a streaming upstream response.
 struct StreamAcc {
     deltas: Vec<String>,
+    tools: Vec<StreamedTool>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     stop_reason: Option<String>,
+}
+
+/// A tool call assembled from stream fragments: providers send the name once and
+/// the JSON arguments in pieces.
+#[derive(Default)]
+struct StreamedTool {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl StreamedTool {
+    fn into_call(self, index: usize) -> ToolCall {
+        ToolCall {
+            id: if self.id.is_empty() {
+                format!("tooluse_fakecloud_{index:02}")
+            } else {
+                self.id
+            },
+            name: self.name,
+            input: serde_json::from_str(&self.arguments).unwrap_or_else(|_| json!({})),
+        }
+    }
 }
 
 /// Byte-oriented line buffer for the streaming path. Raw chunk bytes are
@@ -976,6 +1000,14 @@ impl LineBuffer {
             self.buf.clear();
         }
     }
+}
+
+fn str_at(value: &Value, pointer: &str) -> String {
+    value
+        .pointer(pointer)
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Parse a single completed line from the upstream stream, appending any
@@ -1015,11 +1047,26 @@ fn process_stream_line(protocol: Protocol, line: &str, acc: &mut StreamAcc) {
                     acc.input_tokens = Some(n);
                 }
             }
+            Some("content_block_start") => {
+                if v.pointer("/content_block/type").and_then(|x| x.as_str()) == Some("tool_use") {
+                    acc.tools.push(StreamedTool {
+                        id: str_at(&v, "/content_block/id"),
+                        name: str_at(&v, "/content_block/name"),
+                        arguments: String::new(),
+                    });
+                }
+            }
             Some("content_block_delta") => {
                 if let Some(t) = v.pointer("/delta/text").and_then(|x| x.as_str()) {
                     if !t.is_empty() {
                         acc.deltas.push(t.to_string());
                     }
+                }
+                if let (Some(part), Some(tool)) = (
+                    v.pointer("/delta/partial_json").and_then(|x| x.as_str()),
+                    acc.tools.last_mut(),
+                ) {
+                    tool.arguments.push_str(part);
                 }
             }
             Some("message_delta") => {
@@ -1039,6 +1086,27 @@ fn process_stream_line(protocol: Protocol, line: &str, acc: &mut StreamAcc) {
             {
                 if !t.is_empty() {
                     acc.deltas.push(t.to_string());
+                }
+            }
+            for call in v
+                .pointer("/choices/0/delta/tool_calls")
+                .and_then(|x| x.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let index = call["index"].as_u64().unwrap_or(0) as usize;
+                if acc.tools.len() <= index {
+                    acc.tools.resize_with(index + 1, StreamedTool::default);
+                }
+                let tool = &mut acc.tools[index];
+                if let Some(id) = call["id"].as_str() {
+                    tool.id = id.to_string();
+                }
+                if let Some(name) = call.pointer("/function/name").and_then(|x| x.as_str()) {
+                    tool.name.push_str(name);
+                }
+                if let Some(part) = call.pointer("/function/arguments").and_then(|x| x.as_str()) {
+                    tool.arguments.push_str(part);
                 }
             }
             if let Some(s) = v
@@ -1063,6 +1131,22 @@ fn process_stream_line(protocol: Protocol, line: &str, acc: &mut StreamAcc) {
                     acc.deltas.push(t.to_string());
                 }
             }
+            for call in v
+                .pointer("/message/tool_calls")
+                .and_then(|x| x.as_array())
+                .into_iter()
+                .flatten()
+            {
+                // Ollama sends a whole call at once, its arguments already JSON.
+                acc.tools.push(StreamedTool {
+                    id: str_at(call, "/id"),
+                    name: str_at(call, "/function/name"),
+                    arguments: call
+                        .pointer("/function/arguments")
+                        .map(Value::to_string)
+                        .unwrap_or_default(),
+                });
+            }
             if let Some(s) = v.get("done_reason").and_then(|x| x.as_str()) {
                 acc.stop_reason = Some(s.to_string());
             }
@@ -1081,6 +1165,7 @@ fn process_stream_line(protocol: Protocol, line: &str, acc: &mut StreamAcc) {
 /// event stream.
 struct StreamResult {
     deltas: Vec<String>,
+    tool_calls: Vec<ToolCall>,
     stop: StopKind,
     input_tokens: u64,
     output_tokens: u64,
@@ -1110,6 +1195,7 @@ async fn call_chat_stream(
 
     let mut acc = StreamAcc {
         deltas: Vec::new(),
+        tools: Vec::new(),
         input_tokens: None,
         output_tokens: None,
         stop_reason: None,
@@ -1132,9 +1218,16 @@ async fn call_chat_stream(
     let output_tokens = acc
         .output_tokens
         .unwrap_or_else(|| crate::prompt::count_tokens(&output_text));
+    let tool_calls: Vec<ToolCall> = acc
+        .tools
+        .into_iter()
+        .enumerate()
+        .map(|(index, tool)| tool.into_call(index))
+        .collect();
     Ok(StreamResult {
         deltas: acc.deltas,
-        stop: normalize_stop(acc.stop_reason.as_deref(), false),
+        stop: normalize_stop(acc.stop_reason.as_deref(), !tool_calls.is_empty()),
+        tool_calls,
         input_tokens,
         output_tokens,
     })
@@ -1346,6 +1439,25 @@ pub(crate) async fn invoke_model_upstream(
     }
 }
 
+/// Converse content blocks: the assistant text, then a `toolUse` block for every
+/// tool the model chose to call, mirroring the offline `converse()` shape.
+fn converse_content(text: &str, tool_calls: &[ToolCall]) -> Vec<Value> {
+    let mut content: Vec<Value> = Vec::new();
+    if !text.is_empty() || tool_calls.is_empty() {
+        content.push(json!({ "text": text }));
+    }
+    for tc in tool_calls {
+        content.push(json!({
+            "toolUse": {
+                "toolUseId": tc.id,
+                "name": tc.name,
+                "input": tc.input
+            }
+        }));
+    }
+    content
+}
+
 /// Real-inference `Converse`. Produces the unified Converse response shape.
 pub(crate) async fn converse_upstream(
     state: &SharedBedrockState,
@@ -1391,22 +1503,7 @@ pub(crate) async fn converse_upstream(
         }
     };
 
-    // Build Converse content blocks: the assistant text, then a `toolUse`
-    // block for every tool the model chose to call, mirroring the offline
-    // `converse()` shape.
-    let mut content: Vec<Value> = Vec::new();
-    if !completion.text.is_empty() || completion.tool_calls.is_empty() {
-        content.push(json!({ "text": completion.text }));
-    }
-    for tc in &completion.tool_calls {
-        content.push(json!({
-            "toolUse": {
-                "toolUseId": tc.id,
-                "name": tc.name,
-                "input": tc.input
-            }
-        }));
-    }
+    let content = converse_content(&completion.text, &completion.tool_calls);
 
     let stop = normalize_stop(
         completion.stop_reason.as_deref(),
@@ -1569,17 +1666,34 @@ pub(crate) async fn converse_stream_upstream(
 
     let event_body = crate::streaming::build_converse_stream_from_deltas(
         &result.deltas,
+        &result
+            .tool_calls
+            .iter()
+            .map(|tc| crate::streaming::StreamedToolUse {
+                id: &tc.id,
+                name: &tc.name,
+                input: tc.input.to_string(),
+            })
+            .collect::<Vec<_>>(),
         result.stop,
         result.input_tokens,
         result.output_tokens,
     );
-    let output = crate::converse::response_json(
-        &result.deltas.concat(),
-        None,
-        stop_converse(result.stop),
-        result.input_tokens,
-        result.output_tokens,
-    );
+    // Recorded as the Converse response this stream amounts to.
+    let text = result.deltas.concat();
+    let output = {
+        let mut response: Value = serde_json::from_str(&crate::converse::response_json(
+            &text,
+            None,
+            stop_converse(result.stop),
+            result.input_tokens,
+            result.output_tokens,
+        ))
+        .unwrap_or_default();
+        response["output"]["message"]["content"] =
+            Value::Array(converse_content(&text, &result.tool_calls));
+        response.to_string()
+    };
 
     crate::invoke::record_invocation(state, req, model_id, body, &output, None, request_metadata);
     Ok(eventstream_response(event_body))
@@ -1866,18 +1980,124 @@ mod tests {
         let mut meta_in = None;
         let mut meta_out = None;
         for f in &frames {
+            // A payload is the event's own members, so its fields identify it.
             let inner = converse_frame_inner(f);
-            if let Some(d) = inner.get("contentBlockDelta") {
-                delta_texts.push(d["delta"]["text"].as_str().unwrap().to_string());
+            if let Some(text) = inner["delta"]["text"].as_str() {
+                delta_texts.push(text.to_string());
             }
-            if let Some(m) = inner.get("metadata") {
-                meta_in = m["usage"]["inputTokens"].as_u64();
-                meta_out = m["usage"]["outputTokens"].as_u64();
+            if let Some(usage) = inner.get("usage") {
+                meta_in = usage["inputTokens"].as_u64();
+                meta_out = usage["outputTokens"].as_u64();
             }
         }
         assert_eq!(delta_texts, vec!["foo".to_string(), "bar".to_string()]);
         assert_eq!(meta_in, Some(5));
         assert_eq!(meta_out, Some(2));
+    }
+
+    fn stream_lines(protocol: Protocol, lines: &[Value]) -> Vec<ToolCall> {
+        let mut acc = StreamAcc {
+            deltas: Vec::new(),
+            tools: Vec::new(),
+            input_tokens: None,
+            output_tokens: None,
+            stop_reason: None,
+        };
+        for line in lines {
+            let text = match protocol {
+                Protocol::Ollama => line.to_string(),
+                _ => format!("data: {line}"),
+            };
+            process_stream_line(protocol, &text, &mut acc);
+        }
+        acc.tools
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| t.into_call(i))
+            .collect()
+    }
+
+    #[test]
+    fn openai_stream_assembles_tool_calls_from_fragments() {
+        let calls = stream_lines(
+            Protocol::OpenAi,
+            &[
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"calc","arguments":"{\"a\""}}]}}]}),
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":1}"}}]}}]}),
+            ],
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "calc");
+        assert_eq!(calls[0].input, json!({"a": 1}));
+    }
+
+    #[test]
+    fn anthropic_stream_assembles_tool_calls_from_fragments() {
+        let calls = stream_lines(
+            Protocol::Anthropic,
+            &[
+                json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"calc","input":{}}}),
+                json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}}),
+                json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"1}"}}),
+            ],
+        );
+        assert_eq!(calls[0].id, "toolu_1");
+        assert_eq!(calls[0].input, json!({"a": 1}));
+    }
+
+    #[test]
+    fn ollama_stream_reads_whole_tool_calls() {
+        let calls = stream_lines(
+            Protocol::Ollama,
+            &[json!({"message":{"tool_calls":[{"function":{"name":"calc","arguments":{"a":1}}}]}})],
+        );
+        assert_eq!(calls[0].name, "calc");
+        assert_eq!(calls[0].id, "tooluse_fakecloud_00");
+        assert_eq!(calls[0].input, json!({"a": 1}));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn converse_stream_upstream_streams_tool_calls_as_blocks() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"calc\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+                   data: [DONE]\n\n";
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let sse = sse.to_string();
+                async move { ([(http::header::CONTENT_TYPE, "text/event-stream")], sse) }
+            }),
+        );
+        let url = spawn(app).await;
+        let c = cfg(url, Protocol::OpenAi);
+        let s = shared();
+        let body = br#"{"messages":[{"role":"user","content":[{"text":"hi"}]}]}"#;
+
+        let resp = converse_stream_upstream(&s, &req(), "anthropic.claude-3", body, &c, None)
+            .await
+            .unwrap();
+
+        let inners: Vec<Value> = split_frames(&body_bytes(&resp))
+            .iter()
+            .map(|f| converse_frame_inner(f))
+            .collect();
+        // messageStart, the tool block at index 0, messageStop, metadata: an
+        // all-tool reply has no text block.
+        assert_eq!(inners.len(), 6, "{inners:?}");
+        assert_eq!(inners[1]["contentBlockIndex"], 0);
+        assert_eq!(inners[1]["start"]["toolUse"]["name"], "calc");
+        assert_eq!(inners[1]["start"]["toolUse"]["toolUseId"], "call_1");
+        assert_eq!(inners[2]["delta"]["toolUse"]["input"], "{\"a\":1}");
+        assert_eq!(inners[4]["stopReason"], "tool_use");
+
+        let st = s.read();
+        let recorded: Value =
+            serde_json::from_str(&st.default_ref().invocations[0].output).unwrap();
+        assert_eq!(
+            recorded["output"]["message"]["content"][0]["toolUse"]["input"],
+            json!({"a": 1})
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2100,6 +2320,7 @@ mod tests {
 
         let mut acc = StreamAcc {
             deltas: Vec::new(),
+            tools: Vec::new(),
             input_tokens: None,
             output_tokens: None,
             stop_reason: None,
