@@ -5703,6 +5703,46 @@ mod tests {
         );
     }
 
+    /// A CloudFront resource something still names fails to delete with
+    /// CloudFront's in-use error, as on AWS, and deletes once nothing does.
+    #[test]
+    fn cloudfront_delete_of_a_named_resource_fails() {
+        let prov = make_provisioner();
+        let pk = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFront::PublicKey",
+                "PK",
+                serde_json::json!({"PublicKeyConfig": {"Name": "pk", "EncodedKey": "-----KEY-----",
+                    "CallerReference": "cr-in-use"}}),
+            ))
+            .expect("public key provisions");
+        let kg = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFront::KeyGroup",
+                "KG",
+                serde_json::json!({"KeyGroupConfig": {"Name": "kg", "Items": [pk.physical_id.clone()]}}),
+            ))
+            .expect("key group provisions");
+        let err = prov
+            .delete_resource(&pk)
+            .expect_err("named by the key group");
+        assert!(
+            err.contains("The specified public key is in use.")
+                && err.contains("Status Code: 409")
+                && err.contains("HandlerErrorCode: ResourceConflict"),
+            "{err}"
+        );
+        assert!(prov
+            .cloudfront_state
+            .read()
+            .get(&prov.account_id)
+            .unwrap()
+            .public_keys
+            .contains_key(&pk.physical_id));
+        prov.delete_resource(&kg).expect("key group deletes");
+        prov.delete_resource(&pk).expect("public key deletes");
+    }
+
     #[test]
     fn cloudfront_keygroup_family_updates_preserve_ids() {
         // bug-audit 2026-07-27 (cycle 6) tail: KeyGroup / PublicKey / Function /

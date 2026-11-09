@@ -53,6 +53,11 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_origin_access_identity(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        let value = fakecloud_cloudfront::origin_access_identity_value(physical_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::OriginAccessIdentity(&value),
+        )?;
         state.origin_access_identities.remove(physical_id);
         Ok(())
     }
@@ -125,6 +130,10 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_distribution(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::Distribution(physical_id),
+        )?;
         state.distributions.remove(physical_id);
         Ok(())
     }
@@ -236,6 +245,10 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_origin_access_control(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::OriginAccessControl(physical_id),
+        )?;
         state.origin_access_controls.remove(physical_id);
         Ok(())
     }
@@ -298,6 +311,10 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_public_key(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::PublicKey(physical_id),
+        )?;
         state.public_keys.remove(physical_id);
         Ok(())
     }
@@ -353,6 +370,13 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_key_group(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::KeyGroup {
+                id: physical_id,
+                enabled: true,
+            },
+        )?;
         state.key_groups.remove(physical_id);
         Ok(())
     }
@@ -426,6 +450,12 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_function(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        if let Some(f) = state.functions.get(physical_id) {
+            cf_refuse_in_use(
+                state,
+                fakecloud_cloudfront::Reference::Function(&f.function_arn),
+            )?;
+        }
         state.functions.remove(physical_id);
         Ok(())
     }
@@ -491,6 +521,10 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_cache_policy(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::CachePolicy(physical_id),
+        )?;
         state.cache_policies.remove(physical_id);
         Ok(())
     }
@@ -567,6 +601,10 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_origin_request_policy(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::OriginRequestPolicy(physical_id),
+        )?;
         state.origin_request_policies.remove(physical_id);
         Ok(())
     }
@@ -621,6 +659,10 @@ impl ResourceProvisioner {
     ) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::ResponseHeadersPolicy(physical_id),
+        )?;
         state.response_headers_policies.remove(physical_id);
         Ok(())
     }
@@ -990,4 +1032,23 @@ impl ResourceProvisioner {
             .with("FunctionARN", function_arn)
             .with("Stage", "DEVELOPMENT"))
     }
+}
+
+/// Refuse a delete CloudFront would refuse because something still names the
+/// resource, so the stack's delete fails as on AWS. The model's error text,
+/// wrapped the way a CloudFormation resource handler reports a service error
+/// (the wrapper is inferred, not recorded).
+fn cf_refuse_in_use(
+    state: &fakecloud_cloudfront::AccountState,
+    target: fakecloud_cloudfront::Reference<'_>,
+) -> Result<(), String> {
+    fakecloud_cloudfront::refuse_in_use(state, target).map_err(|e| {
+        format!(
+            "Resource handler returned message: \"{} (Service: CloudFront, Status Code: {}, \
+             Request ID: {})\" (HandlerErrorCode: ResourceConflict)",
+            e.message(),
+            e.status().as_u16(),
+            Uuid::new_v4()
+        )
+    })
 }
