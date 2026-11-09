@@ -546,8 +546,10 @@ impl LambdaBackend for DockerBackend {
 /// A function that fills `/tmp` is never killed for it, at the price of one
 /// that overruns `MemorySize` surviving by up to the size of `/tmp`.
 fn memory_limit_args(memory_size_mb: i64, ephemeral_storage_mb: Option<i64>) -> [String; 4] {
-    let tmp_mb = ephemeral_storage_mb.unwrap_or(512).max(64);
-    let limit = format!("{}m", memory_size_mb.max(128) + tmp_mb);
+    let limit = format!(
+        "{}m",
+        memory_size_mb.max(128) + tmpfs_size_mib(ephemeral_storage_mb)
+    );
     [
         "--memory".to_string(),
         limit.clone(),
@@ -658,8 +660,14 @@ pub fn runtime_to_image(runtime: &str) -> Option<String> {
 /// from `/tmp` would otherwise hit `EACCES` against Docker's default
 /// `noexec` tmpfs.
 pub(crate) fn ephemeral_storage_tmpfs_arg(size: Option<i64>) -> String {
-    let mib = size.unwrap_or(512).max(64);
+    let mib = tmpfs_size_mib(size);
     format!("/tmp:size={mib}m,exec")
+}
+
+/// The size of a function's `/tmp` tmpfs. Also part of its memory limit, because
+/// the tmpfs is charged to the same cgroup.
+fn tmpfs_size_mib(size: Option<i64>) -> i64 {
+    size.unwrap_or(512).max(64)
 }
 
 /// Extract a ZIP archive to a destination directory.
