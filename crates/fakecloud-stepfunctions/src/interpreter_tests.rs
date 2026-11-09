@@ -459,21 +459,6 @@ fn wait_timestamp_in_past_is_noop() {
     });
 }
 
-#[test]
-fn wait_without_any_duration_falls_through() {
-    let state = make_state();
-    let arn = arn_for("wait-none");
-    let def = json!({
-        "StartAt": "W",
-        "States": { "W": { "Type": "Wait", "End": true } }
-    });
-    drive(&state, &arn, def, None);
-
-    read_exec(&state, &arn, |exec| {
-        assert_eq!(exec.status, ExecutionStatus::Succeeded);
-    });
-}
-
 // ── Parallel ─────────────────────────────────────────────────────
 
 #[test]

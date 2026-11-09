@@ -6,6 +6,10 @@ use serde_json::Value;
 /// `States.TaskFailed`) wildcard.
 const NON_WILDCARD_ERRORS: [&str; 2] = ["States.Runtime", "States.DataLimitExceeded"];
 
+/// A query failing inside a Task isn't the task failing: as recorded,
+/// `States.TaskFailed` doesn't match it, though `States.ALL` and its own name do.
+const QUERY_ERROR: &str = "States.QueryEvaluationError";
+
 /// Decide whether a single `ErrorEquals` pattern matches an actual error name.
 ///
 /// * `States.ALL` matches any error except the non-catchable reserved names.
@@ -18,7 +22,10 @@ fn pattern_matches(pattern: &str, error: &str, is_task_error: bool) -> bool {
     match pattern {
         "States.ALL" => !NON_WILDCARD_ERRORS.contains(&error),
         "States.TaskFailed" => {
-            is_task_error && error != "States.Timeout" && !NON_WILDCARD_ERRORS.contains(&error)
+            is_task_error
+                && error != "States.Timeout"
+                && error != QUERY_ERROR
+                && !NON_WILDCARD_ERRORS.contains(&error)
         }
         exact => exact == error,
     }
@@ -115,6 +122,13 @@ pub fn should_retry(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn task_failed_does_not_match_a_query_error() {
+        assert!(!pattern_matches("States.TaskFailed", QUERY_ERROR, true));
+        assert!(pattern_matches("States.ALL", QUERY_ERROR, true));
+        assert!(pattern_matches(QUERY_ERROR, QUERY_ERROR, true));
+    }
 
     #[test]
     fn test_find_catcher_exact_match() {

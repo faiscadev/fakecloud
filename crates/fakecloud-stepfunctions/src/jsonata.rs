@@ -72,6 +72,12 @@ fn expression_of(text: &str) -> Option<&str> {
         .and_then(|rest| rest.strip_suffix("%}"))
 }
 
+/// A string opening an expression it doesn't close, which creation refuses. Text
+/// that merely contains delimiters is a literal, as recorded.
+pub(crate) fn is_unclosed_expression(text: &str) -> bool {
+    text.starts_with("{%") && expression_of(text).is_none()
+}
+
 fn host_error(message: String) -> jsonata_core::evaluator::EvaluatorError {
     jsonata_core::evaluator::EvaluatorError::EvaluationError(message)
 }
@@ -238,12 +244,16 @@ pub(crate) fn eval_template(
         },
         Value::Object(object) => object
             .iter()
-            .map(|(key, value)| Ok((key.clone(), eval_template(field, value, scope)?)))
+            .map(|(key, value)| {
+                let nested = format!("{field}/{key}");
+                Ok((key.clone(), eval_template(&nested, value, scope)?))
+            })
             .collect::<Result<Map<_, _>, StateError>>()
             .map(Value::Object),
         Value::Array(items) => items
             .iter()
-            .map(|item| eval_template(field, item, scope))
+            .enumerate()
+            .map(|(index, item)| eval_template(&format!("{field}[{index}]"), item, scope))
             .collect::<Result<Vec<_>, StateError>>()
             .map(Value::Array),
         other => Ok(other.clone()),
@@ -396,7 +406,7 @@ pub(crate) fn prepare_state(
     Ok((prepared, run_input))
 }
 
-fn apply_assign(assign: &Value, scope: &Scope<'_>) -> Result<(), StateError> {
+fn apply_assign(assign: &Value, prefix: &str, scope: &Scope<'_>) -> Result<(), StateError> {
     let Some(pairs) = assign.as_object() else {
         return Err(query_error("Assign must be a JSON object"));
     };
@@ -404,7 +414,10 @@ fn apply_assign(assign: &Value, scope: &Scope<'_>) -> Result<(), StateError> {
     // state. All of them evaluate before any is staged.
     let evaluated = pairs
         .iter()
-        .map(|(name, template)| Ok((name.clone(), eval_template("Assign", template, scope)?)))
+        .map(|(name, template)| {
+            let field = format!("{prefix}Assign/{name}");
+            Ok((name.clone(), eval_template(&field, template, scope)?))
+        })
         .collect::<Result<Vec<_>, StateError>>()?;
     for (name, value) in evaluated {
         crate::variables::stage(name, value);
@@ -414,8 +427,11 @@ fn apply_assign(assign: &Value, scope: &Scope<'_>) -> Result<(), StateError> {
 
 /// A state's output: its `Assign` applied, then its `Output`, by default
 /// `produced` (the task result, or the input of a state that produces nothing).
+/// `prefix` is where the holder sits within its state, for what a failure names:
+/// empty for the state itself, `Catch[0]/` for a catcher.
 pub(crate) fn finish_state(
     holder: &Value,
+    prefix: &str,
     input: &Value,
     context: &Value,
     produced: Value,
@@ -430,11 +446,11 @@ pub(crate) fn finish_state(
     // Nothing is staged unless both fields evaluate: a state failing here keeps
     // none of its assignments.
     let output = match holder.get("Output") {
-        Some(output) => Some(eval_template("Output", output, &scope)?),
+        Some(output) => Some(eval_template(&format!("{prefix}Output"), output, &scope)?),
         None => None,
     };
     if let Some(assign) = holder.get("Assign") {
-        apply_assign(assign, &scope)?;
+        apply_assign(assign, prefix, &scope)?;
     }
     Ok(output.unwrap_or(produced))
 }
@@ -458,7 +474,7 @@ pub(crate) fn choose(
                 let Some(next) = rule["Next"].as_str() else {
                     continue;
                 };
-                let output = finish_state(rule, input, context, input.clone(), false)?;
+                let output = finish_state(rule, "", input, context, input.clone(), false)?;
                 return Ok(Some((next.to_string(), output)));
             }
             Value::Bool(false) => {}
@@ -471,7 +487,7 @@ pub(crate) fn choose(
     }
     match state_def["Default"].as_str() {
         Some(next) => {
-            let output = finish_state(state_def, input, context, input.clone(), false)?;
+            let output = finish_state(state_def, "", input, context, input.clone(), false)?;
             Ok(Some((next.to_string(), output)))
         }
         None => Ok(None),
@@ -580,6 +596,7 @@ mod tests {
         let run = async {
             finish_state(
                 &json!({"Assign": {"x": 1}}),
+                "",
                 &input,
                 &context,
                 json!({}),
@@ -593,6 +610,7 @@ mod tests {
                     "Assign": {"x": "{% $x + 1 %}", "y": "{% $x %}"},
                     "Output": "{% [$x, $states.result] %}"
                 }),
+                "",
                 &input,
                 &context,
                 json!("r"),
@@ -745,6 +763,7 @@ mod tests {
         let context = json!({});
         let (_, cause) = finish_state(
             &json!({"Output": "{% $states.input.missing %}"}),
+            "",
             &input,
             &context,
             json!({}),

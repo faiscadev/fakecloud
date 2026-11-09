@@ -216,27 +216,19 @@ async fn run_task_state(
     name: &str,
     state_def: &Value,
     input: Value,
+    entered_event_id: i64,
+    attempt: &mut u32,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let entered_event_id = add_event(
-        shared_state,
-        execution_arn,
-        "TaskStateEntered",
-        0,
-        json!({
-            "name": name,
-            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
-        }),
-    );
-
     let result = execute_task_state(
         name,
         state_def,
         &input,
+        attempt,
         delivery,
         dynamodb_state,
         registry,
@@ -261,7 +253,6 @@ async fn run_task_state(
             );
             advance_from_next(state_def, output)
         }
-        // Task-originated error → the States.TaskFailed wildcard applies.
         Err((error, cause)) => {
             let cause = note_query_failure(
                 shared_state,
@@ -271,7 +262,7 @@ async fn run_task_state(
                 &error,
                 cause,
             );
-            advance_from_error(state_def, &input, error, cause, true)
+            Advance::Fail(error, cause)
         }
     }
 }
@@ -281,28 +272,19 @@ async fn run_parallel_state(
     name: &str,
     state_def: &Value,
     input: Value,
+    entered_event_id: i64,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let entered_event_id = add_event(
-        shared_state,
-        execution_arn,
-        "ParallelStateEntered",
-        0,
-        json!({
-            "name": name,
-            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
-        }),
-    );
-
     let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
     let result = execute_parallel_state(
         state_def,
         &ctx,
         &input,
+        entered_event_id,
         delivery,
         dynamodb_state,
         registry,
@@ -326,8 +308,6 @@ async fn run_parallel_state(
             );
             advance_from_next(state_def, output)
         }
-        // A Parallel branch failure is not itself a task error; the
-        // States.TaskFailed wildcard must not swallow branch-level errors.
         Err((error, cause)) => {
             let cause = note_query_failure(
                 shared_state,
@@ -337,7 +317,7 @@ async fn run_parallel_state(
                 &error,
                 cause,
             );
-            advance_from_error(state_def, &input, error, cause, false)
+            Advance::Fail(error, cause)
         }
     }
 }
@@ -347,28 +327,19 @@ async fn run_map_state(
     name: &str,
     state_def: &Value,
     input: Value,
+    entered_event_id: i64,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let entered_event_id = add_event(
-        shared_state,
-        execution_arn,
-        "MapStateEntered",
-        0,
-        json!({
-            "name": name,
-            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
-        }),
-    );
-
     let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
     let result = execute_map_state(
         state_def,
         &ctx,
         &input,
+        entered_event_id,
         delivery,
         dynamodb_state,
         registry,
@@ -392,8 +363,6 @@ async fn run_map_state(
             );
             advance_from_next(state_def, output)
         }
-        // A Map iteration failure is not itself a task error; the
-        // States.TaskFailed wildcard must not swallow iteration-level errors.
         Err((error, cause)) => {
             let cause = note_query_failure(
                 shared_state,
@@ -403,7 +372,7 @@ async fn run_map_state(
                 &error,
                 cause,
             );
-            advance_from_error(state_def, &input, error, cause, false)
+            Advance::Fail(error, cause)
         }
     }
 }
@@ -512,6 +481,28 @@ fn finish_task_result(
     Ok(output)
 }
 
+/// The most a task's result can hold, per the ASL service quota.
+const MAX_TASK_RESULT_BYTES: usize = 256 * 1024;
+
+/// A result over the quota fails the state with an error no wildcard catches.
+fn within_result_limit(resource: &str, result: Value) -> Result<Value, (String, String)> {
+    if serde_json::to_vec(&result).map_or(0, |bytes| bytes.len()) <= MAX_TASK_RESULT_BYTES {
+        return Ok(result);
+    }
+    // As recorded, an SDK integration goes by its service: `aws-sdk:s3`.
+    let task = resource
+        .split_once(":::aws-sdk:")
+        .map(|(_, tail)| format!("aws-sdk:{}", tail.split(':').next().unwrap_or_default()))
+        .unwrap_or_else(|| resource.to_string());
+    Err((
+        "States.DataLimitExceeded".to_string(),
+        format!(
+            "The state/task '{task}' returned a result with a size exceeding the maximum number \
+             of bytes service limit."
+        ),
+    ))
+}
+
 /// Execute a Task state: invoke the resource (Lambda, SQS, SNS, EventBridge, DynamoDB),
 /// apply I/O processing, handle Retry.
 #[allow(clippy::too_many_arguments)]
@@ -519,6 +510,7 @@ async fn execute_task_state(
     name: &str,
     state_def: &Value,
     input: &Value,
+    attempt: &mut u32,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
@@ -541,7 +533,6 @@ async fn execute_task_state(
     let retriers = state_def["Retry"].as_array().cloned().unwrap_or_default();
     let timeout_seconds = state_def["TimeoutSeconds"].as_u64();
     let heartbeat_seconds = state_def["HeartbeatSeconds"].as_u64();
-    let mut attempt = 0u32;
 
     let is_wait_for_task_token = resource.contains(".waitForTaskToken");
     let task_token = if is_wait_for_task_token {
@@ -583,13 +574,13 @@ async fn execute_task_state(
         // Parameters are re-evaluated for every attempt, so
         // `$$.State.RetryCount` reflects the current retry as on AWS.
         let task_input = if let Some(params) = state_def.get("Parameters") {
-            let mut ctx = context_object(shared_state, execution_arn, name, entered, attempt);
+            let mut ctx = context_object(shared_state, execution_arn, name, entered, *attempt);
             if let Some((_, token_ctx)) = &task_token {
                 ctx["Task"] = token_ctx["Task"].clone();
             }
             apply_parameters(params, &effective_input, Some(&ctx))?
         } else if let Some(arguments) = state_def.get("Arguments") {
-            let mut ctx = context_object(shared_state, execution_arn, name, entered, attempt);
+            let mut ctx = context_object(shared_state, execution_arn, name, entered, *attempt);
             if let Some((_, token_ctx)) = &task_token {
                 ctx["Task"] = token_ctx["Task"].clone();
             }
@@ -604,15 +595,8 @@ async fn execute_task_state(
                 },
             ) {
                 Ok(arguments) => arguments,
-                // A Task's `Retry` applies to a query error too.
-                Err((error, cause)) => {
-                    if let Some(delay_ms) = should_retry(&retriers, &error, attempt, true) {
-                        attempt += 1;
-                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                        continue;
-                    }
-                    return Err((error, cause));
-                }
+                // Nothing was scheduled; the state loop decides on `Retry`.
+                Err(failure) => return Err(failure),
             }
         } else {
             effective_input.clone()
@@ -648,7 +632,8 @@ async fn execute_task_state(
             heartbeat_seconds,
             shared_state,
         )
-        .await;
+        .await
+        .and_then(|result| within_result_limit(&resource, result));
 
         match invoke_result {
             Ok(result) => {
@@ -664,6 +649,7 @@ async fn execute_task_state(
                         heartbeat_seconds,
                     )
                     .await
+                    .and_then(|output| within_result_limit(&resource, output))
                     {
                         Ok(output) => {
                             add_event(
@@ -683,7 +669,7 @@ async fn execute_task_state(
                                 input,
                                 output,
                                 entered,
-                                attempt,
+                                *attempt,
                                 shared_state,
                                 execution_arn,
                             );
@@ -697,8 +683,9 @@ async fn execute_task_state(
                                 json!({ "error": error, "cause": cause }),
                             );
 
-                            if let Some(delay_ms) = should_retry(&retriers, &error, attempt, true) {
-                                attempt += 1;
+                            if let Some(delay_ms) = should_retry(&retriers, &error, *attempt, true)
+                            {
+                                *attempt += 1;
                                 // Honour the ASL-computed backoff (already bounded
                                 // by MaxDelaySeconds inside `should_retry`).
                                 tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms))
@@ -728,7 +715,7 @@ async fn execute_task_state(
                     input,
                     result,
                     entered,
-                    attempt,
+                    *attempt,
                     shared_state,
                     execution_arn,
                 );
@@ -742,8 +729,8 @@ async fn execute_task_state(
                     json!({ "error": error, "cause": cause }),
                 );
 
-                if let Some(delay_ms) = should_retry(&retriers, &error, attempt, true) {
-                    attempt += 1;
+                if let Some(delay_ms) = should_retry(&retriers, &error, *attempt, true) {
+                    *attempt += 1;
                     // Honour the ASL-computed backoff (already bounded by
                     // MaxDelaySeconds inside `should_retry`).
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
@@ -762,6 +749,7 @@ async fn execute_parallel_state(
     state_def: &Value,
     ctx: &Value,
     input: &Value,
+    entered_event_id: i64,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
@@ -789,6 +777,14 @@ async fn execute_parallel_state(
             "Parallel state has no Branches".to_string(),
         ));
     }
+
+    add_event(
+        shared_state,
+        execution_arn,
+        "ParallelStateStarted",
+        entered_event_id,
+        json!({}),
+    );
 
     // Spawn all branches concurrently
     let mut handles = Vec::new();
@@ -818,6 +814,14 @@ async fn execute_parallel_state(
         })??;
         results.push(result);
     }
+
+    add_event(
+        shared_state,
+        execution_arn,
+        "ParallelStateSucceeded",
+        entered_event_id,
+        json!({}),
+    );
 
     let branch_output = Value::Array(results);
 
@@ -856,6 +860,7 @@ async fn execute_map_state(
     state_def: &Value,
     ctx: &Value,
     input: &Value,
+    entered_event_id: i64,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
@@ -895,18 +900,20 @@ async fn execute_map_state(
 
     if let (Some(arn), Err((error, cause))) = (&map_run_arn, &result) {
         finish_map_run(shared_state, arn, execution_arn, None, "FAILED");
-        let run_failed = add_event(
+        add_event(
             shared_state,
             execution_arn,
             "MapRunFailed",
             0,
             json!({ "error": error, "cause": cause }),
         );
+    }
+    if result.is_ok() {
         add_event(
             shared_state,
             execution_arn,
-            "MapStateFailed",
-            run_failed,
+            "MapStateSucceeded",
+            entered_event_id,
             json!({}),
         );
     }
@@ -1118,6 +1125,13 @@ async fn run_map_iterations(
 
     let tolerance = FailureTolerance::resolve(state_def, &effective_input, ctx)?;
     let total_items = batched_items.len();
+    add_event(
+        shared_state,
+        execution_arn,
+        "MapStateStarted",
+        0,
+        json!({ "length": total_items }),
+    );
     if let Some(arn) = map_run_arn {
         set_map_run_total(
             shared_state,

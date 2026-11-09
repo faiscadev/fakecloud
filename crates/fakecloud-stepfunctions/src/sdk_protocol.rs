@@ -55,6 +55,11 @@ pub(crate) struct SdkService {
     doc: Value,
 }
 
+/// A payload that isn't text fails in the SDK client, not the service: no status,
+/// no request id, and the code and message exactly as recorded.
+const NOT_TEXT_PREFIX: &str = "Failed to convert '";
+const INVALID_CONTENT: &str = "InvalidContent";
+
 /// The failure of an SDK call as the service reported it.
 #[derive(Debug)]
 pub(crate) struct SdkFailure {
@@ -739,9 +744,17 @@ impl SdkService {
         let raw = self.send(caller, operation, parameters).await?;
         self.parse_reply(operation, raw, style)
             .map_err(|message| SdkFailure {
-                code: "InternalError".to_string(),
+                code: if message.starts_with(NOT_TEXT_PREFIX) {
+                    INVALID_CONTENT.to_string()
+                } else {
+                    "InternalError".to_string()
+                },
+                status: if message.starts_with(NOT_TEXT_PREFIX) {
+                    0
+                } else {
+                    500
+                },
                 message,
-                status: 500,
             })
     }
 
@@ -1158,12 +1171,11 @@ impl SdkService {
             Some((name, payload_target)) => {
                 if self.shape(payload_target).is_none() {
                     // A blob payload (an S3 object's data) reads as its text, as
-                    // recorded. Bytes that aren't text stay intact as base64.
-                    let body = match std::str::from_utf8(&reply.body) {
-                        Ok(text) => text.to_string(),
-                        Err(_) => base64::engine::general_purpose::STANDARD.encode(&reply.body),
-                    };
-                    out.insert(upper_first(name), json!(body));
+                    // recorded; bytes that aren't text fail the task.
+                    let member = upper_first(name);
+                    let body = std::str::from_utf8(&reply.body)
+                        .map_err(|_| format!("{NOT_TEXT_PREFIX}{member}' to string"))?;
+                    out.insert(member, json!(body));
                 } else if !reply.body.is_empty() {
                     let value = if xml {
                         self.xml_out(payload_target, &Node::parse(&reply.body)?, style)
@@ -1234,6 +1246,12 @@ pub(crate) async fn read_body(body: ResponseBody) -> Result<Bytes, String> {
 /// An `aws-sdk` failure as a state error: the SDK exception name and its message.
 pub(crate) fn task_error(service: &SdkService, failure: &SdkFailure) -> (String, String) {
     let prefix = service.error_prefix();
+    if failure.code == INVALID_CONTENT {
+        return (
+            format!("{prefix}.{}", failure.code),
+            failure.message.clone(),
+        );
+    }
     let code = failure.code.rsplit('.').next().unwrap_or(&failure.code);
     let code = if code.ends_with("Exception") {
         code.to_string()
@@ -1525,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn non_text_blob_payloads_stay_intact() {
+    fn non_text_blob_payloads_fail_as_the_sdk_client_does() {
         let s3 = svc("s3");
         let reply = RawReply {
             headers: HeaderMap::new(),
@@ -1533,8 +1551,22 @@ mod tests {
             status: 200,
             body: Bytes::from_static(&[0xff, 0x00, 0xfe]),
         };
-        let out = s3.parse_reply("GetObject", reply, DateStyle::Iso).unwrap();
-        assert_eq!(out["Body"], "/wD+");
+        let message = s3
+            .parse_reply("GetObject", reply, DateStyle::Iso)
+            .unwrap_err();
+        assert_eq!(message, "Failed to convert 'Body' to string");
+        let failure = SdkFailure {
+            code: INVALID_CONTENT.to_string(),
+            message,
+            status: 0,
+        };
+        assert_eq!(
+            task_error(&s3, &failure),
+            (
+                "S3.InvalidContent".to_string(),
+                "Failed to convert 'Body' to string".to_string()
+            )
+        );
     }
 
     #[test]

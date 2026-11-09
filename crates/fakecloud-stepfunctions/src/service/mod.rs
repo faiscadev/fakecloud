@@ -615,6 +615,7 @@ fn validate_definition(definition: &str) -> Result<(), AwsServiceError> {
     }
 
     validate_states_are_objects("", &parsed)?;
+    validate_state_schemas(&parsed)?;
     validate_timeout_field("<root>", &parsed, "TimeoutSeconds")?;
 
     // Reject malformed JSONPath reference fields. AWS rejects bad reference
@@ -624,13 +625,13 @@ fn validate_definition(definition: &str) -> Result<(), AwsServiceError> {
         validate_state_paths(state_name, state_val)?;
     }
     validate_integration_schemas("", states_obj)?;
-    validate_variable_scopes("", states_obj, &[])?;
 
     Ok(())
 }
 
 /// Variables one state assigns, through its own, its Choice rules' and its
-/// catchers' `Assign`, with `.$` stripped.
+/// catchers' `Assign`. A JSONPath key's `.$` isn't part of the name; a JSONata one's
+/// would be.
 fn assigned_variables(state: &Value) -> Vec<String> {
     let mut holders = vec![state];
     for list in ["Choices", "Catch"] {
@@ -640,65 +641,203 @@ fn assigned_variables(state: &Value) -> Vec<String> {
         .into_iter()
         .filter_map(|holder| holder["Assign"].as_object())
         .flat_map(|assign| assign.keys())
-        .map(|key| key.strip_suffix(".$").unwrap_or(key).to_string())
+        .map(|key| {
+            let name = if crate::jsonata::is_jsonata(state) {
+                key.as_str()
+            } else {
+                key.strip_suffix(".$").unwrap_or(key)
+            };
+            name.to_string()
+        })
         .collect()
 }
 
-/// A variable name is an identifier of at most 80 characters, and `states` is
-/// reserved. Parts of a variable (`x.y`, `x[2]`) cannot be assigned.
-fn is_valid_variable_name(name: &str) -> bool {
+/// What is wrong with a variable name: an identifier of at most 80 characters.
+/// Parts of a variable (`x.y`, `x[2]`) cannot be assigned.
+fn variable_name_problem(name: &str) -> Option<&'static str> {
+    if name.chars().count() > 80 {
+        return Some("is too long");
+    }
     let mut chars = name.chars();
-    name != "states"
-        && name.chars().count() <= 80
-        && chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
-        && chars.all(|c| c.is_alphanumeric() || c == '_')
+    let valid = chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_');
+    (!valid).then_some("contains invalid characters")
 }
 
-/// Variables are valid names, and a scope can't assign one an outer scope assigns.
-fn validate_variable_scopes(
-    at: &str,
-    states: &serde_json::Map<String, Value>,
-    outer: &[String],
-) -> Result<(), AwsServiceError> {
-    let mut assigned: Vec<String> = Vec::new();
-    for (name, state) in states {
-        let mut holders = vec![(format!("{at}/States/{name}"), state)];
-        for list in ["Choices", "Catch"] {
-            for (index, holder) in state[list].as_array().into_iter().flatten().enumerate() {
-                holders.push((format!("{at}/States/{name}/{list}/{index}"), holder));
+/// The fields of a state only one query language has.
+const JSONPATH_ONLY_FIELDS: &[&str] = &[
+    "InputPath",
+    "Parameters",
+    "ResultSelector",
+    "ResultPath",
+    "OutputPath",
+    "ItemsPath",
+    "MaxConcurrencyPath",
+    "ToleratedFailureCountPath",
+    "ToleratedFailurePercentagePath",
+    "SecondsPath",
+    "TimestampPath",
+    "ErrorPath",
+    "CausePath",
+    "TimeoutSecondsPath",
+    "HeartbeatSecondsPath",
+];
+const JSONATA_ONLY_FIELDS: &[&str] = &["Arguments", "Output", "Items"];
+
+/// The fields of a JSONata state, or of a catcher or Choice rule in one, that can
+/// hold `{% %}` strings.
+const JSONATA_TEMPLATE_FIELDS: &[&str] = &[
+    "Arguments",
+    "Output",
+    "Assign",
+    "Condition",
+    "Items",
+    "ItemSelector",
+    "ItemBatcher",
+    "ItemReader",
+    "ResultWriter",
+    "Seconds",
+    "Timestamp",
+    "Error",
+    "Cause",
+    "TimeoutSeconds",
+    "HeartbeatSeconds",
+    "MaxConcurrency",
+    "ToleratedFailureCount",
+    "ToleratedFailurePercentage",
+];
+
+const WAIT_DURATION_FIELDS: &[&str] = &["SecondsPath", "Seconds", "TimestampPath", "Timestamp"];
+
+fn schema_detail(detail: String) -> String {
+    format!("SCHEMA_VALIDATION_FAILED: {detail}")
+}
+
+/// Exactly one of `fields`, worded as recorded for none and for several. A field
+/// counts when it is present, even as null.
+fn check_exactly_one(state: &Value, fields: &[&str], path: &str, errors: &mut Vec<String>) {
+    let list = fields.join(", ");
+    match fields.iter().filter(|f| state.get(**f).is_some()).count() {
+        1 => {}
+        0 => errors.push(schema_detail(format!(
+            "This object should have only one of the following fields: [{list}] at {path}"
+        ))),
+        _ => errors.push(schema_detail(format!(
+            "There should only be one of the following fields: [{list}] at {path}"
+        ))),
+    }
+}
+
+/// Every string in a JSONata template that opens `{%` without closing it. Text
+/// merely containing delimiters is a literal.
+fn check_jsonata_delimiters(value: &Value, path: &str, errors: &mut Vec<String>) {
+    match value {
+        Value::String(text) if crate::jsonata::is_unclosed_expression(text) => {
+            errors.push(schema_detail(format!(
+                "JSONata string must start with {{% and end with %}} at {path}"
+            )));
+        }
+        Value::Object(members) => {
+            for (key, member) in members {
+                check_jsonata_delimiters(member, &format!("{path}/{key}"), errors);
             }
         }
-        for (path, holder) in holders {
-            if holder
-                .get("Assign")
-                .is_some_and(|assign| !assign.is_object())
-            {
-                return Err(schema_error(format!(
-                    "Expected value of type [OBJECT] at {path}/Assign"
-                )));
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                check_jsonata_delimiters(item, &format!("{path}/{index}"), errors);
             }
         }
-        for variable in assigned_variables(state) {
-            let path = format!("{at}/States/{name}/Assign");
-            if !is_valid_variable_name(&variable) {
-                return Err(schema_error(format!(
-                    "The variable name '{variable}' is not valid at {path}"
-                )));
-            }
-            if outer.contains(&variable) {
-                return Err(schema_error(format!(
-                    "The variable '{variable}' is already assigned in an outer scope at {path}"
-                )));
-            }
-            assigned.push(variable);
+        _ => {}
+    }
+}
+
+fn check_jsonata_holder(holder: &Value, path: &str, errors: &mut Vec<String>) {
+    for field in JSONATA_TEMPLATE_FIELDS {
+        if let Some(value) = holder.get(*field) {
+            check_jsonata_delimiters(value, &format!("{path}/{field}"), errors);
         }
     }
-    let visible: Vec<String> = outer.iter().cloned().chain(assigned).collect();
+}
+
+/// Everything a state's shape can get wrong independently of the rest, collected
+/// so a definition reports them together, as AWS does. `parent_jsonata` is whether
+/// the machine (or the state enclosing this `States`) sets JSONata as a whole.
+fn collect_state_schema_errors(
+    at: &str,
+    states: &serde_json::Map<String, Value>,
+    parent_jsonata: bool,
+    errors: &mut Vec<String>,
+) {
     for (name, state) in states {
         let path = format!("{at}/States/{name}");
+        let declared = state["QueryLanguage"].as_str();
+        if parent_jsonata && declared == Some("JSONPath") {
+            errors.push(schema_detail(format!(
+                "'QueryLanguage' can not be 'JSONPath' if set to 'JSONata' for whole state \
+                 machine at {path}"
+            )));
+        }
+        let jsonata = parent_jsonata || declared == Some("JSONata");
+        let (language, other, wrong_fields) = if jsonata {
+            ("JSONata", "JSONPath", JSONPATH_ONLY_FIELDS)
+        } else {
+            ("JSONPath", "JSONata", JSONATA_ONLY_FIELDS)
+        };
+        for field in wrong_fields {
+            if state.get(*field).is_some() {
+                errors.push(schema_detail(format!(
+                    "The QueryLanguage is set to '{language}', but field '{field}' is only \
+                     supported for the '{other}' QueryLanguage at {path}"
+                )));
+            }
+        }
+
+        let kind = state["Type"].as_str().unwrap_or_default();
+        if !jsonata && kind == "Task" && state.get("Parameters").is_none() {
+            if let Some(resource) = state["Resource"]
+                .as_str()
+                .filter(|resource| resource.contains(":::aws-sdk:"))
+            {
+                errors.push(schema_detail(format!(
+                    "Parameters field is required for resource ARN: {resource} at \
+                     {path}/Resource"
+                )));
+            }
+        }
+        if !matches!(kind, "Task" | "Parallel" | "Map") {
+            for field in ["Retry", "Catch"] {
+                if state.get(field).is_some() {
+                    errors.push(schema_detail(format!(
+                        "Field '{field}' is not supported at {path}"
+                    )));
+                }
+            }
+        }
+        if matches!(kind, "Task" | "Pass" | "Wait" | "Parallel" | "Map") {
+            check_exactly_one(state, &["Next", "End"], &path, errors);
+        }
+        if kind == "Wait" {
+            check_exactly_one(state, WAIT_DURATION_FIELDS, &path, errors);
+        }
+
+        if jsonata {
+            check_jsonata_holder(state, &path, errors);
+            for list in ["Catch", "Choices"] {
+                for (index, holder) in state[list].as_array().into_iter().flatten().enumerate() {
+                    check_jsonata_holder(holder, &format!("{path}/{list}/{index}"), errors);
+                }
+            }
+        }
+
         for key in ["ItemProcessor", "Iterator"] {
             if let Some(nested) = state[key]["States"].as_object() {
-                validate_variable_scopes(&format!("{path}/{key}"), nested, &visible)?;
+                let nested_jsonata = jsonata || state[key]["QueryLanguage"] == "JSONata";
+                collect_state_schema_errors(
+                    &format!("{path}/{key}"),
+                    nested,
+                    nested_jsonata,
+                    errors,
+                );
             }
         }
         for (index, branch) in state["Branches"]
@@ -708,11 +847,119 @@ fn validate_variable_scopes(
             .enumerate()
         {
             if let Some(nested) = branch["States"].as_object() {
-                validate_variable_scopes(&format!("{path}/Branches/{index}"), nested, &visible)?;
+                let nested_jsonata = jsonata || branch["QueryLanguage"] == "JSONata";
+                collect_state_schema_errors(
+                    &format!("{path}/Branches/{index}"),
+                    nested,
+                    nested_jsonata,
+                    errors,
+                );
             }
         }
     }
-    Ok(())
+}
+
+/// Variables are valid names, and a scope can't assign one that an outer scope
+/// assigns in another state: a Parallel or Map state's own `Assign` runs after its
+/// nested scopes are gone, so they can reuse its names, as recorded.
+fn collect_variable_errors(
+    at: &str,
+    states: &serde_json::Map<String, Value>,
+    outer: &[String],
+    errors: &mut Vec<String>,
+) {
+    let assigned_by: Vec<(&String, Vec<String>)> = states
+        .iter()
+        .map(|(name, state)| (name, assigned_variables(state)))
+        .collect();
+    for (name, state) in states {
+        let state_path = format!("{at}/States/{name}");
+        let mut holders = vec![(state_path.clone(), state)];
+        for list in ["Choices", "Catch"] {
+            for (index, holder) in state[list].as_array().into_iter().flatten().enumerate() {
+                holders.push((format!("{state_path}/{list}/{index}"), holder));
+            }
+        }
+        for (path, holder) in holders {
+            if holder
+                .get("Assign")
+                .is_some_and(|assign| !assign.is_object())
+            {
+                errors.push(schema_detail(format!(
+                    "Expected value of type [OBJECT] at {path}/Assign"
+                )));
+            }
+        }
+        for variable in assigned_variables(state) {
+            if variable == "states" {
+                errors.push(format!(
+                    "RESERVED_VARIABLE_NAME: Cannot assign to reserved variable '$states'. at \
+                     {state_path}"
+                ));
+            } else if let Some(problem) = variable_name_problem(&variable) {
+                errors.push(format!(
+                    "INVALID_VARIABLE_NAME: Invalid variable name '{variable}': the variable \
+                     name {problem}. at {state_path}/Assign/{variable}"
+                ));
+            }
+            if outer.contains(&variable) {
+                errors.push(schema_detail(format!(
+                    "The variable '{variable}' is already assigned in an outer scope at \
+                     {state_path}/Assign"
+                )));
+            }
+        }
+
+        let visible: Vec<String> = outer
+            .iter()
+            .cloned()
+            .chain(
+                assigned_by
+                    .iter()
+                    .filter(|(other, _)| *other != name)
+                    .flat_map(|(_, variables)| variables.iter().cloned()),
+            )
+            .collect();
+        for key in ["ItemProcessor", "Iterator"] {
+            if let Some(nested) = state[key]["States"].as_object() {
+                collect_variable_errors(&format!("{state_path}/{key}"), nested, &visible, errors);
+            }
+        }
+        for (index, branch) in state["Branches"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            if let Some(nested) = branch["States"].as_object() {
+                collect_variable_errors(
+                    &format!("{state_path}/Branches/{index}"),
+                    nested,
+                    &visible,
+                    errors,
+                );
+            }
+        }
+    }
+}
+
+/// The recorded `SCHEMA_VALIDATION_FAILED`, `RESERVED_VARIABLE_NAME` and
+/// `INVALID_VARIABLE_NAME` problems of a definition, comma-joined.
+fn validate_state_schemas(def: &Value) -> Result<(), AwsServiceError> {
+    let Some(states) = def["States"].as_object() else {
+        return Ok(());
+    };
+    let mut errors = Vec::new();
+    collect_state_schema_errors("", states, def["QueryLanguage"] == "JSONata", &mut errors);
+    collect_variable_errors("", states, &[], &mut errors);
+    if errors.is_empty() {
+        return Ok(());
+    }
+    Err(AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidDefinition",
+        format!("Invalid State Machine Definition: '{}'", errors.join(", ")),
+    ))
 }
 
 /// The fields a `ReaderConfig` may hold.
@@ -914,9 +1161,12 @@ fn validate_state_paths(state_name: &str, state: &Value) -> Result<(), AwsServic
     // Payload templates: every key ending in `.$` must carry a string value
     // that is either a JSONPath reference (`$`/`$$`) or an intrinsic call. AWS
     // rejects non-string and bare-literal `.$` values at CreateStateMachine.
-    for field in ["Parameters", "ResultSelector", "ItemSelector", "Assign"] {
-        if let Some(template) = state.get(field) {
-            validate_payload_template(state_name, field, template)?;
+    // In a JSONata state `.$` means nothing: such a key is a literal.
+    if !crate::jsonata::is_jsonata(state) {
+        for field in ["Parameters", "ResultSelector", "ItemSelector", "Assign"] {
+            if let Some(template) = state.get(field) {
+                validate_payload_template(state_name, field, template)?;
+            }
         }
     }
     for field in ["ErrorPath", "CausePath"] {
@@ -1467,22 +1717,79 @@ mod integration_schema_tests {
     #[test]
     fn variable_names_and_scopes_are_checked() {
         let with_assign = |assign: serde_json::Value| serde_json::json!({"StartAt":"P","States":{"P":{"Type":"Pass","Assign":assign,"End":true}}});
-        for bad in ["x.y", "x[2]", "states", "1x"] {
+        for bad in ["x.y", "x[2]", "1x"] {
             let error = message(with_assign(serde_json::json!({ bad: 1 }))).unwrap();
-            assert!(error.contains("is not valid"), "{bad}: {error}");
+            assert!(
+                error.contains(&format!(
+                    "INVALID_VARIABLE_NAME: Invalid variable name '{bad}': the variable name \
+                     contains invalid characters. at /States/P/Assign/{bad}"
+                )),
+                "{error}"
+            );
         }
+        assert_eq!(
+            message(with_assign(serde_json::json!({"states": 1}))),
+            Some(
+                "Invalid State Machine Definition: 'RESERVED_VARIABLE_NAME: Cannot assign to \
+                 reserved variable '$states'. at /States/P'"
+                    .to_string()
+            )
+        );
         assert_eq!(
             message(with_assign(serde_json::json!({"ok_1": 1, "p.$": "$.a"}))),
             None
         );
 
-        let nested = serde_json::json!({"StartAt":"M","States":{"M":{
+        // A state's own `Assign` runs after its nested scopes are gone, as recorded.
+        let own = serde_json::json!({"StartAt":"M","States":{"M":{
             "Type":"Map",
             "Assign":{"x":1},
             "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","Assign":{"x":2},"End":true}}},
             "End":true
         }}});
-        assert!(message(nested).unwrap().contains("outer scope"));
+        assert_eq!(message(own), None);
+        let sibling = serde_json::json!({"StartAt":"A","States":{
+            "A":{"Type":"Pass","Assign":{"x":1},"Next":"M"},
+            "M":{
+                "Type":"Map",
+                "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","Assign":{"x":2},"End":true}}},
+                "End":true
+            }
+        }});
+        assert!(message(sibling).unwrap().contains("outer scope"));
+    }
+
+    #[test]
+    fn several_problems_are_reported_together_and_nested_ones_found() {
+        let def = serde_json::json!({"StartAt":"P","States":{"P":{
+            "Type":"Parallel",
+            "Branches":[{"StartAt":"W","States":{"W":{"Type":"Wait","Next":"X","End":true}}}],
+            "End":true
+        }}});
+        let error = message(def).unwrap();
+        assert!(
+            error.contains(
+                "There should only be one of the following fields: [Next, End] at \
+                 /States/P/Branches/0/States/W, SCHEMA_VALIDATION_FAILED: This object should have \
+                 only one of the following fields: [SecondsPath, Seconds, TimestampPath, \
+                 Timestamp] at /States/P/Branches/0/States/W"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn jsonata_catchers_and_nested_templates_check_their_delimiters() {
+        let def = serde_json::json!({"QueryLanguage":"JSONata","StartAt":"T","States":{
+            "T":{"Type":"Task","Resource":"arn:aws:states:::aws-sdk:sfn:listStateMachines",
+                 "Arguments":{"a":["{% 1"]},
+                 "Catch":[{"ErrorEquals":["States.ALL"],"Output":"{% 2","Next":"E"}],
+                 "End":true},
+            "E":{"Type":"Succeed"}
+        }});
+        let error = message(def).unwrap();
+        assert!(error.contains("at /States/T/Arguments/a/0"), "{error}");
+        assert!(error.contains("at /States/T/Catch/0/Output"), "{error}");
     }
 
     #[test]
