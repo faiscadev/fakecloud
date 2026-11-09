@@ -131,8 +131,16 @@ pub fn generate(
         // PUT and report a spurious echo drop. Only rewrite string-
         // typed required members so we don't trample fields with
         // tighter formats (numbers, enums, etc.).
+        //
+        // A member the caller pinned (`overrides`: a seeded resource, such
+        // as S3's bucket and key) keeps its value: an isolated name would be
+        // a resource that does not exist, so the writer could only answer
+        // not-found.
         let isolation_tag = format!("rt-{}", echo_field.name);
-        for wm in writer_input_members.iter().filter(|m| m.required) {
+        for wm in writer_input_members
+            .iter()
+            .filter(|m| m.required && !overrides.contains_key(&m.name))
+        {
             let is_plain_string = matches!(
                 effective_shape_type(model, &wm.target),
                 Some(crate::smithy::ShapeType::String { enum_values: None }),
@@ -367,6 +375,19 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(layers.len(), 1);
+    }
+
+    #[test]
+    fn pinned_identifiers_are_not_isolated() {
+        let model = lambda_layers_model();
+        let unpinned = generate(&model, "CreateFunction", &HashMap::new());
+        assert_eq!(unpinned[0].input["FunctionName"], "rt-Layers");
+        let overrides = HashMap::from([(
+            "FunctionName".to_string(),
+            Value::String("seeded".to_string()),
+        )]);
+        let pinned = generate(&model, "CreateFunction", &overrides);
+        assert_eq!(pinned[0].input["FunctionName"], "seeded");
     }
 
     #[test]

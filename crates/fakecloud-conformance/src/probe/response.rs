@@ -195,6 +195,40 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             // setting is InvalidBucketAclWithObjectOwnership.
             "AccessControlListNotSupported",
             "InvalidBucketAclWithObjectOwnership",
+            // The probe addresses a seeded bucket and object, so its variants
+            // reach the codes S3 returns for that state. Each was recorded
+            // against real S3 (us-east-1, 2026-11-09) for the same request
+            // shape, and appears in the Error Responses reference above; the
+            // per-operation Smithy `errors:` lists name none of them.
+            //   - NoSuchConfiguration: an analytics / inventory / metrics /
+            //     intelligent-tiering configuration id the bucket lacks
+            //     (Get/Delete with a generated id).
+            //   - ReplicationConfigurationNotFoundError /
+            //     NoSuchWebsiteConfiguration: GetBucketReplication /
+            //     GetBucketWebsite on a bucket without that configuration.
+            //   - PreconditionFailed (412): an If-Match / If-Unmodified-Since
+            //     (or copy-source equivalent) the seeded object fails.
+            //   - MissingRequestBodyError: a configuration PUT/POST whose
+            //     optional payload member was left out.
+            //   - InvalidRange (416): a generated Range past the object's end.
+            //   - InvalidPart: CompleteMultipartUpload naming parts the seeded
+            //     upload does not have.
+            "NoSuchConfiguration",
+            "ReplicationConfigurationNotFoundError",
+            "NoSuchWebsiteConfiguration",
+            "PreconditionFailed",
+            "MissingRequestBodyError",
+            "InvalidRange",
+            "InvalidPart",
+            // SelectObjectContent on a generated SQL expression and
+            // compression type. S3 Select is closed to new accounts, which
+            // get 405 MethodNotAllowed instead, so these could not be
+            // recorded; both are in the API reference's "List of SELECT Object
+            // Content Error Codes" (`InvalidExpression`: "The SQL expression
+            // is invalid", `InvalidCompressionFormat`: "The file is not in a
+            // supported compression format").
+            "InvalidExpression",
+            "InvalidCompressionFormat",
         ],
         // Real Firehose answers input that fails the model's patterns, such as a
         // `BucketARN` that is not an S3 ARN, with ValidationException, recorded on

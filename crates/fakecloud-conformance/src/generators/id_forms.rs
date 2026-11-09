@@ -14,8 +14,6 @@
 //! we emit one variant per accepted form. Each variant overrides the
 //! identifier value in the variant's input — the probe layer's
 //! Smithy-driven URL builder substitutes it into the path automatically.
-//! For Lambda/S3 (still on the legacy hardcoded routing table), the
-//! probe layer also consults the variant input for known label names.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -70,10 +68,17 @@ pub fn generate(
     let mut variants = Vec::new();
     let svc = arn_service_prefix(&model.service_name);
     for (member_name, default_value) in labels {
-        // Derive the bare-name basis from the schema's default. Strip
-        // any `arn:` prefix the default happens to carry so the synthetic
-        // forms below are always layered on a clean identifier.
-        let base = strip_arn(&default_value);
+        // Derive the bare-name basis from the seeded identifier when the
+        // caller pinned one (so every form names a resource that exists and
+        // the variant tests the form, not a not-found), else the schema's
+        // default. Strip any `arn:` prefix so the synthetic forms below are
+        // always layered on a clean identifier.
+        let basis = overrides
+            .get(&member_name)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or(default_value);
+        let base = strip_arn(&basis);
         let forms = vec![
             ("bare", base.clone()),
             ("qualifier", format!("{}:LATEST", base)),
@@ -348,6 +353,54 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(enc_val.contains("%3A"), "got {enc_val}");
+    }
+
+    #[test]
+    fn forms_are_built_on_the_seeded_identifier() {
+        let mut shapes = std::collections::HashMap::new();
+        shapes.insert(
+            "test#GetFunctionRequest".to_string(),
+            structure(
+                "test#GetFunctionRequest",
+                vec![Member {
+                    name: "FunctionName".to_string(),
+                    target: "test#FunctionName".to_string(),
+                    required: true,
+                    traits: ShapeTraits {
+                        http_label: true,
+                        ..ShapeTraits::default()
+                    },
+                }],
+            ),
+        );
+        shapes.insert(
+            "test#FunctionName".to_string(),
+            lambda_function_name_shape(),
+        );
+        let model = ServiceModel {
+            service_name: "lambda".to_string(),
+            operations: vec![op_with_uri("GetFunction", "test#GetFunctionRequest")],
+            shapes,
+            ..Default::default()
+        };
+        let overrides = HashMap::from([(
+            "FunctionName".to_string(),
+            Value::String("seeded-fn".to_string()),
+        )]);
+        let variants = generate(&model, "GetFunction", &overrides);
+        let full = variants
+            .iter()
+            .find(|v| v.name == "id_form_FunctionName_full_arn")
+            .unwrap();
+        assert_eq!(
+            full.input["FunctionName"],
+            "arn:aws:lambda:us-east-1:123456789012:function:seeded-fn"
+        );
+        let bare = variants
+            .iter()
+            .find(|v| v.name == "id_form_FunctionName_bare")
+            .unwrap();
+        assert_eq!(bare.input["FunctionName"], "seeded-fn");
     }
 
     #[test]

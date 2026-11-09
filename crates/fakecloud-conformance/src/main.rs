@@ -396,10 +396,13 @@ fn run_probes(
             // DeleteObject) don't leave later ops staring at a missing
             // resource. Cheap: each call is a single keep-alive request
             // against the in-process server.
-            seed_service_resources(&client, &endpoint, service_name);
+            let seed =
+                seed_service_resources(&client, &endpoint, service_name, &op.name, may_reprobe);
 
-            let overrides = HashMap::new();
-            let variants = generators::generate_all_variants(model, &op.name, &overrides);
+            let mut variants = generators::generate_all_variants(model, &op.name, &seed.overrides);
+            if seed.pin_examples {
+                pin_example_identifiers(&mut variants, &seed.overrides);
+            }
 
             // If fakecloud's SUPPORTED list is known and this op isn't in it,
             // short-circuit every variant to NotImplemented. Saves the
@@ -468,38 +471,53 @@ fn run_probes(
                 .collect();
 
             if may_reprobe {
-                for (variant, result) in variants.iter().zip(op_results.iter_mut()) {
-                    if !needs_container_runtime(result) {
-                        continue;
-                    }
-                    let cli = reprobe_cli.get_or_insert_with(|| {
-                        let cli = reprobe_container_cli(
-                            std::env::var_os("FAKECLOUD_CONTAINER_CLI"),
-                            fakecloud_core::container_net::detect_container_cli,
-                        );
-                        if cli.is_none() {
+                let pending: Vec<usize> = op_results
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| needs_container_runtime(r))
+                    .map(|(i, _)| i)
+                    .collect();
+                let cli = if pending.is_empty() {
+                    None
+                } else {
+                    reprobe_cli
+                        .get_or_insert_with(|| {
+                            let cli = reprobe_container_cli(
+                                std::env::var_os("FAKECLOUD_CONTAINER_CLI"),
+                                fakecloud_core::container_net::detect_container_cli,
+                            );
+                            if cli.is_none() {
+                                eprintln!(
+                                    "  note: some variants need a container runtime and none \
+                                     is available; they are reported as failures"
+                                );
+                            }
+                            cli
+                        })
+                        .as_deref()
+                };
+                if let Some(cli) = cli {
+                    for batch in reprobe_batches(service_name, &pending) {
+                        let batch_variants: Vec<&generators::TestVariant> =
+                            batch.iter().map(|&i| &variants[i]).collect();
+                        for v in &batch_variants {
                             eprintln!(
-                                "  note: some variants need a container runtime and none is \
-                                 available; they are reported as failures"
+                                "  RETRY {} {} against a {}-backed server",
+                                op.name, v.name, cli
                             );
                         }
-                        cli
-                    });
-                    let Some(cli) = cli.as_deref() else {
-                        continue;
-                    };
-                    eprintln!(
-                        "  RETRY {} {} against a {}-backed server",
-                        op.name, variant.name, cli
-                    );
-                    *result = probe_with_container_runtime(
-                        cli,
-                        &client,
-                        service_name,
-                        &op.name,
-                        variant,
-                        output_shape_id.map(|oid| (model, oid)),
-                    );
+                        let results = probe_with_container_runtime(
+                            cli,
+                            &client,
+                            service_name,
+                            &op.name,
+                            &batch_variants,
+                            output_shape_id.map(|oid| (model, oid)),
+                        );
+                        for (&i, r) in batch.iter().zip(results) {
+                            op_results[i] = r;
+                        }
+                    }
                 }
             }
 
@@ -542,43 +560,324 @@ fn cmd_run(
     }
 }
 
-/// Seed any resources the probe driver assumes exist before sending success
-/// expectations. Today only S3 needs this: the REST request builder
-/// hard-codes `test-conformance-bucket` and `test-key` into every operation
-/// URL (see `probe::rest_request_config`), so ops like HeadBucket /
-/// GetObjectAcl / ListObjects can't return 2xx unless the bucket and a
-/// stub object actually exist on the server before the run starts.
+/// The identifier values every generated variant of one operation is built
+/// with, and whether its documented `@examples` use them too.
+#[derive(Default)]
+struct OperationSeedValues {
+    /// Member name -> value, handed to the generators as `overrides`: every
+    /// variant carries it, except one that exercises that member itself (a
+    /// boundary, negative or id-form variant of `Bucket` keeps its own value).
+    overrides: HashMap<String, serde_json::Value>,
+    /// Also replace these members in the operation's documented examples.
+    pin_examples: bool,
+}
+
+/// Seed the resources an operation's variants address, and return the
+/// identifiers to build them with.
 ///
-/// Other services either generate per-op resources inside the variant input
-/// (Lambda's `test-conformance-function`, ECR's `test-conformance-repository`,
-/// etc. are typically created by their own Create* probe before later ops
-/// reach them) or don't depend on pre-existing state at all (Query/Json
-/// services where every probe is self-contained). Calling this for those
-/// service names is a no-op.
-fn seed_service_resources(client: &reqwest::blocking::Client, endpoint: &str, service_name: &str) {
+/// Without this, success-path variants name whatever the generators make up
+/// (`Bucket: "t"`, `FunctionName: "t"`), and the service answers every one of
+/// them with its not-found error before any of the operation's own behaviour
+/// runs. Those errors are modelled, so the variants pass without testing
+/// anything. Seeded identifiers go in through the generators' `overrides`,
+/// which keep a variant's intent: a variant about the identifier itself
+/// (`negative_omit_Bucket`, `boundary_len_min_FunctionName_1`) still sends its
+/// own value.
+///
+/// `owns_server`: the probe started this server, so it may reset the
+/// service's state first (each operation then starts from the same seeded
+/// state, whatever the previous one changed). Against an operator-supplied
+/// endpoint the seed is only added, never reset.
+fn seed_service_resources(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    service_name: &str,
+    op_name: &str,
+    owns_server: bool,
+) -> OperationSeedValues {
     match service_name {
-        "s3" => seed_s3(client, endpoint),
-        "secretsmanager" => seed_secretsmanager(client, endpoint),
-        _ => {}
+        "s3" => seed_s3(client, endpoint, op_name, owns_server),
+        "lambda" => seed_lambda(client, endpoint, op_name),
+        "secretsmanager" => {
+            seed_secretsmanager(client, endpoint);
+            OperationSeedValues::default()
+        }
+        _ => OperationSeedValues::default(),
     }
 }
 
-fn seed_s3(client: &reqwest::blocking::Client, endpoint: &str) {
-    let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/s3/aws4_request, \
-                SignedHeaders=host;x-amz-date, Signature=00";
-    // Best-effort: ignore conflicts (bucket/object may already exist if the
-    // server preserved state across runs) and network errors (the harness
-    // will surface those as crashes during probing anyway).
-    let bucket_url = format!("{}/test-conformance-bucket", endpoint);
-    let _ = client.put(&bucket_url).header("Authorization", auth).send();
-    let object_url = format!("{}/test-conformance-bucket/test-key", endpoint);
-    let _ = client
-        .put(&object_url)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/octet-stream")
-        .body("conformance-seed")
-        .send();
+/// Replace the seeded identifiers in an operation's documented examples.
+///
+/// Example inputs name the resources of the documentation's own account
+/// (`examplebucket`, `HappyFace.jpg`), which never exist on the server. Only
+/// members the example sets are replaced, so an example keeps its shape.
+fn pin_example_identifiers(
+    variants: &mut [generators::TestVariant],
+    overrides: &HashMap<String, serde_json::Value>,
+) {
+    for v in variants.iter_mut().filter(|v| {
+        matches!(
+            v.strategy,
+            generators::Strategy::Examples | generators::Strategy::ExamplesDiff
+        )
+    }) {
+        if let Some(obj) = v.input.as_object_mut() {
+            for (member, value) in overrides {
+                if let Some(slot) = obj.get_mut(member) {
+                    *slot = value.clone();
+                }
+            }
+        }
+    }
 }
+
+const S3_SEED_AUTH: &str = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/s3/aws4_request, \
+                            SignedHeaders=host;x-amz-date, Signature=00";
+const S3_SEED_BUCKET: &str = "test-conformance-bucket";
+const S3_SEED_KEY: &str = "test-key";
+/// A bucket name no seed creates: CreateBucket's variants create it.
+const S3_NEW_BUCKET: &str = "test-conformance-new-bucket";
+
+/// The account the probe's credentials resolve to (the owner every
+/// `ExpectedBucketOwner` check compares against), from STS.
+fn caller_account(client: &reqwest::blocking::Client, endpoint: &str) -> Option<String> {
+    let body = client
+        .post(endpoint)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/sts/aws4_request, \
+             SignedHeaders=host;x-amz-date, Signature=00",
+        )
+        .body("Action=GetCallerIdentity&Version=2011-06-15")
+        .send()
+        .ok()?
+        .text()
+        .ok()?;
+    xml_text(&body, "Account")
+}
+
+/// The text of the first `<tag>` element in `xml`.
+fn xml_text(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = start + xml[start..].find(&format!("</{tag}>"))?;
+    Some(xml[start..end].to_string())
+}
+
+/// Base64 MD5 of the seed object's body (`conformance-seed`): object-lock
+/// buckets refuse a PUT without an integrity header.
+const S3_SEED_BODY_MD5: &str = "e7d33v2nhROiMhKyoIEAVw==";
+
+/// How the seeded bucket and object are set up for one operation, so its
+/// success path has something to act on.
+#[derive(Default)]
+struct S3SeedState {
+    /// The bucket is created with Object Lock (which turns on versioning).
+    object_lock: bool,
+    /// Versioning is enabled (PutObjectLockConfiguration requires it).
+    versioning: bool,
+    /// The object carries a GOVERNANCE retention and a legal hold, so the
+    /// readers find them.
+    retained: bool,
+    /// The object is in GLACIER, so RestoreObject has something to restore.
+    archived: bool,
+}
+
+impl S3SeedState {
+    fn for_operation(op_name: &str) -> Self {
+        match op_name {
+            "GetObjectRetention" | "GetObjectLegalHold" => Self {
+                object_lock: true,
+                retained: true,
+                ..Self::default()
+            },
+            "PutObjectRetention" | "PutObjectLegalHold" | "GetObjectLockConfiguration" => Self {
+                object_lock: true,
+                ..Self::default()
+            },
+            "PutObjectLockConfiguration" => Self {
+                versioning: true,
+                ..Self::default()
+            },
+            "RestoreObject" => Self {
+                archived: true,
+                ..Self::default()
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
+/// S3: a bucket holding one object (`test-key`) with an in-progress multipart
+/// upload of it. Variants address that bucket, that key and its version (`null`
+/// in a bucket without versioning), that upload,
+/// a copy source of that object, and the real owning account.
+///
+/// DeleteBucket gets an empty bucket, so its success path can delete it; a
+/// non-empty one answers every variant with BucketNotEmpty. CreateBucket's
+/// variants name a bucket that does not exist yet.
+fn seed_s3(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    op_name: &str,
+    owns_server: bool,
+) -> OperationSeedValues {
+    if owns_server {
+        let _ = client
+            .post(format!("{endpoint}/_fakecloud/reset/s3"))
+            .send();
+    }
+    // Best-effort: a failed seed shows up as failing variants, which is where
+    // it should be reported.
+    let state = S3SeedState::for_operation(op_name);
+    let bucket_url = format!("{endpoint}/{S3_SEED_BUCKET}");
+    let mut create = client
+        .put(&bucket_url)
+        .header("Authorization", S3_SEED_AUTH);
+    if state.object_lock {
+        create = create.header("x-amz-bucket-object-lock-enabled", "true");
+    }
+    let _ = create.send();
+    if state.versioning {
+        let _ = client
+            .put(format!("{bucket_url}?versioning"))
+            .header("Authorization", S3_SEED_AUTH)
+            .body(
+                "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                 <Status>Enabled</Status></VersioningConfiguration>",
+            )
+            .send();
+    }
+    let mut upload_id = None;
+    let mut version_id = "null".to_string();
+    if op_name != "DeleteBucket" {
+        let object_url = format!("{bucket_url}/{S3_SEED_KEY}");
+        let body = "conformance-seed";
+        let mut put = client
+            .put(&object_url)
+            .header("Authorization", S3_SEED_AUTH)
+            .header("Content-Type", "application/octet-stream")
+            .header("Content-MD5", S3_SEED_BODY_MD5);
+        if state.archived {
+            put = put.header("x-amz-storage-class", "GLACIER");
+        }
+        if state.retained {
+            // The per-operation reset removes it again, retention or not.
+            put = put
+                .header("x-amz-object-lock-mode", "GOVERNANCE")
+                .header(
+                    "x-amz-object-lock-retain-until-date",
+                    "2099-01-01T00:00:00Z",
+                )
+                .header("x-amz-object-lock-legal-hold", "ON");
+        }
+        // The object's version: a versioned (or Object Lock) bucket names it
+        // in `x-amz-version-id`; elsewhere it is the `null` version.
+        version_id = put
+            .body(body)
+            .send()
+            .ok()
+            .and_then(|r| {
+                r.headers()
+                    .get("x-amz-version-id")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "null".to_string());
+        upload_id = client
+            .post(format!("{object_url}?uploads"))
+            .header("Authorization", S3_SEED_AUTH)
+            .send()
+            .ok()
+            .and_then(|r| r.text().ok())
+            .and_then(|body| xml_text(&body, "UploadId"));
+    }
+
+    let s = |v: &str| serde_json::Value::String(v.to_string());
+    let bucket = if op_name == "CreateBucket" {
+        S3_NEW_BUCKET
+    } else {
+        S3_SEED_BUCKET
+    };
+    let mut overrides = HashMap::from([
+        ("Bucket".to_string(), s(bucket)),
+        ("Key".to_string(), s(S3_SEED_KEY)),
+        ("VersionId".to_string(), s(&version_id)),
+        (
+            "CopySource".to_string(),
+            s(&format!("{S3_SEED_BUCKET}/{S3_SEED_KEY}")),
+        ),
+    ]);
+    if let Some(id) = upload_id {
+        overrides.insert("UploadId".to_string(), s(&id));
+    }
+    if let Some(account) = caller_account(client, endpoint) {
+        overrides.insert("ExpectedBucketOwner".to_string(), s(&account));
+        overrides.insert("ExpectedSourceBucketOwner".to_string(), s(&account));
+    }
+    OperationSeedValues {
+        overrides,
+        pin_examples: true,
+    }
+}
+
+const LAMBDA_SEED_FUNCTION: &str = "test-conformance-function";
+
+/// Lambda: a function (`test-conformance-function`) every function-scoped
+/// variant addresses, by name or, for the tagging and resource-policy
+/// operations, by ARN. CreateFunction's variants keep their generated names.
+///
+/// Lambda is not reset between operations: its documented examples build on
+/// each other (`my-function`, created by the CreateFunction example, is read
+/// by later examples), so the examples keep their own names too. The seed is
+/// only re-created when an operation deleted it.
+fn seed_lambda(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    op_name: &str,
+) -> OperationSeedValues {
+    let Some(account) = caller_account(client, endpoint) else {
+        return OperationSeedValues::default();
+    };
+    let create = serde_json::json!({
+        "FunctionName": LAMBDA_SEED_FUNCTION,
+        "Runtime": "python3.12",
+        "Role": format!("arn:aws:iam::{account}:role/test-conformance-role"),
+        "Handler": "index.handler",
+        "Code": {"ZipFile": LAMBDA_SEED_ZIP},
+    });
+    // 409 when it already exists, which is the usual case.
+    let _ = client
+        .post(format!("{endpoint}/2015-03-31/functions"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", LAMBDA_SEED_AUTH)
+        .body(create.to_string())
+        .send();
+
+    let mut overrides = HashMap::new();
+    if op_name != "CreateFunction" {
+        let arn = format!("arn:aws:lambda:us-east-1:{account}:function:{LAMBDA_SEED_FUNCTION}");
+        let s = |v: &str| serde_json::Value::String(v.to_string());
+        overrides.insert("FunctionName".to_string(), s(LAMBDA_SEED_FUNCTION));
+        // TagResource / UntagResource / ListTags and the resource-policy
+        // operations address the function by ARN.
+        overrides.insert("Resource".to_string(), s(&arn));
+        overrides.insert("ResourceArn".to_string(), s(&arn));
+    }
+    OperationSeedValues {
+        overrides,
+        pin_examples: false,
+    }
+}
+
+/// Base64 of a zip holding `index.py`, a handler that echoes its event:
+///
+/// ```python
+/// def handler(event, context):
+///     return event
+/// ```
+const LAMBDA_SEED_ZIP: &str = "UEsDBBQAAAAAAAAAIVi0CHBpLgAAAC4AAAAIAAAAaW5kZXgucHlkZWYgaGFuZGxlcihldmVudCwgY29udGV4dCk6CiAgICByZXR1cm4gZXZlbnQKUEsBAhQDFAAAAAAAAAAhWLQIcGkuAAAALgAAAAgAAAAAAAAAAAAAAIABAAAAAGluZGV4LnB5UEsFBgAAAAABAAEANgAAAFQAAAAAAA==";
 
 /// Pre-seed the secret used by the documented `@examples` for Secrets Manager
 /// (`MyTestDatabaseSecret`) with both a description and a resource-based
@@ -750,45 +1049,72 @@ fn reprobe_container_cli(
     }
 }
 
-/// Probe one variant against a fresh server that drives real containers, then
-/// shut that server down gracefully so it removes what it started. A fresh
-/// server per variant keeps variants from colliding on resource names the
-/// way a shared one would (two documented examples creating the same DB
-/// instance identifier).
+/// Group the variants (indexes into the operation's list) that need a
+/// container-backed server, one group per server.
+///
+/// By default every variant gets a fresh server, so variants cannot collide
+/// on resource names the way they would on a shared one (two documented
+/// examples creating the same DB instance identifier). Lambda's
+/// runtime-dependent variants are invocations of the one seeded function and
+/// create nothing, so an operation's variants share one server; a fresh
+/// server and container cold start per Invoke variant is several minutes of
+/// CI time for no isolation gain.
+fn reprobe_batches(service_name: &str, pending: &[usize]) -> Vec<Vec<usize>> {
+    if service_name == "lambda" {
+        if pending.is_empty() {
+            Vec::new()
+        } else {
+            vec![pending.to_vec()]
+        }
+    } else {
+        pending.iter().map(|&i| vec![i]).collect()
+    }
+}
+
+/// Probe `variants` against a fresh server that drives real containers, then
+/// shut that server down gracefully so it removes what it started.
 fn probe_with_container_runtime(
     cli: &str,
     client: &reqwest::blocking::Client,
     service_name: &str,
     op_name: &str,
-    variant: &generators::TestVariant,
+    variants: &[&generators::TestVariant],
     model_info: Option<(&smithy::ServiceModel, &str)>,
-) -> probe::ProbeResult {
+) -> Vec<probe::ProbeResult> {
     let (endpoint, child) = match try_start_fakecloud(Some(cli), Duration::from_secs(60)) {
         Ok(started) => started,
         Err(e) => {
             eprintln!("  could not start a {cli}-backed server: {e}");
-            return probe::ProbeResult {
-                variant_name: variant.name.clone(),
-                status: probe::ProbeStatus::UnexpectedResult(format!(
-                    "needs a container runtime, but a {cli}-backed server failed to start: {e}"
-                )),
-                http_status: 0,
-                response_body: String::new(),
-                duration_ms: 0,
-            };
+            return variants
+                .iter()
+                .map(|variant| probe::ProbeResult {
+                    variant_name: variant.name.clone(),
+                    status: probe::ProbeStatus::UnexpectedResult(format!(
+                        "needs a container runtime, but a {cli}-backed server failed to start: {e}"
+                    )),
+                    http_status: 0,
+                    response_body: String::new(),
+                    duration_ms: 0,
+                })
+                .collect();
         }
     };
     let pid = child.id();
     let server = GracefulChild(child);
-    seed_service_resources(client, &endpoint, service_name);
-    let result = probe::probe_variant_with_model(
-        client,
-        &endpoint,
-        service_name,
-        op_name,
-        variant,
-        model_info,
-    );
+    seed_service_resources(client, &endpoint, service_name, op_name, true);
+    let results = variants
+        .iter()
+        .map(|variant| {
+            probe::probe_variant_with_model(
+                client,
+                &endpoint,
+                service_name,
+                op_name,
+                variant,
+                model_info,
+            )
+        })
+        .collect();
     // The operation may have started a container in the background (RDS
     // CreateDBInstance returns `creating` and runs the engine afterwards). A
     // container is only tracked for shutdown once its `run` returns, so let
@@ -796,12 +1122,9 @@ fn probe_with_container_runtime(
     wait_for_child_processes(pid, Duration::from_secs(300));
     drop(server);
     remove_labelled_leftovers(cli, pid);
-    result
+    results
 }
 
-/// Wait until `pid` has had no child processes for a short settle period, or
-/// `limit` elapses. fakecloud drives the container runtime through its CLI, so
-/// a live child means a container operation is still in flight.
 fn wait_for_child_processes(pid: u32, limit: Duration) {
     let deadline = std::time::Instant::now() + limit;
     let mut quiet = 0;
@@ -1322,6 +1645,70 @@ mod tests {
             response_body: body.to_string(),
             duration_ms: 0,
         }
+    }
+
+    #[test]
+    fn example_identifiers_are_pinned_only_where_the_example_sets_them() {
+        let variant = |strategy, input: serde_json::Value| generators::TestVariant {
+            name: "v".to_string(),
+            strategy,
+            input,
+            expectation: generators::Expectation::Success,
+            expected_output: None,
+            followup: None,
+        };
+        let mut vs = vec![
+            variant(
+                generators::Strategy::Examples,
+                serde_json::json!({"Bucket": "examplebucket", "Key": "HappyFace.jpg"}),
+            ),
+            variant(
+                generators::Strategy::ExamplesDiff,
+                serde_json::json!({"Bucket": "examplebucket"}),
+            ),
+            variant(
+                generators::Strategy::Negative,
+                serde_json::json!({"Bucket": "t"}),
+            ),
+        ];
+        let overrides = HashMap::from([
+            ("Bucket".to_string(), serde_json::json!("seeded")),
+            ("Key".to_string(), serde_json::json!("test-key")),
+        ]);
+        pin_example_identifiers(&mut vs, &overrides);
+        assert_eq!(
+            vs[0].input,
+            serde_json::json!({"Bucket": "seeded", "Key": "test-key"})
+        );
+        assert_eq!(vs[1].input, serde_json::json!({"Bucket": "seeded"}));
+        // Generated variants already carry their overrides from the generators.
+        assert_eq!(vs[2].input, serde_json::json!({"Bucket": "t"}));
+    }
+
+    #[test]
+    fn s3_seed_state_per_operation() {
+        assert!(S3SeedState::for_operation("GetObjectRetention").retained);
+        assert!(S3SeedState::for_operation("PutObjectLegalHold").object_lock);
+        assert!(S3SeedState::for_operation("PutObjectLockConfiguration").versioning);
+        assert!(S3SeedState::for_operation("RestoreObject").archived);
+        let plain = S3SeedState::for_operation("GetObject");
+        assert!(!plain.object_lock && !plain.versioning && !plain.retained && !plain.archived);
+    }
+
+    #[test]
+    fn xml_text_reads_the_first_element() {
+        assert_eq!(
+            xml_text("<R><UploadId>abc</UploadId></R>", "UploadId").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(xml_text("<R/>", "UploadId"), None);
+    }
+
+    #[test]
+    fn lambda_reprobes_share_one_server_others_get_one_each() {
+        assert_eq!(reprobe_batches("lambda", &[1, 4, 7]), vec![vec![1, 4, 7]]);
+        assert!(reprobe_batches("lambda", &[]).is_empty());
+        assert_eq!(reprobe_batches("rds", &[2, 3]), vec![vec![2], vec![3]]);
     }
 
     #[test]

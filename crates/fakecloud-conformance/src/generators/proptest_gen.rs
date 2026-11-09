@@ -154,8 +154,11 @@ fn random_value_for_shape_def(
         ShapeType::Structure { members } => {
             let mut obj = serde_json::Map::new();
             for member in members {
-                // Always apply overrides.
-                if let Some(ov) = overrides.get(&member.name) {
+                // Overrides pin members of the operation's input, not every
+                // nested member that happens to share a name: S3's seeded
+                // `Key` is the object key, and pinning each `Tag.Key` to it
+                // too would make every generated tag set a duplicate-key set.
+                if let Some(ov) = overrides.get(&member.name).filter(|_| depth == 0) {
                     obj.insert(member.name.clone(), ov.clone());
                     continue;
                 }
@@ -515,6 +518,47 @@ mod tests {
         let variants = generate(&model, "test#Input", &overrides, 5);
         for v in &variants {
             assert_eq!(v.input.get("Name").unwrap(), "fixed");
+        }
+    }
+
+    #[test]
+    fn overrides_pin_top_level_members_only() {
+        let member = |name: &str, target: &str| smithy::Member {
+            name: name.to_string(),
+            target: target.to_string(),
+            required: true,
+            traits: smithy::ShapeTraits::default(),
+        };
+        let structure = |id: &str, members: Vec<smithy::Member>| smithy::Shape {
+            shape_id: id.to_string(),
+            shape_type: ShapeType::Structure { members },
+            traits: smithy::ShapeTraits::default(),
+        };
+        let model = ServiceModel {
+            service_name: "test".to_string(),
+            operations: vec![],
+            shapes: HashMap::from([
+                (
+                    "test#Input".to_string(),
+                    structure(
+                        "test#Input",
+                        vec![
+                            member("Key", "smithy.api#String"),
+                            member("Tag", "test#Tag"),
+                        ],
+                    ),
+                ),
+                (
+                    "test#Tag".to_string(),
+                    structure("test#Tag", vec![member("Key", "smithy.api#String")]),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let overrides = HashMap::from([("Key".to_string(), Value::String("seeded".into()))]);
+        for v in generate(&model, "test#Input", &overrides, 5) {
+            assert_eq!(v.input["Key"], "seeded");
+            assert_ne!(v.input["Tag"]["Key"], "seeded");
         }
     }
 

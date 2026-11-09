@@ -1,898 +1,49 @@
 //! probe `rest_request` (audit-2026-05-19).
 
 use super::*;
+/// S3's object-key limit: a key longer than this many UTF-8 bytes is refused
+/// with `KeyTooLongError`.
+const S3_MAX_KEY_BYTES: usize = 1024;
 
-/// Returns (HTTP method, path, optional query string) for a known REST API operation.
+/// The input to serialize for `op`, with a stand-in for an omitted (or empty)
+/// required `@httpLabel` where leaving the label out would make the request
+/// valid.
 ///
-/// For S3, uses "test-conformance-bucket" as the bucket and "test-key" as the object key.
-/// For Lambda, uses "test-conformance-function" as the function name.
-pub(super) fn rest_request_config(
+/// No Smithy client sends such a request (smithy-rs refuses to build one), so
+/// a `negative_omit_*` / `negative_too_short_*` variant can only be judged on a
+/// value that keeps the request on the operation's own route and that AWS
+/// answers with a client error. `build_http_request_from_model` leaves the
+/// literal `{Name}` in the path, which does that for almost every label: the
+/// braces violate the label's `@pattern` (Lambda names, layer names) or S3's
+/// bucket-naming rules. S3's greedy `{Key+}` is the exception: `{Key+}` is a
+/// perfectly good object key, so `PUT /bucket/{Key+}` would create an object.
+/// Its stand-in is one byte past S3's key-length limit instead, which S3
+/// refuses with `KeyTooLongError` before touching any object.
+pub(super) fn with_omitted_label_sentinels(
     service_name: &str,
-    operation_name: &str,
-) -> (reqwest::Method, String, Option<String>) {
-    const BUCKET: &str = "test-conformance-bucket";
-    const KEY: &str = "test-key";
-    const FUNC: &str = "test-conformance-function";
-    const LAMBDA_PREFIX: &str = "/2015-03-31";
-    const RBP_ARN: &str = "arn:aws:lambda:us-east-1:000000000000:function:test-rbp-function";
-
-    match service_name {
-        "lambda" => match operation_name {
-            // Function CRUD
-            "CreateFunction" => (
-                reqwest::Method::POST,
-                format!("{}/functions", LAMBDA_PREFIX),
-                None,
-            ),
-            "ListFunctions" => (
-                reqwest::Method::GET,
-                format!("{}/functions", LAMBDA_PREFIX),
-                None,
-            ),
-            "GetFunction" => (
-                reqwest::Method::GET,
-                format!("{}/functions/{}", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "DeleteFunction" => (
-                reqwest::Method::DELETE,
-                format!("{}/functions/{}", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "UpdateFunctionCode" => (
-                reqwest::Method::PUT,
-                format!("{}/functions/{}/code", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "UpdateFunctionConfiguration" => (
-                reqwest::Method::PUT,
-                format!("{}/functions/{}/configuration", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "GetFunctionConfiguration" => (
-                reqwest::Method::GET,
-                format!("{}/functions/{}/configuration", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            // Invocation
-            "Invoke" => (
-                reqwest::Method::POST,
-                format!("{}/functions/{}/invocations", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            // Aliases
-            "CreateAlias" => (
-                reqwest::Method::POST,
-                format!("{}/functions/{}/aliases", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "ListAliases" => (
-                reqwest::Method::GET,
-                format!("{}/functions/{}/aliases", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "GetAlias" => (
-                reqwest::Method::GET,
-                format!("{}/functions/{}/aliases/LATEST", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "DeleteAlias" => (
-                reqwest::Method::DELETE,
-                format!("{}/functions/{}/aliases/LATEST", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "UpdateAlias" => (
-                reqwest::Method::PUT,
-                format!("{}/functions/{}/aliases/LATEST", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            // Versions
-            "PublishVersion" => (
-                reqwest::Method::POST,
-                format!("{}/functions/{}/versions", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "ListVersionsByFunction" => (
-                reqwest::Method::GET,
-                format!("{}/functions/{}/versions", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            // Event source mappings
-            "CreateEventSourceMapping" => (
-                reqwest::Method::POST,
-                format!("{}/event-source-mappings", LAMBDA_PREFIX),
-                None,
-            ),
-            "ListEventSourceMappings" => (
-                reqwest::Method::GET,
-                format!("{}/event-source-mappings", LAMBDA_PREFIX),
-                None,
-            ),
-            "GetEventSourceMapping" => (
-                reqwest::Method::GET,
-                format!(
-                    "{}/event-source-mappings/00000000-0000-0000-0000-000000000000",
-                    LAMBDA_PREFIX
-                ),
-                None,
-            ),
-            "DeleteEventSourceMapping" => (
-                reqwest::Method::DELETE,
-                format!(
-                    "{}/event-source-mappings/00000000-0000-0000-0000-000000000000",
-                    LAMBDA_PREFIX
-                ),
-                None,
-            ),
-            "UpdateEventSourceMapping" => (
-                reqwest::Method::PUT,
-                format!(
-                    "{}/event-source-mappings/00000000-0000-0000-0000-000000000000",
-                    LAMBDA_PREFIX
-                ),
-                None,
-            ),
-            // Layers — AWS uses the `2018-10-31` prefix, not `LAMBDA_PREFIX`
-            // (`2015-03-31`). The Lambda service router requires the
-            // 2018-10-31 date for layer paths.
-            "PublishLayerVersion" => (
-                reqwest::Method::POST,
-                "/2018-10-31/layers/test-layer/versions".to_string(),
-                None,
-            ),
-            "ListLayers" => (reqwest::Method::GET, "/2018-10-31/layers".to_string(), None),
-            "ListLayerVersions" => (
-                reqwest::Method::GET,
-                "/2018-10-31/layers/test-layer/versions".to_string(),
-                None,
-            ),
-            "GetLayerVersion" => (
-                reqwest::Method::GET,
-                "/2018-10-31/layers/test-layer/versions/__VERSION__".to_string(),
-                None,
-            ),
-            "DeleteLayerVersion" => (
-                reqwest::Method::DELETE,
-                "/2018-10-31/layers/test-layer/versions/__VERSION__".to_string(),
-                None,
-            ),
-            // Concurrency
-            "PutFunctionConcurrency" => (
-                reqwest::Method::PUT,
-                format!("{}/functions/{}/concurrency", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "GetFunctionConcurrency" => (
-                reqwest::Method::GET,
-                format!("{}/functions/{}/concurrency", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "DeleteFunctionConcurrency" => (
-                reqwest::Method::DELETE,
-                format!("{}/functions/{}/concurrency", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            // Tags
-            "TagResource" => (
-                reqwest::Method::POST,
-                format!(
-                    "{}/tags/arn:aws:lambda:us-east-1:000000000000:function:{}",
-                    LAMBDA_PREFIX, FUNC
-                ),
-                None,
-            ),
-            "UntagResource" => (
-                reqwest::Method::DELETE,
-                format!(
-                    "{}/tags/arn:aws:lambda:us-east-1:000000000000:function:{}",
-                    LAMBDA_PREFIX, FUNC
-                ),
-                Some("tagKeys=key1".to_string()),
-            ),
-            "ListTags" => (
-                reqwest::Method::GET,
-                format!(
-                    "{}/tags/arn:aws:lambda:us-east-1:000000000000:function:{}",
-                    LAMBDA_PREFIX, FUNC
-                ),
-                None,
-            ),
-            // Policy
-            "GetPolicy" => (
-                reqwest::Method::GET,
-                format!("{}/functions/{}/policy", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "AddPermission" => (
-                reqwest::Method::POST,
-                format!("{}/functions/{}/policy", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            "RemovePermission" => (
-                reqwest::Method::DELETE,
-                format!("{}/functions/{}/policy/test-statement", LAMBDA_PREFIX, FUNC),
-                None,
-            ),
-            // Account settings
-            "GetAccountSettings" => (
-                reqwest::Method::GET,
-                format!("{}/account-settings", LAMBDA_PREFIX),
-                None,
-            ),
-            // Function URL config (uses 2021-10-31 prefix in AWS but the
-            // route is prefix-agnostic in fakecloud).
-            "CreateFunctionUrlConfig" => (
-                reqwest::Method::POST,
-                format!("/2021-10-31/functions/{}/url", FUNC),
-                None,
-            ),
-            "GetFunctionUrlConfig" => (
-                reqwest::Method::GET,
-                format!("/2021-10-31/functions/{}/url", FUNC),
-                None,
-            ),
-            "UpdateFunctionUrlConfig" => (
-                reqwest::Method::PUT,
-                format!("/2021-10-31/functions/{}/url", FUNC),
-                None,
-            ),
-            "DeleteFunctionUrlConfig" => (
-                reqwest::Method::DELETE,
-                format!("/2021-10-31/functions/{}/url", FUNC),
-                None,
-            ),
-            "ListFunctionUrlConfigs" => (
-                reqwest::Method::GET,
-                format!("/2021-10-31/functions/{}/urls", FUNC),
-                None,
-            ),
-            // Per-function code-signing config (2020-06-30 in AWS).
-            "PutFunctionCodeSigningConfig" => (
-                reqwest::Method::PUT,
-                format!("/2020-06-30/functions/{}/code-signing-config", FUNC),
-                None,
-            ),
-            "GetFunctionCodeSigningConfig" => (
-                reqwest::Method::GET,
-                format!("/2020-06-30/functions/{}/code-signing-config", FUNC),
-                None,
-            ),
-            "DeleteFunctionCodeSigningConfig" => (
-                reqwest::Method::DELETE,
-                format!("/2020-06-30/functions/{}/code-signing-config", FUNC),
-                None,
-            ),
-            // Runtime management config (2021-07-20 in AWS).
-            "PutRuntimeManagementConfig" => (
-                reqwest::Method::PUT,
-                format!("/2021-07-20/functions/{}/runtime-management-config", FUNC),
-                None,
-            ),
-            "GetRuntimeManagementConfig" => (
-                reqwest::Method::GET,
-                format!("/2021-07-20/functions/{}/runtime-management-config", FUNC),
-                None,
-            ),
-            // Async invocation (2014-11-13 in AWS, but Lambda's router
-            // accepts any well-formed date prefix).
-            "InvokeAsync" => (
-                reqwest::Method::POST,
-                format!("/2014-11-13/functions/{}/invoke-async", FUNC),
-                None,
-            ),
-            // Response-streaming invocation (2021-11-15).
-            "InvokeWithResponseStream" => (
-                reqwest::Method::POST,
-                format!(
-                    "/2021-11-15/functions/{}/response-streaming-invocations",
-                    FUNC
-                ),
-                None,
-            ),
-            // Event invoke configuration (2019-09-25).
-            "PutFunctionEventInvokeConfig" => (
-                reqwest::Method::PUT,
-                format!("/2019-09-25/functions/{}/event-invoke-config", FUNC),
-                None,
-            ),
-            "UpdateFunctionEventInvokeConfig" => (
-                reqwest::Method::POST,
-                format!("/2019-09-25/functions/{}/event-invoke-config", FUNC),
-                None,
-            ),
-            "GetFunctionEventInvokeConfig" => (
-                reqwest::Method::GET,
-                format!("/2019-09-25/functions/{}/event-invoke-config", FUNC),
-                None,
-            ),
-            "DeleteFunctionEventInvokeConfig" => (
-                reqwest::Method::DELETE,
-                format!("/2019-09-25/functions/{}/event-invoke-config", FUNC),
-                None,
-            ),
-            "ListFunctionEventInvokeConfigs" => (
-                reqwest::Method::GET,
-                format!("/2019-09-25/functions/{}/event-invoke-config/list", FUNC),
-                None,
-            ),
-            // Provisioned concurrency (2019-09-30).
-            "PutProvisionedConcurrencyConfig" => (
-                reqwest::Method::PUT,
-                format!("/2019-09-30/functions/{}/provisioned-concurrency", FUNC),
-                None,
-            ),
-            "GetProvisionedConcurrencyConfig" => (
-                reqwest::Method::GET,
-                format!("/2019-09-30/functions/{}/provisioned-concurrency", FUNC),
-                None,
-            ),
-            "DeleteProvisionedConcurrencyConfig" => (
-                reqwest::Method::DELETE,
-                format!("/2019-09-30/functions/{}/provisioned-concurrency", FUNC),
-                None,
-            ),
-            "ListProvisionedConcurrencyConfigs" => (
-                reqwest::Method::GET,
-                format!("/2019-09-30/functions/{}/provisioned-concurrency", FUNC),
-                Some("List=ALL".to_string()),
-            ),
-            // Recursion config (2024-08-31).
-            "PutFunctionRecursionConfig" => (
-                reqwest::Method::PUT,
-                format!("/2024-08-31/functions/{}/recursion-config", FUNC),
-                None,
-            ),
-            "GetFunctionRecursionConfig" => (
-                reqwest::Method::GET,
-                format!("/2024-08-31/functions/{}/recursion-config", FUNC),
-                None,
-            ),
-            // Scaling config (2025-11-30).
-            "PutFunctionScalingConfig" => (
-                reqwest::Method::PUT,
-                format!("/2025-11-30/functions/{}/function-scaling-config", FUNC),
-                None,
-            ),
-            "GetFunctionScalingConfig" => (
-                reqwest::Method::GET,
-                format!("/2025-11-30/functions/{}/function-scaling-config", FUNC),
-                None,
-            ),
-            // Lambda Workflows: capacity providers (2025-11-30 API).
-            "CreateCapacityProvider" => (
-                reqwest::Method::POST,
-                "/2025-11-30/capacity-providers".to_string(),
-                None,
-            ),
-            "ListCapacityProviders" => (
-                reqwest::Method::GET,
-                "/2025-11-30/capacity-providers".to_string(),
-                None,
-            ),
-            "GetCapacityProvider" => (
-                reqwest::Method::GET,
-                "/2025-11-30/capacity-providers/test-capacity-provider".to_string(),
-                None,
-            ),
-            "UpdateCapacityProvider" => (
-                reqwest::Method::PUT,
-                "/2025-11-30/capacity-providers/test-capacity-provider".to_string(),
-                None,
-            ),
-            "DeleteCapacityProvider" => (
-                reqwest::Method::DELETE,
-                "/2025-11-30/capacity-providers/test-capacity-provider".to_string(),
-                None,
-            ),
-            "ListFunctionVersionsByCapacityProvider" => (
-                reqwest::Method::GET,
-                "/2025-11-30/capacity-providers/test-capacity-provider/function-versions"
-                    .to_string(),
-                None,
-            ),
-            // Lambda Workflows: durable executions (2025-12-01 API).
-            "GetDurableExecution" => (
-                reqwest::Method::GET,
-                "/2025-12-01/durable-executions/test-durable-execution".to_string(),
-                None,
-            ),
-            "GetDurableExecutionHistory" => (
-                reqwest::Method::GET,
-                "/2025-12-01/durable-executions/test-durable-execution/history".to_string(),
-                None,
-            ),
-            "GetDurableExecutionState" => (
-                reqwest::Method::GET,
-                "/2025-12-01/durable-executions/test-durable-execution/state".to_string(),
-                None,
-            ),
-            "CheckpointDurableExecution" => (
-                reqwest::Method::POST,
-                "/2025-12-01/durable-executions/test-durable-execution/checkpoint".to_string(),
-                None,
-            ),
-            "StopDurableExecution" => (
-                reqwest::Method::POST,
-                "/2025-12-01/durable-executions/test-durable-execution/stop".to_string(),
-                None,
-            ),
-            "ListDurableExecutionsByFunction" => (
-                reqwest::Method::GET,
-                format!("/2025-12-01/functions/{}/durable-executions", FUNC),
-                None,
-            ),
-            "SendDurableExecutionCallbackSuccess" => (
-                reqwest::Method::POST,
-                "/2025-12-01/durable-execution-callbacks/test-callback/succeed".to_string(),
-                None,
-            ),
-            "SendDurableExecutionCallbackFailure" => (
-                reqwest::Method::POST,
-                "/2025-12-01/durable-execution-callbacks/test-callback/fail".to_string(),
-                None,
-            ),
-            "SendDurableExecutionCallbackHeartbeat" => (
-                reqwest::Method::POST,
-                "/2025-12-01/durable-execution-callbacks/test-callback/heartbeat".to_string(),
-                None,
-            ),
-            // Resource-policy document API (2026-07-09). `ResourceArn` is a
-            // full function ARN in the path, so keep the placeholder distinct
-            // from `FUNC` — the `FunctionName` substitution below would
-            // otherwise rewrite the middle of the ARN.
-            "PutResourcePolicy" => (
-                reqwest::Method::PUT,
-                format!("/2026-07-09/resource-policy/{}", RBP_ARN),
-                None,
-            ),
-            "GetResourcePolicy" => (
-                reqwest::Method::GET,
-                format!("/2026-07-09/resource-policy/{}", RBP_ARN),
-                None,
-            ),
-            "DeleteResourcePolicy" => (
-                reqwest::Method::DELETE,
-                format!("/2026-07-09/resource-policy/{}", RBP_ARN),
-                None,
-            ),
-            // Default: POST to functions path
-            _ => (
-                reqwest::Method::POST,
-                format!("{}/functions", LAMBDA_PREFIX),
-                None,
-            ),
-        },
-        "s3" => match operation_name {
-            // Service-level
-            "ListBuckets" => (reqwest::Method::GET, "/".to_string(), None),
-            // Bucket operations
-            "CreateBucket" => (reqwest::Method::PUT, format!("/{}", BUCKET), None),
-            "DeleteBucket" => (reqwest::Method::DELETE, format!("/{}", BUCKET), None),
-            "HeadBucket" => (reqwest::Method::HEAD, format!("/{}", BUCKET), None),
-            "ListObjects" => (reqwest::Method::GET, format!("/{}", BUCKET), None),
-            "ListObjectsV2" => (
-                reqwest::Method::GET,
-                format!("/{}", BUCKET),
-                Some("list-type=2".to_string()),
-            ),
-            "ListObjectVersions" => (
-                reqwest::Method::GET,
-                format!("/{}", BUCKET),
-                Some("versions".to_string()),
-            ),
-            // Bucket sub-resources
-            "GetBucketTagging" => (
-                reqwest::Method::GET,
-                format!("/{}", BUCKET),
-                Some("tagging".to_string()),
-            ),
-            "PutBucketTagging" => (
-                reqwest::Method::PUT,
-                format!("/{}", BUCKET),
-                Some("tagging".to_string()),
-            ),
-            "DeleteBucketTagging" => (
-                reqwest::Method::DELETE,
-                format!("/{}", BUCKET),
-                Some("tagging".to_string()),
-            ),
-            "GetBucketVersioning" => (
-                reqwest::Method::GET,
-                format!("/{}", BUCKET),
-                Some("versioning".to_string()),
-            ),
-            "PutBucketVersioning" => (
-                reqwest::Method::PUT,
-                format!("/{}", BUCKET),
-                Some("versioning".to_string()),
-            ),
-            "GetBucketLocation" => (
-                reqwest::Method::GET,
-                format!("/{}", BUCKET),
-                Some("location".to_string()),
-            ),
-            "GetBucketAcl" => (
-                reqwest::Method::GET,
-                format!("/{}", BUCKET),
-                Some("acl".to_string()),
-            ),
-            "PutBucketAcl" => (
-                reqwest::Method::PUT,
-                format!("/{}", BUCKET),
-                Some("acl".to_string()),
-            ),
-            "GetBucketPolicy" => (
-                reqwest::Method::GET,
-                format!("/{}", BUCKET),
-                Some("policy".to_string()),
-            ),
-            "PutBucketPolicy" => (
-                reqwest::Method::PUT,
-                format!("/{}", BUCKET),
-                Some("policy".to_string()),
-            ),
-            "DeleteBucketPolicy" => (
-                reqwest::Method::DELETE,
-                format!("/{}", BUCKET),
-                Some("policy".to_string()),
-            ),
-            "GetBucketCors" => (
-                reqwest::Method::GET,
-                format!("/{}", BUCKET),
-                Some("cors".to_string()),
-            ),
-            "PutBucketCors" => (
-                reqwest::Method::PUT,
-                format!("/{}", BUCKET),
-                Some("cors".to_string()),
-            ),
-            "DeleteBucketCors" => (
-                reqwest::Method::DELETE,
-                format!("/{}", BUCKET),
-                Some("cors".to_string()),
-            ),
-            "GetBucketLifecycleConfiguration" => (
-                reqwest::Method::GET,
-                format!("/{}", BUCKET),
-                Some("lifecycle".to_string()),
-            ),
-            "PutBucketLifecycleConfiguration" => (
-                reqwest::Method::PUT,
-                format!("/{}", BUCKET),
-                Some("lifecycle".to_string()),
-            ),
-            "DeleteBucketLifecycle" => (
-                reqwest::Method::DELETE,
-                format!("/{}", BUCKET),
-                Some("lifecycle".to_string()),
-            ),
-            "GetBucketNotificationConfiguration" => (
-                reqwest::Method::GET,
-                format!("/{}", BUCKET),
-                Some("notification".to_string()),
-            ),
-            "PutBucketNotificationConfiguration" => (
-                reqwest::Method::PUT,
-                format!("/{}", BUCKET),
-                Some("notification".to_string()),
-            ),
-            "GetBucketEncryption" => (
-                reqwest::Method::GET,
-                format!("/{}", BUCKET),
-                Some("encryption".to_string()),
-            ),
-            "PutBucketEncryption" => (
-                reqwest::Method::PUT,
-                format!("/{}", BUCKET),
-                Some("encryption".to_string()),
-            ),
-            "DeleteBucketEncryption" => (
-                reqwest::Method::DELETE,
-                format!("/{}", BUCKET),
-                Some("encryption".to_string()),
-            ),
-            // Object operations
-            "PutObject" => (reqwest::Method::PUT, format!("/{}/{}", BUCKET, KEY), None),
-            "GetObject" => (reqwest::Method::GET, format!("/{}/{}", BUCKET, KEY), None),
-            "HeadObject" => (reqwest::Method::HEAD, format!("/{}/{}", BUCKET, KEY), None),
-            "DeleteObject" => (
-                reqwest::Method::DELETE,
-                format!("/{}/{}", BUCKET, KEY),
-                None,
-            ),
-            "CopyObject" => (reqwest::Method::PUT, format!("/{}/{}", BUCKET, KEY), None),
-            // Object annotations. `AnnotationName` is bound to the
-            // `annotationName` query key (`@httpQuery`), so
-            // `append_http_query_from_model` supplies it from the variant under
-            // that wire key — which is also what separates GetObjectAnnotation
-            // (`annotationName` present) from ListObjectAnnotations (absent) on
-            // the shared URI.
-            "PutObjectAnnotation" => (
-                reqwest::Method::PUT,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("annotation".to_string()),
-            ),
-            "GetObjectAnnotation" => (
-                reqwest::Method::GET,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("annotation".to_string()),
-            ),
-            "DeleteObjectAnnotation" => (
-                reqwest::Method::DELETE,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("annotation".to_string()),
-            ),
-            "ListObjectAnnotations" => (
-                reqwest::Method::GET,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("annotation".to_string()),
-            ),
-            "UpdateBucketMetadataAnnotationTableConfiguration" => (
-                reqwest::Method::PUT,
-                format!("/{}", BUCKET),
-                Some("metadataAnnotationTable".to_string()),
-            ),
-            "GetObjectTagging" => (
-                reqwest::Method::GET,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("tagging".to_string()),
-            ),
-            "PutObjectTagging" => (
-                reqwest::Method::PUT,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("tagging".to_string()),
-            ),
-            "DeleteObjectTagging" => (
-                reqwest::Method::DELETE,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("tagging".to_string()),
-            ),
-            "GetObjectAcl" => (
-                reqwest::Method::GET,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("acl".to_string()),
-            ),
-            "PutObjectAcl" => (
-                reqwest::Method::PUT,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("acl".to_string()),
-            ),
-            // Multipart upload
-            "CreateMultipartUpload" => (
-                reqwest::Method::POST,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("uploads".to_string()),
-            ),
-            "CompleteMultipartUpload" => (
-                reqwest::Method::POST,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("uploadId=test-upload-id".to_string()),
-            ),
-            "AbortMultipartUpload" => (
-                reqwest::Method::DELETE,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("uploadId=test-upload-id".to_string()),
-            ),
-            "UploadPart" => (
-                reqwest::Method::PUT,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("partNumber=1&uploadId=test-upload-id".to_string()),
-            ),
-            "ListMultipartUploads" => (
-                reqwest::Method::GET,
-                format!("/{}", BUCKET),
-                Some("uploads".to_string()),
-            ),
-            "ListParts" => (
-                reqwest::Method::GET,
-                format!("/{}/{}", BUCKET, KEY),
-                Some("uploadId=test-upload-id".to_string()),
-            ),
-            // Batch delete
-            "DeleteObjects" => (
-                reqwest::Method::POST,
-                format!("/{}", BUCKET),
-                Some("delete".to_string()),
-            ),
-            // Default: GET on the bucket
-            _ => (reqwest::Method::GET, format!("/{}", BUCKET), None),
-        },
-        // Unknown REST service: fall back to POST at root
-        _ => (reqwest::Method::POST, "/".to_string(), None),
-    }
-}
-
-/// Append the `@httpQuery`-bound members of an operation's input shape
-/// to a legacy-routed URL. Used for Lambda / S3 where the path is
-/// hand-curated but query parameters still need to be honored so
-/// negative/boundary variants can target them.
-pub(super) fn append_http_query_from_model(
-    base_url: &str,
+    op: &crate::smithy::Operation,
     model: &ServiceModel,
-    operation_name: &str,
     input: &serde_json::Value,
-) -> String {
-    use crate::smithy::ShapeType;
-
-    let obj = match input.as_object() {
-        Some(o) => o,
-        None => return base_url.to_string(),
-    };
-    let op = match model.operations.iter().find(|o| o.name == operation_name) {
-        Some(op) => op,
-        None => return base_url.to_string(),
-    };
-    let members: Vec<crate::smithy::Member> = op
-        .input_shape
-        .as_ref()
-        .and_then(|id| model.shapes.get(id))
-        .and_then(|shape| match &shape.shape_type {
-            ShapeType::Structure { members } => Some(members.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    let mut additions: Vec<String> = Vec::new();
-    for member in &members {
-        let target_traits = model.shapes.get(&member.target).map(|s| &s.traits);
-        let query_name = member
-            .traits
-            .http_query
-            .clone()
-            .or_else(|| target_traits.and_then(|t| t.http_query.clone()));
-        if let Some(qk) = query_name {
-            if let Some(val) = obj.get(&member.name) {
-                let mut parts: Vec<String> = Vec::new();
-                append_query(&mut parts, &qk, val);
-                additions.extend(parts);
-            }
-        }
+) -> serde_json::Value {
+    let mut input = input.clone();
+    if service_name != "s3" || !op.http_uri.as_deref().is_some_and(|u| u.contains("{Key+}")) {
+        return input;
     }
-    if additions.is_empty() {
-        return base_url.to_string();
+    let Some(obj) = input.as_object_mut() else {
+        return input;
+    };
+    let is_label =
+        crate::generators::get_members(model, op.input_shape.as_deref().unwrap_or_default())
+            .iter()
+            .any(|m| m.name == "Key" && m.traits.http_label);
+    let omitted = !matches!(obj.get("Key"), Some(serde_json::Value::String(k)) if !k.is_empty());
+    if is_label && omitted {
+        obj.insert(
+            "Key".to_string(),
+            serde_json::Value::String("k".repeat(S3_MAX_KEY_BYTES + 1)),
+        );
     }
-    let joiner = if base_url.contains('?') { '&' } else { '?' };
-    format!("{}{}{}", base_url, joiner, additions.join("&"))
-}
-
-/// Preserve the pre-existing hardcoded-table behavior for Lambda / S3.
-pub(super) fn legacy_rest_request(
-    endpoint: &str,
-    service_name: &str,
-    operation_name: &str,
-    variant: &TestVariant,
-) -> RestRequestParts {
-    let (method, path, query) = rest_request_config(service_name, operation_name);
-    // Hardcoded paths in `rest_request_config` use placeholder identifiers
-    // (`test-conformance-function`, `test-conformance-bucket`, `test-key`).
-    // Strategies that need to exercise alternative identifier forms
-    // (id_forms — bare/ARN/partial) inject the desired value into
-    // `variant.input`; substitute it in here so the URL actually carries
-    // the form being tested. Without this swap, the probe would silently
-    // send the placeholder name and the new forms would be invisible at
-    // the wire layer.
-    let path = legacy_substitute_identifiers(&path, service_name, &variant.input);
-    let url = match query {
-        Some(qs) => format!("{}{}?{}", endpoint, path, qs),
-        None => format!("{}{}", endpoint, path),
-    };
-    let has_body = matches!(method, reqwest::Method::POST | reqwest::Method::PUT);
-    let body = if has_body {
-        Some(serde_json::to_vec(&variant.input).unwrap_or_else(|_| b"{}".to_vec()))
-    } else {
-        None
-    };
-    (method, url, Vec::new(), body)
-}
-
-/// Replace the hardcoded placeholder identifiers in legacy REST paths
-/// with the value the variant put in its input, when present. Mirrors
-/// the substitution `build_http_request_from_model` does via
-/// `@httpLabel`, but for the hand-curated Lambda/S3 routing tables.
-pub(super) fn legacy_substitute_identifiers(
-    path: &str,
-    service_name: &str,
-    input: &serde_json::Value,
-) -> String {
-    let obj = match input.as_object() {
-        Some(o) => o,
-        None => return path.to_string(),
-    };
-    let mut out = path.to_string();
-    let subs: &[(&str, &str)] = match service_name {
-        "lambda" => &[
-            // `ResourceArn` first: it spans a whole ARN, and the
-            // `FunctionName` entry below would otherwise rewrite part of it.
-            (
-                "arn:aws:lambda:us-east-1:000000000000:function:test-rbp-function",
-                "ResourceArn",
-            ),
-            ("test-conformance-function", "FunctionName"),
-            // Layer ops route on `LayerName` (and an optional
-            // numeric `VersionNumber`). Substitute from the variant
-            // so negative/boundary variants reach those routes too.
-            ("test-layer", "LayerName"),
-            ("__VERSION__", "VersionNumber"),
-            // Alias ops use `LATEST` as the path placeholder. Drive
-            // negative variants through the same slot.
-            ("LATEST", "Name"),
-            // Lambda Workflows path labels (2025-11-30 + 2025-12-01).
-            ("test-capacity-provider", "CapacityProviderName"),
-            ("test-durable-execution", "DurableExecutionArn"),
-            ("test-callback", "CallbackId"),
-        ],
-        "s3" => &[("test-conformance-bucket", "Bucket"), ("test-key", "Key")],
-        _ => &[],
-    };
-    for (placeholder, member) in subs {
-        match obj.get(*member) {
-            // For Lambda an empty string is handled like an omitted label
-            // below: no Smithy client serializes an empty `@httpLabel`
-            // (smithy-rs fails the build with "cannot be empty or unset"), and
-            // substituting "" collapses the segment into another operation's
-            // URL -- `GET /2015-03-31/functions/` is ListFunctions (#1645), not
-            // GetFunction with a too-short name. S3 keeps the literal empty
-            // value: its sentinel is a well-formed object key, so an empty
-            // `Key` must not become a request for a real key.
-            Some(serde_json::Value::String(value))
-                if !value.is_empty() || service_name != "lambda" =>
-            {
-                // The legacy path is unencoded; the variant value may be raw
-                // ARN or already URL-encoded. Trust the variant — the
-                // id_forms strategy decides whether to URL-encode.
-                out = out.replace(placeholder, value);
-            }
-            Some(serde_json::Value::Number(value)) => {
-                // Numeric httpLabel members (e.g. Lambda `VersionNumber`)
-                // need to be stringified before the path substitution.
-                out = out.replace(placeholder, &value.to_string());
-            }
-            None | Some(serde_json::Value::String(_)) => {
-                // The variant omitted this httpLabel member entirely
-                // (e.g. `negative_omit_FunctionName`) or, for Lambda, set it
-                // to "". Real
-                // AWS would never see such a request — the SDK refuses to
-                // build one — but synthetic probes can. Substitute a
-                // clearly-invalid sentinel for S3 so a path like
-                // `GET /{Bucket}?prefix=...` doesn't collapse to `/` and
-                // hit ListBuckets (a 200 happy-path response). Uppercase
-                // + underscores violate S3's bucket naming rules, so the
-                // server reliably returns InvalidBucketName.
-                //
-                // Lambda needs the same treatment: omitting `FunctionName`
-                // from `GET /functions/{FunctionName}` collapses to
-                // `GET /functions/`, which real AWS — and now fakecloud
-                // (issue #1645) — routes to `ListFunctions` (200), not a
-                // client error. A non-empty sentinel keeps the probe on
-                // the `GetFunction` route, where a nonexistent name yields
-                // the expected 4xx. Other services keep the empty-string
-                // collapse — their dispatchers reject empty path labels
-                // cleanly.
-                out = out.replace(placeholder, omitted_label_sentinel(service_name, member));
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// The value the legacy Lambda/S3 paths carry for an omitted (or empty)
-/// `@httpLabel`. It must target the operation's own route and make real AWS
-/// answer with a client error.
-///
-/// For most labels a well-formed name that does not exist does that
-/// (`GetFunction` -> ResourceNotFoundException). Lambda layer operations are
-/// different: `PublishLayerVersion` creates the layer and `DeleteLayerVersion`
-/// is idempotent, so no well-formed `LayerName` is an error there. Their
-/// sentinel instead violates the `LayerName` `@pattern`
-/// (`[a-zA-Z0-9-_]+` or a layer ARN), which Lambda rejects with
-/// InvalidParameterValueException before looking anything up.
-pub(super) fn omitted_label_sentinel(service_name: &str, member: &str) -> &'static str {
-    match (service_name, member) {
-        ("lambda", "LayerName") => "INVALID!OMITTED!LABEL",
-        ("s3" | "lambda", _) => "INVALID_OMITTED_LABEL",
-        _ => "",
-    }
+    input
 }
 
 /// Build an HTTP request for an operation from the `@http` / `@httpLabel` /
@@ -918,9 +69,11 @@ pub(super) fn build_http_request_from_model(
         _ => serde_json::Map::new(),
     };
 
-    let mut headers: Vec<(String, String)> = Vec::new();
     let mut query_parts: Vec<String> = Vec::new();
     let mut payload_value: Option<serde_json::Value> = None;
+    // Whether the input shape binds an `@httpPayload` member at all: the
+    // body is then that member alone, and empty when it is absent.
+    let mut has_payload_member = false;
 
     // Walk the input shape's members to discover http bindings. Label / query /
     // header / payload traits can live on either the member or the referenced
@@ -935,8 +88,12 @@ pub(super) fn build_http_request_from_model(
         })
         .unwrap_or_default();
 
-    // restXml headers are bound once, after the body is built, by the shared
-    // binder; this loop only collects them for the other REST protocols.
+    // Header (`@httpHeader` / `@httpPrefixHeaders`) members are bound once,
+    // after the body is built, by the shared binder (`rest_headers`): the HTTP
+    // binding rules are protocol-independent (http-date timestamps,
+    // comma-joined lists, base64 `@mediaType` strings), and integrity headers
+    // are computed over the body actually sent. This loop only drains them so
+    // they do not also travel in a restJson1 body.
     let rest_xml = model.is_rest_xml();
     for member in &members {
         let target_traits = model.shapes.get(&member.target).map(|s| &s.traits);
@@ -947,34 +104,21 @@ pub(super) fn build_http_request_from_model(
             .http_query
             .clone()
             .or_else(|| target_traits.and_then(|t| t.http_query.clone()));
-        // restXml: `bind_headers` reads header members straight from `input`.
-        let header_name = if rest_xml {
-            None
-        } else {
-            member_traits
-                .http_header
-                .clone()
-                .or_else(|| target_traits.and_then(|t| t.http_header.clone()))
-        };
+        let is_header = member_traits.http_header.is_some()
+            || member_traits.http_prefix_headers.is_some()
+            || target_traits
+                .map(|t| t.http_header.is_some() || t.http_prefix_headers.is_some())
+                .unwrap_or(false);
         let is_payload =
             member_traits.http_payload || target_traits.map(|t| t.http_payload).unwrap_or(false);
+        has_payload_member |= is_payload;
 
-        if is_label || query_name.is_some() || header_name.is_some() || is_payload {
+        if is_label || query_name.is_some() || is_header || is_payload {
             if let Some(val) = remaining.remove(&member.name) {
                 if let Some(qk) = query_name {
                     append_query(&mut query_parts, &qk, &val);
-                } else if let Some(hk) = header_name {
-                    if let Some(hv) = value_to_header_string(&val) {
-                        headers.push((hk, hv));
-                    }
                 } else if is_payload {
                     payload_value = Some(val);
-                }
-                // is_label handled below from `remaining` ∪ `members` (we already
-                // removed; re-use the popped value via a side map)
-                if is_label {
-                    // Re-insert for label substitution below. Simpler: keep a
-                    // separate label map rather than re-reading `remaining`.
                 }
             }
         }
@@ -1022,29 +166,20 @@ pub(super) fn build_http_request_from_model(
         method,
         reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::DELETE
     );
+    let mut content_type: Option<&str> = None;
     let body = if rest_xml {
         // restXml bodies are XML documents built from the binding traits,
-        // not the JSON the generators produce, and the header members are
-        // bound by the shared restXml binder (http-date timestamps, prefix
-        // headers, @mediaType, computed integrity headers) over that body.
-        let (body, content_type) = super::rest_xml::rest_xml_body(op, model, input);
-        headers = super::rest_headers::bind_headers(
-            op,
-            model,
-            input,
-            body.as_deref().unwrap_or_default(),
-        );
-        if let Some(ct) = content_type {
-            if !headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            {
-                headers.push(("Content-Type".to_string(), ct.to_string()));
-            }
-        }
+        // not the JSON the generators produce.
+        let (body, ct) = super::rest_xml::rest_xml_body(op, model, input);
+        content_type = ct;
         body
     } else if let Some(v) = payload_value {
         Some(value_to_body(&v).into_bytes())
+    } else if has_payload_member {
+        // An absent `@httpPayload` member is no body, as an SDK sends it
+        // (not `{}`, which is a payload: Lambda InvokeAsync accepts `{}` as
+        // an event and refuses an empty body).
+        None
     } else if is_bodyless_method {
         None
     } else {
@@ -1058,6 +193,16 @@ pub(super) fn build_http_request_from_model(
             Some(serde_json::to_vec(&serde_json::Value::Object(remaining)).unwrap_or_default())
         }
     };
+    let mut headers =
+        super::rest_headers::bind_headers(op, model, input, body.as_deref().unwrap_or_default());
+    if let Some(ct) = content_type {
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        {
+            headers.push(("Content-Type".to_string(), ct.to_string()));
+        }
+    }
 
     Some((method, path_and_query, headers, body))
 }
@@ -1162,15 +307,6 @@ pub(super) fn append_query(out: &mut Vec<String>, key: &str, v: &serde_json::Val
             }
         }
         serde_json::Value::Null | serde_json::Value::Object(_) => {}
-    }
-}
-
-pub(super) fn value_to_header_string(v: &serde_json::Value) -> Option<String> {
-    match v {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        _ => None,
     }
 }
 
