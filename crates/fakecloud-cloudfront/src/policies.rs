@@ -744,13 +744,17 @@ pub(crate) fn require_if_match(req: &AwsRequest) -> Result<String, AwsServiceErr
         .get(IF_MATCH)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-        .ok_or_else(|| {
-            aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidIfMatchVersion",
-                "Missing If-Match header",
-            )
-        })
+        .ok_or_else(invalid_if_match)
+}
+
+/// Text recorded from real AWS on `UpdateDistribution` on 2026-11-09, shared by
+/// every resource's `If-Match`.
+pub(crate) fn invalid_if_match() -> AwsServiceError {
+    aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidIfMatchVersion",
+        "The If-Match version is missing or not valid for the resource.",
+    )
 }
 
 /// Map a logical resource "kind" to the Smithy-declared error shape name used
@@ -794,11 +798,13 @@ pub(crate) fn not_found(kind: &str, id: &str) -> AwsServiceError {
     )
 }
 
+/// Text recorded from real AWS on `UpdateDistribution` and `DeleteDistribution` on
+/// 2026-11-09, shared by every resource's `If-Match`.
 pub(crate) fn precondition_failed() -> AwsServiceError {
     aws_error(
         StatusCode::PRECONDITION_FAILED,
         "PreconditionFailed",
-        "If-Match header does not match the current ETag",
+        "The request failed because it didn't meet the preconditions in one or more request-header fields.",
     )
 }
 

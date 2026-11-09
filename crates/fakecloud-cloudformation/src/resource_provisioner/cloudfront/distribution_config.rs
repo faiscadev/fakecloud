@@ -44,7 +44,9 @@ use fakecloud_cloudfront::model::{
     StringSchemaConfig, TenantConfig, TrustStoreConfig, TrustedKeyGroupIdList, TrustedKeyGroups,
     TrustedSigners, ViewerCertificate, ViewerMtlsConfig, VpcOriginConfig,
 };
-use fakecloud_cloudfront::{canonicalize_distribution_config, ConfigRequest};
+use fakecloud_cloudfront::{
+    canonicalize_distribution_config, canonicalize_distribution_update, ConfigRequest,
+};
 use serde_json::Value;
 
 type CfnResult<T> = Result<T, String>;
@@ -56,6 +58,7 @@ type CfnResult<T> = Result<T, String>;
 pub(super) fn cfn_distribution_config(
     cfg: &Value,
     caller_reference: String,
+    stored: Option<&DistributionConfig>,
 ) -> CfnResult<DistributionConfig> {
     let at = |path: &'static str| move |e: String| format!("DistributionConfig.{path}: {e}");
 
@@ -187,10 +190,13 @@ pub(super) fn cfn_distribution_config(
         .viewer_certificate
         .as_ref()
         .is_none_or(|vc| vc.minimum_protocol_version.is_none());
-    // A template states the whole resource and omitted members take defaults,
-    // on a stack update too, so both go through the rules of a create.
-    canonicalize_distribution_config(&mut config, ConfigRequest::Create)
-        .map_err(|e| invalid_request(e.message().as_str()))?;
+    // Inferred: a stack update goes through `UpdateDistribution`, so it meets the same
+    // rules as an API update, with the schema defaults having filled all three TTLs.
+    match stored {
+        Some(stored) => canonicalize_distribution_update(stored, &mut config),
+        None => canonicalize_distribution_config(&mut config, ConfigRequest::Create),
+    }
+    .map_err(|e| invalid_request(e.message().as_str()))?;
     // Recorded from real CloudFormation on 2026-11-09 for a multi-tenant template
     // with no `ViewerCertificate` at all. Taking one that names a certificate but
     // no protocol version to fail alike, and an explicit version to pass, is
@@ -912,7 +918,7 @@ mod tests {
     }
 
     fn translate(cfg: &Value) -> DistributionConfig {
-        cfn_distribution_config(cfg, "ref".to_string()).expect("translates")
+        cfn_distribution_config(cfg, "ref".to_string(), None).expect("translates")
     }
 
     /// The `CustomErrorResponses` block CDK synthesizes for a SPA
@@ -1012,6 +1018,7 @@ mod tests {
         let err = cfn_distribution_config(
             &with(json!({"CustomErrorResponses": [{"ResponsePagePath": "/index.html"}]})),
             "ref".to_string(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("CustomErrorResponses[0]"), "{err}");
@@ -1074,6 +1081,7 @@ mod tests {
         let err = cfn_distribution_config(
             &with(json!({"CacheBehaviors": [{"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all"}]})),
             "ref".to_string(),
+        None,
         )
         .unwrap_err();
         assert!(
@@ -1195,7 +1203,7 @@ mod tests {
     }
 
     fn translate_err(cfg: &Value) -> String {
-        cfn_distribution_config(cfg, "ref".to_string()).unwrap_err()
+        cfn_distribution_config(cfg, "ref".to_string(), None).unwrap_err()
     }
 
     #[test]
@@ -1448,6 +1456,48 @@ mod tests {
         assert_eq!(
             translate_err(&neither),
             format!("{PREFIX}The CachePolicyId field is required for a multi-tenant distribution.")
+        );
+    }
+
+    /// Inferred: a stack update follows `UpdateDistribution`'s rules.
+    #[test]
+    fn a_stack_update_follows_the_update_rules() {
+        let stored = translate(&base());
+        let update = |cfg: &Value| {
+            cfn_distribution_config(cfg, stored.caller_reference.clone(), Some(&stored))
+        };
+
+        // Out of order is stored as given on an update, unlike on a create.
+        let mut inverted = base();
+        inverted["DefaultCacheBehavior"]["MinTTL"] = json!(100_000);
+        let config = update(&inverted).expect("accepted");
+        let dcb = &config.default_cache_behavior;
+        assert_eq!(
+            (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl),
+            (Some(100_000), Some(86_400), Some(31_536_000))
+        );
+
+        // The mode can't flip.
+        let mut flipped = with(json!({"DefaultCacheBehavior": {
+            "TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all", "CachePolicyId": "cp"}}));
+        flipped["ConnectionMode"] = json!("tenant-only");
+        flipped["ViewerCertificate"] =
+            json!({"CloudFrontDefaultCertificate": true, "MinimumProtocolVersion": "TLSv1"});
+        assert!(
+            update(&flipped).unwrap_err().contains("ConnectionMode"),
+            "standard to multi-tenant"
+        );
+        let tenant = translate(&flipped);
+        let err = cfn_distribution_config(&base(), tenant.caller_reference.clone(), Some(&tenant))
+            .unwrap_err();
+        assert!(err.contains("Price class is missing"), "{err}");
+
+        // Nor can staging.
+        let mut staging = base();
+        staging["Staging"] = json!(true);
+        assert!(
+            update(&staging).unwrap_err().contains("isStaging"),
+            "staging"
         );
     }
 

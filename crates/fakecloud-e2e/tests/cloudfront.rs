@@ -345,8 +345,6 @@ async fn cloudfront_complex_config_roundtrips() {
                         .unwrap(),
                 )
                 .min_ttl(0)
-                .default_ttl(86_400)
-                .max_ttl(31_536_000)
                 .default_ttl(86400)
                 .max_ttl(31536000)
                 .forwarded_values(
@@ -1479,6 +1477,76 @@ async fn cloudfront_if_match_superseded_and_malformed_differ() {
         assert!(err.is_no_such_distribution(), "{err:?}");
         assert_eq!(err.message(), Some(message));
     }
+}
+
+/// Recorded from real AWS on 2026-11-09.
+#[tokio::test]
+async fn cloudfront_update_cannot_change_immutable_members() {
+    use aws_sdk_cloudfront::error::ProvideErrorMetadata;
+
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(minimal_config("e2e-immutable"))
+        .send()
+        .await
+        .unwrap();
+    let id = create.distribution().unwrap().id().to_string();
+    let etag = create.e_tag().unwrap().to_string();
+
+    let mut staging = minimal_config("e2e-immutable");
+    staging.staging = Some(true);
+    for (config, message) in [
+        (
+            minimal_config("e2e-immutable-other"),
+            "The caller reference cannot be modified.",
+        ),
+        (staging, "The isStaging status cannot be changed."),
+    ] {
+        let err = cf
+            .update_distribution()
+            .id(&id)
+            .if_match(&etag)
+            .distribution_config(config)
+            .send()
+            .await
+            .unwrap_err()
+            .into_service_error();
+        assert!(err.is_illegal_update(), "{err:?}");
+        assert_eq!(err.message(), Some(message));
+    }
+
+    let tenant = cf
+        .create_distribution()
+        .distribution_config(tenant_only_config("e2e-immutable-tenant"))
+        .send()
+        .await
+        .unwrap();
+    let err = cf
+        .associate_alias()
+        .target_distribution_id(tenant.distribution().unwrap().id())
+        .alias("a.example.com")
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(
+        err.message(),
+        Some("You can't specify the Alias field for a mutli-tenant distribution.")
+    );
+
+    let err = cf
+        .copy_distribution()
+        .primary_distribution_id(&id)
+        .if_match("garbage")
+        .caller_reference("e2e-immutable-copy")
+        .staging(true)
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert!(err.is_invalid_if_match_version(), "{err:?}");
 }
 
 /// Recorded from real AWS on 2026-11-09.

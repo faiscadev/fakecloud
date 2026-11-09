@@ -14,7 +14,8 @@ use crate::policies::{
 };
 use crate::router::Route;
 use crate::service::{
-    aws_error, esc, extract_body_field, generate_id_with_prefix, invalid_argument, xml_response,
+    alias_refused_for_multi_tenant, aws_error, check_etag_shape, esc, extract_body_field,
+    generate_etag, generate_id_with_prefix, invalid_argument, no_such_distribution, xml_response,
     CloudFrontService,
 };
 use crate::xml_io;
@@ -353,6 +354,17 @@ impl CloudFrontService {
             ));
         }
 
+        // Inferred from `AssociateAlias`: a multi-tenant distribution takes no alias
+        // however it arrives. Checked before the domain is detached from its owner.
+        if let Target::Distribution(did) = &target {
+            if account
+                .distributions
+                .get(did)
+                .is_some_and(|d| d.config.is_multi_tenant())
+            {
+                return Err(alias_refused_for_multi_tenant());
+            }
+        }
         // Detach the domain from whichever tenant or distribution currently
         // owns it, then attach it to the target. Domains are unique across
         // resources, so a plain move is correct.
@@ -461,7 +473,6 @@ impl CloudFrontService {
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = route_id(route, "Distribution")?;
-        let if_match = require_if_match(req)?;
         let staging_id = req
             .query_params
             .get("StagingDistributionId")
@@ -471,31 +482,45 @@ impl CloudFrontService {
         let account = state
             .accounts
             .get_mut(&req.account_id)
-            .ok_or_else(|| not_found("Distribution", &id))?;
-        let staging_config = account
+            .ok_or_else(|| no_such_distribution(&id))?;
+        let staging = account
             .distributions
             .get(&staging_id)
-            .ok_or_else(|| not_found("Distribution", &staging_id))?
-            .config
-            .clone();
+            .ok_or_else(|| no_such_distribution(&staging_id))?;
+        let (staging_config, staging_etag) = (staging.config.clone(), staging.etag.clone());
         let dist = account
             .distributions
             .get_mut(&id)
-            .ok_or_else(|| not_found("Distribution", &id))?;
-        if dist.etag != if_match {
+            .ok_or_else(|| no_such_distribution(&id))?;
+        // `<primary ETag>, <staging ETag>`. A malformed pair recorded from real AWS
+        // on 2026-11-09; a lone primary ETag staying accepted is inferred.
+        let if_match = require_if_match(req)?;
+        let mut etags = if_match.split(',').map(str::trim);
+        let primary_match = etags.next().unwrap_or_default();
+        let staging_match = etags.next();
+        if etags.next().is_some() {
+            return Err(crate::policies::invalid_if_match());
+        }
+        check_etag_shape(primary_match, &dist.etag)?;
+        if let Some(staging_match) = staging_match {
+            check_etag_shape(staging_match, &staging_etag)?;
+        }
+        if primary_match != dist.etag || staging_match.is_some_and(|m| m != staging_etag) {
             return Err(precondition_failed());
         }
         // Promote: the staging distribution's configuration becomes the
         // primary distribution's live config. AWS copies the config wholesale
         // and the resulting primary is no longer a staging distribution.
         // Previously this only bumped the ETag, leaving the old config live.
-        // Alternate domain names are not part of the promotion: a staging
-        // distribution carries none, and the primary keeps its own.
+        // Alternate domain names and the continuous deployment policy are not part
+        // of the promotion: AWS documents that the primary keeps its own.
         let mut promoted = staging_config;
         promoted.staging = Some(false);
         promoted.aliases = dist.config.aliases.take();
+        promoted.continuous_deployment_policy_id =
+            dist.config.continuous_deployment_policy_id.take();
         dist.config = promoted;
-        dist.etag = generate_id_with_prefix("E");
+        dist.etag = generate_etag();
         dist.last_modified_time = Utc::now();
         let snap = dist.clone();
         drop(state);

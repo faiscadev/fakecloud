@@ -64,7 +64,7 @@ pub fn canonicalize_distribution_config(
 ///
 /// A body with those fixed still can't change the mode: that refusal, using the
 /// same `IllegalUpdate` code, is inferred.
-pub(crate) fn canonicalize_distribution_update(
+pub fn canonicalize_distribution_update(
     stored: &DistributionConfig,
     config: &mut DistributionConfig,
 ) -> Result<(), AwsServiceError> {
@@ -79,6 +79,14 @@ pub(crate) fn canonicalize_distribution_update(
     canonicalize_distribution_config(config, ConfigRequest::Update)?;
     if config.is_multi_tenant() != stored.is_multi_tenant() {
         return Err(illegal_update(MODE_IS_FIXED));
+    }
+    // Recorded from real AWS on 2026-11-09. Running these after the rules above is
+    // inferred.
+    if config.caller_reference != stored.caller_reference {
+        return Err(illegal_update("The caller reference cannot be modified."));
+    }
+    if config.staging.unwrap_or(false) != stored.staging.unwrap_or(false) {
+        return Err(illegal_update("The isStaging status cannot be changed."));
     }
     Ok(())
 }
@@ -1097,6 +1105,32 @@ mod tests {
         let mut explicit_direct = standard.clone();
         explicit_direct.connection_mode = Some("direct".into());
         assert_eq!(update_refusal(&standard, explicit_direct), None);
+    }
+
+    /// Recorded from real AWS on 2026-11-09.
+    #[test]
+    fn an_update_cannot_change_the_caller_reference_or_staging() {
+        let standard = standard_config();
+        let mut renamed = standard.clone();
+        renamed.caller_reference = "other".into();
+        assert_eq!(
+            update_refusal(&standard, renamed),
+            illegal("The caller reference cannot be modified.")
+        );
+        let staging_message = illegal("The isStaging status cannot be changed.");
+        let mut to_staging = standard.clone();
+        to_staging.staging = Some(true);
+        assert_eq!(
+            update_refusal(&standard, to_staging.clone()),
+            staging_message
+        );
+        let mut to_primary = to_staging.clone();
+        to_primary.staging = Some(false);
+        assert_eq!(update_refusal(&to_staging, to_primary), staging_message);
+        // Omitted on the body means not staging.
+        let mut omitted = standard.clone();
+        omitted.staging = None;
+        assert_eq!(update_refusal(&standard, omitted), None);
     }
 
     /// Recorded from real AWS `CopyDistribution` on 2026-11-09, except `false`.

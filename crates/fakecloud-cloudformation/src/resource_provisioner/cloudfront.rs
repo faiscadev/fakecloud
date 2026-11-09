@@ -70,7 +70,7 @@ impl ResourceProvisioner {
             .ok_or_else(|| "DistributionConfig is required".to_string())?;
 
         let caller_reference = format!("cfn-{}-{}", resource.logical_id, Uuid::new_v4().simple());
-        let config = cfn_distribution_config(cfg, caller_reference)?;
+        let config = cfn_distribution_config(cfg, caller_reference, None)?;
 
         // Mint distribution id + ARN + domain in the same shape the
         // CloudFront service uses.
@@ -89,16 +89,7 @@ impl ResourceProvisioner {
             },
             |a, id| a.distributions.contains_key(id),
         );
-        // `E` and 13 upper-case alphanumerics, the shape of a real ETag: an
-        // `If-Match` of any other shape is refused as malformed once superseded.
-        let etag_suffix: String = Uuid::new_v4()
-            .simple()
-            .to_string()
-            .chars()
-            .take(13)
-            .collect::<String>()
-            .to_uppercase();
-        let etag = format!("E{etag_suffix}");
+        let etag = fakecloud_cloudfront::generate_etag();
         let domain_name = format!("{}.cloudfront.net", id.to_lowercase());
         let arn = fakecloud_cloudfront::distribution_arn(&self.region, &self.account_id, &id);
 
@@ -148,16 +139,6 @@ impl ResourceProvisioner {
             .get("DistributionConfig")
             .ok_or_else(|| "DistributionConfig is required".to_string())?;
 
-        // `E` and 13 upper-case alphanumerics, the shape of a real ETag: an
-        // `If-Match` of any other shape is refused as malformed once superseded.
-        let etag_suffix: String = Uuid::new_v4()
-            .simple()
-            .to_string()
-            .chars()
-            .take(13)
-            .collect::<String>()
-            .to_uppercase();
-
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
         let dist = state
@@ -165,10 +146,14 @@ impl ResourceProvisioner {
             .get_mut(&existing.physical_id)
             .ok_or_else(|| format!("Distribution {} not yet provisioned", existing.physical_id))?;
         // CallerReference is immutable across an update; keep the stored one.
-        dist.config = cfn_distribution_config(cfg, dist.config.caller_reference.clone())?;
+        dist.config = cfn_distribution_config(
+            cfg,
+            dist.config.caller_reference.clone(),
+            Some(&dist.config),
+        )?;
         dist.status = "InProgress".to_string();
         dist.last_modified_time = Utc::now();
-        dist.etag = format!("E{etag_suffix}");
+        dist.etag = fakecloud_cloudfront::generate_etag();
 
         Ok(ProvisionResult::new(dist.id.clone())
             .with("Id", dist.id.clone())
