@@ -890,30 +890,27 @@ impl AwsService for S3Service {
         // S3 Control (`s3-control` host) shares this handler; its PUTs
         // (CreateAccessPoint, ...) carry an XML body, never object data.
         let is_control = fakecloud_core::protocol::is_s3_control_host(&req.headers);
-        let is_put_to_key = req.method == Method::PUT
-            && !is_control
-            && req.path_segments.len() >= 2
-            && req
-                .path_segments
-                .first()
-                .map(|s| !s.is_empty())
-                .unwrap_or(false);
-        let q = &req.query_params;
-        let is_put_object = is_put_to_key
-            && !q.contains_key("annotation")
-            && !q.contains_key("tagging")
-            && !q.contains_key("acl")
-            && !q.contains_key("retention")
-            && !q.contains_key("legal-hold")
-            && !q.contains_key("renameObject")
-            && !q.contains_key("encryption")
-            && !req.headers.contains_key("x-amz-copy-source");
-        // UploadPart requires both partNumber AND uploadId; checking
-        // only partNumber would skip body draining for stray PUTs that
-        // happened to carry a partNumber query param without being a
-        // real multipart upload.
-        let is_upload_part =
-            is_put_to_key && q.contains_key("partNumber") && q.contains_key("uploadId");
+        // Extract the key from the RAW path (everything after the first
+        // segment), decoded exactly once. This preserves leading slashes and
+        // empty segments inside the key that `path_segments` drops, and it
+        // stays correct when an access-point alias in the first segment is
+        // rewritten to its bucket in `path_segments` (below) but not in
+        // `raw_path`.
+        let key = req.path_segments.first().and_then(|_| {
+            let rest = req.raw_path.strip_prefix('/').unwrap_or(&req.raw_path);
+            let (_, raw_key) = rest.split_once('/')?;
+            (!raw_key.is_empty()).then(|| {
+                percent_encoding::percent_decode_str(raw_key)
+                    .decode_utf8_lossy()
+                    .into_owned()
+            })
+        });
+        // UploadPart requires both partNumber AND uploadId; a stray PUT
+        // carrying only one of them is not an upload and gets its body
+        // drained like any other.
+        let key_put = request_checks::classify_key_put(&req, !is_control && key.is_some());
+        let is_put_object = key_put == request_checks::KeyPut::PutObject;
+        let is_upload_part = key_put == request_checks::KeyPut::UploadPart;
         if !is_put_object && !is_upload_part {
             if let Some(stream) = req.take_body_stream() {
                 req.body = fakecloud_core::service::drain_request_stream(stream).await?;
@@ -965,20 +962,6 @@ impl AwsService for S3Service {
             ));
         }
         let bucket = req.path_segments.first().map(|s| s.as_str());
-        // Extract the key from the RAW path (everything after the first
-        // segment), decoded exactly once. This preserves leading slashes and
-        // empty segments inside the key that `path_segments` drops, and it
-        // stays correct when an access-point alias in the first segment was
-        // rewritten to its bucket in `path_segments` but not in `raw_path`.
-        let key = bucket.and_then(|_| {
-            let rest = req.raw_path.strip_prefix('/').unwrap_or(&req.raw_path);
-            let (_, raw_key) = rest.split_once('/')?;
-            (!raw_key.is_empty()).then(|| {
-                percent_encoding::percent_decode_str(raw_key)
-                    .decode_utf8_lossy()
-                    .into_owned()
-            })
-        });
 
         // Bucket names are one global namespace, so a bucket-addressed request
         // is served in the account that OWNS the bucket, not the caller's: a
@@ -995,7 +978,7 @@ impl AwsService for S3Service {
         let account_id = owner_account.as_deref().unwrap_or(caller_account);
 
         if !is_control && bucket.is_some() {
-            request_checks::check_request(&req, key.as_deref())?;
+            request_checks::check_request(&req, key.as_deref(), key_put)?;
             if owner_account.is_some() {
                 request_checks::check_existing_bucket_request(&req, key.as_deref())?;
             }
@@ -1011,7 +994,7 @@ impl AwsService for S3Service {
         // exist is left to answer NoSuchBucket.
         let verifies_own_payload = is_put_object
             || is_upload_part
-            || (is_put_to_key && req.query_params.contains_key("annotation"))
+            || key_put == request_checks::KeyPut::Annotation
             || (req.method == Method::POST && req.query_params.contains_key("uploadId"))
             // CopyObject / UploadPartCopy carry no body; their checksum header
             // names the copy's algorithm and is validated by the handler.

@@ -28,10 +28,61 @@ fn bad_request(code: &str, message: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, code, message)
 }
 
+/// What a PUT to an object key is. Classified once per request (by
+/// [`classify_key_put`]) and shared by dispatch, which streams the body of the
+/// uploads instead of buffering it, and by the checks below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KeyPut {
+    /// Not a PUT to an object key.
+    None,
+    /// PutObject: the body is the object's data.
+    PutObject,
+    /// CopyObject: no body, the data comes from `x-amz-copy-source`.
+    CopyObject,
+    /// UploadPart or UploadPartCopy: `partNumber` and `uploadId` together.
+    UploadPart,
+    /// PutObjectAnnotation: the body is the annotation's payload.
+    Annotation,
+    /// A sub-resource PUT with a small XML body (tagging, acl, retention,
+    /// legal hold, rename, encryption), or half an upload-part address.
+    SubResource,
+}
+
+/// The object sub-resources a PUT names in its query.
+const OBJECT_SUBRESOURCES: &[&str] = &[
+    "tagging",
+    "acl",
+    "retention",
+    "legal-hold",
+    "renameObject",
+    "encryption",
+];
+
+/// Classify `req` as a PUT to an object key (`has_key`) or not.
+pub(super) fn classify_key_put(req: &AwsRequest, has_key: bool) -> KeyPut {
+    if req.method != Method::PUT || !has_key {
+        return KeyPut::None;
+    }
+    let q = |name: &str| req.query_params.contains_key(name);
+    if q("annotation") {
+        KeyPut::Annotation
+    } else if OBJECT_SUBRESOURCES.iter().any(|name| q(name)) {
+        KeyPut::SubResource
+    } else {
+        match (q("partNumber"), q("uploadId")) {
+            (true, true) => KeyPut::UploadPart,
+            (false, false) if req.headers.contains_key("x-amz-copy-source") => KeyPut::CopyObject,
+            (false, false) => KeyPut::PutObject,
+            _ => KeyPut::SubResource,
+        }
+    }
+}
+
 /// Which request shape this is, as far as the checks below care.
 struct Shape<'a> {
     req: &'a AwsRequest,
     has_key: bool,
+    put: KeyPut,
 }
 
 impl Shape<'_> {
@@ -41,21 +92,7 @@ impl Shape<'_> {
 
     /// PutObject or CopyObject: a PUT to a key with no sub-resource.
     fn is_object_write(&self) -> bool {
-        self.req.method == Method::PUT
-            && self.has_key
-            && ![
-                "annotation",
-                "tagging",
-                "acl",
-                "retention",
-                "legal-hold",
-                "renameObject",
-                "encryption",
-                "partNumber",
-                "uploadId",
-            ]
-            .iter()
-            .any(|q| self.query(q))
+        matches!(self.put, KeyPut::PutObject | KeyPut::CopyObject)
     }
 
     fn is_create_multipart_upload(&self) -> bool {
@@ -74,11 +111,17 @@ impl Shape<'_> {
     }
 }
 
-/// Checks that need nothing but the request.
-pub(super) fn check_request(req: &AwsRequest, key: Option<&str>) -> Result<(), AwsServiceError> {
+/// Checks that need nothing but the request. `put` is the request's
+/// [`classify_key_put`] for `key`.
+pub(super) fn check_request(
+    req: &AwsRequest,
+    key: Option<&str>,
+    put: KeyPut,
+) -> Result<(), AwsServiceError> {
     let shape = Shape {
         req,
         has_key: key.is_some(),
+        put,
     };
 
     // Recorded on CreateMultipartUpload, DeleteObject and GetObject with a
@@ -274,6 +317,39 @@ mod tests {
         r
     }
 
+    fn check(r: &AwsRequest, key: Option<&str>) -> Result<(), AwsServiceError> {
+        check_request(r, key, classify_key_put(r, key.is_some()))
+    }
+
+    #[test]
+    fn key_puts_are_classified_by_sub_resource_and_copy_source() {
+        let classify = |query: &[(&str, &str)], headers: &[(&str, &str)]| {
+            classify_key_put(&req(Method::PUT, query, headers), true)
+        };
+        assert_eq!(classify(&[], &[]), KeyPut::PutObject);
+        assert_eq!(
+            classify(&[], &[("x-amz-copy-source", "b/k")]),
+            KeyPut::CopyObject
+        );
+        let part = [("partNumber", "1"), ("uploadId", "u")];
+        assert_eq!(classify(&part, &[]), KeyPut::UploadPart);
+        assert_eq!(
+            classify(&part, &[("x-amz-copy-source", "b/k")]),
+            KeyPut::UploadPart
+        );
+        assert_eq!(classify(&[("partNumber", "1")], &[]), KeyPut::SubResource);
+        assert_eq!(classify(&[("tagging", "")], &[]), KeyPut::SubResource);
+        assert_eq!(classify(&[("annotation", "")], &[]), KeyPut::Annotation);
+        assert_eq!(
+            classify_key_put(&req(Method::PUT, &[], &[]), false),
+            KeyPut::None
+        );
+        assert_eq!(
+            classify_key_put(&req(Method::GET, &[], &[]), true),
+            KeyPut::None
+        );
+    }
+
     fn code(r: Result<(), AwsServiceError>) -> Option<String> {
         r.err().map(|e| e.code().to_string())
     }
@@ -283,10 +359,10 @@ mod tests {
         let r = req(Method::DELETE, &[], &[]);
         let long = "k".repeat(1025);
         assert_eq!(
-            code(check_request(&r, Some(&long))).as_deref(),
+            code(check(&r, Some(&long))).as_deref(),
             Some("KeyTooLongError")
         );
-        assert!(check_request(&r, Some(&"k".repeat(1024))).is_ok());
+        assert!(check(&r, Some(&"k".repeat(1024))).is_ok());
     }
 
     #[test]
@@ -294,12 +370,12 @@ mod tests {
         let h = [("x-amz-server-side-encryption", "bogus")];
         let put = req(Method::PUT, &[], &h);
         assert_eq!(
-            code(check_request(&put, Some("k"))).as_deref(),
+            code(check(&put, Some("k"))).as_deref(),
             Some("InvalidArgument")
         );
         let cmu = req(Method::POST, &[("uploads", "")], &h);
         assert_eq!(
-            code(check_request(&cmu, Some("k"))).as_deref(),
+            code(check(&cmu, Some("k"))).as_deref(),
             Some("InvalidArgument")
         );
         let ok = req(
@@ -307,14 +383,14 @@ mod tests {
             &[],
             &[("x-amz-server-side-encryption", "aws:kms")],
         );
-        assert!(check_request(&ok, Some("k")).is_ok());
+        assert!(check(&ok, Some("k")).is_ok());
     }
 
     #[test]
     fn event_hold_storage_class_and_metadata_directive_values() {
         let hold = req(Method::PUT, &[], &[("x-amz-object-lock-event-hold", "x")]);
         assert_eq!(
-            code(check_request(&hold, Some("k"))).as_deref(),
+            code(check(&hold, Some("k"))).as_deref(),
             Some("InvalidArgument")
         );
         let sc = req(
@@ -323,7 +399,7 @@ mod tests {
             &[("x-amz-storage-class", "x")],
         );
         assert_eq!(
-            code(check_request(&sc, Some("k"))).as_deref(),
+            code(check(&sc, Some("k"))).as_deref(),
             Some("InvalidStorageClass")
         );
         let md = req(
@@ -335,29 +411,29 @@ mod tests {
             ],
         );
         assert_eq!(
-            code(check_request(&md, Some("k"))).as_deref(),
+            code(check(&md, Some("k"))).as_deref(),
             Some("InvalidArgument")
         );
         // Not a copy: the directive is not read.
         let plain = req(Method::PUT, &[], &[("x-amz-metadata-directive", "x")]);
-        assert!(check_request(&plain, Some("k")).is_ok());
+        assert!(check(&plain, Some("k")).is_ok());
     }
 
     #[test]
     fn request_payer_value_is_not_validated() {
         let r = req(Method::GET, &[], &[("x-amz-request-payer", "bogus")]);
-        assert!(check_request(&r, Some("k")).is_ok());
+        assert!(check(&r, Some("k")).is_ok());
     }
 
     #[test]
     fn checksum_mode_must_be_enabled_on_object_reads() {
         let r = req(Method::HEAD, &[], &[("x-amz-checksum-mode", "x")]);
         assert_eq!(
-            code(check_request(&r, Some("k"))).as_deref(),
+            code(check(&r, Some("k"))).as_deref(),
             Some("InvalidRequest")
         );
         let ok = req(Method::GET, &[], &[("x-amz-checksum-mode", "ENABLED")]);
-        assert!(check_request(&ok, Some("k")).is_ok());
+        assert!(check(&ok, Some("k")).is_ok());
     }
 
     #[test]
@@ -371,30 +447,27 @@ mod tests {
             let mut q = q;
             q.push(("encoding-type", "x"));
             let r = req(Method::GET, &q, &[]);
-            assert_eq!(
-                code(check_request(&r, None)).as_deref(),
-                Some("InvalidArgument")
-            );
+            assert_eq!(code(check(&r, None)).as_deref(), Some("InvalidArgument"));
         }
         let ok = req(Method::GET, &[("encoding-type", "url")], &[]);
-        assert!(check_request(&ok, None).is_ok());
+        assert!(check(&ok, None).is_ok());
     }
 
     #[test]
     fn bucket_namespace_and_lifecycle_tdmos_values() {
         let ns = req(Method::PUT, &[], &[("x-amz-bucket-namespace", "x")]);
         assert_eq!(
-            code(check_request(&ns, None)).as_deref(),
+            code(check(&ns, None)).as_deref(),
             Some("InvalidNamespaceHeader")
         );
         let ok = req(Method::PUT, &[], &[("x-amz-bucket-namespace", "global")]);
-        assert!(check_request(&ok, None).is_ok());
+        assert!(check(&ok, None).is_ok());
         let lc = req(
             Method::PUT,
             &[("lifecycle", "")],
             &[("x-amz-transition-default-minimum-object-size", "x")],
         );
-        let err = check_request(&lc, None).unwrap_err();
+        let err = check(&lc, None).unwrap_err();
         assert_eq!(err.code(), "InvalidRequest");
         assert!(err
             .message()
@@ -405,14 +478,14 @@ mod tests {
     fn half_an_upload_part_address_is_refused() {
         let pn = req(Method::PUT, &[("partNumber", "1")], &[]);
         assert_eq!(
-            code(check_request(&pn, Some("k"))).as_deref(),
+            code(check(&pn, Some("k"))).as_deref(),
             Some("InvalidArgument")
         );
         let up = req(Method::PUT, &[("uploadId", "u")], &[]);
-        let err = check_request(&up, Some("k")).unwrap_err();
+        let err = check(&up, Some("k")).unwrap_err();
         assert_eq!(err.status(), StatusCode::METHOD_NOT_ALLOWED);
         let both = req(Method::PUT, &[("partNumber", "1"), ("uploadId", "u")], &[]);
-        assert!(check_request(&both, Some("k")).is_ok());
+        assert!(check(&both, Some("k")).is_ok());
     }
 
     #[test]
