@@ -1484,18 +1484,23 @@ async fn a_launch_naming_no_zone_lands_where_the_type_is_sold() {
     );
 }
 
-/// A dry run refuses what the real launch would, quotas included.
+/// A dry run refuses what the real launch would, quotas included: here one
+/// m5.large (2 vCPUs) fits the 3-vCPU quota on its own, but not on top of the
+/// one already running, which only the check under the EC2 lock sees.
 #[tokio::test]
 async fn a_dry_run_is_refused_over_quota_like_the_launch() {
-    let svc = seeded(enforcing(&[(ON_DEMAND_STANDARD, 1.0)]));
+    let svc = seeded(enforcing(&[(ON_DEMAND_STANDARD, 3.0)]));
     let launch = [
         ("InstanceType", "m5.large"),
         ("MinCount", "1"),
         ("MaxCount", "1"),
     ];
-    let real = crate::test_support::err_of(run(&svc, &launch).await);
     let mut dry = launch.to_vec();
     dry.push(("DryRun", "true"));
+    // Alone, the dry run passes.
+    assert_eq!(code(run(&svc, &dry).await), "DryRunOperation");
+    body(run(&svc, &launch).await);
+    let real = crate::test_support::err_of(run(&svc, &launch).await);
     let dry = crate::test_support::err_of(run(&svc, &dry).await);
     assert_eq!(
         (dry.code(), dry.message()),
@@ -1587,23 +1592,43 @@ fn reserved_instance_offerings_follow_the_catalog() {
             )
         );
     }
+    let elems = |out: &str, name: &str| -> Vec<String> {
+        out.split(&format!("<{name}>"))
+            .skip(1)
+            .map(|s| s.split('<').next().unwrap().to_string())
+            .collect()
+    };
+    // The Region and every zone selling it, each for a 1-year and a 3-year term.
     let out = body(offerings(&[("InstanceType", "m5.large")]));
-    let zones: Vec<&str> = out
-        .split("<availabilityZone>")
-        .skip(1)
-        .map(|s| s.split('<').next().unwrap())
-        .collect();
     assert_eq!(
-        zones,
-        [
-            "us-east-1a",
-            "us-east-1b",
-            "us-east-1c",
-            "us-east-1d",
-            "us-east-1f"
-        ]
+        elems(&out, "availabilityZone"),
+        ["a", "a", "b", "b", "c", "c", "d", "d", "f", "f"].map(|z| format!("us-east-1{z}"))
     );
-    assert_eq!(out.matches("<scope>Region</scope>").count(), 1);
+    assert_eq!(out.matches("<scope>Region</scope>").count(), 2);
+    assert_eq!(elems(&out, "duration"), ["31536000", "94608000"].repeat(6));
+    let ids = elems(&out, "reservedInstancesOfferingId");
+    assert_eq!(
+        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        ids.len()
+    );
+    // The duration bounds keep one term.
+    let out = body(offerings(&[
+        ("InstanceType", "m5.large"),
+        ("MinDuration", "94608000"),
+    ]));
+    assert_eq!(elems(&out, "duration"), ["94608000"].repeat(6));
+    let out = body(offerings(&[
+        ("InstanceType", "m5.large"),
+        ("MaxDuration", "31536000"),
+    ]));
+    assert_eq!(elems(&out, "duration"), ["31536000"].repeat(6));
+    // Convertible reservations are Region-scoped only.
+    let out = body(offerings(&[
+        ("InstanceType", "m5.large"),
+        ("OfferingClass", "convertible"),
+    ]));
+    assert!(!out.contains("<availabilityZone>"), "{out}");
+    assert_eq!(out.matches("<scope>Region</scope>").count(), 2);
     let none = body(offerings(&[
         ("InstanceType", "m5.large"),
         ("AvailabilityZone", "us-east-1e"),

@@ -81,6 +81,9 @@ pub(crate) fn describe_reserved_instances(
     ))
 }
 
+/// The terms real EC2 offers a reservation for: 1 year and 3 years.
+const RI_TERM_SECONDS: [i64; 2] = [31_536_000, 94_608_000];
+
 pub(crate) fn describe_reserved_instances_offerings(
     _svc: &Ec2Service,
     req: &AwsRequest,
@@ -149,27 +152,47 @@ pub(crate) fn describe_reserved_instances_offerings(
         .get("InstanceTenancy")
         .filter(|v| !v.is_empty())
         .map_or("default", String::as_str);
-    // A Region-scoped offering, and one per zone selling the type, as real EC2
-    // lists them (m5.large in us-east-1: the Region plus every zone but 1e). A
-    // requested zone keeps only its own.
+    // A Region-scoped offering where the Region offers the type, and one per
+    // zone selling it, as real EC2 lists them (m5.large in us-east-1: the
+    // Region plus every zone but 1e). Convertible offerings are Region-scoped
+    // only. A requested zone keeps only its own.
     let wanted_zone = req
         .query_params
         .get("AvailabilityZone")
         .filter(|v| !v.is_empty());
-    let mut locations: Vec<Option<String>> = vec![None];
-    locations.extend(spec.zones_selling(region).into_iter().map(Some));
+    let mut locations: Vec<Option<String>> = Vec::new();
+    if spec.offered_in(region) {
+        locations.push(None);
+    }
+    if class != "convertible" {
+        locations.extend(spec.zones_selling(region).into_iter().map(Some));
+    }
     if let Some(zone) = wanted_zone {
         locations.retain(|l| l.as_ref() == Some(zone));
     }
+    // Each location is offered for a 1-year and a 3-year term, as real EC2
+    // lists them, kept to the requested [MinDuration, MaxDuration] (seconds).
+    let bound = |name: &str| {
+        req.query_params
+            .get(name)
+            .filter(|v| !v.is_empty())
+            .and_then(|v| v.parse::<i64>().ok())
+    };
+    let (min_duration, max_duration) = (bound("MinDuration"), bound("MaxDuration"));
+    let durations: Vec<i64> = RI_TERM_SECONDS
+        .into_iter()
+        .filter(|d| min_duration.is_none_or(|m| *d >= m) && max_duration.is_none_or(|m| *d <= m))
+        .collect();
     let items: Vec<String> = locations
         .iter()
-        .map(|zone| {
+        .flat_map(|zone| durations.iter().map(move |duration| (zone, *duration)))
+        .map(|(zone, duration)| {
             let key = format!(
-                "{}|{instance_type}|{product}|{class}|{offering_type}|{tenancy}",
+                "{}|{instance_type}|{product}|{class}|{offering_type}|{tenancy}|{duration}",
                 zone.as_deref().unwrap_or(region)
             );
             format!(
-                "{}{}{}<duration>31536000</duration><fixedPrice>0.0</fixedPrice><usagePrice>0.02</usagePrice>{}{}{}{}{}{}{}",
+                "{}{}{}<duration>{duration}</duration><fixedPrice>0.0</fixedPrice><usagePrice>0.02</usagePrice>{}{}{}{}{}{}{}",
                 ec2_elem(
                     "reservedInstancesOfferingId",
                     &crate::service_helpers::stable_id("offering", &key),

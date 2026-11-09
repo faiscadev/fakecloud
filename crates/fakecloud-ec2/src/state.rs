@@ -2492,6 +2492,13 @@ impl Ec2State {
         crate::defaults::seed_public_images(self);
     }
 
+    /// On snapshot restore, give the default VPC of a state persisted by a
+    /// build that seeded only three zones the default subnets of the Region's
+    /// other zones (see `defaults::backfill_default_subnets`).
+    pub fn ensure_default_subnets_backfilled(&mut self) {
+        crate::defaults::backfill_default_subnets(self);
+    }
+
     /// Replace the tag set for `resource_id` with `tags` merged over any
     /// existing tags (CreateTags is upsert-by-key, matching AWS).
     pub fn upsert_tags(&mut self, resource_id: &str, new_tags: &[Tag]) {

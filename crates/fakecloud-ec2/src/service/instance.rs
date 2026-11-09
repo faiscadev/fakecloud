@@ -590,39 +590,28 @@ pub(crate) fn launch_instances(
         // requested `Placement.AvailabilityZone`, else in a zone selling the type.
         let explicit_subnet = subnet_id.is_some();
         let zone_named = explicit_subnet || placement_az.is_some();
-        // Only a launch naming neither a subnet nor a zone picks one.
-        let wanted_az = match (&subnet_id, &placement_az) {
-            (_, Some(zone)) => zone.clone(),
-            (Some(_), None) => String::new(),
-            (None, None) => {
-                launch_zone(state, &instance_type, region).unwrap_or_else(|| format!("{region}a"))
-            }
-        };
         // No explicit subnet: land in the default VPC's default subnet for the
         // target AZ, as AWS does. This fills `subnet_id`/`vpc_id` so
         // DescribeInstances reports a real subnet/VPC and phase-2 per-subnet
-        // networking has something to key on. A zone of this Region whose
-        // default subnet is gone is refused rather than launched elsewhere
-        // (inferred: AWS's message for it was not recorded).
+        // networking has something to key on. A launch naming neither a subnet
+        // nor a zone picks a zone that sells the type and has a default subnet.
+        let wanted_az = match (&subnet_id, &placement_az) {
+            (Some(_), None) => String::new(),
+            (_, Some(zone)) => zone.clone(),
+            (None, None) => {
+                let (zone, subnet) = default_launch_place(state, &instance_type, region)?;
+                subnet_id = Some(subnet);
+                zone
+            }
+        };
         if subnet_id.is_none() {
-            subnet_id = state
-                .subnets
-                .values()
-                .filter(|s| s.default_for_az)
-                .find(|s| s.availability_zone == wanted_az)
-                .map(|s| s.subnet_id.clone());
-            // A state with no default subnets at all (migrated from before they
-            // were seeded) still launches into its default VPC.
-            let has_default_subnets = state.subnets.values().any(|s| s.default_for_az);
-            if subnet_id.is_none()
-                && has_default_subnets
-                && crate::defaults::zone_in_region(region, &wanted_az)
-            {
-                return Err(AwsServiceError::aws_error(
-                    http::StatusCode::BAD_REQUEST,
-                    "MissingInput",
-                    format!("No default subnet for availability zone: '{wanted_az}'."),
-                ));
+            let default_vpc = require_default_vpc(state)?;
+            subnet_id = default_subnet_in(state, &default_vpc, &wanted_az);
+            // A zone of this Region with no default subnet (deleted, or none
+            // left in the VPC at all) is refused, as recorded from real EC2,
+            // rather than launched elsewhere or with no subnet.
+            if subnet_id.is_none() && crate::defaults::zone_in_region(region, &wanted_az) {
+                return Err(no_default_subnet_for_zone(&wanted_az));
             }
         }
         let subnet = subnet_id.as_ref().and_then(|sid| state.subnets.get(sid));
@@ -1694,20 +1683,82 @@ fn validate_enum_instance_type(params: &HashMap<String, String>) -> Result<(), A
     Ok(())
 }
 
-/// Where a launch naming neither a subnet nor a zone lands: a zone selling the
-/// type, preferably with a default subnet. `None` when the Region sells it nowhere.
-fn launch_zone(state: &Ec2State, instance_type: &str, region: &str) -> Option<String> {
-    let selling = crate::instance_types::lookup(instance_type)?.zones_selling(region);
-    selling
-        .iter()
-        .find(|zone| {
-            state
-                .subnets
-                .values()
-                .any(|s| s.default_for_az && &&s.availability_zone == zone)
+/// The default VPC a launch naming no subnet goes into. AWS refuses the launch
+/// with `VPCIdNotSpecified` when the account has none.
+fn require_default_vpc(state: &Ec2State) -> Result<String, AwsServiceError> {
+    state
+        .vpcs
+        .values()
+        .find(|v| v.is_default)
+        .map(|v| v.vpc_id.clone())
+        .ok_or_else(|| {
+            AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "VPCIdNotSpecified",
+                "No default VPC for this user",
+            )
         })
-        .or(selling.first())
-        .cloned()
+}
+
+fn default_subnet_in(state: &Ec2State, vpc_id: &str, zone: &str) -> Option<String> {
+    state
+        .subnets
+        .values()
+        .find(|s| s.default_for_az && s.vpc_id == vpc_id && s.availability_zone == zone)
+        .map(|s| s.subnet_id.clone())
+}
+
+fn no_default_subnet_for_zone(zone: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        http::StatusCode::BAD_REQUEST,
+        "MissingInput",
+        format!("No default subnet for availability zone: '{zone}'."),
+    )
+}
+
+/// Where a launch naming neither a subnet nor a zone lands: the first zone
+/// selling the type that has a default subnet, and that subnet.
+///
+/// Inferred, not recorded: a Region selling the type nowhere is refused as
+/// `Unsupported` for the Region (see `refuse_zone_not_selling`); a default VPC
+/// with no default subnet at all as `MissingInput` "No subnets found for the
+/// default VPC", the message EC2 is reported to give; and one whose default
+/// subnets all sit in zones not selling the type as `MissingInput` for the
+/// first zone that does, as a launch naming that zone is refused.
+fn default_launch_place(
+    state: &Ec2State,
+    instance_type: &str,
+    region: &str,
+) -> Result<(String, String), AwsServiceError> {
+    let default_vpc = require_default_vpc(state)?;
+    let selling = crate::instance_types::lookup(instance_type)
+        .map(|spec| spec.zones_selling(region))
+        .unwrap_or_default();
+    let Some(first_selling) = selling.first() else {
+        refuse_zone_not_selling(instance_type, region, &format!("{region}a"), false)?;
+        // The catalog sells it in no zone yet does not refuse it: no zone to pick.
+        return Err(no_default_subnet_for_zone(&format!("{region}a")));
+    };
+    if let Some(place) = selling.iter().find_map(|zone| {
+        default_subnet_in(state, &default_vpc, zone).map(|subnet| (zone.clone(), subnet))
+    }) {
+        return Ok(place);
+    }
+    let any_default = state
+        .subnets
+        .values()
+        .any(|s| s.default_for_az && s.vpc_id == default_vpc);
+    Err(if any_default {
+        no_default_subnet_for_zone(first_selling)
+    } else {
+        AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "MissingInput",
+            format!(
+                "No subnets found for the default VPC '{default_vpc}'. Please specify a subnet."
+            ),
+        )
+    })
 }
 
 /// Refuses a launch in a zone that does not sell the type, as recorded from real EC2
@@ -4305,8 +4356,8 @@ mod modify_tests {
     async fn run_instances_uses_state_default_vpc_and_sg_over_derived_ids() {
         // A state migrated from a pre-regional snapshot keeps its original
         // default VPC / default SG ids, which are not the region-derived
-        // ones. A launch with no resolvable subnet must still land in that
-        // VPC with its `default` group.
+        // ones. A launch naming no subnet lands in that VPC's default subnet
+        // with its `default` group.
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
@@ -4331,8 +4382,9 @@ mod modify_tests {
             sg.group_id = "sg-0legacy000000001".into();
             sg.vpc_id = "vpc-0legacy000000001".into();
             st.security_groups.insert(sg.group_id.clone(), sg);
-            // No default subnet to resolve.
-            st.subnets.clear();
+            for subnet in st.subnets.values_mut() {
+                subnet.vpc_id = "vpc-0legacy000000001".into();
+            }
             assert_ne!(
                 "vpc-0legacy000000001",
                 crate::defaults::default_vpc_id("000000000000", "us-east-1")
@@ -4355,10 +4407,113 @@ mod modify_tests {
         let st = accounts.regional("000000000000", "us-east-1").unwrap();
         let inst = st.instances.values().next().unwrap();
         assert_eq!(inst.vpc_id.as_deref(), Some("vpc-0legacy000000001"));
+        assert!(inst.subnet_id.is_some());
         assert_eq!(
             inst.security_group_ids,
             vec!["sg-0legacy000000001".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn run_instances_without_a_subnet_needs_a_default_subnet_and_vpc() {
+        async fn launch(
+            svc: &Ec2Service,
+            zone: Option<&str>,
+        ) -> Result<AwsResponse, AwsServiceError> {
+            let mut params = vec![
+                ("ImageId", "ami-12345678"),
+                ("MinCount", "1"),
+                ("MaxCount", "1"),
+            ];
+            if let Some(zone) = zone {
+                params.push(("Placement.AvailabilityZone", zone));
+            }
+            run_instances(svc, &req("RunInstances", &params)).await
+        }
+        let err = |r: Result<AwsResponse, AwsServiceError>| {
+            let e = r.err().expect("launch refused");
+            (e.code().to_string(), e.message())
+        };
+        // A default VPC with no default subnet left: refused, with or without a
+        // zone, rather than launched with no subnet.
+        let svc = Ec2Service::new();
+        let vpc = {
+            let mut accounts = svc.state.write();
+            let st = accounts.regional_mut("000000000000", "us-east-1");
+            st.subnets.retain(|_, s| !s.default_for_az);
+            st.vpcs
+                .values()
+                .find(|v| v.is_default)
+                .unwrap()
+                .vpc_id
+                .clone()
+        };
+        assert_eq!(
+            err(launch(&svc, None).await),
+            (
+                "MissingInput".to_string(),
+                format!("No subnets found for the default VPC '{vpc}'. Please specify a subnet.")
+            )
+        );
+        assert_eq!(
+            err(launch(&svc, Some("us-east-1b")).await),
+            (
+                "MissingInput".to_string(),
+                "No default subnet for availability zone: 'us-east-1b'.".to_string()
+            )
+        );
+
+        // Default subnets only in zones not selling the type (m5.large skips
+        // 1e): refused for the first zone that sells it, not launched in another;
+        // a zone that has one is picked when it sells the type.
+        let only_default_in = |zone: &'static str| {
+            let svc = Ec2Service::new();
+            svc.state
+                .write()
+                .regional_mut("000000000000", "us-east-1")
+                .subnets
+                .retain(|_, s| !s.default_for_az || s.availability_zone == zone);
+            svc
+        };
+        let m5 = req(
+            "RunInstances",
+            &[
+                ("ImageId", "ami-12345678"),
+                ("MinCount", "1"),
+                ("MaxCount", "1"),
+                ("InstanceType", "m5.large"),
+            ],
+        );
+        assert_eq!(
+            err(run_instances(&only_default_in("us-east-1e"), &m5).await),
+            (
+                "MissingInput".to_string(),
+                "No default subnet for availability zone: 'us-east-1a'.".to_string()
+            )
+        );
+        let out = run_instances(&only_default_in("us-east-1b"), &m5).await;
+        let out = String::from_utf8(out.unwrap().body.expect_bytes().to_vec()).unwrap();
+        assert!(
+            out.contains("<availabilityZone>us-east-1b</availabilityZone>"),
+            "{out}"
+        );
+
+        // No default VPC: AWS's VPCIdNotSpecified.
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let st = accounts.regional_mut("000000000000", "us-east-1");
+            st.vpcs.values_mut().for_each(|v| v.is_default = false);
+        }
+        for zone in [None, Some("us-east-1a")] {
+            assert_eq!(
+                err(launch(&svc, zone).await),
+                (
+                    "VPCIdNotSpecified".to_string(),
+                    "No default VPC for this user".to_string()
+                )
+            );
+        }
     }
 
     #[tokio::test]

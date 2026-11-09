@@ -311,9 +311,6 @@ pub fn validate_enum(
     Ok(())
 }
 
-/// Reject an out-of-range `MaxResults` (the harness's `negative_below_min` /
-/// `negative_above_max` variants). EC2 describe pages bound MaxResults to
-/// [5, 1000] unless documented otherwise.
 /// Whether the request is a `DryRun`.
 pub(crate) fn is_dry_run(params: &HashMap<String, String>) -> bool {
     params
@@ -333,6 +330,9 @@ pub(crate) fn refuse_dry_run(params: &HashMap<String, String>) -> Result<(), Aws
     Ok(())
 }
 
+/// Reject an out-of-range `MaxResults` (the harness's `negative_below_min` /
+/// `negative_above_max` variants). EC2 describe pages bound MaxResults to
+/// [5, 1000] unless documented otherwise.
 pub fn validate_max_results(
     params: &HashMap<String, String>,
     min: i64,

@@ -2564,6 +2564,7 @@ async fn main() {
                                 let mut guard = ec2_state.write();
                                 for (_, _, st) in guard.iter_regional_mut() {
                                     st.ensure_public_images_seeded();
+                                    st.ensure_default_subnets_backfilled();
                                 }
                             }
                             tracing::info!(
