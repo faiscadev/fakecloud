@@ -43,8 +43,8 @@ pub struct KinesisState {
     pub lambda_checkpoints: BTreeMap<String, usize>,
     /// The ARN of the stream each `lambda_checkpoints` entry reads. Shard IDs
     /// repeat across streams, so this is what ties an offset to its records.
-    /// Snapshots written before it existed load empty; readers claim their
-    /// entries on the next poll, and until then trimming matches by shard ID.
+    /// Snapshots written before it existed load empty. The poller settles those
+    /// entries when it starts; until then trimming matches by shard ID.
     #[serde(default)]
     pub lambda_checkpoint_streams: BTreeMap<String, String>,
     pub consumers: BTreeMap<String, KinesisConsumer>,

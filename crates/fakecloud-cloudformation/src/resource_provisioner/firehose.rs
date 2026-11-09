@@ -42,10 +42,12 @@ fn firehose_template_destination(props: &serde_json::Value) -> Result<FirehoseDe
             .iter()
             .find(|(search, _)| search == property)
         {
-            Some((_, key)) => Ok(FirehoseDestination::Search(
-                (*key).to_string(),
-                coerce_firehose_scalars(props[*property].clone(), property)?,
-            )),
+            Some((_, key)) => {
+                let config = coerce_firehose_scalars(props[*property].clone(), property)?;
+                fakecloud_firehose::validate_search_destination(&config)
+                    .map_err(|err| err.to_string())?;
+                Ok(FirehoseDestination::Search((*key).to_string(), config))
+            }
             None => Ok(FirehoseDestination::S3(Box::new(
                 parse_firehose_s3_destination(&props[*property], property)?,
             ))),
@@ -55,6 +57,10 @@ fn firehose_template_destination(props: &serde_json::Value) -> Result<FirehoseDe
             named.join(", ")
         )),
     }
+}
+
+fn firehose_name_taken(name: &str) -> String {
+    format!("DeliveryStream {name} already exists")
 }
 
 /// CFN currently provisions the classic and Extended S3 configurations and the
@@ -315,6 +321,12 @@ impl ResourceProvisioner {
         let (name, arn, stream) = self.firehose_stream_from_template(resource)?;
         let mut state = self.firehose_state.write();
         let account = state.get_or_create(&self.account_id, &self.region);
+        if account
+            .streams(&self.region)
+            .is_some_and(|streams| streams.contains_key(&name))
+        {
+            return Err(firehose_name_taken(&name));
+        }
         account
             .streams_mut(&self.region)
             .insert(name.clone(), stream);
@@ -401,7 +413,7 @@ impl ResourceProvisioner {
     /// `DeliveryStreamName`, `DeliveryStreamType` and
     /// `KinesisStreamSourceConfiguration` are "Update requires: Replacement"
     /// properties. A replacement deletes the old stream first, so its template
-    /// is validated here, while that stream is still intact.
+    /// and the name it needs are checked here, while that stream is still intact.
     pub(super) fn firehose_update_requires_replacement(
         &self,
         existing: &StackResource,
@@ -414,10 +426,12 @@ impl ResourceProvisioner {
             .unwrap_or("DirectPut");
         let source = fakecloud_firehose::parse_kinesis_source(stream_type, props)
             .map_err(|err| err.to_string())?;
-        let renamed = props
-            .get("DeliveryStreamName")
-            .and_then(|v| v.as_str())
-            .is_some_and(|name| name != existing.physical_id);
+        // With no name in the template, a stream that has a name of its own
+        // loses it. One CloudFormation generated stays as it is.
+        let renamed = match props.get("DeliveryStreamName").and_then(|v| v.as_str()) {
+            Some(name) => name != existing.physical_id,
+            None => self.existing_name(existing).is_none(),
+        };
         let replaced = {
             let state = self.firehose_state.read();
             let Some(stream) = state
@@ -430,7 +444,18 @@ impl ResourceProvisioner {
             renamed || stream.stream_type != stream_type || stream.kinesis_source != source
         };
         if replaced {
-            self.firehose_stream_from_template(resource)?;
+            let (name, ..) = self.firehose_stream_from_template(resource)?;
+            // The old stream frees its own name only if it is really deleted.
+            let freed = name == existing.physical_id
+                && !policy_retains_physical(existing.update_replace_policy.as_deref());
+            let state = self.firehose_state.read();
+            let taken = state
+                .get(&self.account_id)
+                .and_then(|account| account.streams(&self.region))
+                .is_some_and(|streams| streams.contains_key(&name));
+            if taken && !freed {
+                return Err(firehose_name_taken(&name));
+            }
         }
         Ok(replaced)
     }
@@ -703,6 +728,179 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(stored(&prov).instance_id, instance, "still the old stream");
+    }
+
+    /// The fields the Firehose API and CloudFormation require are checked when
+    /// the template is applied, not on the first delivery attempt.
+    #[test]
+    fn search_destination_shape_is_validated_on_create_and_update() {
+        let prov = make_provisioner();
+        let resource =
+            |props: Value| make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", props);
+        const CONFIG: &str = "AmazonopensearchserviceDestinationConfiguration";
+        let without = |member: &str| {
+            let mut props = search_stream_props("orders");
+            props[CONFIG].as_object_mut().unwrap().remove(member);
+            props
+        };
+        for member in ["RoleARN", "IndexName", "ClusterEndpoint", "S3Configuration"] {
+            assert!(
+                prov.create_resource(&resource(without(member))).is_err(),
+                "create without {member}"
+            );
+        }
+        assert!(prov
+            .firehose_state
+            .read()
+            .get("123456789012")
+            .is_none_or(|a| a.streams("us-east-1").is_none_or(|s| s.is_empty())));
+
+        let existing = prov
+            .create_resource(&resource(search_stream_props("orders")))
+            .unwrap();
+        let err = prov
+            .update_resource(&existing, &resource(without("IndexName")))
+            .unwrap_err();
+        assert!(err.contains("IndexName"), "{err}");
+        assert_eq!(
+            stored(&prov).extra_destinations["AmazonopensearchserviceDestinationDescription"]
+                ["IndexName"],
+            "activity"
+        );
+
+        // AWS's own example names only a DomainARN.
+        let prov = make_provisioner();
+        let mut by_domain = without("ClusterEndpoint");
+        by_domain[CONFIG]["DomainARN"] = json!("arn:aws:es:us-east-1:123456789012:domain/d");
+        prov.create_resource(&resource(by_domain)).unwrap();
+    }
+
+    fn other_stream_props() -> Value {
+        let mut props = search_stream_props("orders");
+        props["DeliveryStreamName"] = json!("other");
+        props
+    }
+
+    /// Replacing into a taken name fails before the stream being replaced is
+    /// touched, and leaves the stream holding that name alone.
+    #[test]
+    fn replacement_into_a_taken_name_changes_nothing() {
+        let prov = make_provisioner();
+        let resource =
+            |props: Value| make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", props);
+        let existing = prov
+            .create_resource(&resource(search_stream_props("orders")))
+            .unwrap();
+        let instance = stored(&prov).instance_id;
+        let other = |prov: &ResourceProvisioner| {
+            prov.firehose_state
+                .read()
+                .get("123456789012")
+                .unwrap()
+                .streams("us-east-1")
+                .unwrap()["other"]
+                .instance_id
+        };
+        prov.create_resource(&make_resource(
+            "AWS::KinesisFirehose::DeliveryStream",
+            "Other",
+            other_stream_props(),
+        ))
+        .unwrap();
+        let other_instance = other(&prov);
+
+        let err = prov
+            .update_resource(&existing, &resource(other_stream_props()))
+            .unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(stored(&prov).instance_id, instance);
+        assert_eq!(other(&prov), other_instance);
+
+        // Creating under a taken name is refused too.
+        let err = prov
+            .create_resource(&resource(other_stream_props()))
+            .err()
+            .unwrap();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(other(&prov), other_instance);
+    }
+
+    /// `UpdateReplacePolicy: Retain` keeps the old stream, so a replacement
+    /// cannot reuse its name, and with a new name both streams exist.
+    #[test]
+    fn retained_stream_keeps_its_name_through_a_replacement() {
+        let prov = make_provisioner();
+        let resource =
+            |props: Value| make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", props);
+        let mut existing = prov
+            .create_resource(&resource(search_stream_props("orders")))
+            .unwrap();
+        existing.update_replace_policy = Some("Retain".into());
+        let instance = stored(&prov).instance_id;
+
+        let err = prov
+            .update_resource(&existing, &resource(search_stream_props("payments")))
+            .unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(stored(&prov).instance_id, instance);
+
+        let mut renamed = search_stream_props("payments");
+        renamed["DeliveryStreamName"] = json!("events-2");
+        let replaced = prov.update_resource(&existing, &resource(renamed)).unwrap();
+        assert_eq!(replaced.unwrap().physical_id, "events-2");
+        assert_eq!(stored(&prov).instance_id, instance, "retained");
+    }
+
+    /// Dropping `DeliveryStreamName` replaces a stream that had a name of its
+    /// own, while one that never had one is updated in place.
+    #[test]
+    fn removing_the_stream_name_replaces_only_an_explicitly_named_stream() {
+        let prov = make_provisioner();
+        let resource =
+            |props: Value| make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", props);
+        let unnamed = || {
+            let mut props = search_stream_props("orders");
+            props.as_object_mut().unwrap().remove("DeliveryStreamName");
+            props
+        };
+        let named = prov
+            .create_resource(&resource(search_stream_props("orders")))
+            .unwrap();
+        assert!(prov
+            .firehose_update_requires_replacement(&named, &resource(unnamed()))
+            .unwrap());
+        let replaced = prov
+            .update_resource(&named, &resource(unnamed()))
+            .unwrap()
+            .unwrap();
+        assert_ne!(replaced.physical_id, "events", "a generated name now");
+        assert!(prov
+            .firehose_state
+            .read()
+            .get("123456789012")
+            .unwrap()
+            .streams("us-east-1")
+            .unwrap()
+            .get("events")
+            .is_none());
+
+        let generated = prov
+            .create_resource(&make_resource(
+                "AWS::KinesisFirehose::DeliveryStream",
+                "Generated",
+                unnamed(),
+            ))
+            .unwrap();
+        assert!(!prov
+            .firehose_update_requires_replacement(
+                &generated,
+                &make_resource(
+                    "AWS::KinesisFirehose::DeliveryStream",
+                    "Generated",
+                    unnamed()
+                ),
+            )
+            .unwrap());
     }
 
     #[test]

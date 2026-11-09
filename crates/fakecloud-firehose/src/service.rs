@@ -351,10 +351,16 @@ fn validate_search_updates(
             "You can specify only one destination in UpdateDestination.",
         ));
     }
-    if !stream.extra_destinations.contains_key(key) {
-        crate::search::delivery(key, &search_update_config(update.clone()))?;
+    let update = search_update_config(update.clone());
+    // Validated as it would be stored, before anything changes.
+    match stream.extra_destinations.get(key) {
+        Some(existing) => {
+            let mut merged = existing.clone();
+            merge_json(&mut merged, &update);
+            crate::search::validate_stored(&merged)
+        }
+        None => crate::search::validate_stored(&update),
     }
-    Ok(())
 }
 
 /// Apply an `ElasticsearchDestinationUpdate` or
@@ -811,6 +817,12 @@ impl FirehoseService {
             None => parse_s3_destination(&body["ExtendedS3DestinationConfiguration"])?,
         };
         let extra_destinations = extract_extra_destinations(&body, "Configuration");
+        for (_, search) in extra_destinations
+            .iter()
+            .filter(|(key, _)| is_search_destination(key))
+        {
+            crate::search::validate_search_destination(search)?;
+        }
         let kinesis_source = parse_kinesis_source(&stream_type, &body)?;
 
         // Create-time Tags must be returned by ListTagsForDeliveryStream without
@@ -1470,6 +1482,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn create_refuses_an_incomplete_search_destination() {
+        let complete = json!({
+            "RoleARN": "role",
+            "IndexName": "activity",
+            "ClusterEndpoint": "http://localhost:9200",
+            "S3Configuration": {"RoleARN": "role", "BucketARN": "arn:aws:s3:::backup"},
+        });
+        for (i, (key, member)) in [
+            ("ElasticsearchDestinationConfiguration", "RoleARN"),
+            ("ElasticsearchDestinationConfiguration", "IndexName"),
+            (
+                "AmazonopensearchserviceDestinationConfiguration",
+                "S3Configuration",
+            ),
+            (
+                "AmazonopensearchserviceDestinationConfiguration",
+                "ClusterEndpoint",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let svc = service();
+            let mut destination = complete.clone();
+            destination.as_object_mut().unwrap().remove(member);
+            let name = format!("incomplete-{i}");
+            let error = svc
+                .create_delivery_stream(&request(
+                    "CreateDeliveryStream",
+                    json!({"DeliveryStreamName": name, key: destination}),
+                ))
+                .err()
+                .unwrap_or_else(|| panic!("{key} without {member} is refused"));
+            assert_eq!(error.code(), "InvalidArgumentException");
+        }
+    }
+
     fn search_stream(svc: &FirehoseService, name: &str) -> String {
         svc.create_delivery_stream(&request(
             "CreateDeliveryStream",
@@ -1621,6 +1671,72 @@ mod tests {
     }
 
     #[test]
+    fn search_update_is_validated_merged_with_the_stored_destination() {
+        let svc = service();
+        let id = search_stream(&svc, "merged-check");
+        for update in [
+            json!({"IndexRotationPeriod": "Hourly"}),
+            json!({"S3BackupMode": "Everything"}),
+            json!({"IndexName": ""}),
+            json!({"RetryOptions": {"DurationInSeconds": 7201}}),
+            json!({"S3Update": {"BucketARN": "not-an-arn"}}),
+        ] {
+            let Err(err) = svc.update_destination(&request(
+                "UpdateDestination",
+                json!({
+                    "DeliveryStreamName": "merged-check",
+                    "CurrentDeliveryStreamVersionId": "1",
+                    "DestinationId": id,
+                    "ElasticsearchDestinationUpdate": update,
+                }),
+            )) else {
+                panic!("{update} must be refused");
+            };
+            assert_eq!(err.code(), "InvalidArgumentException");
+            assert_eq!(describe(&svc, "merged-check")["VersionId"], "1");
+        }
+    }
+
+    /// AWS accepts a `DomainARN` destination, so updating one stays possible even
+    /// though delivery here needs a `ClusterEndpoint`.
+    #[test]
+    fn domain_arn_search_destination_can_still_be_updated() {
+        let svc = service();
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "by-domain",
+                "ElasticsearchDestinationConfiguration": {
+                    "RoleARN": "role",
+                    "IndexName": "activity",
+                    "DomainARN": "arn:aws:es:us-east-1:123456789012:domain/d",
+                    "S3Configuration": {"RoleARN": "role", "BucketARN": "arn:aws:s3:::b"},
+                },
+            }),
+        ))
+        .unwrap();
+        let id = describe(&svc, "by-domain")["Destinations"][0]["DestinationId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        svc.update_destination(&request(
+            "UpdateDestination",
+            json!({
+                "DeliveryStreamName": "by-domain",
+                "CurrentDeliveryStreamVersionId": "1",
+                "DestinationId": id,
+                "ElasticsearchDestinationUpdate": {"IndexName": "renamed"},
+            }),
+        ))
+        .unwrap();
+        assert_eq!(
+            describe(&svc, "by-domain")["Destinations"][0]["ElasticsearchDestinationDescription"]
+                ["IndexName"],
+            "renamed"
+        );
+    }
+
+    #[test]
     fn switching_between_search_and_other_destinations_is_refused() {
         let svc = service();
         let id = search_stream(&svc, "search");
@@ -1685,7 +1801,8 @@ mod tests {
                     "RoleARN": "role", "BucketARN": "arn:aws:s3:::fh-bucket",
                 },
                 "ElasticsearchDestinationConfiguration": {
-                    "IndexName": "activity", "ClusterEndpoint": "http://localhost:9200",
+                    "RoleARN": "role", "IndexName": "activity",
+                    "ClusterEndpoint": "http://localhost:9200",
                     "S3Configuration": {"RoleARN": "role", "BucketARN": "arn:aws:s3:::fh-bucket"},
                 },
             }),
@@ -2396,6 +2513,9 @@ mod tests {
             let svc = service();
             let mut config = compression_s3_config();
             config[create_member] = compression_s3_config();
+            config["RoleARN"] = json!("role");
+            config["IndexName"] = json!("activity");
+            config["ClusterEndpoint"] = json!("http://localhost:9200");
             let mut body = json!({"DeliveryStreamName": "nested"});
             body[format!("{base}Configuration")] = config;
             // HADOOP_SNAPPY is valid on every S3 member, including Redshift's

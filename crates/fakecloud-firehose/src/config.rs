@@ -143,15 +143,19 @@ pub fn parse_s3_destination(value: &Value) -> Result<Option<S3Destination>, AwsS
     crate::service::parse_s3_destination(value)
 }
 
+pub(crate) fn s3_bucket_name(dest: &S3Destination) -> Result<&str, AwsServiceError> {
+    fakecloud_aws::arn::arn_resource(&dest.bucket_arn, "s3")
+        .and_then(|resource| resource.strip_prefix("::"))
+        .filter(|bucket| !bucket.is_empty())
+        .ok_or_else(|| invalid_argument("S3 destination requires a bucket ARN"))
+}
+
 /// Capture an owned, immutable delivery configuration before record admission.
 /// This helper does not restrict configuration create/update/describe acceptance.
 pub fn delivery_config(dest: &S3Destination) -> Result<DeliveryConfig, AwsServiceError> {
     let compression = crate::admission::validate_s3_delivery(dest)?;
     let prefix = dest.prefix.as_deref().unwrap_or_default();
-    let bucket = fakecloud_aws::arn::arn_resource(&dest.bucket_arn, "s3")
-        .and_then(|resource| resource.strip_prefix("::"))
-        .filter(|bucket| !bucket.is_empty())
-        .ok_or_else(|| invalid_argument("S3 destination requires a bucket ARN"))?;
+    let bucket = s3_bucket_name(dest)?;
     // Older snapshots can omit either hint; fill defaults independently here.
     let buffering = buffering_policy(
         Some(dest.buffering_size_mb.unwrap_or(5)),

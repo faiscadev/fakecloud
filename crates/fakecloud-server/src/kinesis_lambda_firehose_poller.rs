@@ -15,7 +15,7 @@
 //! destination refuses records. Positions are scoped to the source stream's
 //! creation time, so a source stream recreated under the same name starts over.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,8 +25,10 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 use fakecloud_core::delivery::LambdaDelivery;
-use fakecloud_firehose::{FirehoseEngine, SharedFirehoseState, SourceLimit, SourceRead};
-use fakecloud_kinesis::{KinesisRecord, KinesisShard, SharedKinesisState};
+use fakecloud_firehose::{
+    FirehoseEngine, SharedFirehoseState, SourceLimit, SourceRead, SourceRecord, StreamKey,
+};
+use fakecloud_kinesis::{KinesisRecord, KinesisShard, KinesisStream, SharedKinesisState};
 use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
 use fakecloud_persistence::SnapshotHook;
@@ -34,6 +36,19 @@ use fakecloud_persistence::SnapshotHook;
 /// AWS caps a single GetRecords call at 10,000 records and 10 MiB.
 const MAX_RECORDS_PER_READ: usize = 10_000;
 const MAX_BYTES_PER_READ: usize = 10 * 1024 * 1024;
+
+/// How much one `read_shards` call may take. `shard_bytes` is per shard and
+/// `total_bytes` is shared by the shards, past the first record of each while
+/// any of it is left.
+#[derive(Clone, Copy)]
+struct ReadLimits {
+    records: usize,
+    shard_bytes: usize,
+    total_bytes: usize,
+    /// The incarnation of the stream the caller derived its checkpoints from.
+    /// Another one reads nothing, so its records are not tagged as this one's.
+    generation: Option<i64>,
+}
 
 struct ShardRead {
     shard_id: String,
@@ -52,9 +67,7 @@ fn trimmed(shard: &KinesisShard) -> usize {
 }
 
 struct Source {
-    account: String,
-    region: String,
-    name: String,
+    key: StreamKey,
     source_arn: String,
     checkpoint_id: String,
     created_at: DateTime<Utc>,
@@ -80,6 +93,13 @@ struct Mapping {
     invoke_identity_arn: Option<String>,
 }
 
+fn stream_generation(stream: &KinesisStream) -> i64 {
+    stream
+        .stream_creation_timestamp
+        .timestamp_nanos_opt()
+        .unwrap_or_default()
+}
+
 pub struct KinesisLambdaFirehosePoller {
     kinesis_state: SharedKinesisState,
     lambda_state: SharedLambdaState,
@@ -92,7 +112,7 @@ pub struct KinesisLambdaFirehosePoller {
     firehose: Option<(SharedFirehoseState, Arc<FirehoseEngine>)>,
     /// Why each delivery stream last refused records, so the reason is logged
     /// once per change rather than on every poll.
-    firehose_refusals: parking_lot::Mutex<HashMap<String, String>>,
+    firehose_refusals: parking_lot::Mutex<BTreeMap<StreamKey, String>>,
 }
 
 impl KinesisLambdaFirehosePoller {
@@ -138,6 +158,7 @@ impl KinesisLambdaFirehosePoller {
     /// Polls Lambda mappings and Firehose sources side by side, so a Lambda
     /// invocation awaiting its function does not hold up Firehose reads.
     pub async fn run(self: Arc<Self>) {
+        self.settle_restored_checkpoints().await;
         let lambda = async {
             let mut interval = tokio::time::interval(Duration::from_millis(500));
             loop {
@@ -155,17 +176,58 @@ impl KinesisLambdaFirehosePoller {
         tokio::join!(lambda, firehose);
     }
 
-    /// Reads up to `limit` records and, past the first record, up to
-    /// `max_bytes` of data from each shard of `stream_arn`, starting at
-    /// the shard's checkpoint under `checkpoint_id`, or from the index
-    /// `resume(shard)` returns when that is further. A shard with no checkpoint yet is seeded at
-    /// `seed(&shard.records)`. Also reports whether any checkpoint was seeded.
+    /// Snapshots from before checkpoints named their stream restore entries with
+    /// no owner, which deleting a stream would not forget. Name the stream each
+    /// one's mapping reads, and drop those whose mapping or stream is not here:
+    /// they would apply their old offset to a stream recreated later.
+    async fn settle_restored_checkpoints(&self) {
+        let mapped: HashMap<String, String> = self
+            .lambda_state
+            .read()
+            .iter_regional()
+            .flat_map(|(_, _, lambda)| lambda.event_source_mappings.values())
+            .map(|m| (m.uuid.clone(), m.event_source_arn.clone()))
+            .collect();
+        let mut settled = false;
+        for (_, _, kinesis) in self.kinesis_state.write().iter_regional_mut() {
+            let ownerless: Vec<String> = kinesis
+                .lambda_checkpoints
+                .keys()
+                .filter(|key| !kinesis.lambda_checkpoint_streams.contains_key(*key))
+                .cloned()
+                .collect();
+            for key in ownerless {
+                settled = true;
+                let owner = key
+                    .rsplit_once(':')
+                    .and_then(|(uuid, _)| mapped.get(uuid))
+                    .filter(|arn| kinesis.streams.values().any(|s| s.stream_arn == **arn));
+                match owner {
+                    Some(arn) => {
+                        kinesis.lambda_checkpoint_streams.insert(key, arn.clone());
+                    }
+                    None => {
+                        kinesis.lambda_checkpoints.remove(&key);
+                    }
+                }
+            }
+        }
+        if settled {
+            self.persist().await;
+        }
+    }
+
+    /// Reads from each shard of `stream_arn` within `limits`, starting at the
+    /// shard's checkpoint under `checkpoint_id`, at the index `resume(shard)`
+    /// returns when that is further, and past what retention has expired even if
+    /// no write has trimmed it yet, as GetRecords does. A shard with no checkpoint
+    /// yet is seeded at `seed(&shard.records)`. Also reports whether any
+    /// checkpoint was seeded.
     fn read_shards(
         &self,
         stream_arn: &str,
         checkpoint_id: &str,
-        limit: usize,
-        max_bytes: usize,
+        limits: ReadLimits,
         resume: impl Fn(&KinesisShard) -> Option<usize>,
         seed: impl Fn(&[KinesisRecord]) -> usize,
     ) -> (Vec<ShardRead>, bool) {
@@ -180,8 +242,15 @@ impl KinesisLambdaFirehosePoller {
         else {
             return (Vec::new(), false);
         };
-        let mut reads = Vec::new();
+        if limits
+            .generation
+            .is_some_and(|generation| generation != stream_generation(stream))
+        {
+            return (Vec::new(), false);
+        }
+        let mut pending = Vec::new();
         let mut seeds = Vec::new();
+        let cutoff = Utc::now() - chrono::Duration::hours(i64::from(stream.retention_period_hours));
         for shard in &stream.shards {
             let key = format!("{}:{}", checkpoint_id, shard.shard_id);
             let start = match kinesis.lambda_checkpoints.get(&key) {
@@ -192,33 +261,51 @@ impl KinesisLambdaFirehosePoller {
                     offset
                 }
             };
-            let start = start.max(resume(shard).unwrap_or(0));
+            let live = shard
+                .records
+                .partition_point(|r| r.approximate_arrival_timestamp < cutoff);
+            let start = start.max(resume(shard).unwrap_or(0)).max(live);
             if start < shard.records.len() {
-                let mut end = shard.records.len().min(start.saturating_add(limit));
-                let mut bytes = 0;
-                if let Some(over) = shard.records[start..end].iter().position(|r| {
-                    bytes += r.data.len() + r.partition_key.len();
-                    bytes > max_bytes
-                }) {
-                    end = start + over.max(1);
-                }
-                reads.push(ShardRead {
-                    shard_id: shard.shard_id.clone(),
-                    start,
-                    end,
-                    records: shard.records[start..end].to_vec(),
-                    trimmed: trimmed(shard),
-                });
+                pending.push((shard, start));
             }
         }
-        let seeded = !seeds.is_empty();
-        for shard in &stream.shards {
-            // Entries from snapshots that predate stream ownership.
-            kinesis
-                .lambda_checkpoint_streams
-                .entry(format!("{}:{}", checkpoint_id, shard.shard_id))
-                .or_insert_with(|| stream_arn.to_string());
+        // Oldest unread record first, so a tight budget reaches every shard
+        // before retention expires what it holds.
+        pending.sort_by_key(|(shard, start)| shard.records[*start].approximate_arrival_timestamp);
+        let mut reads = Vec::new();
+        let mut total_left = limits.total_bytes;
+        for (position, (shard, start)) in pending.iter().enumerate() {
+            if total_left == 0 {
+                break;
+            }
+            let start = *start;
+            let mut end = shard
+                .records
+                .len()
+                .min(start.saturating_add(limits.records));
+            let share = total_left / (pending.len() - position);
+            let max_bytes = limits.shard_bytes.min(share);
+            let mut bytes = 0;
+            if let Some(over) = shard.records[start..end].iter().position(|r| {
+                bytes += r.data.len() + r.partition_key.len();
+                bytes > max_bytes
+            }) {
+                end = start + over.max(1);
+            }
+            let taken: usize = shard.records[start..end]
+                .iter()
+                .map(|r| r.data.len() + r.partition_key.len())
+                .sum();
+            total_left = total_left.saturating_sub(taken);
+            reads.push(ShardRead {
+                shard_id: shard.shard_id.clone(),
+                start,
+                end,
+                records: shard.records[start..end].to_vec(),
+                trimmed: trimmed(shard),
+            });
         }
+        let seeded = !seeds.is_empty();
         for (shard_id, offset) in seeds {
             kinesis.set_lambda_checkpoint(stream_arn, checkpoint_id, &shard_id, offset);
         }
@@ -276,8 +363,12 @@ impl KinesisLambdaFirehosePoller {
         let (deliveries, _) = self.read_shards(
             &mapping.stream_arn,
             &mapping.uuid,
-            limit,
-            usize::MAX,
+            ReadLimits {
+                records: limit,
+                shard_bytes: usize::MAX,
+                total_bytes: usize::MAX,
+                generation: None,
+            },
             |_| None,
             |records| {
                 match mapping
@@ -440,7 +531,11 @@ impl KinesisLambdaFirehosePoller {
         let Some((firehose_state, engine)) = &self.firehose else {
             return;
         };
-        for source in collect_sources(firehose_state) {
+        let sources = collect_sources(firehose_state);
+        self.firehose_refusals
+            .lock()
+            .retain(|key, _| sources.iter().any(|source| source.key == *key));
+        for source in sources {
             self.process_source(engine, &source).await;
         }
     }
@@ -473,43 +568,37 @@ impl KinesisLambdaFirehosePoller {
             .streams
             .values()
             .find(|stream| stream.stream_arn == source_arn)?;
-        let generation = stream
-            .stream_creation_timestamp
-            .timestamp_nanos_opt()
-            .unwrap_or_default();
+        let generation = stream_generation(stream);
         let hours = u64::try_from(stream.retention_period_hours).unwrap_or_default();
         Some((generation, Duration::from_secs(hours * 60 * 60)))
     }
 
     fn note_refusal(&self, source: &Source, refused: Option<&String>) {
-        let key = format!("{}/{}/{}", source.account, source.region, source.name);
         let mut refusals = self.firehose_refusals.lock();
         let Some(reason) = refused else {
-            refusals.remove(&key);
+            refusals.remove(&source.key);
             return;
         };
-        if refusals.get(&key) != Some(reason) {
-            tracing::warn!(stream = ?source.name, source_arn = %source.source_arn, ?reason,
+        if refusals.get(&source.key) != Some(reason) {
+            tracing::warn!(stream = ?source.key.name, source_arn = %source.source_arn, ?reason,
                 "Kinesis->Firehose: not reading the source while the destination refuses records");
-            refusals.insert(key, reason.clone());
+            refusals.insert(source.key.clone(), reason.clone());
         }
     }
 
     async fn process_source(&self, engine: &FirehoseEngine, source: &Source) {
         let stream = self.source_stream(&source.source_arn);
         engine.limit_source_retries(
-            &source.account,
-            &source.region,
-            &source.name,
+            &source.key,
             SourceLimit {
                 retention: stream.map_or(Duration::ZERO, |(_, retention)| retention),
-                current_prefix: stream.map(|(generation, _)| format!("{generation}/")),
+                current_generation: stream.map(|(generation, _)| generation),
             },
         );
         let Some((generation, _)) = stream else {
             return;
         };
-        let progress = engine.source_progress(&source.account, &source.region, &source.name);
+        let progress = engine.source_progress(&source.key);
         self.note_refusal(source, progress.refused.as_ref());
         let (reads, seeded) = if progress.backlogged || progress.refused.is_some() {
             (Vec::new(), false)
@@ -517,8 +606,12 @@ impl KinesisLambdaFirehosePoller {
             self.read_shards(
                 &source.source_arn,
                 &source_checkpoint_id(source, generation),
-                MAX_RECORDS_PER_READ,
-                MAX_BYTES_PER_READ,
+                ReadLimits {
+                    records: MAX_RECORDS_PER_READ,
+                    shard_bytes: MAX_BYTES_PER_READ,
+                    total_bytes: progress.remaining_bytes,
+                    generation: Some(generation),
+                },
                 |shard| {
                     let read = progress
                         .read
@@ -543,21 +636,20 @@ impl KinesisLambdaFirehosePoller {
         } in reads
         {
             let read = SourceRead {
+                generation,
                 records: records
                     .iter()
-                    .map(|r| Bytes::copy_from_slice(&r.data))
-                    .collect(),
-                document_ids: records
-                    .iter()
-                    .map(|r| format!("{generation}:{shard_id}:{}", r.sequence_number))
+                    .map(|r| SourceRecord {
+                        data: Bytes::copy_from_slice(&r.data),
+                        document_id: format!("{generation}:{shard_id}:{}", r.sequence_number),
+                        arrival: r.approximate_arrival_timestamp,
+                    })
                     .collect(),
                 shard_id: source_shard_key(generation, &shard_id),
                 end: end + trimmed,
             };
-            if let Err(error) =
-                engine.enqueue_from_source(&source.account, &source.region, &source.name, read)
-            {
-                tracing::warn!(stream = ?source.name, source_arn = %source.source_arn,
+            if let Err(error) = engine.enqueue_from_source(&source.key, read) {
+                tracing::warn!(stream = ?source.key.name, source_arn = %source.source_arn,
                     shard_id = %shard_id, error = ?error.message(),
                     "Kinesis->Firehose: records not admitted; will retry");
             }
@@ -572,9 +664,7 @@ impl KinesisLambdaFirehosePoller {
     /// Moves the source's checkpoints up to what the engine has committed and
     /// reports whether any moved.
     fn commit_source(&self, engine: &FirehoseEngine, source: &Source, generation: i64) -> bool {
-        let committed = engine
-            .source_progress(&source.account, &source.region, &source.name)
-            .committed;
+        let committed = engine.source_progress(&source.key).committed;
         let checkpoint_id = source_checkpoint_id(source, generation);
         let mut advanced = false;
         if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&source.source_arn) {
@@ -631,9 +721,12 @@ fn collect_sources(firehose_state: &SharedFirehoseState) -> Vec<Source> {
                     streams.values().filter_map(move |stream| {
                         let source = stream.kinesis_source.as_ref()?;
                         Some(Source {
-                            account: account.clone(),
-                            region: region.clone(),
-                            name: stream.name.clone(),
+                            key: StreamKey {
+                                account_id: account.clone(),
+                                region: region.clone(),
+                                name: stream.name.clone(),
+                                instance_id: stream.instance_id,
+                            },
                             source_arn: source.kinesis_stream_arn.clone(),
                             // Keyed by creation time too, so a recreated stream
                             // starts fresh instead of resuming the old position.
@@ -1129,7 +1222,7 @@ mod tests {
 
             fn read_position(&self) -> Option<usize> {
                 self.engine
-                    .source_progress(ACCOUNT, REGION, "fh")
+                    .source_progress(&self.source().key)
                     .read
                     .get(&source_shard_key(self.generation(), SHARD))
                     .copied()
@@ -1166,17 +1259,265 @@ mod tests {
             f.engine.shutdown().await;
             let accounts = f.s3.read();
             let objects = &accounts.get(ACCOUNT).unwrap().buckets["bucket"].objects;
+            let mut bodies: Vec<&[u8]> = objects
+                .values()
+                .map(|object| {
+                    let fakecloud_persistence::BodyRef::Memory(body) = &object.body else {
+                        panic!("memory store");
+                    };
+                    body.as_ref()
+                })
+                .collect();
+            bodies.sort_by_key(|body| body.len());
             assert_eq!(
-                objects.len(),
-                1,
-                "old and new records share the buffered batch"
+                bodies,
+                vec![&b"hello"[..], &b"hellohellohello"[..]],
+                "each stream incarnation has its own batch"
             );
-            let fakecloud_persistence::BodyRef::Memory(body) =
-                &objects.values().next().unwrap().body
-            else {
-                panic!("memory store");
+        }
+
+        fn shard_records(f: &Fixture, ages: &[i64]) {
+            let mut accounts = f.kinesis.write();
+            let stream = accounts
+                .regional_mut(ACCOUNT, REGION)
+                .streams
+                .get_mut("orders")
+                .unwrap();
+            let shard = &mut stream.shards[0];
+            for age in ages {
+                shard.records.push(KinesisRecord {
+                    sequence_number: shard.next_sequence_number.to_string(),
+                    partition_key: "pk".into(),
+                    data: b"x".to_vec(),
+                    approximate_arrival_timestamp: Utc::now() - chrono::Duration::hours(*age),
+                });
+                shard.next_sequence_number += 1;
+            }
+        }
+
+        fn read_everything(f: &Fixture, checkpoint: &str, limits: ReadLimits) -> Vec<ShardRead> {
+            f.poller
+                .read_shards(&stream_arn(), checkpoint, limits, |_| None, |_| 0)
+                .0
+        }
+
+        const NO_LIMIT: ReadLimits = ReadLimits {
+            records: usize::MAX,
+            shard_bytes: usize::MAX,
+            total_bytes: usize::MAX,
+            generation: None,
+        };
+
+        /// Records past retention are not returned even when no write has
+        /// trimmed them, like GetRecords.
+        #[tokio::test]
+        async fn reads_skip_records_past_retention_before_they_are_trimmed() {
+            let f = Fixture::new(json!({}));
+            shard_records(&f, &[25, 25, 1]);
+            let reads = read_everything(&f, "reader", NO_LIMIT);
+            assert_eq!(reads.len(), 1);
+            assert_eq!(reads[0].start, 2);
+            assert_eq!(reads[0].records.len(), 1);
+
+            let mut accounts = f.kinesis.write();
+            let stream = accounts
+                .regional_mut(ACCOUNT, REGION)
+                .streams
+                .get_mut("orders")
+                .unwrap();
+            stream.shards[0].records.truncate(2);
+            drop(accounts);
+            assert!(
+                read_everything(&f, "reader-2", NO_LIMIT).is_empty(),
+                "all expired"
+            );
+        }
+
+        /// One read stays within the budget across shards, however many there
+        /// are, and every shard with records gets a share of it.
+        #[tokio::test]
+        async fn a_tight_budget_reaches_every_shard_oldest_first() {
+            let f = Fixture::new(json!({}));
+            let size = 1000;
+            let base = Utc::now() - chrono::Duration::minutes(1);
+            {
+                let mut accounts = f.kinesis.write();
+                let stream = accounts
+                    .regional_mut(ACCOUNT, REGION)
+                    .streams
+                    .get_mut("orders")
+                    .unwrap();
+                stream.shards = fakecloud_kinesis::build_stream_shards(4);
+                for shard in &mut stream.shards {
+                    for age in 0..4 {
+                        shard.records.push(KinesisRecord {
+                            sequence_number: shard.next_sequence_number.to_string(),
+                            partition_key: String::new(),
+                            data: vec![b'x'; size],
+                            approximate_arrival_timestamp: base + chrono::Duration::seconds(age),
+                        });
+                        shard.next_sequence_number += 1;
+                    }
+                }
+            }
+            let limits = ReadLimits {
+                records: usize::MAX,
+                shard_bytes: usize::MAX,
+                total_bytes: size,
+                generation: None,
             };
-            assert_eq!(body.as_ref(), b"hellohellohellohello");
+            let mut read: HashMap<String, usize> = HashMap::new();
+            let mut order = Vec::new();
+            for _ in 0..4 {
+                let (reads, _) = f.poller.read_shards(
+                    &stream_arn(),
+                    "tight",
+                    limits,
+                    |shard| read.get(&shard.shard_id).copied(),
+                    |_| 0,
+                );
+                assert_eq!(reads.len(), 1);
+                read.insert(reads[0].shard_id.clone(), reads[0].end);
+                order.push(reads[0].shard_id.clone());
+            }
+            order.sort();
+            order.dedup();
+            assert_eq!(order.len(), 4, "every shard was read: {order:?}");
+        }
+
+        #[tokio::test]
+        async fn a_read_for_another_stream_incarnation_takes_nothing() {
+            let f = Fixture::new(json!({}));
+            f.kinesis
+                .write()
+                .regional_mut(ACCOUNT, REGION)
+                .streams
+                .get_mut("orders")
+                .unwrap()
+                .shards[0]
+                .records
+                .push(KinesisRecord {
+                    sequence_number: "1".to_string(),
+                    partition_key: String::new(),
+                    data: b"x".to_vec(),
+                    approximate_arrival_timestamp: Utc::now(),
+                });
+            let generation = f.poller.source_stream(&stream_arn()).unwrap().0;
+            let read = |generation| {
+                f.poller.read_shards(
+                    &stream_arn(),
+                    "incarnation",
+                    ReadLimits {
+                        records: usize::MAX,
+                        shard_bytes: usize::MAX,
+                        total_bytes: usize::MAX,
+                        generation: Some(generation),
+                    },
+                    |_| None,
+                    |_| 0,
+                )
+            };
+            let (reads, seeded) = read(generation - 1);
+            assert!(reads.is_empty());
+            assert!(!seeded, "a stale read leaves no checkpoint behind");
+            assert_eq!(read(generation).0.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn reads_share_a_byte_budget_across_shards() {
+            let f = Fixture::new(json!({}));
+            let size = 1000;
+            {
+                let mut accounts = f.kinesis.write();
+                let stream = accounts
+                    .regional_mut(ACCOUNT, REGION)
+                    .streams
+                    .get_mut("orders")
+                    .unwrap();
+                stream.shards = fakecloud_kinesis::build_stream_shards(4);
+                for shard in &mut stream.shards {
+                    for _ in 0..10 {
+                        shard.records.push(KinesisRecord {
+                            sequence_number: shard.next_sequence_number.to_string(),
+                            partition_key: String::new(),
+                            data: vec![b'x'; size],
+                            approximate_arrival_timestamp: Utc::now(),
+                        });
+                        shard.next_sequence_number += 1;
+                    }
+                }
+            }
+            let reads = read_everything(
+                &f,
+                "reader",
+                ReadLimits {
+                    records: usize::MAX,
+                    shard_bytes: usize::MAX,
+                    total_bytes: 8 * size,
+                    generation: None,
+                },
+            );
+            let taken: Vec<usize> = reads.iter().map(|read| read.records.len()).collect();
+            assert_eq!(taken, vec![2, 2, 2, 2]);
+
+            let reads = read_everything(
+                &f,
+                "reader-2",
+                ReadLimits {
+                    records: usize::MAX,
+                    shard_bytes: usize::MAX,
+                    total_bytes: size,
+                    generation: None,
+                },
+            );
+            let taken: usize = reads.iter().map(|read| read.records.len()).sum();
+            assert_eq!(taken, 1, "within one record of a nearly spent budget");
+
+            // Unread shards are still seeded.
+            let accounts = f.kinesis.read();
+            let state = accounts.regional(ACCOUNT, REGION).unwrap();
+            let seeded = state
+                .lambda_checkpoints
+                .keys()
+                .filter(|key| key.starts_with("reader-2:"))
+                .count();
+            assert_eq!(seeded, 4);
+        }
+
+        /// The handoff carries each record's Kinesis arrival, not the read time.
+        #[tokio::test]
+        async fn source_handoff_carries_kinesis_arrival_times() {
+            let f = Fixture::new(json!({}));
+            shard_records(&f, &[2]);
+            let arrival = f.kinesis.read().regional(ACCOUNT, REGION).unwrap().streams["orders"]
+                .shards[0]
+                .records[0]
+                .approximate_arrival_timestamp;
+            f.poll().await;
+            f.engine.shutdown().await;
+            let accounts = f.s3.read();
+            let objects = &accounts.get(ACCOUNT).unwrap().buckets["bucket"].objects;
+            let key = objects.keys().next().unwrap();
+            assert!(
+                key.starts_with(&arrival.format("%Y/%m/%d/%H").to_string()),
+                "{key}"
+            );
+        }
+
+        /// Refusal bookkeeping goes with the stream, or repeated create and
+        /// delete of refused streams would grow it forever.
+        #[tokio::test]
+        async fn refusals_are_forgotten_with_their_delivery_stream() {
+            let f = Fixture::new(json!({"SplunkDestinationDescription": {}}));
+            f.poller.poll_firehose().await;
+            assert_eq!(f.poller.firehose_refusals.lock().len(), 1);
+            f.firehose
+                .write()
+                .get_or_create(ACCOUNT, REGION)
+                .streams_mut(REGION)
+                .remove("fh");
+            f.poller.poll_firehose().await;
+            assert!(f.poller.firehose_refusals.lock().is_empty());
         }
 
         /// The shutdown drain's commits reach the checkpoint, or every graceful
@@ -1241,20 +1582,15 @@ mod tests {
         #[tokio::test]
         async fn source_stream_state_bounds_batch_retries() {
             let f = Fixture::new(json!({}));
-            let limit = || {
-                f.engine
-                    .source_progress(ACCOUNT, REGION, "fh")
-                    .limit
-                    .unwrap()
-            };
+            let limit = || f.engine.source_progress(&f.source().key).limit.unwrap();
             f.poll().await;
-            let prefix = format!("{}/", f.generation());
-            assert_eq!(limit().current_prefix, Some(prefix.clone()));
+            let generation = f.generation();
+            assert_eq!(limit().current_generation, Some(generation));
             assert_eq!(limit().retention, Duration::from_secs(24 * 60 * 60));
 
             f.create_kinesis_stream(Utc::now() + chrono::Duration::seconds(1));
             f.poll().await;
-            assert_ne!(limit().current_prefix, Some(prefix));
+            assert_ne!(limit().current_generation, Some(generation));
 
             f.kinesis
                 .write()
@@ -1262,28 +1598,47 @@ mod tests {
                 .streams
                 .remove("orders");
             f.poll().await;
-            assert_eq!(limit().current_prefix, None);
+            assert_eq!(limit().current_generation, None);
         }
 
-        /// A checkpoint names the stream it reads even when restored from a
-        /// snapshot that predates that, so deleting the stream forgets it.
+        /// A checkpoint restored from a snapshot that predates stream ownership
+        /// is tied to its mapping's stream at startup, even for a disabled
+        /// mapping that is not polling, so deleting the stream forgets it. One
+        /// with no mapping or no stream here could only skip records later.
         #[tokio::test]
-        async fn reading_claims_checkpoints_restored_without_a_stream() {
-            let f = Fixture::new(json!({}));
-            f.poll().await;
-            let key = format!(
-                "{}:{SHARD}",
-                source_checkpoint_id(&f.source(), f.generation())
-            );
-            f.kinesis
-                .write()
-                .regional_mut(ACCOUNT, REGION)
-                .lambda_checkpoint_streams
-                .clear();
-            f.poll().await;
-            let mut accounts = f.kinesis.write();
+        async fn restored_checkpoints_are_settled_at_startup() {
+            let Fixture { kinesis, .. } = Fixture::new(json!({}));
+            let lambda: SharedLambdaState = Arc::new(RwLock::new(MultiAccountState::new(
+                ACCOUNT,
+                REGION,
+                "http://localhost:4566",
+            )));
+            let function = format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:f");
+            let mut disabled = esm("disabled", &function, &stream_arn());
+            disabled.enabled = false;
+            let gone_stream = format!("arn:aws:kinesis:{REGION}:{ACCOUNT}:stream/gone");
+            {
+                let mut accounts = lambda.write();
+                let mappings = &mut accounts.regional_mut(ACCOUNT, REGION).event_source_mappings;
+                mappings.insert("disabled".into(), disabled);
+                mappings.insert("gone".into(), esm("gone", &function, &gone_stream));
+            }
+            {
+                let mut accounts = kinesis.write();
+                let state = accounts.regional_mut(ACCOUNT, REGION);
+                for uuid in ["disabled", "gone", "unmapped"] {
+                    state
+                        .lambda_checkpoints
+                        .insert(format!("{uuid}:{SHARD}"), 7);
+                }
+            }
+            let poller = KinesisLambdaFirehosePoller::new(kinesis.clone(), lambda);
+            poller.settle_restored_checkpoints().await;
+
+            let mut accounts = kinesis.write();
             let state = accounts.regional_mut(ACCOUNT, REGION);
-            assert_eq!(state.lambda_checkpoint_streams[&key], stream_arn());
+            assert_eq!(state.lambda_checkpoints.len(), 1);
+            assert_eq!(state.lambda_checkpoint("disabled", SHARD), 7);
             state.forget_stream_checkpoints(&stream_arn());
             assert!(state.lambda_checkpoints.is_empty());
         }
@@ -1315,6 +1670,7 @@ mod tests {
                         &stream_arn(),
                     ),
                 );
+            let key = collect_sources(&firehose).remove(0).key;
             let hanging = Arc::new(tokio::sync::Notify::new());
             let poller = Arc::new(
                 KinesisLambdaFirehosePoller::new(kinesis.clone(), lambda)
@@ -1329,11 +1685,7 @@ mod tests {
             let running = tokio::spawn(poller.run());
             let read = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
-                    if !engine
-                        .source_progress(ACCOUNT, REGION, "fh")
-                        .read
-                        .is_empty()
-                    {
+                    if !engine.source_progress(&key).read.is_empty() {
                         return;
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;

@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 
 use crate::output::encode_records;
 use crate::search::{self, SearchDelivery};
-use crate::{DeliveryConfig, SharedFirehoseState, StreamKey};
+use crate::{DeliveryConfig, FirehoseAccounts, SharedFirehoseState, StreamKey};
 
 /// An immutable destination/version snapshot and an already chosen, retry-stable key.
 #[derive(Clone, Debug)]
@@ -83,20 +83,22 @@ impl S3BatchWriter {
                     encryption: batch.destination.encryption.clone(),
                 },
             },
-            || {
-                // Configuration changes preserve the instance ID, so old batches keep
-                // their captured destination. Delete/recreate and reset invalidate it.
-                let config = self.state.read();
-                let current = config
-                    .get(&batch.stream.account_id)?
-                    .streams(&batch.stream.region)?
-                    .get(&batch.stream.name)?;
-                if current.instance_id != batch.stream.instance_id {
-                    return None;
-                }
-                Some(config)
-            },
+            || self.live_stream(batch),
         )
+    }
+
+    /// Configuration changes preserve the instance ID, so old batches keep their
+    /// captured destination. Delete/recreate and reset invalidate it.
+    fn live_stream(
+        &self,
+        batch: &DeliveryBatch,
+    ) -> Option<parking_lot::RwLockReadGuard<'_, FirehoseAccounts>> {
+        let config = self.state.read();
+        let current = config
+            .get(&batch.stream.account_id)?
+            .streams(&batch.stream.region)?
+            .get(&batch.stream.name)?;
+        (current.instance_id == batch.stream.instance_id).then_some(config)
     }
 
     fn write_search(
@@ -104,14 +106,17 @@ impl S3BatchWriter {
         batch: &DeliveryBatch,
         search: &SearchDelivery,
     ) -> Result<DeliveryWriteOutcome, String> {
-        let index = search::index_name(&search.index_name, &search.rotation, batch.oldest_arrival);
+        // No lock is held across the request, so this cannot cover one in flight.
+        if self.live_stream(batch).is_none() {
+            return Ok(DeliveryWriteOutcome::Cancelled);
+        }
         let search::BulkProgress {
             rejected: mut failures,
             pending,
         } = search.attempts.progress(batch);
         if !pending.is_empty() {
             let first_attempt = search.attempts.begin();
-            let result = search::post_bulk(search, &index, batch, &pending);
+            let result = search::post_bulk(search, batch, &pending);
             let elapsed = (Utc::now() - first_attempt).to_std().unwrap_or_default();
             let retrying = elapsed < search.retry;
             match result {
@@ -159,7 +164,7 @@ impl S3BatchWriter {
         if !failures.is_empty() {
             let lines: Vec<Vec<u8>> = failures
                 .iter()
-                .map(|failure| search::failed_record(batch, search, &index, failure))
+                .map(|failure| search::failed_record(batch, search, failure))
                 .collect();
             let suffix = &batch.object_key[batch.destination.output.prefix.len()..];
             outcome = self.put(batch, &format!("{}{suffix}", search.error_prefix), &lines)?;
@@ -793,6 +798,21 @@ mod tests {
         assert_eq!(lines.len(), 1, "only the rejected document failed");
         assert_eq!(lines[0]["errorCode"], "400");
         assert_eq!(lines[0]["attemptsMade"], 2);
+    }
+
+    /// A batch of a deleted or recreated stream is not posted to the cluster.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_batch_of_a_replaced_stream_is_cancelled_before_posting() {
+        let (state, s3, mut batch) = fixture();
+        let attempts = search_batch(&mut batch, Duration::from_secs(300));
+        batch.stream.instance_id = uuid::Uuid::new_v4();
+        let writer = Arc::new(writer(&state, &s3, None));
+        let outcome = tokio::task::spawn_blocking(move || writer.write(&batch))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome, DeliveryWriteOutcome::Cancelled);
+        assert_eq!(attempts.made(), 0);
     }
 
     /// A batch that waited behind a failing one still gets its retry duration,

@@ -14,7 +14,10 @@ use fakecloud_core::service::AwsServiceError;
 use serde_json::{json, Value};
 
 use crate::admission::unsupported;
-use crate::config::{buffering_policy, delivery_config, invalid_argument, parse_buffering_hints};
+use crate::config::{
+    buffering_policy, delivery_config, invalid_argument, parse_buffering_hints, s3_bucket_name,
+};
+use crate::state::S3Destination;
 use crate::writer::DeliveryBatch;
 use crate::DeliveryConfig;
 
@@ -126,15 +129,22 @@ fn classify_records(batch: &DeliveryBatch) -> BulkProgress {
     progress
 }
 
-pub(crate) fn delivery(kind: &str, config: &Value) -> Result<DeliveryConfig, AwsServiceError> {
-    let endpoint = config["ClusterEndpoint"]
-        .as_str()
-        .filter(|endpoint| !endpoint.is_empty())
-        .ok_or_else(|| unsupported("a DomainARN without ClusterEndpoint"))?;
-    let index_name = config["IndexName"]
-        .as_str()
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| invalid_argument("IndexName is required"))?;
+fn nonempty<'a>(config: &'a Value, member: &str) -> Option<&'a str> {
+    config[member].as_str().filter(|value| !value.is_empty())
+}
+
+/// What makes a stored destination invalid on AWS too, as opposed to what only
+/// this emulator cannot deliver: `delivery` refuses that when records arrive,
+/// and a `DomainARN` destination is configuration AWS accepts.
+fn validate_settings(config: &Value) -> Result<S3Destination, AwsServiceError> {
+    if nonempty(config, "ClusterEndpoint").is_none() && nonempty(config, "DomainARN").is_none() {
+        return Err(invalid_argument(
+            "Specify either ClusterEndpoint or DomainARN",
+        ));
+    }
+    if nonempty(config, "IndexName").is_none() {
+        return Err(invalid_argument("IndexName is required"));
+    }
     let rotation = config["IndexRotationPeriod"].as_str().unwrap_or("OneDay");
     if !matches!(
         rotation,
@@ -144,25 +154,60 @@ pub(crate) fn delivery(kind: &str, config: &Value) -> Result<DeliveryConfig, Aws
             "Invalid IndexRotationPeriod: {rotation}"
         )));
     }
-    if config["ProcessingConfiguration"]["Enabled"].as_bool() == Some(true) {
-        return Err(unsupported("ProcessingConfiguration"));
+    if !matches!(
+        config["S3BackupMode"].as_str(),
+        None | Some("FailedDocumentsOnly" | "AllDocuments")
+    ) {
+        return Err(invalid_argument(format!(
+            "Invalid S3BackupMode: {}",
+            config["S3BackupMode"]
+        )));
     }
-    let backup_all = match config["S3BackupMode"].as_str() {
-        None | Some("FailedDocumentsOnly") => false,
-        Some("AllDocuments") => true,
-        Some(mode) => return Err(invalid_argument(format!("Invalid S3BackupMode: {mode}"))),
-    };
-    let s3 = crate::config::parse_s3_destination(&config["S3Configuration"])?
-        .ok_or_else(|| invalid_argument("S3Configuration is required"))?;
-    let mut delivery = delivery_config(&s3)?;
-    let (size, interval) = parse_buffering_hints(config)?;
-    let size = size.unwrap_or(5);
-    if size > 100 {
+    let retry = &config["RetryOptions"]["DurationInSeconds"];
+    if !retry.is_null() && !retry.as_u64().is_some_and(|seconds| seconds <= 7200) {
+        return Err(invalid_argument(format!(
+            "RetryOptions.DurationInSeconds must be between 0 and 7200, got {retry}"
+        )));
+    }
+    let (size, _) = parse_buffering_hints(config)?;
+    if let Some(size) = size.filter(|size| *size > 100) {
         return Err(invalid_argument(format!(
             "BufferingHints.SizeInMBs must be between 1 and 100, got {size}"
         )));
     }
-    delivery.buffering = buffering_policy(Some(size), Some(interval.unwrap_or(300)))?;
+    let s3 = crate::config::parse_s3_destination(&config["S3Configuration"])?
+        .ok_or_else(|| invalid_argument("S3Configuration is required"))?;
+    s3_bucket_name(&s3)?;
+    Ok(s3)
+}
+
+/// A destination as `UpdateDestination` would leave it.
+pub(crate) fn validate_stored(config: &Value) -> Result<(), AwsServiceError> {
+    validate_settings(config).map(|_| ())
+}
+
+/// A destination a CloudFormation template declares, whose `RoleARN` is
+/// required as well.
+pub fn validate_search_destination(config: &Value) -> Result<(), AwsServiceError> {
+    if nonempty(config, "RoleARN").is_none() {
+        return Err(invalid_argument("RoleARN is required"));
+    }
+    validate_stored(config)
+}
+
+pub(crate) fn delivery(kind: &str, config: &Value) -> Result<DeliveryConfig, AwsServiceError> {
+    let s3 = validate_settings(config)?;
+    let endpoint = nonempty(config, "ClusterEndpoint")
+        .ok_or_else(|| unsupported("a DomainARN without ClusterEndpoint"))?;
+    let index_name = nonempty(config, "IndexName").unwrap_or_default();
+    let rotation = config["IndexRotationPeriod"].as_str().unwrap_or("OneDay");
+    if config["ProcessingConfiguration"]["Enabled"].as_bool() == Some(true) {
+        return Err(unsupported("ProcessingConfiguration"));
+    }
+    let backup_all = config["S3BackupMode"] == "AllDocuments";
+    let mut delivery = delivery_config(&s3)?;
+    let (size, interval) = parse_buffering_hints(config)?;
+    delivery.buffering = buffering_policy(Some(size.unwrap_or(5)), Some(interval.unwrap_or(300)))?;
     let failed_folder = if kind == OPENSEARCH {
         "AmazonOpenSearchService_failed/"
     } else {
@@ -220,6 +265,24 @@ fn week_suffix(at: DateTime<Utc>) -> String {
     format!("-{}-w{:02}", saturday.year(), saturday.ordinal0() / 7 + 1)
 }
 
+fn arrival(batch: &DeliveryBatch, position: usize) -> DateTime<Utc> {
+    batch
+        .arrivals
+        .get(position)
+        .copied()
+        .unwrap_or(batch.oldest_arrival)
+}
+
+/// The index of one record, from its own arrival time. Replays can batch records
+/// differently, and a stable `_id` only overwrites within the same index.
+fn record_index(batch: &DeliveryBatch, search: &SearchDelivery, position: usize) -> String {
+    index_name(
+        &search.index_name,
+        &search.rotation,
+        arrival(batch, position),
+    )
+}
+
 fn document_id(batch: &DeliveryBatch, position: usize) -> String {
     if let Some(id) = batch.document_ids.get(position) {
         return id.clone();
@@ -233,13 +296,12 @@ fn document_id(batch: &DeliveryBatch, position: usize) -> String {
 pub(crate) fn bulk_body(
     batch: &DeliveryBatch,
     search: &SearchDelivery,
-    index: &str,
     positions: &[usize],
 ) -> Vec<u8> {
     let mut body = Vec::new();
     for &position in positions {
         let record = &batch.records[position];
-        let mut action = json!({ "_index": index });
+        let mut action = json!({ "_index": record_index(batch, search, position) });
         if let Some(type_name) = &search.type_name {
             action["_type"] = json!(type_name);
         }
@@ -262,11 +324,14 @@ pub(crate) fn item_failures(response: &Value, sent: &[usize]) -> Result<Vec<Fail
         code: "OS.ClusterError",
         message: format!("bulk response {message}"),
     };
-    let errors = response["errors"]
-        .as_bool()
-        .ok_or_else(|| malformed("has no errors member"))?;
-    let items = response["items"].as_array();
-    if let Some(items) = items.filter(|items| items.len() != sent.len()) {
+    if !response["errors"].is_boolean() {
+        return Err(malformed("has no errors member"));
+    }
+    // The items decide, whatever `errors` says: a batch commits on them.
+    let items = response["items"]
+        .as_array()
+        .ok_or_else(|| malformed("has no items"))?;
+    if items.len() != sent.len() {
         return Err(BulkError {
             code: "OS.ResponseEntryCountMismatch",
             message: format!(
@@ -276,14 +341,7 @@ pub(crate) fn item_failures(response: &Value, sent: &[usize]) -> Result<Vec<Fail
             ),
         });
     }
-    if !errors {
-        return Ok(Vec::new());
-    }
-    let items = items.ok_or_else(|| malformed("reports errors but has no items"))?;
     let mut failures = Vec::new();
-    if items.len() != sent.len() {
-        return Err(malformed("is missing items"));
-    }
     for (&index, item) in sent.iter().zip(items) {
         let result = item
             .as_object()
@@ -325,12 +383,11 @@ fn send_error_code(error: &reqwest::Error) -> &'static str {
 
 pub(crate) fn post_bulk(
     search: &SearchDelivery,
-    index: &str,
     batch: &DeliveryBatch,
     positions: &[usize],
 ) -> Result<Vec<Failure>, BulkError> {
     let url = format!("{}/_bulk", search.endpoint);
-    let body = bulk_body(batch, search, index, positions);
+    let body = bulk_body(batch, search, positions);
     tokio::runtime::Handle::current().block_on(async {
         let response = reqwest::Client::new()
             .post(&url)
@@ -363,22 +420,17 @@ pub(crate) fn post_bulk(
 pub(crate) fn failed_record(
     batch: &DeliveryBatch,
     search: &SearchDelivery,
-    index: &str,
     failure: &Failure,
 ) -> Vec<u8> {
-    let arrival = batch
-        .arrivals
-        .get(failure.index)
-        .unwrap_or(&batch.oldest_arrival);
     let mut line = json!({
         "attemptsMade": search.attempts.made(),
-        "arrivalTimestamp": arrival.timestamp_millis(),
+        "arrivalTimestamp": arrival(batch, failure.index).timestamp_millis(),
         "errorCode": failure.code,
         "errorMessage": failure.message,
         "attemptEndingTimestamp": Utc::now().timestamp_millis(),
         "rawData": base64::engine::general_purpose::STANDARD.encode(&batch.records[failure.index]),
         "esDocumentId": if search.document_ids { json!(document_id(batch, failure.index)) } else { Value::Null },
-        "esIndexName": index,
+        "esIndexName": record_index(batch, search, failure.index),
         "esTypeName": search.type_name.as_deref().unwrap_or_default(),
     })
     .to_string()
@@ -458,6 +510,16 @@ mod tests {
         );
         assert_eq!(code(json!({}), 1), "OS.ClusterError");
         assert_eq!(code(json!({"errors": true}), 1), "OS.ClusterError");
+        // A success that does not account for the records must not commit them.
+        assert_eq!(code(json!({"errors": false}), 1), "OS.ClusterError");
+        assert_eq!(
+            code(json!({"errors": false, "items": [{}]}), 1),
+            "OS.ClusterError"
+        );
+        assert_eq!(
+            code(json!({"errors": false, "items": [{"index": {}}]}), 1),
+            "OS.ClusterError"
+        );
         assert_eq!(
             code(json!({"errors": true, "items": [{"index": {}}]}), 1),
             "OS.ClusterError"
@@ -466,6 +528,106 @@ mod tests {
             code(json!({"errors": true, "items": [7]}), 1),
             "OS.ClusterError"
         );
+    }
+
+    #[test]
+    fn errors_false_still_reports_a_failed_item() {
+        let response = json!({"errors": false, "items": [{"index": {"status": 400}}]});
+        assert_eq!(item_failures(&response, &[0]).unwrap().len(), 1);
+    }
+
+    fn bulk_batch(arrivals: Vec<DateTime<Utc>>) -> (DeliveryBatch, SearchDelivery) {
+        let config = json!({
+            "IndexName": "activity",
+            "ClusterEndpoint": "http://localhost:9200",
+            "S3Configuration": {"RoleARN": "r", "BucketARN": "arn:aws:s3:::b"},
+        });
+        let destination = delivery(OPENSEARCH, &config).unwrap();
+        let search = destination.search.clone().unwrap();
+        let batch = DeliveryBatch {
+            stream: crate::StreamKey {
+                account_id: "1".into(),
+                region: "us-east-1".into(),
+                name: "s".into(),
+                instance_id: uuid::Uuid::new_v4(),
+            },
+            version_id: "1".into(),
+            destination,
+            records: vec![bytes::Bytes::from_static(b"{}"); arrivals.len()],
+            document_ids: Vec::new(),
+            oldest_arrival: arrivals[0],
+            delivery_time: arrivals[0],
+            object_key: "k".into(),
+            arrivals,
+        };
+        (batch, search)
+    }
+
+    /// A record's index comes from its own arrival, so where a replay happens to
+    /// split batches cannot send its stable `_id` to another index.
+    #[test]
+    fn records_of_one_batch_go_to_the_index_of_their_own_arrival() {
+        let day = |d: &str| {
+            DateTime::parse_from_rfc3339(&format!("{d}T23:59:59Z"))
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let (batch, search) = bulk_batch(vec![day("2026-02-25"), day("2026-02-26")]);
+        let body = String::from_utf8(bulk_body(&batch, &search, &[0, 1])).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert!(lines[0].contains("activity-2026-02-25"), "{}", lines[0]);
+        assert!(lines[2].contains("activity-2026-02-26"), "{}", lines[2]);
+
+        let failure = Failure {
+            index: 1,
+            code: "400".into(),
+            message: String::new(),
+        };
+        let line: Value =
+            serde_json::from_slice(&failed_record(&batch, &search, &failure)).unwrap();
+        assert_eq!(line["esIndexName"], "activity-2026-02-26");
+        assert_eq!(
+            line["arrivalTimestamp"],
+            day("2026-02-26").timestamp_millis()
+        );
+    }
+
+    /// What AWS rejects is refused; what only delivery here cannot do yet, like
+    /// resolving a `DomainARN`, is left for `delivery` to refuse.
+    #[test]
+    fn stored_settings_are_validated_apart_from_delivery_support() {
+        let valid = json!({
+            "RoleARN": "r",
+            "IndexName": "activity",
+            "DomainARN": "arn:aws:es:us-east-1:123456789012:domain/d",
+            "S3Configuration": {"RoleARN": "r", "BucketARN": "arn:aws:s3:::b"},
+        });
+        validate_search_destination(&valid).unwrap();
+        let without = |member: &str| {
+            let mut config = valid.clone();
+            config.as_object_mut().unwrap().remove(member);
+            config
+        };
+        for member in ["RoleARN", "IndexName", "DomainARN", "S3Configuration"] {
+            assert!(
+                validate_search_destination(&without(member)).is_err(),
+                "{member}"
+            );
+        }
+        for (member, value) in [
+            ("IndexRotationPeriod", json!("Hourly")),
+            ("S3BackupMode", json!("Everything")),
+            ("RetryOptions", json!({"DurationInSeconds": 7201})),
+            ("BufferingHints", json!({"SizeInMBs": 101})),
+            (
+                "S3Configuration",
+                json!({"RoleARN": "r", "BucketARN": "not-an-arn"}),
+            ),
+        ] {
+            let mut config = valid.clone();
+            config[member] = value;
+            assert!(validate_search_destination(&config).is_err(), "{member}");
+        }
     }
 
     #[test]
