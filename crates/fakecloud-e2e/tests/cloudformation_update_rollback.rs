@@ -2342,3 +2342,215 @@ async fn a_failed_custom_resource_invoke_rolls_the_update_back() {
         Some("30")
     );
 }
+
+fn require_container_runtime(test: &str) -> bool {
+    let available = std::process::Command::new(helpers::container_cli())
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if available {
+        return true;
+    }
+    if std::env::var("CI").is_ok() {
+        panic!("a container runtime is required for {test} in CI");
+    }
+    eprintln!("skipping {test}: no container runtime");
+    false
+}
+
+/// A real handler, doing what the recorded one did: answer at `ResponseURL`, with
+/// `FAILED` when its properties ask for it.
+const HANDLER: &str = r#"
+import json, urllib.request
+def handler(event, context):
+    props = event["ResourceProperties"] if "ResourceProperties" in event else {}
+    fail = props.get("FailOn") == event["RequestType"]
+    body = json.dumps({
+        "Status": "FAILED" if fail else "SUCCESS",
+        "Reason": "handler said no",
+        "PhysicalResourceId": event.get("PhysicalResourceId") or ("phys-" + event["LogicalResourceId"]),
+        "StackId": event["StackId"],
+        "RequestId": event["RequestId"],
+        "LogicalResourceId": event["LogicalResourceId"],
+        "Data": {"X": "y"},
+    }).encode()
+    urllib.request.urlopen(urllib.request.Request(event["ResponseURL"], data=body, method="PUT", headers={"Content-Type": ""}))
+"#;
+
+fn handler_zip() -> Vec<u8> {
+    use std::io::Write;
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        writer
+            .start_file("index.py", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(HANDLER.as_bytes()).unwrap();
+        writer.finish().unwrap();
+    }
+    buffer.into_inner()
+}
+
+async fn wait_settled(cfn: &Client, stack: &str) -> String {
+    helpers::wait_until(std::time::Duration::from_secs(180), || {
+        let cfn = cfn.clone();
+        let stack = stack.to_string();
+        async move {
+            let current = status(&cfn, &stack).await;
+            (!current.ends_with("_IN_PROGRESS")).then_some(current)
+        }
+    })
+    .await
+    .expect("the stack settles")
+}
+
+/// Recorded: a handler's `FAILED` at its `ResponseURL` fails the resource with
+/// `Received response status [FAILED]...`, and the rollback talks to it: a Delete
+/// after a failed create, an Update back after a failed update. Its physical id
+/// and `Data` are the resource's.
+#[tokio::test]
+async fn a_handlers_own_answer_decides_the_resource() {
+    if !require_container_runtime("a_handlers_own_answer_decides_the_resource") {
+        return;
+    }
+    use aws_sdk_lambda::primitives::Blob;
+    use aws_sdk_lambda::types::{FunctionCode, Runtime};
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let lambda = server.lambda_client().await;
+    lambda
+        .create_function()
+        .function_name("cfn-handler")
+        .runtime(Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("index.handler")
+        .code(
+            FunctionCode::builder()
+                .zip_file(Blob::new(handler_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let token = "arn:aws:lambda:us-east-1:123456789012:function:cfn-handler";
+    let resource = |value: &str, fail_on: Option<&str>| {
+        let mut properties = json!({"ServiceToken": token, "V": value});
+        if let Some(fail_on) = fail_on {
+            properties["FailOn"] = json!(fail_on);
+        }
+        json!({"Type": "Custom::P", "Properties": properties})
+    };
+    let template = |value: &str, fail_on: Option<&str>| {
+        json!({
+            "Resources": {"C": resource(value, fail_on)},
+            "Outputs": {"X": {"Value": {"Fn::GetAtt": ["C", "X"]}}}
+        })
+        .to_string()
+    };
+
+    // A create the handler fails rolls back, with a Delete for what it named.
+    cfn.create_stack()
+        .stack_name("cfn-h-create")
+        .template_body(template("1", Some("Create")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_settled(&cfn, "cfn-h-create").await,
+        "ROLLBACK_COMPLETE"
+    );
+    let rows = last_operation(&cfn, "cfn-h-create").await;
+    let failed = rows
+        .iter()
+        .find(|r| r.0 == "C" && r.1 == "CREATE_FAILED")
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert_eq!(failed.2, "phys-C");
+    assert!(
+        failed
+            .3
+            .starts_with("Received response status [FAILED] from custom resource. Message returned: handler said no (RequestId: "),
+        "{failed:?}"
+    );
+    assert!(rows
+        .iter()
+        .any(|r| r.0 == "C" && r.1 == "DELETE_COMPLETE" && r.2 == "phys-C"));
+    let last = rows.last().unwrap();
+    assert_eq!(last.1, "ROLLBACK_COMPLETE");
+    assert!(rows.iter().any(|r| r.1 == "ROLLBACK_IN_PROGRESS"
+        && r.3 == "The following resource(s) failed to create: [C]. Rollback requested by user."));
+
+    // A stack the handler accepts takes its physical id and data.
+    cfn.create_stack()
+        .stack_name("cfn-h")
+        .template_body(template("1", None))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wait_settled(&cfn, "cfn-h").await, "CREATE_COMPLETE");
+    assert_eq!(physical_ids(&cfn, "cfn-h").await[0].1, "phys-C");
+    let described = describe(&cfn, "cfn-h").await;
+    assert_eq!(described.outputs()[0].output_value(), Some("y"));
+
+    // An update it fails rolls back, with an Update back.
+    update(&cfn, "cfn-h", &template("2", Some("Update"))).await;
+    assert_eq!(
+        wait_settled(&cfn, "cfn-h").await,
+        "UPDATE_ROLLBACK_COMPLETE"
+    );
+    let rows = last_operation(&cfn, "cfn-h").await;
+    let of_c: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.0 == "C")
+        .map(|r| r.1.as_str())
+        .collect();
+    assert_eq!(
+        of_c,
+        [
+            "UPDATE_IN_PROGRESS",
+            "UPDATE_FAILED",
+            "UPDATE_IN_PROGRESS",
+            "UPDATE_COMPLETE"
+        ]
+    );
+    assert!(rows
+        .iter()
+        .any(|r| r.1 == "UPDATE_FAILED" && r.3.contains("handler said no")));
+
+    // Nested, the parent sees the child's handler.
+    let child = template("1", Some("Update"));
+    let parent = |value: &str| {
+        let mut child: Value = serde_json::from_str(&child).unwrap();
+        child["Resources"]["C"]["Properties"]["V"] = json!(value);
+        resources(json!({"Child": {
+            "Type": "AWS::CloudFormation::Stack",
+            "Properties": {"TemplateBody": child.to_string()}
+        }}))
+    };
+    let accepted = template("1", None);
+    let accepted_parent = resources(json!({"Child": {
+        "Type": "AWS::CloudFormation::Stack",
+        "Properties": {"TemplateBody": accepted}
+    }}));
+    cfn.create_stack()
+        .stack_name("cfn-h-nested")
+        .template_body(accepted_parent)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wait_settled(&cfn, "cfn-h-nested").await, "CREATE_COMPLETE");
+    update(&cfn, "cfn-h-nested", &parent("2")).await;
+    assert_eq!(
+        wait_settled(&cfn, "cfn-h-nested").await,
+        "UPDATE_ROLLBACK_COMPLETE"
+    );
+    let rows = last_operation(&cfn, "cfn-h-nested").await;
+    assert!(
+        rows.iter().any(|r| r.0 == "Child"
+            && r.1 == "UPDATE_FAILED"
+            && r.3.starts_with("Embedded stack ")),
+        "{rows:#?}"
+    );
+}

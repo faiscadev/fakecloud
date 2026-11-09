@@ -113,6 +113,8 @@ impl ResourceProvisioner {
             strict_unknown_types: self.strict_unknown_types,
             reused_names: Default::default(),
             reprovision_losses: Default::default(),
+            custom_responses: self.custom_responses.clone(),
+            custom_failures: self.custom_failures.clone(),
         }
     }
 
@@ -231,7 +233,23 @@ impl ResourceProvisioner {
             &child_parameters,
             &std::collections::BTreeMap::new(),
         )
-        .map_err(|e| format!("Failed to provision nested stack: {e}"))?;
+        .map_err(|failure| {
+            for resource in failure.leftovers().iter().rev() {
+                if !resource.physical_id.is_empty()
+                    && !crate::stack_update::is_plain_retain(resource.deletion_policy.as_deref())
+                {
+                    let _ = child_provisioner.delete_resource(resource);
+                }
+            }
+            self.failed_child_create(
+                &child_stack_id,
+                &child_stack_name,
+                &format!(
+                    "The following resource(s) failed to create: [{}]",
+                    failure.logical_id
+                ),
+            )
+        })?;
 
         // The child's own resources resolve its outputs, not the parse above,
         // which ran before any of them existed.

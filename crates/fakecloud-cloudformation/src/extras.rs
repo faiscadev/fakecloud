@@ -462,6 +462,12 @@ impl CloudFormationService {
                     message,
                 ));
             }
+            // A create held by `DisableRollback` holds what it made, and no stable
+            // state: rolling back deletes it all.
+            if stack.status == "CREATE_FAILED" && stack.pending_update.is_none() {
+                stack.pending_update =
+                    Some(crate::stack_update::UpdateJournal::for_failed_create(stack));
+            }
             // A restart lost this rollback's undo log: nothing is left to run.
             if stack.status == "UPDATE_ROLLBACK_FAILED" && stack.pending_update.is_none() {
                 stack.status = "UPDATE_ROLLBACK_COMPLETE".to_string();
@@ -478,6 +484,55 @@ impl CloudFormationService {
         let Some((stack_id, stack_name, journal)) = claimed else {
             return Ok(());
         };
+        // A rollback's handler requests are as real as an update's: one that fails
+        // has to stop the rollback, so they run off the request path too.
+        if self.detach_for_handlers(account_id, region, &stack_id) {
+            let provisioner = self.provisioner(&stack_id, account_id, region);
+            let service = self.clone();
+            let (account_id, region, reason) = (
+                account_id.to_string(),
+                region.to_string(),
+                reason.map(str::to_string),
+            );
+            tokio::spawn(async move {
+                let state = service.state.clone();
+                let finished = tokio::task::spawn_blocking(move || {
+                    let outcome = crate::stack_update::UpdateEngine::new(
+                        &state,
+                        &provisioner,
+                        &account_id,
+                        &region,
+                        &stack_id,
+                        &stack_name,
+                    )
+                    .roll_back(journal, options, reason.as_deref());
+                    (
+                        provisioner,
+                        account_id,
+                        region,
+                        stack_id,
+                        stack_name,
+                        outcome,
+                    )
+                })
+                .await;
+                match finished {
+                    Ok((provisioner, account_id, region, stack_id, stack_name, outcome)) => {
+                        service.finish_stack_operation(
+                            &provisioner,
+                            &stack_id,
+                            &stack_name,
+                            &account_id,
+                            &region,
+                            &outcome,
+                        );
+                        service.persist_after_rollback(outcome.touched_types).await;
+                    }
+                    Err(err) => tracing::error!(%err, "a detached stack rollback panicked"),
+                }
+            });
+            return Ok(());
+        }
         let provisioner = self.provisioner_deferred(&stack_id, account_id, region);
         let engine = crate::stack_update::UpdateEngine::new(
             &self.state,

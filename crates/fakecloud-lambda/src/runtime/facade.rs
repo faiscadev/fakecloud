@@ -390,6 +390,11 @@ impl LambdaRuntime {
         Ok(Self::from_backend(Arc::new(backend)))
     }
 
+    /// How functions reach fakecloud, for a URL handed to one.
+    pub fn callback_endpoint(&self) -> Option<String> {
+        self.backend.callback_endpoint()
+    }
+
     pub fn cli_name(&self) -> &str {
         self.backend.name()
     }

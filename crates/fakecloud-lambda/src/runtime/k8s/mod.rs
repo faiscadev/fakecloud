@@ -115,6 +115,10 @@ fn account_id_from_arn(arn: &str) -> &str {
 
 #[async_trait]
 impl LambdaBackend for K8sBackend {
+    fn callback_endpoint(&self) -> Option<String> {
+        Some(self.self_url.trim_end_matches('/').to_string())
+    }
+
     fn name(&self) -> &str {
         "kubernetes"
     }

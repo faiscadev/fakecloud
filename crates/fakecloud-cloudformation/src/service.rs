@@ -421,6 +421,32 @@ pub(crate) fn collect_nested_touched_types(
     }
 }
 
+/// Why provisioning a stack's resources stopped, and what was left of it.
+#[derive(Debug)]
+pub(crate) struct ProvisionFailure {
+    pub logical_id: String,
+    pub resource_type: String,
+    /// What the failure says, as provisioning reported it.
+    pub reason: String,
+    /// What was provisioned before it.
+    pub created: Vec<StackResource>,
+    /// The failed resource itself, with a physical id when its handler named one.
+    pub failed: Box<StackResource>,
+}
+
+impl ProvisionFailure {
+    /// Everything a rollback goes through, in provisioning order.
+    pub(crate) fn leftovers(&self) -> Vec<StackResource> {
+        let mut all = self.created.clone();
+        all.push((*self.failed).clone());
+        all
+    }
+}
+
+fn is_custom_resource_type(resource_type: &str) -> bool {
+    resource_type.starts_with("Custom::") || resource_type == "AWS::CloudFormation::CustomResource"
+}
+
 /// Multi-pass provisioning for all resources in a parsed template.
 ///
 /// Resources may `Ref` each other in either direction, and JSON object
@@ -435,8 +461,36 @@ pub(crate) fn provision_stack_resources(
     template_body: &str,
     parameters: &BTreeMap<String, String>,
     imports: &BTreeMap<String, String>,
-) -> Result<Vec<StackResource>, AwsServiceError> {
+) -> Result<Vec<StackResource>, ProvisionFailure> {
     let mut resources = Vec::new();
+    let mut last_errors: BTreeMap<String, String> = BTreeMap::new();
+    let failure = |def: &template::ResourceDefinition,
+                   reason: String,
+                   created: &[StackResource]|
+     -> ProvisionFailure {
+        ProvisionFailure {
+            logical_id: def.logical_id.clone(),
+            resource_type: def.resource_type.clone(),
+            reason,
+            created: created.to_vec(),
+            failed: Box::new(StackResource {
+                logical_id: def.logical_id.clone(),
+                physical_id: provisioner
+                    .take_custom_failure(&def.logical_id)
+                    .unwrap_or_default(),
+                resource_type: def.resource_type.clone(),
+                status: "CREATE_FAILED".to_string(),
+                service_token: def
+                    .properties
+                    .get("ServiceToken")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                attributes: BTreeMap::new(),
+                deletion_policy: def.deletion_policy.clone(),
+                update_replace_policy: def.update_replace_policy.clone(),
+            }),
+        }
+    };
     let mut physical_ids: BTreeMap<String, String> = BTreeMap::new();
     let mut attributes: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     // Seed the work list in dependency order so a referenced resource is
@@ -464,16 +518,7 @@ pub(crate) fn provision_stack_resources(
                 &attributes,
                 imports,
             )
-            .map_err(|e| {
-                // `ValidationError` isn't declared on CreateStack/UpdateStack;
-                // surface template resolve failures through the closest declared
-                // shape (`InsufficientCapabilitiesException`) instead.
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InsufficientCapabilitiesException",
-                    e,
-                )
-            })?;
+            .map_err(|e| failure(resource_def, e, &resources))?;
 
             match provisioner.create_resource(&resolved_def) {
                 Ok(mut stack_resource) => {
@@ -499,36 +544,26 @@ pub(crate) fn provision_stack_resources(
                     resources.push(stack_resource);
                     made_progress = true;
                 }
-                Err(_) => still_pending.push(resource_def),
+                // A handler has already answered: asking again would send it a
+                // second Create.
+                Err(e) if is_custom_resource_type(&resource_def.resource_type) => {
+                    return Err(failure(resource_def, e, &resources));
+                }
+                Err(e) => {
+                    last_errors.insert(resource_def.logical_id.clone(), e);
+                    still_pending.push(resource_def);
+                }
             }
         }
 
         pending = still_pending;
         if !made_progress && !pending.is_empty() {
-            // No progress — report the first failure and rollback anything
-            // we already created.
+            // No progress: report the first failure. The caller rolls back.
             let resource_def = pending[0];
-            let resolved_def = template::resolve_resource_properties_with_attrs(
-                resource_def,
-                template_body,
-                parameters,
-                &physical_ids,
-                &attributes,
-                imports,
-            )
-            .unwrap_or_else(|_| resource_def.clone());
-            let err = provisioner.create_resource(&resolved_def).unwrap_err();
-            for r in &resources {
-                let _ = provisioner.delete_resource(r);
-            }
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationError",
-                format!(
-                    "Failed to create resource {}: {err}",
-                    resource_def.logical_id
-                ),
-            ));
+            let reason = last_errors
+                .remove(&resource_def.logical_id)
+                .unwrap_or_default();
+            return Err(failure(resource_def, reason, &resources));
         }
     }
 
@@ -705,6 +740,8 @@ pub struct CloudFormationService {
     /// for them to go idle, so a burst of organization changes against a busy
     /// stack set cannot pile up one poller per change.
     pub(crate) auto_deployment_retries: Arc<parking_lot::Mutex<BTreeSet<(String, String)>>>,
+    /// Custom-resource handlers' answers at their `ResponseURL`.
+    custom_responses: Arc<crate::resource_provisioner::CustomResponses>,
 }
 
 #[derive(Default)]
@@ -804,6 +841,8 @@ struct CreateStackContext {
     notification_arns: Vec<String>,
     imported_names: Vec<String>,
     resource_defs: Vec<template::ResourceDefinition>,
+    /// `OnFailure`, with `DisableRollback` as `DO_NOTHING`.
+    on_failure: String,
 }
 
 /// Owned clones of the service-state + container-runtime handles a provisioner
@@ -1252,6 +1291,7 @@ impl CloudFormationService {
             snapshot_hooks: BTreeMap::new(),
             auto_deployment_gate: Arc::new(parking_lot::Mutex::new(AutoDeploymentGate::default())),
             auto_deployment_retries: Arc::new(parking_lot::Mutex::new(BTreeSet::new())),
+            custom_responses: Default::default(),
         }
     }
 
@@ -1289,6 +1329,17 @@ impl CloudFormationService {
     pub fn with_snapshot_hooks(mut self, hooks: BTreeMap<&'static str, SnapshotHook>) -> Self {
         self.snapshot_hooks = hooks;
         self
+    }
+
+    /// What a detached rollback owes once it stops.
+    pub(crate) async fn persist_after_rollback(&self, touched: Vec<String>) {
+        persist_touched_services(&self.snapshot_hooks, touched).await;
+        self.save_snapshot().await;
+    }
+
+    /// A custom-resource handler's put to its `ResponseURL`.
+    pub fn accept_custom_response(&self, request_id: &str, body: &[u8]) {
+        self.custom_responses.accept(request_id, body);
     }
 
     /// Finish the stack cleanups a restart interrupted, from the journals their
@@ -1482,6 +1533,8 @@ impl CloudFormationService {
             strict_unknown_types: false,
             reused_names: Default::default(),
             reprovision_losses: Default::default(),
+            custom_responses: self.custom_responses.clone(),
+            custom_failures: Default::default(),
         }
     }
 
@@ -2253,6 +2306,17 @@ impl CloudFormationService {
             notification_arns,
             imported_names,
             resource_defs: parsed.resources,
+            on_failure: if params
+                .get("DisableRollback")
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+            {
+                "DO_NOTHING".to_string()
+            } else {
+                params
+                    .get("OnFailure")
+                    .cloned()
+                    .unwrap_or_else(|| "ROLLBACK".to_string())
+            },
         };
 
         // Custom resources (`Custom::*` / `AWS::CloudFormation::CustomResource`)
@@ -2270,10 +2334,10 @@ impl CloudFormationService {
         // expectations that the stack's resources/outputs are queryable as
         // soon as CreateStack returns. The async branch only triggers on a
         // multi-thread runtime (the server); unit tests run current-thread.
-        let has_custom_resource = ctx.resource_defs.iter().any(|r| {
-            r.resource_type.starts_with("Custom::")
-                || r.resource_type == "AWS::CloudFormation::CustomResource"
-        });
+        let has_custom_resource = ctx
+            .resource_defs
+            .iter()
+            .any(|def| definition_may_reach_a_handler(&ctx.provisioner, def));
         let multi_thread = matches!(
             tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()),
             Ok(tokio::runtime::RuntimeFlavor::MultiThread)
@@ -2325,6 +2389,7 @@ impl CloudFormationService {
             notification_arns,
             imported_names,
             resource_defs,
+            on_failure,
         } = ctx;
 
         // An export name another stack owns rolls the create back before any
@@ -2404,15 +2469,44 @@ impl CloudFormationService {
 
         // A spawn_blocking JoinError (panic) or a provisioning error both
         // roll the stack into CREATE_FAILED.
-        let provisioned = match provision_result {
-            Ok((provisioner, Ok(resources))) => Ok((provisioner, resources)),
-            Ok((_, Err(err))) => Err(err.message()),
-            Err(join_err) => Err(format!("provisioning task failed: {join_err}")),
-        };
-
-        let (provisioner, resources) = match provisioned {
-            Ok(provisioned) => provisioned,
-            Err(reason) => {
+        let (provisioner, resources) = match provision_result {
+            Ok((provisioner, Ok(resources))) => (provisioner, resources),
+            Ok((provisioner, Err(failure))) => {
+                let touched: Vec<String> = failure
+                    .leftovers()
+                    .iter()
+                    .map(|r| r.resource_type.clone())
+                    .collect();
+                let status = Self::fail_created_stack(
+                    &state,
+                    provisioner,
+                    &account_id,
+                    &region,
+                    &stack_name,
+                    &stack_id,
+                    failure,
+                    &on_failure,
+                )
+                .await;
+                if status != "CREATE_FAILED" {
+                    container_spawns.lock().clear();
+                }
+                backing_handles
+                    .spawn_container_intents(std::mem::take(&mut *container_spawns.lock()));
+                backing_handles
+                    .spawn_teardown_intents(std::mem::take(&mut *container_teardowns.lock()));
+                Self::send_stack_notification(
+                    &delivery,
+                    &notification_arns,
+                    &stack_name,
+                    &stack_id,
+                    status,
+                );
+                save_snapshot_static(state.clone(), snapshot_store, snapshot_lock).await;
+                persist_touched_services(&snapshot_hooks, touched).await;
+                return;
+            }
+            Err(join_err) => {
                 Self::mark_create_failed(
                     &state,
                     &delivery,
@@ -2421,7 +2515,7 @@ impl CloudFormationService {
                     &stack_name,
                     &stack_id,
                     &notification_arns,
-                    &reason,
+                    &format!("provisioning task failed: {join_err}"),
                 );
                 save_snapshot_static(state.clone(), snapshot_store, snapshot_lock).await;
                 return;
@@ -2525,6 +2619,111 @@ impl CloudFormationService {
         persist_touched_services(&snapshot_hooks, touched_types).await;
     }
 
+    /// A create whose provisioning failed: the events as recorded, then what
+    /// `OnFailure` asks for. Rolls back by default, stays `CREATE_FAILED` with what
+    /// it made under `DO_NOTHING`, and is deleted after the rollback under `DELETE`.
+    /// Returns the status it ended in.
+    #[allow(clippy::too_many_arguments)]
+    async fn fail_created_stack(
+        state: &SharedCloudFormationState,
+        provisioner: ResourceProvisioner,
+        account_id: &str,
+        region: &str,
+        stack_name: &str,
+        stack_id: &str,
+        failure: ProvisionFailure,
+        on_failure: &str,
+    ) -> &'static str {
+        let summary = format!(
+            "The following resource(s) failed to create: [{}]. ",
+            failure.logical_id
+        );
+        let reason = if is_custom_resource_type(&failure.resource_type)
+            && failure.reason.starts_with("Received response status")
+        {
+            failure.reason.clone()
+        } else {
+            crate::stack_update::handler_reason(&failure.reason)
+        };
+        let keep = on_failure.eq_ignore_ascii_case("DO_NOTHING");
+        {
+            let mut accounts = state.write();
+            let st = accounts.regional_mut(account_id, region);
+            record_stack_events(st, stack_id, stack_name, &failure.created);
+            record_event(
+                st,
+                stack_id,
+                stack_name,
+                &failure.logical_id,
+                "",
+                &failure.resource_type,
+                "CREATE_IN_PROGRESS",
+            );
+            record_event_with_reason(
+                st,
+                stack_id,
+                stack_name,
+                &failure.logical_id,
+                &failure.failed.physical_id,
+                &failure.resource_type,
+                "CREATE_FAILED",
+                Some(&reason),
+            );
+            let (status, event_reason) = if keep {
+                ("CREATE_FAILED", summary.clone())
+            } else {
+                (
+                    "ROLLBACK_IN_PROGRESS",
+                    format!("{summary}Rollback requested by user."),
+                )
+            };
+            if let Some(stack) = st.stacks.get_mut(stack_name) {
+                stack.status = status.to_string();
+                stack.status_reason = keep.then(|| summary.clone());
+                if keep {
+                    stack.resources = failure.leftovers();
+                }
+            }
+            record_stack_status_event_with_reason(
+                st,
+                stack_id,
+                stack_name,
+                "AWS::CloudFormation::Stack",
+                status,
+                Some(&event_reason),
+            );
+        }
+        if keep {
+            return "CREATE_FAILED";
+        }
+        let status = Self::roll_back_created_stack(
+            state,
+            provisioner,
+            account_id,
+            region,
+            stack_name,
+            stack_id,
+            failure.leftovers(),
+        )
+        .await;
+        if status == "ROLLBACK_COMPLETE" && on_failure.eq_ignore_ascii_case("DELETE") {
+            let mut accounts = state.write();
+            let st = accounts.regional_mut(account_id, region);
+            if let Some(stack) = st.stacks.get_mut(stack_name) {
+                stack.status = "DELETE_COMPLETE".to_string();
+            }
+            record_stack_status_event(
+                st,
+                stack_id,
+                stack_name,
+                "AWS::CloudFormation::Stack",
+                "DELETE_COMPLETE",
+            );
+            return "DELETE_COMPLETE";
+        }
+        status
+    }
+
     /// Make a provisioned stack `CREATE_COMPLETE` and register its exports, under
     /// one lock with the check that no other stack owns them, since two creates
     /// can both pass the pre-flight. Returns the reason when one does, with the
@@ -2602,6 +2801,8 @@ impl CloudFormationService {
                         crate::stack_update::is_plain_retain(resource.deletion_policy.as_deref());
                     let deleted = if retained {
                         None
+                    } else if resource.physical_id.is_empty() {
+                        Some(Ok(()))
                     } else {
                         Some(provisioner.delete_resource(&resource))
                     };
@@ -2651,6 +2852,10 @@ impl CloudFormationService {
             };
             match deleted {
                 None => event(st, "DELETE_SKIPPED", None),
+                // Never came into existence.
+                Some(Ok(())) if resource.physical_id.is_empty() => {
+                    event(st, "DELETE_COMPLETE", None)
+                }
                 Some(Ok(())) => {
                     event(st, "DELETE_IN_PROGRESS", None);
                     event(st, "DELETE_COMPLETE", None);
@@ -3528,42 +3733,57 @@ impl CloudFormationService {
         ))
     }
 
+    fn multi_thread_runtime() -> bool {
+        matches!(
+            tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()),
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread)
+        )
+    }
+
+    /// Whether a stack, or one nested under it, holds a custom resource.
+    pub(crate) fn handlers_in_stack(&self, account_id: &str, region: &str, stack_id: &str) -> bool {
+        let accounts = self.state.read();
+        let Some(state) = accounts.regional(account_id, region) else {
+            return false;
+        };
+        state.live_stack(stack_id).is_some_and(|stack| {
+            crate::stack_update::stack_family_has_custom_resource(state, stack)
+        })
+    }
+
+    /// Whether handlers must be invoked for real, off the request path.
+    pub(crate) fn detach_for_handlers(
+        &self,
+        account_id: &str,
+        region: &str,
+        stack_id: &str,
+    ) -> bool {
+        Self::multi_thread_runtime() && self.handlers_in_stack(account_id, region, stack_id)
+    }
+
     /// Claim the stack and run an update on it.
     ///
-    /// A stack with a custom resource involved runs detached, as `CreateStack`
+    /// A stack with a custom resource involved, itself or in a nested stack, runs
+    /// detached, as `CreateStack`
     /// does, with real synchronous invokes: a handler can take minutes, its
     /// failure has to fail the update, and the call has to return long before.
     /// The stack reports `UPDATE_IN_PROGRESS` meanwhile, as on AWS. Anything else
     /// provisions in microseconds and has finished when this returns, with its
-    /// touched types for the caller to persist. (A nested stack's custom resource
-    /// is out of the parent's sight here, and stays deferred with its failure
-    /// logged.) `Err` is why the stack could not be claimed.
+    /// touched types for the caller to persist. `Err` is why the stack could not
+    /// be claimed.
     pub(crate) fn run_stack_update(
         &self,
         update: StackUpdate,
         after: Box<dyn FnOnce(&crate::stack_update::UpdateOutcome) + Send>,
     ) -> Result<Option<Vec<String>>, String> {
-        let is_custom = |resource_type: &str| {
-            resource_type.starts_with("Custom::")
-                || resource_type == "AWS::CloudFormation::CustomResource"
-        };
-        let in_stack = {
-            let accounts = self.state.read();
-            accounts
-                .regional(&update.account_id, &update.region)
-                .and_then(|state| state.live_stack(&update.stack_id))
-                .is_some_and(|stack| stack.resources.iter().any(|r| is_custom(&r.resource_type)))
-        };
-        let custom = in_stack
+        let scratch = self.provisioner(&update.stack_id, &update.account_id, &update.region);
+        let custom = self.handlers_in_stack(&update.account_id, &update.region, &update.stack_id)
             || update
                 .parsed
                 .resources
                 .iter()
-                .any(|def| is_custom(&def.resource_type));
-        let multi_thread = matches!(
-            tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()),
-            Ok(tokio::runtime::RuntimeFlavor::MultiThread)
-        );
+                .any(|def| definition_may_reach_a_handler(&scratch, def));
+        let multi_thread = Self::multi_thread_runtime();
         let detached = custom && multi_thread;
         let provisioner = if detached {
             self.provisioner(&update.stack_id, &update.account_id, &update.region)
@@ -3878,6 +4098,34 @@ impl AwsService for CloudFormationService {
             "ValidateTemplate",
         ]
     }
+}
+
+/// Whether provisioning `def` can reach a custom-resource handler: it is one, or a
+/// nested stack whose template names one or nests further. A template that cannot
+/// be read counts, since what it would do is unknown.
+fn definition_may_reach_a_handler(
+    provisioner: &ResourceProvisioner,
+    def: &template::ResourceDefinition,
+) -> bool {
+    if is_custom_resource_type(&def.resource_type) {
+        return true;
+    }
+    if def.resource_type != "AWS::CloudFormation::Stack" {
+        return false;
+    }
+    let body = if let Some(body) = def.properties.get("TemplateBody").and_then(|v| v.as_str()) {
+        Some(body.to_string())
+    } else {
+        def.properties
+            .get("TemplateURL")
+            .and_then(|v| v.as_str())
+            .and_then(|url| provisioner.fetch_template_from_url(url).ok())
+    };
+    body.is_none_or(|body| {
+        body.contains("Custom::")
+            || body.contains("AWS::CloudFormation::CustomResource")
+            || body.contains("AWS::CloudFormation::Stack")
+    })
 }
 
 /// One stack update, owned so it can run detached.

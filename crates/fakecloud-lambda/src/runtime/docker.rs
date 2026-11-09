@@ -450,6 +450,10 @@ impl DockerBackend {
 
 #[async_trait]
 impl LambdaBackend for DockerBackend {
+    fn callback_endpoint(&self) -> Option<String> {
+        Some(format!("http://{}:{}", self.host_alias, self.server_port))
+    }
+
     fn name(&self) -> &str {
         &self.cli
     }

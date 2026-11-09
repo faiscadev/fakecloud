@@ -75,6 +75,7 @@ pub(crate) mod test_hooks {
 }
 
 const STACK_TYPE: &str = "AWS::CloudFormation::Stack";
+const UPDATING: bool = true;
 const REPLACEMENT_REASON: &str =
     "Requested update requires the creation of a new physical resource; hence creating one.";
 const CREATE_INITIATED_REASON: &str = "Resource creation Initiated";
@@ -321,6 +322,46 @@ pub struct UpdateJournal {
 }
 
 impl UpdateJournal {
+    /// The journal of a `CreateStack` held at `CREATE_FAILED`: everything it made
+    /// was created by this operation, and there is no earlier state.
+    pub(crate) fn for_failed_create(stack: &Stack) -> Self {
+        Self {
+            kind: OperationKind::Create,
+            before: StackBaseline {
+                template: stack.template.clone(),
+                parameters: stack.parameters.clone(),
+                tags: stack.tags.clone(),
+                description: stack.description.clone(),
+                notification_arns: stack.notification_arns.clone(),
+                outputs: Vec::new(),
+                resources: Vec::new(),
+                imported_names: Vec::new(),
+            },
+            entries: stack
+                .resources
+                .iter()
+                .map(|resource| {
+                    if resource.physical_id.is_empty() {
+                        JournalEntry::CreateFailed {
+                            logical_id: resource.logical_id.clone(),
+                            resource_type: resource.resource_type.clone(),
+                        }
+                    } else {
+                        JournalEntry::Created {
+                            resource: resource.clone(),
+                        }
+                    }
+                })
+                .collect(),
+            removed: Vec::new(),
+            rollback_deletes: Vec::new(),
+            restored: BTreeMap::new(),
+            applied: BTreeMap::new(),
+            released_entries: stack.resources.len(),
+            retain_except_on_create: false,
+        }
+    }
+
     /// The nested stacks whose own journals wait on this one.
     fn nested_children(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().filter_map(|entry| match entry {
@@ -412,7 +453,21 @@ fn guarded<T>(call: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     }
 }
 
-fn handler_reason(message: &str) -> String {
+/// A failure's event reason. A handler's own answer and CloudFormation's refusals
+/// stand as they are, as recorded; `CloudFormation does not support...` only when
+/// updating, since a create's goes through the handler.
+fn provisioning_reason(message: &str, updating: bool) -> String {
+    if message.starts_with("Received response status")
+        || message.starts_with("Modifying service token")
+        || (updating && message.starts_with("CloudFormation does not support"))
+    {
+        message.to_string()
+    } else {
+        handler_reason(message)
+    }
+}
+
+pub(crate) fn handler_reason(message: &str) -> String {
     // InvalidRequest is recorded for the provisioning-level refusals, and
     // AlreadyExists for a taken name.
     let code = if message.starts_with("CloudFormation does not support") {
@@ -1469,15 +1524,62 @@ impl<'a> UpdateEngine<'a> {
         ) {
             return Err(self.fail_create(&def.logical_id, &def.resource_type, journal, &reason));
         }
-        let mut resource =
-            guarded(|| self.provisioner.create_resource(&resolved)).map_err(|e| {
-                self.fail_create(
+        let mut resource = match guarded(|| self.provisioner.create_resource(&resolved)) {
+            Ok(resource) => resource,
+            Err(e) => {
+                let reason = provisioning_reason(&e, false);
+                let Some(physical_id) = self.provisioner.take_custom_failure(&def.logical_id)
+                else {
+                    return Err(self.fail_create(
+                        &def.logical_id,
+                        &def.resource_type,
+                        journal,
+                        &reason,
+                    ));
+                };
+                // A handler that failed its create named a resource all the same,
+                // and hears a Delete for it in the rollback, as recorded.
+                self.resource_event(
                     &def.logical_id,
+                    &physical_id,
                     &def.resource_type,
-                    journal,
-                    &handler_reason(&e),
-                )
-            })?;
+                    "CREATE_IN_PROGRESS",
+                    Some(CREATE_INITIATED_REASON),
+                );
+                self.resource_event(
+                    &def.logical_id,
+                    &physical_id,
+                    &def.resource_type,
+                    "CREATE_FAILED",
+                    Some(&reason),
+                );
+                let failed = StackResource {
+                    logical_id: def.logical_id.clone(),
+                    physical_id,
+                    resource_type: def.resource_type.clone(),
+                    status: "CREATE_FAILED".to_string(),
+                    service_token: resolved
+                        .properties
+                        .get("ServiceToken")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    attributes: BTreeMap::new(),
+                    deletion_policy: def.deletion_policy.clone(),
+                    update_replace_policy: def.update_replace_policy.clone(),
+                };
+                self.upsert_resource(&failed);
+                journal
+                    .entries
+                    .push(JournalEntry::Created { resource: failed });
+                return Err(ForwardFailure {
+                    reason: format!(
+                        "The following resource(s) failed to create: [{}]. ",
+                        def.logical_id
+                    ),
+                    cancelled: false,
+                });
+            }
+        };
         resource.attributes =
             merged_resource_attributes(self.provisioner, &resource, BTreeMap::new());
         if let Some(name) = replacement::custom_name(&def.resource_type, &resolved.properties) {
@@ -1563,6 +1665,19 @@ impl<'a> UpdateEngine<'a> {
             return self.apply_replacement(existing, &resolved, previous, journal, held);
         }
 
+        // Recorded with no in-progress event before it.
+        if let Some(reason) = self.provisioner.update_refusal(&resolved) {
+            return Err(self.fail_update(
+                existing,
+                JournalEntry::UpdateFailed {
+                    before: existing.clone(),
+                    previous: None,
+                },
+                journal,
+                &reason,
+            ));
+        }
+
         self.resource_event(
             &existing.logical_id,
             &existing.physical_id,
@@ -1602,11 +1717,24 @@ impl<'a> UpdateEngine<'a> {
                 journal
                     .applied
                     .insert(def.logical_id.clone(), SavedDefinition::of(&resolved));
-                journal.entries.push(JournalEntry::Updated {
-                    before: existing.clone(),
-                    after: updated.clone(),
-                    previous: saved,
-                });
+                // A handler answering with another physical id made a new resource:
+                // the old one is deleted in cleanup, like any replacement.
+                journal.entries.push(
+                    if is_custom(&existing.resource_type)
+                        && updated.physical_id != existing.physical_id
+                    {
+                        JournalEntry::Replaced {
+                            before: existing.clone(),
+                            new: updated.clone(),
+                        }
+                    } else {
+                        JournalEntry::Updated {
+                            before: existing.clone(),
+                            after: updated.clone(),
+                            previous: saved,
+                        }
+                    },
+                );
                 self.touch(&updated.resource_type, &updated.physical_id);
                 self.resource_event(
                     &updated.logical_id,
@@ -1620,14 +1748,26 @@ impl<'a> UpdateEngine<'a> {
             Ok(None) => Ok(None),
             Err(e) => {
                 let lost = self.provisioner.take_reprovision_loss(&existing.logical_id);
+                // A handler that said no may have acted on the request, and hears
+                // an Update back to the old properties from what it was sent.
+                let handler_answered = e.starts_with("Received response status");
+                if handler_answered {
+                    journal
+                        .applied
+                        .insert(def.logical_id.clone(), SavedDefinition::of(&resolved));
+                }
                 Err(self.fail_update(
                     existing,
                     JournalEntry::UpdateFailed {
                         before: existing.clone(),
-                        previous: if lost { saved } else { None },
+                        previous: if lost || handler_answered {
+                            saved
+                        } else {
+                            None
+                        },
                     },
                     journal,
-                    &handler_reason(&e),
+                    &provisioning_reason(&e, UPDATING),
                 ))
             }
         }
@@ -1744,7 +1884,7 @@ impl<'a> UpdateEngine<'a> {
                         before: existing.clone(),
                     },
                     journal,
-                    &handler_reason(&e),
+                    &provisioning_reason(&e, UPDATING),
                 ))
             }
         };
@@ -2164,7 +2304,7 @@ impl<'a> UpdateEngine<'a> {
                 &resource.physical_id,
                 &resource.resource_type,
                 "DELETE_FAILED",
-                Some(&handler_reason(&e)),
+                Some(&provisioning_reason(&e, UPDATING)),
             ),
         }
     }
@@ -2520,7 +2660,9 @@ impl<'a> UpdateEngine<'a> {
                     .insert(restored.logical_id.clone(), restored);
                 Ok(())
             }
-            Err(e) => self.reapply_failed(before, &handler_reason(&e), journal, options),
+            Err(e) => {
+                self.reapply_failed(before, &provisioning_reason(&e, UPDATING), journal, options)
+            }
         }
     }
 
@@ -2686,6 +2828,17 @@ fn stack_family(state: &CloudFormationState, stack: &Stack) -> Vec<(String, Stri
         }
     }
     family
+}
+
+/// Whether `stack` or a stack nested under it holds a custom resource.
+pub(crate) fn stack_family_has_custom_resource(state: &CloudFormationState, stack: &Stack) -> bool {
+    stack_family(state, stack).iter().any(|(_, id)| {
+        state
+            .stacks
+            .values()
+            .find(|s| s.stack_id == *id)
+            .is_some_and(|member| member.resources.iter().any(|r| is_custom(&r.resource_type)))
+    })
 }
 
 /// An export `stack` or a stack nested under it owns that a stack outside that
@@ -4872,6 +5025,38 @@ mod tests {
             assert_eq!(event["OldResourceProperties"]["Value"], "b");
         }
 
+        /// Recorded: a changed service token fails with the bare text.
+        #[tokio::test]
+        async fn changing_a_service_token_is_refused_and_rolled_back() {
+            let svc = make_service();
+            create(
+                &svc,
+                "s",
+                &json!({"Resources": {"Anchor": {"Type": "AWS::SNS::Topic"}}}),
+            )
+            .await;
+            let anchor = json!({"Type": "AWS::SNS::Topic"});
+            run_on(
+                &svc,
+                "s",
+                &json!({"Resources": {"Anchor": anchor, "Thing": custom("a")}}),
+            );
+            let mut other = custom("a");
+            other["Properties"]["ServiceToken"] =
+                json!("arn:aws:lambda:us-east-1:123456789012:function:other");
+            let (_, outcome) = run_on(
+                &svc,
+                "s",
+                &json!({"Resources": {"Anchor": anchor, "Thing": other}}),
+            );
+            assert_eq!(outcome.status, "UPDATE_ROLLBACK_COMPLETE");
+            let current = stack(&svc, "s");
+            assert_eq!(
+                crate::service::tests::failure_reasons(&svc, &current.stack_id),
+                ["Modifying service token is not allowed."]
+            );
+        }
+
         /// The floating versions are refused wherever a group names a template,
         /// and on update as on create.
         #[tokio::test]
@@ -4903,6 +5088,7 @@ mod tests {
                 group
             };
             let reason = "CloudFormation does not support using $Latest or $Default";
+            // Recorded: on a create, as the handler's message.
             for bad in [mixed("$Latest", "1"), mixed("1", "$Default")] {
                 let svc = make_service();
                 create(&svc, "s", &json!({"Resources": {"L": lt}})).await;
@@ -4915,17 +5101,31 @@ mod tests {
                         .any(|r| r.contains(reason))
                 );
             }
-            // An existing group's update.
+            // An existing group's update. Recorded: the bare text, with no
+            // in-progress event before it or the rollback's completion after it.
             let svc = make_service();
             create(&svc, "s", &template(plain("1"))).await;
             assert_eq!(stack(&svc, "s").status, "CREATE_COMPLETE");
             update(&svc, "s", &template(plain("$Latest"))).await;
             let after = stack(&svc, "s");
             assert_eq!(after.status, "UPDATE_ROLLBACK_COMPLETE");
-            assert!(
-                crate::service::tests::failure_reasons(&svc, &after.stack_id)
+            assert_eq!(
+                crate::service::tests::failure_reasons(&svc, &after.stack_id),
+                [
+                    "CloudFormation does not support using $Latest or $Default for LaunchTemplate version.  Please specify a version number or name."
+                ]
+            );
+            let group_events = statuses(&svc, "s", "R");
+            assert_eq!(
+                group_events[group_events.len() - 2..],
+                ["UPDATE_FAILED", "UPDATE_COMPLETE"]
+            );
+            assert_eq!(
+                group_events
                     .iter()
-                    .any(|r| r.contains(reason))
+                    .filter(|status| *status == "UPDATE_IN_PROGRESS")
+                    .count(),
+                0
             );
         }
 

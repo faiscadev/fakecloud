@@ -49,10 +49,10 @@ fn prop_bool(p: &Value, k: &str) -> Option<bool> {
     })
 }
 
-/// Recorded on a real account for `LaunchTemplate` at creation: the API takes these
-/// versions, CloudFormation does not. Applied the same to the mixed policy's
-/// specifications and to updates, which name the same shape.
-fn refuse_floating_launch_template_versions(props: &Value) -> Result<(), String> {
+/// Recorded on a real account, for `LaunchTemplate` and the mixed policy with its
+/// overrides, on create and update: the API takes these versions, CloudFormation
+/// does not.
+pub(super) fn refuse_floating_launch_template_versions(props: &Value) -> Result<(), String> {
     let lt = &props["MixedInstancesPolicy"]["LaunchTemplate"];
     let overrides = lt["Overrides"].as_array().into_iter().flatten();
     let versions = std::iter::once(&props["LaunchTemplate"]["Version"])
