@@ -311,6 +311,7 @@ jobs:
           # without this. It cannot explain a lost runner, whose log GitHub never
           # keeps, but it does explain a slow or starving one.
           (
+            set +e
             while sleep 60; do
               echo "::group::resources $(date -u +%H:%M:%S)"
               free -m

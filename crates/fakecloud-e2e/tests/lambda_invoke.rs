@@ -102,12 +102,11 @@ async fn test_invoke_function_memory_is_bounded() {
     assert_eq!(fits.function_error(), None);
 
     // 128 MB of function memory + the default 512 MB of /tmp is the ceiling.
-    let too_big = invoke(1500).await;
-    let refused = match too_big {
-        Ok(resp) => resp.function_error().is_some(),
-        Err(_) => true,
-    };
-    assert!(refused, "a 1500 MiB allocation must not succeed");
+    let too_big = invoke(1500).await.unwrap();
+    assert!(
+        too_big.function_error().is_some(),
+        "a 1500 MiB allocation must fail inside the function"
+    );
 }
 
 // ---- Python runtime tests ----
