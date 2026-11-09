@@ -63,6 +63,14 @@ pub struct AutoScalingService {
     quota_provider: Option<Arc<dyn fakecloud_core::quota::QuotaProvider>>,
 }
 
+/// What a place's refusal of a launch is remembered by: the instance type,
+/// else (a type only EC2 resolves) the launch plan it came from.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum RefusalKey {
+    Type(String),
+    Plan(usize),
+}
+
 /// Where a group can launch an instance.
 enum LaunchPlace {
     Subnet(String),
@@ -162,8 +170,15 @@ impl AutoScalingService {
         self
     }
 
-    /// The zone of a launch place: a subnet's, from EC2, or the zone itself.
-    fn place_zone(&self, place: &LaunchPlace, account: &str, region: &str) -> String {
+    /// The zone of a launch place: a subnet's, from EC2, or the zone itself. A
+    /// subnet EC2 cannot resolve takes `fallback`, never its own id.
+    fn place_zone(
+        &self,
+        place: &LaunchPlace,
+        account: &str,
+        region: &str,
+        fallback: impl FnOnce() -> String,
+    ) -> String {
         match place {
             LaunchPlace::Zone(zone) => zone.clone(),
             LaunchPlace::Subnet(subnet) => self
@@ -177,7 +192,8 @@ impl AutoScalingService {
                         .get(subnet)
                         .map(|s| s.availability_zone.clone())
                 })
-                .unwrap_or_else(|| subnet.clone()),
+                .filter(|zone| !zone.is_empty())
+                .unwrap_or_else(fallback),
         }
     }
 
@@ -1529,11 +1545,20 @@ impl AutoScalingService {
         } else {
             subnets.iter().cloned().map(LaunchPlace::Subnet).collect()
         };
+        // A subnet EC2 cannot resolve counts as one of the group's zones, as
+        // the group spreads over them, or the Region's first.
         let place_zones: Vec<String> = places
             .iter()
-            .map(|p| self.place_zone(p, account, &req.region))
+            .enumerate()
+            .map(|(i, p)| {
+                self.place_zone(p, account, &req.region, || {
+                    azs.get(i % azs.len().max(1))
+                        .cloned()
+                        .unwrap_or_else(|| format!("{}a", req.region))
+                })
+            })
             .collect();
-        let mut refused: HashSet<(usize, Option<String>)> = HashSet::new();
+        let mut refused: HashSet<(usize, RefusalKey)> = HashSet::new();
         let capacity: i64 = current.iter().map(|(_, w, _, _)| weight_of(w)).sum();
 
         let mut launched: Vec<AsgInstance> = Vec::new();
@@ -1568,8 +1593,8 @@ impl AutoScalingService {
                     let mut cap = capacity;
                     let mut last_refusal: Option<String> = None;
                     while cap < target {
-                        let (plan, spot) = match &plans {
-                            LaunchPlans::Single(plan) => (plan, false),
+                        let (plan_index, plan, spot) = match &plans {
+                            LaunchPlans::Single(plan) => (0, plan, false),
                             LaunchPlans::Mixed { policy, plans } => {
                                 let weights: Vec<i64> = plans
                                     .iter()
@@ -1582,7 +1607,7 @@ impl AutoScalingService {
                                     spot,
                                     weight: weights[i],
                                 });
-                                (&plans[i], spot)
+                                (i, &plans[i], spot)
                             }
                         };
                         let weight = weight_of(&plan.weighted_capacity);
@@ -1594,10 +1619,14 @@ impl AutoScalingService {
                             LaunchPlans::Single(_) => None,
                         };
                         let is_spot = spot || plan.spot;
+                        // A refusal is the type's in that place: keyed by the
+                        // plan's resolved type, else by the plan itself, so two
+                        // templates of unknown type never share a key.
                         let type_key = plan
                             .instance_type
                             .clone()
-                            .or_else(|| plan.params.get("InstanceType").cloned());
+                            .or_else(|| plan.params.get("InstanceType").cloned())
+                            .map_or(RefusalKey::Plan(plan_index), RefusalKey::Type);
                         let mut params = plan.params.clone();
                         if spot {
                             params.insert(
@@ -1644,6 +1673,10 @@ impl AutoScalingService {
                             };
                             ec2_touched = true;
                             match self.run_ec2_instance(svc, params, req).await {
+                                // A response without a zone keeps the place's.
+                                Ok((id, az)) if az.is_empty() => {
+                                    break Ok((id, place_zones[at].clone()))
+                                }
                                 Ok(placed) => break Ok(placed),
                                 Err(f) if f.zone_does_not_sell_type => {
                                     refused.insert((at, type_key.clone()));
@@ -2610,6 +2643,25 @@ mod tests {
         .await
         .unwrap();
         assert!(group_instance_ids(&s, "h").is_empty());
+    }
+
+    #[test]
+    fn place_zone_never_reports_a_subnet_id() {
+        let (s, ec2) = ec2_wired();
+        let (subnet, zone) = {
+            let mut accounts = ec2.write();
+            let st = accounts.regional_mut("123456789012", "us-east-1");
+            let sub = st.subnets.values().find(|s| s.default_for_az).unwrap();
+            (sub.subnet_id.clone(), sub.availability_zone.clone())
+        };
+        let fallback = || "us-east-1b".to_string();
+        let at = |place| s.place_zone(&place, "123456789012", "us-east-1", fallback);
+        assert_eq!(at(LaunchPlace::Subnet(subnet)), zone);
+        assert_eq!(
+            at(LaunchPlace::Subnet("subnet-0gone0000000000".into())),
+            "us-east-1b"
+        );
+        assert_eq!(at(LaunchPlace::Zone("us-east-1c".into())), "us-east-1c");
     }
 
     #[test]
