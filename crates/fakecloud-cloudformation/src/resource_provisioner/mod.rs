@@ -1105,6 +1105,10 @@ pub struct ResourceProvisioner {
     /// Names to give resources re-created in place of an existing one, keyed
     /// by logical id (see `ResourceProvisioner::with_existing_name`).
     pub reused_names: Arc<parking_lot::Mutex<BTreeMap<String, String>>>,
+    /// Logical ids whose re-provision stand-in deleted the resource and then
+    /// failed to create it again. The update engine reads this to know that a
+    /// failed update, which otherwise changes nothing, needs its undo re-applied.
+    pub reprovision_losses: Arc<parking_lot::Mutex<std::collections::BTreeSet<String>>>,
 }
 
 /// A container-backed resource the synchronous provisioning pass inserted as a
@@ -1800,9 +1804,8 @@ impl ResourceProvisioner {
             // `update_iam_group`.
             "AWS::IAM::User" => Some(self.update_iam_user(existing, new_def)?),
             "AWS::IAM::Group" => Some(self.update_iam_group(existing, new_def)?),
-            // In-place update: the reprovision fallback deletes then recreates,
-            // which under UpdateReplacePolicy Retain collides with the retained
-            // provider. Only a new Url / Name replaces.
+            // In-place update: only a new Url / Name is a different provider,
+            // which the update engine classifies before getting here.
             "AWS::IAM::OIDCProvider" => Some(self.update_iam_oidc_provider(existing, new_def)?),
             "AWS::IAM::SAMLProvider" => Some(self.update_iam_saml_provider(existing, new_def)?),
             "AWS::ApiGateway::RestApi" => Some(self.update_apigw_rest_api(existing, new_def)?),
@@ -2009,17 +2012,10 @@ impl ResourceProvisioner {
             }
             "AWS::DocDB::DBCluster" => Some(self.update_docdb_cluster(existing, new_def)?),
             "AWS::Neptune::DBCluster" => Some(self.update_neptune_cluster(existing, new_def)?),
-            // A different launch template (or version) replaces the instance,
-            // as in AWS; anything else updates it in place.
-            "AWS::EC2::Instance" if self.instance_launch_template_changed(existing, new_def) => {
-                self.reprovision_resource(existing, new_def)?
-            }
             "AWS::EC2::Instance" => Some(self.update_ec2_instance(existing, new_def)?),
             // A new template version, made the default, keeps the template id
-            // every launch references; a rename replaces it.
-            "AWS::EC2::LaunchTemplate" if self.launch_template_name_kept(existing, new_def) => {
-                Some(self.update_ec2_launch_template(existing, new_def)?)
-            }
+            // every launch references.
+            "AWS::EC2::LaunchTemplate" => Some(self.update_ec2_launch_template(existing, new_def)?),
             // Stateful catalog/timeseries types: an in-place update preserves
             // the contained data (Glue tables/partitions, Timestream records)
             // that a reprovision (delete+create) would silently wipe.
@@ -2085,11 +2081,7 @@ impl ResourceProvisioner {
             "AWS::MWAA::Environment" => Some(self.update_mwaa_environment(existing, new_def)?),
             "AWS::Amplify::App" => Some(self.update_amplify_app(existing, new_def)?),
             "AWS::KinesisFirehose::DeliveryStream" => {
-                if self.firehose_update_requires_replacement(existing, new_def)? {
-                    self.reprovision_resource(existing, new_def)?
-                } else {
-                    Some(self.update_firehose_delivery_stream(existing, new_def)?)
-                }
+                Some(self.update_firehose_delivery_stream(existing, new_def)?)
             }
             "AWS::Backup::BackupVault" => Some(self.update_backup_vault(existing, new_def)?),
             // In-place update: reprovision would mint a new BackupPlanId and
@@ -2193,13 +2185,7 @@ impl ResourceProvisioner {
             // In-place updates: reprovision would churn the vpc-/subnet-/rtb- id
             // and orphan every child/sibling that references it (subnets, SGs,
             // route tables, routes, associations, instances, ENIs).
-            "AWS::EC2::EIP" if self.eip_requires_replacement(existing, new_def) => {
-                self.reprovision_resource(existing, new_def)?
-            }
             "AWS::EC2::EIP" => Some(self.update_ec2_eip(existing, new_def)?),
-            "AWS::EC2::NatGateway" if self.nat_gateway_requires_replacement(existing, new_def) => {
-                self.reprovision_resource(existing, new_def)?
-            }
             "AWS::EC2::NatGateway" => Some(self.update_ec2_nat_gateway(existing, new_def)?),
             "AWS::EC2::VPC" => Some(self.update_ec2_vpc(existing, new_def)?),
             "AWS::EC2::Subnet" => Some(self.update_ec2_subnet(existing, new_def)?),
@@ -2208,14 +2194,10 @@ impl ResourceProvisioner {
             "AWS::EC2::InternetGateway" => {
                 Some(self.update_ec2_internet_gateway(existing, new_def)?)
             }
-            // No dedicated in-place update arm for this type. Real
-            // CloudFormation, lacking an in-place mutator for a changed
-            // property, falls back to REPLACEMENT: it deletes the old backing
-            // resource and creates a new one from the updated definition. Do
-            // the same here so the update actually applies (the owning
-            // service's stored resource reflects the new properties) instead
-            // of silently reporting UPDATE_COMPLETE while the old config
-            // lingers. See `reprovision_resource`.
+            // No dedicated in-place arm for this type, and the change is not a
+            // replacement (those never get here): re-provision under the same
+            // name so the stored resource reflects the update. See
+            // `reprovision_resource`.
             _ => self.reprovision_resource(existing, new_def)?,
         };
 
@@ -2232,58 +2214,40 @@ impl ResourceProvisioner {
         }))
     }
 
-    /// Fallback update path for resource types that have create/delete
-    /// provisioners but no dedicated in-place `update_*` arm.
+    /// Stand-in for an in-place update of a type with no `update_*` arm, or of a
+    /// resource that has gone missing: delete the backing record and create it
+    /// again from the new definition, through the same write-through path
+    /// `create_resource` uses. An emulator detail, not CloudFormation's
+    /// replacement: changes of create-only properties are classified by
+    /// `replacement` and never get here, the old resource's name is kept, and
+    /// `UpdateReplacePolicy` does not apply since nothing is being replaced.
     ///
-    /// Before this existed, `update_resource` returned `Ok(None)` for every
-    /// such type and the update driver treated that as "leave the resource
-    /// untouched" while still transitioning the stack to `UPDATE_COMPLETE`
-    /// and recording no `ResourceChange` -- so `update-stack` / `cdk deploy`
-    /// changing a property on any of the many write-through services
-    /// (AppConfig, Timestream, OpenSearch, EMR, Glue, RDS DBCluster, ...)
-    /// reported success while the backing resource kept its old config.
-    ///
-    /// Mirroring CloudFormation replacement semantics, this tears down the
-    /// old backing resource and re-provisions it from the new definition
-    /// through the exact same write-through path `create_resource` uses, so
-    /// the stored resource reflects the update. A resource whose name the
-    /// template sets keeps that name; an unnamed one keeps the name it was
-    /// generated, so the update stays effectively in place. Genuinely-unmodeled types (no backing state) have
-    /// a no-op delete and a create that records `physical_id == logical_id`;
-    /// they still yield `Some(..)` here so the caller records a
-    /// `ResourceChange` rather than a silent no-op.
+    /// Genuinely-unmodeled types (no backing state) have a no-op delete and a
+    /// create that records `physical_id == logical_id`, and still yield
+    /// `Some(..)` so the update is recorded rather than a silent no-op.
     fn reprovision_resource(
         &self,
         existing: &StackResource,
         new_def: &ResourceDefinition,
     ) -> Result<Option<ProvisionResult>, String> {
-        // A replacement destroys the OLD physical resource — unless its
-        // UpdateReplacePolicy is Retain/Snapshot, in which case CloudFormation
-        // leaves the old resource in place (unmanaged) and only creates the
-        // new one. Honoring this prevents silent data loss on replacement.
-        if policy_retains_physical(existing.update_replace_policy.as_deref()) {
-            tracing::info!(
-                logical_id = %existing.logical_id,
-                resource_type = %existing.resource_type,
-                policy = existing.update_replace_policy.as_deref().unwrap_or(""),
-                "CloudFormation: UpdateReplacePolicy retains the old physical resource on replacement; not deleting it"
-            );
-            // The old resource stays, holding its name, so the replacement
-            // generates a new one rather than overwriting what was retained.
-            let created = self.create_resource(new_def)?;
-            return Ok(Some(ProvisionResult {
-                physical_id: created.physical_id,
-                attributes: created.attributes,
-            }));
-        }
         self.delete_resource(existing)?;
-        // The old resource is gone, so an unnamed resource keeps its name, as
-        // the in-place update this often stands in for would.
-        let created = self.with_existing_name(existing, || self.create_resource(new_def))?;
+        let created = self
+            .with_existing_name(existing, || self.create_resource(new_def))
+            .inspect_err(|_| {
+                self.reprovision_losses
+                    .lock()
+                    .insert(existing.logical_id.clone());
+            })?;
         Ok(Some(ProvisionResult {
             physical_id: created.physical_id,
             attributes: created.attributes,
         }))
+    }
+
+    /// Whether the last failed update of `logical_id` was a re-provision that
+    /// deleted the resource before failing. Clears the mark.
+    pub(crate) fn take_reprovision_loss(&self, logical_id: &str) -> bool {
+        self.reprovision_losses.lock().remove(logical_id)
     }
 
     /// Resolve a `Fn::GetAtt` against a previously provisioned resource.
@@ -3545,6 +3509,59 @@ impl ResourceProvisioner {
         Ok(physical_id)
     }
 
+    /// An in-place update of a custom resource: the handler gets an `Update`
+    /// request with both property sets and the physical id stays. A different
+    /// `ServiceToken` is refused, as CloudFormation refuses it.
+    pub(crate) fn update_custom_resource(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+        old_properties: Option<&serde_json::Value>,
+    ) -> Result<StackResource, String> {
+        let props = &resource.properties;
+        let service_token = props
+            .get("ServiceToken")
+            .and_then(|v| v.as_str())
+            .ok_or("Custom resource requires ServiceToken property")?;
+        if existing
+            .service_token
+            .as_deref()
+            .is_some_and(|token| token != service_token)
+        {
+            return Err("Modifying service token is not allowed.".to_string());
+        }
+        let event = serde_json::json!({
+            "RequestType": "Update",
+            "ServiceToken": service_token,
+            "StackId": self.stack_id,
+            "RequestId": Uuid::new_v4().to_string(),
+            "ResourceType": resource.resource_type,
+            "LogicalResourceId": resource.logical_id,
+            "PhysicalResourceId": existing.physical_id,
+            "ResourceProperties": props,
+            "OldResourceProperties": old_properties,
+        });
+        let payload = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+        if self.defer_custom_invokes {
+            self.pending_custom_invokes.lock().push(CustomInvokeIntent {
+                service_token: service_token.to_string(),
+                payload,
+            });
+        } else {
+            self.invoke_lambda_sync(service_token, &payload)?;
+        }
+        Ok(StackResource {
+            logical_id: existing.logical_id.clone(),
+            physical_id: existing.physical_id.clone(),
+            resource_type: existing.resource_type.clone(),
+            status: "UPDATE_COMPLETE".to_string(),
+            service_token: existing.service_token.clone(),
+            attributes: existing.attributes.clone(),
+            deletion_policy: resource.deletion_policy.clone(),
+            update_replace_policy: resource.update_replace_policy.clone(),
+        })
+    }
+
     fn delete_custom_resource(&self, resource: &StackResource) -> Result<(), String> {
         let service_token = match &resource.service_token {
             Some(token) => token.clone(),
@@ -3603,7 +3620,7 @@ impl ResourceProvisioner {
         out
     }
 
-    fn fetch_template_from_url(&self, url: &str) -> Result<String, String> {
+    pub(crate) fn fetch_template_from_url(&self, url: &str) -> Result<String, String> {
         if let Some(rest) = url.strip_prefix("s3://") {
             let parts: Vec<&str> = rest.splitn(2, '/').collect();
             if parts.len() != 2 {
@@ -4469,6 +4486,7 @@ mod tests {
             stack_id: "arn:aws:cloudformation:us-east-1:123456789012:stack/test/00000000-0000-0000-0000-000000000000".to_string(),
             strict_unknown_types: false,
             reused_names: Default::default(),
+            reprovision_losses: Default::default(),
         };
         // Wire KMS like the server does, over the provisioner's own KMS state.
         prov.kms_hook = Some(Arc::new(fakecloud_kms::hook::KmsServiceHook::new(
@@ -7706,9 +7724,8 @@ mod tests {
     }
 
     /// Changing an OIDC provider's thumbprints or client ids, or a SAML
-    /// provider's metadata, updates the provider in place, even with
-    /// UpdateReplacePolicy Retain, where a replacement would collide with the
-    /// retained provider. A new Url / Name still replaces.
+    /// provider's metadata, updates the provider in place. A new Url / Name is a
+    /// different provider, however it is reached.
     #[test]
     fn iam_oidc_and_saml_providers_update_in_place() {
         let prov = make_provisioner();
@@ -7750,7 +7767,7 @@ mod tests {
             );
             assert_eq!(p.tags.len(), 1);
         }
-        // A new Url is a different provider: replaced, and the retained one stays.
+        // A new Url is a different provider.
         let replaced = prov
             .update_resource(
                 &existing,
@@ -9068,8 +9085,9 @@ mod tests {
             let t = &ec2.regional(acct, "us-east-1").unwrap().launch_templates[&lt.physical_id];
             assert_eq!((t.default_version, t.latest_version), (2, 2));
         }
-        // Same template version: in-place update keeps the instance; a new
-        // version replaces it.
+        // Same template version: in-place update keeps the instance. A new
+        // version is a create-only change, which the update engine turns into a
+        // new instance.
         let same = prov
             .update_resource(
                 &inst,
@@ -9086,18 +9104,19 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(same.physical_id, inst.physical_id);
+        let new_version = serde_json::json!({
+            "LaunchTemplate": {"LaunchTemplateId": lt.physical_id, "Version": "2"}
+        });
+        assert!(crate::replacement::classify(
+            "AWS::EC2::Instance",
+            &serde_json::json!({
+                "LaunchTemplate": {"LaunchTemplateId": lt.physical_id, "Version": "1"}
+            }),
+            &new_version
+        )
+        .is_replacement());
         let replaced = prov
-            .update_resource(
-                &inst,
-                &make_resource(
-                    "AWS::EC2::Instance",
-                    "Box",
-                    serde_json::json!({
-                        "LaunchTemplate": {"LaunchTemplateId": lt.physical_id, "Version": "2"}
-                    }),
-                ),
-            )
-            .unwrap()
+            .create_resource(&make_resource("AWS::EC2::Instance", "Box", new_version))
             .unwrap();
         assert_ne!(
             replaced.physical_id, inst.physical_id,
@@ -9257,8 +9276,8 @@ mod tests {
         );
     }
 
-    /// A stack launch template's tags follow `TagSpecifications` on update,
-    /// and dropping an explicit `LaunchTemplateName` replaces the template.
+    /// A stack launch template's tags follow `TagSpecifications` on update, and
+    /// an unnamed template keeps its generated name.
     #[test]
     fn stack_launch_template_tags_and_name_on_update() {
         let prov = make_provisioner();
@@ -9301,14 +9320,17 @@ mod tests {
                 .collect();
             assert_eq!(tags, vec![("b".to_string(), "2".to_string())]);
         }
+        // Dropping the name is a create-only change.
+        assert!(crate::replacement::classify(
+            "AWS::EC2::LaunchTemplate",
+            &def(Some("named"), serde_json::json!([])).properties,
+            &def(None, serde_json::json!([])).properties
+        )
+        .is_replacement());
         let replaced = prov
-            .update_resource(&updated, &def(None, serde_json::json!([])))
-            .unwrap()
+            .create_resource(&def(None, serde_json::json!([])))
             .unwrap();
-        assert_ne!(
-            replaced.physical_id, lt.physical_id,
-            "dropping the name replaces"
-        );
+        assert_ne!(replaced.physical_id, lt.physical_id);
         // A generated name is kept on the next update.
         let again = prov
             .update_resource(&replaced, &def(None, serde_json::json!([])))
@@ -12595,38 +12617,6 @@ mod tests {
             .expect("update succeeds")
             .expect("subnet group is updatable");
         assert_eq!(updated.physical_id, group.physical_id);
-
-        // A retained old resource keeps its name, so the replacement gets a
-        // new one instead of overwriting it.
-        let retained = StackResource {
-            update_replace_policy: Some("Retain".to_string()),
-            ..group.clone()
-        };
-        let updated = prov
-            .update_resource(
-                &retained,
-                &make_resource(
-                    "AWS::RDS::DBSubnetGroup",
-                    "Subnets",
-                    serde_json::json!({
-                        "DBSubnetGroupDescription": "third",
-                        "SubnetIds": [subnets[0], subnets[1]]
-                    }),
-                ),
-            )
-            .expect("update succeeds")
-            .expect("subnet group is updatable");
-        assert_ne!(updated.physical_id, group.physical_id);
-        assert!(updated.physical_id.starts_with("test-subnets-"));
-        {
-            let rds = prov.rds_state.read();
-            let groups = &rds.get("123456789012").unwrap().subnet_groups;
-            assert!(
-                groups.contains_key(&group.physical_id),
-                "retained group kept"
-            );
-            assert!(groups.contains_key(&updated.physical_id));
-        }
 
         // A resource created before names were generated keeps its
         // logical-id name the same way.

@@ -248,7 +248,7 @@ async fn firehose_cfn_invalid_retry(change_set: bool) {
     invalid["Resources"]["Stream"]["Properties"]["ExtendedS3DestinationConfiguration"]
         ["CompressionFormat"] = json!("BROTLI");
     let invalid = invalid.to_string();
-    for name in ["invalid-1", "invalid-2"] {
+    for (attempt, name) in ["invalid-1", "invalid-2"].into_iter().enumerate() {
         let parameters = vec![
             Parameter::builder()
                 .parameter_key("Codec")
@@ -270,25 +270,22 @@ async fn firehose_cfn_invalid_retry(change_set: bool) {
                 .send()
                 .await
                 .unwrap();
-            let err = cfn
-                .execute_change_set()
+            // Accepted, as on AWS: the stack rolls back and its events say why.
+            cfn.execute_change_set()
                 .stack_name("compression-stack")
                 .change_set_name(name)
                 .send()
                 .await
-                .expect_err("invalid change set must fail even on retry");
-            assert_eq!(err.raw_response().unwrap().status().as_u16(), 400);
+                .unwrap();
         } else {
-            let err = cfn
-                .update_stack()
+            cfn.update_stack()
                 .stack_name("compression-stack")
                 .template_body(&invalid)
                 .set_parameters(Some(parameters))
                 .tags(Tag::builder().key("env").value("rejected").build())
                 .send()
                 .await
-                .expect_err("invalid update must fail even on retry");
-            assert_eq!(err.raw_response().unwrap().status().as_u16(), 400);
+                .unwrap();
         }
         let after = cfn
             .describe_stacks()
@@ -301,10 +298,25 @@ async fn firehose_cfn_invalid_retry(change_set: bool) {
             stack.stack_status().unwrap().as_str(),
             "UPDATE_ROLLBACK_COMPLETE"
         );
-        assert!(stack
-            .stack_status_reason()
-            .unwrap()
-            .contains("CompressionFormat"));
+        // Each retry reached validation again, rather than being skipped as
+        // unchanged: one more failed event each time.
+        let events = cfn
+            .describe_stack_events()
+            .stack_name("compression-stack")
+            .send()
+            .await
+            .unwrap();
+        let failures = events
+            .stack_events()
+            .iter()
+            .filter(|e| {
+                e.resource_status()
+                    .is_some_and(|s| s.as_str() == "UPDATE_FAILED")
+                    && e.resource_status_reason()
+                        .is_some_and(|r| r.contains("CompressionFormat"))
+            })
+            .count();
+        assert_eq!(failures, attempt + 1, "{name}");
         assert_eq!(stack.parameters(), before.stacks()[0].parameters());
         assert_eq!(stack.tags(), before.stacks()[0].tags());
         assert_eq!(stack.outputs(), before.stacks()[0].outputs());

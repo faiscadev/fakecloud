@@ -78,13 +78,18 @@ pub struct Stack {
     /// previous write-only `termination_protection` map is gone).
     #[serde(default)]
     pub enable_termination_protection: bool,
-    /// Logical ids a failed update already changed in their backing service
-    /// (in place or by replacement) before another resource failed. A failed
-    /// update keeps the previous template, which no longer describes these
-    /// resources, so the next update re-applies them instead of skipping them
-    /// as unchanged. Cleared by a successful update.
-    #[serde(default)]
-    pub reapply_logical_ids: std::collections::BTreeSet<String>,
+    /// The undo log of an operation waiting on a later call: after
+    /// `DisableRollback` held the stack at `UPDATE_FAILED`, after
+    /// `UPDATE_ROLLBACK_FAILED`, or on a nested stack whose parent has not
+    /// finished. Normally absent. (An older snapshot may instead carry a
+    /// `reapply_logical_ids` field; updates roll back for real now, so that field
+    /// has no successor and is ignored on load.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_update: Option<crate::stack_update::UpdateJournal>,
+    /// `CancelUpdateStack` asked the running update to stop. Read at the next
+    /// resource boundary; only true while an update runs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_requested: bool,
 }
 
 /// One account's CloudFormation state in one region.
@@ -546,7 +551,8 @@ mod tests {
             notification_arns: vec![],
             outputs: vec![],
             enable_termination_protection: false,
-            reapply_logical_ids: Default::default(),
+            pending_update: None,
+            cancel_requested: false,
         }
     }
 

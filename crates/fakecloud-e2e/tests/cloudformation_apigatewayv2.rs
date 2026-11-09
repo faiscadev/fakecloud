@@ -368,8 +368,8 @@ const TEMPLATE_V2: &str = r#"{
       "Type": "AWS::ApiGatewayV2::VpcLink",
       "Properties": {
         "Name": "vpc-v2",
-        "SubnetIds": ["subnet-aaa", "subnet-bbb", "subnet-ccc"],
-        "SecurityGroupIds": ["sg-111", "sg-222"]
+        "SubnetIds": ["subnet-aaa", "subnet-bbb"],
+        "SecurityGroupIds": ["sg-111"]
       }
     },
     "Domain": {

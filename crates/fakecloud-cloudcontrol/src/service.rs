@@ -217,6 +217,7 @@ impl CloudControlService {
             (managed.properties.clone(), managed.attributes.clone())
         };
 
+        let prior_properties = properties.clone();
         apply_json_patch(&mut properties, &patch)
             .map_err(|e| invalid_request(&format!("invalid PatchDocument: {e}")))?;
 
@@ -225,6 +226,7 @@ impl CloudControlService {
             type_name,
             identifier,
             &attributes,
+            &prior_properties,
             properties.clone(),
             &req.account_id,
             &req.region,
@@ -236,8 +238,8 @@ impl CloudControlService {
                 let mut accounts = self.state.write();
                 let st = accounts.get_or_create(&req.account_id);
                 if new_id != identifier {
-                    // Replacement update: the provisioner assigned a new
-                    // physical id. Re-key the managed resource so subsequent
+                    // A type re-provisioned for lack of an in-place path may
+                    // get a new physical id. Re-key the managed resource so subsequent
                     // Get/Delete track the new identity instead of the stale one.
                     let mut managed = st.resources.remove(&key).unwrap_or(ManagedResource {
                         type_name: type_name.to_string(),

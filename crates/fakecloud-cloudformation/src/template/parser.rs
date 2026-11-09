@@ -203,6 +203,145 @@ pub(super) fn static_import_name(
     }
 }
 
+/// The template after the macro expansions provisioning sees, `None` when the
+/// body is not a template this crate can read.
+fn expanded_template(template_body: &str, parameters: &BTreeMap<String, String>) -> Option<Value> {
+    let value = fakecloud_core::cfn_template::parse_template_body(template_body).ok()?;
+    let value = expand_for_each(&value, &BTreeMap::new(), parameters).ok()?;
+    expand_sam(&value).ok()
+}
+
+/// The names this template imports with `Fn::ImportValue`.
+pub fn imported_names(template_body: &str, parameters: &BTreeMap<String, String>) -> Vec<String> {
+    fakecloud_core::cfn_template::parse_template_body(template_body)
+        .map(|value| collect_import_value_names(&value, parameters))
+        .unwrap_or_default()
+}
+
+/// The export names this template's `Outputs` declare, skipping an output whose
+/// `Condition` is false. CloudFormation requires a name to be known before any
+/// resource exists (see [`validate_export_names`]), so nothing but parameters
+/// goes into resolving it.
+pub fn export_names(template_body: &str, parameters: &BTreeMap<String, String>) -> Vec<String> {
+    let Some(template) = expanded_template(template_body, parameters) else {
+        return Vec::new();
+    };
+    let Some(outputs) = template.get("Outputs").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    let Ok(conditions) = evaluate_conditions(&template, parameters) else {
+        return Vec::new();
+    };
+    let no_resources = serde_json::Map::new();
+    let (no_ids, no_attributes, no_imports) = (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
+    outputs
+        .values()
+        .filter(
+            |body| match body.get("Condition").and_then(|v| v.as_str()) {
+                Some(name) => conditions.get(name).copied().unwrap_or(false),
+                None => true,
+            },
+        )
+        .filter_map(|body| body.get("Export")?.get("Name"))
+        .map(|name| {
+            match resolve_refs_full(
+                name,
+                parameters,
+                &no_resources,
+                &no_ids,
+                &no_attributes,
+                &no_imports,
+                &conditions,
+            ) {
+                Value::String(text) => text,
+                other => other.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// `Fn::Sub`'s `${Name}` / `${Name.Attr}` references, without `${!Literal}`.
+fn sub_references(text: &str) -> Vec<&str> {
+    text.split("${")
+        .skip(1)
+        .filter_map(|tail| tail.split_once('}').map(|(reference, _)| reference))
+        .filter(|reference| !reference.starts_with('!'))
+        .map(|reference| reference.split('.').next().unwrap_or(reference))
+        .collect()
+}
+
+fn depends_on_resources(value: &Value, resources: &serde_json::Map<String, Value>) -> bool {
+    match value {
+        Value::Object(map) => {
+            if map.contains_key("Fn::GetAtt")
+                || map.contains_key("Fn::ImportValue")
+                || map.contains_key("Fn::GetAZs")
+            {
+                return true;
+            }
+            if map
+                .get("Ref")
+                .and_then(|v| v.as_str())
+                .is_some_and(|name| resources.contains_key(name))
+            {
+                return true;
+            }
+            if let Some(sub) = map.get("Fn::Sub") {
+                let (text, variables) = match sub {
+                    Value::String(text) => (text.as_str(), None),
+                    Value::Array(items) => (
+                        items.first().and_then(|v| v.as_str()).unwrap_or(""),
+                        items.get(1).and_then(|v| v.as_object()),
+                    ),
+                    _ => ("", None),
+                };
+                let names_resource = sub_references(text).into_iter().any(|name| {
+                    resources.contains_key(name)
+                        && !variables.is_some_and(|vars| vars.contains_key(name))
+                });
+                if names_resource {
+                    return true;
+                }
+                return variables
+                    .is_some_and(|vars| vars.values().any(|v| depends_on_resources(v, resources)));
+            }
+            map.values().any(|v| depends_on_resources(v, resources))
+        }
+        Value::Array(items) => items.iter().any(|v| depends_on_resources(v, resources)),
+        _ => false,
+    }
+}
+
+/// Refuse an output whose `Export.Name` depends on a resource, an imported value
+/// or `Fn::GetAZs`, which CloudFormation rejects up front. It is what makes an
+/// export collision knowable before anything is provisioned.
+pub fn validate_export_names(
+    template_body: &str,
+    parameters: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let Some(template) = expanded_template(template_body, parameters) else {
+        return Ok(());
+    };
+    let Some(outputs) = template.get("Outputs").and_then(|v| v.as_object()) else {
+        return Ok(());
+    };
+    let no_resources = serde_json::Map::new();
+    let resources = template
+        .get("Resources")
+        .and_then(|v| v.as_object())
+        .unwrap_or(&no_resources);
+    for (logical_id, body) in outputs {
+        let name = body.get("Export").and_then(|export| export.get("Name"));
+        if name.is_some_and(|name| depends_on_resources(name, resources)) {
+            // Two spaces after "malformed." as CloudFormation prints it.
+            return Err(format!(
+                "Template format error: Output {logical_id} is malformed.  The Name field of Export must not depend on any resources, imported values, or Fn::GetAZs."
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Parse the template's `Outputs` block into resolved entries. Each
 /// `Value` is fully resolved (Ref / GetAtt / Sub / Join / Fn::ImportValue)
 /// to a string. Imports use `imports` for cross-stack lookups.

@@ -239,6 +239,13 @@ const OPERATION_INTERRUPTED: &str = "The operation was interrupted by a restart"
 /// process stopped. Nothing resumes those, so left RUNNING they would block
 /// every later operation on their stack set.
 pub fn restore_stack_sets(accounts: &mut MultiAccountState<CloudFormationAccountState>) {
+    for (_, state) in accounts.iter_mut() {
+        for region in state.regions.values_mut() {
+            for stack in region.stacks.values_mut() {
+                crate::stack_update::settle_interrupted_update(stack);
+            }
+        }
+    }
     migrate_legacy_stack_sets(accounts);
     let sets: Vec<(String, String)> = accounts
         .iter()
@@ -3278,10 +3285,31 @@ impl CloudFormationService {
             stack_params,
         );
         if let Err(e) = self.update_stack(&request).await {
+            // A stack set update reaching an instance it does not change is
+            // success for that instance, not the error a direct UpdateStack gets.
+            if e.message() == "No updates are to be performed." {
+                return (Outcome::Succeeded, Some(stack_id.to_string()));
+            }
             return (Outcome::Failed(e.message()), Some(stack_id.to_string()));
         }
         let outcome = match self.stack_status(&target.account, &target.region, stack_id) {
-            Some((_, status, reason)) => stack_outcome("UPDATE", &status, reason.as_deref()),
+            Some((_, status, reason)) => {
+                // A rolled-back stack keeps no reason of its own; its events do.
+                let reason = reason.or_else(|| {
+                    self.state
+                        .read()
+                        .regional(&target.account, &target.region)?
+                        .events
+                        .get(stack_id)?
+                        .iter()
+                        .rev()
+                        .find(|e| e["ResourceStatus"] == "UPDATE_ROLLBACK_IN_PROGRESS")?
+                        ["ResourceStatusReason"]
+                        .as_str()
+                        .map(str::to_string)
+                });
+                stack_outcome("UPDATE", &status, reason.as_deref())
+            }
             None => Outcome::Failed(format!("Stack [{stack_id}] does not exist")),
         };
         (outcome, Some(stack_id.to_string()))

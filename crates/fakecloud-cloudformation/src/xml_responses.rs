@@ -237,16 +237,27 @@ pub fn list_stack_resources_response(resources: &[StackResource], request_id: &s
     )
 }
 
+/// A resource whose create failed has no physical id, and the member is left out.
+fn physical_id_xml(physical_id: &str) -> String {
+    if physical_id.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "        <PhysicalResourceId>{}</PhysicalResourceId>\n",
+            xml_escape(physical_id)
+        )
+    }
+}
+
 fn stack_resource_summary_xml(resource: &StackResource) -> String {
     format!(
         r#"      <member>
         <LogicalResourceId>{logical_id}</LogicalResourceId>
-        <PhysicalResourceId>{physical_id}</PhysicalResourceId>
-        <ResourceType>{resource_type}</ResourceType>
+{physical_id}        <ResourceType>{resource_type}</ResourceType>
         <ResourceStatus>{status}</ResourceStatus>
       </member>"#,
         logical_id = xml_escape(&resource.logical_id),
-        physical_id = xml_escape(&resource.physical_id),
+        physical_id = physical_id_xml(&resource.physical_id),
         resource_type = xml_escape(&resource.resource_type),
         status = xml_escape(&resource.status),
     )
@@ -264,13 +275,12 @@ pub fn describe_stack_resources_response(
                 r#"      <member>
         <StackName>{stack_name}</StackName>
         <LogicalResourceId>{logical_id}</LogicalResourceId>
-        <PhysicalResourceId>{physical_id}</PhysicalResourceId>
-        <ResourceType>{resource_type}</ResourceType>
+{physical_id}        <ResourceType>{resource_type}</ResourceType>
         <ResourceStatus>{status}</ResourceStatus>
       </member>"#,
                 stack_name = xml_escape(stack_name),
                 logical_id = xml_escape(&r.logical_id),
-                physical_id = xml_escape(&r.physical_id),
+                physical_id = physical_id_xml(&r.physical_id),
                 resource_type = xml_escape(&r.resource_type),
                 status = xml_escape(&r.status),
             )
@@ -337,7 +347,8 @@ mod tests {
             notification_arns: vec![],
             outputs: vec![],
             enable_termination_protection: false,
-            reapply_logical_ids: Default::default(),
+            pending_update: None,
+            cancel_requested: false,
         }
     }
 

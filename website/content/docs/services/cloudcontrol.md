@@ -28,6 +28,9 @@ restarts in persistent mode.
   JSON Patch array). fakecloud applies the full operation set (`add`, `remove`,
   `replace`, `move`, `copy`, `test`) over RFC 6901 JSON Pointer paths to the
   stored desired state, then hands the result to the resource's update handler.
+  A patch that changes a create-only property fails the request (`Invalid patch
+  update: createOnlyProperties [...] cannot be updated`), since Cloud Control has
+  no replacement, and leaves the resource as it was.
 - **Idempotency**: `ClientToken` on a mutating request replays the original
   request's terminal `ProgressEvent` instead of provisioning again.
 - **Request tracking** (`GetResourceRequestStatus`, `ListResourceRequests`,

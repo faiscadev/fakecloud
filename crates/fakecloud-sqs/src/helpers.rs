@@ -1210,7 +1210,7 @@ pub(crate) fn validate_message_attributes(
     Ok(())
 }
 
-pub(crate) fn is_valid_queue_name(name: &str) -> bool {
+pub fn is_valid_queue_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 80 {
         return false;
     }

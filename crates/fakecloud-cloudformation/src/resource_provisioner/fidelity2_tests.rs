@@ -1118,18 +1118,26 @@ fn ec2_eip_and_nat_gateway_tag_updates_are_in_place() {
         vec![("env".to_string(), "dev".to_string())]
     );
 
-    // A replacement-requiring change (Domain) releases the old address.
+    // Domain is not create-only in the registry, so the address stays and the
+    // record follows the template.
     let standalone = create(&prov, "AWS::EC2::EIP", "E2", json!({"Domain": "vpc"}));
-    let replaced = update(&prov, &standalone, json!({"Domain": "standard"}));
-    assert_ne!(replaced.physical_id, standalone.physical_id);
-    let ec2 = prov.ec2_state.read();
-    let st = ec2.regional(ACCT, "us-east-1").unwrap();
-    assert!(!st
-        .elastic_ips
-        .values()
-        .any(|e| e.public_ip == standalone.physical_id));
-    assert!(st
-        .elastic_ips
-        .values()
-        .any(|e| e.public_ip == replaced.physical_id));
+    let updated = update(&prov, &standalone, json!({"Domain": "standard"}));
+    assert_eq!(updated.physical_id, standalone.physical_id);
+    {
+        let ec2 = prov.ec2_state.read();
+        let st = ec2.regional(ACCT, "us-east-1").unwrap();
+        let record = st
+            .elastic_ips
+            .values()
+            .find(|e| e.public_ip == standalone.physical_id)
+            .unwrap();
+        assert_eq!(record.domain, "standard");
+    }
+    // NetworkBorderGroup is create-only: the update engine replaces on it.
+    assert!(crate::replacement::classify(
+        "AWS::EC2::EIP",
+        &json!({"NetworkBorderGroup": "us-east-1"}),
+        &json!({"NetworkBorderGroup": "us-west-2"})
+    )
+    .is_replacement());
 }

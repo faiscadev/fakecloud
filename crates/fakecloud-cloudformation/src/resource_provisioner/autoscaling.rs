@@ -328,6 +328,16 @@ impl ResourceProvisioner {
         // Modern templates use LaunchTemplate (or MixedInstancesPolicy) instead
         // of the legacy LaunchConfigurationName; honor every form so the
         // launch spec isn't silently dropped.
+        // Recorded on a real account: the API takes these, CloudFormation does not.
+        if matches!(
+            props["LaunchTemplate"]["Version"].as_str(),
+            Some("$Latest" | "$Default")
+        ) {
+            return Err(
+                "CloudFormation does not support using $Latest or $Default for LaunchTemplate version.  Please specify a version number or name."
+                    .to_string(),
+            );
+        }
         let mut launch_template = parse_cfn_launch_template(props.get("LaunchTemplate"));
         let mut mixed_instances_policy = parse_cfn_mixed_instances_policy(props);
         self.validate_asg_launch_source(
