@@ -317,6 +317,9 @@ jobs:
               free -m
               df -h / /mnt 2>/dev/null
               docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' 2>/dev/null
+              if [ "$INSTALL_PODMAN" = "true" ]; then
+                podman stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' 2>/dev/null
+              fi
               echo "::endgroup::"
             done
           ) &

@@ -548,7 +548,9 @@ impl LambdaBackend for DockerBackend {
 fn memory_limit_args(memory_size_mb: i64, ephemeral_storage_mb: Option<i64>) -> [String; 4] {
     let limit = format!(
         "{}m",
-        memory_size_mb.max(128) + tmpfs_size_mib(ephemeral_storage_mb)
+        memory_size_mb
+            .max(128)
+            .saturating_add(tmpfs_size_mib(ephemeral_storage_mb))
     );
     [
         "--memory".to_string(),
@@ -942,6 +944,10 @@ mod tests {
         assert_eq!(
             memory_limit_args(1024, Some(2048)),
             ["--memory", "3072m", "--memory-swap", "3072m"]
+        );
+        assert_eq!(
+            memory_limit_args(i64::MAX, None)[1],
+            format!("{}m", i64::MAX)
         );
         // Out-of-range stored values still get a usable limit.
         assert_eq!(
