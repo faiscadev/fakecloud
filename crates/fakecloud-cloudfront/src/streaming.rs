@@ -25,8 +25,15 @@ pub struct StreamingDistributionConfig {
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub logging: Option<StreamingLoggingConfig>,
     pub trusted_signers: TrustedSigners,
+    /// Optional in the API; AWS applies (and reports) `PriceClass_All` when
+    /// it is omitted.
+    #[serde(default = "default_price_class")]
     pub price_class: String,
     pub enabled: bool,
+}
+
+fn default_price_class() -> String {
+    "PriceClass_All".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

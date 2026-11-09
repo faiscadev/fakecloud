@@ -37,6 +37,7 @@ impl CloudFrontService {
         if parsed.name.is_empty() {
             return Err(invalid_argument("CreateFunctionRequest.Name is required"));
         }
+        validate_resource_name("Name", &parsed.name)?;
 
         let mut state = self.state.write();
         let account = state.accounts.entry(req.account_id.clone()).or_default();
@@ -82,7 +83,7 @@ impl CloudFrontService {
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = route_id(route, "Function")?;
-        let stage = parse_stage_query(&req.raw_query);
+        let stage = validate_stage_query(&req.raw_query)?;
         let state = self.state.read();
         let f = state
             .accounts
@@ -101,7 +102,7 @@ impl CloudFrontService {
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = route_id(route, "Function")?;
-        let stage = parse_stage_query(&req.raw_query);
+        let stage = validate_stage_query(&req.raw_query)?;
         let state = self.state.read();
         let f = state
             .accounts
@@ -262,6 +263,7 @@ impl CloudFrontService {
         let if_match = require_if_match(req)?;
         let parsed: TestFunctionRequest = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid TestFunctionRequest XML: {e}")))?;
+        validate_stage(parsed.stage.as_deref())?;
         let event_bytes = base64::engine::general_purpose::STANDARD
             .decode(parsed.event_object.trim().as_bytes())
             .map_err(|e| invalid_argument(format!("EventObject is not valid base64: {e}")))?;
@@ -281,8 +283,16 @@ impl CloudFrontService {
                     )
                 })?
         };
+        // TestFunction does not declare PreconditionFailed: an If-Match that
+        // names a different version is the "not valid" half of
+        // InvalidIfMatchVersion ("The If-Match version is missing or not
+        // valid").
         if f.etag != if_match {
-            return Err(precondition_failed());
+            return Err(aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidIfMatchVersion",
+                "The If-Match version is missing or not valid for the resource.",
+            ));
         }
 
         // AWS lets callers pick which version to run. DEVELOPMENT (the
@@ -664,6 +674,16 @@ impl CloudFrontService {
             .map_err(|e| invalid_argument(format!("invalid CreateKeyValueStore XML: {e}")))?;
         if parsed.name.is_empty() {
             return Err(invalid_argument("Name is required"));
+        }
+        validate_resource_name("Name", &parsed.name)?;
+        if parsed
+            .comment
+            .as_deref()
+            .is_some_and(|c| c.chars().count() > 128)
+        {
+            return Err(invalid_argument(
+                "Comment must be at most 128 characters long",
+            ));
         }
         let mut state = self.state.write();
         let account = state.accounts.entry(req.account_id.clone()).or_default();
@@ -1128,14 +1148,41 @@ pub(crate) fn validate_stage_query(
     query: &str,
 ) -> Result<Option<String>, fakecloud_core::service::AwsServiceError> {
     let stage = parse_stage_query(query);
-    if let Some(ref v) = stage {
-        if v != "DEVELOPMENT" && v != "LIVE" {
-            return Err(crate::service::invalid_argument(format!(
-                "Stage must be one of 'DEVELOPMENT' or 'LIVE', got '{v}'"
-            )));
-        }
-    }
+    validate_stage(stage.as_deref())?;
     Ok(stage)
+}
+
+/// Validate a `FunctionStage` value (DEVELOPMENT | LIVE) from a query string
+/// or request body. Absent is OK.
+pub(crate) fn validate_stage(
+    stage: Option<&str>,
+) -> Result<(), fakecloud_core::service::AwsServiceError> {
+    match stage {
+        None | Some("DEVELOPMENT") | Some("LIVE") => Ok(()),
+        Some(v) => Err(crate::service::invalid_argument(format!(
+            "Stage must be one of 'DEVELOPMENT' or 'LIVE', got '{v}'"
+        ))),
+    }
+}
+
+/// Validate a function / connection function / key value store name against
+/// its model constraint `^[a-zA-Z0-9-_]{1,64}$`.
+pub(crate) fn validate_resource_name(
+    field: &str,
+    name: &str,
+) -> Result<(), fakecloud_core::service::AwsServiceError> {
+    let len = name.chars().count();
+    if !(1..=64).contains(&len)
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(crate::service::invalid_argument(format!(
+            "{field} must be 1 to 64 characters long and contain only letters, digits, \
+             hyphens and underscores"
+        )));
+    }
+    Ok(())
 }
 
 fn stage_view(f: &StoredFunction, stage: &Option<String>) -> StoredFunction {
@@ -1833,5 +1880,115 @@ mod tests {
             "describe response dropped KVS association: {describe_xml}"
         );
         assert!(describe_xml.contains("<Quantity>1</Quantity>"));
+    }
+
+    fn with_query(mut r: AwsRequest, query: &str) -> AwsRequest {
+        r.raw_query = query.to_string();
+        r
+    }
+
+    #[tokio::test]
+    async fn create_function_enforces_the_name_constraint() {
+        let svc = svc();
+        create_function(&svc, &"a".repeat(64), "function handler(e) { return e; }").await;
+        for bad in ["a".repeat(65), "bad.name".to_string(), "sp ace".to_string()] {
+            let body = format!(
+                r#"<CreateFunctionRequest xmlns="{NS}"><Name>{bad}</Name><FunctionConfig><Comment>t</Comment><Runtime>cloudfront-js-2.0</Runtime></FunctionConfig><FunctionCode>eA==</FunctionCode></CreateFunctionRequest>"#
+            );
+            let err = svc
+                .handle(req(http::Method::POST, "/2020-05-31/function", &body, None))
+                .await
+                .err()
+                .expect("invalid name must be rejected");
+            assert_eq!(err.code(), "InvalidArgument", "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn describe_and_get_function_reject_an_unknown_stage() {
+        let svc = svc();
+        create_function(&svc, "stagecheck", "function handler(e) { return e; }").await;
+        for path in [
+            "/2020-05-31/function/stagecheck/describe",
+            "/2020-05-31/function/stagecheck",
+        ] {
+            let ok = svc
+                .handle(with_query(
+                    req(http::Method::GET, path, "", None),
+                    "Stage=LIVE",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(ok.status, StatusCode::OK, "{path}");
+            let err = svc
+                .handle(with_query(
+                    req(http::Method::GET, path, "", None),
+                    "Stage=BOGUS",
+                ))
+                .await
+                .err()
+                .expect("unknown stage must be rejected");
+            assert_eq!(err.code(), "InvalidArgument", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_function_with_a_stale_if_match_is_invalid_if_match_version() {
+        let svc = svc();
+        create_function(&svc, "staletest", "function handler(e) { return e; }").await;
+        let err = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/function/staletest/test",
+                &test_function_request_xml("{}"),
+                Some("ESTALE"),
+            ))
+            .await
+            .err()
+            .expect("stale If-Match must be rejected");
+        assert_eq!(err.code(), "InvalidIfMatchVersion");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_function_rejects_an_unknown_stage() {
+        let svc = svc();
+        let etag = create_function(&svc, "stagebody", "function handler(e) { return e; }").await;
+        let err = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/function/stagebody/test",
+                &test_function_request_xml_with_stage("{}", "BOGUS"),
+                Some(&etag),
+            ))
+            .await
+            .err()
+            .expect("unknown stage must be rejected");
+        assert_eq!(err.code(), "InvalidArgument");
+    }
+
+    #[tokio::test]
+    async fn create_key_value_store_enforces_name_and_comment_constraints() {
+        let svc = svc();
+        for (name, comment) in [
+            ("a".repeat(65), "c".to_string()),
+            ("bad.name".to_string(), "c".to_string()),
+            ("okname".to_string(), "c".repeat(129)),
+        ] {
+            let body = format!(
+                r#"<CreateKeyValueStoreRequest xmlns="{NS}"><Name>{name}</Name><Comment>{comment}</Comment></CreateKeyValueStoreRequest>"#
+            );
+            let err = svc
+                .handle(req(
+                    http::Method::POST,
+                    "/2020-05-31/key-value-store",
+                    &body,
+                    None,
+                ))
+                .await
+                .err()
+                .expect("constraint violation must be rejected");
+            assert_eq!(err.code(), "InvalidArgument", "{name} / {comment}");
+        }
     }
 }

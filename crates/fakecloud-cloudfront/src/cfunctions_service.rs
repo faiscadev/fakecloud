@@ -58,6 +58,7 @@ impl CloudFrontService {
         if parsed.name.is_empty() {
             return Err(invalid_argument("Name is required"));
         }
+        crate::functions_service::validate_resource_name("Name", &parsed.name)?;
         let mut state = self.state.write();
         let account = state.accounts.entry(req.account_id.clone()).or_default();
         if account.connection_functions.contains_key(&parsed.name) {
@@ -102,9 +103,11 @@ impl CloudFrontService {
 
     pub(crate) fn describe_connection_function(
         &self,
+        req: &AwsRequest,
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = route_id(route, "ConnectionFunction")?;
+        let stage = crate::functions_service::validate_stage_query(&req.raw_query)?;
         let state = self.state.read();
         let f = state
             .accounts
@@ -112,15 +115,18 @@ impl CloudFrontService {
             .and_then(|a| a.connection_functions.get(&name).cloned())
             .ok_or_else(|| not_found("ConnectionFunction", &name))?;
         drop(state);
+        let f = connection_stage_view(&f, stage.as_deref());
         let body = render_connection_function_summary(&f, true);
         Ok(xml_with_etag(StatusCode::OK, body, &f.etag, None))
     }
 
     pub(crate) fn get_connection_function(
         &self,
+        req: &AwsRequest,
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = route_id(route, "ConnectionFunction")?;
+        let stage = crate::functions_service::validate_stage_query(&req.raw_query)?;
         let state = self.state.read();
         let f = state
             .accounts
@@ -128,6 +134,7 @@ impl CloudFrontService {
             .and_then(|a| a.connection_functions.get(&name).cloned())
             .ok_or_else(|| not_found("ConnectionFunction", &name))?;
         drop(state);
+        let f = connection_stage_view(&f, stage.as_deref());
         let mut headers = HeaderMap::new();
         if let Ok(v) = http::HeaderValue::from_str(&f.etag) {
             headers.insert(ETAG, v);
@@ -283,6 +290,7 @@ impl CloudFrontService {
             xml_io::from_xml_root(&req.body).map_err(|e| {
                 invalid_argument(format!("invalid TestConnectionFunctionRequest XML: {e}"))
             })?;
+        crate::functions_service::validate_stage(parsed.stage.as_deref())?;
         let event_bytes = base64::engine::general_purpose::STANDARD
             .decode(parsed.connection_object.trim().as_bytes())
             .map_err(|e| invalid_argument(format!("ConnectionObject is not valid base64: {e}")))?;
@@ -352,6 +360,23 @@ struct TestConnectionFunctionRequest {
     connection_object: String,
     #[serde(default)]
     stage: Option<String>,
+}
+
+/// The connection function as seen through `stage`: LIVE serves the code
+/// frozen at PublishConnectionFunction (or the development code if it was
+/// never published); DEVELOPMENT or no stage is the stored record.
+fn connection_stage_view(
+    f: &StoredConnectionFunction,
+    stage: Option<&str>,
+) -> StoredConnectionFunction {
+    let mut view = f.clone();
+    if stage == Some("LIVE") {
+        view.stage = "LIVE".to_string();
+        if let Some(live) = &f.live_code {
+            view.code = live.clone();
+        }
+    }
+    view
 }
 
 fn render_connection_function_summary(f: &StoredConnectionFunction, with_decl: bool) -> String {
@@ -718,5 +743,84 @@ mod tests {
         let cu_close = xml.find("</ComputeUtilization>").unwrap();
         let pct: u32 = xml[cu_open..cu_close].parse().unwrap();
         assert!(pct > 100, "expected pct > 100, got {pct}");
+    }
+
+    #[tokio::test]
+    async fn create_connection_function_enforces_the_name_constraint() {
+        let svc = svc();
+        let body = format!(
+            r#"<CreateConnectionFunctionRequest xmlns="{NS}"><Name>{}</Name><ConnectionFunctionConfig><Comment>t</Comment><Runtime>cloudfront-js-2.0</Runtime></ConnectionFunctionConfig><ConnectionFunctionCode>eA==</ConnectionFunctionCode></CreateConnectionFunctionRequest>"#,
+            "a".repeat(65)
+        );
+        let err = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/connection-function",
+                &body,
+                None,
+            ))
+            .await
+            .err()
+            .expect("too-long name must be rejected");
+        assert_eq!(err.code(), "InvalidArgument");
+    }
+
+    #[tokio::test]
+    async fn describe_and_get_connection_function_honor_the_stage() {
+        let svc = svc();
+        let etag = create_cfn(&svc, "cfn-view", r#"function handler() { return "v1"; }"#).await;
+        let pub_etag = publish_cfn(&svc, "cfn-view", &etag).await;
+        update_cfn(
+            &svc,
+            "cfn-view",
+            r#"function handler() { return "v2"; }"#,
+            &pub_etag,
+        )
+        .await;
+        let get = |query: &'static str, path: &'static str| {
+            let mut r = req(http::Method::GET, path, "", None);
+            r.raw_query = query.to_string();
+            r
+        };
+
+        let live = svc
+            .handle(get(
+                "Stage=LIVE",
+                "/2020-05-31/connection-function/cfn-view",
+            ))
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(live.body.expect_bytes()).contains("v1"));
+        let dev = svc
+            .handle(get(
+                "Stage=DEVELOPMENT",
+                "/2020-05-31/connection-function/cfn-view",
+            ))
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(dev.body.expect_bytes()).contains("v2"));
+
+        let described = svc
+            .handle(get(
+                "Stage=LIVE",
+                "/2020-05-31/connection-function/cfn-view/describe",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(described.body.expect_bytes()).contains("<Stage>LIVE</Stage>")
+        );
+
+        for path in [
+            "/2020-05-31/connection-function/cfn-view",
+            "/2020-05-31/connection-function/cfn-view/describe",
+        ] {
+            let err = svc
+                .handle(get("Stage=BOGUS", path))
+                .await
+                .err()
+                .expect("unknown stage must be rejected");
+            assert_eq!(err.code(), "InvalidArgument", "{path}");
+        }
     }
 }
