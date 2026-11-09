@@ -563,6 +563,7 @@ impl KinesisService {
         }
         let stream_arn = state.stream_arn(request.region.as_str(), &stream_name);
         state.consumers.retain(|_, c| c.stream_arn != stream_arn);
+        state.forget_stream_checkpoints(&stream_arn);
 
         Ok(AwsResponse::ok_json(json!({})))
     }

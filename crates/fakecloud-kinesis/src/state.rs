@@ -41,6 +41,12 @@ pub struct KinesisState {
     #[serde(skip)]
     pub iterator_counter: u64,
     pub lambda_checkpoints: BTreeMap<String, usize>,
+    /// The ARN of the stream each `lambda_checkpoints` entry reads. Shard IDs
+    /// repeat across streams, so this is what ties an offset to its records.
+    /// Snapshots written before it existed load empty. The poller settles those
+    /// entries when it starts; until then trimming matches by shard ID.
+    #[serde(default)]
+    pub lambda_checkpoint_streams: BTreeMap<String, String>,
     pub consumers: BTreeMap<String, KinesisConsumer>,
     /// Delivery channels, keyed by channel name (unique per account+region on
     /// AWS). Defaulted so snapshots written before channels existed still load.
@@ -261,6 +267,7 @@ impl KinesisState {
             iterators: BTreeMap::new(),
             iterator_counter: 0,
             lambda_checkpoints: BTreeMap::new(),
+            lambda_checkpoint_streams: BTreeMap::new(),
             consumers: BTreeMap::new(),
             channels: BTreeMap::new(),
             resource_policies: BTreeMap::new(),
@@ -274,6 +281,7 @@ impl KinesisState {
         self.streams.clear();
         self.iterators.clear();
         self.lambda_checkpoints.clear();
+        self.lambda_checkpoint_streams.clear();
         self.consumers.clear();
         self.channels.clear();
         self.resource_policies.clear();
@@ -389,9 +397,26 @@ impl KinesisState {
             .unwrap_or(0)
     }
 
-    pub fn set_lambda_checkpoint(&mut self, mapping_uuid: &str, shard_id: &str, offset: usize) {
+    pub fn set_lambda_checkpoint(
+        &mut self,
+        stream_arn: &str,
+        mapping_uuid: &str,
+        shard_id: &str,
+        offset: usize,
+    ) {
+        let key = format!("{mapping_uuid}:{shard_id}");
+        self.lambda_checkpoint_streams
+            .insert(key.clone(), stream_arn.to_string());
+        self.lambda_checkpoints.insert(key, offset);
+    }
+
+    /// Drop the checkpoints reading a deleted stream. A stream recreated under
+    /// its name restarts its shard IDs and offsets, so they must not carry over.
+    pub fn forget_stream_checkpoints(&mut self, stream_arn: &str) {
+        let owners = &mut self.lambda_checkpoint_streams;
         self.lambda_checkpoints
-            .insert(format!("{mapping_uuid}:{shard_id}"), offset);
+            .retain(|key, _| owners.get(key).map(String::as_str) != Some(stream_arn));
+        owners.retain(|_, owner| owner != stream_arn);
     }
 
     /// Physically drop shard records older than each stream's retention
@@ -424,11 +449,14 @@ impl KinesisState {
 
                 // Shift index-based offsets that referenced this shard.
                 for (key, offset) in self.lambda_checkpoints.iter_mut() {
-                    if key
+                    let same_shard = key
                         .rsplit_once(':')
-                        .map(|(_, sid)| sid == shard.shard_id)
-                        .unwrap_or(false)
-                    {
+                        .is_some_and(|(_, sid)| sid == shard.shard_id);
+                    let same_stream = self
+                        .lambda_checkpoint_streams
+                        .get(key)
+                        .is_none_or(|owner| *owner == stream.stream_arn);
+                    if same_shard && same_stream {
                         *offset = offset.saturating_sub(trim);
                     }
                 }
@@ -505,6 +533,9 @@ impl fakecloud_core::multi_account::SplitByRegion for KinesisState {
             state
                 .lambda_checkpoints
                 .extend(self.lambda_checkpoints.iter().map(|(k, v)| (k.clone(), *v)));
+            state
+                .lambda_checkpoint_streams
+                .extend(self.lambda_checkpoint_streams.clone());
         }
     }
 }
@@ -764,7 +795,7 @@ mod tests {
             MultiAccountState::new("123456789012", "us-east-1", "");
         let st = legacy.default_mut();
         st.shard_limit = 77;
-        st.set_lambda_checkpoint("uuid-1", "shardId-000000000000", 5);
+        st.set_lambda_checkpoint("arn", "uuid-1", "shardId-000000000000", 5);
         // Same-named streams cannot coexist in the legacy name-keyed map, so
         // use distinct names whose ARNs name different regions.
         for (name, region) in [("east", "us-east-1"), ("west", "eu-west-1")] {
@@ -858,9 +889,20 @@ mod tests {
     }
 
     #[test]
+    fn forget_stream_checkpoints_keeps_other_streams() {
+        let mut state = KinesisState::new("123456789012", "us-east-1");
+        state.set_lambda_checkpoint("arn:a", "uuid-1", "shard-0", 7);
+        state.set_lambda_checkpoint("arn:b", "uuid-2", "shard-0", 9);
+        state.forget_stream_checkpoints("arn:a");
+        assert_eq!(state.lambda_checkpoints.len(), 1);
+        assert_eq!(state.lambda_checkpoint("uuid-2", "shard-0"), 9);
+        assert_eq!(state.lambda_checkpoint_streams.len(), 1);
+    }
+
+    #[test]
     fn set_and_get_lambda_checkpoint() {
         let mut state = KinesisState::new("123456789012", "us-east-1");
-        state.set_lambda_checkpoint("uuid-1", "shard-0", 42);
+        state.set_lambda_checkpoint("arn", "uuid-1", "shard-0", 42);
         assert_eq!(state.lambda_checkpoint("uuid-1", "shard-0"), 42);
     }
 
@@ -911,7 +953,14 @@ mod tests {
 
         // A consumer checkpoint that has read all 3, and a live iterator
         // pointing past all 3 — both index-based.
-        state.set_lambda_checkpoint("uuid-1", &shard_id, 3);
+        let stream_arn = state.stream_arn(&state.region, "s");
+        state.set_lambda_checkpoint(&stream_arn, "uuid-1", &shard_id, 3);
+        // Reads a same-ID shard of another stream, whose records did not move.
+        state.set_lambda_checkpoint("arn:other", "uuid-2", &shard_id, 3);
+        // Written before checkpoints named their stream: matched by shard ID.
+        state
+            .lambda_checkpoints
+            .insert(format!("uuid-3:{shard_id}"), 3);
         state.iterators.insert(
             "tok".to_string(),
             ShardIteratorLease {
@@ -933,6 +982,12 @@ mod tests {
             1,
             "checkpoint shifted down by the trimmed prefix"
         );
+        assert_eq!(
+            state.lambda_checkpoint("uuid-2", &shard_id),
+            3,
+            "another stream's checkpoint is untouched"
+        );
+        assert_eq!(state.lambda_checkpoint("uuid-3", &shard_id), 1);
         assert_eq!(
             state.iterators["tok"].next_record_index, 1,
             "iterator offset shifted down by the trimmed prefix"

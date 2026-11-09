@@ -5,10 +5,68 @@
 
 use super::*;
 
-/// CFN currently provisions the classic and Extended S3 configurations. Check
-/// their enum inputs, including the backup blocks, with the same validator the
-/// Firehose API uses before parsing or locking state; the CFN parser otherwise
-/// silently discards non-string enum values.
+/// The search destinations CFN provisions: template property, stored key.
+const FIREHOSE_SEARCH_DESTINATIONS: [(&str, &str); 2] = [
+    (
+        "ElasticsearchDestinationConfiguration",
+        "ElasticsearchDestinationDescription",
+    ),
+    (
+        "AmazonopensearchserviceDestinationConfiguration",
+        "AmazonopensearchserviceDestinationDescription",
+    ),
+];
+
+/// The template's single destination, as CloudFormation requires. An S3 one is
+/// returned parsed, a search one as the stored key and its API-typed value.
+enum FirehoseDestination {
+    S3(Box<fakecloud_firehose::S3Destination>),
+    Search(String, serde_json::Value),
+}
+
+fn firehose_template_destination(props: &serde_json::Value) -> Result<FirehoseDestination, String> {
+    let named = [
+        "S3DestinationConfiguration",
+        "ExtendedS3DestinationConfiguration",
+    ]
+    .into_iter()
+    .chain(FIREHOSE_SEARCH_DESTINATIONS.map(|(property, _)| property))
+    .filter(|property| props.get(*property).is_some())
+    .collect::<Vec<_>>();
+    match named.as_slice() {
+        [] => Err("Delivery stream requires a destination configuration".to_string()),
+        ["S3DestinationConfiguration", "ExtendedS3DestinationConfiguration"] => {
+            Err("Only one of S3DestinationConfiguration or ExtendedS3DestinationConfiguration may be set".to_string())
+        }
+        [property] => match FIREHOSE_SEARCH_DESTINATIONS
+            .iter()
+            .find(|(search, _)| search == property)
+        {
+            Some((_, key)) => {
+                let config = coerce_firehose_scalars(props[*property].clone(), property)?;
+                fakecloud_firehose::validate_search_destination(&config)
+                    .map_err(|err| err.to_string())?;
+                Ok(FirehoseDestination::Search((*key).to_string(), config))
+            }
+            None => Ok(FirehoseDestination::S3(Box::new(
+                parse_firehose_s3_destination(&props[*property], property)?,
+            ))),
+        },
+        _ => Err(format!(
+            "You must specify only one destination configuration, got {}",
+            named.join(", ")
+        )),
+    }
+}
+
+fn firehose_name_taken(name: &str) -> String {
+    format!("DeliveryStream {name} already exists")
+}
+
+/// CFN currently provisions the classic and Extended S3 configurations and the
+/// search destinations. Check their enum inputs, including the backup blocks,
+/// with the same validator the Firehose API uses before parsing or locking
+/// state; the CFN parser otherwise silently discards non-string enum values.
 fn validate_firehose_compression(props: &serde_json::Value) -> Result<(), String> {
     for member in [
         "S3DestinationConfiguration",
@@ -16,6 +74,13 @@ fn validate_firehose_compression(props: &serde_json::Value) -> Result<(), String
     ] {
         fakecloud_firehose::validate_s3_destination_compression(&props[member], false)
             .map_err(|err| err.to_string())?;
+    }
+    for (member, _) in FIREHOSE_SEARCH_DESTINATIONS {
+        fakecloud_firehose::validate_s3_destination_compression(
+            &props[member]["S3Configuration"],
+            false,
+        )
+        .map_err(|err| err.to_string())?;
     }
     Ok(())
 }
@@ -191,10 +256,12 @@ fn coerce_firehose_scalars_in_place(
 impl ResourceProvisioner {
     // --- Firehose ---
 
-    pub(super) fn create_firehose_delivery_stream(
+    /// The stream a template describes, built without touching any state so an
+    /// invalid template can be refused before anything is replaced.
+    fn firehose_stream_from_template(
         &self,
         resource: &ResourceDefinition,
-    ) -> Result<ProvisionResult, String> {
+    ) -> Result<(String, String, DeliveryStream), String> {
         let props = &resource.properties;
         validate_firehose_compression(props)?;
         let generated_name = self.physical_name(resource);
@@ -211,18 +278,10 @@ impl ResourceProvisioner {
             .unwrap_or("DirectPut")
             .to_string();
 
-        let has_s3 = props.get("S3DestinationConfiguration").is_some();
-        let has_extended_s3 = props.get("ExtendedS3DestinationConfiguration").is_some();
-        if has_s3 && has_extended_s3 {
-            return Err("Only one of S3DestinationConfiguration or ExtendedS3DestinationConfiguration may be set".to_string());
-        }
-        let destination = Some(if let Some(s3) = props.get("S3DestinationConfiguration") {
-            parse_firehose_s3_destination(s3, "S3DestinationConfiguration")?
-        } else if let Some(s3) = props.get("ExtendedS3DestinationConfiguration") {
-            parse_firehose_s3_destination(s3, "ExtendedS3DestinationConfiguration")?
-        } else {
-            return Err("Delivery stream requires a destination configuration".to_string());
-        });
+        let (destination, extra_destinations) = match firehose_template_destination(props)? {
+            FirehoseDestination::S3(destination) => (Some(*destination), BTreeMap::new()),
+            FirehoseDestination::Search(key, config) => (None, BTreeMap::from([(key, config)])),
+        };
 
         let mut tags = BTreeMap::new();
         if let Some(arr) = props.get("Tags").and_then(|v| v.as_array()) {
@@ -248,11 +307,26 @@ impl ResourceProvisioner {
             destination,
             tags,
             encryption: None,
-            extra_destinations: std::collections::BTreeMap::new(),
+            extra_destinations,
+            kinesis_source: fakecloud_firehose::parse_kinesis_source(&stream_type, props)
+                .map_err(|err| err.to_string())?,
         };
+        Ok((name, arn, stream))
+    }
 
+    pub(super) fn create_firehose_delivery_stream(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let (name, arn, stream) = self.firehose_stream_from_template(resource)?;
         let mut state = self.firehose_state.write();
         let account = state.get_or_create(&self.account_id, &self.region);
+        if account
+            .streams(&self.region)
+            .is_some_and(|streams| streams.contains_key(&name))
+        {
+            return Err(firehose_name_taken(&name));
+        }
         account
             .streams_mut(&self.region)
             .insert(name.clone(), stream);
@@ -271,8 +345,8 @@ impl ResourceProvisioner {
     /// Mutates the stored `DeliveryStream` in place instead of the reprovision
     /// fallback's delete+recreate. Applies the mutable destination config + tags
     /// (matching `UpdateDestination`/tag ops), bumps the `version_id`, and
-    /// preserves the identity (`arn`, `created_at`, `stream_type`) and any
-    /// `extra_destinations` on the record.
+    /// preserves the identity (`arn`, `created_at`, `stream_type`). A template
+    /// naming a destination replaces whichever one the stream had.
     pub(super) fn update_firehose_delivery_stream(
         &self,
         existing: &StackResource,
@@ -282,24 +356,7 @@ impl ResourceProvisioner {
         validate_firehose_compression(props)?;
         let name = existing.physical_id.clone();
 
-        let has_s3 = props.get("S3DestinationConfiguration").is_some();
-        let has_extended_s3 = props.get("ExtendedS3DestinationConfiguration").is_some();
-        if has_s3 && has_extended_s3 {
-            return Err("Only one of S3DestinationConfiguration or ExtendedS3DestinationConfiguration may be set".to_string());
-        }
-        let new_destination = if let Some(s3) = props.get("S3DestinationConfiguration") {
-            Some(parse_firehose_s3_destination(
-                s3,
-                "S3DestinationConfiguration",
-            )?)
-        } else if let Some(s3) = props.get("ExtendedS3DestinationConfiguration") {
-            Some(parse_firehose_s3_destination(
-                s3,
-                "ExtendedS3DestinationConfiguration",
-            )?)
-        } else {
-            None
-        };
+        let new_destination = firehose_template_destination(props)?;
 
         let mut state = self.firehose_state.write();
         let account = state.get_or_create(&self.account_id, &self.region);
@@ -308,11 +365,22 @@ impl ResourceProvisioner {
             .get_mut(&name)
             .ok_or_else(|| format!("Delivery stream {name} not yet provisioned"))?;
 
-        if let Some(mut dest) = new_destination {
-            if let Some(existing) = &stream.destination {
-                dest.destination_id = existing.destination_id.clone();
+        match new_destination {
+            FirehoseDestination::S3(mut dest) => {
+                if let Some(existing) = &stream.destination {
+                    dest.destination_id = existing.destination_id.clone();
+                }
+                stream.destination = Some(*dest);
+                stream.extra_destinations.retain(|key, _| {
+                    !FIREHOSE_SEARCH_DESTINATIONS
+                        .iter()
+                        .any(|(_, search)| search == key)
+                });
             }
-            stream.destination = Some(dest);
+            FirehoseDestination::Search(key, config) => {
+                stream.destination = None;
+                stream.extra_destinations = BTreeMap::from([(key, config)]);
+            }
         }
         if props.get("Tags").is_some() {
             let mut tags = BTreeMap::new();
@@ -340,6 +408,56 @@ impl ResourceProvisioner {
             physical_id: name,
             attributes,
         })
+    }
+
+    /// `DeliveryStreamName`, `DeliveryStreamType` and
+    /// `KinesisStreamSourceConfiguration` are "Update requires: Replacement"
+    /// properties. A replacement deletes the old stream first, so its template
+    /// and the name it needs are checked here, while that stream is still intact.
+    pub(super) fn firehose_update_requires_replacement(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<bool, String> {
+        let props = &resource.properties;
+        let stream_type = props
+            .get("DeliveryStreamType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("DirectPut");
+        let source = fakecloud_firehose::parse_kinesis_source(stream_type, props)
+            .map_err(|err| err.to_string())?;
+        // With no name in the template, a stream that has a name of its own
+        // loses it. One CloudFormation generated stays as it is.
+        let renamed = match props.get("DeliveryStreamName").and_then(|v| v.as_str()) {
+            Some(name) => name != existing.physical_id,
+            None => self.existing_name(existing).is_none(),
+        };
+        let replaced = {
+            let state = self.firehose_state.read();
+            let Some(stream) = state
+                .get(&self.account_id)
+                .and_then(|account| account.streams(&self.region))
+                .and_then(|streams| streams.get(&existing.physical_id))
+            else {
+                return Ok(false);
+            };
+            renamed || stream.stream_type != stream_type || stream.kinesis_source != source
+        };
+        if replaced {
+            let (name, ..) = self.firehose_stream_from_template(resource)?;
+            // The old stream frees its own name only if it is really deleted.
+            let freed = name == existing.physical_id
+                && !policy_retains_physical(existing.update_replace_policy.as_deref());
+            let state = self.firehose_state.read();
+            let taken = state
+                .get(&self.account_id)
+                .and_then(|account| account.streams(&self.region))
+                .is_some_and(|streams| streams.contains_key(&name));
+            if taken && !freed {
+                return Err(firehose_name_taken(&name));
+            }
+        }
+        Ok(replaced)
     }
 
     pub(super) fn delete_firehose_delivery_stream(&self, physical_id: &str) -> Result<(), String> {
@@ -510,6 +628,404 @@ mod tests {
             assert_eq!(after.version_id, "2");
             assert_eq!(after.tags.get("env").map(String::as_str), Some("after"));
         }
+    }
+
+    fn search_stream_props(source_stream: &str) -> Value {
+        json!({
+            "DeliveryStreamName": "events",
+            "DeliveryStreamType": "KinesisStreamAsSource",
+            "KinesisStreamSourceConfiguration": {
+                "KinesisStreamARN": format!("arn:aws:kinesis:us-east-1:123456789012:stream/{source_stream}"),
+                "RoleARN": "arn:aws:iam::123456789012:role/fh",
+            },
+            "AmazonopensearchserviceDestinationConfiguration": {
+                "RoleARN": "arn:aws:iam::123456789012:role/fh",
+                "IndexName": "activity",
+                "ClusterEndpoint": "http://localhost:9200",
+                "S3Configuration": {
+                    "RoleARN": "arn:aws:iam::123456789012:role/fh",
+                    "BucketARN": "arn:aws:s3:::backup",
+                },
+            },
+        })
+    }
+
+    /// A template can name a search destination, which is stored for delivery
+    /// instead of being refused for lacking an S3 destination.
+    #[test]
+    fn search_destination_is_provisioned_and_updated() {
+        let prov = make_provisioner();
+        let existing = prov
+            .create_resource(&make_resource(
+                "AWS::KinesisFirehose::DeliveryStream",
+                "Firehose",
+                search_stream_props("orders"),
+            ))
+            .unwrap();
+        let stream = stored(&prov);
+        assert!(stream.destination.is_none());
+        assert!(stream
+            .extra_destinations
+            .contains_key("AmazonopensearchserviceDestinationDescription"));
+        let instance = stream.instance_id;
+
+        let mut changed = search_stream_props("orders");
+        changed["AmazonopensearchserviceDestinationConfiguration"]["IndexName"] = json!("renamed");
+        prov.update_resource(
+            &existing,
+            &make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", changed),
+        )
+        .unwrap();
+        let stream = stored(&prov);
+        assert_eq!(stream.instance_id, instance, "updated in place");
+        assert_eq!(
+            stream.extra_destinations["AmazonopensearchserviceDestinationDescription"]["IndexName"],
+            "renamed"
+        );
+    }
+
+    /// Template parameters reach search destinations as strings too, as in
+    /// the example AWS documents for `RetryOptions.DurationInSeconds`.
+    #[test]
+    fn search_destination_scalars_get_their_api_types() {
+        let prov = make_provisioner();
+        let mut props = search_stream_props("orders");
+        let config = &mut props["AmazonopensearchserviceDestinationConfiguration"];
+        config["BufferingHints"] = json!({"IntervalInSeconds": "60", "SizeInMBs": "5"});
+        config["RetryOptions"] = json!({"DurationInSeconds": "60"});
+        config["ProcessingConfiguration"] = json!({"Enabled": "false"});
+        prov.create_resource(&make_resource(
+            "AWS::KinesisFirehose::DeliveryStream",
+            "Firehose",
+            props,
+        ))
+        .unwrap();
+        let stream = stored(&prov);
+        let stored = &stream.extra_destinations["AmazonopensearchserviceDestinationDescription"];
+        assert_eq!(stored["BufferingHints"]["IntervalInSeconds"], 60);
+        assert_eq!(stored["RetryOptions"]["DurationInSeconds"], 60);
+        assert_eq!(stored["ProcessingConfiguration"]["Enabled"], false);
+    }
+
+    /// A replacement deletes first, so a bad template must fail before that.
+    #[test]
+    fn invalid_replacement_template_keeps_the_live_stream() {
+        let prov = make_provisioner();
+        let existing = prov
+            .create_resource(&make_resource(
+                "AWS::KinesisFirehose::DeliveryStream",
+                "Firehose",
+                search_stream_props("orders"),
+            ))
+            .unwrap();
+        let instance = stored(&prov).instance_id;
+        let mut bad = search_stream_props("payments");
+        bad["AmazonopensearchserviceDestinationConfiguration"]["RetryOptions"] =
+            json!({"DurationInSeconds": "soon"});
+        prov.update_resource(
+            &existing,
+            &make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", bad),
+        )
+        .unwrap_err();
+        assert_eq!(stored(&prov).instance_id, instance, "still the old stream");
+    }
+
+    /// The fields the Firehose API and CloudFormation require are checked when
+    /// the template is applied, not on the first delivery attempt.
+    #[test]
+    fn search_destination_shape_is_validated_on_create_and_update() {
+        let prov = make_provisioner();
+        let resource =
+            |props: Value| make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", props);
+        const CONFIG: &str = "AmazonopensearchserviceDestinationConfiguration";
+        let without = |member: &str| {
+            let mut props = search_stream_props("orders");
+            props[CONFIG].as_object_mut().unwrap().remove(member);
+            props
+        };
+        for member in ["RoleARN", "IndexName", "ClusterEndpoint", "S3Configuration"] {
+            assert!(
+                prov.create_resource(&resource(without(member))).is_err(),
+                "create without {member}"
+            );
+        }
+        assert!(prov
+            .firehose_state
+            .read()
+            .get("123456789012")
+            .is_none_or(|a| a.streams("us-east-1").is_none_or(|s| s.is_empty())));
+
+        let existing = prov
+            .create_resource(&resource(search_stream_props("orders")))
+            .unwrap();
+        let err = prov
+            .update_resource(&existing, &resource(without("IndexName")))
+            .unwrap_err();
+        assert!(err.contains("IndexName"), "{err}");
+        assert_eq!(
+            stored(&prov).extra_destinations["AmazonopensearchserviceDestinationDescription"]
+                ["IndexName"],
+            "activity"
+        );
+
+        // AWS's own example names only a DomainARN.
+        let prov = make_provisioner();
+        let mut by_domain = without("ClusterEndpoint");
+        by_domain[CONFIG]["DomainARN"] = json!("arn:aws:es:us-east-1:123456789012:domain/d");
+        prov.create_resource(&resource(by_domain)).unwrap();
+    }
+
+    fn other_stream_props() -> Value {
+        let mut props = search_stream_props("orders");
+        props["DeliveryStreamName"] = json!("other");
+        props
+    }
+
+    /// Replacing into a taken name fails before the stream being replaced is
+    /// touched, and leaves the stream holding that name alone.
+    #[test]
+    fn replacement_into_a_taken_name_changes_nothing() {
+        let prov = make_provisioner();
+        let resource =
+            |props: Value| make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", props);
+        let existing = prov
+            .create_resource(&resource(search_stream_props("orders")))
+            .unwrap();
+        let instance = stored(&prov).instance_id;
+        let other = |prov: &ResourceProvisioner| {
+            prov.firehose_state
+                .read()
+                .get("123456789012")
+                .unwrap()
+                .streams("us-east-1")
+                .unwrap()["other"]
+                .instance_id
+        };
+        prov.create_resource(&make_resource(
+            "AWS::KinesisFirehose::DeliveryStream",
+            "Other",
+            other_stream_props(),
+        ))
+        .unwrap();
+        let other_instance = other(&prov);
+
+        let err = prov
+            .update_resource(&existing, &resource(other_stream_props()))
+            .unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(stored(&prov).instance_id, instance);
+        assert_eq!(other(&prov), other_instance);
+
+        // Creating under a taken name is refused too.
+        let err = prov
+            .create_resource(&resource(other_stream_props()))
+            .err()
+            .unwrap();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(other(&prov), other_instance);
+    }
+
+    /// `UpdateReplacePolicy: Retain` keeps the old stream, so a replacement
+    /// cannot reuse its name, and with a new name both streams exist.
+    #[test]
+    fn retained_stream_keeps_its_name_through_a_replacement() {
+        let prov = make_provisioner();
+        let resource =
+            |props: Value| make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", props);
+        let mut existing = prov
+            .create_resource(&resource(search_stream_props("orders")))
+            .unwrap();
+        existing.update_replace_policy = Some("Retain".into());
+        let instance = stored(&prov).instance_id;
+
+        let err = prov
+            .update_resource(&existing, &resource(search_stream_props("payments")))
+            .unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(stored(&prov).instance_id, instance);
+
+        let mut renamed = search_stream_props("payments");
+        renamed["DeliveryStreamName"] = json!("events-2");
+        let replaced = prov.update_resource(&existing, &resource(renamed)).unwrap();
+        assert_eq!(replaced.unwrap().physical_id, "events-2");
+        assert_eq!(stored(&prov).instance_id, instance, "retained");
+    }
+
+    /// Dropping `DeliveryStreamName` replaces a stream that had a name of its
+    /// own, while one that never had one is updated in place.
+    #[test]
+    fn removing_the_stream_name_replaces_only_an_explicitly_named_stream() {
+        let prov = make_provisioner();
+        let resource =
+            |props: Value| make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", props);
+        let unnamed = || {
+            let mut props = search_stream_props("orders");
+            props.as_object_mut().unwrap().remove("DeliveryStreamName");
+            props
+        };
+        let named = prov
+            .create_resource(&resource(search_stream_props("orders")))
+            .unwrap();
+        assert!(prov
+            .firehose_update_requires_replacement(&named, &resource(unnamed()))
+            .unwrap());
+        let replaced = prov
+            .update_resource(&named, &resource(unnamed()))
+            .unwrap()
+            .unwrap();
+        assert_ne!(replaced.physical_id, "events", "a generated name now");
+        assert!(prov
+            .firehose_state
+            .read()
+            .get("123456789012")
+            .unwrap()
+            .streams("us-east-1")
+            .unwrap()
+            .get("events")
+            .is_none());
+
+        let generated = prov
+            .create_resource(&make_resource(
+                "AWS::KinesisFirehose::DeliveryStream",
+                "Generated",
+                unnamed(),
+            ))
+            .unwrap();
+        assert!(!prov
+            .firehose_update_requires_replacement(
+                &generated,
+                &make_resource(
+                    "AWS::KinesisFirehose::DeliveryStream",
+                    "Generated",
+                    unnamed()
+                ),
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn role_or_name_change_replaces_the_stream() {
+        let prov = make_provisioner();
+        let existing = prov
+            .create_resource(&make_resource(
+                "AWS::KinesisFirehose::DeliveryStream",
+                "Firehose",
+                search_stream_props("orders"),
+            ))
+            .unwrap();
+        let instance = stored(&prov).instance_id;
+        let mut changed = search_stream_props("orders");
+        changed["KinesisStreamSourceConfiguration"]["RoleARN"] =
+            json!("arn:aws:iam::123456789012:role/other");
+        let definition = make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", changed);
+        assert!(prov
+            .firehose_update_requires_replacement(&existing, &definition)
+            .unwrap());
+        prov.update_resource(&existing, &definition).unwrap();
+        let stream = stored(&prov);
+        assert_ne!(stream.instance_id, instance);
+        assert_eq!(
+            stream.kinesis_source.unwrap().role_arn,
+            "arn:aws:iam::123456789012:role/other"
+        );
+
+        let mut renamed = search_stream_props("orders");
+        renamed["DeliveryStreamName"] = json!("renamed");
+        assert!(prov
+            .firehose_update_requires_replacement(
+                &existing,
+                &make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", renamed),
+            )
+            .unwrap());
+    }
+
+    /// CloudFormation allows a change of destination type on update, and a
+    /// template always names exactly one destination.
+    #[test]
+    fn template_names_exactly_one_destination() {
+        let prov = make_provisioner();
+        let s3_props = json!({
+            "DeliveryStreamName": "events",
+            "ExtendedS3DestinationConfiguration": configuration(),
+        });
+        let existing = prov
+            .create_resource(&make_resource(
+                "AWS::KinesisFirehose::DeliveryStream",
+                "Firehose",
+                s3_props.clone(),
+            ))
+            .unwrap();
+        let search = search_stream_props("orders")
+            ["AmazonopensearchserviceDestinationConfiguration"]
+            .clone();
+
+        let mut both = s3_props.clone();
+        both["AmazonopensearchserviceDestinationConfiguration"] = search.clone();
+        let resource =
+            |props: Value| make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", props);
+        assert!(prov
+            .create_resource(&resource(both.clone()))
+            .unwrap_err()
+            .contains("only one destination"));
+        assert!(prov
+            .update_resource(&existing, &resource(both))
+            .unwrap_err()
+            .contains("only one destination"));
+        let none = json!({"DeliveryStreamName": "events"});
+        assert!(prov
+            .update_resource(&existing, &resource(none))
+            .unwrap_err()
+            .contains("requires a destination"));
+        assert!(
+            stored(&prov).destination.is_some(),
+            "refused updates change nothing"
+        );
+
+        let to_search = json!({
+            "DeliveryStreamName": "events",
+            "AmazonopensearchserviceDestinationConfiguration": search,
+        });
+        prov.update_resource(&existing, &resource(to_search))
+            .unwrap();
+        let stream = stored(&prov);
+        assert!(stream.destination.is_none());
+        assert_eq!(stream.extra_destinations.len(), 1);
+
+        prov.update_resource(&existing, &resource(s3_props))
+            .unwrap();
+        let stream = stored(&prov);
+        assert!(stream.destination.is_some());
+        assert!(stream.extra_destinations.is_empty());
+    }
+
+    /// `KinesisStreamSourceConfiguration` requires replacement: an in-place
+    /// update would keep reading the old stream.
+    #[test]
+    fn changed_kinesis_source_replaces_the_stream() {
+        let prov = make_provisioner();
+        let existing = prov
+            .create_resource(&make_resource(
+                "AWS::KinesisFirehose::DeliveryStream",
+                "Firehose",
+                search_stream_props("orders"),
+            ))
+            .unwrap();
+        let instance = stored(&prov).instance_id;
+        prov.update_resource(
+            &existing,
+            &make_resource(
+                "AWS::KinesisFirehose::DeliveryStream",
+                "Firehose",
+                search_stream_props("payments"),
+            ),
+        )
+        .unwrap();
+        let stream = stored(&prov);
+        assert_ne!(stream.instance_id, instance, "replaced");
+        assert_eq!(
+            stream.kinesis_source.unwrap().kinesis_stream_arn,
+            "arn:aws:kinesis:us-east-1:123456789012:stream/payments"
+        );
     }
 
     #[test]
@@ -1212,6 +1728,8 @@ mod tests {
             version_id: "1".into(),
             destination: delivery_config(before.destination.as_ref().unwrap()).unwrap(),
             records: vec![bytes::Bytes::from_static(b"captured-old")],
+            document_ids: Vec::new(),
+            arrivals: Vec::new(),
             oldest_arrival: Utc::now(),
             delivery_time: Utc::now(),
             object_key: "stale".into(),

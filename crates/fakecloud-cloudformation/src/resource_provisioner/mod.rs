@@ -2085,7 +2085,11 @@ impl ResourceProvisioner {
             "AWS::MWAA::Environment" => Some(self.update_mwaa_environment(existing, new_def)?),
             "AWS::Amplify::App" => Some(self.update_amplify_app(existing, new_def)?),
             "AWS::KinesisFirehose::DeliveryStream" => {
-                Some(self.update_firehose_delivery_stream(existing, new_def)?)
+                if self.firehose_update_requires_replacement(existing, new_def)? {
+                    self.reprovision_resource(existing, new_def)?
+                } else {
+                    Some(self.update_firehose_delivery_stream(existing, new_def)?)
+                }
             }
             "AWS::Backup::BackupVault" => Some(self.update_backup_vault(existing, new_def)?),
             // In-place update: reprovision would mint a new BackupPlanId and

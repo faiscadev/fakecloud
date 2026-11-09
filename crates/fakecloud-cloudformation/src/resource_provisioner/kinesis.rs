@@ -126,7 +126,9 @@ impl ResourceProvisioner {
     pub(super) fn delete_kinesis_stream(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.kinesis_state.write();
         let state = accounts.regional_mut(&self.account_id, &self.region);
-        state.streams.remove(physical_id);
+        if let Some(stream) = state.streams.remove(physical_id) {
+            state.forget_stream_checkpoints(&stream.stream_arn);
+        }
         Ok(())
     }
 

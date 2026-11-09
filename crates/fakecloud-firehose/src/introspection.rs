@@ -123,6 +123,7 @@ mod tests {
             tags: BTreeMap::new(),
             encryption,
             extra_destinations: BTreeMap::new(),
+            kinesis_source: None,
         }
     }
 

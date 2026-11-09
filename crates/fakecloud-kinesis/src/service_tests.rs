@@ -552,6 +552,32 @@ fn delete_stream_unknown_errors() {
 }
 
 #[test]
+fn delete_stream_forgets_its_checkpoints() {
+    let state: SharedKinesisState = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4566",
+        ),
+    ));
+    let svc = KinesisService::new(state);
+    let arn = {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_regional_mut();
+        let stream = test_stream("orders");
+        let arn = stream.stream_arn.clone();
+        state.streams.insert("orders".into(), stream);
+        state.set_lambda_checkpoint(&arn, "uuid-1", "shardId-000000000000", 5);
+        arn
+    };
+    svc.delete_stream(&request("DeleteStream", json!({ "StreamName": "orders" })))
+        .unwrap();
+    let accounts = svc.state.read();
+    let state = accounts.default_regional().unwrap();
+    assert!(state.lambda_checkpoints.is_empty(), "{arn}");
+}
+
+#[test]
 fn delete_stream_removes_entry_and_consumers() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);

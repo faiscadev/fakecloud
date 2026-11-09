@@ -36,13 +36,77 @@ pub struct DrainReport {
 pub struct WorkerAlreadyStarted;
 
 /// AWS keeps retrying DirectPut delivery to S3 for up to 24 hours after the
-/// data arrives, then discards it.
+/// data arrives, then discards it. Kinesis-source batches are bounded by
+/// [`SourceLimit`] instead: AWS retries them for as long as the source stream
+/// retains the records.
 const MAX_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Delay before retrying a failed S3 delivery. AWS documents that Firehose
 /// retries delivery to S3 every 5 seconds until the 24-hour retention ends
 /// ([`MAX_RETENTION`]). Retries still start only on worker ticks.
-const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Pending decoded bytes at which a stream stops reading its Kinesis source.
+const MAX_SOURCE_BACKLOG_BYTES: usize = 128 * 1024 * 1024;
+/// Empty records hold no bytes but each still costs a document ID and an
+/// arrival time, so the byte budget alone would not bound them.
+const MAX_SOURCE_BACKLOG_RECORDS: usize = 1_000_000;
+
+/// Records read from one shard of one incarnation of the source stream. `end`
+/// is the reader's position just past the last record.
+pub struct SourceRead {
+    pub generation: i64,
+    pub shard_id: String,
+    pub end: usize,
+    pub records: Vec<SourceRecord>,
+}
+
+pub struct SourceRecord {
+    pub data: Bytes,
+    pub document_id: String,
+    /// When the record reached the source stream, not when it was read.
+    pub arrival: DateTime<Utc>,
+}
+
+/// Per-shard offsets of a `KinesisStreamAsSource` stream: `read` is what the
+/// engine has accepted, `committed` what has been delivered or written to the
+/// failure location. `backlogged` asks the reader to pause, `remaining_bytes` is
+/// how much more it may read now, and `refused` says why the stream's destination
+/// cannot accept records now.
+#[derive(Clone, Debug, Default)]
+pub struct SourceProgress {
+    pub read: BTreeMap<String, usize>,
+    pub committed: BTreeMap<String, usize>,
+    pub backlogged: bool,
+    pub remaining_bytes: usize,
+    pub refused: Option<String>,
+    pub limit: Option<SourceLimit>,
+}
+
+/// How long a failing batch read from a source may be retried: for the source
+/// stream's retention, and not after the records' stream is gone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceLimit {
+    pub retention: Duration,
+    /// The incarnation of the source stream existing now, or `None` when it has
+    /// been deleted.
+    pub current_generation: Option<i64>,
+}
+
+impl SourceLimit {
+    /// A batch ends with its newest record, so a batch spanning a long read
+    /// backlog does not lose recent records to the age of its oldest.
+    fn expired(&self, generation: i64, newest_record_age: Duration) -> bool {
+        self.current_generation != Some(generation) || newest_record_age >= self.retention
+    }
+}
+
+fn advance(offsets: &mut BTreeMap<String, usize>, positions: &BTreeMap<String, usize>) {
+    for (shard, end) in positions {
+        let offset = offsets.entry(shard.clone()).or_default();
+        *offset = (*offset).max(*end);
+    }
+}
 
 #[derive(Clone)]
 struct TimePoint {
@@ -67,6 +131,10 @@ impl Clock for SystemClock {
 
 struct ActiveBuffer {
     records: Vec<Bytes>,
+    document_ids: Vec<String>,
+    arrivals: Vec<DateTime<Utc>>,
+    source_generation: Option<i64>,
+    source_positions: BTreeMap<String, usize>,
     // Decoded record bytes only: size triggers and drain reports never count
     // an `AppendDelimiterToRecord` newline.
     input_bytes: usize,
@@ -77,9 +145,13 @@ impl ActiveBuffer {
     /// Nothing to write: no records, or only empty records for a destination
     /// that adds no delimiter. Judged on the payload before any codec runs,
     /// since even GZIP encodes an empty payload into nonempty bytes, while
-    /// `AppendDelimiterToRecord` writes a newline for every empty record.
+    /// `AppendDelimiterToRecord` writes a newline for every empty record. A
+    /// search destination has something to write too: their failure records.
     fn is_empty(&self, destination: &DeliveryConfig) -> bool {
-        self.records.is_empty() || (self.input_bytes == 0 && !destination.output.append_delimiter)
+        self.records.is_empty()
+            || (self.input_bytes == 0
+                && !destination.output.append_delimiter
+                && destination.search.is_none())
     }
 }
 
@@ -90,6 +162,8 @@ struct DetachedBatch {
     input_bytes: usize,
     // Oldest record's arrival; bounds retries to `MAX_RETENTION`.
     first_arrival: Instant,
+    source_generation: Option<i64>,
+    source_positions: BTreeMap<String, usize>,
 }
 
 #[derive(Default)]
@@ -104,9 +178,28 @@ struct StreamBuffer {
     // configuration was last reported, so each update warns once rather than
     // on every one-second scan.
     blocked_version: Option<String>,
+    // Source positions of discarded empty batches. They must not commit
+    // before the batches queued ahead of them.
+    held_positions: BTreeMap<String, usize>,
 }
 
 impl StreamBuffer {
+    /// Returns the source positions that are ready to commit.
+    fn discard(&mut self, positions: BTreeMap<String, usize>) -> BTreeMap<String, usize> {
+        advance(&mut self.held_positions, &positions);
+        self.release_held()
+    }
+
+    fn release_held(&mut self) -> BTreeMap<String, usize> {
+        if self.queue.is_empty() {
+            std::mem::take(&mut self.held_positions)
+        } else {
+            BTreeMap::new()
+        }
+    }
+
+    /// Returns the source positions of an empty batch it discards instead,
+    /// when they are ready to commit.
     fn detach(
         &mut self,
         key: &StreamKey,
@@ -114,39 +207,52 @@ impl StreamBuffer {
         config: DeliveryConfig,
         now: &TimePoint,
         force: bool,
-    ) {
-        let Some(active) = &self.active else { return };
+    ) -> BTreeMap<String, usize> {
+        let Some(active) = &self.active else {
+            return BTreeMap::new();
+        };
         if !force
             && active.input_bytes < config.buffering.size_bytes
             && now.monotonic.duration_since(active.first.monotonic) < config.buffering.interval
         {
-            return;
+            return BTreeMap::new();
         }
         let active = self.active.take().unwrap();
         if active.is_empty(&config) {
-            return;
+            return self.discard(active.source_positions);
         }
+        let oldest_arrival = active
+            .arrivals
+            .iter()
+            .min()
+            .copied()
+            .unwrap_or(active.first.wall);
         let object_key = object_key(
             &key.name,
             &stream.version_id,
             &config.output,
-            active.first.wall,
+            oldest_arrival,
             now.wall,
             uuid::Uuid::new_v4(),
         );
         self.queue.push_back(Arc::new(DetachedBatch {
             input_bytes: active.input_bytes,
             first_arrival: active.first.monotonic,
+            source_generation: active.source_generation,
+            source_positions: active.source_positions,
             batch: DeliveryBatch {
                 stream: key.clone(),
                 version_id: stream.version_id.clone(),
                 destination: config,
                 records: active.records,
-                oldest_arrival: active.first.wall,
+                document_ids: active.document_ids,
+                arrivals: active.arrivals,
+                oldest_arrival,
                 delivery_time: now.wall,
                 object_key,
             },
         }));
+        BTreeMap::new()
     }
 }
 
@@ -156,6 +262,7 @@ struct Registry {
     // Ingestion accounting outlives a drained S3 buffer and also covers streams
     // with configuration-only destinations. Never used by delivery retries.
     windows: BTreeMap<StreamKey, ThroughputWindow>,
+    sources: BTreeMap<StreamKey, SourceProgress>,
     // Last assigned stream, not last scanned. A removed generation remains a
     // valid ordering cursor; range selection skips it and wraps naturally.
     last_scheduled: Option<StreamKey>,
@@ -252,8 +359,73 @@ impl FirehoseEngine {
         name: &str,
         records: Vec<Bytes>,
     ) -> Result<(), AwsServiceError> {
-        self.enqueue_admission(account, region, name, records, None)
+        self.enqueue_admission(account, region, name, records, None, None)
             .map(|_| ())
+    }
+
+    /// Hand off records a `KinesisStreamAsSource` stream read from its source
+    /// stream. Unmetered: the Direct PUT throughput quotas do not apply.
+    /// `key` names the stream instance whose source configuration the records
+    /// were read for. Refused if a replacement has taken its name since, under
+    /// the configuration lock and before anything changes.
+    pub fn enqueue_from_source(
+        &self,
+        key: &StreamKey,
+        read: SourceRead,
+    ) -> Result<(), AwsServiceError> {
+        let records = read.records.iter().map(|r| r.data.clone()).collect();
+        self.enqueue_admission(
+            &key.account_id,
+            &key.region,
+            &key.name,
+            records,
+            None,
+            Some((key.instance_id, read)),
+        )
+        .map(|_| ())
+    }
+
+    /// The progress of this stream instance; empty with no room to read when it
+    /// no longer exists.
+    pub fn source_progress(&self, key: &StreamKey) -> SourceProgress {
+        let config = self.core.state.read();
+        let Some(stream) = current(&config, key) else {
+            return SourceProgress::default();
+        };
+        let refused = stream_delivery(stream).err().map(|error| error.message());
+        let registry = self.core.registry.lock();
+        let mut progress = registry.sources.get(key).cloned().unwrap_or_default();
+        progress.refused = refused;
+        progress.remaining_bytes = MAX_SOURCE_BACKLOG_BYTES;
+        if let Some(buffer) = registry.streams.get(key) {
+            let pending = buffer.active.as_ref().map_or(0, |a| a.input_bytes)
+                + buffer.queue.iter().map(|b| b.input_bytes).sum::<usize>();
+            progress.remaining_bytes = MAX_SOURCE_BACKLOG_BYTES.saturating_sub(pending);
+            let records = buffer.active.as_ref().map_or(0, |a| a.records.len())
+                + buffer
+                    .queue
+                    .iter()
+                    .map(|b| b.batch.records.len())
+                    .sum::<usize>();
+            progress.backlogged = buffer.failures > 0
+                || progress.remaining_bytes == 0
+                || records >= MAX_SOURCE_BACKLOG_RECORDS;
+        }
+        progress
+    }
+
+    /// Update what bounds the retries of batches read from this stream's source.
+    pub fn limit_source_retries(&self, key: &StreamKey, limit: SourceLimit) {
+        let config = self.core.state.read();
+        if current(&config, key).is_some() {
+            self.core
+                .registry
+                .lock()
+                .sources
+                .entry(key.clone())
+                .or_default()
+                .limit = Some(limit);
+        }
     }
 
     pub(crate) fn enqueue_put(
@@ -286,7 +458,7 @@ impl FirehoseEngine {
         });
         let limits =
             limits.filter(|l| l.requests.is_some() || l.records.is_some() || l.mib.is_some());
-        self.enqueue_admission(account, region, name, records, limits)
+        self.enqueue_admission(account, region, name, records, limits, None)
     }
 
     fn enqueue_admission(
@@ -296,6 +468,7 @@ impl FirehoseEngine {
         name: &str,
         records: Vec<Bytes>,
         limits: Option<ThroughputLimits>,
+        source: Option<(uuid::Uuid, SourceRead)>,
     ) -> Result<Vec<bool>, AwsServiceError> {
         // Every path holding both takes configuration before the registry. Keep
         // the read guard until admission and immediate detachment both commit.
@@ -319,9 +492,19 @@ impl FirehoseEngine {
                     format!("DeliveryStream {name} not found"),
                 )
             })?;
+        let source = match source {
+            Some((instance_id, _)) if instance_id != stream.instance_id => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("DeliveryStream {name} was replaced"),
+                ));
+            }
+            source => source.map(|(_, read)| read),
+        };
         // Public APIs and internal hooks are DirectPut producers, even without
         // an S3 destination/backend. Preserve the shared source admission guard.
-        if stream.stream_type == "KinesisStreamAsSource" {
+        if stream.stream_type == "KinesisStreamAsSource" && source.is_none() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidArgumentException",
@@ -354,30 +537,71 @@ impl FirehoseEngine {
         }
         // Non-S3 streams retain the configuration-only acknowledgement, but
         // public ingestion is still metered even without an S3 backend.
+        let position = source
+            .as_ref()
+            .map(|read| BTreeMap::from([(read.shard_id.clone(), read.end)]))
+            .unwrap_or_default();
+        if !position.is_empty() {
+            advance(
+                &mut registry.sources.entry(key.clone()).or_default().read,
+                &position,
+            );
+        }
         let Some(destination) = destination else {
+            if !position.is_empty() {
+                registry.commit_source(&key, &position);
+            }
             return Ok(accepted);
         };
+        let source_generation = source.as_ref().map(|read| read.generation);
+        let source_records = source.map(|read| read.records).unwrap_or_default();
         let buffer = registry.streams.entry(key.clone()).or_default();
+        let mut ready = BTreeMap::new();
         if accepted.iter().any(|admitted| *admitted) {
+            // Retries of records from an earlier source stream end with it, so
+            // they must not share a batch with the current stream's records.
+            if buffer
+                .active
+                .as_ref()
+                .is_some_and(|active| active.source_generation != source_generation)
+            {
+                // Its own capture: a clone would share the bulk retry state.
+                if let Some(earlier) = stream_delivery(stream)? {
+                    ready = buffer.detach(&key, stream, earlier, &now, true);
+                }
+            }
             let active = buffer.active.get_or_insert_with(|| ActiveBuffer {
                 records: Vec::new(),
+                document_ids: Vec::new(),
+                arrivals: Vec::new(),
+                source_generation,
+                source_positions: BTreeMap::new(),
                 input_bytes: 0,
                 first: now.clone(),
             });
-            for (record, admitted) in records.into_iter().zip(&accepted) {
+            advance(&mut active.source_positions, &position);
+            for (position, (record, admitted)) in records.into_iter().zip(&accepted).enumerate() {
                 if !admitted {
                     continue;
                 }
                 active.input_bytes += record.len();
                 active.records.push(record);
+                let source = source_records.get(position);
+                active.arrivals.push(source.map_or(now.wall, |r| r.arrival));
+                if let Some(source) = source {
+                    active.document_ids.push(source.document_id.clone());
+                }
             }
-            if active.is_empty(&destination) {
+            let released = if active.is_empty(&destination) {
                 // Clear before invoking any codec or writer.
-                buffer.active = None;
+                let positions = buffer.active.take().unwrap().source_positions;
+                buffer.discard(positions)
             } else {
-                buffer.detach(&key, stream, destination, &now, false);
-            }
+                buffer.detach(&key, stream, destination, &now, false)
+            };
+            advance(&mut ready, &released);
         }
+        registry.commit_source(&key, &ready);
         drop(registry);
         drop(config);
         self.core.wake.notify_one();
@@ -537,6 +761,17 @@ async fn run_worker(core: Weak<EngineCore>, wake: Arc<Notify>) {
     }
 }
 
+impl Registry {
+    fn commit_source(&mut self, key: &StreamKey, positions: &BTreeMap<String, usize>) {
+        if !positions.is_empty() {
+            advance(
+                &mut self.sources.entry(key.clone()).or_default().committed,
+                positions,
+            );
+        }
+    }
+}
+
 impl EngineCore {
     fn finish_shutdown(&self, blocked: &BTreeSet<StreamKey>) -> Option<DrainReport> {
         // Pin configuration through the final snapshot. A restoration between
@@ -548,6 +783,9 @@ impl EngineCore {
             .retain(|key, _| current(&config, key).is_some());
         registry
             .windows
+            .retain(|key, _| current(&config, key).is_some());
+        registry
+            .sources
             .retain(|key, _| current(&config, key).is_some());
         for (key, buffer) in &registry.streams {
             if blocked.contains(key) || buffer.in_flight {
@@ -599,10 +837,14 @@ impl EngineCore {
         registry
             .windows
             .retain(|key, _| current(&config, key).is_some());
+        registry
+            .sources
+            .retain(|key, _| current(&config, key).is_some());
         if registry.closed && !force {
             return Vec::new();
         }
         let mut ready = Vec::new();
+        let mut discarded = Vec::new();
         let mut keys: Vec<_> = registry.streams.keys().cloned().collect();
         if let Some(cursor) = &registry.last_scheduled {
             let start = keys.partition_point(|key| key <= cursor);
@@ -621,7 +863,7 @@ impl EngineCore {
             match destination {
                 Ok(destination) => {
                     buffer.blocked_version = None;
-                    buffer.detach(key, stream, destination, &now, force);
+                    discarded.push((key, buffer.detach(key, stream, destination, &now, force)));
                 }
                 Err(reason) => {
                     if let Some(active) = &buffer.active {
@@ -667,6 +909,9 @@ impl EngineCore {
                 }
             }
         }
+        for (key, positions) in discarded {
+            registry.commit_source(key, &positions);
+        }
         if let Some(job) = ready.last() {
             registry.last_scheduled = Some(job.batch.batch.stream.clone());
         }
@@ -686,6 +931,20 @@ impl EngineCore {
         }
         let now = self.clock.now();
         let key = &completion.batch.batch.stream;
+        let expired = match completion.batch.source_generation {
+            None => now.monotonic.duration_since(completion.batch.first_arrival) >= MAX_RETENTION,
+            Some(generation) => {
+                let newest = completion.batch.batch.arrivals.iter().max();
+                let age = newest.map_or(Duration::ZERO, |newest| {
+                    (now.wall - *newest).to_std().unwrap_or_default()
+                });
+                registry
+                    .sources
+                    .get(key)
+                    .and_then(|source| source.limit.as_ref())
+                    .is_some_and(|limit| limit.expired(generation, age))
+            }
+        };
         let Some(buffer) = registry.streams.get_mut(key) else {
             return true;
         };
@@ -702,6 +961,9 @@ impl EngineCore {
                 buffer.queue.pop_front();
                 buffer.retry_not_before = None;
                 buffer.failures = 0;
+                let held = buffer.release_held();
+                registry.commit_source(key, &completion.batch.source_positions);
+                registry.commit_source(key, &held);
                 true
             }
             Err(error) => {
@@ -714,16 +976,17 @@ impl EngineCore {
                     tracing::warn!(stream = ?key.name, account = %key.account_id, region = %key.region,
                         ?object_key, attempt = buffer.failures, ?error,
                         "Firehose delivery attempt failed after admission closed");
-                } else if now.monotonic.duration_since(completion.batch.first_arrival)
-                    >= MAX_RETENTION
-                {
+                } else if expired {
                     buffer.queue.pop_front();
                     buffer.retry_not_before = None;
                     buffer.failures = 0;
                     tracing::warn!(stream = ?key.name, account = %key.account_id, region = %key.region,
                         ?object_key, records = completion.batch.batch.records.len(),
                         bytes = completion.batch.input_bytes, ?error,
-                        "Firehose batch discarded after failing delivery for 24 hours");
+                        "Firehose batch discarded after failing delivery past its retention");
+                    let held = buffer.release_held();
+                    registry.commit_source(key, &completion.batch.source_positions);
+                    registry.commit_source(key, &held);
                     return true;
                 } else {
                     let delay = RETRY_INTERVAL;
@@ -753,6 +1016,9 @@ pub(crate) fn throughput_error() -> AwsServiceError {
 /// `Ok(None)`: no destination is configured, so nothing is written.
 fn stream_delivery(stream: &DeliveryStream) -> Result<Option<DeliveryConfig>, AwsServiceError> {
     crate::admission::validate_stream_destination(stream)?;
+    if let Some((kind, config)) = stream.extra_destinations.iter().next() {
+        return crate::search::delivery(kind, config).map(Some);
+    }
     stream.destination.as_ref().map(delivery_config).transpose()
 }
 
@@ -886,6 +1152,255 @@ mod tests {
 
     fn record(byte: u8, size: usize) -> Bytes {
         Bytes::from(vec![byte; size])
+    }
+
+    impl Fixture {
+        fn key(&self) -> StreamKey {
+            StreamKey {
+                account_id: ACCOUNT.into(),
+                region: REGION.into(),
+                name: NAME.into(),
+                instance_id: current_instance(self),
+            }
+        }
+
+        fn wall(&self) -> DateTime<Utc> {
+            self.clock.0.lock().wall
+        }
+
+        /// One record that arrived at the source `age_secs` before now.
+        fn read(
+            &self,
+            generation: i64,
+            end: usize,
+            data: &'static [u8],
+            age_secs: i64,
+        ) -> SourceRead {
+            SourceRead {
+                generation,
+                shard_id: format!("{generation}/shard-0"),
+                end,
+                records: vec![SourceRecord {
+                    data: Bytes::from_static(data),
+                    document_id: format!("shard-0:{end}"),
+                    arrival: self.wall() - chrono::Duration::seconds(age_secs),
+                }],
+            }
+        }
+
+        fn queued(&self) -> usize {
+            self.engine
+                .core
+                .registry
+                .lock()
+                .streams
+                .values()
+                .map(|buffer| buffer.queue.len())
+                .sum()
+        }
+    }
+
+    fn current_instance(f: &Fixture) -> uuid::Uuid {
+        f.engine
+            .core
+            .state
+            .read()
+            .get(ACCOUNT)
+            .unwrap()
+            .streams(REGION)
+            .unwrap()[NAME]
+            .instance_id
+    }
+
+    /// A failing batch ends with its newest record's retention, counted from
+    /// when it reached the source rather than when it was read.
+    #[tokio::test]
+    async fn source_retries_end_at_the_records_source_retention() {
+        let f = Fixture::new(0);
+        *f.engine.core.writer.write() = Some(Arc::new(FailingWriter));
+        let key = f.key();
+        let retention = Duration::from_secs(100);
+        f.engine.limit_source_retries(
+            &key,
+            SourceLimit {
+                retention,
+                current_generation: Some(1),
+            },
+        );
+        // Read 90 seconds into its retention, with an older record alongside.
+        let mut read = f.read(1, 1, b"{}", 95);
+        read.records[0].arrival = f.wall() - chrono::Duration::seconds(90);
+        read.records.insert(
+            0,
+            SourceRecord {
+                data: Bytes::from_static(b"{}"),
+                document_id: "older".into(),
+                arrival: f.wall() - chrono::Duration::seconds(99),
+            },
+        );
+        f.engine.enqueue_from_source(&key, read).unwrap();
+        f.turn().await;
+        assert_eq!(f.queued(), 1, "inside the retention");
+        f.advance(5);
+        f.turn().await;
+        assert_eq!(
+            f.queued(),
+            1,
+            "the older record alone does not end the batch"
+        );
+        f.advance(5);
+        f.turn().await;
+        assert_eq!(f.queued(), 0, "past the newest record's retention");
+    }
+
+    #[tokio::test]
+    async fn source_arrivals_reach_the_batch_and_its_key() {
+        let f = Fixture::new(0);
+        let read = f.read(1, 1, b"a", 2 * 3600);
+        let arrival = read.records[0].arrival;
+        f.engine.enqueue_from_source(&f.key(), read).unwrap();
+        f.advance(1);
+        f.turn().await;
+        let batch = &f.batches()[0];
+        assert_eq!(batch.arrivals, vec![arrival]);
+        assert_eq!(batch.oldest_arrival, arrival);
+        assert!(batch
+            .object_key
+            .starts_with(&arrival.format("%Y/%m/%d/%H").to_string()));
+    }
+
+    /// Buffering still times from when the record was read: an old record does
+    /// not make its batch due at once.
+    #[tokio::test]
+    async fn source_arrival_does_not_start_the_buffering_interval() {
+        let f = Fixture::new(60);
+        let read = f.read(1, 1, b"a", 3600);
+        f.engine.enqueue_from_source(&f.key(), read).unwrap();
+        f.turn().await;
+        assert!(f.batches().is_empty());
+        f.advance(60);
+        f.turn().await;
+        assert_eq!(f.batches().len(), 1);
+    }
+
+    /// Records read before the delivery stream was replaced do not enter the
+    /// replacement, and leave its progress and buffers alone.
+    #[tokio::test]
+    async fn source_read_for_a_replaced_instance_is_refused() {
+        let f = Fixture::new(60);
+        let stale = f.key();
+        f.add_stream(ACCOUNT, REGION, NAME, 60);
+        let read = f.read(1, 1, b"a", 0);
+        let error = f.engine.enqueue_from_source(&stale, read).err().unwrap();
+        assert_eq!(error.code(), "ResourceNotFoundException");
+        assert!(f.engine.core.registry.lock().streams.is_empty());
+        assert!(f.engine.source_progress(&f.key()).read.is_empty());
+        let stale_progress = f.engine.source_progress(&stale);
+        assert_eq!(stale_progress.remaining_bytes, 0);
+        f.engine.limit_source_retries(
+            &stale,
+            SourceLimit {
+                retention: Duration::ZERO,
+                current_generation: None,
+            },
+        );
+        assert!(f.engine.core.registry.lock().sources.is_empty());
+    }
+
+    /// A recreated source starts a new batch: the earlier one ends with its
+    /// stream on its next failure, with no newer record held up or dropped.
+    #[tokio::test]
+    async fn source_generations_do_not_share_a_batch() {
+        let f = Fixture::new(60);
+        *f.engine.core.writer.write() = Some(Arc::new(FailingWriter));
+        let key = f.key();
+        f.engine
+            .enqueue_from_source(&key, f.read(1, 1, b"old", 0))
+            .unwrap();
+        f.engine.limit_source_retries(
+            &key,
+            SourceLimit {
+                retention: Duration::from_secs(3600),
+                current_generation: Some(2),
+            },
+        );
+        f.engine
+            .enqueue_from_source(&key, f.read(2, 1, b"new", 0))
+            .unwrap();
+        {
+            let registry = f.engine.core.registry.lock();
+            let buffer = registry.streams.get(&key).unwrap();
+            assert_eq!(buffer.queue.len(), 1);
+            assert_eq!(buffer.queue[0].batch.records[0].as_ref(), b"old");
+            assert_eq!(buffer.active.as_ref().unwrap().records[0].as_ref(), b"new");
+        }
+        f.turn().await;
+        assert_eq!(f.queued(), 0, "the deleted generation stopped retrying");
+        let registry = f.engine.core.registry.lock();
+        let buffer = registry.streams.get(&key).unwrap();
+        assert_eq!(buffer.active.as_ref().unwrap().records[0].as_ref(), b"new");
+    }
+
+    /// An empty record cannot be a search document, so a batch of nothing else
+    /// reaches the writer and gets its failure records instead of vanishing.
+    #[tokio::test]
+    async fn empty_records_of_a_search_stream_reach_the_writer() {
+        let f = Fixture::new(0);
+        f.update(NAME, |stream| {
+            stream.destination = None;
+            stream.extra_destinations.insert(
+                crate::search::OPENSEARCH.into(),
+                json!({
+                    "IndexName": "activity",
+                    "ClusterEndpoint": "http://localhost:9200",
+                    "S3Configuration": {"RoleARN": "r", "BucketARN": "arn:aws:s3:::b"},
+                }),
+            );
+        });
+        let key = f.key();
+        f.engine
+            .enqueue_from_source(&key, f.read(1, 1, b"", 0))
+            .unwrap();
+        assert_eq!(f.engine.source_progress(&key).committed.len(), 0);
+        f.advance(300);
+        f.turn().await;
+        assert_eq!(f.batches().len(), 1);
+        assert_eq!(f.engine.source_progress(&key).committed["1/shard-0"], 1);
+    }
+
+    #[tokio::test]
+    async fn records_that_hold_no_bytes_cannot_grow_the_source_backlog_without_bound() {
+        let f = Fixture::new(60);
+        let key = f.key();
+        f.engine
+            .enqueue_from_source(&key, f.read(1, 1, b"x", 0))
+            .unwrap();
+        assert!(!f.engine.source_progress(&key).backlogged);
+        f.engine
+            .core
+            .registry
+            .lock()
+            .streams
+            .get_mut(&key)
+            .unwrap()
+            .active
+            .as_mut()
+            .unwrap()
+            .records
+            .resize(MAX_SOURCE_BACKLOG_RECORDS, Bytes::new());
+        assert!(f.engine.source_progress(&key).backlogged);
+    }
+
+    #[tokio::test]
+    async fn remaining_source_bytes_shrink_with_pending_records() {
+        let f = Fixture::new(60);
+        let key = f.key();
+        let room = f.engine.source_progress(&key).remaining_bytes;
+        assert_eq!(room, MAX_SOURCE_BACKLOG_BYTES);
+        f.engine
+            .enqueue_from_source(&key, f.read(1, 1, b"abc", 0))
+            .unwrap();
+        assert_eq!(f.engine.source_progress(&key).remaining_bytes, room - 3);
     }
 
     #[tokio::test]
@@ -1151,6 +1666,79 @@ mod tests {
                 .core
                 .complete(bounded(jobs.next()).await.unwrap());
         }
+    }
+
+    #[tokio::test]
+    async fn source_offsets_commit_in_order_and_failures_pause_reading() {
+        let f = Fixture::new(0);
+        let mut entered = f.controlled();
+        let key = f.key();
+        let read = |end: usize, data: &'static [u8]| f.read(0, end, data, 0);
+        let progress = || f.engine.source_progress(&key);
+        f.engine.enqueue_from_source(&key, read(1, b"a")).unwrap();
+        assert_eq!(progress().read["0/shard-0"], 1);
+        assert!(progress().committed.is_empty());
+
+        let mut jobs = Writes::default();
+        f.schedule(&mut jobs, false);
+        let first = next_attempt(&mut entered).await;
+        assert_eq!(first.batch.document_ids, vec!["shard-0:1".to_owned()]);
+        first.reply.send(Action::Fail).unwrap();
+        f.finish(&mut jobs).await;
+        assert!(progress().backlogged);
+        assert!(progress().committed.is_empty());
+
+        f.engine.enqueue_from_source(&key, read(2, b"b")).unwrap();
+        f.advance(RETRY_INTERVAL.as_secs());
+        f.schedule(&mut jobs, true);
+        next_attempt(&mut entered)
+            .await
+            .reply
+            .send(Action::Commit)
+            .unwrap();
+        f.finish(&mut jobs).await;
+        assert_eq!(progress().committed["0/shard-0"], 1);
+        assert!(!progress().backlogged);
+
+        f.schedule(&mut jobs, false);
+        next_attempt(&mut entered)
+            .await
+            .reply
+            .send(Action::Commit)
+            .unwrap();
+        f.finish(&mut jobs).await;
+        assert_eq!(progress().committed["0/shard-0"], 2);
+    }
+
+    #[tokio::test]
+    async fn discarded_empty_source_records_commit_after_queued_batches() {
+        let f = Fixture::new(0);
+        let mut entered = f.controlled();
+        let key = f.key();
+        let read = |end: usize, data: &'static [u8]| f.read(0, end, data, 0);
+        let progress = || f.engine.source_progress(&key);
+        f.engine.enqueue_from_source(&key, read(1, b"a")).unwrap();
+        let mut jobs = Writes::default();
+        f.schedule(&mut jobs, false);
+        next_attempt(&mut entered)
+            .await
+            .reply
+            .send(Action::Fail)
+            .unwrap();
+        f.finish(&mut jobs).await;
+
+        f.engine.enqueue_from_source(&key, read(2, b"")).unwrap();
+        assert!(progress().committed.is_empty());
+
+        f.advance(RETRY_INTERVAL.as_secs());
+        f.schedule(&mut jobs, true);
+        next_attempt(&mut entered)
+            .await
+            .reply
+            .send(Action::Commit)
+            .unwrap();
+        f.finish(&mut jobs).await;
+        assert_eq!(progress().committed["0/shard-0"], 2);
     }
 
     #[tokio::test]
@@ -1625,6 +2213,73 @@ mod tests {
         fn write(&self, _: &DeliveryBatch) -> Result<DeliveryWriteOutcome, String> {
             Err("unavailable".into())
         }
+    }
+
+    /// AWS retries Kinesis-source batches for as long as the stream retains
+    /// them, so the 24-hour Direct PUT limit must not drop and commit them, but
+    /// the stream's retention or its deletion does end the retries.
+    #[tokio::test]
+    async fn source_batches_are_bound_by_the_source_stream() {
+        let limit = |retention_days: u64, generation: Option<i64>| SourceLimit {
+            retention: Duration::from_secs(retention_days * 86_400),
+            current_generation: generation,
+        };
+        for (expired_limit, age_days) in [
+            (limit(7, Some(1)), 8),
+            (limit(7, Some(2)), 0),
+            (limit(7, None), 0),
+        ] {
+            let f = Fixture::new(0);
+            *f.engine.core.writer.write() = Some(Arc::new(FailingWriter));
+            let key = f.key();
+            f.engine.limit_source_retries(&key, limit(7, Some(1)));
+            f.engine
+                .enqueue_from_source(&key, f.read(1, 1, b"kept", 0))
+                .unwrap();
+            f.turn().await;
+            f.advance(2 * 86_400);
+            f.turn().await;
+            assert_eq!(f.queued(), 1, "past 24 hours, inside the retention");
+            f.engine.limit_source_retries(&key, expired_limit);
+            f.advance(age_days * 86_400 + RETRY_INTERVAL.as_secs());
+            f.turn().await;
+            assert_eq!(f.queued(), 0);
+            let progress = f.engine.source_progress(&key);
+            assert_eq!(progress.committed["1/shard-0"], 1);
+            assert!(!progress.backlogged);
+        }
+    }
+
+    #[tokio::test]
+    async fn source_batches_outlive_the_24_hour_retry_limit() {
+        let f = Fixture::new(0);
+        *f.engine.core.writer.write() = Some(Arc::new(FailingWriter));
+        let key = f.key();
+        f.engine
+            .enqueue_from_source(&key, f.read(0, 1, b"kept", 0))
+            .unwrap();
+        f.turn().await;
+        f.advance(2 * 86_400);
+        f.turn().await;
+        let progress = f.engine.source_progress(&key);
+        assert!(progress.committed.is_empty());
+        assert!(progress.backlogged);
+        let registry = f.engine.core.registry.lock();
+        assert_eq!(registry.streams.values().next().unwrap().queue.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn source_progress_reports_a_destination_that_refuses_records() {
+        let f = Fixture::new(0);
+        let key = f.key();
+        let progress = || f.engine.source_progress(&key);
+        assert_eq!(progress().refused, None);
+        f.update(NAME, |stream| {
+            stream
+                .extra_destinations
+                .insert("SplunkDestinationDescription".into(), json!({}));
+        });
+        assert!(progress().refused.unwrap().contains("SplunkDestination"));
     }
 
     #[tokio::test]
