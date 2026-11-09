@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use fakecloud_aws::ec2query::{ec2_elem, ec2_list, ec2_return};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::instance_types::InstanceTypeSpec;
+use crate::instance_types::{Accelerator, InstanceTypeSpec};
 use crate::service::resource_quotas as rq;
 use crate::service::Ec2Service;
 use crate::service_helpers::{
@@ -452,6 +452,9 @@ pub(crate) fn launch_instances(
     };
     let params = &params;
     validate_enum_instance_type(params)?;
+    // Recorded: a dry run refuses an unknown type, but passes a type the requested
+    // zone does not sell.
+    crate::service::capacity::refuse_dry_run(params)?;
     validate_enum(
         params,
         "InstanceInitiatedShutdownBehavior",
@@ -584,8 +587,11 @@ pub(crate) fn launch_instances(
         let empty = Ec2State::new(account_id, region);
         let state = accounts.regional(account_id, region).unwrap_or(&empty);
         // The instance lands in its subnet's AZ; without a subnet, in the
-        // requested `Placement.AvailabilityZone` (else the region's first AZ).
-        let wanted_az = placement_az.clone().unwrap_or_else(|| format!("{region}a"));
+        // requested `Placement.AvailabilityZone`, else in a zone selling the type.
+        let explicit_subnet = subnet_id.is_some();
+        let wanted_az = placement_az
+            .clone()
+            .unwrap_or_else(|| zone_selling(state, &instance_type, region));
         // No explicit subnet: land in the default VPC's default subnet for the
         // target AZ (falling back to any default subnet), exactly as AWS does.
         // This fills `subnet_id`/`vpc_id` so DescribeInstances reports a real
@@ -603,9 +609,11 @@ pub(crate) fn launch_instances(
         }
         let subnet = subnet_id.as_ref().and_then(|sid| state.subnets.get(sid));
         let az = subnet
+            .filter(|s| explicit_subnet || s.availability_zone == wanted_az)
             .map(|s| s.availability_zone.clone())
             .filter(|a| !a.is_empty())
             .unwrap_or(wanted_az);
+        refuse_zone_not_selling(&instance_type, region, &az)?;
         // When the caller named no security group, AWS attaches the VPC's
         // `default` group. Resolve it from the subnet's VPC (or the default VPC).
         let resolved_vpc = subnet.map(|s| s.vpc_id.clone());
@@ -1652,16 +1660,77 @@ pub(crate) async fn cfn_terminate_instance(
 }
 
 fn validate_enum_instance_type(params: &HashMap<String, String>) -> Result<(), AwsServiceError> {
-    // InstanceType has ~850 enum members; accept any non-empty value that looks
-    // like a `family.size` token rather than enumerating them all.
     if let Some(v) = params.get("InstanceType").filter(|v| !v.is_empty()) {
-        if !v.contains('.') {
+        if crate::instance_types::lookup(v).is_none() {
             return Err(invalid_parameter_value(format!(
-                "Invalid instance type '{v}'"
+                "Invalid value '{v}' for InstanceType."
             )));
         }
     }
     Ok(())
+}
+
+/// The zones of `region` that sell `instance_type`.
+fn zones_selling(instance_type: &str, region: &str) -> Vec<String> {
+    let Some(spec) = crate::instance_types::lookup(instance_type) else {
+        return Vec::new();
+    };
+    crate::defaults::region_zones(region)
+        .into_iter()
+        .map(|(zone, _)| zone)
+        .filter(|zone| spec.offered_in_zone(region, zone))
+        .collect()
+}
+
+/// Where a launch naming no zone lands: a zone selling the type, preferably with a
+/// default subnet. A type the Region does not sell at all is refused for the first zone.
+fn zone_selling(state: &Ec2State, instance_type: &str, region: &str) -> String {
+    let selling = zones_selling(instance_type, region);
+    selling
+        .iter()
+        .find(|zone| {
+            state
+                .subnets
+                .values()
+                .any(|s| s.default_for_az && &&s.availability_zone == zone)
+        })
+        .or(selling.first())
+        .cloned()
+        .unwrap_or_else(|| format!("{region}a"))
+}
+
+/// Refuses a launch in a zone that does not sell the type, as recorded from real EC2
+/// for m5.large in us-east-1e. A Region selling it nowhere was not recorded, so the
+/// same refusal there, without the zones to retry in, is inferred.
+fn refuse_zone_not_selling(
+    instance_type: &str,
+    region: &str,
+    zone: &str,
+) -> Result<(), AwsServiceError> {
+    let Some(spec) = crate::instance_types::lookup(instance_type) else {
+        return Ok(());
+    };
+    // A zone outside this Region is not this check's to judge.
+    if !zone.starts_with(region) || spec.offered_in_zone(region, zone) {
+        return Ok(());
+    }
+    let selling = zones_selling(instance_type, region);
+    let retry = if selling.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Please retry your request by not specifying an Availability Zone or choosing {}.",
+            selling.join(", ")
+        )
+    };
+    Err(AwsServiceError::aws_error(
+        http::StatusCode::BAD_REQUEST,
+        "Unsupported",
+        format!(
+            "Your requested instance type ({instance_type}) is not supported in your \
+             requested Availability Zone ({zone}).{retry}"
+        ),
+    ))
 }
 
 /// Is a transition to `new_code` legal from the instance's `current` state?
@@ -2441,86 +2510,16 @@ pub(crate) fn describe_instance_status(
     ))
 }
 
-/// Every filter name in the Smithy model's `DescribeInstanceTypes` filter list.
-const KNOWN_INSTANCE_TYPE_FILTERS: &[&str] = &[
-    "auto-recovery-supported",
-    "bare-metal",
-    "burstable-performance-supported",
-    "current-generation",
-    "dedicated-hosts-supported",
-    "ebs-info.attachment-limit-type",
-    "ebs-info.maximum-ebs-attachments",
-    "ebs-info.ebs-optimized-info.baseline-bandwidth-in-mbps",
-    "ebs-info.ebs-optimized-info.baseline-iops",
-    "ebs-info.ebs-optimized-info.baseline-throughput-in-mbps",
-    "ebs-info.ebs-optimized-info.maximum-bandwidth-in-mbps",
-    "ebs-info.ebs-optimized-info.maximum-iops",
-    "ebs-info.ebs-optimized-info.maximum-throughput-in-mbps",
-    "ebs-info.ebs-optimized-support",
-    "ebs-info.encryption-support",
-    "ebs-info.nvme-support",
-    "free-tier-eligible",
-    "hibernation-supported",
-    "hypervisor",
-    "instance-storage-info.disk.count",
-    "instance-storage-info.disk.size-in-gb",
-    "instance-storage-info.disk.type",
-    "instance-storage-info.encryption-support",
-    "instance-storage-info.nvme-support",
-    "instance-storage-info.total-size-in-gb",
-    "instance-storage-supported",
-    "instance-type",
-    "memory-info.size-in-mib",
-    "network-info.bandwidth-weightings",
-    "network-info.efa-info.maximum-efa-interfaces",
-    "network-info.efa-supported",
-    "network-info.ena-support",
-    "network-info.flexible-ena-queues-support",
-    "network-info.encryption-in-transit-supported",
-    "network-info.ipv4-addresses-per-interface",
-    "network-info.ipv6-addresses-per-interface",
-    "network-info.ipv6-supported",
-    "network-info.maximum-network-cards",
-    "network-info.maximum-network-interfaces",
-    "network-info.network-performance",
-    "nitro-enclaves-support",
-    "nitro-tpm-support",
-    "nitro-tpm-info.supported-versions",
-    "processor-info.supported-architecture",
-    "processor-info.sustained-clock-speed-in-ghz",
-    "processor-info.supported-features",
-    "reboot-migration-support",
-    "supported-boot-mode",
-    "supported-root-device-type",
-    "supported-usage-class",
-    "supported-virtualization-type",
-    "vcpu-info.default-cores",
-    "vcpu-info.default-threads-per-core",
-    "vcpu-info.default-vcpus",
-    "vcpu-info.valid-cores",
-    "vcpu-info.valid-threads-per-core",
-];
+/// The element a `DescribeInstanceTypes` filter compares against.
+fn instance_type_filter_path(name: &str) -> Option<&'static str> {
+    crate::instance_types::INSTANCE_TYPE_FILTERS
+        .iter()
+        .find(|(filter, _)| *filter == name)
+        .map(|(_, path)| *path)
+}
 
-fn validate_instance_type_filters(filters: &[Filter]) -> Result<(), AwsServiceError> {
-    let any_type = &crate::instance_types::catalog()[0];
-    for f in filters {
-        let name = f.name.as_str();
-        if !KNOWN_INSTANCE_TYPE_FILTERS.contains(&name) {
-            return Err(AwsServiceError::aws_error(
-                http::StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                format!("The filter '{name}' is invalid"),
-            ));
-        }
-        if any_type.filter_values(name).is_none() {
-            return Err(AwsServiceError::aws_error(
-                http::StatusCode::BAD_REQUEST,
-                "UnsupportedOperation",
-                format!("The filter '{name}' is not supported by this emulator"),
-            ));
-        }
-    }
-    Ok(())
+pub(crate) fn invalid_catalog_filter(name: &str) -> AwsServiceError {
+    invalid_parameter_value(format!("The filter '{name}' is invalid"))
 }
 
 /// A filter value matches literally or by wildcard; for a number, `1250.0`
@@ -2533,10 +2532,28 @@ fn instance_type_filter_value_matches(pattern: &str, actual: &str) -> bool {
         )
 }
 
-fn instance_type_matches_filters(spec: &InstanceTypeSpec, filters: &[Filter]) -> bool {
-    filters.iter().all(|f| {
-        let actual = spec.filter_values(&f.name).unwrap_or_default();
-        f.values.iter().any(|pattern| {
+/// The filters resolved to their elements, each with the patterns it allows.
+fn resolve_instance_type_filters(
+    filters: &[Filter],
+) -> Result<Vec<(&'static str, &[String])>, AwsServiceError> {
+    filters
+        .iter()
+        .map(|f| {
+            instance_type_filter_path(&f.name)
+                .map(|path| (path, f.values.as_slice()))
+                .ok_or_else(|| invalid_catalog_filter(&f.name))
+        })
+        .collect()
+}
+
+fn instance_type_matches_filters(
+    spec: &InstanceTypeSpec,
+    region: &str,
+    filters: &[(&'static str, &[String])],
+) -> bool {
+    filters.iter().all(|(path, patterns)| {
+        let actual = spec.values_in(region, path);
+        patterns.iter().any(|pattern| {
             actual
                 .iter()
                 .any(|a| instance_type_filter_value_matches(pattern, a))
@@ -2544,115 +2561,15 @@ fn instance_type_matches_filters(spec: &InstanceTypeSpec, filters: &[Filter]) ->
     })
 }
 
-/// `<tag><item>value</item>...</tag>`, with each value escaped.
-fn value_list(tag: &str, values: &[String]) -> String {
-    let items: Vec<String> = values
-        .iter()
-        .map(|v| fakecloud_aws::xml::xml_escape(v))
-        .collect();
-    ec2_list(tag, &items)
-}
-
-/// `<tag>value</tag>`, or nothing when the value is unknown.
+/// `<tag>value</tag>`, or nothing when the value is absent.
 fn known_elem(tag: &str, value: Option<impl ToString>) -> String {
     value.map_or_else(String::new, |v| ec2_elem(tag, &v.to_string()))
 }
 
-fn instance_storage_xml(spec: &InstanceTypeSpec) -> String {
-    let Some(s) = &spec.instance_storage else {
-        return String::new();
-    };
-    format!(
-        "<instanceStorageInfo><totalSizeInGB>{}</totalSizeInGB><disks><item>\
-         <sizeInGB>{}</sizeInGB><count>{}</count><type>{}</type></item></disks>\
-         <nvmeSupport>{}</nvmeSupport></instanceStorageInfo>",
-        s.total_gb, s.disk_size_gb, s.disk_count, s.disk_type, s.nvme_support,
-    )
-}
-
-/// The element exists for every type: the Terraform `aws_ec2_instance_type` data
-/// source reads into it unconditionally.
-fn ebs_info_xml(spec: &InstanceTypeSpec) -> String {
-    let optimized = spec
-        .ebs_optimized_info
-        .as_ref()
-        .map_or_else(String::new, |e| {
-            format!(
-                "<ebsOptimizedInfo><baselineBandwidthInMbps>{}</baselineBandwidthInMbps>\
-             <baselineThroughputInMBps>{:?}</baselineThroughputInMBps>\
-             <baselineIops>{}</baselineIops>\
-             <maximumBandwidthInMbps>{}</maximumBandwidthInMbps>\
-             <maximumThroughputInMBps>{:?}</maximumThroughputInMBps>\
-             <maximumIops>{}</maximumIops></ebsOptimizedInfo>",
-                e.baseline_bandwidth_mbps,
-                e.baseline_throughput_mbps,
-                e.baseline_iops,
-                e.max_bandwidth_mbps,
-                e.max_throughput_mbps,
-                e.max_iops,
-            )
-        });
-    format!(
-        "<ebsInfo>{}{optimized}{}</ebsInfo>",
-        known_elem("ebsOptimizedSupport", spec.ebs_optimized_support.as_ref()),
-        known_elem("nvmeSupport", spec.ebs_nvme_support.as_ref()),
-    )
-}
-
-/// Exists for every type, see [`ebs_info_xml`].
-fn network_info_xml(spec: &InstanceTypeSpec) -> String {
-    format!(
-        "<networkInfo>{}{}{}{}{}{}</networkInfo>",
-        ec2_elem("networkPerformance", &spec.network_performance),
-        known_elem("maximumNetworkInterfaces", spec.max_network_interfaces),
-        known_elem("ipv4AddressesPerInterface", spec.ipv4_per_interface),
-        known_elem(
-            "ipv6AddressesPerInterface",
-            spec.ipv6_addresses_per_interface(),
-        ),
-        known_elem("ipv6Supported", spec.ipv6_supported),
-        known_elem("enaSupport", spec.ena_support.as_ref()),
-    )
-}
-
 fn instance_type_item(spec: &InstanceTypeSpec, region: &str) -> String {
-    let strategies = if spec.placement_strategies.is_empty() {
-        String::new()
-    } else {
-        value_list("supportedStrategies", &spec.placement_strategies)
-    };
-    let usage_classes = spec.usage_classes();
-    let usage_classes = if usage_classes.is_empty() {
-        String::new()
-    } else {
-        value_list("supportedUsageClasses", &usage_classes)
-    };
-    let cores = known_elem("defaultCores", spec.cores);
-    let threads = known_elem("defaultThreadsPerCore", spec.threads_per_core);
     format!(
-        "{}<currentGeneration>{}</currentGeneration>{usage_classes}{}\
-         <bareMetal>{}</bareMetal>{}\
-         <processorInfo>{}{}</processorInfo>\
-         <vCpuInfo><defaultVCpus>{}</defaultVCpus>{cores}{threads}</vCpuInfo>\
-         <memoryInfo><sizeInMiB>{}</sizeInMiB></memoryInfo>{}{}{}{}\
-         <placementGroupInfo>{strategies}</placementGroupInfo>\
-         <burstablePerformanceSupported>{}</burstablePerformanceSupported>{}\
-         <supportedInRegion>{}</supportedInRegion>",
-        ec2_elem("instanceType", &spec.name),
-        spec.current_generation,
-        value_list("supportedVirtualizationTypes", &spec.virtualization_types),
-        spec.bare_metal,
-        known_elem("hypervisor", spec.hypervisor.as_ref()),
-        value_list("supportedArchitectures", &spec.architectures),
-        known_elem("manufacturer", spec.manufacturer.as_ref()),
-        spec.vcpus,
-        spec.memory_mib,
-        known_elem("instanceStorageSupported", spec.instance_storage_supported),
-        instance_storage_xml(spec),
-        ebs_info_xml(spec),
-        network_info_xml(spec),
-        spec.burstable,
-        known_elem("nitroEnclavesSupport", spec.nitro_enclaves_support.as_ref()),
+        "{}<supportedInRegion>{}</supportedInRegion>",
+        spec.info_xml(region),
         spec.offered_in(region),
     )
 }
@@ -2668,16 +2585,22 @@ pub(crate) fn request_region(req: &AwsRequest) -> &str {
 
 /// One page of a catalog listing. These operations are in
 /// `pagination::HANDLER_PAGED` so only the page is rendered: re-parsing the XML
-/// of 1,430 types for every page is what the dispatch layer would otherwise do.
+/// of the whole catalog for every page is what the dispatch layer would otherwise
+/// do.
+///
+/// `default_size` is what a request without `MaxResults` gets: real EC2 was recorded
+/// answering `DescribeInstanceTypes` with 100 types and a token, and
+/// `DescribeInstanceTypeOfferings` with 1000 and a token.
 pub(crate) fn catalog_page<T: Clone>(
     items: &[T],
     req: &AwsRequest,
+    default_size: Option<usize>,
 ) -> Result<(Vec<T>, Option<String>), AwsServiceError> {
     let size = crate::service_helpers::parse_page_size(&req.query_params)?;
     crate::service_helpers::paginate(
         items,
         req.query_params.get("NextToken").map(String::as_str),
-        size.map(|n| n as usize),
+        size.map(|n| n as usize).or(default_size),
     )
 }
 
@@ -2694,7 +2617,6 @@ pub(crate) fn describe_instance_types(
     _svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    crate::service_helpers::validate_max_results(&req.query_params, 5, 100)?;
     let wanted = indexed_list(&req.query_params, "InstanceType");
     let filters = parse_filters(&req.query_params);
     let region = request_region(req);
@@ -2718,14 +2640,14 @@ pub(crate) fn describe_instance_types(
             ),
         ));
     }
-    validate_instance_type_filters(&filters)?;
+    let filters = resolve_instance_type_filters(&filters)?;
     let matching: Vec<&InstanceTypeSpec> = crate::instance_types::catalog()
         .iter()
         .filter(|t| in_scope(t))
         .filter(|t| wanted.is_empty() || wanted.contains(&t.name))
-        .filter(|t| instance_type_matches_filters(t, &filters))
+        .filter(|t| instance_type_matches_filters(t, region, &filters))
         .collect();
-    let (page, next_token) = catalog_page(&matching, req)?;
+    let (page, next_token) = catalog_page(&matching, req, Some(100))?;
     let items: Vec<String> = page.iter().map(|t| instance_type_item(t, region)).collect();
     Ok(Ec2Service::respond(
         "DescribeInstanceTypes",
@@ -2763,12 +2685,13 @@ fn requirement_range(
     Ok((side("Min")?, side("Max")?))
 }
 
-/// Within the range. A range was asked for and the value is unknown: no match.
-fn in_range(actual: Option<f64>, (min, max): (Option<f64>, Option<f64>)) -> bool {
+/// Within the range. A range was asked for and the value is unknown: no match. The
+/// value is only computed when a range was asked for.
+fn in_range((min, max): (Option<f64>, Option<f64>), actual: impl FnOnce() -> Option<f64>) -> bool {
     if min.is_none() && max.is_none() {
         return true;
     }
-    actual.is_some_and(|a| min.is_none_or(|m| a >= m) && max.is_none_or(|m| a <= m))
+    actual().is_some_and(|a| min.is_none_or(|m| a >= m) && max.is_none_or(|m| a <= m))
 }
 
 fn validate_enum_values(
@@ -2791,6 +2714,73 @@ fn inclusion_matches(policy: &str, has: Option<bool>) -> bool {
         "required" => has == Some(true),
         "excluded" => has == Some(false),
         _ => true,
+    }
+}
+
+/// The longest `InstanceFamily` real EC2 accepted: 30 characters, 31 is refused.
+const MAX_BASELINE_REFERENCE_LENGTH: usize = 30;
+
+/// The `BaselinePerformanceFactors` reference family, refused as recorded from real
+/// EC2. A reference without a family does not narrow anything.
+fn baseline_reference(params: &HashMap<String, String>) -> Result<Option<String>, AwsServiceError> {
+    const REFERENCE: &str = "InstanceRequirements.BaselinePerformanceFactors.Cpu.Reference.";
+    let families: Vec<&String> = params
+        .iter()
+        .filter(|(key, _)| key.starts_with(REFERENCE) && key.ends_with(".InstanceFamily"))
+        .map(|(_, family)| family)
+        .collect();
+    if families.len() > 1 {
+        return Err(invalid_parameter_value(
+            "CPU.References contain more than the maximum allowed number of items (1). \
+             Remove additional references, and try again.",
+        ));
+    }
+    let Some(family) = families.first() else {
+        return Ok(None);
+    };
+    let valid = (1..=MAX_BASELINE_REFERENCE_LENGTH).contains(&family.len())
+        && family
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !valid {
+        return Err(invalid_parameter_value(
+            "CPU.References contain invalid value for the referred Instance Family. \
+             Correct it, and try again.",
+        ));
+    }
+    Ok(Some((*family).clone()))
+}
+
+/// `AcceleratorNames`, refused as recorded from real EC2.
+fn accelerator_names(params: &HashMap<String, String>) -> Result<Vec<String>, AwsServiceError> {
+    const VALID: &[&str] = &[
+        "a10g",
+        "a100",
+        "h100",
+        "inferentia",
+        "k520",
+        "k80",
+        "m60",
+        "radeon-pro-v520",
+        "t4",
+        "t4g",
+        "vu9p",
+        "v100",
+        "l40s",
+        "l4",
+        "gaudi-hl-205",
+        "inferentia2",
+        "trainium",
+        "trainium2",
+        "u30",
+    ];
+    let names = indexed_list(params, "InstanceRequirements.AcceleratorName");
+    match names.iter().find(|n| !VALID.contains(&n.as_str())) {
+        Some(bad) => Err(invalid_parameter_value(format!(
+            "The value '{bad}' for AcceleratorNames is not valid. Valid values: [{}]",
+            VALID.join(", ")
+        ))),
+        None => Ok(names),
     }
 }
 
@@ -2818,6 +2808,9 @@ struct InstanceRequirementsQuery {
     bare_metal: String,
     burstable: String,
     local_storage: String,
+    require_hibernate: bool,
+    require_encryption_in_transit: bool,
+    baseline_reference: Option<String>,
 }
 
 impl InstanceRequirementsQuery {
@@ -2895,30 +2888,7 @@ impl InstanceRequirementsQuery {
                 "AcceleratorManufacturer",
                 &["amazon-web-services", "amd", "nvidia", "xilinx", "habana"],
             )?,
-            accelerator_names: enum_list(
-                "AcceleratorName",
-                &[
-                    "a100",
-                    "inferentia",
-                    "k520",
-                    "k80",
-                    "m60",
-                    "radeon-pro-v520",
-                    "t4",
-                    "vu9p",
-                    "v100",
-                    "a10g",
-                    "h100",
-                    "t4g",
-                    "l40s",
-                    "l4",
-                    "gaudi-hl-205",
-                    "inferentia2",
-                    "trainium",
-                    "trainium2",
-                    "u30",
-                ],
-            )?,
+            accelerator_names: accelerator_names(params)?,
             manufacturers: enum_list(
                 "CpuManufacturer",
                 &["intel", "amd", "amazon-web-services", "apple"],
@@ -2930,6 +2900,30 @@ impl InstanceRequirementsQuery {
             bare_metal: inclusion("BareMetal", "excluded")?,
             burstable: inclusion("BurstablePerformance", "excluded")?,
             local_storage: inclusion("LocalStorage", "included")?,
+            require_hibernate: params
+                .get("InstanceRequirements.RequireHibernateSupport")
+                .is_some_and(|v| v == "true"),
+            require_encryption_in_transit: params
+                .get("InstanceRequirements.RequireEncryptionInTransit")
+                .is_some_and(|v| v == "true"),
+            baseline_reference: baseline_reference(params)?,
+        })
+    }
+
+    /// Real EC2 lists nothing for a reference family the Region does not sell, or that
+    /// the `BurstablePerformance` policy rules out: `t3` while burstable types are
+    /// excluded (the default), `m5` while they are required.
+    fn baseline_reference_usable_in(&self, region: &str) -> bool {
+        let Some(reference) = &self.baseline_reference else {
+            return true;
+        };
+        crate::instance_types::catalog().iter().any(|t| {
+            t.family().eq_ignore_ascii_case(reference)
+                && t.offered_in(region)
+                && inclusion_matches(
+                    &self.burstable,
+                    t.known_flag("burstablePerformanceSupported"),
+                )
         })
     }
 
@@ -2939,100 +2933,90 @@ impl InstanceRequirementsQuery {
                 .iter()
                 .any(|p| crate::service_helpers::filter_value_matches(p, &t.name))
         };
-        let storage = t.instance_storage.as_ref();
-        let generation = if t.current_generation {
+        let contains_any = |wanted: &[String], path: &str| {
+            let actual = t.values(path);
+            wanted.iter().any(|w| actual.contains(&w.as_str()))
+        };
+        let any_of =
+            |wanted: &[String], path: &str| wanted.is_empty() || contains_any(wanted, path);
+        // An accelerator asked for of a type whose devices are unknown: no match.
+        let any_device = |wanted: &[String], actual: fn(&Accelerator) -> Option<&'static str>| {
+            wanted.is_empty()
+                || t.accelerators().is_some_and(|devices| {
+                    devices
+                        .iter()
+                        .filter_map(actual)
+                        .any(|a| wanted.iter().any(|w| w == a))
+                })
+        };
+        let generation = if t.flag("currentGeneration") {
             "current"
         } else {
             "previous"
         };
         // The API's CpuManufacturer values, against the `manufacturer` element.
-        let manufacturer = match t.manufacturer.as_deref() {
+        let manufacturer = match t.text("processorInfo.manufacturer") {
             Some("Intel") => Some("intel"),
             Some("AMD") => Some("amd"),
             Some("AWS") => Some("amazon-web-services"),
             Some("Apple") => Some("apple"),
             _ => None,
         };
-        let any_of = |wanted: &[String], actual: Option<&str>| {
-            wanted.is_empty() || actual.is_some_and(|a| wanted.iter().any(|w| w == a))
-        };
-        // No disks at all is a known 0, unlike a type whose storage is unknown.
-        let local_storage_gb = match (storage, t.instance_storage_supported) {
-            (Some(s), _) => Some(s.total_gb as f64),
-            (None, Some(false)) => Some(0.0),
-            _ => None,
-        };
-        // Likewise no accelerator is a known 0; one the data has no figure for
-        // is unknown.
-        let accelerator = t.accelerator.as_ref();
-        let accelerator_count = match accelerator {
-            Some(a) => a.count.map(f64::from),
-            None => Some(0.0),
-        };
-        let accelerator_memory = match accelerator {
-            Some(a) => a.total_memory_mib.map(|m| m as f64),
-            None => Some(0.0),
-        };
-        self.architectures
-            .iter()
-            .any(|a| t.architectures.contains(a))
-            && self
-                .virtualization_types
-                .iter()
-                .any(|v| t.virtualization_types.contains(v))
-            && in_range(Some(f64::from(t.vcpus)), self.vcpus)
-            && in_range(Some(t.memory_mib as f64), self.memory_mib)
-            && in_range(
-                Some(t.memory_mib as f64 / 1024.0 / f64::from(t.vcpus)),
-                self.memory_gib_per_vcpu,
-            )
-            && in_range(
-                t.max_network_interfaces.map(f64::from),
-                self.network_interfaces,
-            )
-            && in_range(local_storage_gb, self.local_storage_gb)
-            && in_range(accelerator_count, self.accelerator_count)
-            && in_range(accelerator_memory, self.accelerator_memory_mib)
-            && any_of(
-                &self.accelerator_types,
-                accelerator.map(|a| a.kind.as_str()),
-            )
-            && any_of(
-                &self.accelerator_manufacturers,
-                accelerator.and_then(|a| a.manufacturer.as_deref()),
-            )
-            && any_of(
-                &self.accelerator_names,
-                accelerator.and_then(|a| a.name.as_deref()),
-            )
-            && in_range(
-                t.ebs_optimized_info
-                    .as_ref()
-                    .map(|e| e.baseline_bandwidth_mbps as f64),
-                self.ebs_bandwidth_mbps,
-            )
-            && in_range(t.network_bandwidth_gbps, self.network_bandwidth_gbps)
-            && any_of(&self.manufacturers, manufacturer)
-            && any_of(&self.generations, Some(generation))
+        let vcpus = t.number("vCpuInfo.defaultVCpus");
+        let memory_mib = t.number("memoryInfo.sizeInMiB");
+        let has_local_storage = t.known_flag("instanceStorageSupported");
+        contains_any(&self.architectures, "processorInfo.supportedArchitectures")
+            && contains_any(&self.virtualization_types, "supportedVirtualizationTypes")
+            && in_range(self.vcpus, || vcpus)
+            && in_range(self.memory_mib, || memory_mib)
+            && in_range(self.memory_gib_per_vcpu, || {
+                memory_mib.zip(vcpus).map(|(m, v)| m / 1024.0 / v)
+            })
+            && in_range(self.network_interfaces, || {
+                t.number("networkInfo.maximumNetworkInterfaces")
+            })
+            // No disks at all is a known 0, unlike a type whose storage is unknown.
+            && in_range(self.local_storage_gb, || {
+                t.number("instanceStorageInfo.totalSizeInGB")
+                    .or((has_local_storage == Some(false)).then_some(0.0))
+            })
+            && in_range(self.accelerator_count, || {
+                t.accelerators()
+                    .map(|devices| devices.iter().map(|d| d.count).sum())
+            })
+            && any_device(&self.accelerator_types, |d| d.kind)
+            && any_device(&self.accelerator_manufacturers, |d| d.manufacturer)
+            && any_device(&self.accelerator_names, |d| d.name)
+            && in_range(self.accelerator_memory_mib, || t.accelerator_memory_mib())
+            && in_range(self.ebs_bandwidth_mbps, || {
+                t.number("ebsInfo.ebsOptimizedInfo.baselineBandwidthInMbps")
+            })
+            && in_range(self.network_bandwidth_gbps, || t.baseline_network_gbps())
+            && (self.manufacturers.is_empty()
+                || manufacturer.is_some_and(|m| self.manufacturers.iter().any(|w| w == m)))
+            && (self.generations.is_empty() || self.generations.iter().any(|g| g == generation))
             && (self.allowed_types.is_empty() || type_listed(&self.allowed_types))
             && !type_listed(&self.excluded_types)
-            && any_of(
-                &self.local_storage_types,
-                storage.map(|s| s.disk_type.as_str()),
+            && any_of(&self.local_storage_types, "instanceStorageInfo.disks.type")
+            && inclusion_matches(&self.bare_metal, t.known_flag("bareMetal"))
+            && inclusion_matches(
+                &self.burstable,
+                t.known_flag("burstablePerformanceSupported"),
             )
-            && inclusion_matches(&self.bare_metal, Some(t.bare_metal))
-            && inclusion_matches(&self.burstable, Some(t.burstable))
-            && inclusion_matches(&self.local_storage, t.instance_storage_supported)
+            && inclusion_matches(&self.local_storage, has_local_storage)
+            && self
+                .baseline_reference
+                .as_ref()
+                .is_none_or(|r| t.included_by_baseline_reference(r))
+            && (!self.require_hibernate || t.flag("hibernationSupported"))
+            && (!self.require_encryption_in_transit
+                || t.flag("networkInfo.encryptionInTransitSupported"))
     }
 }
 
 /// Evaluates `InstanceRequirements` against the types sold in the request's
-/// Region. The catalog has no data for hibernation, in-transit encryption or
-/// baseline performance factors, and the price protection members compare live
-/// per-zone Spot prices against the cheapest matching C, M or R type, which a
-/// per-Region snapshot cannot answer. Those are accepted without narrowing the
-/// result: refusing them is an error the model does not declare for this
-/// operation, which the EC2 conformance probe rejects.
+/// Region. The three price protection members do not narrow the result, as recorded:
+/// at 1% each, real EC2 returned the same types as with none.
 pub(crate) fn get_instance_types_from_requirements(
     _svc: &Ec2Service,
     req: &AwsRequest,
@@ -3043,11 +3027,12 @@ pub(crate) fn get_instance_types_from_requirements(
     require_struct(&req.query_params, "InstanceRequirements")?;
     let query = InstanceRequirementsQuery::parse(&req.query_params)?;
     let region = request_region(req);
+    let reference_usable = query.baseline_reference_usable_in(region);
     let matching: Vec<&InstanceTypeSpec> = crate::instance_types::catalog()
         .iter()
-        .filter(|t| t.offered_in(region) && query.matches(t))
+        .filter(|t| reference_usable && t.listed_by_requirements_in(region) && query.matches(t))
         .collect();
-    let (page, next_token) = catalog_page(&matching, req)?;
+    let (page, next_token) = catalog_page(&matching, req, None)?;
     let items: Vec<String> = page
         .iter()
         .map(|t| ec2_elem("instanceType", &t.name))
