@@ -146,7 +146,7 @@ pub fn parse_s3_destination(value: &Value) -> Result<Option<S3Destination>, AwsS
 pub(crate) fn s3_bucket_name(dest: &S3Destination) -> Result<&str, AwsServiceError> {
     fakecloud_aws::arn::arn_resource(&dest.bucket_arn, "s3")
         .and_then(|resource| resource.strip_prefix("::"))
-        .filter(|bucket| !bucket.is_empty())
+        .filter(|bucket| !bucket.is_empty() && !bucket.contains(['/', ':']))
         .ok_or_else(|| invalid_argument("S3 destination requires a bucket ARN"))
 }
 

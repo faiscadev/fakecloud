@@ -136,6 +136,21 @@ fn nonempty<'a>(config: &'a Value, member: &str) -> Option<&'a str> {
 /// What makes a stored destination invalid on AWS too, as opposed to what only
 /// this emulator cannot deliver: `delivery` refuses that when records arrive,
 /// and a `DomainARN` destination is configuration AWS accepts.
+/// A member that defaults when absent, which a value of another type must not
+/// pass for.
+fn optional_string<'a>(
+    config: &'a Value,
+    member: &str,
+) -> Result<Option<&'a str>, AwsServiceError> {
+    match &config[member] {
+        Value::Null => Ok(None),
+        Value::String(value) => Ok(Some(value)),
+        other => Err(invalid_argument(format!(
+            "{member} must be a string, got {other}"
+        ))),
+    }
+}
+
 fn validate_settings(config: &Value) -> Result<S3Destination, AwsServiceError> {
     if nonempty(config, "ClusterEndpoint").is_none() && nonempty(config, "DomainARN").is_none() {
         return Err(invalid_argument(
@@ -145,7 +160,7 @@ fn validate_settings(config: &Value) -> Result<S3Destination, AwsServiceError> {
     if nonempty(config, "IndexName").is_none() {
         return Err(invalid_argument("IndexName is required"));
     }
-    let rotation = config["IndexRotationPeriod"].as_str().unwrap_or("OneDay");
+    let rotation = optional_string(config, "IndexRotationPeriod")?.unwrap_or("OneDay");
     if !matches!(
         rotation,
         "NoRotation" | "OneHour" | "OneDay" | "OneWeek" | "OneMonth"
@@ -155,7 +170,7 @@ fn validate_settings(config: &Value) -> Result<S3Destination, AwsServiceError> {
         )));
     }
     if !matches!(
-        config["S3BackupMode"].as_str(),
+        optional_string(config, "S3BackupMode")?,
         None | Some("FailedDocumentsOnly" | "AllDocuments")
     ) {
         return Err(invalid_argument(format!(

@@ -48,6 +48,9 @@ pub(crate) const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Pending decoded bytes at which a stream stops reading its Kinesis source.
 const MAX_SOURCE_BACKLOG_BYTES: usize = 128 * 1024 * 1024;
+/// Empty records hold no bytes but each still costs a document ID and an
+/// arrival time, so the byte budget alone would not bound them.
+const MAX_SOURCE_BACKLOG_RECORDS: usize = 1_000_000;
 
 /// Records read from one shard of one incarnation of the source stream. `end`
 /// is the reader's position just past the last record.
@@ -398,7 +401,15 @@ impl FirehoseEngine {
             let pending = buffer.active.as_ref().map_or(0, |a| a.input_bytes)
                 + buffer.queue.iter().map(|b| b.input_bytes).sum::<usize>();
             progress.remaining_bytes = MAX_SOURCE_BACKLOG_BYTES.saturating_sub(pending);
-            progress.backlogged = buffer.failures > 0 || progress.remaining_bytes == 0;
+            let records = buffer.active.as_ref().map_or(0, |a| a.records.len())
+                + buffer
+                    .queue
+                    .iter()
+                    .map(|b| b.batch.records.len())
+                    .sum::<usize>();
+            progress.backlogged = buffer.failures > 0
+                || progress.remaining_bytes == 0
+                || records >= MAX_SOURCE_BACKLOG_RECORDS;
         }
         progress
     }
@@ -1355,6 +1366,29 @@ mod tests {
         f.turn().await;
         assert_eq!(f.batches().len(), 1);
         assert_eq!(f.engine.source_progress(&key).committed["1/shard-0"], 1);
+    }
+
+    #[tokio::test]
+    async fn records_that_hold_no_bytes_cannot_grow_the_source_backlog_without_bound() {
+        let f = Fixture::new(60);
+        let key = f.key();
+        f.engine
+            .enqueue_from_source(&key, f.read(1, 1, b"x", 0))
+            .unwrap();
+        assert!(!f.engine.source_progress(&key).backlogged);
+        f.engine
+            .core
+            .registry
+            .lock()
+            .streams
+            .get_mut(&key)
+            .unwrap()
+            .active
+            .as_mut()
+            .unwrap()
+            .records
+            .resize(MAX_SOURCE_BACKLOG_RECORDS, Bytes::new());
+        assert!(f.engine.source_progress(&key).backlogged);
     }
 
     #[tokio::test]

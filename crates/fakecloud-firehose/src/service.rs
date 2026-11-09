@@ -282,6 +282,21 @@ fn extract_extra_destinations(body: &Value, suffix: &str) -> BTreeMap<String, Va
     out
 }
 
+/// `extract_extra_destinations` passes over anything but an object, which would
+/// leave a malformed search destination unvalidated.
+fn refuse_malformed_search_blocks(body: &Value, suffix: &str) -> Result<(), AwsServiceError> {
+    for base in [
+        "ElasticsearchDestination",
+        "AmazonopensearchserviceDestination",
+    ] {
+        let member = format!("{base}{suffix}");
+        if !matches!(&body[&member], Value::Null | Value::Object(_)) {
+            return Err(invalid_argument(format!("{member} must be a structure")));
+        }
+    }
+    Ok(())
+}
+
 fn is_search_destination(key: &str) -> bool {
     matches!(
         key,
@@ -816,6 +831,7 @@ impl FirehoseService {
             Some(d) => Some(d),
             None => parse_s3_destination(&body["ExtendedS3DestinationConfiguration"])?,
         };
+        refuse_malformed_search_blocks(&body, "Configuration")?;
         let extra_destinations = extract_extra_destinations(&body, "Configuration");
         for (_, search) in extra_destinations
             .iter()
@@ -1227,6 +1243,7 @@ impl FirehoseService {
             )));
         }
 
+        refuse_malformed_search_blocks(&body, "Update")?;
         let extra_updates = extract_extra_destinations(&body, "Update");
         if switches_search_family(stream, s3_update_given, &extra_updates) {
             return Err(invalid_argument(
@@ -1480,6 +1497,74 @@ mod tests {
                 .message()
                 .contains("HttpEndpointDestinationConfiguration"));
         }
+    }
+
+    #[test]
+    fn create_and_update_refuse_malformed_search_settings() {
+        let valid = json!({
+            "RoleARN": "role",
+            "IndexName": "activity",
+            "ClusterEndpoint": "http://localhost:9200",
+            "S3Configuration": {"RoleARN": "role", "BucketARN": "arn:aws:s3:::backup"},
+        });
+        for (member, value) in [
+            ("IndexRotationPeriod", json!(7)),
+            ("S3BackupMode", json!(["AllDocuments"])),
+        ] {
+            let mut destination = valid.clone();
+            destination[member] = value;
+            let error = service()
+                .create_delivery_stream(&request(
+                    "CreateDeliveryStream",
+                    json!({
+                        "DeliveryStreamName": "typed",
+                        "ElasticsearchDestinationConfiguration": destination,
+                    }),
+                ))
+                .err()
+                .unwrap_or_else(|| panic!("{member} of another type is refused"));
+            assert_eq!(error.code(), "InvalidArgumentException");
+        }
+        for bucket in ["arn:aws:s3:::backup/key", "arn:aws:s3:::backup:extra"] {
+            let mut destination = valid.clone();
+            destination["S3Configuration"]["BucketARN"] = json!(bucket);
+            assert!(
+                service()
+                    .create_delivery_stream(&request(
+                        "CreateDeliveryStream",
+                        json!({
+                            "DeliveryStreamName": "bucket",
+                            "ElasticsearchDestinationConfiguration": destination,
+                        }),
+                    ))
+                    .is_err(),
+                "{bucket} is not a bucket ARN"
+            );
+        }
+        assert!(service()
+            .create_delivery_stream(&request(
+                "CreateDeliveryStream",
+                json!({
+                    "DeliveryStreamName": "block",
+                    "AmazonopensearchserviceDestinationConfiguration": "not a structure",
+                }),
+            ))
+            .is_err());
+        let svc = service();
+        let id = search_stream(&svc, "update-block");
+        let error = svc
+            .update_destination(&request(
+                "UpdateDestination",
+                json!({
+                    "DeliveryStreamName": "update-block",
+                    "CurrentDeliveryStreamVersionId": "1",
+                    "DestinationId": id,
+                    "ElasticsearchDestinationUpdate": "not a structure",
+                }),
+            ))
+            .err()
+            .expect("a malformed update block is refused");
+        assert_eq!(error.code(), "InvalidArgumentException");
     }
 
     #[test]
