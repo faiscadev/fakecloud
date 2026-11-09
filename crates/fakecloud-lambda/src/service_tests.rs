@@ -5585,3 +5585,143 @@ async fn invoke_async_requires_a_body() {
         .expect("{} is a valid event");
     assert_eq!(ok.status, StatusCode::ACCEPTED);
 }
+
+#[tokio::test]
+async fn code_signing_config_labels_are_judged_alike_and_issued_ids_stay_usable() {
+    let svc = LambdaService::new(make_state());
+    // Every label operation refuses a malformed ARN before any lookup.
+    let bad = "/2020-04-22/code-signing-configs/%7BCodeSigningConfigArn%7D";
+    for (method, path) in [
+        (Method::GET, bad.to_string()),
+        (Method::PUT, bad.to_string()),
+        (Method::DELETE, bad.to_string()),
+        (Method::GET, format!("{bad}/functions")),
+    ] {
+        assert_eq!(
+            validation_code(svc.handle(make_request(method.clone(), &path, "{}")).await),
+            "ValidationException",
+            "{method} {path}"
+        );
+    }
+
+    // A config an earlier build issued carries a `csc-<nanoseconds>` id the
+    // model's pattern does not admit; it must still be readable, updatable
+    // and deletable.
+    let old_id = "csc-1767225600123456789";
+    let old_arn = format!("arn:aws:lambda:us-east-1:123456789012:code-signing-config:{old_id}");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.regional_mut("123456789012", "us-east-1");
+        state.code_signing_configs.insert(
+            old_id.to_string(),
+            crate::state::CodeSigningConfig {
+                csc_id: old_id.to_string(),
+                csc_arn: old_arn.clone(),
+                description: String::new(),
+                allowed_publishers: Vec::new(),
+                untrusted_artifact_action: "Warn".to_string(),
+                last_modified: chrono::Utc::now(),
+            },
+        );
+    }
+    assert!(crate::extras::validate_csc_arn(&old_arn).is_err());
+    let path = format!(
+        "/2020-04-22/code-signing-configs/{}",
+        old_arn.replace(':', "%3A")
+    );
+    svc.handle(make_request(Method::GET, &path, ""))
+        .await
+        .expect("issued config is readable");
+    svc.handle(make_request(
+        Method::PUT,
+        &path,
+        &json!({"Description": "d"}).to_string(),
+    ))
+    .await
+    .expect("issued config is updatable");
+    svc.handle(make_request(Method::GET, &format!("{path}/functions"), ""))
+        .await
+        .expect("issued config lists its functions");
+    let resp = svc
+        .handle(make_request(Method::DELETE, &path, ""))
+        .await
+        .expect("issued config is deletable");
+    assert!(resp.status.is_success());
+    // Gone now, so the same label is judged by the pattern again.
+    assert_eq!(
+        validation_code(svc.handle(make_request(Method::DELETE, &path, "")).await),
+        "ValidationException"
+    );
+}
+
+#[tokio::test]
+async fn length_constraints_use_lambdas_validation_message() {
+    let svc = svc_with_function().await;
+    let body = json!({"Description": "d".repeat(257)});
+    let Err(err) = svc
+        .handle(make_request(
+            Method::PUT,
+            "/2015-03-31/functions/f/configuration",
+            &body.to_string(),
+        ))
+        .await
+    else {
+        panic!("an overlong Description must be refused");
+    };
+    assert_eq!(err.code(), "ValidationException");
+    assert_eq!(
+        err.message(),
+        format!(
+            "1 validation error detected: Value '{}' at 'description' failed to satisfy \
+             constraint: Member must have length less than or equal to 256",
+            "d".repeat(257)
+        )
+    );
+}
+
+#[tokio::test]
+async fn capacity_provider_arn_input_takes_the_issued_form() {
+    let svc = svc_with_function().await;
+    let update = |arn: &str| {
+        json!({"CapacityProviderConfig": {"LambdaManagedInstancesCapacityProviderConfig": {"CapacityProviderArn": arn}}})
+            .to_string()
+    };
+    let path = "/2015-03-31/functions/f/configuration";
+    // The slash form earlier builds issued is not the model's pattern.
+    assert_eq!(
+        validation_code(
+            svc.handle(make_request(
+                Method::PUT,
+                path,
+                &update("arn:aws:lambda:us-east-1:123456789012:capacity-provider/cp")
+            ))
+            .await
+        ),
+        "ValidationException"
+    );
+    // A region outside the pattern is refused too.
+    assert_eq!(
+        validation_code(
+            svc.handle(make_request(
+                Method::PUT,
+                path,
+                &update("arn:aws:lambda:x:123456789012:capacity-provider:cp")
+            ))
+            .await
+        ),
+        "ValidationException"
+    );
+    // The issued form passes the pattern; the function is a Lambda Default
+    // one, so what refuses it is the recorded semantic check, not validation.
+    assert_eq!(
+        validation_code(
+            svc.handle(make_request(
+                Method::PUT,
+                path,
+                &update("arn:aws:lambda:us-east-1:123456789012:capacity-provider:cp")
+            ))
+            .await
+        ),
+        "InvalidParameterValueException"
+    );
+}

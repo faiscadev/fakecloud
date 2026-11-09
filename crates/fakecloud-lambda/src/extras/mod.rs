@@ -201,74 +201,106 @@ pub(crate) fn null_member(member: &str) -> AwsServiceError {
     )
 }
 
+/// The member name Lambda's input validation quotes: the Smithy member
+/// with its first letter lowered (`Description` -> `description`,
+/// `KMSKeyArn` -> `kMSKeyArn`).
+fn validation_member(field: &str) -> String {
+    let mut chars = field.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// A string member's Smithy `@length`, checked the way Lambda's input
-/// validation does before the operation runs. `member` is the wire name the
-/// message quotes (`statementId`, `functionVersion`).
-pub(crate) fn check_length(
+/// validation does before the operation runs: a refusal is
+/// `ValidationException` "1 validation error detected: Value '...' at
+/// '<member>' failed to satisfy constraint: ...". `field` is the Smithy
+/// member name (`StatementId`); the length counts characters, as Smithy's
+/// does.
+pub(crate) fn check_len(
+    field: &str,
     value: &str,
-    member: &str,
     min: usize,
     max: usize,
 ) -> Result<(), AwsServiceError> {
     let len = value.chars().count();
-    if len < min {
-        return Err(constraint_violation(
-            value,
-            member,
-            &format!("Member must have length greater than or equal to {min}"),
-        ));
-    }
-    if len > max {
-        return Err(constraint_violation(
-            value,
-            member,
-            &format!("Member must have length less than or equal to {max}"),
-        ));
-    }
-    Ok(())
+    let constraint = if len < min {
+        format!("Member must have length greater than or equal to {min}")
+    } else if len > max {
+        format!("Member must have length less than or equal to {max}")
+    } else {
+        return Ok(());
+    };
+    Err(constraint_violation(
+        value,
+        &validation_member(field),
+        &constraint,
+    ))
 }
 
-/// [`check_length`] for an optional body member: absent is fine.
-pub(crate) fn check_optional_length(
-    body: &Value,
+/// [`check_len`] for an optional member: absent is fine.
+pub(crate) fn check_optional_len(
     field: &str,
-    member: &str,
+    value: Option<&str>,
+    min: usize,
     max: usize,
 ) -> Result<(), AwsServiceError> {
-    match body[field].as_str() {
-        Some(v) => check_length(v, member, 0, max),
+    match value {
+        Some(v) => check_len(field, v, min, max),
         None => Ok(()),
     }
+}
+
+/// The resource segments of a Lambda ARN whose head satisfies the model's
+/// ARN patterns: `arn:<partition>:lambda:<region>:\d{12}:...`, the partition
+/// `aws[a-zA-Z-]*` (or empty when `partition_optional`, for patterns that
+/// write `(aws[a-zA-Z-]*)?`) and the region
+/// `(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\d{1}`. `own_region` is
+/// also accepted as the region: the server's `--region` need not look like an
+/// AWS region (`--region local`), yet the ARNs fakecloud mints there must
+/// still address their resource.
+pub(crate) fn lambda_arn_resource<'a>(
+    arn: &'a str,
+    partition_optional: bool,
+    own_region: Option<&str>,
+) -> Option<Vec<&'a str>> {
+    let mut parts = arn.split(':');
+    let (prefix, partition, service, region, account) = (
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+    );
+    let partition_ok = (partition_optional && partition.is_empty())
+        || partition
+            .strip_prefix("aws")
+            .is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-'));
+    let head_ok = prefix == "arn"
+        && partition_ok
+        && service == "lambda"
+        && (is_lambda_arn_region(region) || own_region == Some(region))
+        && account.len() == 12
+        && account.bytes().all(|b| b.is_ascii_digit());
+    head_ok.then(|| parts.collect())
 }
 
 /// Smithy `CodeSigningConfigArn` `@pattern`, quoted in the validation message.
 const CSC_ARN_PATTERN: &str = "arn:(aws[a-zA-Z-]*)?:lambda:(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}:\\d{12}:code-signing-config:csc-[a-z0-9]{17}";
 
-/// A `CodeSigningConfigArn` path label: `@length` max 200 and the ARN
-/// `@pattern` (`...:code-signing-config:csc-` plus 17 lowercase letters or
-/// digits).
+/// A `CodeSigningConfigArn` value against the model: `@length(0, 200)` and
+/// the `@pattern` above, whose id is `csc-` plus exactly 17 lowercase
+/// letters or digits.
 pub(crate) fn validate_csc_arn(arn: &str) -> Result<(), AwsServiceError> {
-    check_length(arn, "codeSigningConfigArn", 0, 200)?;
-    let parts: Vec<&str> = arn.split(':').collect();
-    let ok = match parts.as_slice() {
-        [prefix, partition, service, region, account, kind, id] => {
-            *prefix == "arn"
-                && (partition.is_empty()
-                    || partition
-                        .strip_prefix("aws")
-                        .is_some_and(|r| r.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-')))
-                && *service == "lambda"
-                && is_layer_arn_region(region)
-                && account.len() == 12
-                && account.bytes().all(|b| b.is_ascii_digit())
-                && *kind == "code-signing-config"
-                && id.strip_prefix("csc-").is_some_and(|rest| {
-                    rest.len() == 17
-                        && rest
-                            .bytes()
-                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-                })
-        }
+    check_len("CodeSigningConfigArn", arn, 0, 200)?;
+    let ok = match lambda_arn_resource(arn, true, None).as_deref() {
+        Some(["code-signing-config", id]) => id.strip_prefix("csc-").is_some_and(|rest| {
+            rest.len() == 17
+                && rest
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        }),
         _ => false,
     };
     if ok {
@@ -297,9 +329,9 @@ fn is_bare_layer_name(s: &str) -> bool {
 }
 
 /// `(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\d{1}`: the region part of
-/// a layer ARN (`us-east-1`, `us-gov-west-1`, `us-isob-east-1`,
+/// a Lambda ARN in the model's ARN patterns (`us-east-1`, `us-gov-west-1`, `us-isob-east-1`,
 /// `eusc-de-east-1`).
-pub(crate) fn is_layer_arn_region(region: &str) -> bool {
+pub(crate) fn is_lambda_arn_region(region: &str) -> bool {
     let rest = region.strip_prefix("eusc-").unwrap_or(region);
     let mut parts: Vec<&str> = rest.split('-').collect();
     // Trailing `\d{1}`.
@@ -330,22 +362,10 @@ pub(crate) fn is_layer_arn_region(region: &str) -> bool {
 /// The ARN alternative of the `LayerName` pattern:
 /// `arn:(aws[a-zA-Z-]*)?:lambda:<region>:\d{12}:layer:[a-zA-Z0-9-_]+`.
 fn is_layer_name_arn(arn: &str) -> bool {
-    let parts: Vec<&str> = arn.split(':').collect();
-    let [prefix, partition, service, region, account, kind, name] = parts.as_slice() else {
-        return false;
-    };
-    let partition_ok = partition.is_empty()
-        || partition
-            .strip_prefix("aws")
-            .is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-'));
-    *prefix == "arn"
-        && partition_ok
-        && *service == "lambda"
-        && is_layer_arn_region(region)
-        && account.len() == 12
-        && account.bytes().all(|b| b.is_ascii_digit())
-        && *kind == "layer"
-        && is_bare_layer_name(name)
+    matches!(
+        lambda_arn_resource(arn, true, None).as_deref(),
+        Some(["layer", name]) if is_bare_layer_name(name)
+    )
 }
 
 /// Validate a `LayerName` value against its Smithy constraints: `@length
@@ -354,21 +374,7 @@ fn is_layer_name_arn(arn: &str) -> bool {
 /// `PublishLayerVersion` (which would otherwise create the layer) and the
 /// idempotent `DeleteLayerVersion`.
 pub(crate) fn validate_layer_name(raw: &str) -> Result<(), AwsServiceError> {
-    let len = raw.chars().count();
-    if len < 1 {
-        return Err(constraint_violation(
-            raw,
-            "layerName",
-            "Member must have length greater than or equal to 1",
-        ));
-    }
-    if len > LAYER_NAME_MAX_LEN {
-        return Err(constraint_violation(
-            raw,
-            "layerName",
-            &format!("Member must have length less than or equal to {LAYER_NAME_MAX_LEN}"),
-        ));
-    }
+    check_len("LayerName", raw, 1, LAYER_NAME_MAX_LEN)?;
     if is_bare_layer_name(raw) || is_layer_name_arn(raw) {
         return Ok(());
     }
@@ -554,8 +560,8 @@ impl LambdaService {
         // Validate before taking the write lock and before any mutation:
         // an invalid EphemeralStorage.Size on an otherwise valid request
         // must not silently apply the surrounding fields.
-        check_optional_length(&body, "KMSKeyArn", "kMSKeyArn", 10000)?;
-        check_optional_length(&body, "Role", "role", 10000)?;
+        check_optional_len("KMSKeyArn", body["KMSKeyArn"].as_str(), 0, 10000)?;
+        check_optional_len("Role", body["Role"].as_str(), 0, 10000)?;
         let validated_ephemeral = match body["EphemeralStorage"]["Size"].as_i64() {
             Some(size) => Some(crate::service::validate_ephemeral_storage(size)?),
             None => None,
@@ -748,7 +754,12 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
-        check_optional_length(&body, "SourceKMSKeyArn", "sourceKMSKeyArn", 10000)?;
+        check_optional_len(
+            "SourceKMSKeyArn",
+            body["SourceKMSKeyArn"].as_str(),
+            0,
+            10000,
+        )?;
         if let Some(mode) = body["S3ObjectStorageMode"].as_str() {
             if mode != "Copy" && mode != "Reference" {
                 return Err(constraint_violation(

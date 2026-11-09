@@ -2,6 +2,24 @@
 
 use super::*;
 
+/// The id of the config a `CodeSigningConfigArn` path label names, judged
+/// the same way by every operation that takes one. An ARN this server issued
+/// is honoured as stored: earlier builds minted `csc-<nanoseconds>` ids,
+/// which the model's `csc-[a-z0-9]{17}` does not admit, and a server run
+/// with a non-AWS `--region` mints ARNs in that region. Any other label must
+/// satisfy the model before it is looked up.
+fn csc_label_id(state: &LambdaState, label: &str) -> Result<String, AwsServiceError> {
+    let id = extract_csc_id(label);
+    let issued = state
+        .code_signing_configs
+        .get(&id)
+        .is_some_and(|c| c.csc_arn == label);
+    if !issued {
+        validate_csc_arn(label)?;
+    }
+    Ok(id)
+}
+
 impl LambdaService {
     // ── Code signing ──
 
@@ -13,7 +31,7 @@ impl LambdaService {
         if body.get("AllowedPublishers").is_none_or(Value::is_null) {
             return Err(null_member("allowedPublishers"));
         }
-        check_optional_length(&body, "Description", "description", 256)?;
+        check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
         let id = new_csc_id();
@@ -55,9 +73,9 @@ impl LambdaService {
         account_id: &str,
         region: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let id = extract_csc_id(csc_id);
         let region = region.to_string();
         self.with_state_read(account_id, &region, |state| {
+            let id = csc_label_id(state, csc_id)?;
             state
                 .code_signing_configs
                 .get(&id)
@@ -74,7 +92,7 @@ impl LambdaService {
         let body = body(req);
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
-        let id = extract_csc_id(csc_id);
+        let id = csc_label_id(state, csc_id)?;
         let csc = state
             .code_signing_configs
             .get_mut(&id)
@@ -96,10 +114,9 @@ impl LambdaService {
         account_id: &str,
         region: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        validate_csc_arn(csc_id)?;
-        let id = extract_csc_id(csc_id);
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(account_id, region);
+        let id = csc_label_id(state, csc_id)?;
         if state.code_signing_configs.remove(&id).is_none() {
             return Err(not_found("CodeSigningConfig", &id));
         }
@@ -134,13 +151,7 @@ impl LambdaService {
             .to_string();
         // Smithy length bound: max 200. Reject overlong inputs rather
         // than persisting a malformed ARN.
-        if csc_arn.chars().count() > 200 {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValueException",
-                "CodeSigningConfigArn exceeds the 200-character maximum",
-            ));
-        }
+        check_len("CodeSigningConfigArn", &csc_arn, 0, 200)?;
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
         state
@@ -190,10 +201,9 @@ impl LambdaService {
         account_id: &str,
         region: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        validate_csc_arn(csc_id)?;
-        let id = extract_csc_id(csc_id);
         let region = region.to_string();
         self.with_state_read(account_id, &region, |state| {
+            let id = csc_label_id(state, csc_id)?;
             if !state.code_signing_configs.contains_key(&id) {
                 return Err(not_found("CodeSigningConfig", &id));
             }

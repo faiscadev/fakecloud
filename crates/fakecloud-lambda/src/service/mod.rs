@@ -11,6 +11,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
+use crate::extras::check_optional_len;
 use crate::runtime::ContainerRuntime;
 use crate::state::{function_arn, qualified_function_arn};
 use crate::state::{
@@ -24,28 +25,6 @@ fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
         "InvalidParameterValueException",
         msg,
     )
-}
-
-fn check_len(field: &str, v: &str, min: usize, max: usize) -> Result<(), AwsServiceError> {
-    if v.len() < min || v.len() > max {
-        return Err(invalid_param(format!(
-            "{field} length must be in [{min},{max}], got {}",
-            v.len()
-        )));
-    }
-    Ok(())
-}
-
-fn check_optional_len(
-    field: &str,
-    v: Option<&str>,
-    min: usize,
-    max: usize,
-) -> Result<(), AwsServiceError> {
-    if let Some(s) = v {
-        check_len(field, s, min, max)?;
-    }
-    Ok(())
 }
 
 fn check_optional_int_range(
@@ -147,7 +126,7 @@ fn check_optional_enum(
 /// `X-Amz-Tenant-Id` is `@length(1, 256)` and `X-Amz-Durable-Execution-Name`
 /// `@length(1, 64)`.
 fn validate_invoke_headers(action: &str, req: &AwsRequest) -> Result<(), AwsServiceError> {
-    use crate::extras::{check_length, constraint_violation};
+    use crate::extras::{check_len, constraint_violation};
     let header = |name: &str| req.headers.get(name).and_then(|v| v.to_str().ok());
     let invocation_types: &[&str] = if action == "Invoke" {
         &["Event", "RequestResponse", "DryRun"]
@@ -176,32 +155,22 @@ fn validate_invoke_headers(action: &str, req: &AwsRequest) -> Result<(), AwsServ
         }
     }
     if let Some(v) = header("x-amz-tenant-id") {
-        check_length(v, "tenantId", 1, 256)?;
+        check_len("TenantId", v, 1, 256)?;
     }
     if let Some(v) = header("x-amz-durable-execution-name") {
-        check_length(v, "durableExecutionName", 1, 64)?;
+        check_len("DurableExecutionName", v, 1, 64)?;
     }
     Ok(())
 }
 
 /// Smithy `CapacityProviderArn`: `@length(1, 140)` and the
-/// `...:lambda:<region>:<account>:capacity-provider:<name>` `@pattern`.
-fn validate_capacity_provider_arn(arn: &str) -> Result<(), AwsServiceError> {
-    crate::extras::check_length(arn, "capacityProviderArn", 1, 140)?;
-    let parts: Vec<&str> = arn.split(':').collect();
-    let ok = match parts.as_slice() {
-        ["arn", partition, "lambda", region, account, "capacity-provider", name] => {
-            partition
-                .strip_prefix("aws")
-                .is_some_and(|r| r.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-'))
-                && !region.is_empty()
-                && account.len() == 12
-                && account.bytes().all(|b| b.is_ascii_digit())
-                && !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        }
+/// `...:lambda:<region>:<account>:capacity-provider:<name>` `@pattern` (the
+/// form `CreateCapacityProvider` issues). `own_region` is the request's
+/// region, accepted as the ARN region like every ARN fakecloud mints.
+fn validate_capacity_provider_arn(arn: &str, own_region: &str) -> Result<(), AwsServiceError> {
+    crate::extras::check_len("CapacityProviderArn", arn, 1, 140)?;
+    let ok = match crate::extras::lambda_arn_resource(arn, false, Some(own_region)).as_deref() {
+        Some(["capacity-provider", name]) => crate::workflows::is_capacity_provider_name(name),
         _ => false,
     };
     if ok {
@@ -262,7 +231,7 @@ fn prevalidate_lambda(action: &str, req: &AwsRequest) -> Result<(), AwsServiceEr
                 ["LambdaManagedInstancesCapacityProviderConfig"]["CapacityProviderArn"]
                 .as_str()
             {
-                validate_capacity_provider_arn(arn)?;
+                validate_capacity_provider_arn(arn, &req.region)?;
             }
             check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
             check_optional_len("Handler", body["Handler"].as_str(), 0, 128)?;

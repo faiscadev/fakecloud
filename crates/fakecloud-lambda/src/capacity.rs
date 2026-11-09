@@ -61,7 +61,7 @@ pub(crate) fn parse_capacity_provider_arn(arn: &str) -> Option<(&str, &str, &str
     let ok = *prefix == "arn"
         && partition_ok
         && *service == "lambda"
-        && crate::extras::is_layer_arn_region(region)
+        && crate::extras::is_lambda_arn_region(region)
         && account.len() == 12
         && account.bytes().all(|b| b.is_ascii_digit())
         && *kind == "capacity-provider"

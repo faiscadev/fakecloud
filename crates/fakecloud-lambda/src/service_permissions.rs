@@ -39,7 +39,7 @@ impl LambdaService {
                 )
             })?
             .to_string();
-        crate::extras::check_length(&statement_id, "statementId", 1, 100)?;
+        crate::extras::check_len("StatementId", &statement_id, 1, 100)?;
         let action = body
             .get("Action")
             .and_then(|v| v.as_str())

@@ -53,8 +53,8 @@ impl LambdaService {
             .as_str()
             .ok_or_else(|| null_member("functionVersion"))?
             .to_string();
-        check_length(&version, "functionVersion", 1, 1024)?;
-        check_optional_length(&body, "Description", "description", 256)?;
+        check_len("FunctionVersion", &version, 1, 1024)?;
+        check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
         if !state.functions.contains_key(function_name) {
