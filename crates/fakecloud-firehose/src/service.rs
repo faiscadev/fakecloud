@@ -282,6 +282,81 @@ fn extract_extra_destinations(body: &Value, suffix: &str) -> BTreeMap<String, Va
     out
 }
 
+/// As the AWS model's patterns refuse a value, naming where the request held it.
+fn model_pattern_error(member: &str, pattern: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ValidationException",
+        format!(
+            "1 validation error detected: Value at '{member}' failed to satisfy constraint: \
+             Member must satisfy regular expression pattern: {pattern}"
+        ),
+    )
+}
+
+/// The model's `arn:.*:s3:::[\w\.\-]{1,255}`.
+fn bucket_arn_matches_model(arn: &str) -> bool {
+    let Some(rest) = arn.strip_prefix("arn:") else {
+        return false;
+    };
+    let Some((_, bucket)) = rest.rsplit_once(":s3:::") else {
+        return false;
+    };
+    (1..=255).contains(&bucket.chars().count())
+        && bucket
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// What the AWS model refuses before anything else, in a request's destination
+/// blocks. Recorded for `BucketARN` on Extended S3 and S3 destinations and for
+/// `ClusterEndpoint` on OpenSearch Service; the paths of other blocks and of updates
+/// follow the same form, by inference. Unlike AWS, whose pattern is `https:.*`, a
+/// `ClusterEndpoint` may be `http:` here: local clusters serve plain HTTP.
+fn validate_model_patterns(body: &Value, suffix: &str) -> Result<(), AwsServiceError> {
+    const BUCKET_PATTERN: &str = r"arn:.*:s3:::[\w\.\-]{1,255}";
+    let member_name = |base: &str| {
+        let mut chars = base.chars();
+        let first = chars.next().map(|c| c.to_ascii_lowercase());
+        format!(
+            "{}{}{suffix}",
+            first.into_iter().collect::<String>(),
+            chars.as_str()
+        )
+    };
+    let check_bucket = |block: &Value, path: String| match block["BucketARN"].as_str() {
+        Some(arn) if !bucket_arn_matches_model(arn) => Err(model_pattern_error(
+            &format!("{path}.bucketARN"),
+            BUCKET_PATTERN,
+        )),
+        _ => Ok(()),
+    };
+    for base in ["S3Destination", "ExtendedS3Destination"] {
+        check_bucket(&body[format!("{base}{suffix}")], member_name(base))?;
+    }
+    for base in EXTRA_DESTINATION_BASES {
+        let block = &body[format!("{base}{suffix}")];
+        for (s3_member, s3_path) in [
+            ("S3Configuration", "s3Configuration"),
+            ("S3Update", "s3Update"),
+        ] {
+            check_bucket(
+                &block[s3_member],
+                format!("{}.{s3_path}", member_name(base)),
+            )?;
+        }
+        if let Some(endpoint) = block["ClusterEndpoint"].as_str() {
+            if !endpoint.starts_with("https:") && !endpoint.starts_with("http:") {
+                return Err(model_pattern_error(
+                    &format!("{}.clusterEndpoint", member_name(base)),
+                    "https:.*",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `extract_extra_destinations` passes over anything but an object, which would
 /// leave a malformed search destination unvalidated.
 fn refuse_malformed_search_blocks(body: &Value, suffix: &str) -> Result<(), AwsServiceError> {
@@ -432,10 +507,9 @@ fn require_destination_resources(
         .iter()
         .map(|member| &block[*member])
         .chain([block])
-        .filter_map(|s3| s3["BucketARN"].as_str());
-    for arn in buckets {
-        let bucket = crate::config::bucket_of_arn(arn)
-            .ok_or_else(|| invalid_argument("S3 destination requires a bucket ARN"))?;
+        .filter_map(|s3| s3["BucketARN"].as_str())
+        .filter_map(crate::config::bucket_of_arn);
+    for bucket in buckets {
         engine.require_bucket(account, bucket)?;
     }
     if let Some(domain) = block["DomainARN"].as_str().filter(|arn| !arn.is_empty()) {
@@ -481,6 +555,7 @@ impl<'a> DestinationUpdate<'a> {
         let destination_id = body["DestinationId"]
             .as_str()
             .ok_or_else(|| missing("DestinationId"))?;
+        validate_model_patterns(body, "Update")?;
         validate_destination_compression(body, "Update")?;
         refuse_malformed_search_blocks(body, "Update")?;
         Ok(Self {
@@ -1018,6 +1093,7 @@ impl FirehoseService {
             )));
         }
 
+        validate_model_patterns(&body, "Configuration")?;
         validate_destination_compression(&body, "Configuration")?;
 
         let s3_dest = match parse_s3_destination(&body["S3DestinationConfiguration"])? {
@@ -2003,7 +2079,6 @@ mod tests {
             json!({"S3BackupMode": "Everything"}),
             json!({"IndexName": ""}),
             json!({"RetryOptions": {"DurationInSeconds": 7201}}),
-            json!({"S3Update": {"BucketARN": "not-an-arn"}}),
         ] {
             let Err(err) = svc.update_destination(&request(
                 "UpdateDestination",
@@ -2121,13 +2196,43 @@ mod tests {
             ))
         };
         const OPENSEARCH: &str = "AmazonopensearchserviceDestinationConfiguration";
-        assert_eq!(
-            refusal(create(
-                "s",
+        // As recorded: what the model's patterns refuse names where it was.
+        let validation = |member: &str, config: Value, expected: &str| {
+            let error = create("s", member, config).err().expect("refused");
+            assert_eq!(error.code(), "ValidationException");
+            assert_eq!(error.message(), expected);
+        };
+        const BUCKET: &str = r"arn:.*:s3:::[\w\.\-]{1,255}";
+        for arn in ["not-an-arn", "arn:aws:sqs:::x"] {
+            validation(
                 "ExtendedS3DestinationConfiguration",
-                json!({"RoleARN": "r", "BucketARN": "not-an-arn"}),
-            )),
-            "S3 destination requires a bucket ARN"
+                json!({"RoleARN": "r", "BucketARN": arn}),
+                &format!(
+                    "1 validation error detected: Value at \
+                     'extendedS3DestinationConfiguration.bucketARN' failed to satisfy \
+                     constraint: Member must satisfy regular expression pattern: {BUCKET}"
+                ),
+            );
+        }
+        validation(
+            "S3DestinationConfiguration",
+            json!({"RoleARN": "r", "BucketARN": "not-an-arn"}),
+            &format!(
+                "1 validation error detected: Value at 's3DestinationConfiguration.bucketARN' \
+                 failed to satisfy constraint: Member must satisfy regular expression pattern: \
+                 {BUCKET}"
+            ),
+        );
+        // `http:` stays allowed, for local clusters, unlike AWS's `https:.*`.
+        let mut ftp = search_config("known-bucket", "known");
+        ftp.as_object_mut().unwrap().remove("DomainARN");
+        ftp["ClusterEndpoint"] = json!("ftp://127.0.0.1:9200");
+        validation(
+            OPENSEARCH,
+            ftp,
+            "1 validation error detected: Value at \
+             'amazonopensearchserviceDestinationConfiguration.clusterEndpoint' failed to satisfy \
+             constraint: Member must satisfy regular expression pattern: https:.*",
         );
         for bucket in ["Bad_Bucket_Name", "ab", "missing"] {
             assert_eq!(

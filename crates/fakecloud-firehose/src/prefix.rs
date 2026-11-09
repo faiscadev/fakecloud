@@ -44,35 +44,43 @@ fn expressions(prefix: &str) -> impl Iterator<Item = (&str, Option<&str>)> {
     })
 }
 
-fn validate_expressions(prefix: &str, error_prefix: bool) -> Result<(), AwsServiceError> {
+/// `member` is the prefix's name in the recorded "Invalid conversion character"
+/// message, which was only recorded for `Prefix`.
+fn validate_expressions(prefix: &str, member: &str) -> Result<(), AwsServiceError> {
+    let usage = || {
+        invalid(format!(
+            "Invalid expression usage: {prefix}.Must be of the form !{{<namespace>:<value>}}"
+        ))
+    };
+    let conversion = || {
+        invalid(format!(
+            "Invalid conversion character used in the value of the expression in {member}"
+        ))
+    };
     if let Some(start) = prefix.rfind("!{") {
         if !prefix[start..].contains('}') {
-            return Err(invalid("Expression is missing its closing brace!"));
+            return Err(usage());
         }
     }
     for (_, expression) in expressions(prefix) {
         let Some(expression) = expression else {
             continue;
         };
-        let (namespace, key) = expression
-            .split_once(':')
-            .ok_or_else(|| invalid(format!("Expression ({expression}) has no namespace!")))?;
+        let (namespace, key) = expression.split_once(':').ok_or_else(usage)?;
         match (namespace, key) {
-            ("timestamp", pattern) => {
-                if !pattern_is_valid(pattern) {
-                    return Err(invalid(format!("Invalid timestamp pattern ({pattern})!")));
+            ("timestamp", "") => return Err(usage()),
+            ("timestamp", pattern) => match render_timestamp(pattern, widest_instant()) {
+                Ok(_) => {}
+                Err(PatternError::Invalid) => return Err(conversion()),
+                Err(PatternError::PadOverflow) => {
+                    return Err(invalid(format!(
+                        "Invalid input to timestamp evaluation: {pattern}"
+                    )))
                 }
-            }
+            },
             ("firehose", "random-string") => {}
-            ("firehose", "error-output-type") if error_prefix => {}
-            ("firehose", "error-output-type") => {
-                return Err(invalid(
-                    "firehose:error-output-type can only be used in ErrorOutputPrefix!",
-                ));
-            }
-            ("firehose", other) => {
-                return Err(invalid(format!("Invalid firehose keyword ({other})!")));
-            }
+            ("firehose", "error-output-type") if member == "ErrorOutputPrefix" => {}
+            ("firehose", _) => return Err(conversion()),
             ("partitionKeyFromQuery" | "partitionKeyFromLambda", _) => {}
             (other, _) => {
                 return Err(invalid(format!(
@@ -84,11 +92,21 @@ fn validate_expressions(prefix: &str, error_prefix: bool) -> Result<(), AwsServi
     Ok(())
 }
 
+/// AWS refuses `pH`, a padded field that can outgrow its pad, when the stream is
+/// created. That was recorded at an hour with two digits; refusing it at every hour
+/// is inferred, and makes creation independent of the clock. Evaluated at the
+/// instant where every field is at its widest.
+fn widest_instant() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339("2026-12-26T23:59:59.999999999Z")
+        .map(|at| at.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
 /// Whether a stored prefix can be evaluated. Admission asks only this: the rule on
 /// `ErrorOutputPrefix` and anything about a prefix delivery does not read were
 /// never required of streams already stored, which must keep delivering.
 pub(crate) fn validate_evaluable(prefix: &str) -> Result<(), AwsServiceError> {
-    validate_expressions(prefix, false)
+    validate_expressions(prefix, "Prefix")
 }
 
 /// What `CreateDeliveryStream` and `UpdateDestination` require of a destination's
@@ -105,8 +123,8 @@ pub(crate) fn validate_prefixes(
             "ErrorOutputPrefix cannot be null or empty when Prefix contains expressions",
         ));
     }
-    validate_expressions(prefix, false)?;
-    validate_expressions(error_output_prefix, true)
+    validate_expressions(prefix, "Prefix")?;
+    validate_expressions(error_output_prefix, "ErrorOutputPrefix")
 }
 
 fn random_string() -> String {
@@ -140,36 +158,33 @@ pub(crate) fn render(prefix: &str, at: DateTime<Utc>, error_output_type: Option<
     rendered
 }
 
+/// Why a pattern does not format: Java refuses it, or a padded field outgrew its pad.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PatternError {
+    Invalid,
+    PadOverflow,
+}
+
 /// A Java `DateTimeFormatter` pattern, the kind AWS documents for this namespace,
 /// formatted as Java does in `Locale.US` and UTC. A pattern Java would refuse is
 /// refused.
-fn render_timestamp(pattern: &str, at: DateTime<Utc>) -> Result<String, ()> {
-    format_pattern(pattern, at, true)
-}
-
-/// Whether Java takes a pattern. A padded field wider than its pad fails only when
-/// it is formatted, so whether `pH` works depends on the hour and not on the pattern.
-fn pattern_is_valid(pattern: &str) -> bool {
-    format_pattern(pattern, Utc::now(), false).is_ok()
-}
-
-fn format_pattern(pattern: &str, at: DateTime<Utc>, enforce_pad: bool) -> Result<String, ()> {
+fn render_timestamp(pattern: &str, at: DateTime<Utc>) -> Result<String, PatternError> {
     let mut output = String::new();
     let mut chars = pattern.chars().peekable();
     let mut optional_depth = 0usize;
     let mut pad_next = None;
     while let Some(c) = chars.next() {
         let item = match c {
-            '\'' => quoted_text(&mut chars)?,
+            '\'' => quoted_text(&mut chars).map_err(|()| PatternError::Invalid)?,
             '[' => {
                 optional_depth += 1;
                 continue;
             }
             ']' => {
-                optional_depth = optional_depth.checked_sub(1).ok_or(())?;
+                optional_depth = optional_depth.checked_sub(1).ok_or(PatternError::Invalid)?;
                 continue;
             }
-            '{' | '}' | '#' => return Err(()),
+            '{' | '}' | '#' => return Err(PatternError::Invalid),
             c if c.is_ascii_alphabetic() => {
                 let mut count = 1;
                 while chars.peek() == Some(&c) {
@@ -180,18 +195,20 @@ fn format_pattern(pattern: &str, at: DateTime<Utc>, enforce_pad: bool) -> Result
                     pad_next = Some(count);
                     continue;
                 }
-                date_field(c, count, at)?
+                date_field(c, count, at).map_err(|()| PatternError::Invalid)?
             }
             c => c.to_string(),
         };
         match pad_next.take() {
-            Some(width) if enforce_pad && item.chars().count() > width => return Err(()),
+            Some(width) if item.chars().count() > width => {
+                return Err(PatternError::PadOverflow);
+            }
             Some(width) => output.push_str(&format!("{item:>width$}")),
             None => output.push_str(&item),
         }
     }
     if pad_next.is_some() {
-        return Err(());
+        return Err(PatternError::Invalid);
     }
     Ok(output)
 }
@@ -418,7 +435,11 @@ mod tests {
             let pattern = columns.next().unwrap();
             let first = columns.next().unwrap();
             if first == "ERR" {
-                assert_eq!(render_timestamp(pattern, instants[0]), Err(()), "{pattern}");
+                assert_eq!(
+                    render_timestamp(pattern, instants[0]),
+                    Err(PatternError::Invalid),
+                    "{pattern}"
+                );
                 continue;
             }
             let expected = std::iter::once(first).chain(columns.take(3));
@@ -462,20 +483,72 @@ mod tests {
             let pattern = columns.next().unwrap();
             let expected: Vec<&str> = columns.collect();
             if expected == ["ERR"] {
-                assert!(!pattern_is_valid(pattern), "{pattern}");
+                assert_eq!(
+                    render_timestamp(pattern, times[0]),
+                    Err(PatternError::Invalid),
+                    "{pattern}"
+                );
                 continue;
             }
-            assert!(pattern_is_valid(pattern), "{pattern}");
             for (at, expected) in times.iter().zip(expected) {
                 let rendered = render_timestamp(pattern, *at);
                 match expected {
-                    "FMTERR" => assert_eq!(rendered, Err(()), "{pattern} at {at}"),
+                    "FMTERR" => {
+                        assert_eq!(
+                            rendered,
+                            Err(PatternError::PadOverflow),
+                            "{pattern} at {at}"
+                        )
+                    }
                     expected => {
                         assert_eq!(rendered.as_deref(), Ok(expected), "{pattern} at {at}")
                     }
                 }
             }
         }
+    }
+
+    /// As recorded for each kind of refused expression, and for two that AWS takes.
+    #[test]
+    fn recorded_expression_refusals() {
+        const CONSTRAINT: &str = "The supplied prefix(es) do not satisfy the following constraint:";
+        let message = |prefix: &str| {
+            validate_prefixes(Some(prefix), Some("e/"))
+                .unwrap_err()
+                .message()
+        };
+        for hour in ["!{timestamp:pH}/", "x/!{timestamp:pH}"] {
+            assert_eq!(
+                message(hour),
+                format!("{CONSTRAINT} Invalid input to timestamp evaluation: pH")
+            );
+        }
+        for conversion in [
+            "!{timestamp:aa}/",
+            "!{timestamp:ZZZZZZ}/",
+            "!{firehose:nope}/",
+        ] {
+            assert_eq!(
+                message(conversion),
+                format!(
+                    "{CONSTRAINT} Invalid conversion character used in the value of the \
+                     expression in Prefix"
+                )
+            );
+        }
+        assert_eq!(
+            message("p/!{timestamp:}/"),
+            format!(
+                "{CONSTRAINT} Invalid expression usage: p/!{{timestamp:}}/.Must be of the form \
+                 !{{<namespace>:<value>}}"
+            )
+        );
+        validate_prefixes(Some("!{timestamp:B}/!{timestamp:vvvv}/"), Some("e/")).unwrap();
+        assert_eq!(render("!{timestamp:B}", at(), None), "in the afternoon");
+        assert_eq!(
+            render("!{timestamp:vvvv}", at(), None),
+            "Coordinated Universal Time"
+        );
     }
 
     #[test]

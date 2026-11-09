@@ -350,11 +350,6 @@ pub(crate) async fn probe_cluster_endpoint(endpoint: &str) -> Result<(), AwsServ
         ))
     };
     let url = reqwest::Url::parse(endpoint).map_err(|_| invalid())?;
-    // Delivery only speaks HTTP(S): anything else would pass here and fail every
-    // attempt. AWS's model only allows `https:`; a local cluster needs `http:` too.
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(invalid());
-    }
     let host = url
         .host_str()
         .ok_or_else(invalid)?
@@ -1186,12 +1181,6 @@ mod tests {
             "Error connecting to the provided ElasticSearch cluster endpoint.  Ensure that the \
              ElasticSearch cluster endpoint is valid."
         );
-        let scheme = probe_cluster_endpoint(&format!("ftp://127.0.0.1:{port}"))
-            .await
-            .unwrap_err();
-        assert!(scheme
-            .message()
-            .starts_with("Invalid Elasticsearch Cluster"));
         assert_eq!(
             probe_cluster_endpoint("https://no-such-host.invalid")
                 .await
