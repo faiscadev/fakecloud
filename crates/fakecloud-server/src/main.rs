@@ -20,6 +20,7 @@ mod dns;
 mod dynamodb_streams_lambda_poller;
 mod ec2_imds;
 mod ecs_creds;
+mod firehose_topology;
 mod imds;
 mod introspection;
 mod kinesis_lambda_firehose_poller;
@@ -7547,6 +7548,10 @@ async fn main() {
     if let Some(h) = kinesis_poller_snapshot_hook {
         kinesis_lambda_firehose_poller = kinesis_lambda_firehose_poller.with_snapshot_hook(h);
     }
+    firehose_engine.set_topology(Arc::new(firehose_topology::ServerFirehoseTopology::new(
+        kinesis_state.clone(),
+        opensearch_state.clone(),
+    )));
     let kinesis_lambda_firehose_poller = Arc::new(kinesis_lambda_firehose_poller);
     tokio::spawn(kinesis_lambda_firehose_poller.clone().run());
     let mut dynamodb_streams_poller =

@@ -323,9 +323,15 @@ fn search_destination_json(stored: &Value) -> Value {
             s3_fields
                 .entry("EncryptionConfiguration")
                 .or_insert_with(|| json!({"NoEncryptionConfig": "NoEncryption"}));
+            s3_fields
+                .entry("CloudWatchLoggingOptions")
+                .or_insert_with(|| json!({"Enabled": false}));
         }
         fields.insert("S3DestinationDescription".to_owned(), s3);
     }
+    fields
+        .entry("CloudWatchLoggingOptions")
+        .or_insert_with(|| json!({"Enabled": false}));
     fields
         .entry("BufferingHints")
         .or_insert_with(|| json!({"SizeInMBs": 5, "IntervalInSeconds": 300}));
@@ -339,6 +345,27 @@ fn search_destination_json(stored: &Value) -> Value {
         .entry("S3BackupMode")
         .or_insert_with(|| json!("FailedDocumentsOnly"));
     description
+}
+
+/// A stored destination with `update` merged in. Naming one of `ClusterEndpoint`
+/// and `DomainARN` replaces the other, or no update could ever move between them.
+fn merged_search_update(existing: &Value, update: &Value) -> Value {
+    let mut merged = existing.clone();
+    if let Some(fields) = merged.as_object_mut() {
+        for (named, replaced) in [
+            ("ClusterEndpoint", "DomainARN"),
+            ("DomainARN", "ClusterEndpoint"),
+        ] {
+            if update[named]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+            {
+                fields.remove(replaced);
+            }
+        }
+    }
+    merge_json(&mut merged, update);
+    merged
 }
 
 fn search_update_config(mut update: Value) -> Value {
@@ -369,11 +396,7 @@ fn validate_search_updates(
     let update = search_update_config(update.clone());
     // Validated as it would be stored, before anything changes.
     match stream.extra_destinations.get(key) {
-        Some(existing) => {
-            let mut merged = existing.clone();
-            merge_json(&mut merged, &update);
-            crate::search::validate_stored(&merged)
-        }
+        Some(existing) => crate::search::validate_stored(&merged_search_update(existing, &update)),
         None => crate::search::validate_stored(&update),
     }
 }
@@ -388,11 +411,49 @@ fn apply_search_update(stream: &mut DeliveryStream, key: String, update: Value) 
         .extra_destinations
         .retain(|existing, _| *existing == key);
     match stream.extra_destinations.get_mut(&key) {
-        Some(existing) => merge_json(existing, &update),
+        Some(existing) => *existing = merged_search_update(existing, &update),
         None => {
             stream.extra_destinations.insert(key, update);
         }
     }
+}
+
+/// The bucket and domain a destination block names must exist. `s3_members` are
+/// where the block keeps its bucket: `S3Configuration` or `S3Update`, or the
+/// block itself for an S3 destination.
+fn require_destination_resources(
+    engine: &FirehoseEngine,
+    account: &str,
+    block: &Value,
+    s3_members: &[&str],
+) -> Result<(), AwsServiceError> {
+    let buckets = s3_members
+        .iter()
+        .map(|member| &block[*member])
+        .chain([block])
+        .filter_map(|s3| s3["BucketARN"].as_str())
+        .filter_map(crate::config::bucket_of_arn);
+    for bucket in buckets {
+        engine.require_bucket(account, bucket)?;
+    }
+    if let Some(domain) = block["DomainARN"].as_str().filter(|arn| !arn.is_empty()) {
+        engine.require_search_domain(domain)?;
+    }
+    Ok(())
+}
+
+/// Connects to each `ClusterEndpoint` a request names. Bounded, and never called
+/// under the configuration lock.
+fn require_cluster_endpoints(
+    engine: &FirehoseEngine,
+    blocks: &BTreeMap<String, Value>,
+) -> Result<(), AwsServiceError> {
+    for (_, block) in blocks.iter().filter(|(key, _)| is_search_destination(key)) {
+        if let Some(endpoint) = block["ClusterEndpoint"].as_str().filter(|e| !e.is_empty()) {
+            engine.require_cluster_endpoint(endpoint)?;
+        }
+    }
+    Ok(())
 }
 
 /// Whether an update would move a stream between the Elasticsearch / OpenSearch
@@ -537,6 +598,7 @@ pub(crate) fn parse_s3_destination(val: &Value) -> Result<Option<S3Destination>,
     let (size, interval) = parse_buffering_hints(val)?;
     validate_file_extension(val)?;
     validate_destination_strings(val)?;
+    crate::prefix::validate_prefixes(val["Prefix"].as_str(), val["ErrorOutputPrefix"].as_str())?;
     let buffering_size_mb = Some(size.unwrap_or(5));
     let buffering_interval_seconds = Some(interval.unwrap_or(300));
     Ok(Some(S3Destination {
@@ -588,6 +650,13 @@ fn apply_s3_update(dest: &mut S3Destination, val: &Value) -> Result<(), AwsServi
     let (size, interval) = parse_buffering_hints(val)?;
     validate_file_extension(val)?;
     validate_destination_strings(val)?;
+    // As the update would leave them, before anything changes.
+    crate::prefix::validate_prefixes(
+        val["Prefix"].as_str().or(dest.prefix.as_deref()),
+        val["ErrorOutputPrefix"]
+            .as_str()
+            .or(dest.error_output_prefix.as_deref()),
+    )?;
 
     if let Some(v) = val["RoleARN"].as_str() {
         dest.role_arn = v.to_string();
@@ -797,6 +866,10 @@ fn encryption_config_json(enc: &EncryptionConfig) -> Value {
     v
 }
 
+fn epoch_seconds(at: chrono::DateTime<Utc>) -> f64 {
+    at.timestamp_millis() as f64 / 1000.0
+}
+
 fn arn_for(region: &str, account: &str, name: &str) -> String {
     Arn::regional(
         "firehose",
@@ -840,6 +913,27 @@ impl FirehoseService {
             crate::search::validate_search_destination(search)?;
         }
         let kinesis_source = parse_kinesis_source(&stream_type, &body)?;
+        // Existence decides, not how a name looks, and it is checked last: a
+        // malformed request is refused for what it says.
+        for base in [
+            "S3DestinationConfiguration",
+            "ExtendedS3DestinationConfiguration",
+        ] {
+            require_destination_resources(&self.engine, &req.account_id, &body[base], &[])?;
+        }
+        for block in extra_destinations.values() {
+            require_destination_resources(
+                &self.engine,
+                &req.account_id,
+                block,
+                &["S3Configuration"],
+            )?;
+        }
+        if let Some(source) = &kinesis_source {
+            self.engine
+                .require_kinesis_stream(&req.account_id, &source.kinesis_stream_arn)?;
+        }
+        require_cluster_endpoints(&self.engine, &extra_destinations)?;
 
         // Create-time Tags must be returned by ListTagsForDeliveryStream without
         // a follow-up TagDeliveryStream call (bug-hunt).
@@ -935,20 +1029,26 @@ impl FirehoseService {
             "DeliveryStreamStatus": stream.status,
             "DeliveryStreamType": stream.stream_type,
             "VersionId": stream.version_id,
-            "CreateTimestamp": stream.created_at.timestamp() as f64,
-            "LastUpdateTimestamp": stream.last_update.timestamp() as f64,
+            "CreateTimestamp": epoch_seconds(stream.created_at),
             "Destinations": destinations,
             "HasMoreDestinations": false,
         });
+        // Absent until the stream changes, as recorded on a new stream.
+        if stream.last_update != stream.created_at {
+            description["LastUpdateTimestamp"] = json!(epoch_seconds(stream.last_update));
+        }
         if let Some(enc) = &stream.encryption {
             description["DeliveryStreamEncryptionConfiguration"] = encryption_config_json(enc);
+        } else if stream.stream_type == "DirectPut" {
+            // A Kinesis source stream reports no such member at all.
+            description["DeliveryStreamEncryptionConfiguration"] = json!({"Status": "DISABLED"});
         }
         if let Some(source) = &stream.kinesis_source {
             description["Source"] = json!({
                 "KinesisStreamSourceDescription": {
                     "KinesisStreamARN": source.kinesis_stream_arn,
                     "RoleARN": source.role_arn,
-                    "DeliveryStartTimestamp": stream.created_at.timestamp() as f64,
+                    "DeliveryStartTimestamp": epoch_seconds(stream.created_at),
                 }
             });
         }
@@ -1208,49 +1308,73 @@ impl FirehoseService {
         validate_destination_compression(&body, "Update")?;
         let s3_update_given = body["S3DestinationUpdate"].is_object()
             || body["ExtendedS3DestinationUpdate"].is_object();
+        refuse_malformed_search_blocks(&body, "Update")?;
+        let extra_updates = extract_extra_destinations(&body, "Update");
+        let check = |stream: &DeliveryStream| -> Result<(), AwsServiceError> {
+            // AWS requires CurrentDeliveryStreamVersionId to match the stream's
+            // current version and rejects a mismatch with a concurrent-modification
+            // error (this is the optimistic-concurrency guard).
+            if current_version != stream.version_id {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ConcurrentModificationException",
+                    format!(
+                        "Cannot update firehose: {name} since the current version id: {} and \
+                         specified version id: {current_version} do not match",
+                        stream.version_id
+                    ),
+                ));
+            }
+
+            // DestinationId must identify the stream's current destination.
+            let current_dest_id = stream
+                .destination
+                .as_ref()
+                .map(|d| d.destination_id.clone())
+                .unwrap_or_else(|| "destinationId-000000000001".to_string());
+            if destination_id != current_dest_id {
+                return Err(invalid_argument(format!(
+                    "DestinationId {destination_id} does not match the current \
+                     destination {current_dest_id} for delivery stream {name}."
+                )));
+            }
+
+            if switches_search_family(stream, s3_update_given, &extra_updates) {
+                return Err(invalid_argument(
+                    "Changing the destination type to/from \
+                     Elasticsearch/Amazonopensearchservice/AmazonOpenSearchServerless from/to \
+                     other destinations is not supported at this time.",
+                ));
+            }
+            validate_search_updates(stream, &extra_updates)?;
+            // Only what the update names: a source cannot be changed by an update.
+            for base in ["S3DestinationUpdate", "ExtendedS3DestinationUpdate"] {
+                require_destination_resources(&self.engine, &req.account_id, &body[base], &[])?;
+            }
+            for block in extra_updates.values() {
+                require_destination_resources(&self.engine, &req.account_id, block, &["S3Update"])?;
+            }
+            Ok(())
+        };
+        // The endpoint check waits on the network, so it runs between two looks at
+        // the stream with no lock held: the second finds anything that changed.
+        {
+            let accounts = self.state.read();
+            let stream = accounts
+                .get(&req.account_id)
+                .and_then(|state| state.streams(&req.region))
+                .and_then(|streams| streams.get(name))
+                .ok_or_else(|| not_found(name))?;
+            check(stream)?;
+        }
+        require_cluster_endpoints(&self.engine, &extra_updates)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
         let stream = state
             .streams_mut(&req.region)
             .get_mut(name)
             .ok_or_else(|| not_found(name))?;
-
-        // AWS requires CurrentDeliveryStreamVersionId to match the stream's
-        // current version and rejects a mismatch with a concurrent-modification
-        // error (this is the optimistic-concurrency guard).
-        if current_version != stream.version_id {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ConcurrentModificationException",
-                format!(
-                    "The current delivery stream version {} does not match \
-                     the supplied version {current_version}.",
-                    stream.version_id
-                ),
-            ));
-        }
-
-        // DestinationId must identify the stream's current destination.
-        let current_dest_id = stream
-            .destination
-            .as_ref()
-            .map(|d| d.destination_id.clone())
-            .unwrap_or_else(|| "destinationId-000000000001".to_string());
-        if destination_id != current_dest_id {
-            return Err(invalid_argument(format!(
-                "DestinationId {destination_id} does not match the current \
-                 destination {current_dest_id} for delivery stream {name}."
-            )));
-        }
-
-        refuse_malformed_search_blocks(&body, "Update")?;
-        let extra_updates = extract_extra_destinations(&body, "Update");
-        if switches_search_family(stream, s3_update_given, &extra_updates) {
-            return Err(invalid_argument(
-                "Switching between Amazon OpenSearch Service and other services is not supported.",
-            ));
-        }
-        validate_search_updates(stream, &extra_updates)?;
+        check(stream)?;
 
         // Apply the S3 / ExtendedS3 update. The `*Update` shapes make every
         // member optional, so a partial update (e.g. only BufferingHints) must
@@ -1384,7 +1508,6 @@ mod tests {
         for setting in [
             json!({"CompressionFormat": "ZIP"}),
             json!({"CompressionFormat": "HADOOP_SNAPPY"}),
-            json!({"Prefix": "!{timestamp:yyyy}/"}),
             json!({"CustomTimeZone": "America/New_York"}),
             json!({"ProcessingConfiguration": {"Enabled": true}}),
             json!({"ProcessingConfiguration": {"Enabled": true, "Processors": [{"Type": "Lambda"}, {"Type": "AppendDelimiterToRecord"}]}}),
@@ -1400,7 +1523,6 @@ mod tests {
             for (backend, bucket_arn) in [
                 (false, "arn:aws:s3:::admission"),
                 (true, "arn:aws:s3:::admission"),
-                (true, "arn:aws:s3:::missing"),
                 (true, "malformed"),
             ] {
                 let (mut svc, _s3_state, disk, _tmp) = firehose_with_disk_s3("admission");
@@ -1821,6 +1943,227 @@ mod tests {
         );
     }
 
+    struct Topology;
+
+    impl crate::FirehoseTopology for Topology {
+        fn kinesis_stream_exists(&self, stream_arn: &str) -> bool {
+            stream_arn.ends_with("/orders")
+        }
+        fn search_domain(&self, domain_arn: &str) -> crate::SearchDomain {
+            if domain_arn.ends_with("/known") {
+                crate::SearchDomain::Present {
+                    reachable_url: None,
+                }
+            } else {
+                crate::SearchDomain::Absent
+            }
+        }
+    }
+
+    /// A service that can see resources: `known-bucket`, the `known` domain and
+    /// the `orders` source stream exist.
+    fn service_with_resources() -> FirehoseService {
+        let mut s3 = fakecloud_core::multi_account::MultiAccountState::<fakecloud_s3::S3State>::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost",
+        );
+        s3.get_or_create("123456789012").buckets.insert(
+            "known-bucket".to_owned(),
+            fakecloud_s3::S3Bucket::new("known-bucket", "us-east-1", "owner"),
+        );
+        let svc = service().with_s3(Arc::new(RwLock::new(s3)));
+        svc.engine.set_topology(Arc::new(Topology));
+        svc
+    }
+
+    fn search_config(bucket: &str, domain: &str) -> Value {
+        json!({
+            "RoleARN": "role",
+            "IndexName": "activity",
+            "DomainARN": format!("arn:aws:es:us-east-1:123456789012:domain/{domain}"),
+            "S3Configuration": {"RoleARN": "role", "BucketARN": format!("arn:aws:s3:::{bucket}")},
+        })
+    }
+
+    fn refusal(result: Result<AwsResponse, AwsServiceError>) -> String {
+        let error = result.err().expect("refused");
+        assert_eq!(error.code(), "InvalidArgumentException");
+        error.message()
+    }
+
+    /// Existence decides, with the recorded messages: names no rule would accept
+    /// or reject differently, like `Bad_Bucket_Name` and `ab`, are simply absent.
+    #[test]
+    fn create_requires_the_bucket_domain_and_source_stream_to_exist() {
+        let svc = service_with_resources();
+        let create = |name: &str, member: &str, config: Value| {
+            svc.create_delivery_stream(&request(
+                "CreateDeliveryStream",
+                json!({"DeliveryStreamName": name, member: config}),
+            ))
+        };
+        const OPENSEARCH: &str = "AmazonopensearchserviceDestinationConfiguration";
+        for bucket in ["Bad_Bucket_Name", "ab", "missing"] {
+            assert_eq!(
+                refusal(create("s", OPENSEARCH, search_config(bucket, "known"))),
+                format!("S3 Bucket {bucket} does not exist.")
+            );
+            assert_eq!(
+                refusal(create(
+                    "s",
+                    "ExtendedS3DestinationConfiguration",
+                    json!({"RoleARN": "r", "BucketARN": format!("arn:aws:s3:::{bucket}")}),
+                )),
+                format!("S3 Bucket {bucket} does not exist.")
+            );
+        }
+        assert_eq!(
+            refusal(create(
+                "s",
+                OPENSEARCH,
+                search_config("known-bucket", "none")
+            )),
+            "Verify that the IAM role has access to the ElasticSearch domain."
+        );
+        let source = |stream: &str| {
+            svc.create_delivery_stream(&request(
+                "CreateDeliveryStream",
+                json!({
+                    "DeliveryStreamName": "from-kinesis",
+                    "DeliveryStreamType": "KinesisStreamAsSource",
+                    "KinesisStreamSourceConfiguration": {
+                        "KinesisStreamARN": format!("arn:aws:kinesis:us-east-1:444455556666:stream/{stream}"),
+                        "RoleARN": "role",
+                    },
+                    OPENSEARCH: search_config("known-bucket", "known"),
+                }),
+            ))
+        };
+        assert_eq!(
+            refusal(source("gone")),
+            "Stream gone under account 444455556666 not found."
+        );
+        source("orders").unwrap();
+        create("ok", OPENSEARCH, search_config("known-bucket", "known")).unwrap();
+    }
+
+    #[test]
+    fn update_requires_what_it_names_to_exist() {
+        let svc = service_with_resources();
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "s",
+                "AmazonopensearchserviceDestinationConfiguration":
+                    search_config("known-bucket", "known"),
+            }),
+        ))
+        .unwrap();
+        let update = |change: Value| {
+            svc.update_destination(&request(
+                "UpdateDestination",
+                json!({
+                    "DeliveryStreamName": "s",
+                    "CurrentDeliveryStreamVersionId": "1",
+                    "DestinationId": "destinationId-000000000001",
+                    "AmazonopensearchserviceDestinationUpdate": change,
+                }),
+            ))
+        };
+        assert_eq!(
+            refusal(update(
+                json!({"S3Update": {"BucketARN": "arn:aws:s3:::missing"}})
+            )),
+            "S3 Bucket missing does not exist."
+        );
+        assert_eq!(
+            refusal(update(
+                json!({"DomainARN": "arn:aws:es:us-east-1:123456789012:domain/none"})
+            )),
+            "Verify that the IAM role has access to the ElasticSearch domain."
+        );
+        assert_eq!(describe(&svc, "s")["VersionId"], "1", "nothing changed");
+        assert_eq!(
+            refusal(update(
+                json!({"ClusterEndpoint": "https://no-such-host.invalid"})
+            )),
+            "Invalid Elasticsearch Cluster Endpoint https://no-such-host.invalid. If this \
+             Elasticsearch domain is in VPC, please specify VpcConfiguration."
+        );
+        // Moving between the two replaces, rather than leaving both set.
+        let cluster = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", cluster.local_addr().unwrap());
+        update(json!({"ClusterEndpoint": endpoint})).unwrap();
+        let stored = &describe(&svc, "s")["Destinations"][0]
+            ["AmazonopensearchserviceDestinationDescription"];
+        assert_eq!(stored["ClusterEndpoint"], endpoint.as_str());
+        assert!(stored.get("DomainARN").is_none(), "{stored}");
+    }
+
+    /// The members a new stream reports, as recorded.
+    #[test]
+    fn describe_reports_the_recorded_defaults() {
+        let svc = service_with_resources();
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "direct",
+                "AmazonopensearchserviceDestinationConfiguration":
+                    search_config("known-bucket", "known"),
+            }),
+        ))
+        .unwrap();
+        let direct = describe(&svc, "direct");
+        assert_eq!(direct["DeliveryStreamStatus"], "ACTIVE");
+        assert_eq!(
+            direct["DeliveryStreamEncryptionConfiguration"],
+            json!({"Status": "DISABLED"})
+        );
+        assert!(direct.get("Source").is_none());
+        assert!(direct.get("LastUpdateTimestamp").is_none());
+        let destination =
+            &direct["Destinations"][0]["AmazonopensearchserviceDestinationDescription"];
+        assert_eq!(
+            destination["CloudWatchLoggingOptions"],
+            json!({"Enabled": false})
+        );
+        let s3 = &destination["S3DestinationDescription"];
+        assert_eq!(s3["CompressionFormat"], "UNCOMPRESSED");
+        assert_eq!(
+            s3["BufferingHints"],
+            json!({"SizeInMBs": 5, "IntervalInSeconds": 300})
+        );
+        assert_eq!(
+            s3["EncryptionConfiguration"],
+            json!({"NoEncryptionConfig": "NoEncryption"})
+        );
+        assert_eq!(s3["CloudWatchLoggingOptions"], json!({"Enabled": false}));
+
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "kinesis",
+                "DeliveryStreamType": "KinesisStreamAsSource",
+                "KinesisStreamSourceConfiguration": {
+                    "KinesisStreamARN": "arn:aws:kinesis:us-east-1:123456789012:stream/orders",
+                    "RoleARN": "role",
+                },
+                "AmazonopensearchserviceDestinationConfiguration":
+                    search_config("known-bucket", "known"),
+            }),
+        ))
+        .unwrap();
+        let kinesis = describe(&svc, "kinesis");
+        assert!(kinesis
+            .get("DeliveryStreamEncryptionConfiguration")
+            .is_none());
+        assert_eq!(
+            kinesis["Source"]["KinesisStreamSourceDescription"]["DeliveryStartTimestamp"],
+            kinesis["CreateTimestamp"]
+        );
+    }
+
     #[test]
     fn switching_between_search_and_other_destinations_is_refused() {
         let svc = service();
@@ -2052,7 +2395,7 @@ mod tests {
         let svc = service();
         let config = json!({
             "RoleARN": "role", "BucketARN": "arn:aws:s3:::bucket",
-            "CompressionFormat": "ZIP", "Prefix": "!{timestamp:yyyy}/",
+            "CompressionFormat": "ZIP", "Prefix": "!{timestamp:yyyy}/", "ErrorOutputPrefix": "e/",
             "CustomTimeZone": "America/New_York",
             "ProcessingConfiguration": {"Enabled": true},
             "DataFormatConversionConfiguration": {},
@@ -3210,7 +3553,6 @@ mod tests {
         for setting in [
             json!({"CompressionFormat": "ZIP"}),
             json!({"CompressionFormat": "HADOOP_SNAPPY"}),
-            json!({"Prefix": "!{timestamp:yyyy}/"}),
             json!({"CustomTimeZone": "America/New_York"}),
             json!({"ProcessingConfiguration": {"Enabled": true}}),
             json!({"ProcessingConfiguration": {"Enabled": true, "Processors": [{"Type": "Lambda"}, {"Type": "AppendDelimiterToRecord"}]}}),
@@ -4661,8 +5003,18 @@ mod tests {
         // failures asynchronously (never as an API error), so a stream whose
         // destination bucket is absent still returns 200 + RecordId. The record
         // stays buffered for retry instead of fabricating a synchronous error.
+        // The bucket existed when the stream was created, which requires it.
         let (svc, s3_state, _disk, _tmp) = firehose_with_disk_s3("real-bucket");
+        s3_state.write().get_or_create(S3_ACCOUNT).buckets.insert(
+            "ghost-bucket".into(),
+            fakecloud_s3::S3Bucket::new("ghost-bucket", "us-east-1", "owner"),
+        );
         create_s3_stream(&svc, "broken-stream", "ghost-bucket");
+        s3_state
+            .write()
+            .get_or_create(S3_ACCOUNT)
+            .buckets
+            .remove("ghost-bucket");
 
         let resp = svc
             .put_record(&request(

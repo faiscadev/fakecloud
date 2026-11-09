@@ -15,7 +15,7 @@
 //! destination refuses records. Positions are scoped to the source stream's
 //! creation time, so a source stream recreated under the same name starts over.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,8 +38,8 @@ const MAX_RECORDS_PER_READ: usize = 10_000;
 const MAX_BYTES_PER_READ: usize = 10 * 1024 * 1024;
 
 /// How much one `read_shards` call may take. `shard_bytes` is per shard and
-/// `total_bytes` is shared by the shards, past the first record of each while
-/// any of it is left.
+/// `total_bytes` is shared by the shards. The only read past `total_bytes` is a
+/// single record larger than all of it, which could not be read otherwise.
 #[derive(Clone, Copy)]
 struct ReadLimits {
     records: usize,
@@ -171,22 +171,75 @@ impl KinesisLambdaFirehosePoller {
             loop {
                 interval.tick().await;
                 self.poll_firehose().await;
+                self.sweep_orphaned_checkpoints().await;
             }
         };
         tokio::join!(lambda, firehose);
     }
 
+    /// Forgets checkpoints whose reader is gone: a deleted delivery stream or
+    /// event source mapping never polls again, so nothing else would remove them.
+    /// Candidates are listed before their owners are read: a reader created
+    /// meanwhile cannot have its new checkpoint mistaken for an orphan.
+    async fn sweep_orphaned_checkpoints(&self) {
+        let keys: Vec<String> = self
+            .kinesis_state
+            .read()
+            .iter_regional()
+            .flat_map(|(_, _, kinesis)| kinesis.lambda_checkpoints.keys().cloned())
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        let mappings: HashSet<String> = self
+            .lambda_state
+            .read()
+            .iter_regional()
+            .flat_map(|(_, _, lambda)| lambda.event_source_mappings.keys().cloned())
+            .collect();
+        let delivery_streams: Option<HashSet<String>> =
+            self.firehose.as_ref().map(|(firehose_state, _)| {
+                collect_sources(firehose_state)
+                    .into_iter()
+                    .map(|source| source.checkpoint_id)
+                    .collect()
+            });
+        let orphans: HashSet<String> = keys
+            .into_iter()
+            .filter(|key| is_orphaned_checkpoint(key, &mappings, delivery_streams.as_ref()))
+            .collect();
+        if orphans.is_empty() {
+            return;
+        }
+        for (_, _, kinesis) in self.kinesis_state.write().iter_regional_mut() {
+            kinesis
+                .lambda_checkpoints
+                .retain(|key, _| !orphans.contains(key));
+            kinesis
+                .lambda_checkpoint_streams
+                .retain(|key, _| !orphans.contains(key));
+        }
+        self.persist().await;
+    }
+
     /// Snapshots from before checkpoints named their stream restore entries with
     /// no owner, which deleting a stream would not forget. Name the stream each
     /// one's mapping reads, and drop those whose mapping or stream is not here:
-    /// they would apply their old offset to a stream recreated later.
+    /// they would apply their old offset to a stream recreated later. The binary
+    /// that wrote them also kept them across a delete and recreate of the stream,
+    /// so each is checked against the incarnation there now.
     async fn settle_restored_checkpoints(&self) {
-        let mapped: HashMap<String, String> = self
+        let mapped: HashMap<String, (String, DateTime<Utc>)> = self
             .lambda_state
             .read()
             .iter_regional()
             .flat_map(|(_, _, lambda)| lambda.event_source_mappings.values())
-            .map(|m| (m.uuid.clone(), m.event_source_arn.clone()))
+            .map(|m| {
+                (
+                    m.uuid.clone(),
+                    (m.event_source_arn.clone(), m.last_modified),
+                )
+            })
             .collect();
         let mut settled = false;
         for (_, _, kinesis) in self.kinesis_state.write().iter_regional_mut() {
@@ -198,15 +251,25 @@ impl KinesisLambdaFirehosePoller {
                 .collect();
             for key in ownerless {
                 settled = true;
-                let owner = key
-                    .rsplit_once(':')
-                    .and_then(|(uuid, _)| mapped.get(uuid))
-                    .filter(|arn| kinesis.streams.values().any(|s| s.stream_arn == **arn));
-                match owner {
-                    Some(arn) => {
-                        kinesis.lambda_checkpoint_streams.insert(key, arn.clone());
+                let Some((uuid, shard_id)) = key.rsplit_once(':') else {
+                    kinesis.lambda_checkpoints.remove(&key);
+                    continue;
+                };
+                let owner = mapped.get(uuid).and_then(|(arn, last_modified)| {
+                    let stream = kinesis.streams.values().find(|s| s.stream_arn == *arn)?;
+                    let predates = *last_modified < stream.stream_creation_timestamp;
+                    let shard = stream.shards.iter().find(|s| s.shard_id == shard_id);
+                    Some((arn.clone(), predates, shard.map(|s| s.records.len())))
+                });
+                let offset = kinesis.lambda_checkpoints.get(&key).copied().unwrap_or(0);
+                match owner.map(|(arn, predates, records)| {
+                    (arn, restored_position(offset, predates, records))
+                }) {
+                    Some((arn, Some(position))) => {
+                        kinesis.lambda_checkpoints.insert(key.clone(), position);
+                        kinesis.lambda_checkpoint_streams.insert(key, arn);
                     }
-                    None => {
+                    _ => {
                         kinesis.lambda_checkpoints.remove(&key);
                     }
                 }
@@ -285,17 +348,24 @@ impl KinesisLambdaFirehosePoller {
                 .min(start.saturating_add(limits.records));
             let share = total_left / (pending.len() - position);
             let max_bytes = limits.shard_bytes.min(share);
+            let size = |r: &KinesisRecord| r.data.len() + r.partition_key.len();
             let mut bytes = 0;
             if let Some(over) = shard.records[start..end].iter().position(|r| {
-                bytes += r.data.len() + r.partition_key.len();
+                bytes += size(r);
                 bytes > max_bytes
             }) {
+                // A first record past this shard's share is still read if the
+                // budget holds it. One that does not fit waits for a later read,
+                // where its age puts its shard first, unless it could never fit.
+                let first = size(&shard.records[start]);
+                let readable = first <= total_left
+                    || (first > limits.total_bytes && total_left == limits.total_bytes);
+                if over == 0 && !readable {
+                    continue;
+                }
                 end = start + over.max(1);
             }
-            let taken: usize = shard.records[start..end]
-                .iter()
-                .map(|r| r.data.len() + r.partition_key.len())
-                .sum();
+            let taken: usize = shard.records[start..end].iter().map(size).sum();
             total_left = total_left.saturating_sub(taken);
             reads.push(ShardRead {
                 shard_id: shard.shard_id.clone(),
@@ -641,7 +711,9 @@ impl KinesisLambdaFirehosePoller {
                     .iter()
                     .map(|r| SourceRecord {
                         data: Bytes::copy_from_slice(&r.data),
-                        document_id: format!("{generation}:{shard_id}:{}", r.sequence_number),
+                        // As recorded: the sequence number and a subsequence,
+                        // stable across re-reads.
+                        document_id: format!("{}.0", r.sequence_number),
                         arrival: r.approximate_arrival_timestamp,
                     })
                     .collect(),
@@ -697,6 +769,46 @@ impl KinesisLambdaFirehosePoller {
             }
         }
         advanced
+    }
+}
+
+/// Whether nothing reads a checkpoint any more. Delivery stream checkpoints are
+/// `<stream ARN>@<created>@<source generation>:<shard>`, and mapping ones
+/// `<uuid>:<shard>`. Without Firehose wired, its checkpoints are left alone.
+fn is_orphaned_checkpoint(
+    key: &str,
+    mappings: &HashSet<String>,
+    delivery_streams: Option<&HashSet<String>>,
+) -> bool {
+    if key.starts_with("arn:") {
+        let reader = key.rsplit_once('@').map_or(key, |(reader, _)| reader);
+        return delivery_streams.is_some_and(|streams| !streams.contains(reader));
+    }
+    key.rsplit_once(':')
+        .is_some_and(|(uuid, _)| !mappings.contains(uuid))
+}
+
+/// Where a mapping resumes from an ownerless restored checkpoint: `None` to seed
+/// it afresh from its starting position.
+///
+/// `predates` says the mapping last changed before the stream there now was
+/// created, so that stream was recreated under it and every record in it arrived
+/// after the mapping started: the start of the shard loses nothing.
+///
+/// - Past the shard's end, the offset cannot be this incarnation's.
+/// - At the end nothing is unread, so it is harmless whatever its history.
+/// - Below the end, a mapping that predates the stream may be skipping records it
+///   never saw, so it restarts: at-least-once allows the duplicates. Otherwise the
+///   offset is kept: a bare integer below the end is identical for this incarnation
+///   and an earlier one, when the mapping was also updated after the recreate.
+fn restored_position(offset: usize, predates: bool, records: Option<usize>) -> Option<usize> {
+    let records = records?;
+    if offset == records || (offset < records && !predates) {
+        Some(offset)
+    } else if predates {
+        Some(0)
+    } else {
+        None
     }
 }
 
@@ -1484,6 +1596,148 @@ mod tests {
             assert_eq!(seeded, 4);
         }
 
+        /// No read passes its budget, however small the shares, except
+        /// one record larger than all of it.
+        #[tokio::test]
+        async fn a_read_never_passes_its_byte_budget() {
+            let f = Fixture::new(json!({}));
+            let base = Utc::now() - chrono::Duration::minutes(1);
+            {
+                let mut accounts = f.kinesis.write();
+                let stream = accounts
+                    .regional_mut(ACCOUNT, REGION)
+                    .streams
+                    .get_mut("orders")
+                    .unwrap();
+                stream.shards = fakecloud_kinesis::build_stream_shards(3);
+                for (age, (shard, size)) in
+                    stream.shards.iter_mut().zip([600, 600, 600]).enumerate()
+                {
+                    shard.records.push(KinesisRecord {
+                        sequence_number: "1".to_string(),
+                        partition_key: String::new(),
+                        data: vec![b'x'; size],
+                        approximate_arrival_timestamp: base + chrono::Duration::seconds(age as i64),
+                    });
+                }
+            }
+            let budget = |total_bytes| ReadLimits {
+                records: usize::MAX,
+                shard_bytes: usize::MAX,
+                total_bytes,
+                generation: None,
+            };
+            // Each record is past its share, and only one fits the budget.
+            let reads = read_everything(&f, "tight", budget(1000));
+            let read: usize = reads.iter().map(|r| r.records.len()).sum();
+            assert_eq!(read, 1, "taking one per shard would read 1800 of 1000");
+            assert_eq!(reads[0].shard_id, "shardId-000000000000", "oldest first");
+
+            // A record larger than the budget is read alone, or never.
+            let reads = read_everything(&f, "oversized", budget(100));
+            let read: usize = reads.iter().map(|r| r.records.len()).sum();
+            assert_eq!(read, 1);
+        }
+
+        /// A deleted delivery stream's checkpoints go with it, and a live one's stay.
+        #[tokio::test]
+        async fn sweep_forgets_checkpoints_of_deleted_delivery_streams() {
+            let f = Fixture::new(json!({}));
+            f.put();
+            f.poll().await;
+            assert_eq!(f.checkpoint(), Some(0));
+            f.poller.sweep_orphaned_checkpoints().await;
+            assert_eq!(f.checkpoint(), Some(0), "its reader is alive");
+            f.firehose
+                .write()
+                .get_or_create(ACCOUNT, REGION)
+                .streams_mut(REGION)
+                .remove("fh");
+            f.poller.sweep_orphaned_checkpoints().await;
+            let accounts = f.kinesis.read();
+            let state = accounts.regional(ACCOUNT, REGION).unwrap();
+            assert!(state.lambda_checkpoints.is_empty());
+            assert!(state.lambda_checkpoint_streams.is_empty());
+        }
+
+        /// A mapping that is gone, enabled or not when it went, leaves nothing behind.
+        #[tokio::test]
+        async fn sweep_forgets_checkpoints_of_deleted_mappings() {
+            let Fixture { kinesis, .. } = Fixture::new(json!({}));
+            let lambda: SharedLambdaState = Arc::new(RwLock::new(MultiAccountState::new(
+                ACCOUNT,
+                REGION,
+                "http://localhost:4566",
+            )));
+            let function = format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:f");
+            let mut disabled = esm("disabled", &function, &stream_arn());
+            disabled.enabled = false;
+            lambda
+                .write()
+                .regional_mut(ACCOUNT, REGION)
+                .event_source_mappings
+                .insert("disabled".into(), disabled);
+            for uuid in ["disabled", "deleted"] {
+                kinesis
+                    .write()
+                    .regional_mut(ACCOUNT, REGION)
+                    .set_lambda_checkpoint(&stream_arn(), uuid, SHARD, 3);
+            }
+            KinesisLambdaFirehosePoller::new(kinesis.clone(), lambda)
+                .sweep_orphaned_checkpoints()
+                .await;
+            let accounts = kinesis.read();
+            let state = accounts.regional(ACCOUNT, REGION).unwrap();
+            assert_eq!(state.lambda_checkpoints.len(), 1);
+            assert_eq!(state.lambda_checkpoint("disabled", SHARD), 3);
+            assert_eq!(state.lambda_checkpoint_streams.len(), 1);
+        }
+
+        /// The clamp at the retention boundary reaches Lambda mappings: an expired
+        /// record no write has trimmed yet is neither invoked with nor re-read, and
+        /// the checkpoint moves past it.
+        #[tokio::test]
+        async fn retention_clamp_skips_expired_records_for_lambda_mappings() {
+            let f = Fixture::new(json!({}));
+            shard_records(&f, &[25, 25, 1]);
+            let delivery = Arc::new(RecordingDelivery(parking_lot::Mutex::new(Vec::new())));
+            let lambda: SharedLambdaState = Arc::new(RwLock::new(MultiAccountState::new(
+                ACCOUNT,
+                REGION,
+                "http://localhost:4566",
+            )));
+            let poller = KinesisLambdaFirehosePoller::new(f.kinesis.clone(), lambda)
+                .with_lambda_delivery(delivery.clone());
+            let mapping = Mapping {
+                uuid: "esm".to_string(),
+                function_arn: format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:f"),
+                stream_arn: stream_arn(),
+                batch_size: 10,
+                filter: FilterSet::from_strings(std::iter::empty::<&String>()),
+                starting_position: Some("TRIM_HORIZON".to_string()),
+                starting_position_timestamp: None,
+                report_batch_item_failures: false,
+                invoke_identity_arn: None,
+            };
+            poller.process_mapping(&mapping).await;
+            let payloads = delivery.0.lock().clone();
+            assert_eq!(payloads.len(), 1);
+            let event: Value = serde_json::from_str(&payloads[0]).unwrap();
+            assert_eq!(
+                event["Records"].as_array().unwrap().len(),
+                1,
+                "only the live one"
+            );
+            assert_eq!(
+                f.kinesis
+                    .read()
+                    .regional(ACCOUNT, REGION)
+                    .unwrap()
+                    .lambda_checkpoint("esm", SHARD),
+                3
+            );
+        }
+
         /// The handoff carries each record's Kinesis arrival, not the read time.
         #[tokio::test]
         async fn source_handoff_carries_kinesis_arrival_times() {
@@ -1631,6 +1885,15 @@ mod tests {
                         .lambda_checkpoints
                         .insert(format!("{uuid}:{SHARD}"), 7);
                 }
+                let stream = state.streams.get_mut("orders").unwrap();
+                for n in 0..7 {
+                    stream.shards[0].records.push(KinesisRecord {
+                        sequence_number: n.to_string(),
+                        partition_key: String::new(),
+                        data: Vec::new(),
+                        approximate_arrival_timestamp: Utc::now(),
+                    });
+                }
             }
             let poller = KinesisLambdaFirehosePoller::new(kinesis.clone(), lambda);
             poller.settle_restored_checkpoints().await;
@@ -1695,6 +1958,40 @@ mod tests {
             running.abort();
             assert!(read.is_ok(), "Firehose read nothing behind a hung Lambda");
         }
+    }
+
+    /// An ownerless restored checkpoint against the stream that exists now.
+    #[test]
+    fn restored_checkpoints_of_an_earlier_incarnation_are_not_applied() {
+        // No such shard: nothing to resume.
+        assert_eq!(restored_position(3, false, None), None);
+        // Past the end of the shard: cannot be this incarnation's.
+        assert_eq!(restored_position(9, false, Some(4)), None);
+        assert_eq!(restored_position(9, true, Some(4)), Some(0));
+        // At the end nothing is unread either way.
+        assert_eq!(restored_position(4, true, Some(4)), Some(4));
+        assert_eq!(restored_position(4, false, Some(4)), Some(4));
+        // Below it: the mapping predating the stream shows it was recreated, and
+        // everything in it arrived after the mapping started.
+        assert_eq!(restored_position(2, true, Some(4)), Some(0));
+        assert_eq!(restored_position(2, false, Some(4)), Some(2));
+    }
+
+    #[test]
+    fn checkpoints_are_orphaned_only_when_their_reader_is_known_to_be_gone() {
+        let mappings = HashSet::from(["live".to_string()]);
+        let reader = "arn:aws:firehose:us-east-1:1:deliverystream/fh@7";
+        let streams = HashSet::from([reader.to_string()]);
+        let key = format!("{reader}@9:shardId-000000000000");
+        assert!(!is_orphaned_checkpoint(&key, &mappings, Some(&streams)));
+        assert!(is_orphaned_checkpoint(
+            &key,
+            &mappings,
+            Some(&HashSet::new())
+        ));
+        assert!(!is_orphaned_checkpoint(&key, &mappings, None), "not wired");
+        assert!(!is_orphaned_checkpoint("live:s", &mappings, None));
+        assert!(is_orphaned_checkpoint("gone:s", &mappings, None));
     }
 
     #[test]

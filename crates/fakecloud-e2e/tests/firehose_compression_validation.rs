@@ -426,6 +426,14 @@ async fn firehose_cfn_execute_change_set_rejects_invalid_retry() {
 async fn firehose_sdk_unknown_compression_rejected_without_mutation() {
     let server = TestServer::start().await;
     let client = server.firehose_client().await;
+    server
+        .s3_client()
+        .await
+        .create_bucket()
+        .bucket("compression-bucket")
+        .send()
+        .await
+        .unwrap();
     let err = client
         .create_delivery_stream()
         .delivery_stream_name("invalid-compression")

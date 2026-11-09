@@ -40,12 +40,13 @@ pub(crate) fn validate_s3_delivery(dest: &S3Destination) -> Result<Compression, 
     let codec = dest.compression_format.as_deref().unwrap_or("UNCOMPRESSED");
     let compression = Compression::from_format(codec)
         .ok_or_else(|| unsupported(format!("CompressionFormat {codec}")))?;
+    crate::prefix::validate_prefixes(dest.prefix.as_deref(), dest.error_output_prefix.as_deref())?;
     if dest
         .prefix
         .as_deref()
-        .is_some_and(|prefix| prefix.contains("!{"))
+        .is_some_and(crate::prefix::has_partition_keys)
     {
-        return Err(unsupported("Prefix expressions"));
+        return Err(unsupported("Prefix partition key expressions"));
     }
     if let Some(zone) = dest
         .custom_time_zone

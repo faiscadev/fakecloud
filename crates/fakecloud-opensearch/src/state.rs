@@ -265,6 +265,27 @@ pub fn direct_query_data_source_arn(region: &str, account_id: &str, name: &str) 
     .to_string()
 }
 
+impl Domain {
+    /// Where a client can reach this domain's cluster. Domains are control-plane
+    /// only today, so none has one; `endpoint` is a formatted name nothing serves.
+    pub fn reachable_url(&self) -> Option<String> {
+        None
+    }
+}
+
+/// The live domain an ARN names, in the account the ARN names.
+pub fn domain_by_arn<'a>(
+    accounts: &'a MultiAccountState<OpenSearchState>,
+    arn: &str,
+) -> Option<&'a Domain> {
+    let account = fakecloud_aws::arn::account_of(arn)?;
+    accounts
+        .get(account)?
+        .domains
+        .values()
+        .find(|domain| domain.arn == arn && !domain.deleted)
+}
+
 pub type SharedOpenSearchState = Arc<RwLock<MultiAccountState<OpenSearchState>>>;
 
 #[derive(Debug, Serialize, Deserialize)]

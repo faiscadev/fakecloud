@@ -11,7 +11,8 @@ use fakecloud_s3::SharedS3State;
 use parking_lot::RwLock;
 
 use crate::output::encode_records;
-use crate::search::{self, SearchDelivery};
+use crate::search::{self, SearchDelivery, SearchTarget};
+use crate::topology::{SearchDomain, SharedTopology};
 use crate::{DeliveryConfig, FirehoseAccounts, SharedFirehoseState, StreamKey};
 
 /// An immutable destination/version snapshot and an already chosen, retry-stable key.
@@ -30,6 +31,17 @@ pub struct DeliveryBatch {
     pub object_key: String,
 }
 
+impl DeliveryBatch {
+    fn live_records(&self) -> Vec<&Bytes> {
+        self.records
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| !self.destination.expired.contains(position))
+            .map(|(_, record)| record)
+            .collect()
+    }
+}
+
 pub trait BatchWriter: Send + Sync {
     fn write(&self, batch: &DeliveryBatch) -> Result<DeliveryWriteOutcome, String>;
 }
@@ -38,6 +50,7 @@ pub struct S3BatchWriter {
     state: SharedFirehoseState,
     s3: SharedS3State,
     store: Arc<RwLock<Option<Arc<dyn S3Store>>>>,
+    topology: SharedTopology,
 }
 
 impl S3BatchWriter {
@@ -46,7 +59,17 @@ impl S3BatchWriter {
         s3: SharedS3State,
         store: Arc<RwLock<Option<Arc<dyn S3Store>>>>,
     ) -> Self {
-        Self { state, s3, store }
+        Self {
+            state,
+            s3,
+            store,
+            topology: Arc::default(),
+        }
+    }
+
+    pub(crate) fn with_topology(mut self, topology: SharedTopology) -> Self {
+        self.topology = topology;
+        self
     }
 }
 
@@ -101,6 +124,84 @@ impl S3BatchWriter {
         (current.instance_id == batch.stream.instance_id).then_some(config)
     }
 
+    /// The cluster to send to now. A domain resolves on every attempt, so its
+    /// failure retries like any other until the retry duration ends.
+    fn bulk_endpoint(&self, search: &SearchDelivery) -> Result<String, search::BulkError> {
+        let family = search.family;
+        let domain = match &search.target {
+            SearchTarget::Cluster(endpoint) => return Ok(endpoint.clone()),
+            SearchTarget::Domain(arn) => arn,
+        };
+        let lookup = self.topology.read().clone();
+        match lookup.map(|topology| topology.search_domain(domain)) {
+            Some(SearchDomain::Present {
+                reachable_url: Some(url),
+            }) => Ok(url.trim_end_matches('/').to_owned()),
+            // Recorded for a domain deleted with records buffered; a domain nothing
+            // can reach is the same to a client.
+            _ => Err(family.connection_error()),
+        }
+    }
+
+    /// One bulk attempt. `Err` asks for another; `Ok` means no record is left to
+    /// send.
+    fn index_pending(
+        &self,
+        batch: &DeliveryBatch,
+        search: &SearchDelivery,
+        progress: &mut search::BulkProgress,
+    ) -> Result<(), String> {
+        let first_attempt = search.attempts.begin();
+        let result = self.bulk_endpoint(search).and_then(|endpoint| {
+            search::post_bulk(
+                search,
+                &endpoint,
+                batch,
+                &progress.pending,
+                &mut progress.first_bad_request,
+            )
+        });
+        let elapsed = (Utc::now() - first_attempt).to_std().unwrap_or_default();
+        let retrying = elapsed < search.retry;
+        match result {
+            Ok(items) => {
+                progress.any_indexed |= items.len() < progress.pending.len();
+                let (retriable, finished): (Vec<_>, Vec<_>) =
+                    items.into_iter().partition(|failure| failure.retriable);
+                progress.failed.extend(finished);
+                if retrying && !retriable.is_empty() {
+                    let message = format!(
+                        "{} documents failed with a retriable status, first: {} {}",
+                        retriable.len(),
+                        retriable[0].code,
+                        retriable[0].message
+                    );
+                    progress.pending = retriable.iter().map(|failure| failure.index).collect();
+                    return Err(message);
+                }
+                progress.failed.extend(retriable);
+            }
+            Err(error) => {
+                if retrying {
+                    return Err(error.message);
+                }
+                progress
+                    .failed
+                    .extend(progress.pending.iter().map(|&index| search::Failure {
+                        index,
+                        code: error.code.clone(),
+                        message: error.message.clone(),
+                        retriable: false,
+                        bad_request_item: false,
+                    }));
+            }
+        }
+        progress.pending.clear();
+        search::apply_parse_exception(search.family, progress);
+        progress.failed.sort_by_key(|failure| failure.index);
+        Ok(())
+    }
+
     fn write_search(
         &self,
         batch: &DeliveryBatch,
@@ -110,64 +211,54 @@ impl S3BatchWriter {
         if self.live_stream(batch).is_none() {
             return Ok(DeliveryWriteOutcome::Cancelled);
         }
-        let search::BulkProgress {
-            rejected: mut failures,
-            pending,
-        } = search.attempts.progress(batch);
-        if !pending.is_empty() {
-            let first_attempt = search.attempts.begin();
-            let result = search::post_bulk(search, batch, &pending);
-            let elapsed = (Utc::now() - first_attempt).to_std().unwrap_or_default();
-            let retrying = elapsed < search.retry;
-            match result {
-                Ok(items) => {
-                    let (retriable, rejected): (Vec<_>, Vec<_>) =
-                        items.into_iter().partition(search::Failure::retriable);
-                    failures.extend(rejected);
-                    if retrying && !retriable.is_empty() {
-                        let message = format!(
-                            "{} documents failed with a retriable status, first: {} {}",
-                            retriable.len(),
-                            retriable[0].code,
-                            retriable[0].message
-                        );
-                        search.attempts.save(search::BulkProgress {
-                            rejected: failures,
-                            pending: retriable.iter().map(|failure| failure.index).collect(),
-                        });
-                        return Err(message);
-                    }
-                    failures.extend(retriable);
-                }
-                Err(error) => {
-                    if retrying {
-                        return Err(error.message);
-                    }
-                    failures.extend(pending.iter().map(|&index| search::Failure {
-                        index,
-                        code: error.code.into(),
-                        message: error.message.clone(),
-                    }));
+        search.attempts.set_bulk_retry_due(false);
+        let mut progress = search.attempts.progress(batch);
+        progress
+            .pending
+            .retain(|index| !batch.destination.expired.contains(index));
+        let live = |failure: &&search::Failure| !batch.destination.expired.contains(&failure.index);
+        let mut outcome = DeliveryWriteOutcome::Committed;
+        if !progress.rejected_written {
+            let lines: Vec<String> = progress
+                .rejected
+                .iter()
+                .filter(live)
+                .map(|failure| search::rejected_record(batch, failure))
+                .collect();
+            if !lines.is_empty() {
+                let key = search::rejected_object_key(batch, search);
+                outcome = self.put(batch, &key, &[lines.join("\n")])?;
+                if outcome == DeliveryWriteOutcome::Cancelled {
+                    return Ok(outcome);
                 }
             }
-            failures.sort_by_key(|failure| failure.index);
-            // A failed S3 write below retries the write, not the indexing.
-            search.attempts.save(search::BulkProgress {
-                rejected: failures.clone(),
-                pending: Vec::new(),
-            });
+            progress.rejected_written = true;
         }
-        let mut outcome = DeliveryWriteOutcome::Committed;
+        if !progress.pending.is_empty() {
+            if let Err(message) = self.index_pending(batch, search, &mut progress) {
+                search.attempts.save(progress);
+                search.attempts.set_bulk_retry_due(true);
+                return Err(message);
+            }
+        }
+        // A failed S3 write below retries the write, not the indexing.
+        search.attempts.save(progress.clone());
         if search.backup_all {
-            outcome = self.put(batch, &batch.object_key, &batch.records)?;
+            outcome = self.put(batch, &batch.object_key, &batch.live_records())?;
         }
-        if !failures.is_empty() {
-            let lines: Vec<Vec<u8>> = failures
-                .iter()
-                .map(|failure| search::failed_record(batch, search, failure))
-                .collect();
-            let suffix = &batch.object_key[batch.destination.output.prefix.len()..];
-            outcome = self.put(batch, &format!("{}{suffix}", search.error_prefix), &lines)?;
+        let lines: Vec<String> = progress
+            .failed
+            .iter()
+            .filter(live)
+            .map(|failure| search::failed_record(batch, search, failure))
+            .collect();
+        if !lines.is_empty() {
+            let name = batch.object_key.rsplit('/').next().unwrap_or_default();
+            outcome = self.put(
+                batch,
+                &format!("{}{name}", search.error_prefix),
+                &[lines.join("\n")],
+            )?;
         }
         Ok(outcome)
     }
@@ -178,7 +269,7 @@ impl BatchWriter for S3BatchWriter {
         if let Some(search) = &batch.destination.search {
             return self.write_search(batch, search);
         }
-        self.put(batch, &batch.object_key, &batch.records)
+        self.put(batch, &batch.object_key, &batch.live_records())
     }
 }
 
@@ -297,6 +388,7 @@ mod tests {
                 },
                 encryption: DeliveredEncryption::AsDelivered,
                 search: None,
+                expired: Default::default(),
             },
             records: vec![
                 Bytes::from_static(b"first\n"),
@@ -663,8 +755,9 @@ mod tests {
             Bytes::from_static(b"{\"n\":1}"),
         ];
         batch.destination.search = Some(SearchDelivery {
+            family: search::SearchFamily::OpenSearch,
             // Nothing listens on port 1, so the request is refused.
-            endpoint: "http://127.0.0.1:1".into(),
+            target: SearchTarget::Cluster("http://127.0.0.1:1".into()),
             index_name: "activity".into(),
             rotation: "NoRotation".into(),
             type_name: None,
@@ -733,35 +826,208 @@ mod tests {
             .collect()
     }
 
-    /// Only the record that cannot be a line of a bulk body fails; the others
-    /// are indexed without it.
+    fn failure_objects(s3: &SharedS3State) -> Vec<(String, Vec<serde_json::Value>)> {
+        let accounts = s3.read();
+        accounts.get(ACCOUNT).unwrap().buckets["logs-bucket"]
+            .objects
+            .iter()
+            .filter(|(key, _)| key.starts_with("failed/"))
+            .map(|(key, object)| {
+                let BodyRef::Memory(body) = &object.body else {
+                    panic!("memory writer")
+                };
+                let lines = std::str::from_utf8(body)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                (key.clone(), lines)
+            })
+            .collect()
+    }
+
+    /// Records refused before sending land in their own object with their own
+    /// shape; the others are sent, and a sent one that fails lands in another.
     #[tokio::test(flavor = "multi_thread")]
-    async fn malformed_records_fail_alone() {
+    async fn refused_and_sent_failures_land_in_separate_objects() {
         let (state, s3, mut batch) = fixture();
         search_batch(&mut batch, Duration::from_secs(300));
         batch.records = vec![
             Bytes::from_static(b"{\"ok\":1}\n"),
-            Bytes::from_static(b"{\n\"multi\":\"line\"}"),
+            Bytes::new(),
             Bytes::from_static(b"not json"),
-            Bytes::from_static(b"{\"ok\":2}"),
+            Bytes::from_static(b"\xff\xfe"),
         ];
         let (endpoint, sent) = bulk_stub(vec![serde_json::json!({
-            "errors": false,
-            "items": [{"index": {"status": 201}}, {"index": {"status": 201}}],
+            "errors": true,
+            "items": [
+                {"index": {"status": 201}},
+                {"index": {"status": 400, "error": {"type": "mapper_parsing_exception"}}},
+            ],
         })])
         .await;
-        batch.destination.search.as_mut().unwrap().endpoint = endpoint;
+        batch.destination.search.as_mut().unwrap().target = SearchTarget::Cluster(endpoint);
         let writer = Arc::new(writer(&state, &s3, None));
-        let key = batch.object_key.clone();
         tokio::task::spawn_blocking(move || writer.write(&batch))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(*sent.lock(), vec![2]);
-        let lines = failure_lines(&s3, &key);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["errorCode"], "OS.MalformedData");
-        assert_eq!(lines[1]["errorCode"], "OS.MalformedData");
+        let objects = failure_objects(&s3);
+        assert_eq!(objects.len(), 2, "{objects:?}");
+        let (refused, attempted): (Vec<_>, Vec<_>) = objects
+            .iter()
+            .flat_map(|(_, lines)| lines)
+            .partition(|line| line["attemptsMade"] == 0);
+        assert_eq!(refused.len(), 2);
+        assert!(refused.iter().all(|l| l.get("osDocumentId").is_none()));
+        assert_eq!(attempted.len(), 1);
+        assert_eq!(attempted[0]["errorCode"], "OS.ServiceException");
+        assert_eq!(attempted[0]["attemptsMade"], 1);
+        assert_eq!(attempted[0]["osIndexName"], "activity");
+    }
+
+    /// A failure object's lines are separated, with nothing after the last.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failure_objects_end_without_a_newline() {
+        let (state, s3, mut batch) = fixture();
+        search_batch(&mut batch, Duration::ZERO);
+        let key = batch.object_key.clone();
+        let writer = Arc::new(writer(&state, &s3, None));
+        tokio::task::spawn_blocking(move || writer.write(&batch))
+            .await
+            .unwrap()
+            .unwrap();
+        let accounts = s3.read();
+        let suffix = &key["captured/".len()..];
+        let object = &accounts.get(ACCOUNT).unwrap().buckets["logs-bucket"].objects
+            [&format!("failed/{suffix}")];
+        let BodyRef::Memory(body) = &object.body else {
+            panic!("memory writer")
+        };
+        assert_eq!(body.iter().filter(|b| **b == b'\n').count(), 1);
+        assert_ne!(body.last(), Some(&b'\n'));
+    }
+
+    struct FixedTopology(SearchDomain);
+
+    impl crate::FirehoseTopology for FixedTopology {
+        fn kinesis_stream_exists(&self, _stream_arn: &str) -> bool {
+            true
+        }
+        fn search_domain(&self, _domain_arn: &str) -> SearchDomain {
+            self.0.clone()
+        }
+    }
+
+    fn domain_writer(
+        state: &SharedFirehoseState,
+        s3: &SharedS3State,
+        domain: SearchDomain,
+    ) -> Arc<S3BatchWriter> {
+        let topology: Arc<dyn crate::FirehoseTopology> = Arc::new(FixedTopology(domain));
+        Arc::new(writer(state, s3, None).with_topology(Arc::new(RwLock::new(Some(topology)))))
+    }
+
+    /// A `DomainARN` destination delivers to the URL its domain resolves to.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_domain_arn_destination_delivers_to_the_resolved_url() {
+        let (state, s3, mut batch) = fixture();
+        search_batch(&mut batch, Duration::from_secs(300));
+        batch.destination.search.as_mut().unwrap().target =
+            SearchTarget::Domain("arn:aws:es:us-east-1:123456789012:domain/d".into());
+        let (endpoint, sent) = bulk_stub(vec![serde_json::json!({
+            "errors": false,
+            "items": [{"index": {"status": 201}}, {"index": {"status": 201}}],
+        })])
+        .await;
+        let writer = domain_writer(
+            &state,
+            &s3,
+            SearchDomain::Present {
+                reachable_url: Some(format!("{endpoint}/")),
+            },
+        );
+        tokio::task::spawn_blocking(move || writer.write(&batch))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*sent.lock(), vec![2]);
+        assert!(failure_objects(&s3).is_empty());
+    }
+
+    /// A domain nothing can reach, or one gone since, retries like any failed
+    /// request and then fails into S3 with the code naming why.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unavailable_domain_retries_then_fails_into_s3() {
+        for (domain, code) in [
+            (
+                SearchDomain::Present {
+                    reachable_url: None,
+                },
+                "OS.ConnectionReset",
+            ),
+            (SearchDomain::Absent, "OS.ConnectionReset"),
+        ] {
+            let (state, s3, mut batch) = fixture();
+            let attempts = search_batch(&mut batch, Duration::from_secs(300));
+            batch.destination.search.as_mut().unwrap().target =
+                SearchTarget::Domain("arn:aws:es:us-east-1:123456789012:domain/d".into());
+            let writer = domain_writer(&state, &s3, domain);
+            let retried = batch.clone();
+            let retrying = writer.clone();
+            assert!(
+                tokio::task::spawn_blocking(move || retrying.write(&retried))
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            assert_eq!(attempts.made(), 1);
+            assert!(failure_objects(&s3).is_empty(), "still retrying");
+
+            batch.destination.search.as_mut().unwrap().retry = Duration::ZERO;
+            tokio::task::spawn_blocking(move || writer.write(&batch))
+                .await
+                .unwrap()
+                .unwrap();
+            let objects = failure_objects(&s3);
+            let lines = &objects[0].1;
+            assert_eq!(lines.len(), 2);
+            assert_eq!(lines[0]["errorCode"], code);
+            assert_eq!(lines[0]["attemptsMade"], 2);
+        }
+    }
+
+    /// A record that aged out while its batch retried is not delivered, while the
+    /// rest of the batch is, at positions the retry state still recognises.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn expired_records_are_left_out_of_delivery() {
+        let (state, s3, mut batch) = fixture();
+        search_batch(&mut batch, Duration::from_secs(300));
+        batch.destination.expired.insert(0);
+        let (endpoint, sent) = bulk_stub(vec![serde_json::json!({
+            "errors": false,
+            "items": [{"index": {"status": 201}}],
+        })])
+        .await;
+        batch.destination.search.as_mut().unwrap().target = SearchTarget::Cluster(endpoint);
+        let writer = Arc::new(writer(&state, &s3, None));
+        tokio::task::spawn_blocking(move || writer.write(&batch))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*sent.lock(), vec![1]);
+
+        let (state, s3, mut batch) = fixture();
+        batch.destination.output.compression = Compression::Uncompressed;
+        batch.destination.expired.insert(0);
+        super::BatchWriter::write(&self::tests::writer(&state, &s3, None), &batch).unwrap();
+        let accounts = s3.read();
+        let object =
+            &accounts.get(ACCOUNT).unwrap().buckets["logs-bucket"].objects[&batch.object_key];
+        assert!(
+            matches!(&object.body, BodyRef::Memory(bytes) if bytes.as_ref() == b"second\x00\xff")
+        );
     }
 
     /// Retriable item statuses are resent alone until the retry duration ends;
@@ -784,7 +1050,7 @@ mod tests {
             serde_json::json!({"errors": false, "items": [{"index": {"status": 201}}]}),
         ])
         .await;
-        batch.destination.search.as_mut().unwrap().endpoint = endpoint;
+        batch.destination.search.as_mut().unwrap().target = SearchTarget::Cluster(endpoint);
         let writer = Arc::new(writer(&state, &s3, None));
         let key = batch.object_key.clone();
         let write = |writer: Arc<S3BatchWriter>, batch: DeliveryBatch| {
@@ -796,7 +1062,10 @@ mod tests {
         assert_eq!(attempts.made(), 2);
         let lines = failure_lines(&s3, &key);
         assert_eq!(lines.len(), 1, "only the rejected document failed");
-        assert_eq!(lines[0]["errorCode"], "400");
+        assert_eq!(
+            lines[0]["errorCode"], "OS.AmazonOpenSearchServiceParseException",
+            "part of the batch was indexed and nothing was refused"
+        );
         assert_eq!(lines[0]["attemptsMade"], 2);
     }
 
@@ -859,7 +1128,7 @@ mod tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["errorCode"], "OS.ConnectionFailed");
+        assert_eq!(lines[0]["errorCode"], "OS.ConnectionReset");
         assert_eq!(lines[0]["attemptsMade"], 1);
     }
 

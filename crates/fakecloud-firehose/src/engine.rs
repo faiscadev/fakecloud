@@ -10,15 +10,20 @@ use fakecloud_core::quota::{
 };
 use fakecloud_core::service::AwsServiceError;
 use fakecloud_persistence::S3Store;
-use fakecloud_s3::{delivery::DeliveryWriteOutcome, SharedS3State};
+use fakecloud_s3::{
+    delivery::{ensure_delivery_bucket, DeliveryWriteOutcome},
+    SharedS3State,
+};
 use http::StatusCode;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tokio::task::{Id, JoinHandle, JoinSet};
 use tokio::time::Instant;
 
-use crate::output::object_key;
+use crate::config::invalid_argument;
+use crate::output::{object_key, object_name};
 use crate::throughput::{ThroughputLimits, ThroughputWindow};
+use crate::topology::{FirehoseTopology, SearchDomain, SharedTopology};
 use crate::writer::{BatchWriter, DeliveryBatch, S3BatchWriter};
 use crate::{delivery_config, DeliveryConfig, DeliveryStream, SharedFirehoseState, StreamKey};
 
@@ -94,11 +99,50 @@ pub struct SourceLimit {
 }
 
 impl SourceLimit {
-    /// A batch ends with its newest record, so a batch spanning a long read
-    /// backlog does not lose recent records to the age of its oldest.
+    /// Whether nothing of a batch is left to retry. Before that, each record
+    /// expires on its own arrival: see [`expire_aged_records`].
     fn expired(&self, generation: i64, newest_record_age: Duration) -> bool {
         self.current_generation != Some(generation) || newest_record_age >= self.retention
     }
+}
+
+/// A copy of the batch without the records its source stream no longer retains,
+/// if it holds any new ones. A batch spanning a long read backlog therefore loses
+/// its old records when they age out, and keeps retrying its recent ones. Positions
+/// stay valid for the bulk retry state, which the copy shares.
+fn expire_aged_records(
+    detached: &DetachedBatch,
+    retention: Duration,
+    now: DateTime<Utc>,
+) -> Option<DetachedBatch> {
+    let batch = &detached.batch;
+    let aged: BTreeSet<usize> = batch
+        .arrivals
+        .iter()
+        .enumerate()
+        .filter(|(position, arrival)| {
+            !batch.destination.expired.contains(position)
+                && (now - **arrival).to_std().unwrap_or_default() >= retention
+        })
+        .map(|(position, _)| position)
+        .collect();
+    if aged.is_empty() {
+        return None;
+    }
+    let mut batch = batch.clone();
+    let mut released = 0;
+    for &position in &aged {
+        released += batch.records[position].len();
+        batch.records[position] = Bytes::new();
+    }
+    batch.destination.expired.extend(aged);
+    Some(DetachedBatch {
+        batch,
+        input_bytes: detached.input_bytes.saturating_sub(released),
+        first_arrival: detached.first_arrival,
+        source_generation: detached.source_generation,
+        source_positions: detached.source_positions.clone(),
+    })
 }
 
 fn advance(offsets: &mut BTreeMap<String, usize>, positions: &BTreeMap<String, usize>) {
@@ -204,7 +248,7 @@ impl StreamBuffer {
         &mut self,
         key: &StreamKey,
         stream: &DeliveryStream,
-        config: DeliveryConfig,
+        mut config: DeliveryConfig,
         now: &TimePoint,
         force: bool,
     ) -> BTreeMap<String, usize> {
@@ -227,14 +271,42 @@ impl StreamBuffer {
             .min()
             .copied()
             .unwrap_or(active.first.wall);
-        let object_key = object_key(
-            &key.name,
-            &stream.version_id,
-            &config.output,
-            oldest_arrival,
-            now.wall,
-            uuid::Uuid::new_v4(),
-        );
+        // Search destinations name their objects after the arrival, as recorded.
+        let key_time = if config.search.is_some() {
+            oldest_arrival
+        } else {
+            now.wall
+        };
+        // A prefix with expressions is the whole directory, as recorded; a static
+        // one is followed by the date hierarchy. Evaluated once, so retries of the
+        // batch keep their key.
+        let object_key = if crate::prefix::has_expressions(&config.output.prefix) {
+            config.output.prefix =
+                crate::prefix::render(&config.output.prefix, oldest_arrival, None);
+            format!(
+                "{}{}",
+                config.output.prefix,
+                object_name(
+                    &key.name,
+                    &stream.version_id,
+                    &config.output,
+                    key_time,
+                    uuid::Uuid::new_v4()
+                )
+            )
+        } else {
+            object_key(
+                &key.name,
+                &stream.version_id,
+                &config.output,
+                oldest_arrival,
+                key_time,
+                uuid::Uuid::new_v4(),
+            )
+        };
+        if let Some(search) = &mut config.search {
+            search.error_prefix = search.failure_directory(oldest_arrival);
+        }
         self.queue.push_back(Arc::new(DetachedBatch {
             input_bytes: active.input_bytes,
             first_arrival: active.first.monotonic,
@@ -248,7 +320,7 @@ impl StreamBuffer {
                 document_ids: active.document_ids,
                 arrivals: active.arrivals,
                 oldest_arrival,
-                delivery_time: now.wall,
+                delivery_time: key_time,
                 object_key,
             },
         }));
@@ -278,6 +350,8 @@ struct EngineCore {
     writer: RwLock<Option<Arc<dyn BatchWriter>>>,
     quota_provider: RwLock<Option<Arc<dyn QuotaProvider>>>,
     store: Arc<RwLock<Option<Arc<dyn S3Store>>>>,
+    s3: RwLock<Option<SharedS3State>>,
+    topology: SharedTopology,
     wake: Arc<Notify>,
 }
 
@@ -316,6 +390,8 @@ impl FirehoseEngine {
                 writer: RwLock::new(None),
                 quota_provider: RwLock::new(None),
                 store: Arc::new(RwLock::new(None)),
+                s3: RwLock::new(None),
+                topology: Arc::default(),
                 wake: Arc::new(Notify::new()),
             }),
             worker: Mutex::new(Worker::default()),
@@ -324,17 +400,71 @@ impl FirehoseEngine {
     }
 
     pub fn set_s3(&self, s3: SharedS3State) {
-        *self.core.writer.write() = Some(Arc::new(S3BatchWriter::new(
-            self.core.state.clone(),
-            s3,
-            self.core.store.clone(),
-        )));
+        *self.core.s3.write() = Some(s3.clone());
+        *self.core.writer.write() = Some(Arc::new(
+            S3BatchWriter::new(self.core.state.clone(), s3, self.core.store.clone())
+                .with_topology(self.core.topology.clone()),
+        ));
         self.core.wake.notify_one();
     }
 
     pub fn set_s3_store(&self, store: Arc<dyn S3Store>) {
         *self.core.store.write() = Some(store);
         self.core.wake.notify_one();
+    }
+
+    /// Answers for what other services hold: source streams and search domains.
+    pub fn set_topology(&self, topology: Arc<dyn FirehoseTopology>) {
+        *self.core.topology.write() = Some(topology);
+    }
+
+    pub(crate) fn require_bucket(
+        &self,
+        account: &str,
+        bucket: &str,
+    ) -> Result<(), AwsServiceError> {
+        let s3 = self.core.s3.read().clone();
+        match s3 {
+            Some(s3) if ensure_delivery_bucket(&s3, account, bucket).is_err() => Err(
+                invalid_argument(format!("S3 Bucket {bucket} does not exist.")),
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn require_search_domain(&self, domain_arn: &str) -> Result<(), AwsServiceError> {
+        let topology = self.core.topology.read().clone();
+        match topology.map(|topology| topology.search_domain(domain_arn)) {
+            Some(SearchDomain::Absent) => Err(invalid_argument(
+                "Verify that the IAM role has access to the ElasticSearch domain.",
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// A `ClusterEndpoint` must answer, as AWS checks when it is named. Not
+    /// checked without a topology: nothing else about the world is known then.
+    pub(crate) fn require_cluster_endpoint(&self, endpoint: &str) -> Result<(), AwsServiceError> {
+        if self.core.topology.read().is_none() {
+            return Ok(());
+        }
+        crate::search::probe_cluster_endpoint(endpoint)
+    }
+
+    pub(crate) fn require_kinesis_stream(
+        &self,
+        account: &str,
+        stream_arn: &str,
+    ) -> Result<(), AwsServiceError> {
+        let topology = self.core.topology.read().clone();
+        if topology.is_none_or(|topology| topology.kinesis_stream_exists(stream_arn)) {
+            return Ok(());
+        }
+        let name = stream_arn.rsplit('/').next().unwrap_or(stream_arn);
+        let owner = fakecloud_aws::arn::account_of(stream_arn).unwrap_or(account);
+        Err(invalid_argument(format!(
+            "Stream {name} under account {owner} not found."
+        )))
     }
 
     pub fn set_quota_provider(&self, provider: Arc<dyn QuotaProvider>) {
@@ -580,6 +710,10 @@ impl FirehoseEngine {
                 first: now.clone(),
             });
             advance(&mut active.source_positions, &position);
+            // The records of one Direct PUT call share an ID prefix.
+            let direct_put = (source_generation.is_none() && destination.search.is_some())
+                .then(crate::search::direct_put_id_prefix);
+            let mut subsequence = 0;
             for (position, (record, admitted)) in records.into_iter().zip(&accepted).enumerate() {
                 if !admitted {
                     continue;
@@ -590,6 +724,9 @@ impl FirehoseEngine {
                 active.arrivals.push(source.map_or(now.wall, |r| r.arrival));
                 if let Some(source) = source {
                     active.document_ids.push(source.document_id.clone());
+                } else if let Some(prefix) = &direct_put {
+                    active.document_ids.push(format!("{prefix}.{subsequence}"));
+                    subsequence += 1;
                 }
             }
             let released = if active.is_empty(&destination) {
@@ -945,6 +1082,11 @@ impl EngineCore {
                     .is_some_and(|limit| limit.expired(generation, age))
             }
         };
+        let retention = registry
+            .sources
+            .get(key)
+            .and_then(|source| source.limit.as_ref())
+            .map(|limit| limit.retention);
         let Some(buffer) = registry.streams.get_mut(key) else {
             return true;
         };
@@ -989,7 +1131,26 @@ impl EngineCore {
                     registry.commit_source(key, &held);
                     return true;
                 } else {
-                    let delay = RETRY_INTERVAL;
+                    if let Some(aged) = retention
+                        .filter(|_| completion.batch.source_generation.is_some())
+                        .and_then(|retention| {
+                            expire_aged_records(&completion.batch, retention, now.wall)
+                        })
+                    {
+                        if let Some(head) = buffer.queue.front_mut() {
+                            *head = Arc::new(aged);
+                        }
+                    }
+                    // A failing bulk request backs off on its own schedule, within
+                    // the destination's retry duration.
+                    let delay = completion
+                        .batch
+                        .batch
+                        .destination
+                        .search
+                        .as_ref()
+                        .and_then(|search| search.attempts.retry_delay(search.retry))
+                        .unwrap_or(RETRY_INTERVAL);
                     buffer.retry_not_before = Some(now.monotonic + delay);
                     tracing::warn!(stream = ?key.name, account = %key.account_id, region = %key.region,
                         ?object_key, attempt = buffer.failures, retry_in_secs = delay.as_secs(), ?error,
@@ -1248,6 +1409,18 @@ mod tests {
             1,
             "the older record alone does not end the batch"
         );
+        {
+            let registry = f.engine.core.registry.lock();
+            let head = registry.streams[&key].queue.front().unwrap().clone();
+            assert_eq!(
+                head.batch.destination.expired,
+                BTreeSet::from([0]),
+                "it expires alone, on its own arrival"
+            );
+            assert_eq!(head.input_bytes, 2, "and holds no more bytes");
+            assert!(head.batch.records[0].is_empty());
+            assert_eq!(head.batch.records[1].as_ref(), b"{}");
+        }
         f.advance(5);
         f.turn().await;
         assert_eq!(f.queued(), 0, "past the newest record's retention");
