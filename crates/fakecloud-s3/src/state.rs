@@ -317,6 +317,19 @@ pub const DEFAULT_BUCKET_ENCRYPTION_XML: &str = "<?xml version=\"1.0\" encoding=
 </Rule>\
 </ServerSideEncryptionConfiguration>";
 
+/// Default encryption a bucket persisted by an older build (no encryption
+/// sidecar) reads back with. AWS applied SSE-S3 to every existing bucket in
+/// January 2023, so such a bucket is not unencrypted. It does not block SSE-C:
+/// whether AWS's April 2026 SSE-C default reached a given pre-existing bucket
+/// depended on the account's SSE-C usage, so it is not assumed here.
+pub const LEGACY_BUCKET_ENCRYPTION_XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+<Rule>\
+<ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault>\
+<BucketKeyEnabled>false</BucketKeyEnabled>\
+</Rule>\
+</ServerSideEncryptionConfiguration>";
+
 /// The stored `OwnershipControls` document for one `ObjectOwnership` value.
 pub fn ownership_controls_xml(ownership: &str) -> String {
     format!(

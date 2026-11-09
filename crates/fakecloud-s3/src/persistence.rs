@@ -359,7 +359,10 @@ pub fn s3_bucket_from_snapshot(
         mfa_delete: meta.mfa_delete.clone(),
         object_versions: BTreeMap::new(),
         acl: meta.acl.clone(),
-        encryption_config: None,
+        // Overwritten by `encryption.toml` below when the bucket has one. A
+        // bucket without it was persisted by an older build and reads back
+        // with SSE-S3, which AWS applied to all existing buckets in 2023.
+        encryption_config: Some(crate::state::LEGACY_BUCKET_ENCRYPTION_XML.to_string()),
         lifecycle_config: None,
         lifecycle_transition_default_min_size: meta.lifecycle_transition_default_min_size.clone(),
         policy: None,
@@ -603,8 +606,10 @@ mod tests {
     fn bucket_from_an_older_snapshot_does_not_gain_the_new_bucket_defaults() {
         // A bucket persisted before CreateBucket applied S3's new-bucket
         // defaults has no ownership.toml, public_access_block.toml or
-        // encryption.toml. AWS left existing buckets as they were, so it must
-        // load with none of the three rather than having them invented.
+        // encryption.toml. AWS did not give existing buckets the April 2023
+        // ownership / Block Public Access defaults, so those stay absent; it
+        // did apply SSE-S3 to every existing bucket in January 2023, so the
+        // bucket reads back with plain SSE-S3 (SSE-C not blocked).
         let snap = BucketSnapshot {
             meta: BucketMeta {
                 name: "legacy".into(),
@@ -616,7 +621,13 @@ mod tests {
         let b = s3_bucket_from_snapshot("legacy", snap, "us-east-1").unwrap();
         assert!(b.ownership_controls.is_none());
         assert!(b.public_access_block.is_none());
-        assert!(b.encryption_config.is_none());
+        assert_eq!(
+            b.encryption_config.as_deref(),
+            Some(crate::state::LEGACY_BUCKET_ENCRYPTION_XML)
+        );
+        assert!(!crate::state::encryption_blocks_sse_c(
+            b.encryption_config.as_deref().unwrap()
+        ));
 
         // ...while a bucket persisted with them gets exactly what was stored.
         let mut fresh = S3Bucket::new("fresh", "us-east-1", "owner-xyz");
