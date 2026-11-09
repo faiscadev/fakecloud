@@ -3139,3 +3139,37 @@ fn job_runs_keep_the_settings_they_started_with() {
     assert_eq!(run["MaxCapacity"], 1.0);
     assert_eq!(run["AllocatedCapacity"], 1);
 }
+
+/// A run takes the job's stored `AllocatedCapacity` unless it overrides its own
+/// capacity or workers.
+#[test]
+fn job_runs_prefer_the_jobs_allocated_capacity() {
+    let svc = GlueService::default();
+    svc.create_job(&req(
+        "CreateJob",
+        json!({"Name": "j", "Role": "r", "Command": {"Name": "glueetl"},
+               "MaxCapacity": 10.0, "AllocatedCapacity": 7}),
+    ))
+    .unwrap();
+    let allocated = |body: Value| {
+        let run = body_of(svc.start_job_run(&req("StartJobRun", body)).unwrap())["JobRunId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        body_of(
+            svc.get_job_run(&req("GetJobRun", json!({"JobName": "j", "RunId": run})))
+                .unwrap(),
+        )["JobRun"]["AllocatedCapacity"]
+            .clone()
+    };
+    assert_eq!(allocated(json!({"JobName": "j"})), 7);
+    assert_eq!(allocated(json!({"JobName": "j", "MaxCapacity": 3.0})), 3);
+    assert_eq!(
+        allocated(json!({"JobName": "j", "WorkerType": "G.2X", "NumberOfWorkers": 2})),
+        4
+    );
+    assert_eq!(
+        allocated(json!({"JobName": "j", "AllocatedCapacity": 5})),
+        5
+    );
+}

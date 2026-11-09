@@ -218,10 +218,18 @@ fn run_settings(job: &Job, body: &Value) -> crate::state::JobRunSettings {
             })
         })
         .or(job.max_capacity);
+    // A run's own capacity (or workers) first, then the job's stored count,
+    // then the whole DPUs of the capacity.
+    let capacity_overridden = workers_overridden || body["MaxCapacity"].is_number();
     let allocated = body["AllocatedCapacity"]
         .as_i64()
-        .or_else(|| max_capacity.map(allocated_capacity))
-        .or(job.allocated_capacity);
+        .or_else(|| {
+            capacity_overridden
+                .then(|| max_capacity.map(allocated_capacity))
+                .flatten()
+        })
+        .or(job.allocated_capacity)
+        .or_else(|| max_capacity.map(allocated_capacity));
     crate::state::JobRunSettings {
         timeout: body["Timeout"].as_i64().or(job.timeout),
         max_capacity,
