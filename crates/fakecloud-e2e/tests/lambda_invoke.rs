@@ -60,6 +60,55 @@ async fn create_and_invoke(
     String::from_utf8(payload_bytes).unwrap()
 }
 
+// ---- Memory limit ----
+
+const ALLOCATING_HANDLER: &str = r#"
+def handler(event, context):
+    block = bytearray(event["mib"] * 1024 * 1024)
+    for i in range(0, len(block), 4096):
+        block[i] = 1
+    return {"allocated": len(block)}
+"#;
+
+/// A function stays bounded instead of taking the machine's memory, and one
+/// inside its limit is unaffected.
+#[tokio::test]
+async fn test_invoke_function_memory_is_bounded() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let zip = make_zip(&[("index.py", ALLOCATING_HANDLER.as_bytes())]);
+
+    client
+        .create_function()
+        .function_name("memory-limit-func")
+        .runtime(Runtime::Python313)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .memory_size(128)
+        .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
+        .send()
+        .await
+        .unwrap();
+
+    let invoke = |mib: u32| {
+        client
+            .invoke()
+            .function_name("memory-limit-func")
+            .payload(Blob::new(format!(r#"{{"mib":{mib}}}"#).into_bytes()))
+            .send()
+    };
+
+    let fits = invoke(32).await.unwrap();
+    assert_eq!(fits.function_error(), None);
+
+    // 128 MB of function memory + the default 512 MB of /tmp is the ceiling.
+    let too_big = invoke(1500).await.unwrap();
+    assert!(
+        too_big.function_error().is_some(),
+        "a 1500 MiB allocation must fail inside the function"
+    );
+}
+
 // ---- Python runtime tests ----
 
 const PYTHON_HANDLER: &str = r#"
