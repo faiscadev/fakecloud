@@ -57,6 +57,18 @@ FAKECLOUD_IAM=soft|strict      # identity + condition + resource-policy evaluati
 
 Evaluation covers `Allow` / `Deny` with Deny precedence, `Action` / `NotAction` / `Resource` / `NotResource` with wildcards, identity policies attached via user/group/role, `Condition` blocks with all 28 AWS operators against global keys plus service-specific keys for S3/SNS/Lambda/SQS, resource-based policies for S3 bucket policies, SNS topic policies, Lambda function policies, KMS key policies, and DynamoDB table and stream policies (with AWS's cross-account combining semantics), full `Principal` / `NotPrincipal` matching on resource-based policies, permission boundaries (`PutUserPermissionsBoundary` / `PutRolePermissionsBoundary`), session policies passed to `AssumeRole` / `AssumeRoleWithWebIdentity` / `AssumeRoleWithSAML` / `GetFederationToken`, ABAC tag conditions (`aws:ResourceTag/<key>`, `aws:RequestTag/<key>`, `aws:TagKeys`, `aws:PrincipalTag/<key>`) on S3, SQS, SNS, IAM, KMS, and DynamoDB resources, and Organizations SCPs (Service Control Policies) as a permissions ceiling across multi-account setups. See [SigV4 verification and IAM enforcement](@/docs/reference/security.md) for the full scope, enforced-service list, and the reserved `test`/`test` root-bypass convention.
 
+## Reproducing a crash with a full backtrace
+
+Release binaries are stripped to keep them small. A panic message still names the source file and line, but a backtrace has no function names.
+
+Every release also publishes `fakecloud-<version>-<platform>-debug.tar.gz`, the same code built with symbols and line numbers. To get a usable backtrace, run the debug binary and reproduce the crash:
+
+```sh
+RUST_BACKTRACE=1 ./fakecloud
+```
+
+From source, use `cargo run --profile release-debug --bin fakecloud`. Please include the output when you report a crash.
+
 ## Everything else is in scope
 
 If you hit a behavior that's documented in the AWS Smithy model and fakecloud doesn't match it, that's a bug. [Open an issue](https://github.com/faiscadev/fakecloud/issues).

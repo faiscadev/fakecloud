@@ -57,7 +57,8 @@ jobs:
     if: github.event_name == 'push'
     needs: check
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    # Two full builds per target: the stripped binary and release-debug.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -163,16 +164,34 @@ jobs:
         if: matrix.zig_target == ''
         run: cargo build --release --locked --target ${{ matrix.target }} --bin fakecloud
 
+      # Release binaries are stripped, so a panic backtrace has no function
+      # names. A published release-debug binary lets anyone reproduce a crash
+      # with names and line numbers, with no toolchain.
+      - name: Build release-debug (Linux, cargo-zigbuild)
+        if: matrix.zig_target != ''
+        env:
+          LIBZ_SYS_STATIC: "1"
+          LZMA_API_STATIC: "1"
+        run: cargo zigbuild --profile release-debug --locked --target ${{ matrix.zig_target }} --bin fakecloud --features vendored-openssl
+
+      - name: Build release-debug (macOS)
+        if: matrix.zig_target == ''
+        run: cargo build --profile release-debug --locked --target ${{ matrix.target }} --bin fakecloud
+
       - name: Package
         shell: bash
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          DIR="fakecloud-${TAG}-${{ matrix.name }}"
-          mkdir -p "${DIR}"
-          cp "target/${{ matrix.target }}/release/fakecloud" "${DIR}/"
-          cp LICENSE "${DIR}/"
-          tar czf "${DIR}.tar.gz" "${DIR}"
-          shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+          package() {
+            DIR="$1"
+            mkdir -p "${DIR}"
+            cp "$2" "${DIR}/fakecloud"
+            cp LICENSE "${DIR}/"
+            tar czf "${DIR}.tar.gz" "${DIR}"
+            shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+          }
+          package "fakecloud-${TAG}-${{ matrix.name }}" "target/${{ matrix.target }}/release/fakecloud"
+          package "fakecloud-${TAG}-${{ matrix.name }}-debug" "target/${{ matrix.target }}/release-debug/fakecloud"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
