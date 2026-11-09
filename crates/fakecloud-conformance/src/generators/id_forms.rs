@@ -219,6 +219,10 @@ fn merged_traits(target: &ShapeTraits, member: &ShapeTraits) -> ShapeTraits {
             .or_else(|| target.http_prefix_headers.clone()),
         http_query_params: member.http_query_params || target.http_query_params,
         rest_xml: member.rest_xml || target.rest_xml,
+        media_type: member
+            .media_type
+            .clone()
+            .or_else(|| target.media_type.clone()),
         xml_list_member_name: target.xml_list_member_name.clone(),
         xml_map_key_name: target.xml_map_key_name.clone(),
         xml_map_value_name: target.xml_map_value_name.clone(),

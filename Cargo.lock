@@ -5172,6 +5172,9 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "clap",
+ "crc32c",
+ "crc32fast",
+ "crc64fast-nvme",
  "fakecloud-cloudfront",
  "fakecloud-cognito",
  "fakecloud-conformance-checksum",
@@ -5180,6 +5183,7 @@ dependencies = [
  "fakecloud-testkit",
  "flate2",
  "http 1.4.0",
+ "md-5 0.10.6",
  "parking_lot",
  "rand 0.8.5",
  "rcgen",
@@ -5188,8 +5192,10 @@ dependencies = [
  "rsa",
  "serde",
  "serde_json",
+ "sha1 0.10.6",
  "sha2 0.10.9",
  "tokio",
+ "xxhash-rust",
  "zip",
 ]
 

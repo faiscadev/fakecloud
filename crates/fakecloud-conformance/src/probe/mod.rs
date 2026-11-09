@@ -888,6 +888,7 @@ mod tests {
             (400, "InvalidArgument"),
             (400, "MalformedACLError"),
             (400, "MalformedPolicy"),
+            (400, "InvalidRequest"),
             (404, "NoSuchBucketPolicy"),
             (404, "NoSuchCORSConfiguration"),
             (404, "NoSuchLifecycleConfiguration"),
@@ -1206,6 +1207,7 @@ mod tests {
 mod followup;
 mod protocols;
 mod response;
+mod rest_headers;
 mod rest_request;
 mod rest_xml;
 mod service_detection;

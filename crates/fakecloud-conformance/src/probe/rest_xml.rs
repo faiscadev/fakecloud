@@ -491,7 +491,7 @@ fn json_scalar_text(value: &Value) -> Option<String> {
 /// Re-render an RFC 3339 `YYYY-MM-DDTHH:MM:SS[.fff]Z` timestamp (the form the
 /// generators emit) in `format`. Anything that does not parse is sent
 /// unchanged, so a deliberately malformed value still reaches the handler.
-fn format_timestamp(s: &str, format: Option<&str>) -> String {
+pub(super) fn format_timestamp(s: &str, format: Option<&str>) -> String {
     let Some(epoch) = parse_rfc3339_utc(s) else {
         return s.to_string();
     };

@@ -162,6 +162,9 @@ pub struct ShapeTraits {
     pub http_query_params: bool,
     /// `aws.protocols#restXml` on a service shape.
     pub rest_xml: bool,
+    /// `smithy.api#mediaType` on a string shape. A string with a media type
+    /// bound to an HTTP header is sent base64-encoded.
+    pub media_type: Option<String>,
     /// The `smithy.api#xmlName` on a list's `member`, or a map's `key` /
     /// `value`. These live on the collection shape's member definitions, which
     /// `ShapeType` does not keep, so they are carried on the collection
@@ -702,6 +705,10 @@ fn parse_traits(raw: Option<&serde_json::Map<String, Value>>) -> ShapeTraits {
     traits.http_query_params = raw.contains_key("smithy.api#httpQueryParams");
 
     traits.rest_xml = raw.contains_key("aws.protocols#restXml");
+
+    if let Some(mt) = raw.get("smithy.api#mediaType").and_then(|v| v.as_str()) {
+        traits.media_type = Some(mt.to_string());
+    }
 
     if let Some(default) = raw.get("smithy.api#default") {
         traits.default_value = Some(default.clone());
