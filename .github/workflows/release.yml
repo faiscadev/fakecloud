@@ -126,44 +126,6 @@ jobs:
           LZMA_API_STATIC: "1"
         run: cargo zigbuild --release --locked --target ${{ matrix.zig_target }} --bin fakecloud --features vendored-openssl
 
-      - name: Verify Linux binary portability
-        if: matrix.zig_target != ''
-        shell: bash
-        run: |
-          BIN="target/${{ matrix.target }}/release/fakecloud"
-          file "$BIN"
-          # The only shared objects allowed are glibc's own (musl builds have
-          # none at all).
-          NEEDED="$(readelf -d "$BIN" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')"
-          echo "NEEDED: ${NEEDED:-<none>}"
-          BAD="$(printf '%s\n' "$NEEDED" | grep -vE '^(libc|libm|libdl|libpthread|librt|libgcc_s|ld-linux-(x86-64|aarch64))\.so' | grep . || true)"
-          if [ -n "$BAD" ]; then
-            echo "::error::unexpected shared library dependencies: $BAD"
-            exit 1
-          fi
-          case "${{ matrix.target }}" in
-            *-musl)
-              if [ -n "$NEEDED" ]; then
-                echo "::error::musl build is not fully static"
-                exit 1
-              fi
-              ;;
-            *-gnu)
-              # Highest GLIBC_x.y symbol version referenced must be <= 2.17.
-              MAX="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"
-              echo "max GLIBC symbol version: $MAX"
-              if [ "$(printf '%s\n2.17\n' "$MAX" | sort -V | tail -1)" != "2.17" ]; then
-                echo "::error::binary requires GLIBC_$MAX (> 2.17)"
-                exit 1
-              fi
-              ;;
-          esac
-          "$BIN" --version
-
-      - name: Build (macOS)
-        if: matrix.zig_target == ''
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin fakecloud
-
       # Release binaries are stripped, so a panic backtrace has no function
       # names. A published release-debug binary lets anyone reproduce a crash
       # with names and line numbers, with no toolchain.
@@ -173,6 +135,18 @@ jobs:
           LIBZ_SYS_STATIC: "1"
           LZMA_API_STATIC: "1"
         run: cargo zigbuild --profile release-debug --locked --target ${{ matrix.zig_target }} --bin fakecloud --features vendored-openssl
+
+      - name: Verify Linux binary portability
+        if: matrix.zig_target != ''
+        shell: bash
+        run: |
+          for profile in release release-debug; do
+            scripts/verify-linux-binary.sh "target/${{ matrix.target }}/$profile/fakecloud" "${{ matrix.target }}"
+          done
+
+      - name: Build (macOS)
+        if: matrix.zig_target == ''
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin fakecloud
 
       - name: Build release-debug (macOS)
         if: matrix.zig_target == ''
