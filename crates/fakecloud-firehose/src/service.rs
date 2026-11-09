@@ -420,7 +420,8 @@ fn apply_search_update(stream: &mut DeliveryStream, key: String, update: Value) 
 
 /// The bucket and domain a destination block names must exist. `s3_members` are
 /// where the block keeps its bucket: `S3Configuration` or `S3Update`, or the
-/// block itself for an S3 destination.
+/// block itself for an S3 destination. An update to an Iceberg destination keeps it
+/// in `S3Configuration`.
 fn require_destination_resources(
     engine: &FirehoseEngine,
     account: &str,
@@ -431,9 +432,10 @@ fn require_destination_resources(
         .iter()
         .map(|member| &block[*member])
         .chain([block])
-        .filter_map(|s3| s3["BucketARN"].as_str())
-        .filter_map(crate::config::bucket_of_arn);
-    for bucket in buckets {
+        .filter_map(|s3| s3["BucketARN"].as_str());
+    for arn in buckets {
+        let bucket = crate::config::bucket_of_arn(arn)
+            .ok_or_else(|| invalid_argument("S3 destination requires a bucket ARN"))?;
         engine.require_bucket(account, bucket)?;
     }
     if let Some(domain) = block["DomainARN"].as_str().filter(|arn| !arn.is_empty()) {
@@ -541,7 +543,12 @@ impl<'a> DestinationUpdate<'a> {
             require_destination_resources(engine, account, &self.body[base], &[])?;
         }
         for block in self.extra_updates.values() {
-            require_destination_resources(engine, account, block, &["S3Update"])?;
+            require_destination_resources(
+                engine,
+                account,
+                block,
+                &["S3Update", "S3Configuration"],
+            )?;
         }
         Ok(())
     }
@@ -1092,10 +1099,22 @@ impl FirehoseService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let validated = self.validate_create(req)?;
         require_cluster_endpoints(&self.engine, &validated.extra_destinations).await?;
-        self.create_delivery_stream(req)
+        self.insert_stream(req, validated)
     }
 
+    /// Without the network, for tests of everything else.
+    #[cfg(test)]
     fn create_delivery_stream(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let validated = self.validate_create(req)?;
+        self.insert_stream(req, validated)
+    }
+
+    /// The name is looked at again under the lock: it could have been taken since.
+    fn insert_stream(
+        &self,
+        req: &AwsRequest,
+        validated: ValidatedCreate,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let ValidatedCreate {
             name,
             stream_type,
@@ -1104,7 +1123,7 @@ impl FirehoseService {
             kinesis_source,
             tags: create_tags,
             encryption,
-        } = self.validate_create(req)?;
+        } = validated;
 
         let now = Utc::now();
         let mut accounts = self.state.write();
@@ -1622,7 +1641,6 @@ mod tests {
             for (backend, bucket_arn) in [
                 (false, "arn:aws:s3:::admission"),
                 (true, "arn:aws:s3:::admission"),
-                (true, "malformed"),
             ] {
                 let (mut svc, _s3_state, disk, _tmp) = firehose_with_disk_s3("admission");
                 if !backend {
@@ -2103,6 +2121,14 @@ mod tests {
             ))
         };
         const OPENSEARCH: &str = "AmazonopensearchserviceDestinationConfiguration";
+        assert_eq!(
+            refusal(create(
+                "s",
+                "ExtendedS3DestinationConfiguration",
+                json!({"RoleARN": "r", "BucketARN": "not-an-arn"}),
+            )),
+            "S3 destination requires a bucket ARN"
+        );
         for bucket in ["Bad_Bucket_Name", "ab", "missing"] {
             assert_eq!(
                 refusal(create("s", OPENSEARCH, search_config(bucket, "known"))),
@@ -2159,6 +2185,19 @@ mod tests {
             }),
         ))
         .unwrap();
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "iceberg",
+                "IcebergDestinationConfiguration": {
+                    "RoleARN": "role",
+                    "S3Configuration": {
+                        "RoleARN": "role", "BucketARN": "arn:aws:s3:::known-bucket",
+                    },
+                },
+            }),
+        ))
+        .unwrap();
         let update = |change: Value| {
             svc.update_destination(&request(
                 "UpdateDestination",
@@ -2181,6 +2220,20 @@ mod tests {
                 json!({"DomainARN": "arn:aws:es:us-east-1:123456789012:domain/none"})
             )),
             "Verify that the IAM role has access to the ElasticSearch domain."
+        );
+        assert_eq!(
+            refusal(svc.update_destination(&request(
+                "UpdateDestination",
+                json!({
+                    "DeliveryStreamName": "iceberg",
+                    "CurrentDeliveryStreamVersionId": "1",
+                    "DestinationId": "destinationId-000000000001",
+                    "IcebergDestinationUpdate": {
+                        "S3Configuration": {"BucketARN": "arn:aws:s3:::missing"},
+                    },
+                }),
+            ))),
+            "S3 Bucket missing does not exist."
         );
         assert_eq!(describe(&svc, "s")["VersionId"], "1", "nothing changed");
         // Moving between the two replaces, rather than leaving both set.

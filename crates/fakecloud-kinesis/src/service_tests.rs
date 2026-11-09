@@ -68,6 +68,7 @@ fn test_shard() -> KinesisShard {
         adjacent_parent_shard_id: None,
         is_open: true,
         next_sequence_number: 1,
+        sequence_incarnation: 0,
         records: Vec::new(),
     }
 }
@@ -231,6 +232,30 @@ fn append_record_advances_sequence_numbers() {
     assert!(first.ends_with("1"));
     assert!(second.ends_with("2"));
     assert_eq!(shard.records.len(), 2);
+}
+
+/// A stream recreated under its name restarts its shard IDs and counters. Its
+/// sequence numbers must still differ, as AWS never reuses them.
+#[test]
+fn recreated_shards_do_not_repeat_sequence_numbers() {
+    let mut earlier = build_stream_shards(1).remove(0);
+    let first = append_record(&mut earlier, "key", b"a".to_vec());
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let mut recreated = build_stream_shards(1).remove(0);
+    let second = append_record(&mut recreated, "key", b"a".to_vec());
+    assert_eq!(earlier.shard_id, recreated.shard_id);
+    assert_eq!(second.len(), 56);
+    assert_ne!(first, second);
+    assert!(first < second, "later shards sort after");
+    assert_eq!(
+        shard_to_json(&recreated)["SequenceNumberRange"]["StartingSequenceNumber"],
+        second.as_str(),
+        "the advertised start is the first record"
+    );
+    assert_eq!(
+        resolve_sequence_number_index(&recreated, &second, false).unwrap(),
+        0
+    );
 }
 
 #[test]

@@ -1826,6 +1826,7 @@ impl KinesisService {
             adjacent_parent_shard_id: Some(adjacent_shard.to_string()),
             is_open: true,
             next_sequence_number: 1,
+            sequence_incarnation: crate::state::new_sequence_incarnation(),
             records: Vec::new(),
         });
 
@@ -1882,6 +1883,7 @@ impl KinesisService {
             adjacent_parent_shard_id: None,
             is_open: true,
             next_sequence_number: 1,
+            sequence_incarnation: crate::state::new_sequence_incarnation(),
             records: Vec::new(),
         });
         stream.shards.push(KinesisShard {
@@ -1892,6 +1894,7 @@ impl KinesisService {
             adjacent_parent_shard_id: None,
             is_open: true,
             next_sequence_number: 1,
+            sequence_incarnation: crate::state::new_sequence_incarnation(),
             records: Vec::new(),
         });
 
@@ -2418,6 +2421,7 @@ pub fn reshard_uniform(stream: &mut KinesisStream, target: i32) {
             adjacent_parent_shard_id: None,
             is_open: true,
             next_sequence_number: 1,
+            sequence_incarnation: crate::state::new_sequence_incarnation(),
             records: Vec::new(),
         });
         piece_ids.push((*start, *end, new_id));
@@ -2454,6 +2458,7 @@ pub fn reshard_uniform(stream: &mut KinesisStream, target: i32) {
                 adjacent_parent_shard_id: Some(next_id.clone()),
                 is_open: true,
                 next_sequence_number: 1,
+                sequence_incarnation: crate::state::new_sequence_incarnation(),
                 records: Vec::new(),
             });
             // The previous head is now an interior (closed) merge node; the

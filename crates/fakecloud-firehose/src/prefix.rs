@@ -59,8 +59,9 @@ fn validate_expressions(prefix: &str, error_prefix: bool) -> Result<(), AwsServi
             .ok_or_else(|| invalid(format!("Expression ({expression}) has no namespace!")))?;
         match (namespace, key) {
             ("timestamp", pattern) => {
-                render_timestamp(pattern, Utc::now())
-                    .map_err(|()| invalid(format!("Invalid timestamp pattern ({pattern})!")))?;
+                if !pattern_is_valid(pattern) {
+                    return Err(invalid(format!("Invalid timestamp pattern ({pattern})!")));
+                }
             }
             ("firehose", "random-string") => {}
             ("firehose", "error-output-type") if error_prefix => {}
@@ -141,8 +142,18 @@ pub(crate) fn render(prefix: &str, at: DateTime<Utc>, error_output_type: Option<
 
 /// A Java `DateTimeFormatter` pattern, the kind AWS documents for this namespace,
 /// formatted as Java does in `Locale.US` and UTC. A pattern Java would refuse is
-/// refused, as is `B` (the day-period letter), whose text this does not model.
+/// refused.
 fn render_timestamp(pattern: &str, at: DateTime<Utc>) -> Result<String, ()> {
+    format_pattern(pattern, at, true)
+}
+
+/// Whether Java takes a pattern. A padded field wider than its pad fails only when
+/// it is formatted, so whether `pH` works depends on the hour and not on the pattern.
+fn pattern_is_valid(pattern: &str) -> bool {
+    format_pattern(pattern, Utc::now(), false).is_ok()
+}
+
+fn format_pattern(pattern: &str, at: DateTime<Utc>, enforce_pad: bool) -> Result<String, ()> {
     let mut output = String::new();
     let mut chars = pattern.chars().peekable();
     let mut optional_depth = 0usize;
@@ -174,6 +185,7 @@ fn render_timestamp(pattern: &str, at: DateTime<Utc>) -> Result<String, ()> {
             c => c.to_string(),
         };
         match pad_next.take() {
+            Some(width) if enforce_pad && item.chars().count() > width => return Err(()),
             Some(width) => output.push_str(&format!("{item:>width$}")),
             None => output.push_str(&item),
         }
@@ -201,6 +213,21 @@ fn quoted_text(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<S
             '\'' => return Ok(text),
             other => text.push(other),
         }
+    }
+}
+
+/// The period of the day in `Locale.US`, with its narrow forms for the two exact
+/// times that have their own names.
+fn day_period(at: DateTime<Utc>, narrow: bool) -> &'static str {
+    match (at.hour(), at.minute()) {
+        (0, 0) if narrow => "mi",
+        (0, 0) => "midnight",
+        (12, 0) if narrow => "n",
+        (12, 0) => "noon",
+        (6..=11, _) => "in the morning",
+        (12..=17, _) => "in the afternoon",
+        (18..=20, _) => "in the evening",
+        _ => "at night",
     }
 }
 
@@ -270,6 +297,7 @@ fn date_field(letter: char, count: usize, at: DateTime<Utc>) -> Result<String, (
         'F' => number(i64::from(at.day0() % 7) + 1, 1),
         'a' if count == 1 => Ok(at.format("%p").to_string()),
         'a' => Err(()),
+        'B' if count == 1 || count == 4 || count == 5 => Ok(day_period(at, count == 5).to_owned()),
         'H' => number(hour, 2),
         'k' => number(if hour == 0 { 24 } else { hour }, 2),
         'K' => number(hour % 12, 2),
@@ -285,6 +313,7 @@ fn date_field(letter: char, count: usize, at: DateTime<Utc>) -> Result<String, (
         'g' => number(i64::from(at.date_naive().num_days_from_ce()) - 678_576, 19),
         'V' if count == 2 => Ok("UTC".to_owned()),
         'v' if count == 1 => Ok("UTC".to_owned()),
+        'v' if count == 4 => Ok("Coordinated Universal Time".to_owned()),
         'z' if count <= 3 => Ok("UTC".to_owned()),
         'z' if count == 4 => Ok("Coordinated Universal Time".to_owned()),
         'O' if count == 1 || count == 4 => Ok("GMT".to_owned()),
@@ -399,6 +428,52 @@ mod tests {
                     Ok(expected),
                     "{pattern} at {at}"
                 );
+            }
+        }
+    }
+
+    /// More of the same JDK, across a day: day periods, zone names and the am/pm
+    /// marker, whose wider forms Java refuses. `FMTERR` is a padded field wider than
+    /// its pad, which Java accepts as a pattern and fails only when formatting.
+    #[test]
+    fn day_periods_and_pad_overflow_match_java() {
+        let times = [
+            (0, 0),
+            (0, 5),
+            (5, 59),
+            (6, 0),
+            (11, 59),
+            (12, 0),
+            (12, 1),
+            (17, 59),
+            (18, 0),
+            (20, 59),
+            (21, 0),
+            (23, 59),
+        ]
+        .map(|(hour, minute)| {
+            DateTime::parse_from_rfc3339(&format!("2026-11-09T{hour:02}:{minute:02}:00Z"))
+                .unwrap()
+                .with_timezone(&Utc)
+        });
+        let golden = include_str!("../tests/fixtures/java_date_periods.tsv");
+        for row in golden.lines() {
+            let mut columns = row.split('\t');
+            let pattern = columns.next().unwrap();
+            let expected: Vec<&str> = columns.collect();
+            if expected == ["ERR"] {
+                assert!(!pattern_is_valid(pattern), "{pattern}");
+                continue;
+            }
+            assert!(pattern_is_valid(pattern), "{pattern}");
+            for (at, expected) in times.iter().zip(expected) {
+                let rendered = render_timestamp(pattern, *at);
+                match expected {
+                    "FMTERR" => assert_eq!(rendered, Err(()), "{pattern} at {at}"),
+                    expected => {
+                        assert_eq!(rendered.as_deref(), Ok(expected), "{pattern} at {at}")
+                    }
+                }
             }
         }
     }

@@ -268,13 +268,17 @@ async fn server_errors_fail_with_a_cluster_error_code() {
     let server = TestServer::start().await;
     let answer = Arc::new(std::sync::Mutex::new(Answer::Status(500, "boom")));
     let (endpoint, _) = bulk_endpoint(answer).await;
+    let sent = chrono::Utc::now();
     direct_put_stream(&server, &endpoint, 0).await;
     let line = failure_line(&server, Duration::from_secs(15)).await;
     assert_eq!(line["errorCode"], "ES.ClusterError");
     assert_eq!(line["attemptsMade"], 1);
-    assert_eq!(
-        line["esIndexName"].as_str().unwrap().len(),
-        "activity-2026-11-09".len()
+    // The default rotation is OneDay. Either day, if the test straddles midnight.
+    let day = |at: chrono::DateTime<chrono::Utc>| format!("activity-{}", at.format("%Y-%m-%d"));
+    let index = line["esIndexName"].as_str().unwrap().to_owned();
+    assert!(
+        [day(sent), day(chrono::Utc::now())].contains(&index),
+        "{index}"
     );
 }
 

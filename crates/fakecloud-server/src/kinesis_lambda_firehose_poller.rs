@@ -793,22 +793,19 @@ fn is_orphaned_checkpoint(
 ///
 /// `predates` says the mapping last changed before the stream there now was
 /// created, so that stream was recreated under it and every record in it arrived
-/// after the mapping started: the start of the shard loses nothing.
+/// after the mapping started. The offset says nothing then, even at the shard's end,
+/// where a disabled mapping would skip all of it, and the start of the shard loses
+/// nothing; at-least-once allows the duplicates.
 ///
-/// - Past the shard's end, the offset cannot be this incarnation's.
-/// - At the end nothing is unread, so it is harmless whatever its history.
-/// - Below the end, a mapping that predates the stream may be skipping records it
-///   never saw, so it restarts: at-least-once allows the duplicates. Otherwise the
-///   offset is kept: a bare integer below the end is identical for this incarnation
-///   and an earlier one, when the mapping was also updated after the recreate.
+/// Otherwise an offset past the end cannot be this incarnation's. One within the
+/// shard is kept: a bare integer is identical for this incarnation and an earlier
+/// one, when the mapping was also updated after the recreate.
 fn restored_position(offset: usize, predates: bool, records: Option<usize>) -> Option<usize> {
     let records = records?;
-    if offset == records || (offset < records && !predates) {
-        Some(offset)
-    } else if predates {
+    if predates {
         Some(0)
     } else {
-        None
+        (offset <= records).then_some(offset)
     }
 }
 
@@ -1968,12 +1965,11 @@ mod tests {
         // Past the end of the shard: cannot be this incarnation's.
         assert_eq!(restored_position(9, false, Some(4)), None);
         assert_eq!(restored_position(9, true, Some(4)), Some(0));
-        // At the end nothing is unread either way.
-        assert_eq!(restored_position(4, true, Some(4)), Some(4));
-        assert_eq!(restored_position(4, false, Some(4)), Some(4));
-        // Below it: the mapping predating the stream shows it was recreated, and
-        // everything in it arrived after the mapping started.
+        // Within the shard: the mapping predating the stream shows it was recreated,
+        // and everything in it arrived after the mapping started, wherever the offset.
+        assert_eq!(restored_position(4, true, Some(4)), Some(0));
         assert_eq!(restored_position(2, true, Some(4)), Some(0));
+        assert_eq!(restored_position(4, false, Some(4)), Some(4));
         assert_eq!(restored_position(2, false, Some(4)), Some(2));
     }
 

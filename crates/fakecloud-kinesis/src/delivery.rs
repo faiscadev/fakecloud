@@ -183,6 +183,7 @@ mod tests {
                 adjacent_parent_shard_id: None,
                 is_open: true,
                 next_sequence_number: 0,
+                sequence_incarnation: 0,
                 records: Vec::new(),
             })
             .collect();

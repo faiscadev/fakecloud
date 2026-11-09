@@ -8,15 +8,20 @@ use aws_sdk_firehose::types::{
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
 
-/// A stream's destination bucket has to exist. Creating it again is harmless.
+/// A stream's destination bucket has to exist. A test making several streams asks
+/// for it again, and only that is ignored.
 async fn create_bucket(server: &TestServer) {
-    let _ = server
+    let created = server
         .s3_client()
         .await
         .create_bucket()
         .bucket("conf-firehose-bucket")
         .send()
         .await;
+    if let Err(error) = created {
+        let service = error.into_service_error();
+        assert!(service.is_bucket_already_owned_by_you(), "{service:?}");
+    }
 }
 
 /// Create a DirectPut delivery stream with an Extended S3 destination so that
