@@ -67,8 +67,8 @@ pub(crate) struct Scope<'a> {
 }
 
 fn expression_of(text: &str) -> Option<&str> {
-    text.trim()
-        .strip_prefix("{%")
+    // The string must start and end with the delimiters, with no spaces around.
+    text.strip_prefix("{%")
         .and_then(|rest| rest.strip_suffix("%}"))
 }
 
@@ -90,6 +90,9 @@ fn seeded_random(seed: i64) -> f64 {
     let low = next(27);
     ((high << 27) + low) as f64 / (1_i64 << 53) as f64
 }
+
+/// `$range`'s output is bounded: an expression has a memory limit on AWS too.
+const MAX_RANGE_ITEMS: usize = 1_000_000;
 
 fn register_step_functions_functions(evaluator: &mut Evaluator) -> Result<(), StateError> {
     let bad = |e: jsonata_core::evaluator::EvaluatorError| query_error(e.to_string());
@@ -116,6 +119,7 @@ fn register_step_functions_functions(evaluator: &mut Evaluator) -> Result<(), St
             let size = args
                 .get(1)
                 .and_then(|v| v.as_f64())
+                .map(f64::floor)
                 .filter(|size| *size >= 1.0)
                 .ok_or_else(|| host_error("$partition needs a positive size".to_string()))?;
             let chunks: Vec<JValue> = items
@@ -127,17 +131,21 @@ fn register_step_functions_functions(evaluator: &mut Evaluator) -> Result<(), St
         .map_err(bad)?;
     evaluator
         .register_fn("range", |args: &[JValue]| {
-            let number = |index: usize| args.get(index).and_then(|v| v.as_f64());
+            // Non-integer arguments round down, like every integer parameter.
+            let number = |index: usize| args.get(index).and_then(|v| v.as_f64()).map(f64::floor);
             let (start, end, step) = match (number(0), number(1), number(2)) {
                 (Some(start), Some(end), Some(step)) if step != 0.0 => (start, end, step),
                 _ => return Err(host_error("$range needs a start, end and step".to_string())),
             };
-            let mut out = Vec::new();
-            let mut at = start;
-            while (step > 0.0 && at <= end) || (step < 0.0 && at >= end) {
-                out.push(JValue::from(at));
-                at += step;
+            let count = ((end - start) / step).floor() + 1.0;
+            if !count.is_finite() || count > MAX_RANGE_ITEMS as f64 {
+                return Err(host_error(format!(
+                    "$range would produce more than {MAX_RANGE_ITEMS} items"
+                )));
             }
+            let out = (0..count.max(0.0) as usize)
+                .map(|i| JValue::from(start + i as f64 * step))
+                .collect();
             Ok(JValue::array(out))
         })
         .map_err(bad)?;
@@ -147,7 +155,13 @@ fn register_step_functions_functions(evaluator: &mut Evaluator) -> Result<(), St
                 .first()
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| host_error("$hash needs a string".to_string()))?;
-            let digest = match args.get(1).and_then(|v| v.as_str()).unwrap_or("SHA-256") {
+            let algorithm = match args.get(1) {
+                None => "SHA-256",
+                Some(algorithm) => algorithm
+                    .as_str()
+                    .ok_or_else(|| host_error("$hash needs an algorithm name".to_string()))?,
+            };
+            let digest = match algorithm {
                 "MD5" => hex::encode(Md5::digest(data)),
                 "SHA-1" => hex::encode(sha1::Sha1::digest(data)),
                 "SHA-256" => hex::encode(sha2::Sha256::digest(data)),
@@ -162,7 +176,7 @@ fn register_step_functions_functions(evaluator: &mut Evaluator) -> Result<(), St
     evaluator
         .register_fn_override("random", |args: &[JValue]| {
             Ok(JValue::from(match args.first().and_then(|v| v.as_f64()) {
-                Some(seed) => seeded_random(seed as i64),
+                Some(seed) => seeded_random(seed.floor() as i64),
                 None => rand::random::<f64>(),
             }))
         })
@@ -384,7 +398,7 @@ pub(crate) fn prepare_state(
 
 fn apply_assign(assign: &Value, scope: &Scope<'_>) -> Result<(), StateError> {
     let Some(pairs) = assign.as_object() else {
-        return Ok(());
+        return Err(query_error("Assign must be a JSON object"));
     };
     // References read the values from state entry; new ones apply to the next
     // state. All of them evaluate before any is staged.
@@ -499,6 +513,30 @@ mod tests {
     }
 
     #[test]
+    fn bad_function_arguments_are_query_errors() {
+        let input = json!({});
+        let context = json!({});
+        for bad in [
+            "{% $range(0, 1e17, 1) %}",
+            "{% $range(0, 1, 0) %}",
+            "{% $hash('a', 5) %}",
+        ] {
+            let (error, _) =
+                eval_template("Output", &json!(bad), &scope(&input, &context, "")).unwrap_err();
+            assert_eq!(error, QUERY_ERROR, "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_exact_delimiters_open_an_expression() {
+        let input = json!({});
+        let context = json!({});
+        let out =
+            eval_template("Output", &json!(" {% 1 %}"), &scope(&input, &context, "")).unwrap();
+        assert_eq!(out, " {% 1 %}");
+    }
+
+    #[test]
     fn undefined_and_broken_expressions_are_query_errors() {
         let input = json!({});
         let context = json!({});
@@ -523,6 +561,10 @@ mod tests {
         assert_eq!(eval("{% $parse('{\"a\":1}') %}"), json!({"a": 1}));
         assert_eq!(eval("{% $partition([1,2,3], 2) %}"), json!([[1, 2], [3]]));
         assert_eq!(eval("{% $range(0, 4, 2) %}"), json!([0, 2, 4]));
+        assert_eq!(eval("{% $range(0.9, 4.9, 2.9) %}"), json!([0, 2, 4]));
+        assert_eq!(eval("{% $range(4, 0, -2) %}"), json!([4, 2, 0]));
+        assert_eq!(eval("{% $partition([1,2,3], 2.9) %}"), json!([[1, 2], [3]]));
+        assert_eq!(eval("{% $random(42.9) %}"), json!(0.7275636800328681));
         assert_eq!(
             eval("{% $hash('abc', 'MD5') %}"),
             "900150983cd24fb0d6963f7d28e17f72"

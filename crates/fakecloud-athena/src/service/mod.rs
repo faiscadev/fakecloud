@@ -717,11 +717,7 @@ fn parse_tags(
 fn classify_statement(query: &str) -> String {
     let trimmed = query.trim_start();
     let upper = trimmed.to_uppercase();
-    if upper.starts_with("SELECT")
-        || upper.starts_with("SHOW")
-        || upper.starts_with("DESCRIBE")
-        || upper.starts_with("EXPLAIN")
-    {
+    if upper.starts_with("SELECT") || upper.starts_with("WITH") {
         "DML".to_string()
     } else if upper.starts_with("CREATE") || upper.starts_with("ALTER") || upper.starts_with("DROP")
     {
@@ -863,13 +859,20 @@ fn query_execution_json(q: &QueryExecution) -> Value {
             "ResultReuseInformation": { "ReusedPreviousResult": false },
         },
     });
-    if let Some(keyword) = q
-        .query
-        .split_whitespace()
-        .next()
-        .filter(|_| q.statement_type == "DML")
-    {
-        obj["SubstatementType"] = json!(keyword.to_ascii_uppercase());
+    if q.statement_type == "DML" {
+        let keyword: String = q
+            .query
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_alphabetic)
+            .collect::<String>()
+            .to_ascii_uppercase();
+        // A common table expression reads, whatever it leads with.
+        obj["SubstatementType"] = json!(if keyword == "WITH" {
+            "SELECT"
+        } else {
+            keyword.as_str()
+        });
     }
     if let Some(c) = &q.result_reuse_configuration {
         obj.as_object_mut()
@@ -2310,6 +2313,51 @@ mod tests {
                 execution_parameters: None,
             },
         );
+    }
+
+    #[test]
+    fn statements_classify_and_name_their_substatement() {
+        assert_eq!(super::classify_statement("SHOW TABLES"), "UTILITY");
+        assert_eq!(super::classify_statement("DESCRIBE t"), "UTILITY");
+        assert_eq!(super::classify_statement("EXPLAIN SELECT 1"), "UTILITY");
+        assert_eq!(super::classify_statement("SELECT 1"), "DML");
+        assert_eq!(
+            super::classify_statement("WITH a AS (SELECT 1) SELECT * FROM a"),
+            "DML"
+        );
+
+        let execution = |query: &str| crate::state::QueryExecution {
+            query_execution_id: "q".to_string(),
+            query: query.to_string(),
+            statement_type: super::classify_statement(query),
+            work_group: "primary".to_string(),
+            state: "SUCCEEDED".to_string(),
+            state_change_reason: None,
+            submission_time: Utc::now(),
+            completion_time: None,
+            query_execution_context: None,
+            result_configuration: None,
+            engine_version: None,
+            data_scanned_bytes: 0,
+            engine_execution_time_ms: 0,
+            query_planning_time_ms: 0,
+            total_execution_time_ms: 0,
+            result_rows: vec![],
+            result_columns: vec![],
+            region: None,
+            result_reuse_configuration: None,
+            execution_parameters: None,
+        };
+        let substatement = |query: &str| {
+            super::query_execution_json(&execution(query))["SubstatementType"].clone()
+        };
+        assert_eq!(substatement("SELECT*FROM t"), "SELECT");
+        assert_eq!(substatement("  insert into t values (1)"), "INSERT");
+        assert_eq!(
+            substatement("WITH a AS (SELECT 1) SELECT * FROM a"),
+            "SELECT"
+        );
+        assert!(substatement("SHOW TABLES").is_null());
     }
 
     fn job_for(

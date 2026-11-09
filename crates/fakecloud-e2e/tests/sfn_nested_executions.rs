@@ -1529,3 +1529,39 @@ async fn item_batcher_shape_matches_the_recording() {
         ])
     );
 }
+
+// The docs: Task states can `Retry` on `States.QueryEvaluationError`.
+#[tokio::test]
+async fn task_retry_applies_to_query_errors_in_arguments() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let machine = create_machine(
+        &client,
+        "retry-query",
+        json!({"QueryLanguage":"JSONata","StartAt":"T","States":{"T":{
+            "Type":"Task",
+            "Resource":"arn:aws:states:::aws-sdk:sqs:listQueues",
+            "Arguments":{"QueueNamePrefix":"{% $states.input.missing %}"},
+            "Retry":[{
+                "ErrorEquals":["States.QueryEvaluationError"],
+                "IntervalSeconds":1,
+                "MaxAttempts":1
+            }],
+            "End":true
+        }}}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(machine)
+        .send()
+        .await
+        .unwrap();
+    let begun = std::time::Instant::now();
+    let desc = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(desc.error(), Some("States.QueryEvaluationError"));
+    assert!(
+        begun.elapsed() >= Duration::from_millis(900),
+        "no retry happened"
+    );
+}

@@ -593,7 +593,7 @@ async fn execute_task_state(
             if let Some((_, token_ctx)) = &task_token {
                 ctx["Task"] = token_ctx["Task"].clone();
             }
-            crate::jsonata::eval_template(
+            match crate::jsonata::eval_template(
                 "Arguments",
                 arguments,
                 &crate::jsonata::Scope {
@@ -602,7 +602,18 @@ async fn execute_task_state(
                     result: None,
                     error_output: None,
                 },
-            )?
+            ) {
+                Ok(arguments) => arguments,
+                // A Task's `Retry` applies to a query error too.
+                Err((error, cause)) => {
+                    if let Some(delay_ms) = should_retry(&retriers, &error, attempt, true) {
+                        attempt += 1;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                        continue;
+                    }
+                    return Err((error, cause));
+                }
+            }
         } else {
             effective_input.clone()
         };
@@ -912,7 +923,7 @@ struct FailureTolerance {
 
 impl FailureTolerance {
     fn resolve(state_def: &Value, input: &Value, ctx: &Value) -> Result<Self, (String, String)> {
-        let path_or = |path: &str, field: &str| -> Result<Option<Value>, (String, String)> {
+        let resolved = |path: &str, field: &str| -> Result<Option<Value>, (String, String)> {
             match state_def[path].as_str() {
                 Some(reference) => crate::io_processing::resolve_reference_with_context(
                     input,
@@ -923,15 +934,36 @@ impl FailureTolerance {
                 None => Ok(state_def.get(field).cloned()),
             }
         };
-        Ok(Self {
-            count: path_or("ToleratedFailureCountPath", "ToleratedFailureCount")?
-                .and_then(|v| v.as_u64()),
-            percentage: path_or(
-                "ToleratedFailurePercentagePath",
-                "ToleratedFailurePercentage",
-            )?
-            .and_then(|v| v.as_f64()),
-        })
+        let invalid = |field: &str, value: &Value, wanted: &str| {
+            crate::io_processing::runtime_error(format!(
+                "The {field} must be {wanted}, got {value}"
+            ))
+        };
+        let count = match resolved("ToleratedFailureCountPath", "ToleratedFailureCount")? {
+            None => None,
+            Some(value) => Some(value.as_u64().ok_or_else(|| {
+                invalid("ToleratedFailureCount", &value, "a non-negative integer")
+            })?),
+        };
+        let percentage = match resolved(
+            "ToleratedFailurePercentagePath",
+            "ToleratedFailurePercentage",
+        )? {
+            None => None,
+            Some(value) => Some(
+                value
+                    .as_f64()
+                    .filter(|p| (0.0..=100.0).contains(p))
+                    .ok_or_else(|| {
+                        invalid(
+                            "ToleratedFailurePercentage",
+                            &value,
+                            "a number from 0 to 100",
+                        )
+                    })?,
+            ),
+        };
+        Ok(Self { count, percentage })
     }
 
     fn exceeded(&self, failed: usize, total: usize) -> bool {
@@ -1093,6 +1125,7 @@ async fn run_map_iterations(
             execution_arn,
             total_items,
             max_concurrency,
+            tolerance,
         );
     }
 
@@ -1375,6 +1408,7 @@ fn set_map_run_total(
     execution_arn: &str,
     total: usize,
     max_concurrency: u64,
+    tolerance: FailureTolerance,
 ) {
     let account = account_id_from_arn(execution_arn).to_string();
     let mut accounts = shared_state.write();
@@ -1385,6 +1419,9 @@ fn set_map_run_total(
         // The configured MaxConcurrency (0 == unlimited), as AWS reports it, not
         // the internal effective concurrency.
         mr.max_concurrency = max_concurrency as i32;
+        // What the run actually enforces, `*Path` forms resolved.
+        mr.tolerated_failure_count = tolerance.count.unwrap_or(0) as i64;
+        mr.tolerated_failure_percentage = tolerance.percentage.unwrap_or(0.0);
     }
 }
 

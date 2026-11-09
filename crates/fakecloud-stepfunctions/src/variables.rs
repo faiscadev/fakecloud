@@ -138,7 +138,10 @@ pub(crate) fn assign_jsonpath(
     };
     let Value::Object(evaluated) = crate::interpreter::apply_parameters(template, value, context)?
     else {
-        return Ok(());
+        return Err((
+            "States.Runtime".to_string(),
+            "Assign must be a JSON object".to_string(),
+        ));
     };
     for (name, value) in evaluated {
         stage(name, value);

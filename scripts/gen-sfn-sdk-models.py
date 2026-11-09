@@ -79,6 +79,25 @@ def short(shape_id):
     return shape_id.split("#")[-1]
 
 
+# The name each shape of the model being condensed goes by. Models merged from
+# several namespaces (Timestream) repeat short names for different shapes.
+NAMES = {}
+
+
+def table_name(shape_id):
+    return NAMES.get(shape_id, short(shape_id))
+
+
+def assign_names(shapes):
+    NAMES.clear()
+    by_short = {}
+    for shape_id in shapes:
+        by_short.setdefault(short(shape_id), []).append(shape_id)
+    for name, ids in by_short.items():
+        for shape_id in ids:
+            NAMES[shape_id] = name if len(ids) == 1 else shape_id
+
+
 def target_of(shapes, shape_id):
     """A scalar's sentinel, or the short name of a structure, list or map."""
     if shape_id.startswith("smithy.api#"):
@@ -91,7 +110,7 @@ def target_of(shapes, shape_id):
         return "~sb"
     if kind in SCALARS:
         return SCALARS[kind]
-    return short(shape_id)
+    return table_name(shape_id)
 
 
 def member_entry(shapes, member):
@@ -119,6 +138,12 @@ def member_entry(shapes, member):
         out["hp"] = traits["smithy.api#httpPrefixHeaders"]
     if "smithy.api#httpQueryParams" in traits:
         out["qp"] = 1
+    target_traits = shapes.get(member["target"], {}).get("traits", {})
+    timestamp_format = traits.get(
+        "smithy.api#timestampFormat", target_traits.get("smithy.api#timestampFormat")
+    )
+    if timestamp_format:
+        out["tf"] = timestamp_format
     return out
 
 
@@ -172,6 +197,7 @@ def reachable(shapes, roots):
 
 def condense(model_key, model, registered):
     shapes = model["shapes"]
+    assign_names(shapes)
     service_id, service = next((k, v) for k, v in shapes.items() if v["type"] == "service")
     traits = service.get("traits", {})
     protocol = next((PROTOCOLS[p] for p in PROTOCOL_ORDER if p in traits), None)
@@ -198,14 +224,14 @@ def condense(model_key, model, registered):
         operations[short(op_id)] = [
             http.get("method"),
             http.get("uri"),
-            "" if input_id == "smithy.api#Unit" else short(input_id),
-            "" if output_id == "smithy.api#Unit" else short(output_id),
+            "" if input_id == "smithy.api#Unit" else table_name(input_id),
+            "" if output_id == "smithy.api#Unit" else table_name(output_id),
         ]
     kept = {}
     for shape_id in sorted(reachable(shapes, roots)):
         entry = shape_entry(shapes, shape_id)
         if entry is not None:
-            kept[short(shape_id)] = entry
+            kept[table_name(shape_id)] = entry
     doc = {
         "n": sdk_id,
         "p": protocol,

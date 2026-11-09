@@ -563,13 +563,16 @@ fn validate_name(name: &str) -> Result<(), AwsServiceError> {
 }
 
 fn validate_definition(definition: &str) -> Result<(), AwsServiceError> {
-    let parsed: Value = serde_json::from_str(definition).map_err(|e| {
+    let mut parsed: Value = serde_json::from_str(definition).map_err(|e| {
         AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "InvalidDefinition",
             format!("Invalid State Machine Definition: '{e}'"),
         )
     })?;
+
+    // What follows depends on each state's effective query language.
+    crate::jsonata::propagate_query_language(&mut parsed, None);
 
     if parsed.get("StartAt").and_then(|v| v.as_str()).is_none() {
         return Err(AwsServiceError::aws_error(
@@ -659,6 +662,22 @@ fn validate_variable_scopes(
 ) -> Result<(), AwsServiceError> {
     let mut assigned: Vec<String> = Vec::new();
     for (name, state) in states {
+        let mut holders = vec![(format!("{at}/States/{name}"), state)];
+        for list in ["Choices", "Catch"] {
+            for (index, holder) in state[list].as_array().into_iter().flatten().enumerate() {
+                holders.push((format!("{at}/States/{name}/{list}/{index}"), holder));
+            }
+        }
+        for (path, holder) in holders {
+            if holder
+                .get("Assign")
+                .is_some_and(|assign| !assign.is_object())
+            {
+                return Err(schema_error(format!(
+                    "Expected value of type [OBJECT] at {path}/Assign"
+                )));
+            }
+        }
         for variable in assigned_variables(state) {
             let path = format!("{at}/States/{name}/Assign");
             if !is_valid_variable_name(&variable) {
@@ -780,24 +799,27 @@ fn validate_integration_schemas(
                     .as_str()
                     .and_then(integration_of)
                     .is_some_and(|tail| tail.starts_with("states:startExecution"));
-                let template = ["Parameters", "Arguments"]
+                let field = if crate::jsonata::is_jsonata(state) {
+                    "Arguments"
+                } else {
+                    "Parameters"
+                };
+                // A whole-value expression can only be checked when it runs.
+                let is_expression = state[field].is_string();
+                let has_arn = ["StateMachineArn", "StateMachineArn.$"]
                     .iter()
-                    .find_map(|field| state[*field].as_object().map(|o| (*field, o)));
-                if let (true, Some((field, template))) = (is_nested_start, template) {
-                    if !template.contains_key("StateMachineArn")
-                        && !template.contains_key("StateMachineArn.$")
-                    {
-                        return Err(schema_error(format!(
-                            "The field 'StateMachineArn' is required but was missing at \
-                             {path}/{field}"
-                        )));
-                    }
+                    .any(|key| state[field].get(*key).is_some());
+                if is_nested_start && !is_expression && !has_arn {
+                    return Err(schema_error(format!(
+                        "The field 'StateMachineArn' is required but was missing at \
+                         {path}/{field}"
+                    )));
                 }
             }
             Some("Map") => {
                 let reader = &state["ItemReader"];
                 if reader["Resource"].as_str().and_then(integration_of) == Some("s3:getObject")
-                    && reader.get("ReaderConfig").is_none()
+                    && reader["ReaderConfig"].as_object().is_none()
                 {
                     return Err(schema_error(format!(
                         "These fields are required: [ReaderConfig] at {path}/ItemReader"
@@ -948,9 +970,7 @@ fn validate_timeout_field(
         return Ok(());
     };
     // In a JSONata state the value may be an expression, checked when it runs.
-    if v.as_str()
-        .is_some_and(|text| text.trim_start().starts_with("{%"))
-    {
+    if crate::jsonata::is_jsonata(state) && v.as_str().is_some_and(|text| text.starts_with("{%")) {
         return Ok(());
     }
     match v.as_u64() {
@@ -1504,6 +1524,79 @@ mod integration_schema_tests {
         assert!(message(nested)
             .unwrap()
             .contains("at /States/M/ItemProcessor/States/S"));
+    }
+
+    #[test]
+    fn nested_start_without_a_template_is_refused() {
+        let definition = |language: &str, field: Option<serde_json::Value>| {
+            let mut state = serde_json::json!({
+                "Type": "Task",
+                "Resource": "arn:aws:states:::states:startExecution",
+                "End": true
+            });
+            if let Some(value) = field {
+                state["Arguments"] = value;
+            }
+            serde_json::json!({"QueryLanguage": language, "StartAt": "T", "States": {"T": state}})
+        };
+        assert!(message(definition("JSONPath", None))
+            .unwrap()
+            .contains("/States/T/Parameters"));
+        assert!(message(definition("JSONata", None))
+            .unwrap()
+            .contains("/States/T/Arguments"));
+        assert_eq!(
+            message(definition(
+                "JSONata",
+                Some(serde_json::json!("{% $args %}"))
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn timeout_expressions_need_a_jsonata_state() {
+        let definition = |language: &str| {
+            serde_json::json!({"QueryLanguage": language, "StartAt": "T", "States": {"T": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::sqs:sendMessage",
+                "TimeoutSeconds": "{% 5 %}",
+                "End": true
+            }}})
+        };
+        assert_eq!(message(definition("JSONata")), None);
+        assert!(message(definition("JSONPath")).is_some());
+    }
+
+    #[test]
+    fn assign_and_reader_config_must_be_objects() {
+        let pass = serde_json::json!({"StartAt": "P", "States": {"P": {
+            "Type": "Pass", "Assign": 5, "End": true
+        }}});
+        assert!(message(pass)
+            .unwrap()
+            .contains("Expected value of type [OBJECT] at /States/P/Assign"));
+        let rule = serde_json::json!({"StartAt": "C", "States": {
+            "C": {"Type": "Choice", "Choices": [
+                {"Variable": "$.a", "IsPresent": true, "Assign": [], "Next": "E"}
+            ]},
+            "E": {"Type": "Succeed"}
+        }});
+        assert!(message(rule)
+            .unwrap()
+            .contains("/States/C/Choices/0/Assign"));
+        let map = serde_json::json!({"StartAt": "M", "States": {"M": {
+            "Type": "Map",
+            "ItemProcessor": {"ProcessorConfig": {"Mode": "DISTRIBUTED"}, "StartAt": "P",
+                "States": {"P": {"Type": "Pass", "End": true}}},
+            "ItemReader": {
+                "Resource": "arn:aws:states:::s3:getObject",
+                "ReaderConfig": "JSON",
+                "Parameters": {"Bucket": "b", "Key": "k"}
+            },
+            "End": true
+        }}});
+        assert!(message(map).unwrap().contains("[ReaderConfig]"));
     }
 
     #[test]

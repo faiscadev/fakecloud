@@ -87,6 +87,10 @@ impl ItemReader {
         Ok(items)
     }
 
+    fn reached_limit(&self, items: &[Value]) -> bool {
+        self.max_items.is_some_and(|max| items.len() >= max)
+    }
+
     async fn read_listing(
         &self,
         s3: &S3Caller<'_>,
@@ -119,8 +123,12 @@ impl ItemReader {
                     .map_err(|e| reader_s3_failed(s3, e))?;
                 let body = decompress(key, &body)?;
                 items.extend(self.decode(input_type, key, &body)?);
+                // What lies past the limit is never read, so it can't fail the run.
+                if self.reached_limit(&items) {
+                    return Ok(items);
+                }
             }
-            if self.max_items.is_some_and(|max| items.len() >= max) {
+            if self.reached_limit(&items) {
                 return Ok(items);
             }
             match page["NextContinuationToken"].as_str() {
@@ -158,6 +166,9 @@ impl ItemReader {
                 .map_err(|e| reader_s3_failed(s3, e))?;
             let body = decompress(key, &body)?;
             items.extend(self.decode(input_type, key, &body)?);
+            if self.reached_limit(&items) {
+                return Ok(items);
+            }
         }
         Ok(items)
     }
@@ -204,6 +215,9 @@ impl ItemReader {
             let text = utf8(key, &raw)?;
             for row in parse_csv(text, self.csv_delimiter()?) {
                 items.push(csv_item(&headers, row));
+            }
+            if self.reached_limit(&items) {
+                return Ok(items);
             }
         }
         Ok(items)

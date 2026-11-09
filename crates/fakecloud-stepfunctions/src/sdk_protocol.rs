@@ -185,6 +185,21 @@ fn present_date(value: &Value, style: DateStyle) -> Value {
     }
 }
 
+/// A timestamp parameter in the form its member's model asks for.
+fn timestamp_wire(value: &Value, format: Option<&str>, default: &str) -> Value {
+    let Some(millis) = to_epoch_millis(value) else {
+        return value.clone();
+    };
+    let Some(at) = DateTime::<Utc>::from_timestamp_millis(millis) else {
+        return value.clone();
+    };
+    match format.unwrap_or(default) {
+        "epoch-seconds" => json!(millis as f64 / 1000.0),
+        "http-date" => json!(at.format("%a, %d %b %Y %H:%M:%S GMT").to_string()),
+        _ => json!(at.to_rfc3339_opts(SecondsFormat::Millis, true)),
+    }
+}
+
 /// Any JSON a definition gives for a text member is sent as its JSON text.
 fn text_param(value: &Value) -> String {
     scalar_text(value)
@@ -366,10 +381,18 @@ impl SdkService {
                             .map(|(key, member_value)| match find_member(members, key) {
                                 Some((name, member)) => (
                                     member["j"].as_str().unwrap_or(name).to_string(),
-                                    self.json_in(
-                                        member["t"].as_str().unwrap_or("~d"),
-                                        member_value,
-                                    ),
+                                    if member["t"] == "~t" {
+                                        timestamp_wire(
+                                            member_value,
+                                            member["tf"].as_str(),
+                                            "epoch-seconds",
+                                        )
+                                    } else {
+                                        self.json_in(
+                                            member["t"].as_str().unwrap_or("~d"),
+                                            member_value,
+                                        )
+                                    },
                                 ),
                                 None => (key.clone(), member_value.clone()),
                             })
@@ -472,6 +495,11 @@ impl SdkService {
                         format!("{prefix}.{wire}")
                     };
                     let inner = member["t"].as_str().unwrap_or("~s");
+                    if inner == "~t" {
+                        let wire = timestamp_wire(member_value, member["tf"].as_str(), "date-time");
+                        out.push((path, scalar_text(&wire)));
+                        continue;
+                    }
                     if member["f"] == 1 && !ec2 {
                         // A flattened list has no `member` step of its own.
                         if let (Some(list), Value::Array(items)) = (self.shape(inner), member_value)
@@ -523,6 +551,7 @@ impl SdkService {
                 let empty = Map::new();
                 let members = shape["m"].as_object().unwrap_or(&empty);
                 let mut inner = String::new();
+                let mut attr = attr;
                 for (key, member_value) in object {
                     let Some((member_name, member)) = find_member(members, key) else {
                         continue;
@@ -531,7 +560,25 @@ impl SdkService {
                         continue;
                     }
                     let wire = member["x"].as_str().unwrap_or(member_name);
+                    if member["a"] == 1 {
+                        // S3 grantees are the one modeled use of a prefixed attribute.
+                        if wire.starts_with("xsi:") {
+                            attr.push_str(
+                                " xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"",
+                            );
+                        }
+                        attr.push_str(&format!(
+                            " {wire}=\"{}\"",
+                            xml_escape(&scalar_text(member_value))
+                        ));
+                        continue;
+                    }
                     let member_target = member["t"].as_str().unwrap_or("~s");
+                    if member_target == "~t" {
+                        let text = timestamp_wire(member_value, member["tf"].as_str(), "date-time");
+                        inner.push_str(&self.xml_in(wire, "~s", &text, false));
+                        continue;
+                    }
                     if member["f"] == 1 {
                         if let (Some(list), Value::Array(items)) =
                             (self.shape(member_target), member_value)
@@ -609,10 +656,12 @@ impl SdkService {
                     let member_target = member["t"].as_str().unwrap_or("~s");
                     let wire = member["x"].as_str().unwrap_or(name);
                     if member["a"] == 1 {
+                        // Attributes are read by local name: `xsi:type` is `type`.
+                        let local = wire.rsplit(':').next().unwrap_or(wire);
                         if let Some((_, value)) = node
                             .attrs
                             .iter()
-                            .find(|(key, _)| key.eq_ignore_ascii_case(wire))
+                            .find(|(key, _)| key.eq_ignore_ascii_case(local))
                         {
                             out.insert(upper_first(name), json!(value));
                         }
@@ -889,6 +938,10 @@ impl SdkService {
                 }
             } else if let Some(wire) = member["q"].as_str() {
                 match value {
+                    other if target == "~t" => {
+                        let text = timestamp_wire(other, member["tf"].as_str(), "date-time");
+                        query.push((wire.to_string(), scalar_text(&text)));
+                    }
                     Value::Array(items) => {
                         for item in items {
                             query.push((wire.to_string(), scalar_text(item)));
@@ -902,10 +955,9 @@ impl SdkService {
                 }
             } else if let Some(wire) = member["h"].as_str() {
                 let text = match (target, value) {
-                    ("~t", other) => to_epoch_millis(other)
-                        .and_then(DateTime::<Utc>::from_timestamp_millis)
-                        .map(|at| at.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
-                        .unwrap_or_else(|| scalar_text(other)),
+                    ("~t", other) => {
+                        scalar_text(&timestamp_wire(other, member["tf"].as_str(), "http-date"))
+                    }
                     (_, Value::Array(items)) => {
                         items.iter().map(scalar_text).collect::<Vec<_>>().join(",")
                     }
@@ -1105,11 +1157,13 @@ impl SdkService {
         match payload_member {
             Some((name, payload_target)) => {
                 if self.shape(payload_target).is_none() {
-                    // A blob payload (an S3 object's data) reads as its text.
-                    out.insert(
-                        upper_first(name),
-                        json!(String::from_utf8_lossy(&reply.body)),
-                    );
+                    // A blob payload (an S3 object's data) reads as its text, as
+                    // recorded. Bytes that aren't text stay intact as base64.
+                    let body = match std::str::from_utf8(&reply.body) {
+                        Ok(text) => text.to_string(),
+                        Err(_) => base64::engine::general_purpose::STANDARD.encode(&reply.body),
+                    };
+                    out.insert(upper_first(name), json!(body));
                 } else if !reply.body.is_empty() {
                     let value = if xml {
                         self.xml_out(payload_target, &Node::parse(&reply.body)?, style)
@@ -1413,6 +1467,74 @@ mod tests {
         assert_eq!(out["Contents"][0]["LastModified"], "2026-11-09T12:58:06Z");
         assert_eq!(out["Contents"][1]["Size"], 8);
         assert_eq!(out["CommonPrefixes"][0]["Prefix"], "p/");
+    }
+
+    #[test]
+    fn merged_models_keep_shapes_that_share_a_short_name_apart() {
+        let timestream = svc("timestreamwrite");
+        let shapes = timestream.doc["h"].as_object().unwrap();
+        assert!(
+            shapes.keys().any(|name| name.contains('#')),
+            "no qualified shape"
+        );
+        // Each operation resolves to a shape of its own namespace.
+        let write = timestream.input_shape("WriteRecords");
+        assert!(shapes.contains_key(write), "{write}");
+        for name in shapes.keys() {
+            let reduced = name.rsplit('#').next().unwrap();
+            if name != reduced {
+                assert!(!shapes.contains_key(reduced), "{reduced} is ambiguous");
+            }
+        }
+    }
+
+    #[test]
+    fn timestamps_take_their_modeled_format() {
+        let at = json!("2026-11-09T12:58:06Z");
+        assert_eq!(
+            timestamp_wire(&at, None, "epoch-seconds"),
+            json!(1794229086.0)
+        );
+        assert_eq!(
+            timestamp_wire(&at, Some("date-time"), "epoch-seconds"),
+            json!("2026-11-09T12:58:06.000Z")
+        );
+        assert_eq!(
+            timestamp_wire(&json!(1794229086), None, "http-date"),
+            json!("Mon, 09 Nov 2026 12:58:06 GMT")
+        );
+    }
+
+    #[test]
+    fn xml_attributes_round_trip() {
+        let s3 = svc("s3");
+        let body = s3.xml_in(
+            "Grantee",
+            "Grantee",
+            &json!({"Type": "CanonicalUser", "ID": "abc"}),
+            false,
+        );
+        assert!(body.contains(" xsi:type=\"CanonicalUser\""), "{body}");
+        assert!(body.contains("xmlns:xsi="), "{body}");
+        assert!(body.contains("<ID>abc</ID>"), "{body}");
+        assert!(!body.contains("<xsi:type>"), "{body}");
+
+        let node = Node::parse(body.as_bytes()).unwrap();
+        let back = s3.xml_out("Grantee", &node, DateStyle::Iso);
+        assert_eq!(back["Type"], "CanonicalUser", "{back}");
+    }
+
+    #[test]
+    fn non_text_blob_payloads_stay_intact() {
+        let s3 = svc("s3");
+        let reply = RawReply {
+            headers: HeaderMap::new(),
+            content_type: String::new(),
+            status: 200,
+            body: Bytes::from_static(&[0xff, 0x00, 0xfe]),
+        };
+        let out = s3.parse_reply("GetObject", reply, DateStyle::Iso).unwrap();
+        assert_eq!(out["Body"], "/wD+");
     }
 
     #[test]

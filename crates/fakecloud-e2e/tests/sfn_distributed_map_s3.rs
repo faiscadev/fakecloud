@@ -1307,3 +1307,83 @@ async fn aws_sdk_s3_tasks_reach_the_object_api() {
         .await;
     assert!(gone.is_err(), "deleteObject must remove the object");
 }
+
+#[tokio::test]
+async fn invalid_tolerance_paths_fail_the_map_run() {
+    let server = TestServer::start().await;
+    create_bucket(&server).await;
+
+    for (field, value) in [
+        ("ToleratedFailureCountPath", json!("many")),
+        ("ToleratedFailurePercentagePath", json!(250)),
+    ] {
+        let desc = run(
+            &server,
+            failing_map(json!({ field: "$.limit", "ItemsPath": "$.items" })),
+            json!({"limit": value, "items": [1]}),
+        )
+        .await;
+        assert_eq!(desc.error(), Some("States.Runtime"), "{field}");
+    }
+}
+
+#[tokio::test]
+async fn describe_map_run_reports_the_resolved_tolerance() {
+    let server = TestServer::start().await;
+    create_bucket(&server).await;
+    let client = server.sfn_client().await;
+
+    let desc = run(
+        &server,
+        failing_map(json!({
+            "ToleratedFailureCountPath": "$.count",
+            "ToleratedFailurePercentagePath": "$.percent",
+            "ItemsPath": "$.items"
+        })),
+        json!({"count": 7, "percent": 80, "items": [1, 2]}),
+    )
+    .await;
+    assert_eq!(desc.status().as_str(), "FAILED");
+
+    let runs = client
+        .list_map_runs()
+        .execution_arn(desc.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let map_run = client
+        .describe_map_run()
+        .map_run_arn(runs.map_runs()[0].map_run_arn())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(map_run.tolerated_failure_count(), 7);
+    assert_eq!(map_run.tolerated_failure_percentage(), 80.0);
+}
+
+// What lies past `MaxItems` is never read, so it can't fail the run.
+#[tokio::test]
+async fn max_items_stops_reading_at_the_limit() {
+    let server = TestServer::start().await;
+    create_bucket(&server).await;
+    put(&server, "in/a.jsonl", "{\"n\":1}\n").await;
+    put(&server, "in/b.jsonl", "not json\n").await;
+
+    let output = run_ok(
+        &server,
+        map_definition(json!({
+            "ItemReader": {
+                "Resource": "arn:aws:states:::s3:listObjectsV2",
+                "ReaderConfig": {
+                    "InputType": "JSONL",
+                    "Transformation": "LOAD_AND_FLATTEN",
+                    "MaxItems": 1
+                },
+                "Parameters": {"Bucket": BUCKET, "Prefix": "in/"}
+            }
+        })),
+        json!({}),
+    )
+    .await;
+    assert_eq!(output, json!([{"n": 1}]));
+}

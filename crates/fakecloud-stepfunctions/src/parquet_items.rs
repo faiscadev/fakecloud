@@ -10,7 +10,7 @@ use serde_json::{json, Map, Value};
 fn field_json(field: &Field) -> Value {
     match field {
         Field::TimestampMillis(millis) => json!(millis),
-        Field::TimestampMicros(micros) => json!(micros / 1000),
+        Field::TimestampMicros(micros) => json!(micros.div_euclid(1000)),
         Field::Group(row) => row_json(row),
         Field::ListInternal(list) => Value::Array(list.elements().iter().map(field_json).collect()),
         Field::MapInternal(map) => {
