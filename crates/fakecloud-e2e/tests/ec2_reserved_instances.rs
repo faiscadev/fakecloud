@@ -61,6 +61,8 @@ async fn a_purchased_offering_becomes_an_active_reservation() {
     assert_eq!(ri.scope(), Some(&Scope::AvailabilityZone));
     let (start, end) = (ri.start().unwrap(), ri.end().unwrap());
     assert_eq!(end.secs() - start.secs(), 94_608_000);
+    // Paid for a moment after the purchase, then active.
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
     assert_eq!(
         describe().await.state(),
         Some(&ReservedInstanceState::Active)

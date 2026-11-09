@@ -599,7 +599,7 @@ pub(crate) fn launch_instances(
             (Some(_), None) => String::new(),
             (_, Some(zone)) => zone.clone(),
             (None, None) => {
-                let (zone, subnet) = default_launch_place(state, &instance_type, region)?;
+                let (zone, subnet) = default_launch_place(state, &instance_type, region, dry_run)?;
                 subnet_id = Some(subnet);
                 zone
             }
@@ -1725,19 +1725,34 @@ fn no_default_subnet_for_zone(zone: &str) -> AwsServiceError {
 /// default VPC", the message EC2 is reported to give; and one whose default
 /// subnets all sit in zones not selling the type as `MissingInput` for the
 /// first zone that does, as a launch naming that zone is refused.
+///
+/// A dry run skips the not-selling refusal, as the launch path does: with no
+/// zone selling the type, it picks among all of the Region's zones.
 fn default_launch_place(
     state: &Ec2State,
     instance_type: &str,
     region: &str,
+    dry_run: bool,
 ) -> Result<(String, String), AwsServiceError> {
     let default_vpc = require_default_vpc(state)?;
-    let selling = crate::instance_types::lookup(instance_type)
+    let mut selling = crate::instance_types::lookup(instance_type)
         .map(|spec| spec.zones_selling(region))
         .unwrap_or_default();
+    if selling.is_empty() {
+        let zones: Vec<String> = crate::defaults::region_zones(region)
+            .into_iter()
+            .map(|(zone, _)| zone)
+            .collect();
+        if !dry_run {
+            if let Some(zone) = zones.first() {
+                refuse_zone_not_selling(instance_type, region, zone, false)?;
+            }
+        }
+        selling = zones;
+    }
     let Some(first_selling) = selling.first() else {
-        refuse_zone_not_selling(instance_type, region, &format!("{region}a"), false)?;
-        // The catalog sells it in no zone yet does not refuse it: no zone to pick.
-        return Err(no_default_subnet_for_zone(&format!("{region}a")));
+        // A Region without zones: nowhere to launch.
+        return Err(no_default_subnet_for_zone(region));
     };
     if let Some(place) = selling.iter().find_map(|zone| {
         default_subnet_in(state, &default_vpc, zone).map(|subnet| (zone.clone(), subnet))

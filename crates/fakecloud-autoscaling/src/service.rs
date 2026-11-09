@@ -63,6 +63,14 @@ pub struct AutoScalingService {
     quota_provider: Option<Arc<dyn fakecloud_core::quota::QuotaProvider>>,
 }
 
+/// The Region's zones, in DescribeAvailabilityZones order.
+fn region_zones(region: &str) -> Vec<String> {
+    fakecloud_aws::regions::availability_zone_letters(region)
+        .chars()
+        .map(|letter| format!("{region}{letter}"))
+        .collect()
+}
+
 /// What a place's refusal of a launch is remembered by: the instance type,
 /// else (a type only EC2 resolves) the launch plan it came from.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -168,6 +176,48 @@ impl AutoScalingService {
         self.ec2_state = Some(state);
         self.ec2_runtime = runtime;
         self
+    }
+
+    /// The Region a request is in: its own, else the server's (EC2's default
+    /// Region when wired), so a zone is never derived from an empty name.
+    fn region_of(&self, req: &AwsRequest) -> String {
+        if !req.region.is_empty() {
+            return req.region.clone();
+        }
+        self.ec2_state
+            .as_ref()
+            .map(|s| s.read().region().to_string())
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| "us-east-1".to_string())
+    }
+
+    /// Refuse a `VPCZoneIdentifier` naming a subnet EC2 does not have, as
+    /// Auto Scaling does. Unchecked without an EC2 backend.
+    fn validate_subnets(
+        &self,
+        req: &AwsRequest,
+        vpc_zone_identifier: &str,
+    ) -> Result<(), AwsServiceError> {
+        let Some(ec2) = &self.ec2_state else {
+            return Ok(());
+        };
+        let accounts = ec2.read();
+        let region = self.region_of(req);
+        let state = accounts.regional(&req.account_id, &region);
+        for subnet in vpc_zone_identifier
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !state.is_some_and(|st| st.subnets.contains_key(subnet)) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!("The subnet ID '{subnet}' does not exist"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The zone of a launch place: a subnet's, from EC2, or the zone itself. A
@@ -731,8 +781,13 @@ impl AutoScalingService {
             launch_configuration_name = Some(lc.name.clone());
             derived_lc = Some(lc);
         }
+        if let Some(v) = &vpc_zone_identifier {
+            self.validate_subnets(req, v)?;
+        }
         if azs.is_empty() {
-            azs.push(format!("{}a", req.region));
+            if let Some(zone) = region_zones(&self.region_of(req)).into_iter().next() {
+                azs.push(zone);
+            }
         }
 
         let tags = parse_tags(req);
@@ -814,6 +869,9 @@ impl AutoScalingService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = required_query_param(req, "AutoScalingGroupName")?;
+        if let Some(v) = optional_query_param(req, "VPCZoneIdentifier") {
+            self.validate_subnets(req, &v)?;
+        }
         let new_lc = optional_query_param(req, "LaunchConfigurationName");
         let mut new_lt = parse_launch_template(req);
         let mut new_mixed = crate::launch::parse_mixed_instances_policy(req);
@@ -1535,9 +1593,11 @@ impl AutoScalingService {
         // refuses the type in is remembered for the rest of this pass and not
         // tried again, and every launch goes to the usable place whose zone has
         // the fewest of the group's instances, as Auto Scaling balances them.
+        let region = self.region_of(req);
+        let zones_of_region = region_zones(&region);
         let places: Vec<LaunchPlace> = if subnets.is_empty() {
             let zones = if azs.is_empty() {
-                vec![format!("{}a", req.region)]
+                zones_of_region.iter().take(1).cloned().collect()
             } else {
                 azs.clone()
             };
@@ -1545,16 +1605,18 @@ impl AutoScalingService {
         } else {
             subnets.iter().cloned().map(LaunchPlace::Subnet).collect()
         };
-        // A subnet EC2 cannot resolve counts as one of the group's zones, as
-        // the group spreads over them, or the Region's first.
+        // A subnet EC2 cannot resolve (no EC2 backend, or deleted since the
+        // group named it) counts as the Region's zone at its position, so the
+        // group still spreads over zones.
         let place_zones: Vec<String> = places
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                self.place_zone(p, account, &req.region, || {
-                    azs.get(i % azs.len().max(1))
+                self.place_zone(p, account, &region, || {
+                    zones_of_region
+                        .get(i % zones_of_region.len().max(1))
                         .cloned()
-                        .unwrap_or_else(|| format!("{}a", req.region))
+                        .unwrap_or_else(|| region.clone())
                 })
             })
             .collect();
@@ -2643,6 +2705,87 @@ mod tests {
         .await
         .unwrap();
         assert!(group_instance_ids(&s, "h").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_subnet_ec2_does_not_have_is_refused() {
+        let (s, ec2) = ec2_wired();
+        let real = {
+            let mut accounts = ec2.write();
+            let st = accounts.regional_mut("123456789012", "us-east-1");
+            st.subnets
+                .values()
+                .find(|s| s.default_for_az)
+                .unwrap()
+                .subnet_id
+                .clone()
+        };
+        s.handle(req(
+            "CreateLaunchConfiguration",
+            &[
+                ("LaunchConfigurationName", "lc"),
+                ("ImageId", "ami-1"),
+                ("InstanceType", "t3.micro"),
+            ],
+        ))
+        .await
+        .unwrap();
+        let bogus = format!("{real},subnet-0nothere00000000");
+        let create = |vpc: String| {
+            req(
+                "CreateAutoScalingGroup",
+                &[
+                    ("AutoScalingGroupName", "g"),
+                    ("LaunchConfigurationName", "lc"),
+                    ("MinSize", "0"),
+                    ("MaxSize", "1"),
+                    ("VPCZoneIdentifier", &vpc),
+                ],
+            )
+        };
+        let e = s.handle(create(bogus.clone())).await.err().unwrap();
+        assert_eq!(
+            (e.code(), e.message()),
+            (
+                "ValidationError",
+                "The subnet ID 'subnet-0nothere00000000' does not exist".to_string()
+            )
+        );
+        s.handle(create(real)).await.unwrap();
+        let e = s
+            .handle(req(
+                "UpdateAutoScalingGroup",
+                &[("AutoScalingGroupName", "g"), ("VPCZoneIdentifier", &bogus)],
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.code(), "ValidationError");
+    }
+
+    #[test]
+    fn without_ec2_subnets_spread_over_the_regions_zones() {
+        let s = svc();
+        create_basic_asg(&s, "base");
+        body(
+            &s,
+            "CreateAutoScalingGroup",
+            &[
+                ("AutoScalingGroupName", "g"),
+                ("LaunchConfigurationName", "lc"),
+                ("MinSize", "3"),
+                ("MaxSize", "3"),
+                ("DesiredCapacity", "3"),
+                ("VPCZoneIdentifier", "subnet-1,subnet-2,subnet-3"),
+            ],
+        );
+        let mut zones: Vec<String> = s.state.read().accounts["123456789012"].groups["g"]
+            .instances
+            .iter()
+            .map(|i| i.availability_zone.clone())
+            .collect();
+        zones.sort();
+        assert_eq!(zones, ["us-east-1a", "us-east-1b", "us-east-1c"]);
     }
 
     #[test]

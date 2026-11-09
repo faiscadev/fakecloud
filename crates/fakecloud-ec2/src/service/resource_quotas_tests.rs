@@ -1636,6 +1636,22 @@ fn reserved_instance_offerings_follow_the_catalog() {
     assert!(!none.contains("<item>"), "{none}");
 }
 
+/// A launch naming no zone of a type the Region sells nowhere: refused, but a
+/// dry run skips that check, as it does for a named zone.
+#[tokio::test]
+async fn a_dry_run_naming_no_zone_skips_the_selling_check() {
+    let svc = seeded(Ec2Service::new());
+    let launch = [
+        ("InstanceType", "dl1.24xlarge"),
+        ("MinCount", "1"),
+        ("MaxCount", "1"),
+    ];
+    assert_eq!(code(run(&svc, &launch).await), "Unsupported");
+    let mut dry = launch.to_vec();
+    dry.push(("DryRun", "true"));
+    assert_eq!(code(run(&svc, &dry).await), "DryRunOperation");
+}
+
 /// A dry run validates everything but the zone, and changes nothing.
 #[tokio::test]
 async fn a_dry_run_validates_the_rest_of_the_launch() {

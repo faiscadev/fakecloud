@@ -16,7 +16,7 @@ const FIXED_TIME: &str = "2024-01-01T00:00:00.000Z";
 
 // ---- reserved instances ----
 
-fn ri_xml(r: &ReservedInstances, tags: &[Tag]) -> String {
+fn ri_xml(r: &ReservedInstances, state: &str, tags: &[Tag]) -> String {
     format!(
         "{}{}{}<instanceCount>{}</instanceCount>{}{}<duration>{}</duration>\
          <fixedPrice>{}</fixedPrice><usagePrice>{}</usagePrice>{}{}{}{}{}{}{}{}{}",
@@ -29,7 +29,7 @@ fn ri_xml(r: &ReservedInstances, tags: &[Tag]) -> String {
         },
         r.instance_count,
         ec2_elem("productDescription", &r.product_description),
-        ec2_elem("state", &r.state),
+        ec2_elem("state", state),
         r.duration,
         r.fixed_price,
         r.usage_price,
@@ -67,23 +67,24 @@ pub(crate) fn describe_reserved_instances(
         ],
     )?;
     let wanted = indexed_list(&req.query_params, "ReservedInstancesId");
-    let mut accounts = svc.state.write();
-    let state = accounts.regional_mut(&req.account_id, &req.region);
-    settle_queued(state, chrono::Utc::now());
-    let mut items: Vec<String> = state
-        .reserved_instances
-        .values()
-        .filter(|r| wanted.is_empty() || wanted.contains(&r.id))
-        .map(|r| ri_xml(r, state.tags_for(&r.id)))
-        .collect();
+    let param = |name: &str| req.query_params.get(name).filter(|v| !v.is_empty());
+    let (class, offering_type) = (param("OfferingClass"), param("OfferingType"));
+    let now = chrono::Utc::now();
+    let accounts = svc.state.read();
+    let mut items: Vec<String> = accounts
+        .regional(&req.account_id, &req.region)
+        .map(|state| {
+            state
+                .reserved_instances
+                .values()
+                .filter(|r| wanted.is_empty() || wanted.contains(&r.id))
+                .filter(|r| class.is_none_or(|c| *c == r.offering_class))
+                .filter(|r| offering_type.is_none_or(|t| *t == r.offering_type))
+                .map(|r| ri_xml(r, ri_state(r, now), state.tags_for(&r.id)))
+                .collect()
+        })
+        .unwrap_or_default();
     items.sort();
-    // A purchase reported `payment-pending` once has been paid for: no
-    // payment is ever outstanding here, so it is `active` from now on.
-    for r in state.reserved_instances.values_mut() {
-        if r.state == "payment-pending" && (wanted.is_empty() || wanted.contains(&r.id)) {
-            r.state = "active".to_string();
-        }
-    }
     Ok(Ec2Service::respond(
         "DescribeReservedInstances",
         &req.request_id,
@@ -184,16 +185,21 @@ impl Offering {
             .and_then(|i| u16::try_from(i).ok())
             .filter(|i| *i < 0x4000)
             .unwrap_or(0);
-        let letter = self
+        // The zone by its position among the Region's zones, 0 for none.
+        let zone_slot = self
             .zone
             .as_deref()
-            .and_then(|z| z.strip_prefix(region))
-            .and_then(|l| l.bytes().next())
+            .and_then(|z| {
+                crate::defaults::region_zones(region)
+                    .iter()
+                    .position(|(name, _)| name == z)
+            })
+            .and_then(|i| u8::try_from(i + 1).ok())
             .unwrap_or(0);
         let payload = [
             (type_index >> 8) as u8,
             type_index as u8,
-            letter,
+            zone_slot,
             index_of(&PRODUCTS, self.product).unwrap_or(0),
             index_of(&CLASSES, self.class).unwrap_or(0),
             index_of(&OFFERING_TYPES, self.offering_type).unwrap_or(0),
@@ -226,7 +232,15 @@ impl Offering {
                 .get(type_index)?
                 .name
                 .as_str(),
-            zone: (payload[2] != 0).then(|| format!("{region}{}", char::from(payload[2]))),
+            zone: match payload[2] {
+                0 => None,
+                slot => Some(
+                    crate::defaults::region_zones(region)
+                        .into_iter()
+                        .nth(usize::from(slot) - 1)?
+                        .0,
+                ),
+            },
             product: PRODUCTS.get(usize::from(payload[3]))?,
             class: CLASSES.get(usize::from(payload[4]))?,
             offering_type: OFFERING_TYPES.get(usize::from(payload[5]))?,
@@ -331,13 +345,20 @@ pub(crate) fn describe_reserved_instances_offerings(
     }
     // Each location is offered for a 1-year and a 3-year term, as real EC2
     // lists them, kept to the requested [MinDuration, MaxDuration] (seconds).
-    let bound = |name: &str| {
+    let bound = |name: &str| -> Result<Option<i64>, AwsServiceError> {
         req.query_params
             .get(name)
             .filter(|v| !v.is_empty())
-            .and_then(|v| v.parse::<i64>().ok())
+            .map(|v| {
+                v.parse::<i64>().map_err(|_| {
+                    crate::service_helpers::invalid_parameter_value(format!(
+                        "Invalid value '{v}' for {name}."
+                    ))
+                })
+            })
+            .transpose()
     };
-    let (min_duration, max_duration) = (bound("MinDuration"), bound("MaxDuration"));
+    let (min_duration, max_duration) = (bound("MinDuration")?, bound("MaxDuration")?);
     let items: Vec<String> = locations
         .into_iter()
         .flat_map(|zone| {
@@ -365,13 +386,30 @@ pub(crate) fn describe_reserved_instances_offerings(
     ))
 }
 
-/// A queued purchase whose time has come is made: it reads `active` from then
-/// on, as AWS applies the reservation once the scheduled payment succeeds.
-fn settle_queued(state: &mut Ec2State, now: chrono::DateTime<chrono::Utc>) {
-    for r in state.reserved_instances.values_mut() {
-        if r.state == "queued" && parse_time(&r.start).is_some_and(|start| start <= now) {
-            r.state = "active".to_string();
-        }
+/// How long a purchase reads `payment-pending` after it is made, before it is
+/// `active`. Inferred: AWS documents the transition but not its length, and
+/// payment here never fails.
+const PAYMENT_PENDING_SECONDS: i64 = 2;
+
+/// The state of a reservation at `now`, from its stored deletion and its
+/// clock alone: `queued-deleted` once its queued purchase is deleted, `queued`
+/// until its start, `payment-pending` just after, `active` until its end, then
+/// `retired`.
+fn ri_state(r: &ReservedInstances, now: chrono::DateTime<chrono::Utc>) -> &'static str {
+    if r.state == "queued-deleted" {
+        return "queued-deleted";
+    }
+    let (Some(start), Some(end)) = (parse_time(&r.start), parse_time(&r.end)) else {
+        return "active";
+    };
+    if now < start {
+        "queued"
+    } else if now < start + chrono::Duration::seconds(PAYMENT_PENDING_SECONDS) {
+        "payment-pending"
+    } else if now < end {
+        "active"
+    } else {
+        "retired"
     }
 }
 
@@ -431,9 +469,8 @@ fn queued_purchase_time(
 
 /// Buys `InstanceCount` of an offering DescribeReservedInstancesOfferings
 /// lists in this Region. Without a `PurchaseTime` ahead the purchase is made
-/// at once, as AWS makes it; it reads `payment-pending` until its payment
-/// settles, which here is the first DescribeReservedInstances after it (AWS
-/// gives no delay). With one, it is `queued` until that time, then `active`.
+/// at once, as AWS makes it; with one, it is `queued` until that time. Its
+/// state is then read off the clock (see `ri_state`).
 pub(crate) fn purchase_reserved_instances_offering(
     svc: &Ec2Service,
     req: &AwsRequest,
@@ -756,29 +793,33 @@ pub(crate) fn delete_queued_reserved_instances(
         ));
     }
     crate::service_helpers::refuse_dry_run(&req.query_params)?;
+    let now = chrono::Utc::now();
     let mut accounts = svc.state.write();
-    let state = accounts.regional_mut(&req.account_id, &req.region);
-    settle_queued(state, chrono::Utc::now());
+    let mut state = accounts.regional_get_mut(&req.account_id, &req.region);
     let mut success = Vec::new();
     let mut failed = Vec::new();
     for id in &ids {
-        let failure = match state.reserved_instances.get_mut(id) {
+        let failure = match state
+            .as_mut()
+            .and_then(|s| s.reserved_instances.get_mut(id))
+        {
             None => Some((
                 "reserved-instances-id-invalid",
                 format!("The Reserved Instances ID '{id}' does not exist."),
             )),
-            Some(r) if r.state != "queued" => Some((
-                "reserved-instances-not-in-queued-state",
-                format!(
-                    "The Reserved Instances '{id}' cannot be deleted because they are in the \
-                     {} state, not queued.",
-                    r.state
-                ),
-            )),
-            Some(r) => {
-                r.state = "queued-deleted".to_string();
-                None
-            }
+            Some(r) => match ri_state(r, now) {
+                "queued" => {
+                    r.state = "queued-deleted".to_string();
+                    None
+                }
+                current => Some((
+                    "reserved-instances-not-in-queued-state",
+                    format!(
+                        "The Reserved Instances '{id}' cannot be deleted because they are in the \
+                         {current} state, not queued."
+                    ),
+                )),
+            },
         };
         match failure {
             None => success.push(ec2_elem("reservedInstancesId", id)),
@@ -1117,7 +1158,19 @@ mod tests {
         let parse =
             |name: &str| chrono::DateTime::parse_from_rfc3339(&elems(&out, name)[0]).unwrap();
         assert_eq!((parse("end") - parse("start")).num_seconds(), 94_608_000);
-        assert_eq!(elems(&describe(&svc), "state"), ["active"]);
+        let accounts = svc.state.read();
+        let r = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .reserved_instances[&ri_id];
+        let start = parse_time(&r.start).unwrap();
+        assert_eq!(
+            ri_state(
+                r,
+                start + chrono::Duration::seconds(PAYMENT_PENDING_SECONDS)
+            ),
+            "active"
+        );
     }
 
     #[test]
@@ -1234,12 +1287,24 @@ mod tests {
         assert_eq!((end - start).num_seconds(), 31_536_000);
         // Still queued on another read before its time.
         assert_eq!(elems(&describe(&svc), "state"), ["queued"]);
-        // Once the clock reaches it, it is active.
+        // Once the clock reaches it, it is paid for, active, then retired.
         {
-            let mut accounts = svc.state.write();
-            let state = accounts.regional_mut("000000000000", "us-east-1");
-            settle_queued(state, at + chrono::Duration::seconds(1));
-            assert_eq!(state.reserved_instances[&id].state, "active");
+            let accounts = svc.state.read();
+            let r = &accounts
+                .regional("000000000000", "us-east-1")
+                .unwrap()
+                .reserved_instances[&id];
+            let start = parse_time(&r.start).unwrap();
+            let end = parse_time(&r.end).unwrap();
+            let at = |t| ri_state(r, t);
+            assert_eq!(at(start - chrono::Duration::seconds(1)), "queued");
+            assert_eq!(at(start), "payment-pending");
+            assert_eq!(
+                at(start + chrono::Duration::seconds(PAYMENT_PENDING_SECONDS)),
+                "active"
+            );
+            assert_eq!(at(end - chrono::Duration::seconds(1)), "active");
+            assert_eq!(at(end), "retired");
         }
         // A time within the current second is a purchase made now.
         let now = chrono::Utc::now();
@@ -1345,15 +1410,138 @@ mod tests {
         );
         // Deleted, it is never made, and cannot be deleted twice.
         {
-            let mut accounts = svc.state.write();
-            let state = accounts.regional_mut("000000000000", "us-east-1");
-            settle_queued(state, at + chrono::Duration::days(1));
-            assert_eq!(state.reserved_instances[&queued].state, "queued-deleted");
+            let accounts = svc.state.read();
+            let r = &accounts
+                .regional("000000000000", "us-east-1")
+                .unwrap()
+                .reserved_instances[&queued];
+            assert_eq!(
+                ri_state(r, at + chrono::Duration::days(1)),
+                "queued-deleted"
+            );
         }
         let again = delete(&[&queued]);
         assert_eq!(
             elems(&again, "code"),
             ["reserved-instances-not-in-queued-state"]
         );
+    }
+
+    #[test]
+    fn describe_applies_the_offering_class_and_type() {
+        let svc = Ec2Service::new();
+        let convertible = region_offering(&svc);
+        let standard = offering_ids(
+            &svc,
+            &[
+                ("InstanceType", "t3.micro"),
+                ("OfferingType", "All Upfront"),
+            ],
+        )
+        .remove(0);
+        for offering in [&convertible, &standard] {
+            body(purchase(
+                &svc,
+                &[
+                    ("ReservedInstancesOfferingId", offering),
+                    ("InstanceCount", "1"),
+                ],
+            ));
+        }
+        let classes = |params: &[(&str, &str)]| {
+            elems(
+                &body(describe_reserved_instances(
+                    &svc,
+                    &req("DescribeReservedInstances", params),
+                )),
+                "instanceType",
+            )
+        };
+        assert_eq!(classes(&[("OfferingClass", "convertible")]), ["m5.large"]);
+        assert_eq!(classes(&[("OfferingClass", "standard")]), ["t3.micro"]);
+        assert_eq!(classes(&[("OfferingType", "All Upfront")]), ["t3.micro"]);
+        assert!(classes(&[("OfferingType", "Partial Upfront")]).is_empty());
+    }
+
+    #[test]
+    fn describe_never_creates_a_region() {
+        let svc = Ec2Service::new();
+        let mut r = req("DescribeReservedInstances", &[]);
+        r.region = "eu-north-1".into();
+        let out = body(describe_reserved_instances(&svc, &r));
+        assert!(!out.contains("<item>"));
+        assert!(svc
+            .state
+            .read()
+            .regional("000000000000", "eu-north-1")
+            .is_none());
+    }
+
+    #[test]
+    fn an_unparseable_duration_bound_is_refused() {
+        let svc = Ec2Service::new();
+        for name in ["MinDuration", "MaxDuration"] {
+            let e = err_of(describe_reserved_instances_offerings(
+                &svc,
+                &req("DescribeReservedInstancesOfferings", &[(name, "a year")]),
+            ));
+            assert_eq!(
+                (e.code(), e.message()),
+                (
+                    "InvalidParameterValue",
+                    format!("Invalid value 'a year' for {name}.")
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn every_zone_round_trips_through_an_offering_id() {
+        // The catalog's zones are letter-suffixed only (no Local Zones), so the
+        // zone is checked by index: every zone of a few Regions, and an index
+        // past the last one.
+        for region in ["us-east-1", "eu-west-1", "ap-northeast-1", "sa-east-1"] {
+            let zones = crate::defaults::region_zones(region);
+            assert!(!zones.is_empty(), "{region}");
+            let mut checked = 0;
+            for (zone, _) in &zones {
+                let offering = Offering {
+                    instance_type: "t3.micro",
+                    zone: Some(zone.clone()),
+                    product: "Linux/UNIX",
+                    class: "standard",
+                    offering_type: "No Upfront",
+                    tenancy: "default",
+                    duration: 31_536_000,
+                };
+                if !offering.listed(region) {
+                    continue;
+                }
+                assert_eq!(
+                    Offering::from_id(region, &offering.id(region)),
+                    Some(offering.clone()),
+                    "{zone}"
+                );
+                checked += 1;
+            }
+            assert!(checked >= 3, "{region}: {checked}");
+            // A slot one past the Region's zones decodes to nothing.
+            let past = Offering {
+                instance_type: "t3.micro",
+                zone: None,
+                product: "Linux/UNIX",
+                class: "standard",
+                offering_type: "No Upfront",
+                tenancy: "default",
+                duration: 31_536_000,
+            };
+            let id = past.id(region);
+            let mut bytes = *uuid::Uuid::parse_str(&id).unwrap().as_bytes();
+            let check: [u8; 8] = bytes[..8].try_into().unwrap();
+            let mask = Offering::mask(&check);
+            bytes[10] = u8::try_from(zones.len() + 1).unwrap() ^ mask[2];
+            let forged = uuid::Uuid::from_bytes(bytes).to_string();
+            assert_eq!(Offering::from_id(region, &forged), None, "{region}");
+        }
     }
 }

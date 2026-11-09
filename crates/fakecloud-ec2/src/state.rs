@@ -2083,6 +2083,11 @@ pub struct TgwMcastGroup {
 pub struct Ec2State {
     pub account_id: String,
     pub region: String,
+    /// Whether this state has been given a default subnet in every zone (set at
+    /// bootstrap; `false` in a snapshot from a build that seeded fewer, which
+    /// restore backfills once and then sets).
+    #[serde(default)]
+    pub default_subnets_backfilled: bool,
     /// resource-id -> tags. Shared by every Describe* `tag:` filter.
     #[serde(default)]
     pub tags: BTreeMap<String, Vec<Tag>>,
@@ -2527,8 +2532,8 @@ impl Ec2State {
     }
 
     /// On snapshot restore, give the default VPC of a state persisted by a
-    /// build that seeded only three zones the default subnets of the Region's
-    /// other zones (see `defaults::backfill_default_subnets`).
+    /// build that seeded fewer zones the default subnets it lacks, once (see
+    /// `defaults::backfill_default_subnets`).
     pub fn ensure_default_subnets_backfilled(&mut self) {
         crate::defaults::backfill_default_subnets(self);
     }
