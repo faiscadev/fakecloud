@@ -27,7 +27,7 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -78,6 +78,12 @@ jobs:
           LIBZ_SYS_STATIC: "1"
           LZMA_API_STATIC: "1"
         run: cargo zigbuild --release --locked --target ${{ matrix.zig_target }} --bin fakecloud --features vendored-openssl
+
+      - name: Build release-debug (cargo-zigbuild)
+        env:
+          LIBZ_SYS_STATIC: "1"
+          LZMA_API_STATIC: "1"
+        run: cargo zigbuild --profile release-debug --locked --target ${{ matrix.zig_target }} --bin fakecloud --features vendored-openssl
 
       - name: Verify Linux binary portability
         if: matrix.zig_target != ''

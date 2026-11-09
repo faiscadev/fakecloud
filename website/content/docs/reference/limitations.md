@@ -64,10 +64,12 @@ Release binaries are stripped to keep them small. A panic message still names th
 Every release also publishes `fakecloud-<version>-<platform>-debug.tar.gz`, the same code built with symbols and line numbers. To get a usable backtrace, run the debug binary and reproduce the crash:
 
 ```sh
+tar xzf fakecloud-<version>-<platform>-debug.tar.gz
+cd fakecloud-<version>-<platform>-debug
 RUST_BACKTRACE=1 ./fakecloud
 ```
 
-From source, use `cargo run --profile release-debug --bin fakecloud`. Please include the output when you report a crash.
+From source, use `RUST_BACKTRACE=1 cargo run --profile release-debug --bin fakecloud`. Please include the output when you report a crash.
 
 ## Everything else is in scope
 
