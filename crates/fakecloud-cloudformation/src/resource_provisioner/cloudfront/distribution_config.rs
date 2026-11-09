@@ -51,7 +51,8 @@ type CfnResult<T> = Result<T, String>;
 
 /// Build the wire `DistributionConfig` from a CloudFormation
 /// `DistributionConfig` and validate it as CloudFront would. Members absent
-/// from the template stay `None`, so an update that drops one clears it.
+/// from the template take CloudFront's defaults, so an update that drops one
+/// resets it.
 pub(super) fn cfn_distribution_config(
     cfg: &Value,
     caller_reference: String,
@@ -113,7 +114,7 @@ pub(super) fn cfn_distribution_config(
         Aliases { quantity, items }
     });
 
-    let config = DistributionConfig {
+    let mut config = DistributionConfig {
         caller_reference,
         aliases,
         default_root_object: opt_str(cfg, "DefaultRootObject")?,
@@ -144,7 +145,8 @@ pub(super) fn cfn_distribution_config(
             .transpose()
             .map_err(at("Restrictions"))?,
         web_acl_id: opt_str(cfg, "WebACLId")?,
-        http_version: opt_str(cfg, "HttpVersion")?,
+        // CloudFormation documents its own default here, unlike the API's http2.
+        http_version: Some(opt_str(cfg, "HttpVersion")?.unwrap_or_else(|| "http1.1".to_string())),
         is_ipv6_enabled: opt_bool(cfg, "IPV6Enabled")?,
         continuous_deployment_policy_id: opt_str(cfg, "ContinuousDeploymentPolicyId")?,
         staging: opt_bool(cfg, "Staging")?,
@@ -176,6 +178,7 @@ pub(super) fn cfn_distribution_config(
             .map_err(at("CacheTagConfig"))?,
     };
 
+    config.ensure_aws_defaults();
     validate_distribution_config(&config).map_err(|e| format!("{}: {}", e.code(), e.message()))?;
     Ok(config)
 }
@@ -316,12 +319,15 @@ fn cfn_custom_origin_config(c: &Value) -> CfnResult<CustomOriginConfig> {
         http_port: opt_i32(c, "HTTPPort")?.unwrap_or(80),
         https_port: opt_i32(c, "HTTPSPort")?.unwrap_or(443),
         origin_protocol_policy: req_str(c, "OriginProtocolPolicy")?,
-        origin_ssl_protocols: str_list(c, "OriginSSLProtocols")?.map(|ssl_protocol| {
-            OriginSslProtocols {
+        origin_ssl_protocols: {
+            // The resource schema's default; the API documents none.
+            let ssl_protocol = str_list(c, "OriginSSLProtocols")?
+                .unwrap_or_else(|| vec!["TLSv1".to_string(), "SSLv3".to_string()]);
+            Some(OriginSslProtocols {
                 quantity: len(&ssl_protocol),
                 items: SslProtocolItems { ssl_protocol },
-            }
-        }),
+            })
+        },
         origin_read_timeout: opt_i32(c, "OriginReadTimeout")?,
         origin_keepalive_timeout: opt_i32(c, "OriginKeepaliveTimeout")?,
         ip_address_type: opt_str(c, "IpAddressType")?,
@@ -873,6 +879,41 @@ mod tests {
             assert_eq!(rule.response_page_path.as_deref(), Some("/index.html"));
             assert_eq!(rule.error_caching_min_ttl, Some(300));
         }
+    }
+
+    #[test]
+    fn a_custom_origin_without_ssl_protocols_gets_the_schema_default() {
+        let config = translate(&with(json!({"Origins": [{
+            "Id": "o1", "DomainName": "o.example.com",
+            "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}
+        }]})));
+        let origin = &config.origins.items.unwrap().origin[0];
+        let ssl = origin
+            .custom_origin_config
+            .as_ref()
+            .unwrap()
+            .origin_ssl_protocols
+            .as_ref()
+            .unwrap();
+        assert_eq!(ssl.quantity, 2);
+        assert_eq!(ssl.items.ssl_protocol, ["TLSv1", "SSLv3"]);
+    }
+
+    #[test]
+    fn members_the_template_omits_take_the_cloudfront_defaults() {
+        let config = translate(&with(json!({})));
+        assert_eq!(config.aliases.as_ref().unwrap().quantity, 0);
+        assert_eq!(config.origin_groups.as_ref().unwrap().quantity, 0);
+        assert_eq!(config.cache_behaviors.as_ref().unwrap().quantity, 0);
+        assert_eq!(config.custom_error_responses.as_ref().unwrap().quantity, 0);
+        assert_eq!(config.price_class.as_deref(), Some("PriceClass_All"));
+        let geo = config.restrictions.as_ref().unwrap();
+        assert_eq!(geo.geo_restriction.restriction_type, "none");
+        let vc = config.viewer_certificate.as_ref().unwrap();
+        assert_eq!(vc.cloud_front_default_certificate, Some(true));
+        assert!(config.default_cache_behavior.trusted_signers.is_some());
+        // CloudFormation's documented default, not the API's http2.
+        assert_eq!(config.http_version.as_deref(), Some("http1.1"));
     }
 
     #[test]

@@ -524,7 +524,7 @@ impl Target {
 
 /// Add `domain` to a distribution's alias (CNAME) set, keeping Quantity in
 /// sync. No-op if the alias is already present.
-fn add_alias(config: &mut crate::model::DistributionConfig, domain: &str) {
+pub(crate) fn add_alias(config: &mut crate::model::DistributionConfig, domain: &str) {
     let aliases = config.aliases.get_or_insert_with(Default::default);
     let items = aliases.items.get_or_insert_with(Default::default);
     if !items.cname.iter().any(|c| c == domain) {
@@ -535,11 +535,14 @@ fn add_alias(config: &mut crate::model::DistributionConfig, domain: &str) {
 
 /// Remove `domain` from a distribution's alias (CNAME) set, keeping Quantity
 /// in sync.
-fn remove_alias(config: &mut crate::model::DistributionConfig, domain: &str) {
+pub(crate) fn remove_alias(config: &mut crate::model::DistributionConfig, domain: &str) {
     if let Some(aliases) = config.aliases.as_mut() {
         if let Some(items) = aliases.items.as_mut() {
             items.cname.retain(|c| !c.eq_ignore_ascii_case(domain));
             aliases.quantity = items.cname.len() as i32;
+            if items.cname.is_empty() {
+                aliases.items = None;
+            }
         }
     }
 }

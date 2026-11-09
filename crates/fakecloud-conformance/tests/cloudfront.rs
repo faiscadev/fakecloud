@@ -451,8 +451,10 @@ async fn cloudfront_associate_web_acl() {
     let server = TestServer::start().await;
     let cf = server.cloudfront_client().await;
     let id = make_dist(&server, "conf-webacl").await;
+    let got = cf.get_distribution().id(&id).send().await.unwrap();
     cf.associate_distribution_web_acl()
         .id(&id)
+        .if_match(got.e_tag().unwrap())
         .web_acl_arn("arn:aws:wafv2:us-east-1:000000000000:global/webacl/conf/abc")
         .send()
         .await
@@ -465,8 +467,10 @@ async fn cloudfront_disassociate_web_acl() {
     let server = TestServer::start().await;
     let cf = server.cloudfront_client().await;
     let id = make_dist(&server, "conf-webacl-dis").await;
+    let got = cf.get_distribution().id(&id).send().await.unwrap();
     cf.disassociate_distribution_web_acl()
         .id(&id)
+        .if_match(got.e_tag().unwrap())
         .send()
         .await
         .unwrap();
