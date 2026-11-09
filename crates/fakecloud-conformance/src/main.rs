@@ -320,6 +320,7 @@ fn run_probes(
         .connect_timeout(Duration::from_secs(5))
         .build()
         .expect("Failed to create HTTP client");
+    let seed_context = SeedContext::new(may_reprobe, caller_account(&client, &endpoint));
 
     // Cross-reference Smithy operations against fakecloud's own
     // `fn supported_actions()` lists. Operations not in a service's SUPPORTED
@@ -391,18 +392,21 @@ fn run_probes(
             }
         };
 
-        for op in &model.operations {
+        for (op_index, op) in model.operations.iter().enumerate() {
             // Re-seed before every op so destructive ops (DeleteBucket /
             // DeleteObject) don't leave later ops staring at a missing
             // resource. Cheap: each call is a single keep-alive request
-            // against the in-process server.
-            let seed =
-                seed_service_resources(&client, &endpoint, service_name, &op.name, may_reprobe);
-
-            let mut variants = generators::generate_all_variants(model, &op.name, &seed.overrides);
-            if seed.pin_examples {
-                pin_example_identifiers(&mut variants, &seed.overrides);
-            }
+            // against the in-process server. Against an operator-supplied
+            // endpoint the seed is torn down when `seed` drops at the end of
+            // this iteration.
+            let seed = seed_service_resources(
+                &client,
+                &endpoint,
+                service_name,
+                &op.name,
+                &seed_context.for_operation(op_index),
+            );
+            let variants = seeded_variants(model, &op.name, &seed);
 
             // If fakecloud's SUPPORTED list is known and this op isn't in it,
             // short-circuit every variant to NotImplemented. Saves the
@@ -436,38 +440,47 @@ fn run_probes(
             // Get output shape for shape validation
             let output_shape_id = op.output_shape.as_deref();
 
-            // Probe variants with bounded concurrency to avoid overwhelming fakecloud
+            // Probe variants with bounded concurrency to avoid overwhelming
+            // fakecloud. A round-trip variant writes and then reads back the
+            // same resource, so it runs alone, after the others: a concurrent
+            // variant writing that resource between its two steps would make
+            // it read someone else's value.
             let max_concurrent = 8;
-            let mut op_results: Vec<probe::ProbeResult> = variants
-                .chunks(max_concurrent)
-                .flat_map(|chunk| {
-                    std::thread::scope(|s| {
-                        let handles: Vec<_> = chunk
-                            .iter()
-                            .map(|variant| {
-                                let client = &client;
-                                let endpoint = &endpoint;
-                                let service_name = service_name.as_str();
-                                let op_name = op.name.as_str();
-                                let model_info = output_shape_id.map(|oid| (model, oid));
-                                s.spawn(move || {
-                                    probe::probe_variant_with_model(
-                                        client,
-                                        endpoint,
-                                        service_name,
-                                        op_name,
-                                        variant,
-                                        model_info,
-                                    )
-                                })
-                            })
-                            .collect();
-                        handles
-                            .into_iter()
-                            .map(|h| h.join().unwrap())
-                            .collect::<Vec<_>>()
-                    })
-                })
+            let probe_one = |variant: &generators::TestVariant| {
+                probe::probe_variant_with_model(
+                    &client,
+                    &endpoint,
+                    service_name,
+                    &op.name,
+                    variant,
+                    output_shape_id.map(|oid| (model, oid)),
+                )
+            };
+            let (round_trips, concurrent): (Vec<usize>, Vec<usize>) =
+                (0..variants.len()).partition(|&i| variants[i].followup.is_some());
+            let mut slots: Vec<Option<probe::ProbeResult>> =
+                variants.iter().map(|_| None).collect();
+            for chunk in concurrent.chunks(max_concurrent) {
+                std::thread::scope(|s| {
+                    let handles: Vec<_> = chunk
+                        .iter()
+                        .map(|&i| {
+                            let probe_one = &probe_one;
+                            let variant = &variants[i];
+                            (i, s.spawn(move || probe_one(variant)))
+                        })
+                        .collect();
+                    for (i, h) in handles {
+                        slots[i] = Some(h.join().unwrap());
+                    }
+                });
+            }
+            for i in round_trips {
+                slots[i] = Some(probe_one(&variants[i]));
+            }
+            let mut op_results: Vec<probe::ProbeResult> = slots
+                .into_iter()
+                .map(|r| r.expect("every variant is probed"))
                 .collect();
 
             if may_reprobe {
@@ -509,10 +522,15 @@ fn run_probes(
                         let results = probe_with_container_runtime(
                             cli,
                             &client,
-                            service_name,
-                            &op.name,
+                            &seed_context,
+                            ServiceOperation {
+                                service_name,
+                                model,
+                                op_name: &op.name,
+                                op_index,
+                                output_shape_id,
+                            },
                             &batch_variants,
-                            output_shape_id.map(|oid| (model, oid)),
                         );
                         for (&i, r) in batch.iter().zip(results) {
                             op_results[i] = r;
@@ -561,15 +579,129 @@ fn cmd_run(
 }
 
 /// The identifier values every generated variant of one operation is built
-/// with, and whether its documented `@examples` use them too.
+/// with, whether its documented `@examples` use them too, and what to remove
+/// once the operation is done.
 #[derive(Default)]
-struct OperationSeedValues {
+struct OperationSeedValues<'a> {
     /// Member name -> value, handed to the generators as `overrides`: every
     /// variant carries it, except one that exercises that member itself (a
     /// boundary, negative or id-form variant of `Bucket` keeps its own value).
     overrides: HashMap<String, serde_json::Value>,
     /// Also replace these members in the operation's documented examples.
     pin_examples: bool,
+    /// Removes the seeded resources when dropped (operator endpoints only).
+    teardown: Option<SeedTeardown<'a>>,
+}
+
+/// What every operation's seed shares: whether the probe owns the server,
+/// the account the probe's credentials resolve to (resolved once, after the
+/// server is up), and a token naming this run's resources on an
+/// operator-supplied endpoint.
+struct SeedContext {
+    owns_server: bool,
+    account: Option<String>,
+    run_id: String,
+}
+
+impl SeedContext {
+    fn new(owns_server: bool, account: Option<String>) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        Self {
+            owns_server,
+            account,
+            run_id: format!(
+                "{:08x}",
+                (nanos as u64 ^ u64::from(std::process::id())) as u32
+            ),
+        }
+    }
+
+    fn for_operation(&self, op_index: usize) -> OperationSeedContext<'_> {
+        OperationSeedContext {
+            owns_server: self.owns_server,
+            account: self.account.as_deref(),
+            names: SeedNames::new(self.owns_server, &self.run_id, op_index),
+        }
+    }
+}
+
+/// [`SeedContext`] narrowed to one operation.
+struct OperationSeedContext<'a> {
+    owns_server: bool,
+    account: Option<&'a str>,
+    names: SeedNames,
+}
+
+/// The names one operation's seed creates.
+///
+/// On a server the probe owns these are fixed: the service is reset (or its
+/// seed re-created) before every operation, so nothing carries over. Against
+/// an operator-supplied endpoint nothing is reset, so each operation gets
+/// names of its own: a bucket that already exists from an earlier operation
+/// would keep that operation's changes and would never pick up this one's
+/// creation-time setup (Object Lock can only be enabled when a bucket is
+/// created).
+#[derive(Debug, PartialEq)]
+struct SeedNames {
+    bucket: String,
+    /// A bucket nothing creates: CreateBucket's variants create it.
+    new_bucket: String,
+    function: String,
+}
+
+impl SeedNames {
+    fn new(owns_server: bool, run_id: &str, op_index: usize) -> Self {
+        if owns_server {
+            Self {
+                bucket: S3_SEED_BUCKET.to_string(),
+                new_bucket: S3_NEW_BUCKET.to_string(),
+                function: LAMBDA_SEED_FUNCTION.to_string(),
+            }
+        } else {
+            Self {
+                bucket: format!("{S3_SEED_BUCKET}-{run_id}-{op_index}"),
+                new_bucket: format!("{S3_NEW_BUCKET}-{run_id}-{op_index}"),
+                function: format!("{LAMBDA_SEED_FUNCTION}-{run_id}-{op_index}"),
+            }
+        }
+    }
+}
+
+/// The resources one operation's seed created on an operator-supplied
+/// endpoint, removed (best effort) when dropped -- after the operation's
+/// variants ran, or while unwinding from a panicking one.
+struct SeedTeardown<'a> {
+    client: &'a reqwest::blocking::Client,
+    endpoint: &'a str,
+    buckets: Vec<String>,
+    functions: Vec<String>,
+}
+
+impl Drop for SeedTeardown<'_> {
+    fn drop(&mut self) {
+        for bucket in &self.buckets {
+            remove_s3_bucket(self.client, self.endpoint, bucket);
+        }
+        for function in &self.functions {
+            let _ = self
+                .client
+                .delete(format!("{}/2015-03-31/functions/{function}", self.endpoint))
+                .header("Authorization", LAMBDA_SEED_AUTH)
+                .send();
+        }
+    }
+}
+
+/// One operation of one service, as the re-probe needs it.
+struct ServiceOperation<'m> {
+    service_name: &'m str,
+    model: &'m smithy::ServiceModel,
+    op_name: &'m str,
+    op_index: usize,
+    output_shape_id: Option<&'m str>,
 }
 
 /// Seed the resources an operation's variants address, and return the
@@ -584,26 +716,62 @@ struct OperationSeedValues {
 /// (`negative_omit_Bucket`, `boundary_len_min_FunctionName_1`) still sends its
 /// own value.
 ///
-/// `owns_server`: the probe started this server, so it may reset the
-/// service's state first (each operation then starts from the same seeded
-/// state, whatever the previous one changed). Against an operator-supplied
-/// endpoint the seed is only added, never reset.
-fn seed_service_resources(
-    client: &reqwest::blocking::Client,
-    endpoint: &str,
+/// When the probe owns the server, every operation starts from the same
+/// seeded state, whatever the previous one changed: S3 is reset and the
+/// Lambda seed function re-created. Against an operator-supplied endpoint
+/// nothing is reset; the seed uses names of its own (see [`SeedNames`]) and is
+/// removed again when the returned value drops.
+fn seed_service_resources<'a>(
+    client: &'a reqwest::blocking::Client,
+    endpoint: &'a str,
     service_name: &str,
     op_name: &str,
-    owns_server: bool,
-) -> OperationSeedValues {
-    match service_name {
-        "s3" => seed_s3(client, endpoint, op_name, owns_server),
-        "lambda" => seed_lambda(client, endpoint, op_name),
+    ctx: &OperationSeedContext<'_>,
+) -> OperationSeedValues<'a> {
+    let mut seed = match service_name {
+        "s3" => seed_s3(client, endpoint, op_name, ctx),
+        "lambda" => seed_lambda(client, endpoint, op_name, ctx),
         "secretsmanager" => {
             seed_secretsmanager(client, endpoint);
             OperationSeedValues::default()
         }
         _ => OperationSeedValues::default(),
+    };
+    if !ctx.owns_server {
+        match service_name {
+            "s3" => {
+                seed.teardown = Some(SeedTeardown {
+                    client,
+                    endpoint,
+                    buckets: vec![ctx.names.bucket.clone(), ctx.names.new_bucket.clone()],
+                    functions: Vec::new(),
+                })
+            }
+            "lambda" => {
+                seed.teardown = Some(SeedTeardown {
+                    client,
+                    endpoint,
+                    buckets: Vec::new(),
+                    functions: vec![ctx.names.function.clone()],
+                })
+            }
+            _ => {}
+        }
     }
+    seed
+}
+
+/// The operation's variants, built with the seed's identifiers.
+fn seeded_variants(
+    model: &smithy::ServiceModel,
+    op_name: &str,
+    seed: &OperationSeedValues<'_>,
+) -> Vec<generators::TestVariant> {
+    let mut variants = generators::generate_all_variants(model, op_name, &seed.overrides);
+    if seed.pin_examples {
+        pin_example_identifiers(&mut variants, &seed.overrides);
+    }
+    variants
 }
 
 /// Replace the seeded identifiers in an operation's documented examples.
@@ -717,13 +885,13 @@ impl S3SeedState {
 /// DeleteBucket gets an empty bucket, so its success path can delete it; a
 /// non-empty one answers every variant with BucketNotEmpty. CreateBucket's
 /// variants name a bucket that does not exist yet.
-fn seed_s3(
+fn seed_s3<'a>(
     client: &reqwest::blocking::Client,
     endpoint: &str,
     op_name: &str,
-    owns_server: bool,
-) -> OperationSeedValues {
-    if owns_server {
+    ctx: &OperationSeedContext<'_>,
+) -> OperationSeedValues<'a> {
+    if ctx.owns_server {
         let _ = client
             .post(format!("{endpoint}/_fakecloud/reset/s3"))
             .send();
@@ -731,7 +899,8 @@ fn seed_s3(
     // Best-effort: a failed seed shows up as failing variants, which is where
     // it should be reported.
     let state = S3SeedState::for_operation(op_name);
-    let bucket_url = format!("{endpoint}/{S3_SEED_BUCKET}");
+    let seed_bucket = ctx.names.bucket.as_str();
+    let bucket_url = format!("{endpoint}/{seed_bucket}");
     let mut create = client
         .put(&bucket_url)
         .header("Authorization", S3_SEED_AUTH);
@@ -796,9 +965,9 @@ fn seed_s3(
 
     let s = |v: &str| serde_json::Value::String(v.to_string());
     let bucket = if op_name == "CreateBucket" {
-        S3_NEW_BUCKET
+        ctx.names.new_bucket.as_str()
     } else {
-        S3_SEED_BUCKET
+        seed_bucket
     };
     let mut overrides = HashMap::from([
         ("Bucket".to_string(), s(bucket)),
@@ -806,20 +975,152 @@ fn seed_s3(
         ("VersionId".to_string(), s(&version_id)),
         (
             "CopySource".to_string(),
-            s(&format!("{S3_SEED_BUCKET}/{S3_SEED_KEY}")),
+            s(&format!("{seed_bucket}/{S3_SEED_KEY}")),
         ),
     ]);
     if let Some(id) = upload_id {
         overrides.insert("UploadId".to_string(), s(&id));
     }
-    if let Some(account) = caller_account(client, endpoint) {
-        overrides.insert("ExpectedBucketOwner".to_string(), s(&account));
-        overrides.insert("ExpectedSourceBucketOwner".to_string(), s(&account));
+    if let Some(account) = ctx.account {
+        overrides.insert("ExpectedBucketOwner".to_string(), s(account));
+        overrides.insert("ExpectedSourceBucketOwner".to_string(), s(account));
     }
     OperationSeedValues {
         overrides,
         pin_examples: true,
+        teardown: None,
     }
+}
+
+/// Empty and delete `bucket`, best effort: abort its multipart uploads,
+/// delete every object version and delete marker (lifting a legal hold and
+/// bypassing a GOVERNANCE retention first), then the bucket itself.
+fn remove_s3_bucket(client: &reqwest::blocking::Client, endpoint: &str, bucket: &str) {
+    let Ok(base) = reqwest::Url::parse(endpoint) else {
+        return;
+    };
+    let url = |key: Option<&str>, query: &[(&str, Option<&str>)]| {
+        let mut u = base.clone();
+        if let Ok(mut segs) = u.path_segments_mut() {
+            segs.pop_if_empty().push(bucket);
+            if let Some(key) = key {
+                segs.push(key);
+            }
+        }
+        {
+            let mut q = u.query_pairs_mut();
+            for (k, v) in query {
+                match v {
+                    Some(v) => q.append_pair(k, v),
+                    None => q.append_key_only(k),
+                };
+            }
+        }
+        if query.is_empty() {
+            u.set_query(None);
+        }
+        u
+    };
+    let list = |query: &str| {
+        client
+            .get(url(None, &[(query, None)]))
+            .header("Authorization", S3_SEED_AUTH)
+            .send()
+            .ok()
+            .filter(|r| r.status().is_success())
+            .and_then(|r| r.text().ok())
+    };
+    // Each listing returns up to 1000 entries; a few rounds covers anything a
+    // single operation's variants create.
+    for _ in 0..10 {
+        let Some(body) = list("uploads") else { break };
+        let uploads: Vec<(String, String)> = xml_blocks(&body, "Upload")
+            .filter_map(|u| {
+                Some((
+                    xml_text_decoded(u, "Key")?,
+                    xml_text_decoded(u, "UploadId")?,
+                ))
+            })
+            .collect();
+        if uploads.is_empty() {
+            break;
+        }
+        for (key, id) in uploads {
+            let _ = client
+                .delete(url(Some(&key), &[("uploadId", Some(&id))]))
+                .header("Authorization", S3_SEED_AUTH)
+                .send();
+        }
+    }
+    for _ in 0..10 {
+        let Some(body) = list("versions") else { break };
+        let versions: Vec<(String, String, bool)> = xml_blocks(&body, "Version")
+            .map(|v| (v, false))
+            .chain(xml_blocks(&body, "DeleteMarker").map(|v| (v, true)))
+            .filter_map(|(v, marker)| {
+                Some((
+                    xml_text_decoded(v, "Key")?,
+                    xml_text_decoded(v, "VersionId")?,
+                    marker,
+                ))
+            })
+            .collect();
+        if versions.is_empty() {
+            break;
+        }
+        for (key, version, marker) in versions {
+            if !marker {
+                let _ = client
+                    .put(url(
+                        Some(&key),
+                        &[("legal-hold", None), ("versionId", Some(&version))],
+                    ))
+                    .header("Authorization", S3_SEED_AUTH)
+                    .body(
+                        "<LegalHold xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                         <Status>OFF</Status></LegalHold>",
+                    )
+                    .send();
+            }
+            let _ = client
+                .delete(url(Some(&key), &[("versionId", Some(&version))]))
+                .header("Authorization", S3_SEED_AUTH)
+                .header("x-amz-bypass-governance-retention", "true")
+                .send();
+        }
+    }
+    let _ = client
+        .delete(url(None, &[]))
+        .header("Authorization", S3_SEED_AUTH)
+        .send();
+}
+
+/// The contents of every `<tag>...</tag>` element in `xml`.
+fn xml_blocks<'x>(xml: &'x str, tag: &str) -> impl Iterator<Item = &'x str> + 'x {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut rest = xml;
+    std::iter::from_fn(move || {
+        let start = rest.find(&open)? + open.len();
+        let end = start + rest[start..].find(&close)?;
+        let block = &rest[start..end];
+        rest = &rest[end + close.len()..];
+        Some(block)
+    })
+}
+
+/// [`xml_text`] with the XML entities S3 escapes in keys decoded.
+fn xml_text_decoded(xml: &str, tag: &str) -> Option<String> {
+    let raw = xml_text(xml, tag)?;
+    Some(
+        raw.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&#13;", "\r")
+            .replace("&#10;", "\n")
+            .replace("&amp;", "&"),
+    )
 }
 
 const LAMBDA_SEED_FUNCTION: &str = "test-conformance-function";
@@ -830,24 +1131,34 @@ const LAMBDA_SEED_FUNCTION: &str = "test-conformance-function";
 ///
 /// Lambda is not reset between operations: its documented examples build on
 /// each other (`my-function`, created by the CreateFunction example, is read
-/// by later examples), so the examples keep their own names too. The seed is
-/// only re-created when an operation deleted it.
-fn seed_lambda(
+/// by later examples), so the examples keep their own names too. The seed
+/// function alone is re-created before every operation on a server the probe
+/// owns, so what one operation changed on it (configuration, aliases,
+/// versions, policy, tags) does not leak into the next.
+fn seed_lambda<'a>(
     client: &reqwest::blocking::Client,
     endpoint: &str,
     op_name: &str,
-) -> OperationSeedValues {
-    let Some(account) = caller_account(client, endpoint) else {
+    ctx: &OperationSeedContext<'_>,
+) -> OperationSeedValues<'a> {
+    let Some(account) = ctx.account else {
         return OperationSeedValues::default();
     };
+    let function = ctx.names.function.as_str();
+    if ctx.owns_server {
+        // 404 for the first operation, and after one that deleted it.
+        let _ = client
+            .delete(format!("{endpoint}/2015-03-31/functions/{function}"))
+            .header("Authorization", LAMBDA_SEED_AUTH)
+            .send();
+    }
     let create = serde_json::json!({
-        "FunctionName": LAMBDA_SEED_FUNCTION,
+        "FunctionName": function,
         "Runtime": "python3.12",
         "Role": format!("arn:aws:iam::{account}:role/test-conformance-role"),
         "Handler": "index.handler",
         "Code": {"ZipFile": LAMBDA_SEED_ZIP},
     });
-    // 409 when it already exists, which is the usual case.
     let _ = client
         .post(format!("{endpoint}/2015-03-31/functions"))
         .header("Content-Type", "application/json")
@@ -857,9 +1168,9 @@ fn seed_lambda(
 
     let mut overrides = HashMap::new();
     if op_name != "CreateFunction" {
-        let arn = format!("arn:aws:lambda:us-east-1:{account}:function:{LAMBDA_SEED_FUNCTION}");
+        let arn = format!("arn:aws:lambda:us-east-1:{account}:function:{function}");
         let s = |v: &str| serde_json::Value::String(v.to_string());
-        overrides.insert("FunctionName".to_string(), s(LAMBDA_SEED_FUNCTION));
+        overrides.insert("FunctionName".to_string(), s(function));
         // TagResource / UntagResource / ListTags and the resource-policy
         // operations address the function by ARN.
         overrides.insert("Resource".to_string(), s(&arn));
@@ -868,6 +1179,7 @@ fn seed_lambda(
     OperationSeedValues {
         overrides,
         pin_examples: false,
+        teardown: None,
     }
 }
 
@@ -1073,14 +1385,25 @@ fn reprobe_batches(service_name: &str, pending: &[usize]) -> Vec<Vec<usize>> {
 
 /// Probe `variants` against a fresh server that drives real containers, then
 /// shut that server down gracefully so it removes what it started.
+///
+/// The fresh server is seeded the way the sweep server was, but what it
+/// issued (an upload id, a version id) is its own, so the variants are
+/// rebuilt from that seed's values and matched to `variants` by name.
 fn probe_with_container_runtime(
     cli: &str,
     client: &reqwest::blocking::Client,
-    service_name: &str,
-    op_name: &str,
+    seed_context: &SeedContext,
+    op: ServiceOperation<'_>,
     variants: &[&generators::TestVariant],
-    model_info: Option<(&smithy::ServiceModel, &str)>,
 ) -> Vec<probe::ProbeResult> {
+    let ServiceOperation {
+        service_name,
+        model,
+        op_name,
+        op_index,
+        output_shape_id,
+    } = op;
+    let model_info = output_shape_id.map(|oid| (model, oid));
     let (endpoint, child) = match try_start_fakecloud(Some(cli), Duration::from_secs(60)) {
         Ok(started) => started,
         Err(e) => {
@@ -1101,8 +1424,15 @@ fn probe_with_container_runtime(
     };
     let pid = child.id();
     let server = GracefulChild(child);
-    seed_service_resources(client, &endpoint, service_name, op_name, true);
-    let results = variants
+    let seed = seed_service_resources(
+        client,
+        &endpoint,
+        service_name,
+        op_name,
+        &seed_context.for_operation(op_index),
+    );
+    let reseeded = rebind_variants(variants, seeded_variants(model, op_name, &seed));
+    let results = reseeded
         .iter()
         .map(|variant| {
             probe::probe_variant_with_model(
@@ -1123,6 +1453,21 @@ fn probe_with_container_runtime(
     drop(server);
     remove_labelled_leftovers(cli, pid);
     results
+}
+
+/// `variants` as `rebuilt` (the same operation's variants generated again
+/// from another seed) has them, matched by name. A variant `rebuilt` lacks is
+/// kept as it was.
+fn rebind_variants(
+    variants: &[&generators::TestVariant],
+    rebuilt: Vec<generators::TestVariant>,
+) -> Vec<generators::TestVariant> {
+    let mut by_name: HashMap<String, generators::TestVariant> =
+        rebuilt.into_iter().map(|v| (v.name.clone(), v)).collect();
+    variants
+        .iter()
+        .map(|v| by_name.remove(&v.name).unwrap_or_else(|| (*v).clone()))
+        .collect()
 }
 
 fn wait_for_child_processes(pid: u32, limit: Duration) {
@@ -1693,6 +2038,56 @@ mod tests {
         assert!(S3SeedState::for_operation("RestoreObject").archived);
         let plain = S3SeedState::for_operation("GetObject");
         assert!(!plain.object_lock && !plain.versioning && !plain.retained && !plain.archived);
+    }
+
+    #[test]
+    fn seed_names_are_fixed_on_an_owned_server_and_unique_per_operation_elsewhere() {
+        let owned = SeedNames::new(true, "run", 3);
+        assert_eq!(owned, SeedNames::new(true, "other", 7));
+        assert_eq!(owned.bucket, S3_SEED_BUCKET);
+        assert_eq!(owned.function, LAMBDA_SEED_FUNCTION);
+        let a = SeedNames::new(false, "0badf00d", 3);
+        let b = SeedNames::new(false, "0badf00d", 4);
+        assert_ne!(a.bucket, b.bucket);
+        assert_ne!(a.function, b.function);
+        assert_ne!(a.bucket, a.new_bucket);
+        // Still valid bucket and function names at the largest index.
+        let big = SeedNames::new(false, "ffffffff", usize::MAX);
+        assert!(big.bucket.len() <= 63 && big.new_bucket.len() <= 63);
+        assert!(big.function.len() <= 64);
+    }
+
+    #[test]
+    fn rebind_variants_takes_the_rebuilt_inputs_by_name() {
+        let variant = |name: &str, upload: &str| generators::TestVariant {
+            name: name.to_string(),
+            strategy: generators::Strategy::Examples,
+            input: serde_json::json!({"UploadId": upload}),
+            expectation: generators::Expectation::Success,
+            expected_output: None,
+            followup: None,
+        };
+        let old_a = variant("a", "old");
+        let old_b = variant("b", "old");
+        let rebound = rebind_variants(
+            &[&old_a, &old_b],
+            vec![variant("a", "new"), variant("c", "new")],
+        );
+        assert_eq!(rebound[0].input["UploadId"], "new");
+        // Not in the rebuilt set: kept as it was.
+        assert_eq!(rebound[1].input["UploadId"], "old");
+    }
+
+    #[test]
+    fn xml_blocks_iterates_every_element() {
+        let xml = "<R><Version><Key>a&amp;b</Key><VersionId>1</VersionId></Version>\
+                   <DeleteMarker><Key>c</Key></DeleteMarker>\
+                   <Version><Key>d</Key><VersionId>2</VersionId></Version></R>";
+        let keys: Vec<String> = xml_blocks(xml, "Version")
+            .filter_map(|v| xml_text_decoded(v, "Key"))
+            .collect();
+        assert_eq!(keys, vec!["a&b".to_string(), "d".to_string()]);
+        assert_eq!(xml_blocks(xml, "Upload").count(), 0);
     }
 
     #[test]
