@@ -197,6 +197,17 @@ impl CloudFrontService {
         if f.etag != if_match {
             return Err(precondition_failed());
         }
+        // Model-declared; checked after the If-Match (inferred).
+        if account.connection_functions.get(&name).is_some_and(|f| {
+            [&f.id, &f.name, &f.arn].into_iter().any(|r| {
+                crate::validate::reference_in_use(
+                    account,
+                    &crate::validate::Reference::ConnectionFunction(r.clone()),
+                )
+            })
+        }) {
+            return Err(crate::policies::in_use("CannotDeleteEntityWhileInUse"));
+        }
         account.connection_functions.remove(&name);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))

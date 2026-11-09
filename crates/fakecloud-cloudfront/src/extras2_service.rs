@@ -17,6 +17,7 @@ use crate::service::{
     aws_error, check_etag_shape, esc, extract_body_field, generate_etag, generate_id_with_prefix,
     invalid_argument, no_such_distribution, xml_response, CloudFrontService,
 };
+use crate::state::DomainOwner;
 use crate::xml_io;
 
 const NS: &str = crate::NAMESPACE;
@@ -338,38 +339,20 @@ impl CloudFrontService {
                 ),
             ));
         }
-        let account = state.entry(&req.account_id);
-
         // Recorded from real AWS on 2026-11-09: a domain nothing holds wins over an
-        // unknown target and a bad If-Match.
-        let domain_held = account.distribution_tenants.values().any(|t| {
-            t.domains
-                .iter()
-                .any(|d| d.eq_ignore_ascii_case(&parsed.domain))
-        }) || account.distributions.values().any(|d| {
-            d.config
-                .aliases
-                .as_ref()
-                .and_then(|al| al.items.as_ref())
-                .is_some_and(|i| {
-                    i.cname
-                        .iter()
-                        .any(|c| c.eq_ignore_ascii_case(&parsed.domain))
-                })
-        });
-        if !domain_held {
+        // unknown target and a bad If-Match. Another account's domains were refused
+        // above, so any holder left is the caller's.
+        if !state.domain_in_use(&parsed.domain, DomainOwner::New) {
             return Err(aws_error(
                 StatusCode::NOT_FOUND,
                 "EntityNotFound",
                 "The provided Domain Name is not associated with any Resource.",
             ));
         }
+        let account = state.entry(&req.account_id);
 
-        // The target must exist, otherwise AWS returns EntityNotFound. A multi-tenant
-        // distribution is allowed as one: the model documents the target's
-        // `DistributionId` as "The ID of the multi-tenant distribution", and real AWS
-        // couldn't be recorded here without an owned domain and certificate. Inferred,
-        // as is the optional If-Match checked after this, against the target's ETag.
+        // The target must exist, otherwise AWS returns EntityNotFound. The optional
+        // If-Match is checked after this, against the target's ETag (inferred).
         let target_etag = match &target {
             Target::Tenant(tid) => account
                 .distribution_tenants
@@ -384,6 +367,22 @@ impl CloudFrontService {
                 format!("The target resource {} was not found", target.id()),
             )
         })?;
+        // A multi-tenant distribution holds no domains itself: they belong to its
+        // tenants, and real AWS refuses `Aliases` on one and `AssociateAlias` to one.
+        // So a domain can't be moved onto one; target one of its tenants instead.
+        // Refused with `AssociateAlias`'s recorded error, the closest AWS answer for
+        // the same request. Inferred: the documentation calls the target "the
+        // multi-tenant distribution" but also "standard distribution or distribution
+        // tenant", and this couldn't be recorded without an owned domain.
+        if let Target::Distribution(did) = &target {
+            if account
+                .distributions
+                .get(did)
+                .is_some_and(|d| d.config.is_multi_tenant())
+            {
+                return Err(crate::service::alias_refused_for_multi_tenant());
+            }
+        }
         if let Some(if_match) = req.headers.get(http::header::IF_MATCH) {
             let if_match = if_match.to_str().unwrap_or_default();
             check_etag_shape(if_match, &target_etag)?;
@@ -395,13 +394,25 @@ impl CloudFrontService {
 
         // Detach the domain from whichever tenant or distribution currently
         // owns it, then attach it to the target. Domains are unique across
-        // resources, so a plain move is correct.
+        // resources, so a plain move is correct. The source changes too, so it gets
+        // a new ETag and modified time.
+        let now = Utc::now();
         for t in account.distribution_tenants.values_mut() {
+            let before = t.domains.len();
             t.domains
                 .retain(|d| !d.eq_ignore_ascii_case(&parsed.domain));
+            if t.domains.len() != before {
+                t.etag = generate_etag();
+                t.last_modified_time = now;
+            }
         }
         for d in account.distributions.values_mut() {
+            let before = config_aliases_len(&d.config);
             remove_alias(&mut d.config, &parsed.domain);
+            if config_aliases_len(&d.config) != before {
+                d.etag = generate_etag();
+                d.last_modified_time = now;
+            }
         }
         match &target {
             Target::Tenant(tid) => {
@@ -517,10 +528,12 @@ impl CloudFrontService {
             .get(&staging_id)
             .ok_or_else(|| no_such_distribution(&staging_id))?;
         let (staging_config, staging_etag) = (staging.config.clone(), staging.etag.clone());
-        let dist = account
+        let primary_etag = account
             .distributions
-            .get_mut(&id)
-            .ok_or_else(|| no_such_distribution(&id))?;
+            .get(&id)
+            .ok_or_else(|| no_such_distribution(&id))?
+            .etag
+            .clone();
         // `<primary ETag>, <staging ETag>`. A malformed pair recorded from real AWS
         // on 2026-11-09; a lone primary ETag staying accepted is inferred.
         let if_match = require_if_match(req)?;
@@ -530,13 +543,21 @@ impl CloudFrontService {
         if etags.next().is_some() {
             return Err(crate::policies::invalid_if_match());
         }
-        check_etag_shape(primary_match, &dist.etag)?;
+        check_etag_shape(primary_match, &primary_etag)?;
         if let Some(staging_match) = staging_match {
             check_etag_shape(staging_match, &staging_etag)?;
         }
-        if primary_match != dist.etag || staging_match.is_some_and(|m| m != staging_etag) {
+        // The model declares the reference errors here; the staging config is what
+        // becomes live. Checked before staleness, as on `UpdateDistribution`
+        // (inferred), and under the guard that commits.
+        crate::validate::validate_distribution_references(&staging_config, None, Some(&*account))?;
+        if primary_match != primary_etag || staging_match.is_some_and(|m| m != staging_etag) {
             return Err(precondition_failed());
         }
+        let dist = account
+            .distributions
+            .get_mut(&id)
+            .ok_or_else(|| no_such_distribution(&id))?;
         // Promote: the staging distribution's configuration becomes the
         // primary distribution's live config. AWS copies the config wholesale
         // and the resulting primary is no longer a staging distribution.
@@ -574,6 +595,14 @@ impl Target {
             Target::Tenant(id) | Target::Distribution(id) => id,
         }
     }
+}
+
+fn config_aliases_len(config: &crate::model::DistributionConfig) -> usize {
+    config
+        .aliases
+        .as_ref()
+        .and_then(|a| a.items.as_ref())
+        .map_or(0, |i| i.cname.len())
 }
 
 /// Add `domain` to a distribution's alias (CNAME) set, keeping Quantity in

@@ -375,6 +375,15 @@ fn cdk_shaped_template(error_page: &str, api_max_ttl: u32) -> String {
     "Ipv6": {{"Type": "String", "Default": "true"}}
   }},
   "Resources": {{
+    "Rewrite": {{
+      "Type": "AWS::CloudFront::Function",
+      "Properties": {{
+        "Name": "rewrite",
+        "AutoPublish": true,
+        "FunctionCode": "function handler(event) {{ return event.request; }}",
+        "FunctionConfig": {{"Comment": "rewrite", "Runtime": "cloudfront-js-2.0"}}
+      }}
+    }},
     "Dist": {{
       "Type": "AWS::CloudFront::Distribution",
       "Properties": {{
@@ -394,7 +403,7 @@ fn cdk_shaped_template(error_page: &str, api_max_ttl: u32) -> String {
             "Compress": true,
             "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
             "FunctionAssociations": [
-              {{"EventType": "viewer-request", "FunctionARN": "arn:aws:cloudfront::123456789012:function/rewrite"}}
+              {{"EventType": "viewer-request", "FunctionARN": {{"Fn::GetAtt": ["Rewrite", "FunctionARN"]}}}}
             ]
           }},
           "CacheBehaviors": [{{
@@ -495,9 +504,11 @@ async fn cfn_provisions_and_updates_a_cdk_shaped_distribution() {
     assert_eq!(dcb.compress(), Some(true));
     let fa = dcb.function_associations().unwrap();
     assert_eq!(fa.quantity(), 1);
-    assert_eq!(
-        fa.items()[0].function_arn(),
-        "arn:aws:cloudfront::123456789012:function/rewrite"
+    // The function must exist; CDK references it the same way.
+    assert!(
+        fa.items()[0].function_arn().ends_with(":function/rewrite"),
+        "{}",
+        fa.items()[0].function_arn()
     );
 
     let behaviors = dcfg.cache_behaviors().expect("cache behaviors kept");

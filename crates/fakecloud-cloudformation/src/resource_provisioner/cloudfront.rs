@@ -71,14 +71,6 @@ impl ResourceProvisioner {
 
         let caller_reference = format!("cfn-{}-{}", resource.logical_id, Uuid::new_v4().simple());
         let config = cfn_distribution_config(cfg, caller_reference, None)?;
-        fakecloud_cloudfront::validate_distribution_references(
-            &config,
-            self.cloudfront_state
-                .read()
-                .get(&self.account_id)
-                .unwrap_or(&fakecloud_cloudfront::AccountState::default()),
-        )
-        .map_err(|e| cfn_invalid_request(e.message().as_str()))?;
 
         // Mint distribution id + ARN + domain in the same shape the
         // CloudFront service uses.
@@ -115,6 +107,13 @@ impl ResourceProvisioner {
         };
 
         let mut accounts = self.cloudfront_state.write();
+        // Under the guard that commits, so a reference can't be deleted in between.
+        fakecloud_cloudfront::validate_distribution_references(
+            &stored.config,
+            None,
+            accounts.get(&self.account_id),
+        )
+        .map_err(|e| cfn_invalid_request(e.message().as_str()))?;
         let state = accounts.entry(&self.account_id);
         state.distributions.insert(id.clone(), stored);
         Ok(ProvisionResult::new(id.clone())
@@ -159,8 +158,12 @@ impl ResourceProvisioner {
             stored.config.caller_reference.clone(),
             Some(&stored.config),
         )?;
-        fakecloud_cloudfront::validate_distribution_references(&config, state)
-            .map_err(|e| cfn_invalid_request(e.message().as_str()))?;
+        fakecloud_cloudfront::validate_distribution_references(
+            &config,
+            Some(&stored.config),
+            Some(&*state),
+        )
+        .map_err(|e| cfn_invalid_request(e.message().as_str()))?;
         let dist = state
             .distributions
             .get_mut(&existing.physical_id)

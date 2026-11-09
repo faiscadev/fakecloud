@@ -188,6 +188,15 @@ impl CloudFrontService {
         if f.etag != if_match {
             return Err(precondition_failed());
         }
+        // Model-declared; checked after the If-Match (inferred).
+        if account.functions.get(&name).is_some_and(|f| {
+            crate::validate::reference_in_use(
+                account,
+                &crate::validate::Reference::Function(f.function_arn.clone()),
+            )
+        }) {
+            return Err(crate::policies::in_use("FunctionInUse"));
+        }
         account.functions.remove(&name);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))
@@ -618,6 +627,13 @@ impl CloudFrontService {
         if g.etag != if_match {
             return Err(precondition_failed());
         }
+        // Model-declared; checked after the If-Match (inferred).
+        if crate::validate::reference_in_use(
+            account,
+            &crate::validate::Reference::KeyGroup(id.clone()),
+        ) {
+            return Err(crate::policies::in_use("ResourceInUse"));
+        }
         account.key_groups.remove(&id);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))
@@ -928,6 +944,15 @@ impl CloudFrontService {
             .ok_or_else(|| not_found("CloudFrontOriginAccessIdentity", &id))?;
         if oai.etag != if_match {
             return Err(precondition_failed());
+        }
+        // Model-declared; checked after the If-Match (inferred).
+        if crate::validate::reference_in_use(
+            account,
+            &crate::validate::Reference::origin_access_identity(&id),
+        ) {
+            return Err(crate::policies::in_use(
+                "CloudFrontOriginAccessIdentityInUse",
+            ));
         }
         account.origin_access_identities.remove(&id);
         drop(state);

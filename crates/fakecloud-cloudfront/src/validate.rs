@@ -385,81 +385,266 @@ pub(crate) fn validate_copy(
     ))
 }
 
+/// Something a distribution config names that lives elsewhere in CloudFront.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Reference {
+    /// The whole `origin-access-identity/cloudfront/<id>` value.
+    OriginAccessIdentity(String),
+    OriginAccessControl(String),
+    VpcOrigin(String),
+    AnycastIpList(String),
+    ContinuousDeploymentPolicy(String),
+    TrustStore(String),
+    ConnectionFunction(String),
+    KeyGroup(String),
+    FieldLevelEncryption(String),
+    RealtimeLogConfig(String),
+    CachePolicy(String),
+    OriginRequestPolicy(String),
+    ResponseHeadersPolicy(String),
+    /// A CloudFront Function's ARN.
+    Function(String),
+}
+
+impl Reference {
+    pub(crate) fn origin_access_identity(id: &str) -> Self {
+        Reference::OriginAccessIdentity(format!("origin-access-identity/cloudfront/{id}"))
+    }
+}
+
+/// Everything `config` names, in the order the checks run. Empty values name
+/// nothing, as a config read back has them.
+pub(crate) fn config_references(config: &DistributionConfig) -> Vec<Reference> {
+    let present = |v: Option<&str>| v.filter(|v| !v.is_empty()).map(str::to_string);
+    let mut refs = Vec::new();
+    for origin in config.origins.items.iter().flat_map(|i| &i.origin) {
+        if let Some(s3) = &origin.s3_origin_config {
+            refs.extend(
+                present(Some(&s3.origin_access_identity)).map(Reference::OriginAccessIdentity),
+            );
+        }
+        refs.extend(
+            present(origin.origin_access_control_id.as_deref()).map(Reference::OriginAccessControl),
+        );
+        if let Some(vpc) = &origin.vpc_origin_config {
+            refs.extend(present(Some(&vpc.vpc_origin_id)).map(Reference::VpcOrigin));
+        }
+    }
+    refs.extend(present(config.anycast_ip_list_id.as_deref()).map(Reference::AnycastIpList));
+    refs.extend(
+        present(config.continuous_deployment_policy_id.as_deref())
+            .map(Reference::ContinuousDeploymentPolicy),
+    );
+    if let Some(trust) = config
+        .viewer_mtls_config
+        .as_ref()
+        .and_then(|m| m.trust_store_config.as_ref())
+    {
+        refs.extend(present(Some(&trust.trust_store_id)).map(Reference::TrustStore));
+    }
+    if let Some(function) = &config.connection_function_association {
+        refs.extend(present(Some(&function.id)).map(Reference::ConnectionFunction));
+    }
+    let dcb = &config.default_cache_behavior;
+    let behaviors = std::iter::once(BehaviorRefs {
+        key_groups: dcb.trusted_key_groups.as_ref(),
+        field_level_encryption_id: dcb.field_level_encryption_id.as_deref(),
+        realtime_log_config_arn: dcb.realtime_log_config_arn.as_deref(),
+        cache_policy_id: dcb.cache_policy_id.as_deref(),
+        origin_request_policy_id: dcb.origin_request_policy_id.as_deref(),
+        response_headers_policy_id: dcb.response_headers_policy_id.as_deref(),
+        functions: dcb.function_associations.as_ref(),
+    })
+    .chain(config.cache_behavior_items().map(|b| BehaviorRefs {
+        key_groups: b.trusted_key_groups.as_ref(),
+        field_level_encryption_id: b.field_level_encryption_id.as_deref(),
+        realtime_log_config_arn: b.realtime_log_config_arn.as_deref(),
+        cache_policy_id: b.cache_policy_id.as_deref(),
+        origin_request_policy_id: b.origin_request_policy_id.as_deref(),
+        response_headers_policy_id: b.response_headers_policy_id.as_deref(),
+        functions: b.function_associations.as_ref(),
+    }));
+    for b in behaviors {
+        // Checked whether or not the groups are enabled: the recording only shows a
+        // disabled, empty list accepted.
+        refs.extend(
+            b.key_groups
+                .iter()
+                .flat_map(|g| g.items.iter().flat_map(|i| &i.key_group))
+                .filter(|g| !g.is_empty())
+                .cloned()
+                .map(Reference::KeyGroup),
+        );
+        refs.extend(present(b.field_level_encryption_id).map(Reference::FieldLevelEncryption));
+        refs.extend(present(b.realtime_log_config_arn).map(Reference::RealtimeLogConfig));
+        refs.extend(present(b.cache_policy_id).map(Reference::CachePolicy));
+        refs.extend(present(b.origin_request_policy_id).map(Reference::OriginRequestPolicy));
+        refs.extend(present(b.response_headers_policy_id).map(Reference::ResponseHeadersPolicy));
+        refs.extend(
+            b.functions
+                .iter()
+                .flat_map(|f| f.items.iter().flat_map(|i| &i.function_association))
+                .filter(|f| !f.function_arn.is_empty())
+                .map(|f| Reference::Function(f.function_arn.clone())),
+        );
+    }
+    refs
+}
+
+struct BehaviorRefs<'a> {
+    key_groups: Option<&'a crate::model::TrustedKeyGroups>,
+    field_level_encryption_id: Option<&'a str>,
+    realtime_log_config_arn: Option<&'a str>,
+    cache_policy_id: Option<&'a str>,
+    origin_request_policy_id: Option<&'a str>,
+    response_headers_policy_id: Option<&'a str>,
+    functions: Option<&'a crate::model::FunctionAssociations>,
+}
+
+/// Whether any distribution in `account` names `reference`, for the in-use refusals
+/// on delete.
+pub(crate) fn reference_in_use(account: &AccountState, reference: &Reference) -> bool {
+    account
+        .distributions
+        .values()
+        .any(|d| config_references(&d.config).contains(reference))
+}
+
+fn reference_exists(reference: &Reference, account: Option<&AccountState>) -> bool {
+    use crate::policies::{
+        is_managed_cache_policy, is_managed_origin_request_policy,
+        is_managed_response_headers_policy,
+    };
+    match reference {
+        Reference::CachePolicy(id) if is_managed_cache_policy(id) => return true,
+        Reference::OriginRequestPolicy(id) if is_managed_origin_request_policy(id) => return true,
+        Reference::ResponseHeadersPolicy(id) if is_managed_response_headers_policy(id) => {
+            return true
+        }
+        _ => {}
+    }
+    let Some(a) = account else {
+        return false;
+    };
+    match reference {
+        Reference::OriginAccessIdentity(value) => value
+            .strip_prefix("origin-access-identity/cloudfront/")
+            .is_some_and(|id| a.origin_access_identities.contains_key(id)),
+        Reference::OriginAccessControl(id) => a.origin_access_controls.contains_key(id),
+        Reference::VpcOrigin(id) => a.vpc_origins.contains_key(id),
+        Reference::AnycastIpList(id) => a.anycast_ip_lists.contains_key(id),
+        Reference::ContinuousDeploymentPolicy(id) => {
+            a.continuous_deployment_policies.contains_key(id)
+        }
+        Reference::TrustStore(id) => a.trust_stores.contains_key(id),
+        Reference::ConnectionFunction(id) => a
+            .connection_functions
+            .values()
+            .any(|f| &f.id == id || &f.name == id || &f.arn == id),
+        Reference::KeyGroup(id) => a.key_groups.contains_key(id),
+        Reference::FieldLevelEncryption(id) => a.field_level_encryptions.contains_key(id),
+        Reference::RealtimeLogConfig(arn) => a.realtime_log_configs.contains_key(arn),
+        Reference::CachePolicy(id) => a.cache_policies.contains_key(id),
+        Reference::OriginRequestPolicy(id) => a.origin_request_policies.contains_key(id),
+        Reference::ResponseHeadersPolicy(id) => a.response_headers_policies.contains_key(id),
+        Reference::Function(arn) => a.functions.values().any(|f| &f.function_arn == arn),
+    }
+}
+
+/// The refusal for a reference that doesn't exist. Recorded from real AWS on
+/// 2026-11-09 where noted; the others use the error the model declares, with its
+/// documented text.
+fn missing_reference(reference: &Reference) -> AwsServiceError {
+    let (status, code, message) = match reference {
+        // Recorded.
+        Reference::OriginAccessIdentity(_) => (
+            StatusCode::BAD_REQUEST,
+            "InvalidOriginAccessIdentity",
+            "The specified origin access identity does not exist or is not valid.",
+        ),
+        Reference::KeyGroup(_) => (
+            StatusCode::BAD_REQUEST,
+            "TrustedKeyGroupDoesNotExist",
+            "One or more of your trusted keygroups do not exist.",
+        ),
+        Reference::FieldLevelEncryption(_) => (
+            StatusCode::NOT_FOUND,
+            "NoSuchFieldLevelEncryptionConfig",
+            "The specified field level encryption config does not exist.",
+        ),
+        Reference::RealtimeLogConfig(_) => (
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "The parameter RealtimeLogConfigArn is invalid or does not exist.",
+        ),
+        // From the model.
+        Reference::OriginAccessControl(_) => (
+            StatusCode::BAD_REQUEST,
+            "InvalidOriginAccessControl",
+            "The origin access control is not valid.",
+        ),
+        Reference::VpcOrigin(_)
+        | Reference::AnycastIpList(_)
+        | Reference::TrustStore(_)
+        | Reference::ConnectionFunction(_) => (
+            StatusCode::NOT_FOUND,
+            "EntityNotFound",
+            "The entity was not found.",
+        ),
+        Reference::ContinuousDeploymentPolicy(_) => (
+            StatusCode::NOT_FOUND,
+            "NoSuchContinuousDeploymentPolicy",
+            "The continuous deployment policy doesn't exist.",
+        ),
+        Reference::CachePolicy(_) => (
+            StatusCode::NOT_FOUND,
+            "NoSuchCachePolicy",
+            "The cache policy does not exist.",
+        ),
+        Reference::OriginRequestPolicy(_) => (
+            StatusCode::NOT_FOUND,
+            "NoSuchOriginRequestPolicy",
+            "The origin request policy does not exist.",
+        ),
+        Reference::ResponseHeadersPolicy(_) => (
+            StatusCode::NOT_FOUND,
+            "NoSuchResponseHeadersPolicy",
+            "The response headers policy does not exist.",
+        ),
+        Reference::Function(_) => (
+            StatusCode::BAD_REQUEST,
+            "InvalidFunctionAssociation",
+            "A CloudFront function association is invalid.",
+        ),
+    };
+    aws_error(status, code, message)
+}
+
 /// That what a config names exists in the caller's account, on both distribution
-/// modes. Messages recorded from real AWS on 2026-11-09 on a multi-tenant
-/// distribution, and for the origin access identity on a standard one too. Their
-/// order, and applying the rest to standard distributions and to updates, is
-/// inferred.
+/// modes. The first four kinds' messages were recorded from real AWS on
+/// 2026-11-09 (on a multi-tenant distribution, the origin access identity on a
+/// standard one too); the rest use the errors the model declares. Their order,
+/// and applying them to standard distributions and updates, is inferred.
+///
+/// `stored` is the config an update replaces: what it already named is not
+/// checked again, so a config persisted with a reference since deleted can still
+/// be updated, disabled and deleted as long as that reference is left alone.
 ///
 /// IAM certificates, Lambda@Edge functions and logging buckets live in other
 /// services this crate can't see, so they aren't checked.
 pub fn validate_distribution_references(
     config: &DistributionConfig,
-    account: &AccountState,
+    stored: Option<&DistributionConfig>,
+    account: Option<&AccountState>,
 ) -> Result<(), AwsServiceError> {
-    for s3 in config
-        .origins
-        .items
-        .iter()
-        .flat_map(|i| &i.origin)
-        .filter_map(|o| o.s3_origin_config.as_ref())
+    let kept = stored.map(config_references).unwrap_or_default();
+    match config_references(config)
+        .into_iter()
+        .find(|r| !kept.contains(r) && !reference_exists(r, account))
     {
-        let identity = s3.origin_access_identity.as_str();
-        // Empty means none: an origin using an origin access control has it so.
-        if !identity.is_empty()
-            && !identity
-                .strip_prefix("origin-access-identity/cloudfront/")
-                .is_some_and(|id| account.origin_access_identities.contains_key(id))
-        {
-            return Err(aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidOriginAccessIdentity",
-                "The specified origin access identity does not exist or is not valid.",
-            ));
-        }
+        Some(missing) => Err(missing_reference(&missing)),
+        None => Ok(()),
     }
-    let dcb = &config.default_cache_behavior;
-    let behaviors = std::iter::once((
-        dcb.trusted_key_groups.as_ref(),
-        dcb.field_level_encryption_id.as_deref(),
-        dcb.realtime_log_config_arn.as_deref(),
-    ))
-    .chain(config.cache_behavior_items().map(|b| {
-        (
-            b.trusted_key_groups.as_ref(),
-            b.field_level_encryption_id.as_deref(),
-            b.realtime_log_config_arn.as_deref(),
-        )
-    }));
-    for (key_groups, encryption_id, log_arn) in behaviors {
-        if let Some(groups) = key_groups.filter(|g| g.enabled) {
-            let mut names = groups.items.iter().flat_map(|i| &i.key_group);
-            if names.any(|g| !account.key_groups.contains_key(g)) {
-                return Err(aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "TrustedKeyGroupDoesNotExist",
-                    "One or more of your trusted keygroups do not exist.",
-                ));
-            }
-        }
-        if encryption_id
-            .is_some_and(|id| !id.is_empty() && !account.field_level_encryptions.contains_key(id))
-        {
-            return Err(aws_error(
-                StatusCode::NOT_FOUND,
-                "NoSuchFieldLevelEncryptionConfig",
-                "The specified field level encryption config does not exist.",
-            ));
-        }
-        if log_arn
-            .is_some_and(|arn| !arn.is_empty() && !account.realtime_log_configs.contains_key(arn))
-        {
-            return Err(invalid_argument(
-                "The parameter RealtimeLogConfigArn is invalid or does not exist.",
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Validate a canonical `DistributionConfig` the way CloudFront does on
@@ -1264,7 +1449,7 @@ mod tests {
     fn references_must_exist_on_both_modes() {
         let empty = AccountState::default();
         let check = |c: &DistributionConfig| {
-            validate_distribution_references(c, &empty)
+            validate_distribution_references(c, None, Some(&empty))
                 .err()
                 .map(|e| (e.code().to_string(), e.message().to_string()))
         };
@@ -1313,7 +1498,9 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .enabled = false;
-            assert_eq!(check(&disabled), None);
+            // Checked whether or not the groups are enabled: no recording shows AWS
+            // skipping the check for a disabled list that names one.
+            assert_eq!(check(&enabled), check(&disabled));
 
             let mut encryption = base.clone();
             encryption.default_cache_behavior.field_level_encryption_id = Some("fle-none".into());
@@ -1332,7 +1519,77 @@ mod tests {
                 check(&logs),
                 invalid("The parameter RealtimeLogConfigArn is invalid or does not exist.")
             );
+
+            // The model's errors for the other kinds this crate stores.
+            let code = |set: fn(&mut DistributionConfig)| {
+                let mut c = base.clone();
+                set(&mut c);
+                check(&c).map(|(code, _)| code)
+            };
+            let some = |c: &str| Some(c.to_string());
+            assert_eq!(
+                code(|c| c.default_cache_behavior.origin_request_policy_id = Some("orp".into())),
+                some("NoSuchOriginRequestPolicy")
+            );
+            assert_eq!(
+                code(|c| c.default_cache_behavior.response_headers_policy_id = Some("rhp".into())),
+                some("NoSuchResponseHeadersPolicy")
+            );
+            assert_eq!(
+                code(|c| {
+                    c.origins.items.as_mut().unwrap().origin[0].origin_access_control_id =
+                        Some("oac".into())
+                }),
+                some("InvalidOriginAccessControl")
+            );
+            assert_eq!(
+                code(|c| {
+                    c.default_cache_behavior.function_associations =
+                        Some(crate::model::FunctionAssociations {
+                            quantity: 1,
+                            items: Some(crate::model::FunctionAssociationItems {
+                                function_association: vec![crate::model::FunctionAssociation {
+                                    function_arn: "arn:aws:cloudfront::1:function/none".into(),
+                                    event_type: "viewer-request".into(),
+                                }],
+                            }),
+                        })
+                }),
+                some("InvalidFunctionAssociation")
+            );
+            assert_eq!(
+                code(|c| c.anycast_ip_list_id = Some("ail".into())),
+                some("EntityNotFound")
+            );
         }
+        // A standard behavior on an unknown cache policy; managed ones always exist.
+        let mut unknown = standard_config();
+        unknown.default_cache_behavior.cache_policy_id = Some("cp".into());
+        assert_eq!(
+            validate_distribution_references(&unknown, None, None)
+                .unwrap_err()
+                .code(),
+            "NoSuchCachePolicy"
+        );
+        unknown.default_cache_behavior.cache_policy_id = Some(POLICY.into());
+        validate_distribution_references(&unknown, None, None).unwrap();
+    }
+
+    /// What the stored config already named isn't checked again on an update.
+    #[test]
+    fn an_update_checks_only_new_references() {
+        let mut stored = standard_config();
+        stored.default_cache_behavior.field_level_encryption_id = Some("gone".into());
+        let account = AccountState::default();
+        validate_distribution_references(&stored, Some(&stored), Some(&account)).unwrap();
+        let mut changed = stored.clone();
+        changed.default_cache_behavior.field_level_encryption_id = Some("other".into());
+        assert_eq!(
+            validate_distribution_references(&changed, Some(&stored), Some(&account))
+                .unwrap_err()
+                .code(),
+            "NoSuchFieldLevelEncryptionConfig"
+        );
     }
 
     /// Recorded from real AWS on 2026-11-09.

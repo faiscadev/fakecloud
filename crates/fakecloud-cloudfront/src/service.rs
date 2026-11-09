@@ -707,12 +707,7 @@ impl CloudFrontService {
         canonicalize_distribution_config(&mut config, ConfigRequest::Create)?;
 
         let mut state = self.state.write();
-        validate_distribution_references(
-            &config,
-            state
-                .get(&req.account_id)
-                .unwrap_or(&crate::state::AccountState::default()),
-        )?;
+        validate_distribution_references(&config, None, state.get(&req.account_id))?;
         reject_domains_in_use(&state, config_aliases(&config), DomainOwner::New)?;
         let id = state.unused_id(generate_distribution_id, |a, id| {
             a.distributions.contains_key(id)
@@ -963,17 +958,18 @@ impl CloudFrontService {
             false
         } else {
             canonicalize_distribution_update(&stored, &mut new_config)?;
-            validate_distribution_references(
-                &new_config,
-                self.state
-                    .read()
-                    .get(&req.account_id)
-                    .unwrap_or(&crate::state::AccountState::default()),
-            )?;
             !configs_equal(&stored, &new_config)
         };
 
         let mut state = self.state.write();
+        // Under the guard that commits, so a reference can't be deleted in between.
+        if config_changed {
+            validate_distribution_references(
+                &new_config,
+                Some(&stored),
+                state.get(&req.account_id),
+            )?;
+        }
         reject_domains_in_use(
             &state,
             config_aliases(&new_config),
@@ -1307,6 +1303,9 @@ impl CloudFrontService {
         // the copy isn't itself attached to one.
         config.continuous_deployment_policy_id = Some(String::new());
         config.ensure_aws_defaults();
+        // The model declares the reference errors on a copy too; a staging copy names
+        // what its primary does, so this fails only on a reference deleted since.
+        validate_distribution_references(&config, None, Some(&*account))?;
         let now = Utc::now();
         let etag = generate_etag();
         let arn = distribution_arn(&req.region, &req.account_id, &new_id);
@@ -2554,8 +2553,76 @@ mod tests {
         ));
     }
 
+    /// A fresh state holding what the fixtures below name, since a distribution's
+    /// references must exist.
     fn make_state() -> SharedCloudFrontState {
-        Arc::new(RwLock::new(CloudFrontAccounts::new()))
+        let state = Arc::new(RwLock::new(CloudFrontAccounts::new()));
+        seed_referenced_resources(&state);
+        state
+    }
+
+    fn seed_referenced_resources(state: &SharedCloudFrontState) {
+        let mut s = state.write();
+        let a = s.entry(DEFAULT_ACCOUNT);
+        crate::policies::seed_managed(a);
+        let now = Utc::now();
+        let template = a.cache_policies.values().next().unwrap().clone();
+        for id in ["cp-123", "cp-x", "cp-pg"] {
+            let mut p = template.clone();
+            (p.id, p.policy_type) = (id.into(), "custom".into());
+            a.cache_policies.insert(id.into(), p);
+        }
+        let mut p = a.origin_request_policies.values().next().unwrap().clone();
+        (p.id, p.policy_type) = ("orp-123".into(), "custom".into());
+        a.origin_request_policies.insert(p.id.clone(), p);
+        let mut p = a.response_headers_policies.values().next().unwrap().clone();
+        (p.id, p.policy_type) = ("rhp-123".into(), "custom".into());
+        a.response_headers_policies.insert(p.id.clone(), p);
+        a.key_groups.insert(
+            "kg-123".into(),
+            crate::functions::StoredKeyGroup {
+                id: "kg-123".into(),
+                etag: generate_etag(),
+                last_modified_time: now,
+                config: Default::default(),
+            },
+        );
+        a.continuous_deployment_policies.insert(
+            "cdp-1".into(),
+            crate::policies::StoredContinuousDeploymentPolicy {
+                id: "cdp-1".into(),
+                etag: generate_etag(),
+                last_modified_time: now,
+                config: Default::default(),
+            },
+        );
+        a.vpc_origins.insert(
+            "vo-123".into(),
+            crate::extras::StoredVpcOrigin {
+                id: "vo-123".into(),
+                arn: "arn:aws:cloudfront::123456789012:vpcorigin/vo-123".into(),
+                status: "Deployed".into(),
+                etag: generate_etag(),
+                created_time: now,
+                last_modified_time: now,
+                config: Default::default(),
+            },
+        );
+        a.anycast_ip_lists.insert(
+            "ail-123".into(),
+            crate::extras::StoredAnycastIpList {
+                id: "ail-123".into(),
+                name: "ail".into(),
+                status: "Deployed".into(),
+                arn: "arn:aws:cloudfront::123456789012:anycast-ip-list/ail-123".into(),
+                ip_count: 3,
+                ip_address_type: None,
+                anycast_ips: Vec::new(),
+                last_modified_time: now,
+                etag: generate_etag(),
+                ipam_cidr_configs: Vec::new(),
+            },
+        );
     }
 
     fn make_request(method: http::Method, path: &str, query: &str, body: &str) -> AwsRequest {
@@ -3400,6 +3467,145 @@ mod tests {
                 "The specified distribution does not exist."
             )
         );
+    }
+
+    /// Model-declared in-use errors, checked after the If-Match (inferred).
+    #[tokio::test]
+    async fn deleting_what_a_distribution_names_is_refused() {
+        let state = make_state();
+        let svc = CloudFrontService::new(state.clone());
+        create_dist_returning_id(&svc, &predicate_dist_config_xml("in-use")).await;
+        let etags = {
+            let s = state.read();
+            let a = s.get(DEFAULT_ACCOUNT).unwrap();
+            [
+                a.cache_policies["cp-123"].etag.clone(),
+                a.key_groups["kg-123"].etag.clone(),
+                a.vpc_origins["vo-123"].etag.clone(),
+                a.origin_request_policies["orp-123"].etag.clone(),
+            ]
+        };
+        for ((path, code), etag) in [
+            ("cache-policy/cp-123", "CachePolicyInUse"),
+            ("key-group/kg-123", "ResourceInUse"),
+            ("vpc-origin/vo-123", "CannotDeleteEntityWhileInUse"),
+            ("origin-request-policy/orp-123", "OriginRequestPolicyInUse"),
+        ]
+        .into_iter()
+        .zip(etags)
+        {
+            let mut delete =
+                make_request(http::Method::DELETE, &format!("/2020-05-31/{path}"), "", "");
+            delete.headers.insert(IF_MATCH, etag.parse().unwrap());
+            let err = svc.handle(delete).await.err().expect(path);
+            assert_eq!(err.code(), code, "{path}");
+        }
+    }
+
+    /// A reference deleted after the distribution was stored: an update leaving it
+    /// alone still works, while a copy or promotion, whose config is checked whole,
+    /// is refused.
+    #[tokio::test]
+    async fn a_dangling_reference_blocks_copies_but_not_untouched_updates() {
+        let state = make_state();
+        let svc = CloudFrontService::new(state.clone());
+        let body = dist_config_with_cache_policy("dangling", "cp-x");
+        let create = svc.handle(create_request(&body)).await.unwrap();
+        let id = id_in(&create);
+        let mut copy = copy_request(&id, &etag_of(&create), "dangling-copy", "");
+        copy.headers.insert("Staging", "true".parse().unwrap());
+        let copied = svc.handle(copy).await.unwrap();
+        let staging = id_in(&copied);
+        state
+            .write()
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .unwrap()
+            .cache_policies
+            .remove("cp-x");
+
+        let mut again = copy_request(&id, &etag_of(&create), "dangling-copy-2", "");
+        again.headers.insert("Staging", "true".parse().unwrap());
+        assert_eq!(
+            svc.handle(again).await.err().unwrap().code(),
+            "NoSuchCachePolicy"
+        );
+
+        let mut promote = make_request(
+            http::Method::PUT,
+            &format!("/2020-05-31/distribution/{id}/promote-staging-config"),
+            &format!("StagingDistributionId={staging}"),
+            "",
+        );
+        promote
+            .query_params
+            .insert("StagingDistributionId".into(), staging.clone());
+        promote
+            .headers
+            .insert(IF_MATCH, etag_of(&create).parse().unwrap());
+        assert_eq!(
+            svc.handle(promote).await.err().unwrap().code(),
+            "NoSuchCachePolicy"
+        );
+
+        let mut update = make_request(
+            http::Method::PUT,
+            &format!("/2020-05-31/distribution/{id}/config"),
+            "",
+            &body.replace("<Enabled>true</Enabled>", "<Enabled>false</Enabled>"),
+        );
+        update
+            .headers
+            .insert(IF_MATCH, etag_of(&create).parse().unwrap());
+        svc.handle(update).await.expect("untouched reference");
+    }
+
+    /// Inferred: a multi-tenant distribution holds no domains of its own, so one
+    /// can't be moved onto it; and the source of a move changes too.
+    #[tokio::test]
+    async fn a_domain_moves_between_standard_distributions_only() {
+        let state = make_state();
+        let svc = CloudFrontService::new(state.clone());
+        let source = svc
+            .handle(create_request(&dist_config_with_alias(
+                "src",
+                "move.example.com",
+            )))
+            .await
+            .unwrap();
+        let source_id = id_in(&source);
+        let standard = id_in(
+            &svc.handle(create_request(&minimal_dist_config_xml("dst")))
+                .await
+                .unwrap(),
+        );
+        let tenant = id_in(
+            &svc.handle(create_request(&tenant_only_config_xml("dst-tenant")))
+                .await
+                .unwrap(),
+        );
+        let move_to = |target: &str| {
+            make_request(
+                http::Method::POST,
+                "/2020-05-31/domain-association",
+                "",
+                &format!(
+                    "<UpdateDomainAssociationRequest><Domain>move.example.com</Domain>\
+                     <TargetResource><DistributionId>{target}</DistributionId></TargetResource>\
+                     </UpdateDomainAssociationRequest>"
+                ),
+            )
+        };
+        let err = svc.handle(move_to(&tenant)).await.err().unwrap();
+        assert_eq!(
+            err.message(),
+            "You can't specify the Alias field for a mutli-tenant distribution."
+        );
+        svc.handle(move_to(&standard)).await.expect("moved");
+        let s = state.read();
+        let src = &s.get(DEFAULT_ACCOUNT).unwrap().distributions[&source_id];
+        assert!(config_aliases(&src.config).is_empty());
+        assert_ne!(src.etag, etag_of(&source), "the source's ETag moves");
     }
 
     /// Inferred: the copy isn't itself attached to the primary's policy.
@@ -4506,7 +4712,7 @@ mod tests {
     <OriginRequestPolicyId>orp-123</OriginRequestPolicyId>
     <ResponseHeadersPolicyId>rhp-123</ResponseHeadersPolicyId>
     <TrustedKeyGroups>
-      <Enabled>false</Enabled>
+      <Enabled>true</Enabled>
       <Quantity>1</Quantity>
       <Items><KeyGroup>kg-123</KeyGroup></Items>
     </TrustedKeyGroups>

@@ -155,6 +155,13 @@ impl CloudFrontService {
         if f.etag != if_match {
             return Err(precondition_failed());
         }
+        // Model-declared; checked after the If-Match (inferred).
+        if crate::validate::reference_in_use(
+            account,
+            &crate::validate::Reference::FieldLevelEncryption(id.clone()),
+        ) {
+            return Err(crate::policies::in_use("FieldLevelEncryptionConfigInUse"));
+        }
         account.field_level_encryptions.remove(&id);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))
@@ -520,6 +527,13 @@ impl CloudFrontService {
             .accounts
             .get_mut(&req.account_id)
             .ok_or_else(|| not_found("RealtimeLogConfig", &key))?;
+        // Model-declared; checked after the If-Match (inferred).
+        if crate::validate::reference_in_use(
+            account,
+            &crate::validate::Reference::RealtimeLogConfig(key.clone()),
+        ) {
+            return Err(crate::policies::in_use("RealtimeLogConfigInUse"));
+        }
         if account.realtime_log_configs.remove(&key).is_none() {
             return Err(not_found("RealtimeLogConfig", &key));
         }
