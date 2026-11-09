@@ -254,6 +254,29 @@ const ACCELERATOR_BLOCKS: &[AcceleratorBlock] = &[
     },
 ];
 
+/// The `AcceleratorName` values, in the order real EC2's refusal lists them.
+pub(crate) const ACCELERATOR_NAME_VALUES: &[&str] = &[
+    "a10g",
+    "a100",
+    "h100",
+    "inferentia",
+    "k520",
+    "k80",
+    "m60",
+    "radeon-pro-v520",
+    "t4",
+    "t4g",
+    "vu9p",
+    "v100",
+    "l40s",
+    "l4",
+    "gaudi-hl-205",
+    "inferentia2",
+    "trainium",
+    "trainium2",
+    "u30",
+];
+
 /// Every name a response gives a device -> the API's `AcceleratorName`.
 const ACCELERATOR_NAMES: &[(&str, &str)] = &[
     ("A100", "a100"),
@@ -374,9 +397,15 @@ struct RawCatalog {
     instance_types: Vec<InstanceTypeSpec>,
     /// `BaselinePerformanceFactors` reference family -> the families it includes.
     baseline_performance: HashMap<String, HashSet<String>>,
-    /// Types `GetInstanceTypesFromInstanceRequirements` never lists where they are
-    /// sold. Real EC2 leaves these out whatever is asked, and does not say why.
-    requirements_omitted: HashSet<String>,
+    /// The Regions dumped from EC2, as opposed to carried over.
+    dump_regions: HashSet<String>,
+    /// Region -> types `GetInstanceTypesFromInstanceRequirements` does not list there
+    /// though it sells them. Real EC2 leaves these out whatever is asked, and does not
+    /// say why.
+    requirements_omitted: HashMap<String, HashSet<String>>,
+    /// Region -> types its `IncludeUnsupportedInRegion` listing leaves out, so that
+    /// they are unknown there even when asked for.
+    not_described: HashMap<String, HashSet<String>>,
     /// Region -> types it lists there although `DescribeInstanceTypes` does not.
     requirements_extra: HashMap<String, HashSet<String>>,
 }
@@ -463,8 +492,8 @@ fn leaves<'a>(node: &'a Node, path: &str, out: &mut Vec<&'a str>) {
                 leaves(next, tail, out);
             }
         }
-        // An empty element holds no value. The API has one: a type sold nowhere has
-        // an empty `supportedUsageClasses`.
+        // An empty element holds no value. The API has one: `supportedUsageClasses` of
+        // a few types no Region sells (cc1, hs1, u-*.metal).
         Node::Text(text) if path.is_empty() && !text.is_empty() => out.push(text),
         Node::Text(_) => {}
     }
@@ -565,11 +594,29 @@ impl InstanceTypeSpec {
         !catalog_regions().contains(region) || self.offerings.contains_key(region)
     }
 
+    /// Whether `IncludeUnsupportedInRegion` shows this type in `region`.
+    pub(crate) fn described_with_unsupported_in(&self, region: &str) -> bool {
+        !raw_catalog()
+            .not_described
+            .get(region)
+            .is_some_and(|absent| absent.contains(&self.name))
+    }
+
     /// Whether `GetInstanceTypesFromInstanceRequirements` can list this type in
     /// `region`. It is not quite what the Region sells, see [`RawCatalog`].
     pub(crate) fn listed_by_requirements_in(&self, region: &str) -> bool {
         let raw = raw_catalog();
-        !raw.requirements_omitted.contains(&self.name)
+        // A Region without its own data follows the ones that have it.
+        let omitted = if raw.dump_regions.contains(region) {
+            raw.requirements_omitted
+                .get(region)
+                .is_some_and(|omitted| omitted.contains(&self.name))
+        } else {
+            raw.requirements_omitted
+                .values()
+                .any(|omitted| omitted.contains(&self.name))
+        };
+        !omitted
             && (self.offered_in(region)
                 || raw
                     .requirements_extra
@@ -590,6 +637,15 @@ impl InstanceTypeSpec {
     /// `m5` of `m5.large`.
     pub(crate) fn family(&self) -> &str {
         self.name.split('.').next().unwrap_or_default()
+    }
+
+    /// The zones of `region` selling this type.
+    pub(crate) fn zones_selling(&self, region: &str) -> Vec<String> {
+        crate::defaults::region_zones(region)
+            .into_iter()
+            .map(|(zone, _)| zone)
+            .filter(|zone| self.offered_in_zone(region, zone))
+            .collect()
     }
 
     /// Whether `zone` of `region` sells this type. A zone the catalog has no data
@@ -1057,29 +1113,8 @@ mod tests {
     /// recorded, or is deliberately listed as having none.
     #[test]
     fn every_accelerator_name_is_mapped_or_deliberately_not() {
-        const ENUM: &[&str] = &[
-            "a10g",
-            "a100",
-            "h100",
-            "inferentia",
-            "k520",
-            "k80",
-            "m60",
-            "radeon-pro-v520",
-            "t4",
-            "t4g",
-            "vu9p",
-            "v100",
-            "l40s",
-            "l4",
-            "gaudi-hl-205",
-            "inferentia2",
-            "trainium",
-            "trainium2",
-            "u30",
-        ];
         for (_, api) in ACCELERATOR_NAMES {
-            assert!(ENUM.contains(api), "{api}");
+            assert!(ACCELERATOR_NAME_VALUES.contains(api), "{api}");
         }
         let mut seen = HashSet::new();
         for t in catalog() {
@@ -1114,14 +1149,37 @@ mod tests {
         );
     }
 
+    /// As real EC2 answers `IncludeUnsupportedInRegion` per Region.
+    #[test]
+    fn the_unsupported_listing_is_per_region() {
+        let c8gb = spec("c8gb.large");
+        assert!(!c8gb.described_with_unsupported_in("ap-northeast-3"));
+        assert!(c8gb.described_with_unsupported_in("us-east-1"));
+        // Kept known wherever asked, though EC2 no longer describes it.
+        assert!(spec("i3p.16xlarge").described_with_unsupported_in("us-east-1"));
+        // A Region says what it says about a type it does not sell.
+        let a1 = spec("a1.large");
+        assert!(a1
+            .values_in("us-east-1", "supportedUsageClasses")
+            .contains(&"on-demand"));
+    }
+
     /// Regions list a few types `DescribeInstanceTypes` does not describe, as recorded.
     #[test]
     fn requirements_listing_is_not_quite_what_a_region_sells() {
         let raw = raw_catalog();
-        assert_eq!(
-            raw.requirements_omitted,
-            HashSet::from(["p5.4xlarge".to_string(), "t1.micro".to_string()])
-        );
+        let omitted: HashSet<&str> = raw
+            .requirements_omitted
+            .values()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(omitted, HashSet::from(["p5.4xlarge", "t1.micro"]));
+        // Each Region only for what it sells.
+        assert!(raw.requirements_omitted["us-east-2"].contains("p5.4xlarge"));
+        assert!(!raw.requirements_omitted["us-east-2"].contains("t1.micro"));
+        // A Region without its own data follows the others.
+        assert!(!spec("t1.micro").listed_by_requirements_in("af-south-1"));
         let p5 = spec("p5.4xlarge");
         assert!(p5.offered_in("us-east-1"));
         assert!(!p5.listed_by_requirements_in("us-east-1"));

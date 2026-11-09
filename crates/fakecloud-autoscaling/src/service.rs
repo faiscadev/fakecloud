@@ -62,6 +62,13 @@ pub struct AutoScalingService {
     quota_provider: Option<Arc<dyn fakecloud_core::quota::QuotaProvider>>,
 }
 
+/// Why one `RunInstances` of a group failed.
+struct LaunchFailure {
+    /// EC2 refused the type in this zone, which another of the group's zones may sell.
+    zone_does_not_sell_type: bool,
+    message: String,
+}
+
 impl AutoScalingService {
     pub fn new(state: SharedAutoScalingState) -> Self {
         Self {
@@ -138,24 +145,30 @@ impl AutoScalingService {
 
     /// Launch one EC2 instance for a group through `RunInstances` with the
     /// given parameters, returning its id and availability zone, or the
-    /// launch error's message.
+    /// launch error.
     async fn run_ec2_instance(
         &self,
         svc: &fakecloud_ec2::Ec2Service,
         mut params: std::collections::HashMap<String, String>,
         req: &AwsRequest,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), LaunchFailure> {
         params.insert("MinCount".to_string(), "1".to_string());
         params.insert("MaxCount".to_string(), "1".to_string());
         let resp = svc
             .handle(ec2_request("RunInstances", params, req))
             .await
-            .map_err(|e| e.message())?;
+            .map_err(|e| LaunchFailure {
+                zone_does_not_sell_type: e.code() == "Unsupported",
+                message: e.message(),
+            })?;
         let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
         let id = parse_instance_ids(&body)
             .into_iter()
             .next()
-            .ok_or_else(|| "RunInstances returned no instance".to_string())?;
+            .ok_or_else(|| LaunchFailure {
+                zone_does_not_sell_type: false,
+                message: "RunInstances returned no instance".to_string(),
+            })?;
         let az = body
             .split("<availabilityZone>")
             .nth(1)
@@ -1543,17 +1556,6 @@ impl AutoScalingService {
                                         );
                                     }
                                 }
-                                match subnets.get(slot % subnets.len().max(1)) {
-                                    Some(subnet) => {
-                                        params.insert("SubnetId".to_string(), subnet.clone());
-                                    }
-                                    None => {
-                                        params.insert(
-                                            "Placement.AvailabilityZone".to_string(),
-                                            az_hint.clone(),
-                                        );
-                                    }
-                                }
                                 params.insert(
                                     "TagSpecification.1.ResourceType".to_string(),
                                     "instance".to_string(),
@@ -1570,7 +1572,35 @@ impl AutoScalingService {
                                     );
                                 }
                                 ec2_touched = true;
-                                self.run_ec2_instance(svc, params, req).await
+                                // From this slot's subnet or zone, on past any that
+                                // does not sell the type, as a group does.
+                                let places = subnets.len().max(azs.len()).max(1);
+                                let mut placed = None;
+                                for offset in 0..places {
+                                    let mut params = params.clone();
+                                    if let Some(subnet) =
+                                        subnets.get((slot + offset) % subnets.len().max(1))
+                                    {
+                                        params.insert("SubnetId".to_string(), subnet.clone());
+                                    } else if let Some(zone) =
+                                        azs.get((slot + offset) % azs.len().max(1))
+                                    {
+                                        params.insert(
+                                            "Placement.AvailabilityZone".to_string(),
+                                            zone.clone(),
+                                        );
+                                    }
+                                    let attempt = self.run_ec2_instance(svc, params, req).await;
+                                    let next_place = matches!(
+                                        &attempt,
+                                        Err(failure) if failure.zone_does_not_sell_type
+                                    );
+                                    placed = Some(attempt.map_err(|f| f.message));
+                                    if !next_place {
+                                        break;
+                                    }
+                                }
+                                placed.expect("at least one place is tried")
                             }
                         };
                         match placed {
@@ -2474,6 +2504,58 @@ mod tests {
     async fn body_async(s: &AutoScalingService, action: &str, params: &[(&str, &str)]) -> String {
         let r = s.handle(req(action, params)).await.unwrap();
         String::from_utf8_lossy(r.body.expect_bytes()).to_string()
+    }
+
+    #[tokio::test]
+    async fn a_group_launches_past_a_zone_that_does_not_sell_its_type() {
+        let (s, _ec2) = ec2_wired();
+        s.handle(req(
+            "CreateLaunchConfiguration",
+            &[
+                ("LaunchConfigurationName", "lc"),
+                ("ImageId", "ami-lc"),
+                ("InstanceType", "m5.large"),
+            ],
+        ))
+        .await
+        .unwrap();
+        // m5.large is not sold in us-east-1e.
+        s.handle(req(
+            "CreateAutoScalingGroup",
+            &[
+                ("AutoScalingGroupName", "g"),
+                ("LaunchConfigurationName", "lc"),
+                ("MinSize", "6"),
+                ("MaxSize", "6"),
+                ("AvailabilityZones.member.1", "us-east-1a"),
+                ("AvailabilityZones.member.2", "us-east-1e"),
+                ("AvailabilityZones.member.3", "us-east-1b"),
+            ],
+        ))
+        .await
+        .unwrap();
+        let zones: Vec<String> = s.state.read().accounts["123456789012"].groups["g"]
+            .instances
+            .iter()
+            .map(|i| i.availability_zone.clone())
+            .collect();
+        assert_eq!(zones.len(), 6, "{zones:?}");
+        assert!(!zones.iter().any(|z| z == "us-east-1e"), "{zones:?}");
+
+        // None of its zones sells the type: nothing launches, and the refusal is kept.
+        s.handle(req(
+            "CreateAutoScalingGroup",
+            &[
+                ("AutoScalingGroupName", "h"),
+                ("LaunchConfigurationName", "lc"),
+                ("MinSize", "1"),
+                ("MaxSize", "1"),
+                ("AvailabilityZones.member.1", "us-east-1e"),
+            ],
+        ))
+        .await
+        .unwrap();
+        assert!(group_instance_ids(&s, "h").is_empty());
     }
 
     #[tokio::test]

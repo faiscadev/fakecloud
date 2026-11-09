@@ -53,7 +53,11 @@ unsupported = {
 
 save("dumps/us-east-1.types.json", InstanceTypes=[cli("a.large", False, ["on-demand"])])
 save("dumps/us-west-2.types.json", InstanceTypes=[cli("a.large", True, ["spot"]), raw_only_west])
-save("dumps/unsupported.types.json", InstanceTypes=[unsupported, raw_only_west])
+# us-east-1 does not sell b.large or only-unsupported.large, and says different things
+# about the former than the Region selling it does.
+save("dumps/us-east-1.unsupported.json", InstanceTypes=[
+    unsupported, cli("a.large", False, ["on-demand"]), dict(raw_only_west, supportedUsageClasses=""),
+])
 # GetInstanceTypesFromInstanceRequirements: a.large is never listed, c.large is listed
 # though us-west-2 does not describe it.
 save("dumps/us-east-1.requirements.json", InstanceTypes=[])
@@ -106,7 +110,9 @@ import json
 with gzip.open("catalog.json.gz", "rt", encoding="utf-8") as f:
     doc = json.load(f)
 assert doc["dump_regions"] == ["us-east-1", "us-west-2"], doc["dump_regions"]
-assert doc["requirements_omitted"] == ["a.large"], doc["requirements_omitted"]
+assert doc["requirements_omitted"] == {"us-east-1": ["a.large"], "us-west-2": ["a.large"]}, doc
+# us-west-2 has no unsupported listing here, so nothing is said of it.
+assert doc["not_described"] == {}, doc["not_described"]
 assert doc["requirements_extra"] == {"us-west-2": ["c.large"]}, doc["requirements_extra"]
 # Each reference's families, merged across Regions; one listing nothing is left out.
 assert doc["baseline_performance"] == {"a": ["b", "c", "z"], "b": ["c"]}, doc["baseline_performance"]
@@ -130,7 +136,8 @@ assert a["overrides"] == {
     "us-east-1": {"dedicatedHostsSupported": "false", "supportedUsageClasses": ["on-demand"]},
     "us-west-2": {"supportedUsageClasses": ["spot"]},
 }, a["overrides"]
-assert "overrides" not in types["b.large"], types["b.large"]
+# A Region's answer about a type it does not sell is kept for that Region too.
+assert types["b.large"]["overrides"] == {"us-east-1": {"supportedUsageClasses": ""}}, types["b.large"]
 
 # The raw form is taken as is, without the per-request element.
 assert "supportedInRegion" not in types["b.large"]["info"], types["b.large"]
@@ -182,6 +189,28 @@ if python3 "$SCRIPT" --dumps stale --out stale.json.gz 2>stale.err; then
 fi
 grep -q "rebootMigrationSupport" stale.err
 test ! -e stale.json.gz
+
+# A list against a string (a scalar in one Region, a list in another) merges without
+# crashing, and dumps are written atomically.
+python3 - "$SCRIPT" <<'PY'
+import importlib.util
+import json
+import os
+import sys
+
+spec = importlib.util.spec_from_file_location("generator", sys.argv[1])
+generator = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(generator)
+seen = []
+merged = generator.merge(["a"], "b", "x", lambda *conflict: seen.append(conflict))
+assert merged == ["a"] and seen, (merged, seen)
+assert generator.merge("true", "false", "x", lambda *_: None) == "true"
+os.mkdir("atomic")
+generator.write_dump("atomic", "f.json", "K", [1])
+assert os.listdir("atomic") == ["f.json"], os.listdir("atomic")
+with open("atomic/f.json", encoding="utf-8") as f:
+    assert json.load(f) == {"K": [1]}
+PY
 
 # Regions must be there at all.
 mkdir empty

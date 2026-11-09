@@ -3,8 +3,8 @@
 
 Source of truth: EC2 itself. For every enabled Region of an account,
 DescribeInstanceTypes plus DescribeInstanceTypeOfferings (LocationType region and
-availability-zone), and one DescribeInstanceTypes with IncludeUnsupportedInRegion
-for the types no enabled Region sells. fakecloud vendors the result as
+availability-zone), and DescribeInstanceTypes with IncludeUnsupportedInRegion, which
+describes the types a Region does not sell. fakecloud vendors the result as
 `crates/fakecloud-ec2/data/instance_types.json.gz`, which
 `fakecloud_ec2::instance_types` decodes once at first use.
 
@@ -21,7 +21,7 @@ A file already in DIR is not fetched again, so an interrupted fetch resumes. A r
 refresh starts from an empty DIR.
 
 DIR holds `<region>.types.json`, `<region>.region.json`, `<region>.az.json` and
-optionally `unsupported.types.json`. A `.types.json` is {"InstanceTypes": [...]}
+optionally `<region>.unsupported.json`. The first and last are {"InstanceTypes": [...]}
 and an offerings file {"InstanceTypeOfferings": [...]}, in either the API's own
 element names (what --profile writes) or the `aws ec2 describe-*` output.
 
@@ -39,7 +39,8 @@ Vendored schema:
 
   {"source": str, "dump_regions": [region...],
    "baseline_performance": {reference family: [included families]},
-   "requirements_omitted": [type...],
+   "requirements_omitted": {region: [type...]},
+   "not_described": {region: [type its unsupported listing leaves out]},
    "requirements_extra": {region: [type...]},
    "instance_types": [
     {"name": str, "info": InstanceTypeInfo, "offerings": {region: zone letters},
@@ -57,8 +58,10 @@ takes every value, a boolean is true if any Region says true, a structure merges
 field by field; a scalar or list of structures has no union, so the first Region in
 sorted order wins), which is what a Region without its own data serves, and each
 dumped Region whose value differs gets it in `overrides`, by top-level element.
-Every disagreement is printed. Unsupported listings only fill in types no enabled
-Region sells.
+Every disagreement is printed. A Region's unsupported listing gets the same
+treatment: what it says about a type it does not sell differs too (usage classes and
+dedicated hosts, and differently per Region), so it is kept in `overrides` as well,
+and it is the only record of a type no enabled Region sells.
 
 GetInstanceTypesFromInstanceRequirements is not simply DescribeInstanceTypes
 filtered, so its answers are dumped too (`<region>.requirements.json`, the listing
@@ -66,7 +69,8 @@ with everything included, and `<region>.baseline.json`, the listing per
 BaselinePerformanceFactors reference family, for the few Regions that between them
 sell every family; the API has no other source for that measure):
 
-  requirements_omitted   types it never lists wherever they are sold
+  requirements_omitted   types it does not list in a Region that sells them. A Region
+                         without its own data applies them all.
   requirements_extra     types it lists in a Region that does not describe them
   baseline_performance   the families each reference includes, unioned across those
                          Regions. They agree, apart from a Region that does not sell
@@ -83,10 +87,10 @@ What is carried over rather than fetched:
   before it moved to EC2's own data, and nothing can refresh them from here. For a
   Region in the dumps, its own offerings replace whatever was vendored.
 
-  A type only an unsupported listing describes has empty supportedUsageClasses (EC2
-  reports none for a type the Region does not sell). If a carried-over Region sells
-  it, it keeps the classes already vendored, so it does not read as unsellable where
-  it is offered.
+  A type no enabled Region sells may have empty supportedUsageClasses (EC2 reports
+  none for cc1, hs1, u-*.metal and a few others). If a carried-over Region sells it,
+  it keeps the classes already vendored, so it does not read as unsellable where it
+  is offered.
 
   A type the API no longer describes at all keeps its vendored record, so a refresh
   never makes a type that worked before unknown. It is printed as "kept". Today that
@@ -201,8 +205,16 @@ def dump_regions(directory):
     return sorted(
         os.path.basename(p)[: -len(suffix)]
         for p in glob.glob(os.path.join(directory, "*" + suffix))
-        if os.path.basename(p) != "unsupported" + suffix
     )
+
+
+def write_dump(directory, name, key, items):
+    """Atomically, so an interrupted fetch never leaves a truncated file to resume on."""
+    path = os.path.join(directory, name)
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as f:
+        json.dump({key: items}, f)
+    os.replace(temporary, path)
 
 
 # ---- merging ----
@@ -239,7 +251,10 @@ def merge(a, b, where, on_conflict):
     if a == b:
         return a
     on_conflict(where, a, b)
-    return "true" if {a, b} == {"true", "false"} else a
+    # Only two strings can be a boolean: `a` or `b` may be a list or structure here.
+    if isinstance(a, str) and isinstance(b, str) and {a, b} == {"true", "false"}:
+        return "true"
+    return a
 
 
 def merge_regions(regions, by_region):
@@ -316,20 +331,19 @@ def optional_json(path, key):
 
 
 def requirements_differences(directory, regions, sold):
-    """(types never listed where sold, {region: listed but not described})."""
-    omitted, listed_anywhere, extra = set(), set(), {}
+    """({region: sold but not listed}, {region: listed but not described})."""
+    omitted, extra = {}, {}
     for region in regions:
-        listed = optional_json(os.path.join(directory, f"{region}.requirements.json"), "InstanceTypes")
+        listed = optional_json(
+            os.path.join(directory, f"{region}.requirements.json"), "InstanceTypes"
+        )
         if listed is None:
             continue
-        omitted |= sold[region] - set(listed)
-        listed_anywhere |= set(listed)
+        if sold[region] - set(listed):
+            omitted[region] = sorted(sold[region] - set(listed))
         if set(listed) - sold[region]:
             extra[region] = sorted(set(listed) - sold[region])
-    both = sorted(omitted & listed_anywhere)
-    if both:
-        print(f"listed by requirements in only some Regions selling them: {both}")
-    return sorted(omitted - listed_anywhere), extra
+    return omitted, extra
 
 
 def baseline_performance(directory, previous):
@@ -380,20 +394,23 @@ def build(directory, previous):
     }
     merged, conflicts = merge_regions(regions, types)
     described_anywhere = set(merged)
-    overrides = region_overrides(merged, regions, types)
+    described_in = {r: {t["instanceType"] for t in types[r]} for r in regions}
     for region in regions:
-        described = {t["instanceType"] for t in types[region]}
-        sold = {name for name, _ in in_region[region]}
-        if described != sold:
+        path = os.path.join(directory, f"{region}.unsupported.json")
+        if not os.path.exists(path):
+            continue
+        for record in load_types(path):
+            if record["instanceType"] not in described_in[region]:
+                merged.setdefault(record["instanceType"], record)
+                types[region].append(record)
+    for region in regions:
+        described = described_in[region]
+        offered_here = {name for name, _ in in_region[region]}
+        if described != offered_here:
             print(
-                f"{region}: described but not offered {sorted(described - sold)}, "
-                f"offered but not described {sorted(sold - described)}"
+                f"{region}: described but not offered {sorted(described - offered_here)}, "
+                f"offered but not described {sorted(offered_here - described)}"
             )
-
-    unsupported = os.path.join(directory, "unsupported.types.json")
-    if os.path.exists(unsupported):
-        for record in load_types(unsupported):
-            merged.setdefault(record["instanceType"], record)
 
     letters = zone_letters(in_zone, regions)
     offered = {r: {name for name, _ in in_region[r]} for r in regions}
@@ -421,26 +438,42 @@ def build(directory, previous):
                 and before
                 and before["info"].get("supportedUsageClasses")
             ):
-                info["supportedUsageClasses"] = before["info"]["supportedUsageClasses"]
+                # A copy: `info` is also the record of the Region that said none.
+                info = {**info, "supportedUsageClasses": before["info"]["supportedUsageClasses"]}
+                merged[name] = info
         else:
             print(f"kept {name}: EC2 no longer describes it")
             info = before["info"]
-        entry = {"name": name, "info": info, "offerings": offerings}
+        entries.append({"name": name, "info": info, "offerings": offerings})
+    # After the loop above, which can still change `info`.
+    overrides = region_overrides(merged, regions, types)
+    for entry in entries:
+        before = previous_by_name.get(entry["name"]) or {}
         own = {
             region: elements
-            for region, elements in (before or {}).get("overrides", {}).items()
+            for region, elements in before.get("overrides", {}).items()
             if region not in regions
         }
-        own.update(overrides.get(name, {}))
+        own.update(overrides.get(entry["name"], {}))
         if own:
             entry["overrides"] = own
-        entries.append(entry)
+    # A Region's unsupported listing leaves out some types it has never sold, which
+    # are then unknown there even when asked for. A type EC2 no longer describes at
+    # all is kept known, see the module docs.
+    not_described = {}
+    for region in regions:
+        path = os.path.join(directory, f"{region}.unsupported.json")
+        if os.path.exists(path):
+            listed = {t["instanceType"] for t in types[region]}
+            absent = sorted(set(merged) - listed)
+            if absent:
+                not_described[region] = absent
     report_conflicts(conflicts)
     print(f"{len(regions)} Regions dumped: {' '.join(regions)}")
     never = sum(1 for e in entries if not e["offerings"])
     print(f"{never} types not offered in any Region known to the catalog")
     print(f"requirements never list {omitted}; extra in {sorted(extra)}")
-    return regions, entries, omitted, extra
+    return regions, entries, omitted, extra, not_described
 
 
 def report_conflicts(conflicts):
@@ -453,8 +486,9 @@ def report_conflicts(conflicts):
         )
 
 
-def write(regions, entries, omitted, extra, baseline, path):
+def write(regions, entries, omitted, extra, not_described, baseline, path):
     doc = {
+        "not_described": not_described,
         "source": SOURCE,
         "dump_regions": regions,
         "baseline_performance": baseline,
@@ -626,8 +660,7 @@ def fetch(profile, directory, only_regions):
         return os.path.exists(os.path.join(directory, name))
 
     def save(name, key, items):
-        with open(os.path.join(directory, name), "w", encoding="utf-8") as f:
-            json.dump({key: items}, f)
+        write_dump(directory, name, key, items)
 
     root = ec2_call(creds, "us-east-1", "DescribeRegions", {})
     regions = sorted(
@@ -648,6 +681,17 @@ def fetch(profile, directory, only_regions):
                 )
             )
             save(f"{region}.types.json", "InstanceTypes", types)
+        if not have(f"{region}.unsupported.json"):
+            types = list(
+                paged(
+                    creds,
+                    region,
+                    "DescribeInstanceTypes",
+                    "instanceTypeSet",
+                    {"MaxResults": "100", "IncludeUnsupportedInRegion": "true"},
+                )
+            )
+            save(f"{region}.unsupported.json", "InstanceTypes", types)
         if not have(f"{region}.requirements.json"):
             listed = requirements_listing(creds, region)
             save(f"{region}.requirements.json", "InstanceTypes", listed)
@@ -665,19 +709,12 @@ def fetch(profile, directory, only_regions):
                 )
             ]
             save(f"{region}.{suffix}.json", "InstanceTypeOfferings", offerings)
-    if not have("unsupported.types.json"):
-        types = list(
-            paged(
-                creds,
-                "us-east-1",
-                "DescribeInstanceTypes",
-                "instanceTypeSet",
-                {"MaxResults": "100", "IncludeUnsupportedInRegion": "true"},
-            )
-        )
-        save("unsupported.types.json", "InstanceTypes", types)
     families = sorted(
-        {family_of(t) for t in load_types(os.path.join(directory, "unsupported.types.json"))}
+        {
+            family_of(t)
+            for region in regions
+            for t in load_types(os.path.join(directory, f"{region}.unsupported.json"))
+        }
     )
     for region in covering_regions(directory, regions):
         name = f"{region}.baseline.json"
@@ -710,9 +747,11 @@ def main():
     if args.profile:
         fetch(args.profile, args.dumps, args.region)
     previous = vendored(args.out)
-    regions, entries, omitted, extra = build(args.dumps, previous["instance_types"])
+    regions, entries, omitted, extra, not_described = build(
+        args.dumps, previous["instance_types"]
+    )
     baseline = baseline_performance(args.dumps, previous.get("baseline_performance", {}))
-    write(regions, entries, omitted, extra, baseline, args.out)
+    write(regions, entries, omitted, extra, not_described, baseline, args.out)
 
 
 if __name__ == "__main__":

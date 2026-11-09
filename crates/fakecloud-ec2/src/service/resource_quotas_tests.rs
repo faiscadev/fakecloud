@@ -1456,7 +1456,8 @@ async fn a_launch_naming_no_zone_lands_where_the_type_is_sold() {
         .await,
     );
     assert_eq!(xml(&out, "availabilityZone"), "us-east-1b", "{out}");
-    // Inferred: a Region selling it nowhere refuses with the same code.
+    // Inferred: a Region selling it nowhere refuses with the same code, naming no zone
+    // when none was asked for.
     let e = crate::test_support::err_of(
         run(
             &svc,
@@ -1471,9 +1472,122 @@ async fn a_launch_naming_no_zone_lands_where_the_type_is_sold() {
     assert_eq!(e.code(), "Unsupported");
     assert_eq!(
         e.message(),
-        "Your requested instance type (dl1.24xlarge) is not supported in your requested \
-         Availability Zone (us-east-1a)."
+        "Your requested instance type (dl1.24xlarge) is not supported in us-east-1."
     );
+    let e = crate::test_support::err_of(
+        run(
+            &svc,
+            &[
+                ("InstanceType", "dl1.24xlarge"),
+                ("MinCount", "1"),
+                ("MaxCount", "1"),
+                ("Placement.AvailabilityZone", "us-east-1b"),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(
+        e.message(),
+        "Your requested instance type (dl1.24xlarge) is not supported in your requested \
+         Availability Zone (us-east-1b)."
+    );
+}
+
+/// The instance and its subnet are in the same zone, whatever default subnets exist.
+#[tokio::test]
+async fn a_zone_without_a_default_subnet_does_not_borrow_another_zones() {
+    let svc = seeded(Ec2Service::new());
+    let in_zone = |out: &str| xml(out, "availabilityZone");
+    let params = |zone: &'static str| {
+        [
+            ("InstanceType", "m5.large"),
+            ("MinCount", "1"),
+            ("MaxCount", "1"),
+            ("Placement.AvailabilityZone", zone),
+        ]
+    };
+    // Past the three default subnets: the zone it asked for, and no other's subnet.
+    let out = body(run(&svc, &params("us-east-1f")).await);
+    assert_eq!(in_zone(&out), "us-east-1f");
+    assert!(!out.contains("<subnetId>"), "{out}");
+    // A deleted default subnet behaves the same.
+    let default_b = {
+        let accounts = svc.state.read();
+        accounts
+            .regional(ACCT, "us-east-1")
+            .unwrap()
+            .subnets
+            .values()
+            .find(|s| s.default_for_az && s.availability_zone == "us-east-1b")
+            .unwrap()
+            .subnet_id
+            .clone()
+    };
+    svc.state
+        .write()
+        .regional_mut(ACCT, "us-east-1")
+        .subnets
+        .remove(&default_b);
+    let out = body(run(&svc, &params("us-east-1b")).await);
+    assert_eq!(in_zone(&out), "us-east-1b");
+    assert!(!out.contains(&default_b), "{out}");
+    assert!(!out.contains("<subnetId>"), "{out}");
+    // With one, it uses it.
+    let out = body(run(&svc, &params("us-east-1a")).await);
+    assert_eq!(in_zone(&out), "us-east-1a");
+    assert!(out.contains("<subnetId>"), "{out}");
+    // And a launch naming no zone prefers one with a default subnet.
+    let out = body(
+        run(
+            &svc,
+            &[
+                ("InstanceType", "inf2.xlarge"),
+                ("MinCount", "1"),
+                ("MaxCount", "1"),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(in_zone(&out), "us-east-1c", "{out}");
+}
+
+/// A dry run validates everything but the zone, and changes nothing.
+#[tokio::test]
+async fn a_dry_run_validates_the_rest_of_the_launch() {
+    let svc = seeded(Ec2Service::new());
+    let dry = |extra: &'static [(&'static str, &'static str)]| {
+        let mut all = vec![
+            ("InstanceType", "m5.large"),
+            ("MinCount", "1"),
+            ("MaxCount", "1"),
+            ("DryRun", "true"),
+        ];
+        all.extend_from_slice(extra);
+        all
+    };
+    let e = crate::test_support::err_of(run(&svc, &dry(&[])).await);
+    assert_eq!(e.code(), "DryRunOperation");
+    let e = crate::test_support::err_of(
+        run(
+            &svc,
+            &dry(&[("InstanceInitiatedShutdownBehavior", "explode")]),
+        )
+        .await,
+    );
+    assert_eq!(e.code(), "InvalidParameterValue");
+    // No ImageId: `run` adds one, so the request goes in by hand.
+    let e = crate::test_support::err_of(
+        instance::run_instances(&svc, &req("RunInstances", &dry(&[]))).await,
+    );
+    assert_eq!(e.code(), "MissingParameter");
+    // Nothing was launched by any of them.
+    assert!(svc
+        .state
+        .read()
+        .regional(ACCT, "us-east-1")
+        .unwrap()
+        .instances
+        .is_empty());
 }
 
 /// The Regions and zones without data of their own keep working.

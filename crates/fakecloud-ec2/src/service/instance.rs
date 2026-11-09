@@ -453,8 +453,8 @@ pub(crate) fn launch_instances(
     let params = &params;
     validate_enum_instance_type(params)?;
     // Recorded: a dry run refuses an unknown type, but passes a type the requested
-    // zone does not sell.
-    crate::service::capacity::refuse_dry_run(params)?;
+    // zone does not sell. Everything else is checked, up to changing any state.
+    let dry_run = crate::service::capacity::is_dry_run(params);
     validate_enum(
         params,
         "InstanceInitiatedShutdownBehavior",
@@ -589,31 +589,33 @@ pub(crate) fn launch_instances(
         // The instance lands in its subnet's AZ; without a subnet, in the
         // requested `Placement.AvailabilityZone`, else in a zone selling the type.
         let explicit_subnet = subnet_id.is_some();
+        let zone_named = explicit_subnet || placement_az.is_some();
         let wanted_az = placement_az
             .clone()
-            .unwrap_or_else(|| zone_selling(state, &instance_type, region));
+            .or_else(|| launch_zone(state, &instance_type, region))
+            .unwrap_or_else(|| format!("{region}a"));
         // No explicit subnet: land in the default VPC's default subnet for the
-        // target AZ (falling back to any default subnet), exactly as AWS does.
-        // This fills `subnet_id`/`vpc_id` so DescribeInstances reports a real
-        // subnet/VPC and phase-2 per-subnet networking has something to key on.
+        // target AZ. This fills `subnet_id`/`vpc_id` so DescribeInstances reports
+        // a real subnet/VPC and phase-2 per-subnet networking has something to
+        // key on. A zone without one (deleted, or past the three this emulator
+        // creates) launches with no subnet, rather than reporting a subnet in
+        // another zone than the instance.
         if subnet_id.is_none() {
-            if let Some(s) = state
+            subnet_id = state
                 .subnets
                 .values()
                 .filter(|s| s.default_for_az)
                 .find(|s| s.availability_zone == wanted_az)
-                .or_else(|| state.subnets.values().find(|s| s.default_for_az))
-            {
-                subnet_id = Some(s.subnet_id.clone());
-            }
+                .map(|s| s.subnet_id.clone());
         }
         let subnet = subnet_id.as_ref().and_then(|sid| state.subnets.get(sid));
         let az = subnet
-            .filter(|s| explicit_subnet || s.availability_zone == wanted_az)
             .map(|s| s.availability_zone.clone())
             .filter(|a| !a.is_empty())
             .unwrap_or(wanted_az);
-        refuse_zone_not_selling(&instance_type, region, &az)?;
+        if !dry_run {
+            refuse_zone_not_selling(&instance_type, region, &az, zone_named)?;
+        }
         // When the caller named no security group, AWS attaches the VPC's
         // `default` group. Resolve it from the subnet's VPC (or the default VPC).
         let resolved_vpc = subnet.map(|s| s.vpc_id.clone());
@@ -757,6 +759,9 @@ pub(crate) fn launch_instances(
         None => 0,
     };
     let eni_limit = svc.enforced_count_quota(account_id, region, rq::NETWORK_INTERFACES_PER_REGION);
+    if dry_run {
+        crate::service::capacity::refuse_dry_run(params)?;
+    }
     let mut rendered = Vec::new();
     {
         let mut accounts = svc.state.write();
@@ -1670,22 +1675,10 @@ fn validate_enum_instance_type(params: &HashMap<String, String>) -> Result<(), A
     Ok(())
 }
 
-/// The zones of `region` that sell `instance_type`.
-fn zones_selling(instance_type: &str, region: &str) -> Vec<String> {
-    let Some(spec) = crate::instance_types::lookup(instance_type) else {
-        return Vec::new();
-    };
-    crate::defaults::region_zones(region)
-        .into_iter()
-        .map(|(zone, _)| zone)
-        .filter(|zone| spec.offered_in_zone(region, zone))
-        .collect()
-}
-
 /// Where a launch naming no zone lands: a zone selling the type, preferably with a
-/// default subnet. A type the Region does not sell at all is refused for the first zone.
-fn zone_selling(state: &Ec2State, instance_type: &str, region: &str) -> String {
-    let selling = zones_selling(instance_type, region);
+/// default subnet. `None` when the Region sells it nowhere.
+fn launch_zone(state: &Ec2State, instance_type: &str, region: &str) -> Option<String> {
+    let selling = crate::instance_types::lookup(instance_type)?.zones_selling(region);
     selling
         .iter()
         .find(|zone| {
@@ -1696,16 +1689,17 @@ fn zone_selling(state: &Ec2State, instance_type: &str, region: &str) -> String {
         })
         .or(selling.first())
         .cloned()
-        .unwrap_or_else(|| format!("{region}a"))
 }
 
 /// Refuses a launch in a zone that does not sell the type, as recorded from real EC2
-/// for m5.large in us-east-1e. A Region selling it nowhere was not recorded, so the
-/// same refusal there, without the zones to retry in, is inferred.
+/// for m5.large in us-east-1e. A Region selling it nowhere was not recorded (launching
+/// one to find out could start a costly instance), so what it answers is inferred:
+/// the same code, without zones to retry in, and without naming a zone nobody asked for.
 fn refuse_zone_not_selling(
     instance_type: &str,
     region: &str,
     zone: &str,
+    zone_named: bool,
 ) -> Result<(), AwsServiceError> {
     let Some(spec) = crate::instance_types::lookup(instance_type) else {
         return Ok(());
@@ -1714,22 +1708,26 @@ fn refuse_zone_not_selling(
     if !zone.starts_with(region) || spec.offered_in_zone(region, zone) {
         return Ok(());
     }
-    let selling = zones_selling(instance_type, region);
-    let retry = if selling.is_empty() {
-        String::new()
+    let selling = spec.zones_selling(region);
+    let message = if !zone_named {
+        format!("Your requested instance type ({instance_type}) is not supported in {region}.")
+    } else if selling.is_empty() {
+        format!(
+            "Your requested instance type ({instance_type}) is not supported in your \
+             requested Availability Zone ({zone})."
+        )
     } else {
         format!(
-            " Please retry your request by not specifying an Availability Zone or choosing {}.",
+            "Your requested instance type ({instance_type}) is not supported in your \
+             requested Availability Zone ({zone}). Please retry your request by not specifying \
+             an Availability Zone or choosing {}.",
             selling.join(", ")
         )
     };
     Err(AwsServiceError::aws_error(
         http::StatusCode::BAD_REQUEST,
         "Unsupported",
-        format!(
-            "Your requested instance type ({instance_type}) is not supported in your \
-             requested Availability Zone ({zone}).{retry}"
-        ),
+        message,
     ))
 }
 
@@ -2624,7 +2622,9 @@ pub(crate) fn describe_instance_types(
         .query_params
         .get("IncludeUnsupportedInRegion")
         .is_some_and(|v| v == "true");
-    let in_scope = |t: &InstanceTypeSpec| include_unsupported || t.offered_in(region);
+    let in_scope = |t: &InstanceTypeSpec| {
+        t.offered_in(region) || (include_unsupported && t.described_with_unsupported_in(region))
+    };
     let unknown: Vec<&str> = wanted
         .iter()
         .map(String::as_str)
@@ -2753,27 +2753,7 @@ fn baseline_reference(params: &HashMap<String, String>) -> Result<Option<String>
 
 /// `AcceleratorNames`, refused as recorded from real EC2.
 fn accelerator_names(params: &HashMap<String, String>) -> Result<Vec<String>, AwsServiceError> {
-    const VALID: &[&str] = &[
-        "a10g",
-        "a100",
-        "h100",
-        "inferentia",
-        "k520",
-        "k80",
-        "m60",
-        "radeon-pro-v520",
-        "t4",
-        "t4g",
-        "vu9p",
-        "v100",
-        "l40s",
-        "l4",
-        "gaudi-hl-205",
-        "inferentia2",
-        "trainium",
-        "trainium2",
-        "u30",
-    ];
+    use crate::instance_types::ACCELERATOR_NAME_VALUES as VALID;
     let names = indexed_list(params, "InstanceRequirements.AcceleratorName");
     match names.iter().find(|n| !VALID.contains(&n.as_str())) {
         Some(bad) => Err(invalid_parameter_value(format!(
@@ -2939,10 +2919,13 @@ impl InstanceRequirementsQuery {
         };
         let any_of =
             |wanted: &[String], path: &str| wanted.is_empty() || contains_any(wanted, path);
+        // Computed at most once per type, and only if a requirement asks about them.
+        let accelerators = std::cell::OnceCell::new();
+        let devices = || accelerators.get_or_init(|| t.accelerators());
         // An accelerator asked for of a type whose devices are unknown: no match.
         let any_device = |wanted: &[String], actual: fn(&Accelerator) -> Option<&'static str>| {
             wanted.is_empty()
-                || t.accelerators().is_some_and(|devices| {
+                || devices().as_ref().is_some_and(|devices| {
                     devices
                         .iter()
                         .filter_map(actual)
@@ -2981,7 +2964,8 @@ impl InstanceRequirementsQuery {
                     .or((has_local_storage == Some(false)).then_some(0.0))
             })
             && in_range(self.accelerator_count, || {
-                t.accelerators()
+                devices()
+                    .as_ref()
                     .map(|devices| devices.iter().map(|d| d.count).sum())
             })
             && any_device(&self.accelerator_types, |d| d.kind)

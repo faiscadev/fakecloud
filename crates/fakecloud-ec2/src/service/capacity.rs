@@ -1006,14 +1006,17 @@ fn dry_run_succeeded(req: &AwsRequest) -> Result<(), AwsServiceError> {
     refuse_dry_run(&req.query_params)
 }
 
+pub(crate) fn is_dry_run(params: &std::collections::HashMap<String, String>) -> bool {
+    params
+        .get("DryRun")
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+}
+
 /// [`dry_run_succeeded`] over a flattened parameter map.
 pub(crate) fn refuse_dry_run(
     params: &std::collections::HashMap<String, String>,
 ) -> Result<(), AwsServiceError> {
-    if params
-        .get("DryRun")
-        .is_some_and(|v| v.eq_ignore_ascii_case("true"))
-    {
+    if is_dry_run(params) {
         return Err(AwsServiceError::aws_error(
             http::StatusCode::PRECONDITION_FAILED,
             "DryRunOperation",
@@ -1429,16 +1432,14 @@ fn capacity_block_zone(region: &str, instance_type: &str) -> String {
         .iter()
         .find(|(t, zone)| *t == instance_type && zone.starts_with(region))
         .map(|(_, zone)| zone.to_string());
-    recorded.unwrap_or_else(|| {
-        crate::defaults::region_zones(region)
-            .into_iter()
-            .map(|(zone, _)| zone)
-            .find(|zone| {
-                crate::instance_types::lookup(instance_type)
-                    .is_some_and(|t| t.offered_in_zone(region, zone))
-            })
-            .unwrap_or_else(|| format!("{region}a"))
-    })
+    recorded
+        .or_else(|| {
+            crate::instance_types::lookup(instance_type)?
+                .zones_selling(region)
+                .into_iter()
+                .next()
+        })
+        .unwrap_or_else(|| format!("{region}a"))
 }
 
 /// The first Capacity Block start (11:30 UTC) at or after `t`.
