@@ -888,3 +888,104 @@ async fn cloudfront_explicit_staging_false_is_a_no_op_update() {
         .unwrap();
     assert_eq!(updated.e_tag(), create.e_tag());
 }
+
+#[tokio::test]
+async fn cloudfront_copy_distribution_honors_the_staging_header() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(bare_config("e2e-copy-primary"))
+        .send()
+        .await
+        .unwrap();
+    let primary = create.distribution().unwrap().id().to_string();
+    let etag = create.e_tag().unwrap().to_string();
+
+    let staging = cf
+        .copy_distribution()
+        .primary_distribution_id(&primary)
+        .if_match(&etag)
+        .caller_reference("e2e-copy-staging")
+        .staging(true)
+        .send()
+        .await
+        .unwrap();
+    let staging = staging.distribution().unwrap();
+    assert_eq!(staging.distribution_config().unwrap().staging(), Some(true));
+
+    let plain = cf
+        .copy_distribution()
+        .primary_distribution_id(&primary)
+        .if_match(&etag)
+        .caller_reference("e2e-copy-plain")
+        .send()
+        .await
+        .unwrap();
+    let plain = plain.distribution().unwrap();
+    assert_eq!(plain.distribution_config().unwrap().staging(), Some(false));
+
+    // The flag is stored, not just echoed.
+    let read = cf
+        .get_distribution_config()
+        .id(staging.id())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.distribution_config().unwrap().staging(), Some(true));
+
+    let list = cf.list_distributions().send().await.unwrap();
+    let items = list.distribution_list().unwrap().items();
+    let summary_staging = |id: &str| items.iter().find(|d| d.id() == id).unwrap().staging();
+    assert!(summary_staging(staging.id()));
+    assert!(!summary_staging(plain.id()));
+    assert!(!summary_staging(&primary));
+}
+
+#[tokio::test]
+async fn cloudfront_omitted_ttls_follow_the_supplied_bounds() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    for (caller_ref, min, default, expected) in [
+        (
+            "e2e-ttl-min",
+            Some(172_800),
+            None,
+            (172_800, 172_800, 31_536_000),
+        ),
+        (
+            "e2e-ttl-default",
+            None,
+            Some(40_000_000),
+            (0, 40_000_000, 40_000_000),
+        ),
+        ("e2e-ttl-none", None, None, (0, 86_400, 31_536_000)),
+    ] {
+        let mut config = minimal_config(caller_ref);
+        let behavior = config.default_cache_behavior.as_mut().unwrap();
+        behavior.min_ttl = min;
+        behavior.default_ttl = default;
+        let create = cf
+            .create_distribution()
+            .distribution_config(config)
+            .send()
+            .await
+            .unwrap();
+        let read = cf
+            .get_distribution_config()
+            .id(create.distribution().unwrap().id())
+            .send()
+            .await
+            .unwrap();
+        let dcb = read
+            .distribution_config()
+            .unwrap()
+            .default_cache_behavior()
+            .unwrap();
+        assert_eq!(
+            (dcb.min_ttl(), dcb.default_ttl(), dcb.max_ttl()),
+            (Some(expected.0), Some(expected.1), Some(expected.2)),
+            "{caller_ref}"
+        );
+    }
+}

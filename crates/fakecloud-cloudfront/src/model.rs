@@ -87,10 +87,13 @@ macro_rules! fill_behavior_defaults {
             }
             // The legacy cache settings, standard-only: a behavior on a cache
             // policy has no TTLs.
+            // A day and a year, unless the bounds supplied exceed them: AWS
+            // documents that the default `DefaultTTL` then follows `MinTTL`,
+            // and the default `MaxTTL` follows `DefaultTTL`.
             if !$multi_tenant {
-                b.min_ttl.get_or_insert(0);
-                b.default_ttl.get_or_insert(86_400);
-                b.max_ttl.get_or_insert(31_536_000);
+                let min = *b.min_ttl.get_or_insert(0);
+                let default = *b.default_ttl.get_or_insert(min.max(86_400));
+                b.max_ttl.get_or_insert(default.max(31_536_000));
             }
         }
     }};
@@ -1601,6 +1604,64 @@ mod tests {
         assert!(dcb.trusted_key_groups.is_some());
         let vc = config.viewer_certificate.as_ref().unwrap();
         assert_eq!(vc.minimum_protocol_version.as_deref(), Some("TLSv1.2_2021"));
+    }
+
+    #[test]
+    fn omitted_ttls_follow_the_bounds_the_request_supplied() {
+        const DAY: i64 = 86_400;
+        const YEAR: i64 = 31_536_000;
+        const LONG: i64 = 40_000_000;
+        for (supplied, expected) in [
+            ((None, None, None), (0, DAY, YEAR)),
+            // A MinTTL above a day raises the default DefaultTTL to it.
+            ((Some(172_800), None, None), (172_800, 172_800, YEAR)),
+            // A MinTTL or DefaultTTL above a year raises the default MaxTTL.
+            ((None, Some(LONG), None), (0, LONG, LONG)),
+            ((Some(LONG), None, None), (LONG, LONG, LONG)),
+            // Below those thresholds the fixed defaults stand.
+            ((Some(10), None, None), (10, DAY, YEAR)),
+            ((None, Some(10), None), (0, 10, YEAR)),
+            // What a request supplied is kept.
+            ((Some(1), Some(2), Some(3)), (1, 2, 3)),
+            ((None, None, Some(600)), (0, DAY, 600)),
+        ] {
+            let mut config = parse(&sparse_config_xml());
+            let dcb = &mut config.default_cache_behavior;
+            (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl) = supplied;
+            config.cache_behaviors = Some(CacheBehaviors {
+                quantity: 1,
+                items: Some(CacheBehaviorItems {
+                    cache_behavior: vec![CacheBehavior {
+                        path_pattern: "/x".into(),
+                        target_origin_id: "o1".into(),
+                        viewer_protocol_policy: "allow-all".into(),
+                        forwarded_values: dcb.forwarded_values.clone(),
+                        min_ttl: supplied.0,
+                        default_ttl: supplied.1,
+                        max_ttl: supplied.2,
+                        ..Default::default()
+                    }],
+                }),
+            });
+            config.ensure_aws_defaults();
+            let expected = (Some(expected.0), Some(expected.1), Some(expected.2));
+            let dcb = &config.default_cache_behavior;
+            assert_eq!((dcb.min_ttl, dcb.default_ttl, dcb.max_ttl), expected);
+            let b = &config
+                .cache_behaviors
+                .as_ref()
+                .unwrap()
+                .items
+                .as_ref()
+                .unwrap()
+                .cache_behavior[0];
+            assert_eq!((b.min_ttl, b.default_ttl, b.max_ttl), expected);
+
+            // Read back and sent again, the derived values do not move.
+            let mut again = config.clone();
+            again.ensure_aws_defaults();
+            assert_eq!(render(&again), render(&config));
+        }
     }
 
     #[test]

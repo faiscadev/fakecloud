@@ -1253,6 +1253,19 @@ impl CloudFrontService {
                 )
             })?
             .to_string();
+        // `Staging` is modeled as a header, not a body member. The API reference
+        // spells its value `True`; SDKs send `true`.
+        let staging = req
+            .headers
+            .get("Staging")
+            .map(|value| {
+                value
+                    .to_str()
+                    .ok()
+                    .and_then(|v| v.to_ascii_lowercase().parse::<bool>().ok())
+                    .ok_or_else(|| invalid_argument("The Staging header must be true or false"))
+            })
+            .transpose()?;
         let parsed: CopyDistributionRequest = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid request XML: {e}")))?;
         validate_caller_reference(&parsed.caller_reference)?;
@@ -1295,7 +1308,7 @@ impl CloudFrontService {
         }
         config.caller_reference = parsed.caller_reference;
         config.enabled = parsed.enabled.unwrap_or(true);
-        config.staging = parsed.staging;
+        config.staging = staging;
         config.ensure_aws_defaults();
         let now = Utc::now();
         let etag = generate_etag();
@@ -1327,8 +1340,6 @@ struct CopyDistributionRequest {
     caller_reference: String,
     #[serde(default)]
     enabled: Option<bool>,
-    #[serde(default)]
-    staging: Option<bool>,
 }
 
 // ─── Invalidations ────────────────────────────────────────────────────
@@ -2698,10 +2709,22 @@ mod tests {
         }
     }
 
+    fn copy_request(id: &str, etag: &str, caller_ref: &str, body_extra: &str) -> AwsRequest {
+        let mut copy = make_request(
+            http::Method::POST,
+            &format!("/2020-05-31/distribution/{id}/copy"),
+            "",
+            &format!(
+                "<CopyDistributionRequest><CallerReference>{caller_ref}</CallerReference>{body_extra}</CopyDistributionRequest>"
+            ),
+        );
+        copy.headers.insert(IF_MATCH, etag.parse().unwrap());
+        copy
+    }
+
     #[tokio::test]
-    async fn a_copy_keeps_staging_true_and_defaults_it_to_false() {
-        let svc = CloudFrontService::new(make_state())
-            .with_propagation_delay(std::time::Duration::from_secs(60));
+    async fn a_copy_takes_staging_from_the_header() {
+        let svc = CloudFrontService::new(make_state());
         let create = svc
             .handle(make_request(
                 http::Method::POST,
@@ -2712,26 +2735,100 @@ mod tests {
             .await
             .unwrap();
         let id = id_in(&create);
-        for (caller_ref, staging, expected) in [
-            ("copy-staging-true", "<Staging>true</Staging>", true),
-            ("copy-staging-none", "", false),
+        let etag = etag_of(&create);
+        for (caller_ref, header, body_extra, expected) in [
+            ("copy-true", Some("true"), "", true),
+            // The API reference spells the value `True`.
+            ("copy-title", Some("True"), "", true),
+            ("copy-false", Some("false"), "", false),
+            ("copy-none", None, "", false),
+            // `Staging` is not a member of the request body.
+            ("copy-body", None, "<Staging>true</Staging>", false),
         ] {
-            let mut copy = make_request(
-                http::Method::POST,
-                &format!("/2020-05-31/distribution/{id}/copy"),
-                "",
-                &format!(
-                    "<CopyDistributionRequest><CallerReference>{caller_ref}</CallerReference>{staging}</CopyDistributionRequest>"
-                ),
-            );
-            copy.headers
-                .insert(IF_MATCH, etag_of(&create).parse().unwrap());
+            let mut copy = copy_request(&id, &etag, caller_ref, body_extra);
+            if let Some(header) = header {
+                copy.headers.insert("Staging", header.parse().unwrap());
+            }
             let copied = svc.handle(copy).await.unwrap();
             let body = std::str::from_utf8(copied.body.expect_bytes()).unwrap();
             assert!(
                 body.contains(&format!("<Staging>{expected}</Staging>")),
-                "{body}"
+                "{caller_ref}: {body}"
             );
+        }
+
+        let mut copy = copy_request(&id, &etag, "copy-bad", "");
+        copy.headers.insert("Staging", "maybe".parse().unwrap());
+        let err = svc.handle(copy).await.err().expect("invalid Staging");
+        assert_eq!(err.code(), "InvalidArgument");
+    }
+
+    /// `DistributionSummary` requires these members with no carve-out for a
+    /// multi-tenant distribution, unlike `DistributionConfig`, where the
+    /// standard-only ones are optional and stay absent.
+    #[tokio::test]
+    async fn a_tenant_only_summary_keeps_every_required_member() {
+        let svc = CloudFrontService::new(make_state());
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                &minimal_dist_config_xml("summary-tenant").replace(
+                    "<Enabled>true</Enabled>",
+                    "<Enabled>true</Enabled><ConnectionMode>tenant-only</ConnectionMode>",
+                ),
+            ))
+            .await
+            .unwrap();
+        let id = id_in(&create);
+        let config = svc
+            .handle(make_request(
+                http::Method::GET,
+                &format!("/2020-05-31/distribution/{id}/config"),
+                "",
+                "",
+            ))
+            .await
+            .unwrap();
+        let config = std::str::from_utf8(config.body.expect_bytes()).unwrap();
+        for absent in ["<Aliases>", "<PriceClass>", "<IsIPV6Enabled>", "<Staging>"] {
+            assert!(!config.contains(absent), "{absent} in {config}");
+        }
+
+        let list = svc
+            .handle(make_request(
+                http::Method::GET,
+                "/2020-05-31/distribution",
+                "",
+                "",
+            ))
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(list.body.expect_bytes()).unwrap();
+        for member in [
+            "Id",
+            "ARN",
+            "Status",
+            "LastModifiedTime",
+            "DomainName",
+            "Aliases",
+            "Origins",
+            "DefaultCacheBehavior",
+            "CacheBehaviors",
+            "CustomErrorResponses",
+            "Comment",
+            "PriceClass",
+            "Enabled",
+            "ViewerCertificate",
+            "Restrictions",
+            "WebACLId",
+            "HttpVersion",
+            "IsIPV6Enabled",
+            "Staging",
+            "ConnectionMode",
+        ] {
+            assert!(body.contains(&format!("<{member}>")), "{member} in {body}");
         }
     }
 
@@ -3256,10 +3353,11 @@ mod tests {
             http::Method::POST,
             &format!("/2020-05-31/distribution/{p}/copy"),
             "",
-            r#"<CopyDistributionRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/"><CallerReference>s</CallerReference><Staging>true</Staging></CopyDistributionRequest>"#,
+            r#"<CopyDistributionRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/"><CallerReference>s</CallerReference></CopyDistributionRequest>"#,
         );
         copy.headers
             .insert(IF_MATCH, etag_of(&created).parse().unwrap());
+        copy.headers.insert("Staging", "true".parse().unwrap());
         let copied = svc.handle(copy).await.unwrap();
         let copied_xml = std::str::from_utf8(copied.body.expect_bytes()).unwrap();
         let staging = first_tag(copied_xml, "Id");
