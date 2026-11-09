@@ -79,22 +79,11 @@ pub(super) fn bind_headers(
         let Some(value) = obj.get(&member.name).filter(|v| !v.is_null()) else {
             continue;
         };
-        let target_traits = model.shapes.get(&member.target).map(|s| &s.traits);
-        if let Some(name) = member
-            .traits
-            .http_header
-            .clone()
-            .or_else(|| target_traits.and_then(|t| t.http_header.clone()))
-        {
+        if let Some(name) = header_name(model, member) {
             if let Some(v) = header_value(model, member, value) {
                 headers.push((name, v));
             }
-        } else if let Some(prefix) = member
-            .traits
-            .http_prefix_headers
-            .clone()
-            .or_else(|| target_traits.and_then(|t| t.http_prefix_headers.clone()))
-        {
+        } else if let Some(prefix) = member_or_target(model, member, |t| &t.http_prefix_headers) {
             if let Some(map) = value.as_object() {
                 for (k, v) in map {
                     if let Some(text) = scalar(v) {
@@ -110,7 +99,7 @@ pub(super) fn bind_headers(
         c.algorithm_member
             .as_deref()
             .and_then(|name| members.iter().find(|m| m.name == name))
-            .and_then(|m| m.traits.http_header.clone())
+            .and_then(|m| header_name(model, m))
     });
     finalize_integrity_headers(headers, body, required)
         .into_iter()
@@ -119,6 +108,26 @@ pub(super) fn bind_headers(
                 && reqwest::header::HeaderValue::from_str(v).is_ok()
         })
         .collect()
+}
+
+/// A string trait read from the member, else from its target shape (binding
+/// traits may sit on either).
+fn member_or_target(
+    model: &ServiceModel,
+    member: &Member,
+    field: impl Fn(&ShapeTraits) -> &Option<String>,
+) -> Option<String> {
+    field(&member.traits).clone().or_else(|| {
+        model
+            .shapes
+            .get(&member.target)
+            .and_then(|s| field(&s.traits).clone())
+    })
+}
+
+/// The `@httpHeader` name `member` binds to.
+fn header_name(model: &ServiceModel, member: &Member) -> Option<String> {
+    member_or_target(model, member, |t| &t.http_header)
 }
 
 /// Drop the headers the client and signer own, and compute the digests.
@@ -217,7 +226,7 @@ fn header_value(model: &ServiceModel, member: &Member, value: &Value) -> Option<
                     .and_then(|t| t.traits.list_member_timestamp_format.clone()),
                 ..ShapeTraits::default()
             };
-            let item_is_timestamp = is_timestamp(model, member_target);
+            let item_is_timestamp = super::rest_xml::is_timestamp(model, member_target);
             let rendered: Vec<String> = items
                 .iter()
                 .filter_map(|item| scalar_header(model, member_target, Some(&item_traits), item))
@@ -244,7 +253,7 @@ fn scalar_header(
     value: &Value,
 ) -> Option<String> {
     let shape = model.shapes.get(shape_id);
-    if is_timestamp(model, shape_id) {
+    if super::rest_xml::is_timestamp(model, shape_id) {
         let format = member_traits
             .and_then(|t| t.timestamp_format.clone())
             .or_else(|| shape.and_then(|s| s.traits.timestamp_format.clone()))
@@ -258,14 +267,6 @@ fn scalar_header(
         return Some(BASE64.encode(text.as_bytes()));
     }
     Some(text)
-}
-
-fn is_timestamp(model: &ServiceModel, shape_id: &str) -> bool {
-    shape_id == "smithy.api#Timestamp"
-        || matches!(
-            model.shapes.get(shape_id).map(|s| &s.shape_type),
-            Some(ShapeType::Timestamp)
-        )
 }
 
 fn scalar(value: &Value) -> Option<String> {
@@ -462,6 +463,35 @@ mod tests {
         // An optional-checksum operation gets nothing added.
         let h = headers(json!({}), b"abc");
         assert!(h.iter().all(|(k, _)| !k.starts_with("x-amz-checksum-")));
+    }
+
+    #[test]
+    fn algorithm_member_header_falls_back_to_the_target_shape() {
+        // Binding traits may sit on the target shape; the required-checksum
+        // default must find the algorithm member's header the same way the
+        // binding loop does.
+        let mut m = model();
+        let req = m.shapes.get_mut("t#PutRequiredRequest").unwrap();
+        if let ShapeType::Structure { members } = &mut req.shape_type {
+            let alg = members
+                .iter_mut()
+                .find(|m| m.name == "ChecksumAlgorithm")
+                .unwrap();
+            alg.traits.http_header = None;
+            alg.target = "t#AlgHeader".to_string();
+        }
+        let mut target = m.shapes["t#Str"].clone();
+        target.shape_id = "t#AlgHeader".to_string();
+        target.traits.http_header = Some("x-amz-sdk-checksum-algorithm".to_string());
+        m.shapes.insert("t#AlgHeader".to_string(), target);
+        let op = m
+            .operations
+            .iter()
+            .find(|o| o.name == "PutRequired")
+            .unwrap();
+        let h = bind_headers(op, &m, &json!({}), b"abc");
+        assert_eq!(get(&h, "x-amz-sdk-checksum-algorithm"), Some("CRC32"));
+        assert_eq!(get(&h, "x-amz-checksum-crc32"), Some("NSRBwg=="));
     }
 
     #[test]

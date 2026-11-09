@@ -269,7 +269,7 @@ fn write_element(
             let item_name = shape
                 .and_then(|s| s.traits.xml_list_member_name.as_deref())
                 .unwrap_or("member");
-            write_list_items(model, out, item_name, member_target, value);
+            write_list_items(model, out, item_name, shape_id, member_target, value);
         }
         Some(ShapeType::Map {
             key_target,
@@ -306,7 +306,7 @@ fn write_member(model: &ServiceModel, out: &mut String, member: &Member, value: 
         let shape = model.shapes.get(&member.target);
         match shape.map(|s| &s.shape_type) {
             Some(ShapeType::List { member_target }) => {
-                write_list_items(model, out, name, member_target, value);
+                write_list_items(model, out, name, &member.target, member_target, value);
                 return;
             }
             Some(ShapeType::Map {
@@ -374,17 +374,33 @@ fn write_list_items(
     model: &ServiceModel,
     out: &mut String,
     item_name: &str,
+    list_shape_id: &str,
     member_target: &str,
     value: &Value,
 ) {
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                write_element(model, out, item_name, None, member_target, item, None);
-            }
-        }
+    // `@timestampFormat` on the list's member applies to every item.
+    let item_traits = ShapeTraits {
+        timestamp_format: model
+            .shapes
+            .get(list_shape_id)
+            .and_then(|s| s.traits.list_member_timestamp_format.clone()),
+        ..ShapeTraits::default()
+    };
+    let items: &[Value] = match value {
+        Value::Array(items) => items,
         // A non-array where a list is modelled: send it as a single item.
-        other => write_element(model, out, item_name, None, member_target, other, None),
+        other => std::slice::from_ref(other),
+    };
+    for item in items {
+        write_element(
+            model,
+            out,
+            item_name,
+            None,
+            member_target,
+            item,
+            Some(&item_traits),
+        );
     }
 }
 
@@ -475,12 +491,7 @@ fn scalar_text(
     value: &Value,
     member_traits: Option<&ShapeTraits>,
 ) -> Option<String> {
-    let is_timestamp = shape_id == "smithy.api#Timestamp"
-        || matches!(
-            model.shapes.get(shape_id).map(|s| &s.shape_type),
-            Some(ShapeType::Timestamp)
-        );
-    if is_timestamp {
+    if is_timestamp(model, shape_id) {
         let format = member_traits
             .and_then(|t| t.timestamp_format.clone())
             .or_else(|| {
@@ -496,6 +507,15 @@ fn scalar_text(
     json_scalar_text(value)
 }
 
+/// Whether `shape_id` is a timestamp (the prelude shape or a modelled one).
+pub(super) fn is_timestamp(model: &ServiceModel, shape_id: &str) -> bool {
+    shape_id == "smithy.api#Timestamp"
+        || matches!(
+            model.shapes.get(shape_id).map(|s| &s.shape_type),
+            Some(ShapeType::Timestamp)
+        )
+}
+
 fn json_scalar_text(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),
@@ -505,44 +525,61 @@ fn json_scalar_text(value: &Value) -> Option<String> {
     }
 }
 
-/// A parsed RFC 3339 instant: whole seconds since the epoch (UTC) and the
-/// fractional-second digits exactly as written.
+/// A parsed RFC 3339 instant: whole seconds since the epoch (UTC, floored)
+/// and the fractional-second digits exactly as written.
 struct Instant {
     epoch: i64,
     fraction: String,
 }
 
-/// Re-render an RFC 3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.f+](Z|+HH:MM|-HH:MM)`)
-/// in `format`: `date-time` (the default) is normalized to UTC with `Z`,
-/// `epoch-seconds` is decimal seconds, `http-date` is IMF-fixdate (whole
-/// seconds; the format has no fraction). Fractional seconds are kept where
-/// the format can carry them. Anything that does not parse is sent unchanged,
-/// so a deliberately malformed value still reaches the handler.
+/// Render an RFC 3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.f+](Z|+HH:MM|-HH:MM)`,
+/// the form the generators emit) in `format`.
+///
+/// - `date-time` (the default): the input is already that format and is sent
+///   unchanged, byte for byte.
+/// - `epoch-seconds`: decimal seconds built as text, the fraction digits
+///   copied from the input.
+/// - `http-date`: IMF-fixdate, whole seconds (the format has no fraction).
+///
+/// A value that does not parse as a real instant (bad syntax, 2024-02-30, a
+/// :60 second) is sent unchanged, so a deliberately malformed value still
+/// reaches the handler as written.
 pub(super) fn format_timestamp(s: &str, format: Option<&str>) -> String {
-    let Some(t) = parse_rfc3339(s) else {
+    let convert = matches!(format, Some("epoch-seconds") | Some("http-date"));
+    let Some(t) = convert.then(|| parse_rfc3339(s)).flatten() else {
         return s.to_string();
     };
-    let frac = if t.fraction.is_empty() {
-        String::new()
-    } else {
-        format!(".{}", t.fraction)
-    };
     match format {
-        Some("epoch-seconds") => {
-            if t.epoch < 0 && !t.fraction.is_empty() {
-                // -1 + .5 is -0.5: the fraction reduces the magnitude.
-                let value: f64 = format!("{}{frac}", t.epoch + 1).parse().unwrap_or(0.0) - 1.0;
-                value.to_string()
-            } else {
-                format!("{}{frac}", t.epoch)
-            }
-        }
-        Some("http-date") => http_date(t.epoch),
-        _ => {
-            let (y, mo, d, h, mi, sec) = civil(t.epoch);
-            format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{sec:02}{frac}Z")
+        Some("epoch-seconds") => epoch_seconds_text(&t),
+        _ => http_date(t.epoch),
+    }
+}
+
+/// `t` as decimal epoch seconds, without going through floating point.
+/// `t.epoch` is floored, so a negative instant with a fraction is
+/// `-(|epoch| - 1) - (1 - 0.fraction)`: 1969-12-31T23:59:58.5Z has
+/// `epoch = -2`, `fraction = "5"` and is -1.5.
+fn epoch_seconds_text(t: &Instant) -> String {
+    if t.fraction.is_empty() {
+        return t.epoch.to_string();
+    }
+    if t.epoch >= 0 || t.fraction.bytes().all(|b| b == b'0') {
+        return format!("{}.{}", t.epoch, t.fraction);
+    }
+    // Ten's complement of the fraction digits, same width: 1 - 0.25 = 0.75.
+    let mut digits: Vec<u8> = t.fraction.bytes().map(|b| b - b'0').collect();
+    let mut borrow = 0u8;
+    for d in digits.iter_mut().rev() {
+        let sub = *d + borrow;
+        if sub == 0 {
+            *d = 0;
+        } else {
+            *d = 10 - sub;
+            borrow = 1;
         }
     }
+    let complement: String = digits.iter().map(|d| char::from(b'0' + d)).collect();
+    format!("-{}.{}", -(t.epoch + 1), complement)
 }
 
 fn parse_rfc3339(s: &str) -> Option<Instant> {
@@ -578,10 +615,11 @@ fn parse_rfc3339(s: &str) -> Option<Instant> {
     let minute: i64 = t.next()?.parse().ok()?;
     let second: i64 = t.next()?.parse().ok()?;
     if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
+        || day < 1
+        || day > days_in_month(year, month)
         || hour > 23
         || minute > 59
-        || second > 60
+        || second > 59
     {
         return None;
     }
@@ -590,6 +628,15 @@ fn parse_rfc3339(s: &str) -> Option<Instant> {
             - offset_secs,
         fraction,
     })
+}
+
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date.
@@ -932,22 +979,55 @@ mod tests {
 
     #[test]
     fn timestamps_keep_fractions_and_accept_offsets() {
-        assert_eq!(
-            format_timestamp("2024-01-01T00:00:00.123Z", Some("epoch-seconds")),
-            "1704067200.123"
-        );
-        assert_eq!(
-            format_timestamp("2024-01-01T02:00:00.5+02:00", None),
-            "2024-01-01T00:00:00.5Z"
-        );
+        let epoch = |s| format_timestamp(s, Some("epoch-seconds"));
+        assert_eq!(epoch("2024-01-01T00:00:00.123Z"), "1704067200.123");
+        assert_eq!(epoch("2024-01-01T02:00:00+02:00"), "1704067200");
+        assert_eq!(epoch("1969-12-31T23:59:57.5Z"), "-2.5");
+        assert_eq!(epoch("1969-12-31T23:59:58.5Z"), "-1.5");
+        assert_eq!(epoch("1969-12-31T23:59:59.5Z"), "-0.5");
+        assert_eq!(epoch("1969-12-31T23:59:59.25Z"), "-0.75");
+        assert_eq!(epoch("1969-12-31T23:59:58.000Z"), "-2.000");
         assert_eq!(
             format_timestamp("2023-12-31T19:00:00-05:00", Some("http-date")),
             "Mon, 01 Jan 2024 00:00:00 GMT"
         );
-        assert_eq!(
-            format_timestamp("1969-12-31T23:59:59.5Z", Some("epoch-seconds")),
-            "-0.5"
-        );
+        // date-time input is already the wire form and goes out unchanged.
+        for s in ["2024-01-01T02:00:00.5+02:00", "2024-01-01T00:00:00Z"] {
+            assert_eq!(format_timestamp(s, None), s);
+            assert_eq!(format_timestamp(s, Some("date-time")), s);
+        }
+        // Not a real instant: unchanged, never re-rendered as another one.
+        for s in ["2024-02-30T00:00:00Z", "2024-01-01T00:00:60Z", "garbage"] {
+            assert_eq!(epoch(s), s);
+            assert_eq!(format_timestamp(s, Some("http-date")), s);
+        }
+    }
+
+    #[test]
+    fn xml_list_items_honor_list_member_timestamp_format() {
+        let m = parse_model_str(
+            r##"{
+                "smithy": "2.0",
+                "shapes": {
+                    "t#Svc": {"type": "service", "operations": [{"target": "t#Put"}],
+                              "traits": {"aws.protocols#restXml": {}}},
+                    "t#Put": {"type": "operation", "input": {"target": "t#PutRequest"},
+                              "traits": {"smithy.api#http": {"method": "PUT", "uri": "/o"}}},
+                    "t#PutRequest": {"type": "structure", "members": {
+                        "Times": {"target": "t#Times"},
+                        "Flat": {"target": "t#Times", "traits": {"smithy.api#xmlFlattened": {}}}}},
+                    "t#Times": {"type": "list", "member": {"target": "t#Time",
+                              "traits": {"smithy.api#timestampFormat": "epoch-seconds"}}},
+                    "t#Time": {"type": "timestamp"}
+                }
+            }"##,
+        )
+        .unwrap();
+        let op = m.operations.iter().find(|o| o.name == "Put").unwrap();
+        let input = json!({"Times": ["1970-01-01T00:00:01Z"], "Flat": ["1970-01-01T00:00:02Z"]});
+        let body = String::from_utf8(rest_xml_body(op, &m, &input).0.unwrap()).unwrap();
+        assert!(body.contains("<Times><member>1</member></Times>"), "{body}");
+        assert!(body.contains("<Flat>2</Flat>"), "{body}");
     }
 
     #[test]

@@ -9,8 +9,6 @@ pub struct ServiceModel {
     pub service_name: String,
     pub operations: Vec<Operation>,
     pub shapes: HashMap<String, Shape>,
-    /// The service shape's id, when the model has one.
-    pub service_shape_id: Option<String>,
     /// Whether the service carries `aws.protocols#restXml`.
     pub rest_xml: bool,
     /// The service shape's `smithy.api#xmlNamespace`: the default namespace
@@ -223,8 +221,9 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
 
 /// Parse a Smithy JSON AST model from a string.
 pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
-    let (root, mut member_order) = parse_json_recording_member_order(content)
-        .map_err(|e| format!("Failed to parse model: {}", e))?;
+    let root: Value =
+        serde_json::from_str(content).map_err(|e| format!("Failed to parse model: {}", e))?;
+    let mut member_order = declared_member_orders(content);
 
     let smithy_version = root
         .get("smithy")
@@ -246,7 +245,6 @@ pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
     // lenient acceptance hack; the strict probe matches only the op's own
     // directly-declared error shapes.
     let mut service_name = String::new();
-    let mut service_shape_id = None;
     let mut rest_xml = false;
     let mut xml_namespace = None;
     let mut operation_targets: Vec<String> = Vec::new();
@@ -254,7 +252,6 @@ pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
     for (shape_id, shape_def) in raw_shapes {
         if shape_def.get("type").and_then(|v| v.as_str()) == Some("service") {
             service_name = shape_id.split('#').next().unwrap_or(shape_id).to_string();
-            service_shape_id = Some(shape_id.clone());
             let traits = shape_def.get("traits").and_then(|v| v.as_object());
             rest_xml = traits.is_some_and(|t| t.contains_key("aws.protocols#restXml"));
             xml_namespace = parse_traits(traits).xml_namespace;
@@ -377,7 +374,6 @@ pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
         service_name,
         operations,
         shapes,
-        service_shape_id,
         rest_xml,
         xml_namespace,
         member_order,
@@ -385,112 +381,56 @@ pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
     })
 }
 
-/// Parse the model JSON into a `Value`, recording each shape's `members`
-/// keys in declaration order in the same pass. The order is captured from
-/// the token stream, so it does not depend on serde_json's `preserve_order`
-/// feature.
-fn parse_json_recording_member_order(
-    content: &str,
-) -> Result<(Value, HashMap<String, Vec<String>>), serde_json::Error> {
-    use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
-    use std::cell::RefCell;
+/// Each shape's `members` keys in declaration order.
+///
+/// A second, lightweight pass over the model text: everything but the
+/// `shapes.*.members` keys is skipped with `IgnoredAny`, so the order does
+/// not depend on serde_json's `preserve_order` feature (the main parse into
+/// `Value` loses it without that feature).
+fn declared_member_orders(content: &str) -> HashMap<String, Vec<String>> {
+    use serde::de::{IgnoredAny, MapAccess, Visitor};
 
-    /// Where in the document the value being read sits.
-    #[derive(Clone)]
-    enum At {
-        Root,
-        Shapes,
-        Shape(String),
-        Members(String),
-        Other,
-    }
-
-    struct Seed<'a> {
-        at: At,
-        orders: &'a RefCell<HashMap<String, Vec<String>>>,
-    }
-
-    impl<'de> DeserializeSeed<'de> for Seed<'_> {
-        type Value = Value;
-        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Value, D::Error> {
-            d.deserialize_any(self)
-        }
-    }
-
-    impl<'de> Visitor<'de> for Seed<'_> {
-        type Value = Value;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a JSON value")
-        }
-        fn visit_bool<E>(self, v: bool) -> Result<Value, E> {
-            Ok(Value::Bool(v))
-        }
-        fn visit_i64<E>(self, v: i64) -> Result<Value, E> {
-            Ok(Value::from(v))
-        }
-        fn visit_u64<E>(self, v: u64) -> Result<Value, E> {
-            Ok(Value::from(v))
-        }
-        fn visit_f64<E>(self, v: f64) -> Result<Value, E> {
-            Ok(serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number))
-        }
-        fn visit_str<E>(self, v: &str) -> Result<Value, E> {
-            Ok(Value::String(v.to_string()))
-        }
-        fn visit_string<E>(self, v: String) -> Result<Value, E> {
-            Ok(Value::String(v))
-        }
-        fn visit_unit<E>(self) -> Result<Value, E> {
-            Ok(Value::Null)
-        }
-        fn visit_none<E>(self) -> Result<Value, E> {
-            Ok(Value::Null)
-        }
-        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
-            let mut items = Vec::new();
-            while let Some(v) = seq.next_element_seed(Seed {
-                at: At::Other,
-                orders: self.orders,
-            })? {
-                items.push(v);
-            }
-            Ok(Value::Array(items))
-        }
-        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
-            let mut out = serde_json::Map::new();
-            let mut keys = Vec::new();
-            while let Some(key) = map.next_key::<String>()? {
-                let child = match (&self.at, key.as_str()) {
-                    (At::Root, "shapes") => At::Shapes,
-                    (At::Shapes, id) => At::Shape(id.to_string()),
-                    (At::Shape(id), "members") => At::Members(id.clone()),
-                    _ => At::Other,
-                };
-                if matches!(self.at, At::Members(_)) {
-                    keys.push(key.clone());
+    /// The keys of a JSON object, in order, values ignored.
+    struct Keys(Vec<String>);
+    impl<'de> Deserialize<'de> for Keys {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> Visitor<'de> for V {
+                type Value = Keys;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a JSON object")
                 }
-                let value = map.next_value_seed(Seed {
-                    at: child,
-                    orders: self.orders,
-                })?;
-                out.insert(key, value);
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
+                    let mut keys = Vec::new();
+                    while let Some((k, IgnoredAny)) = map.next_entry::<String, IgnoredAny>()? {
+                        keys.push(k);
+                    }
+                    Ok(Keys(keys))
+                }
             }
-            if let At::Members(id) = self.at {
-                self.orders.borrow_mut().insert(id, keys);
-            }
-            Ok(Value::Object(out))
+            d.deserialize_map(V)
         }
     }
 
-    let orders = RefCell::new(HashMap::new());
-    let mut de = serde_json::Deserializer::from_str(content);
-    let value = Seed {
-        at: At::Root,
-        orders: &orders,
+    #[derive(Deserialize)]
+    struct RawShape {
+        #[serde(default)]
+        members: Option<Keys>,
     }
-    .deserialize(&mut de)?;
-    de.end()?;
-    Ok((value, orders.into_inner()))
+    #[derive(Deserialize)]
+    struct RawModel {
+        #[serde(default)]
+        shapes: HashMap<String, RawShape>,
+    }
+
+    serde_json::from_str::<RawModel>(content)
+        .map(|m| {
+            m.shapes
+                .into_iter()
+                .filter_map(|(id, shape)| shape.members.map(|k| (id, k.0)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn collect_resource_operations(

@@ -935,6 +935,9 @@ pub(super) fn build_http_request_from_model(
         })
         .unwrap_or_default();
 
+    // restXml headers are bound once, after the body is built, by the shared
+    // binder; this loop only collects them for the other REST protocols.
+    let rest_xml = model.is_rest_xml();
     for member in &members {
         let target_traits = model.shapes.get(&member.target).map(|s| &s.traits);
         let member_traits = &member.traits;
@@ -956,8 +959,10 @@ pub(super) fn build_http_request_from_model(
                 if let Some(qk) = query_name {
                     append_query(&mut query_parts, &qk, &val);
                 } else if let Some(hk) = header_name {
-                    if let Some(hv) = value_to_header_string(&val) {
-                        headers.push((hk, hv));
+                    if !rest_xml {
+                        if let Some(hv) = value_to_header_string(&val) {
+                            headers.push((hk, hv));
+                        }
                     }
                 } else if is_payload {
                     payload_value = Some(val);
@@ -1014,7 +1019,7 @@ pub(super) fn build_http_request_from_model(
         method,
         reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::DELETE
     );
-    let body = if model.is_rest_xml() {
+    let body = if rest_xml {
         // restXml bodies are XML documents built from the binding traits,
         // not the JSON the generators produce, and the header members are
         // bound by the shared restXml binder (http-date timestamps, prefix
