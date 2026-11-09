@@ -13,6 +13,7 @@ use crate::policies::{
     not_found, precondition_failed, require_if_match, rfc3339, route_id, xml_with_etag,
 };
 use crate::router::Route;
+use crate::service::config_aliases;
 use crate::service::{
     aws_error, check_etag_shape, esc, extract_body_field, generate_etag, generate_id_with_prefix,
     invalid_argument, no_such_distribution, xml_response, CloudFrontService,
@@ -201,6 +202,9 @@ impl CloudFrontService {
                 "ConnectionGroup must be disabled before delete",
             ));
         }
+        // Model-declared; a distribution tenant names it. Checked after the
+        // disabled check (inferred).
+        crate::validate::refuse_in_use(account, crate::validate::Reference::ConnectionGroup(&id))?;
         let arn = g.arn.clone();
         account.connection_groups.remove(&id);
         account.tags.remove(&arn);
@@ -308,27 +312,9 @@ impl CloudFrontService {
         // A domain is unique across all of CloudFront. Moving it is limited
         // to resources the caller owns: one held by another account's
         // distribution or tenant cannot be taken over.
-        let held_elsewhere = state
-            .accounts
-            .iter()
-            .filter(|(owner, _)| **owner != req.account_id)
-            .any(|(_, a)| {
-                a.distribution_tenants.values().any(|t| {
-                    t.domains
-                        .iter()
-                        .any(|d| d.eq_ignore_ascii_case(&parsed.domain))
-                }) || a.distributions.values().any(|d| {
-                    d.config
-                        .aliases
-                        .as_ref()
-                        .and_then(|al| al.items.as_ref())
-                        .is_some_and(|i| {
-                            i.cname
-                                .iter()
-                                .any(|c| c.eq_ignore_ascii_case(&parsed.domain))
-                        })
-                })
-            });
+        let held_elsewhere = state.domain_in_use_by(&parsed.domain, DomainOwner::New, |owner| {
+            owner != req.account_id
+        });
         if held_elsewhere {
             return Err(aws_error(
                 StatusCode::FORBIDDEN,
@@ -395,8 +381,10 @@ impl CloudFrontService {
         // Detach the domain from whichever tenant or distribution currently
         // owns it, then attach it to the target. Domains are unique across
         // resources, so a plain move is correct. The source changes too, so it gets
-        // a new ETag and modified time.
+        // a new ETag and modified time, and a distribution's changed config
+        // redeploys, as on `UpdateDistribution`.
         let now = Utc::now();
+        let mut redeploy = Vec::new();
         for t in account.distribution_tenants.values_mut() {
             let before = t.domains.len();
             t.domains
@@ -407,11 +395,13 @@ impl CloudFrontService {
             }
         }
         for d in account.distributions.values_mut() {
-            let before = config_aliases_len(&d.config);
+            let before = config_aliases(&d.config).len();
             remove_alias(&mut d.config, &parsed.domain);
-            if config_aliases_len(&d.config) != before {
+            if config_aliases(&d.config).len() != before {
                 d.etag = generate_etag();
                 d.last_modified_time = now;
+                d.status = "InProgress".to_string();
+                redeploy.push(d.id.clone());
             }
         }
         match &target {
@@ -427,10 +417,17 @@ impl CloudFrontService {
                     add_alias(&mut d.config, &parsed.domain);
                     d.last_modified_time = Utc::now();
                     d.etag = etag.clone();
+                    d.status = "InProgress".to_string();
+                    if !redeploy.contains(&d.id) {
+                        redeploy.push(d.id.clone());
+                    }
                 }
             }
         }
         drop(state);
+        for id in redeploy {
+            self.schedule_distribution_deploy(id);
+        }
 
         let mut body = String::with_capacity(256);
         body.push_str(XML_DECL);
@@ -547,10 +544,15 @@ impl CloudFrontService {
         if let Some(staging_match) = staging_match {
             check_etag_shape(staging_match, &staging_etag)?;
         }
-        // The model declares the reference errors here; the staging config is what
-        // becomes live. Checked before staleness, as on `UpdateDistribution`
+        // The staging config is what becomes live; the kinds whose errors the model
+        // declares here are checked. Before staleness, as on `UpdateDistribution`
         // (inferred), and under the guard that commits.
-        crate::validate::validate_distribution_references(&staging_config, None, Some(&*account))?;
+        crate::validate::validate_references_for(
+            &staging_config,
+            None,
+            Some(&*account),
+            crate::validate::ReferenceCheck::StagingPromotion,
+        )?;
         if primary_match != primary_etag || staging_match.is_some_and(|m| m != staging_etag) {
             return Err(precondition_failed());
         }
@@ -595,14 +597,6 @@ impl Target {
             Target::Tenant(id) | Target::Distribution(id) => id,
         }
     }
-}
-
-fn config_aliases_len(config: &crate::model::DistributionConfig) -> usize {
-    config
-        .aliases
-        .as_ref()
-        .and_then(|a| a.items.as_ref())
-        .map_or(0, |i| i.cname.len())
 }
 
 /// Add `domain` to a distribution's alias (CNAME) set, keeping Quantity in

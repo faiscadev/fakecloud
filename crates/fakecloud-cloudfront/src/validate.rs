@@ -385,66 +385,96 @@ pub(crate) fn validate_copy(
     ))
 }
 
-/// Something a distribution config names that lives elsewhere in CloudFront.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Reference {
+/// Something one CloudFront resource names that lives elsewhere in CloudFront.
+/// Distribution configs name most kinds; the rest are named by the other
+/// holders [`reference_in_use`] scans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reference<'a> {
     /// The whole `origin-access-identity/cloudfront/<id>` value.
-    OriginAccessIdentity(String),
-    OriginAccessControl(String),
-    VpcOrigin(String),
-    AnycastIpList(String),
-    ContinuousDeploymentPolicy(String),
-    TrustStore(String),
-    ConnectionFunction(String),
-    KeyGroup(String),
-    FieldLevelEncryption(String),
-    RealtimeLogConfig(String),
-    CachePolicy(String),
-    OriginRequestPolicy(String),
-    ResponseHeadersPolicy(String),
+    OriginAccessIdentity(&'a str),
+    OriginAccessControl(&'a str),
+    VpcOrigin(&'a str),
+    AnycastIpList(&'a str),
+    ContinuousDeploymentPolicy(&'a str),
+    TrustStore(&'a str),
+    /// The connection function's ID.
+    ConnectionFunction(&'a str),
+    /// A trusted key group, and whether the list naming it is enabled.
+    KeyGroup {
+        id: &'a str,
+        enabled: bool,
+    },
+    FieldLevelEncryption(&'a str),
+    RealtimeLogConfig(&'a str),
+    CachePolicy(&'a str),
+    OriginRequestPolicy(&'a str),
+    ResponseHeadersPolicy(&'a str),
     /// A CloudFront Function's ARN.
-    Function(String),
+    Function(&'a str),
+    PublicKey(&'a str),
+    FieldLevelEncryptionProfile(&'a str),
+    /// A key value store's ARN.
+    KeyValueStore(&'a str),
+    ConnectionGroup(&'a str),
+    Distribution(&'a str),
 }
 
-impl Reference {
-    pub(crate) fn origin_access_identity(id: &str) -> Self {
-        Reference::OriginAccessIdentity(format!("origin-access-identity/cloudfront/{id}"))
+impl Reference<'_> {
+    /// Whether both name the same resource, however it is named: a key group is
+    /// associated whether or not its list is enabled.
+    fn same_resource(&self, other: &Reference<'_>) -> bool {
+        match (self, other) {
+            (Reference::KeyGroup { id: a, .. }, Reference::KeyGroup { id: b, .. }) => a == b,
+            _ => self == other,
+        }
     }
 }
 
-/// Everything `config` names, in the order the checks run. Empty values name
-/// nothing, as a config read back has them.
-pub(crate) fn config_references(config: &DistributionConfig) -> Vec<Reference> {
-    let present = |v: Option<&str>| v.filter(|v| !v.is_empty()).map(str::to_string);
-    let mut refs = Vec::new();
-    for origin in config.origins.items.iter().flat_map(|i| &i.origin) {
-        if let Some(s3) = &origin.s3_origin_config {
-            refs.extend(
-                present(Some(&s3.origin_access_identity)).map(Reference::OriginAccessIdentity),
-            );
-        }
-        refs.extend(
-            present(origin.origin_access_control_id.as_deref()).map(Reference::OriginAccessControl),
-        );
-        if let Some(vpc) = &origin.vpc_origin_config {
-            refs.extend(present(Some(&vpc.vpc_origin_id)).map(Reference::VpcOrigin));
-        }
-    }
-    refs.extend(present(config.anycast_ip_list_id.as_deref()).map(Reference::AnycastIpList));
-    refs.extend(
-        present(config.continuous_deployment_policy_id.as_deref())
-            .map(Reference::ContinuousDeploymentPolicy),
-    );
-    if let Some(trust) = config
+/// The value an origin stores to name the origin access identity `id`.
+pub fn origin_access_identity_value(id: &str) -> String {
+    format!("origin-access-identity/cloudfront/{id}")
+}
+
+/// Empty values name nothing, as a config read back has them.
+fn present(value: Option<&str>) -> Option<&str> {
+    value.filter(|v| !v.is_empty())
+}
+
+/// Everything `config` names, in the order the checks run.
+pub(crate) fn config_references(
+    config: &DistributionConfig,
+) -> impl Iterator<Item = Reference<'_>> {
+    let origins = config
+        .origins
+        .items
+        .iter()
+        .flat_map(|i| &i.origin)
+        .flat_map(|origin| {
+            let identity = origin
+                .s3_origin_config
+                .as_ref()
+                .and_then(|s3| present(Some(&s3.origin_access_identity)))
+                .map(Reference::OriginAccessIdentity);
+            let control = present(origin.origin_access_control_id.as_deref())
+                .map(Reference::OriginAccessControl);
+            let vpc = origin
+                .vpc_origin_config
+                .as_ref()
+                .and_then(|vpc| present(Some(&vpc.vpc_origin_id)))
+                .map(Reference::VpcOrigin);
+            identity.into_iter().chain(control).chain(vpc)
+        });
+    let trust_store = config
         .viewer_mtls_config
         .as_ref()
         .and_then(|m| m.trust_store_config.as_ref())
-    {
-        refs.extend(present(Some(&trust.trust_store_id)).map(Reference::TrustStore));
-    }
-    if let Some(function) = &config.connection_function_association {
-        refs.extend(present(Some(&function.id)).map(Reference::ConnectionFunction));
-    }
+        .and_then(|t| present(Some(&t.trust_store_id)))
+        .map(Reference::TrustStore);
+    let connection_function = config
+        .connection_function_association
+        .as_ref()
+        .and_then(|f| present(Some(&f.id)))
+        .map(Reference::ConnectionFunction);
     let dcb = &config.default_cache_behavior;
     let behaviors = std::iter::once(BehaviorRefs {
         key_groups: dcb.trusted_key_groups.as_ref(),
@@ -463,32 +493,44 @@ pub(crate) fn config_references(config: &DistributionConfig) -> Vec<Reference> {
         origin_request_policy_id: b.origin_request_policy_id.as_deref(),
         response_headers_policy_id: b.response_headers_policy_id.as_deref(),
         functions: b.function_associations.as_ref(),
-    }));
-    for b in behaviors {
-        // Checked whether or not the groups are enabled: the recording only shows a
-        // disabled, empty list accepted.
-        refs.extend(
-            b.key_groups
-                .iter()
-                .flat_map(|g| g.items.iter().flat_map(|i| &i.key_group))
-                .filter(|g| !g.is_empty())
-                .cloned()
-                .map(Reference::KeyGroup),
-        );
-        refs.extend(present(b.field_level_encryption_id).map(Reference::FieldLevelEncryption));
-        refs.extend(present(b.realtime_log_config_arn).map(Reference::RealtimeLogConfig));
-        refs.extend(present(b.cache_policy_id).map(Reference::CachePolicy));
-        refs.extend(present(b.origin_request_policy_id).map(Reference::OriginRequestPolicy));
-        refs.extend(present(b.response_headers_policy_id).map(Reference::ResponseHeadersPolicy));
-        refs.extend(
-            b.functions
-                .iter()
-                .flat_map(|f| f.items.iter().flat_map(|i| &i.function_association))
-                .filter(|f| !f.function_arn.is_empty())
-                .map(|f| Reference::Function(f.function_arn.clone())),
-        );
-    }
-    refs
+    }))
+    .flat_map(behavior_references);
+    origins
+        .chain(present(config.anycast_ip_list_id.as_deref()).map(Reference::AnycastIpList))
+        .chain(
+            present(config.continuous_deployment_policy_id.as_deref())
+                .map(Reference::ContinuousDeploymentPolicy),
+        )
+        .chain(trust_store)
+        .chain(connection_function)
+        .chain(behaviors)
+}
+
+fn behavior_references(b: BehaviorRefs<'_>) -> impl Iterator<Item = Reference<'_>> {
+    let key_groups = b.key_groups.into_iter().flat_map(|groups| {
+        groups
+            .items
+            .iter()
+            .flat_map(|i| &i.key_group)
+            .filter(|id| !id.is_empty())
+            .map(|id| Reference::KeyGroup {
+                id,
+                enabled: groups.enabled,
+            })
+    });
+    let functions = b
+        .functions
+        .into_iter()
+        .flat_map(|f| f.items.iter().flat_map(|i| &i.function_association))
+        .filter(|f| !f.function_arn.is_empty())
+        .map(|f| Reference::Function(&f.function_arn));
+    key_groups
+        .chain(present(b.field_level_encryption_id).map(Reference::FieldLevelEncryption))
+        .chain(present(b.realtime_log_config_arn).map(Reference::RealtimeLogConfig))
+        .chain(present(b.cache_policy_id).map(Reference::CachePolicy))
+        .chain(present(b.origin_request_policy_id).map(Reference::OriginRequestPolicy))
+        .chain(present(b.response_headers_policy_id).map(Reference::ResponseHeadersPolicy))
+        .chain(functions)
 }
 
 struct BehaviorRefs<'a> {
@@ -501,16 +543,124 @@ struct BehaviorRefs<'a> {
     functions: Option<&'a crate::model::FunctionAssociations>,
 }
 
-/// Whether any distribution in `account` names `reference`, for the in-use refusals
-/// on delete.
-pub(crate) fn reference_in_use(account: &AccountState, reference: &Reference) -> bool {
-    account
+/// Everything any resource in `account` names: distribution configs, streaming
+/// distributions (their origin access identity), connection groups (their Anycast
+/// IP list), key groups (their public keys), field-level encryption configs (their
+/// profiles), field-level encryption profiles (their public keys), functions
+/// (their key value stores) and distribution tenants (their distribution and
+/// connection group).
+fn account_references(account: &AccountState) -> impl Iterator<Item = Reference<'_>> {
+    let distributions = account
         .distributions
         .values()
-        .any(|d| config_references(&d.config).contains(reference))
+        .flat_map(|d| config_references(&d.config));
+    let streaming = account
+        .streaming_distributions
+        .values()
+        .filter_map(|s| present(Some(&s.config.s3_origin.origin_access_identity)))
+        .map(Reference::OriginAccessIdentity);
+    let connection_groups = account
+        .connection_groups
+        .values()
+        .filter_map(|g| present(g.anycast_ip_list_id.as_deref()))
+        .map(Reference::AnycastIpList);
+    let key_groups = account
+        .key_groups
+        .values()
+        .flat_map(|g| &g.config.items.public_key)
+        .map(|k| Reference::PublicKey(k));
+    let encryption_configs = account.field_level_encryptions.values().flat_map(|f| {
+        let query_args = f
+            .config
+            .query_arg_profile_config
+            .query_arg_profiles
+            .iter()
+            .flat_map(|p| p.items.iter().flat_map(|i| &i.query_arg_profile))
+            .map(|p| p.profile_id.as_str());
+        let content_types = f
+            .config
+            .content_type_profile_config
+            .content_type_profiles
+            .iter()
+            .flat_map(|p| p.items.iter().flat_map(|i| &i.content_type_profile))
+            .filter_map(|p| p.profile_id.as_deref());
+        query_args
+            .chain(content_types)
+            .filter(|id| !id.is_empty())
+            .map(Reference::FieldLevelEncryptionProfile)
+    });
+    let encryption_profiles = account
+        .field_level_encryption_profiles
+        .values()
+        .flat_map(|p| {
+            p.config
+                .encryption_entities
+                .items
+                .iter()
+                .flat_map(|i| &i.encryption_entity)
+        })
+        .map(|e| Reference::PublicKey(&e.public_key_id));
+    let functions = account
+        .functions
+        .values()
+        .flat_map(|f| {
+            f.config
+                .key_value_store_associations
+                .iter()
+                .flat_map(|a| a.items.iter().flat_map(|i| &i.key_value_store_association))
+        })
+        .map(|a| Reference::KeyValueStore(&a.key_value_store_arn));
+    let tenants = account.distribution_tenants.values().flat_map(|t| {
+        std::iter::once(Reference::Distribution(&t.distribution_id))
+            .chain(present(t.connection_group_id.as_deref()).map(Reference::ConnectionGroup))
+    });
+    distributions
+        .chain(streaming)
+        .chain(connection_groups)
+        .chain(key_groups)
+        .chain(encryption_configs)
+        .chain(encryption_profiles)
+        .chain(functions)
+        .chain(tenants)
 }
 
-fn reference_exists(reference: &Reference, account: Option<&AccountState>) -> bool {
+/// Whether anything in `account` names `target`, for the in-use refusals on
+/// delete. One walk over every holder, stopping at the first match.
+pub(crate) fn reference_in_use(account: &AccountState, target: Reference<'_>) -> bool {
+    account_references(account).any(|r| r.same_resource(&target))
+}
+
+/// Refuse deleting `target` while anything in `account` names it, with the in-use
+/// error the delete operation declares in the model. Shared by the API's deletes
+/// and CloudFormation's.
+pub fn refuse_in_use(account: &AccountState, target: Reference<'_>) -> Result<(), AwsServiceError> {
+    if !reference_in_use(account, target) {
+        return Ok(());
+    }
+    let code = match target {
+        Reference::OriginAccessIdentity(_) => "CloudFrontOriginAccessIdentityInUse",
+        Reference::OriginAccessControl(_) => "OriginAccessControlInUse",
+        Reference::VpcOrigin(_)
+        | Reference::AnycastIpList(_)
+        | Reference::TrustStore(_)
+        | Reference::ConnectionFunction(_)
+        | Reference::KeyValueStore(_)
+        | Reference::ConnectionGroup(_) => "CannotDeleteEntityWhileInUse",
+        Reference::ContinuousDeploymentPolicy(_) => "ContinuousDeploymentPolicyInUse",
+        Reference::KeyGroup { .. } | Reference::Distribution(_) => "ResourceInUse",
+        Reference::FieldLevelEncryption(_) => "FieldLevelEncryptionConfigInUse",
+        Reference::RealtimeLogConfig(_) => "RealtimeLogConfigInUse",
+        Reference::CachePolicy(_) => "CachePolicyInUse",
+        Reference::OriginRequestPolicy(_) => "OriginRequestPolicyInUse",
+        Reference::ResponseHeadersPolicy(_) => "ResponseHeadersPolicyInUse",
+        Reference::Function(_) => "FunctionInUse",
+        Reference::PublicKey(_) => "PublicKeyInUse",
+        Reference::FieldLevelEncryptionProfile(_) => "FieldLevelEncryptionProfileInUse",
+    };
+    Err(crate::policies::in_use(code))
+}
+
+fn reference_exists(reference: Reference<'_>, account: Option<&AccountState>) -> bool {
     use crate::policies::{
         is_managed_cache_policy, is_managed_origin_request_policy,
         is_managed_response_headers_policy,
@@ -537,24 +687,28 @@ fn reference_exists(reference: &Reference, account: Option<&AccountState>) -> bo
             a.continuous_deployment_policies.contains_key(id)
         }
         Reference::TrustStore(id) => a.trust_stores.contains_key(id),
-        Reference::ConnectionFunction(id) => a
-            .connection_functions
-            .values()
-            .any(|f| &f.id == id || &f.name == id || &f.arn == id),
-        Reference::KeyGroup(id) => a.key_groups.contains_key(id),
+        Reference::ConnectionFunction(id) => a.connection_functions.values().any(|f| f.id == id),
+        Reference::KeyGroup { id, .. } => a.key_groups.contains_key(id),
         Reference::FieldLevelEncryption(id) => a.field_level_encryptions.contains_key(id),
         Reference::RealtimeLogConfig(arn) => a.realtime_log_configs.contains_key(arn),
         Reference::CachePolicy(id) => a.cache_policies.contains_key(id),
         Reference::OriginRequestPolicy(id) => a.origin_request_policies.contains_key(id),
         Reference::ResponseHeadersPolicy(id) => a.response_headers_policies.contains_key(id),
-        Reference::Function(arn) => a.functions.values().any(|f| &f.function_arn == arn),
+        Reference::Function(arn) => a.functions.values().any(|f| f.function_arn == arn),
+        Reference::PublicKey(id) => a.public_keys.contains_key(id),
+        Reference::FieldLevelEncryptionProfile(id) => {
+            a.field_level_encryption_profiles.contains_key(id)
+        }
+        Reference::KeyValueStore(arn) => a.key_value_stores.values().any(|k| k.arn == arn),
+        Reference::ConnectionGroup(id) => a.connection_groups.contains_key(id),
+        Reference::Distribution(id) => a.distributions.contains_key(id),
     }
 }
 
 /// The refusal for a reference that doesn't exist. Recorded from real AWS on
 /// 2026-11-09 where noted; the others use the error the model declares, with its
 /// documented text.
-fn missing_reference(reference: &Reference) -> AwsServiceError {
+fn missing_reference(reference: Reference<'_>) -> AwsServiceError {
     let (status, code, message) = match reference {
         // Recorded.
         Reference::OriginAccessIdentity(_) => (
@@ -562,7 +716,7 @@ fn missing_reference(reference: &Reference) -> AwsServiceError {
             "InvalidOriginAccessIdentity",
             "The specified origin access identity does not exist or is not valid.",
         ),
-        Reference::KeyGroup(_) => (
+        Reference::KeyGroup { .. } => (
             StatusCode::BAD_REQUEST,
             "TrustedKeyGroupDoesNotExist",
             "One or more of your trusted keygroups do not exist.",
@@ -583,10 +737,14 @@ fn missing_reference(reference: &Reference) -> AwsServiceError {
             "InvalidOriginAccessControl",
             "The origin access control is not valid.",
         ),
+        // A distribution config names none of the last five; they are here for
+        // completeness.
         Reference::VpcOrigin(_)
         | Reference::AnycastIpList(_)
         | Reference::TrustStore(_)
-        | Reference::ConnectionFunction(_) => (
+        | Reference::ConnectionFunction(_)
+        | Reference::KeyValueStore(_)
+        | Reference::ConnectionGroup(_) => (
             StatusCode::NOT_FOUND,
             "EntityNotFound",
             "The entity was not found.",
@@ -616,8 +774,58 @@ fn missing_reference(reference: &Reference) -> AwsServiceError {
             "InvalidFunctionAssociation",
             "A CloudFront function association is invalid.",
         ),
+        Reference::PublicKey(_) => (
+            StatusCode::NOT_FOUND,
+            "NoSuchPublicKey",
+            "The specified public key doesn't exist.",
+        ),
+        Reference::FieldLevelEncryptionProfile(_) => (
+            StatusCode::NOT_FOUND,
+            "NoSuchFieldLevelEncryptionProfile",
+            "The specified profile for field-level encryption doesn't exist.",
+        ),
+        Reference::Distribution(_) => (
+            StatusCode::NOT_FOUND,
+            "NoSuchDistribution",
+            "The specified distribution does not exist.",
+        ),
     };
     aws_error(status, code, message)
+}
+
+/// The operation a config's references are checked for. Each checks only the
+/// kinds whose missing-reference error it declares in the model; since deletes
+/// refuse what is in use, a reference left dangling can only come from an old
+/// snapshot, so skipping the rest loses nothing a live config could reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReferenceCheck {
+    /// Create, update and CloudFormation: every kind.
+    All,
+    /// `CopyDistribution` declares no `EntityNotFound` and no
+    /// `NoSuchContinuousDeploymentPolicy`.
+    Copy,
+    /// `UpdateDistributionWithStagingConfig` declares no
+    /// `NoSuchContinuousDeploymentPolicy`.
+    StagingPromotion,
+}
+
+impl ReferenceCheck {
+    fn declares(self, reference: Reference<'_>) -> bool {
+        match self {
+            ReferenceCheck::All => true,
+            ReferenceCheck::Copy => !matches!(
+                reference,
+                Reference::VpcOrigin(_)
+                    | Reference::AnycastIpList(_)
+                    | Reference::TrustStore(_)
+                    | Reference::ConnectionFunction(_)
+                    | Reference::ContinuousDeploymentPolicy(_)
+            ),
+            ReferenceCheck::StagingPromotion => {
+                !matches!(reference, Reference::ContinuousDeploymentPolicy(_))
+            }
+        }
+    }
 }
 
 /// That what a config names exists in the caller's account, on both distribution
@@ -630,6 +838,9 @@ fn missing_reference(reference: &Reference) -> AwsServiceError {
 /// checked again, so a config persisted with a reference since deleted can still
 /// be updated, disabled and deleted as long as that reference is left alone.
 ///
+/// Trusted key groups are checked only in an enabled list, as before any
+/// recording; none shows AWS checking a disabled one.
+///
 /// IAM certificates, Lambda@Edge functions and logging buckets live in other
 /// services this crate can't see, so they aren't checked.
 pub fn validate_distribution_references(
@@ -637,12 +848,22 @@ pub fn validate_distribution_references(
     stored: Option<&DistributionConfig>,
     account: Option<&AccountState>,
 ) -> Result<(), AwsServiceError> {
-    let kept = stored.map(config_references).unwrap_or_default();
+    validate_references_for(config, stored, account, ReferenceCheck::All)
+}
+
+/// [`validate_distribution_references`] limited to what `check` declares.
+pub(crate) fn validate_references_for(
+    config: &DistributionConfig,
+    stored: Option<&DistributionConfig>,
+    account: Option<&AccountState>,
+    check: ReferenceCheck,
+) -> Result<(), AwsServiceError> {
+    let kept = |r: Reference<'_>| stored.is_some_and(|s| config_references(s).any(|k| k == r));
+    let enforced = |r: Reference<'_>| !matches!(r, Reference::KeyGroup { enabled: false, .. });
     match config_references(config)
-        .into_iter()
-        .find(|r| !kept.contains(r) && !reference_exists(r, account))
+        .find(|&r| enforced(r) && check.declares(r) && !kept(r) && !reference_exists(r, account))
     {
-        Some(missing) => Err(missing_reference(&missing)),
+        Some(missing) => Err(missing_reference(missing)),
         None => Ok(()),
     }
 }
@@ -1498,9 +1719,8 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .enabled = false;
-            // Checked whether or not the groups are enabled: no recording shows AWS
-            // skipping the check for a disabled list that names one.
-            assert_eq!(check(&enabled), check(&disabled));
+            // Only an enabled list is checked.
+            assert_eq!(check(&disabled), None);
 
             let mut encryption = base.clone();
             encryption.default_cache_behavior.field_level_encryption_id = Some("fle-none".into());
@@ -1590,6 +1810,298 @@ mod tests {
                 .code(),
             "NoSuchFieldLevelEncryptionConfig"
         );
+    }
+
+    /// Copy and staging promotion check only the kinds whose errors they declare.
+    #[test]
+    fn copies_and_promotions_check_only_declared_kinds() {
+        let account = AccountState::default();
+        let check = |c: &DistributionConfig, op| {
+            validate_references_for(c, None, Some(&account), op)
+                .err()
+                .map(|e| e.code().to_string())
+        };
+        let mut anycast = standard_config();
+        anycast.anycast_ip_list_id = Some("ail".into());
+        let mut policy = standard_config();
+        policy.continuous_deployment_policy_id = Some("cdp".into());
+        let mut function = standard_config();
+        function.connection_function_association =
+            Some(crate::model::ConnectionFunctionAssociation { id: "cf".into() });
+        let mut cache = standard_config();
+        cache.default_cache_behavior.cache_policy_id = Some("cp".into());
+
+        assert_eq!(check(&anycast, ReferenceCheck::Copy), None);
+        assert_eq!(check(&function, ReferenceCheck::Copy), None);
+        assert_eq!(check(&policy, ReferenceCheck::Copy), None);
+        assert_eq!(
+            check(&cache, ReferenceCheck::Copy).as_deref(),
+            Some("NoSuchCachePolicy")
+        );
+        assert_eq!(
+            check(&anycast, ReferenceCheck::StagingPromotion).as_deref(),
+            Some("EntityNotFound")
+        );
+        assert_eq!(check(&policy, ReferenceCheck::StagingPromotion), None);
+        assert_eq!(
+            check(&policy, ReferenceCheck::All).as_deref(),
+            Some("NoSuchContinuousDeploymentPolicy")
+        );
+    }
+
+    /// A connection function association names the function by ID, not by name
+    /// or ARN.
+    #[test]
+    fn a_connection_function_is_named_by_id() {
+        let now = chrono::Utc::now();
+        let mut account = AccountState::default();
+        account.connection_functions.insert(
+            "fn-name".into(),
+            crate::cfunctions::StoredConnectionFunction {
+                id: "cf-id".into(),
+                name: "fn-name".into(),
+                arn: "arn:aws:cloudfront::1:connection-function/cf-id".into(),
+                stage: "DEVELOPMENT".into(),
+                status: "UNPUBLISHED".into(),
+                runtime: "cloudfront-js-2.0".into(),
+                comment: String::new(),
+                code: Vec::new(),
+                live_code: None,
+                etag: "E1".into(),
+                created_time: now,
+                last_modified_time: now,
+            },
+        );
+        let named = |id: &str| {
+            let mut c = standard_config();
+            c.connection_function_association =
+                Some(crate::model::ConnectionFunctionAssociation { id: id.into() });
+            c
+        };
+        validate_distribution_references(&named("cf-id"), None, Some(&account)).unwrap();
+        for other in ["fn-name", "arn:aws:cloudfront::1:connection-function/cf-id"] {
+            assert_eq!(
+                validate_distribution_references(&named(other), None, Some(&account))
+                    .unwrap_err()
+                    .code(),
+                "EntityNotFound"
+            );
+        }
+        account.distributions.insert(
+            "E1".into(),
+            crate::state::StoredDistribution {
+                id: "E1".into(),
+                arn: String::new(),
+                status: "Deployed".into(),
+                last_modified_time: now,
+                domain_name: String::new(),
+                in_progress_invalidation_batches: 0,
+                etag: "E1".into(),
+                config: named("cf-id"),
+            },
+        );
+        assert!(reference_in_use(
+            &account,
+            Reference::ConnectionFunction("cf-id")
+        ));
+        assert!(!reference_in_use(
+            &account,
+            Reference::ConnectionFunction("fn-name")
+        ));
+    }
+
+    /// Every holder that names another resource counts for the in-use check, and
+    /// a key group in a disabled list counts too.
+    #[test]
+    fn every_holder_counts_as_a_use() {
+        let now = chrono::Utc::now();
+        let mut account = AccountState::default();
+        let mut config = standard_config();
+        config.default_cache_behavior.trusted_key_groups = Some(crate::model::TrustedKeyGroups {
+            enabled: false,
+            quantity: 1,
+            items: Some(crate::model::TrustedKeyGroupIdList {
+                key_group: vec!["kg".into()],
+            }),
+        });
+        account.distributions.insert(
+            "E1".into(),
+            crate::state::StoredDistribution {
+                id: "E1".into(),
+                arn: String::new(),
+                status: "Deployed".into(),
+                last_modified_time: now,
+                domain_name: String::new(),
+                in_progress_invalidation_batches: 0,
+                etag: "E1".into(),
+                config,
+            },
+        );
+        account.streaming_distributions.insert(
+            "S1".into(),
+            crate::streaming::StoredStreamingDistribution {
+                id: "S1".into(),
+                arn: String::new(),
+                status: "Deployed".into(),
+                last_modified_time: now,
+                domain_name: String::new(),
+                etag: "E1".into(),
+                config: crate::streaming::StreamingDistributionConfig {
+                    s3_origin: crate::streaming::S3Origin {
+                        domain_name: "b.s3.amazonaws.com".into(),
+                        origin_access_identity: origin_access_identity_value("oai"),
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        account.connection_groups.insert(
+            "cg".into(),
+            crate::extras2::StoredConnectionGroup {
+                id: "cg".into(),
+                name: "cg".into(),
+                arn: String::new(),
+                routing_endpoint: String::new(),
+                status: "Deployed".into(),
+                etag: "E1".into(),
+                created_time: now,
+                last_modified_time: now,
+                ipv6_enabled: true,
+                anycast_ip_list_id: Some("ail".into()),
+                enabled: false,
+                is_default: false,
+            },
+        );
+        account.key_groups.insert(
+            "kg".into(),
+            crate::functions::StoredKeyGroup {
+                id: "kg".into(),
+                etag: "E1".into(),
+                last_modified_time: now,
+                config: crate::functions::KeyGroupConfig {
+                    items: crate::functions::KeyGroupItems {
+                        public_key: vec!["pk-group".into()],
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        account.field_level_encryptions.insert(
+            "fle".into(),
+            crate::fle::StoredFieldLevelEncryption {
+                id: "fle".into(),
+                etag: "E1".into(),
+                last_modified_time: now,
+                config: crate::fle::FieldLevelEncryptionConfig {
+                    content_type_profile_config: crate::fle::ContentTypeProfileConfig {
+                        content_type_profiles: Some(crate::fle::ContentTypeProfiles {
+                            quantity: 1,
+                            items: Some(crate::fle::ContentTypeProfileItems {
+                                content_type_profile: vec![crate::fle::ContentTypeProfile {
+                                    profile_id: Some("prof".into()),
+                                    ..Default::default()
+                                }],
+                            }),
+                        }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        account.field_level_encryption_profiles.insert(
+            "prof".into(),
+            crate::fle::StoredFieldLevelEncryptionProfile {
+                id: "prof".into(),
+                etag: "E1".into(),
+                last_modified_time: now,
+                config: crate::fle::FieldLevelEncryptionProfileConfig {
+                    encryption_entities: crate::fle::EncryptionEntities {
+                        quantity: 1,
+                        items: Some(crate::fle::EncryptionEntityItems {
+                            encryption_entity: vec![crate::fle::EncryptionEntity {
+                                public_key_id: "pk-profile".into(),
+                                ..Default::default()
+                            }],
+                        }),
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        account.functions.insert(
+            "f".into(),
+            crate::functions::StoredFunction {
+                name: "f".into(),
+                etag: "E1".into(),
+                status: "UNASSOCIATED".into(),
+                stage: "DEVELOPMENT".into(),
+                function_arn: "arn:aws:cloudfront::1:function/f".into(),
+                created_time: now,
+                last_modified_time: now,
+                config: crate::functions::FunctionConfig {
+                    key_value_store_associations: Some(
+                        crate::functions::KeyValueStoreAssociations {
+                            quantity: 1,
+                            items: Some(crate::functions::KeyValueStoreAssociationItems {
+                                key_value_store_association: vec![
+                                    crate::functions::KeyValueStoreAssociation {
+                                        key_value_store_arn: "arn:kvs".into(),
+                                    },
+                                ],
+                            }),
+                        },
+                    ),
+                    ..Default::default()
+                },
+                function_code: String::new(),
+                live_function_code: None,
+            },
+        );
+        account.distribution_tenants.insert(
+            "dt".into(),
+            crate::tenants::StoredDistributionTenant {
+                id: "dt".into(),
+                arn: String::new(),
+                name: "dt".into(),
+                distribution_id: "E-mt".into(),
+                domains: Vec::new(),
+                connection_group_id: Some("cg-t".into()),
+                web_acl_arn: None,
+                enabled: false,
+                status: "Deployed".into(),
+                etag: "E1".into(),
+                created_time: now,
+                last_modified_time: now,
+                parameters: Vec::new(),
+                customizations: None,
+            },
+        );
+        for (target, used) in [
+            (Reference::KeyValueStore("arn:kvs"), true),
+            (Reference::Distribution("E-mt"), true),
+            (Reference::ConnectionGroup("cg-t"), true),
+            (Reference::Distribution("E1"), false),
+            (
+                Reference::KeyGroup {
+                    id: "kg",
+                    enabled: true,
+                },
+                true,
+            ),
+            (
+                Reference::OriginAccessIdentity(&origin_access_identity_value("oai")),
+                true,
+            ),
+            (Reference::AnycastIpList("ail"), true),
+            (Reference::PublicKey("pk-group"), true),
+            (Reference::PublicKey("pk-profile"), true),
+            (Reference::FieldLevelEncryptionProfile("prof"), true),
+            (Reference::PublicKey("pk-other"), false),
+            (Reference::AnycastIpList("other"), false),
+        ] {
+            assert_eq!(reference_in_use(&account, target), used, "{target:?}");
+        }
     }
 
     /// Recorded from real AWS on 2026-11-09.

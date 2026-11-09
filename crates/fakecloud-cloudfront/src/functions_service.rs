@@ -189,14 +189,10 @@ impl CloudFrontService {
             return Err(precondition_failed());
         }
         // Model-declared; checked after the If-Match (inferred).
-        if account.functions.get(&name).is_some_and(|f| {
-            crate::validate::reference_in_use(
-                account,
-                &crate::validate::Reference::Function(f.function_arn.clone()),
-            )
-        }) {
-            return Err(crate::policies::in_use("FunctionInUse"));
-        }
+        crate::validate::refuse_in_use(
+            account,
+            crate::validate::Reference::Function(&f.function_arn),
+        )?;
         account.functions.remove(&name);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))
@@ -470,6 +466,9 @@ impl CloudFrontService {
         if p.etag != if_match {
             return Err(precondition_failed());
         }
+        // Model-declared; key groups and field-level encryption profiles name one.
+        // Checked after the If-Match (inferred).
+        crate::validate::refuse_in_use(account, crate::validate::Reference::PublicKey(&id))?;
         account.public_keys.remove(&id);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))
@@ -628,12 +627,14 @@ impl CloudFrontService {
             return Err(precondition_failed());
         }
         // Model-declared; checked after the If-Match (inferred).
-        if crate::validate::reference_in_use(
+        // Any association counts, enabled or not.
+        crate::validate::refuse_in_use(
             account,
-            &crate::validate::Reference::KeyGroup(id.clone()),
-        ) {
-            return Err(crate::policies::in_use("ResourceInUse"));
-        }
+            crate::validate::Reference::KeyGroup {
+                id: &id,
+                enabled: true,
+            },
+        )?;
         account.key_groups.remove(&id);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))
@@ -782,6 +783,12 @@ impl CloudFrontService {
         if kvs.etag != if_match {
             return Err(precondition_failed());
         }
+        // Model-declared; a function names it by ARN. Checked after the If-Match
+        // (inferred).
+        crate::validate::refuse_in_use(
+            account,
+            crate::validate::Reference::KeyValueStore(&kvs.arn),
+        )?;
         account.key_value_stores.remove(&name);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))
@@ -946,14 +953,12 @@ impl CloudFrontService {
             return Err(precondition_failed());
         }
         // Model-declared; checked after the If-Match (inferred).
-        if crate::validate::reference_in_use(
+        // Streaming distributions name one too.
+        let value = crate::validate::origin_access_identity_value(&id);
+        crate::validate::refuse_in_use(
             account,
-            &crate::validate::Reference::origin_access_identity(&id),
-        ) {
-            return Err(crate::policies::in_use(
-                "CloudFrontOriginAccessIdentityInUse",
-            ));
-        }
+            crate::validate::Reference::OriginAccessIdentity(&value),
+        )?;
         account.origin_access_identities.remove(&id);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))

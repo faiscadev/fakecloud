@@ -42,5 +42,6 @@ pub use state::{
 };
 pub use validate::{
     canonicalize_distribution_config, canonicalize_distribution_update,
-    validate_distribution_references, ConfigRequest,
+    origin_access_identity_value, refuse_in_use, validate_distribution_references, ConfigRequest,
+    Reference,
 };

@@ -854,6 +854,11 @@ pub(crate) fn in_use(code: &str) -> AwsServiceError {
             StatusCode::CONFLICT,
             "The specified configuration for field-level encryption is in use.",
         ),
+        "FieldLevelEncryptionProfileInUse" => (
+            StatusCode::CONFLICT,
+            "The specified profile for field-level encryption is in use.",
+        ),
+        "PublicKeyInUse" => (StatusCode::CONFLICT, "The specified public key is in use."),
         "RealtimeLogConfigInUse" => (
             StatusCode::BAD_REQUEST,
             "Cannot delete the real-time log configuration because it is attached to one or more cache behaviors.",

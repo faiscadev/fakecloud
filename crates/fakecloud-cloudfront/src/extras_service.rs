@@ -168,12 +168,7 @@ impl CloudFrontService {
         let arn = v.arn.clone();
         let snap = v.clone();
         // Model-declared; checked after the If-Match (inferred).
-        if crate::validate::reference_in_use(
-            account,
-            &crate::validate::Reference::VpcOrigin(id.clone()),
-        ) {
-            return Err(crate::policies::in_use("CannotDeleteEntityWhileInUse"));
-        }
+        crate::validate::refuse_in_use(account, crate::validate::Reference::VpcOrigin(&id))?;
         account.vpc_origins.remove(&id);
         account.tags.remove(&arn);
         drop(state);
@@ -370,12 +365,8 @@ impl CloudFrontService {
         }
         let arn = a.arn.clone();
         // Model-declared; checked after the If-Match (inferred).
-        if crate::validate::reference_in_use(
-            account,
-            &crate::validate::Reference::AnycastIpList(id.clone()),
-        ) {
-            return Err(crate::policies::in_use("CannotDeleteEntityWhileInUse"));
-        }
+        // Connection groups name one too.
+        crate::validate::refuse_in_use(account, crate::validate::Reference::AnycastIpList(&id))?;
         account.anycast_ip_lists.remove(&id);
         account.tags.remove(&arn);
         drop(state);
@@ -540,12 +531,7 @@ impl CloudFrontService {
         }
         let arn = t.arn.clone();
         // Model-declared; checked after the If-Match (inferred).
-        if crate::validate::reference_in_use(
-            account,
-            &crate::validate::Reference::TrustStore(id.clone()),
-        ) {
-            return Err(crate::policies::in_use("CannotDeleteEntityWhileInUse"));
-        }
+        crate::validate::refuse_in_use(account, crate::validate::Reference::TrustStore(&id))?;
         account.trust_stores.remove(&id);
         account.tags.remove(&arn);
         drop(state);

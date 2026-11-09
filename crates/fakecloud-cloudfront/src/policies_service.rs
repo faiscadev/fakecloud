@@ -167,12 +167,10 @@ impl CloudFrontService {
             }
         }
         // Model-declared; checked after the If-Match (inferred).
-        if crate::validate::reference_in_use(
+        crate::validate::refuse_in_use(
             account,
-            &crate::validate::Reference::OriginAccessControl(id.clone()),
-        ) {
-            return Err(crate::policies::in_use("OriginAccessControlInUse"));
-        }
+            crate::validate::Reference::OriginAccessControl(&id),
+        )?;
         account.origin_access_controls.remove(&id);
         Ok(empty(StatusCode::NO_CONTENT))
     }
@@ -363,12 +361,7 @@ impl CloudFrontService {
             }
         }
         // Model-declared; checked after the If-Match (inferred).
-        if crate::validate::reference_in_use(
-            account,
-            &crate::validate::Reference::CachePolicy(id.clone()),
-        ) {
-            return Err(crate::policies::in_use("CachePolicyInUse"));
-        }
+        crate::validate::refuse_in_use(account, crate::validate::Reference::CachePolicy(&id))?;
         account.cache_policies.remove(&id);
         Ok(empty(StatusCode::NO_CONTENT))
     }
@@ -564,12 +557,10 @@ impl CloudFrontService {
             }
         }
         // Model-declared; checked after the If-Match (inferred).
-        if crate::validate::reference_in_use(
+        crate::validate::refuse_in_use(
             account,
-            &crate::validate::Reference::OriginRequestPolicy(id.clone()),
-        ) {
-            return Err(crate::policies::in_use("OriginRequestPolicyInUse"));
-        }
+            crate::validate::Reference::OriginRequestPolicy(&id),
+        )?;
         account.origin_request_policies.remove(&id);
         Ok(empty(StatusCode::NO_CONTENT))
     }
@@ -768,12 +759,10 @@ impl CloudFrontService {
             }
         }
         // Model-declared; checked after the If-Match (inferred).
-        if crate::validate::reference_in_use(
+        crate::validate::refuse_in_use(
             account,
-            &crate::validate::Reference::ResponseHeadersPolicy(id.clone()),
-        ) {
-            return Err(crate::policies::in_use("ResponseHeadersPolicyInUse"));
-        }
+            crate::validate::Reference::ResponseHeadersPolicy(&id),
+        )?;
         account.response_headers_policies.remove(&id);
         Ok(empty(StatusCode::NO_CONTENT))
     }
@@ -949,12 +938,10 @@ impl CloudFrontService {
             }
         }
         // Model-declared; checked after the If-Match (inferred).
-        if crate::validate::reference_in_use(
+        crate::validate::refuse_in_use(
             account,
-            &crate::validate::Reference::ContinuousDeploymentPolicy(id.clone()),
-        ) {
-            return Err(crate::policies::in_use("ContinuousDeploymentPolicyInUse"));
-        }
+            crate::validate::Reference::ContinuousDeploymentPolicy(&id),
+        )?;
         account.continuous_deployment_policies.remove(&id);
         Ok(empty(StatusCode::NO_CONTENT))
     }

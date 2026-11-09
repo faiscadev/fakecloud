@@ -766,7 +766,7 @@ impl CloudFrontService {
     /// `InProgress` to `Deployed` after `propagation_delay`. Used by
     /// `CreateDistribution` and `UpdateDistribution` to model the real
     /// CloudFront edge propagation lifecycle.
-    fn schedule_distribution_deploy(&self, id: String) {
+    pub(crate) fn schedule_distribution_deploy(&self, id: String) {
         let state = Arc::clone(&self.state);
         let delay = self.propagation_delay;
         let store = self.snapshot_store.clone();
@@ -1042,6 +1042,9 @@ impl CloudFrontService {
                 ));
             }
         }
+        // Model-declared: a multi-tenant distribution's tenants name it. Checked
+        // after the disabled check (inferred).
+        crate::validate::refuse_in_use(account, crate::validate::Reference::Distribution(id))?;
         let removed = account.distributions.remove(id).unwrap();
         account.tags.remove(&removed.arn);
         Ok(empty_response(StatusCode::NO_CONTENT))
@@ -1303,9 +1306,15 @@ impl CloudFrontService {
         // the copy isn't itself attached to one.
         config.continuous_deployment_policy_id = Some(String::new());
         config.ensure_aws_defaults();
-        // The model declares the reference errors on a copy too; a staging copy names
-        // what its primary does, so this fails only on a reference deleted since.
-        validate_distribution_references(&config, None, Some(&*account))?;
+        // A copy checks the kinds whose errors its model declares; a staging copy
+        // names what its primary does, so this fails only on a reference an old
+        // snapshot left dangling.
+        crate::validate::validate_references_for(
+            &config,
+            None,
+            Some(&*account),
+            crate::validate::ReferenceCheck::Copy,
+        )?;
         let now = Utc::now();
         let etag = generate_etag();
         let arn = distribution_arn(&req.region, &req.account_id, &new_id);
@@ -1700,7 +1709,7 @@ struct AssociateAliasRequest {
 }
 
 /// The alternate domain names a distribution config carries.
-fn config_aliases(config: &DistributionConfig) -> &[String] {
+pub(crate) fn config_aliases(config: &DistributionConfig) -> &[String] {
     config
         .aliases
         .as_ref()
@@ -3560,6 +3569,120 @@ mod tests {
         svc.handle(update).await.expect("untouched reference");
     }
 
+    /// A disabled trusted key group list isn't checked, on create, update or copy.
+    #[tokio::test]
+    async fn a_disabled_key_group_list_naming_a_missing_group_passes() {
+        let state = make_state();
+        let svc = CloudFrontService::new(state.clone());
+        let body = dist_config_with_cache_policy("disabled-kg", "cp-x").replace(
+            "</CachePolicyId>",
+            "</CachePolicyId><TrustedKeyGroups><Enabled>false</Enabled><Quantity>1</Quantity>\
+             <Items><KeyGroup>kg-missing</KeyGroup></Items></TrustedKeyGroups>",
+        );
+        let create = svc.handle(create_request(&body)).await.expect("create");
+        let id = id_in(&create);
+        let mut update = make_request(
+            http::Method::PUT,
+            &format!("/2020-05-31/distribution/{id}/config"),
+            "",
+            &body
+                .replace("kg-missing", "kg-missing-2")
+                .replace("<Comment></Comment>", "<Comment>changed</Comment>"),
+        );
+        update
+            .headers
+            .insert(IF_MATCH, etag_of(&create).parse().unwrap());
+        let updated = svc.handle(update).await.expect("update");
+        let mut copy = copy_request(&id, &etag_of(&updated), "disabled-kg-copy", "");
+        copy.headers.insert("Staging", "true".parse().unwrap());
+        svc.handle(copy).await.expect("copy");
+    }
+
+    /// Model-declared: a public key named by a key group or a field-level
+    /// encryption profile, and a profile named by a config, can't be deleted.
+    #[tokio::test]
+    async fn deleting_a_named_public_key_or_profile_is_refused() {
+        let state = make_state();
+        let svc = CloudFrontService::new(state.clone());
+        let now = Utc::now();
+        {
+            let mut s = state.write();
+            let a = s.entry(DEFAULT_ACCOUNT);
+            for id in ["pk-group", "pk-profile"] {
+                a.public_keys.insert(
+                    id.into(),
+                    crate::functions::StoredPublicKey {
+                        id: id.into(),
+                        etag: "EPK".into(),
+                        created_time: now,
+                        config: Default::default(),
+                    },
+                );
+            }
+            a.key_groups
+                .get_mut("kg-123")
+                .unwrap()
+                .config
+                .items
+                .public_key = vec!["pk-group".into()];
+            let mut profile = crate::fle::FieldLevelEncryptionProfileConfig::default();
+            profile.encryption_entities.items = Some(crate::fle::EncryptionEntityItems {
+                encryption_entity: vec![crate::fle::EncryptionEntity {
+                    public_key_id: "pk-profile".into(),
+                    ..Default::default()
+                }],
+            });
+            a.field_level_encryption_profiles.insert(
+                "prof".into(),
+                crate::fle::StoredFieldLevelEncryptionProfile {
+                    id: "prof".into(),
+                    etag: "EPF".into(),
+                    last_modified_time: now,
+                    config: profile,
+                },
+            );
+            let mut config = crate::fle::FieldLevelEncryptionConfig::default();
+            config.query_arg_profile_config.query_arg_profiles =
+                Some(crate::fle::QueryArgProfiles {
+                    quantity: 1,
+                    items: Some(crate::fle::QueryArgProfileItems {
+                        query_arg_profile: vec![crate::fle::QueryArgProfile {
+                            query_arg: "q".into(),
+                            profile_id: "prof".into(),
+                        }],
+                    }),
+                });
+            a.field_level_encryptions.insert(
+                "fle".into(),
+                crate::fle::StoredFieldLevelEncryption {
+                    id: "fle".into(),
+                    etag: "EFL".into(),
+                    last_modified_time: now,
+                    config,
+                },
+            );
+        }
+        for (path, etag, code) in [
+            ("public-key/pk-group", "EPK", "PublicKeyInUse"),
+            ("public-key/pk-profile", "EPK", "PublicKeyInUse"),
+            (
+                "field-level-encryption-profile/prof",
+                "EPF",
+                "FieldLevelEncryptionProfileInUse",
+            ),
+        ] {
+            let mut delete =
+                make_request(http::Method::DELETE, &format!("/2020-05-31/{path}"), "", "");
+            delete.headers.insert(IF_MATCH, etag.parse().unwrap());
+            let err = svc.handle(delete).await.err().expect(path);
+            assert_eq!(
+                (err.code(), err.status()),
+                (code, StatusCode::CONFLICT),
+                "{path}"
+            );
+        }
+    }
+
     /// Inferred: a multi-tenant distribution holds no domains of its own, so one
     /// can't be moved onto it; and the source of a move changes too.
     #[tokio::test]
@@ -3601,11 +3724,19 @@ mod tests {
             err.message(),
             "You can't specify the Alias field for a mutli-tenant distribution."
         );
+        state
+            .write()
+            .entry(DEFAULT_ACCOUNT)
+            .distributions
+            .get_mut(&source_id)
+            .unwrap()
+            .status = "Deployed".into();
         svc.handle(move_to(&standard)).await.expect("moved");
         let s = state.read();
         let src = &s.get(DEFAULT_ACCOUNT).unwrap().distributions[&source_id];
         assert!(config_aliases(&src.config).is_empty());
         assert_ne!(src.etag, etag_of(&source), "the source's ETag moves");
+        assert_eq!(src.status, "InProgress", "the source redeploys");
     }
 
     /// Inferred: the copy isn't itself attached to the primary's policy.
