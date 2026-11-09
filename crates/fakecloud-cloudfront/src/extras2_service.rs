@@ -427,7 +427,11 @@ impl CloudFrontService {
         // declared error shapes are AccessDenied / EntityNotFound, so return
         // EntityNotFound rather than a fabricated 200.
         if crate::service::is_placeholder_label(&id) {
-            return Err(crate::policies::not_found("ManagedCertificate", &id));
+            return Err(aws_error(
+                StatusCode::NOT_FOUND,
+                "EntityNotFound",
+                format!("ManagedCertificate not found: {id}"),
+            ));
         }
         let mut body = String::with_capacity(256);
         body.push_str(XML_DECL);

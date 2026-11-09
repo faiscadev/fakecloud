@@ -301,7 +301,13 @@ impl CloudFrontService {
                 .accounts
                 .get(&req.account_id)
                 .and_then(|a| a.connection_functions.get(&name).cloned())
-                .ok_or_else(|| not_found("ConnectionFunction", &name))?
+                .ok_or_else(|| {
+                    aws_error(
+                        StatusCode::NOT_FOUND,
+                        "EntityNotFound",
+                        format!("ConnectionFunction {name} does not exist"),
+                    )
+                })?
         };
         if f.etag != if_match {
             return Err(precondition_failed());

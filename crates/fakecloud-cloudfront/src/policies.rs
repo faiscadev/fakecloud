@@ -769,8 +769,7 @@ fn not_found_code(kind: &str) -> &'static str {
         "KeyGroup" => "NoSuchResource",
         "FieldLevelEncryption" => "NoSuchFieldLevelEncryptionConfig",
         "AnycastIpList" | "ConnectionFunction" | "ConnectionGroup" | "DistributionTenant"
-        | "KeyValueStore" | "ManagedCertificate" | "ResourcePolicy" | "TrustStore"
-        | "VpcOrigin" => "EntityNotFound",
+        | "KeyValueStore" | "ResourcePolicy" | "TrustStore" | "VpcOrigin" => "EntityNotFound",
         _ => "",
     }
 }
