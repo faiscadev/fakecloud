@@ -1145,17 +1145,19 @@ async fn a_state_failing_after_its_result_assigns_nothing() {
 
     let output = run_parent(
         &client,
-        json!({"StartAt":"Seed","States":{
+        // A failure after the result that a catcher can take: a JSONata
+        // `Output` (no Retry or Catch takes `States.Runtime`, as recorded).
+        json!({"QueryLanguage":"JSONata","StartAt":"Seed","States":{
             "Seed":{"Type":"Pass","Assign":{"x":"before"},"Next":"Boom"},
             "Boom":{
                 "Type":"Parallel",
-                "Branches":[{"StartAt":"P","States":{"P":{"Type":"Pass","Result":1,"End":true}}}],
+                "Branches":[{"StartAt":"P","States":{"P":{"Type":"Pass","Output":1,"End":true}}}],
                 "Assign":{"x":"from-state"},
-                "ResultSelector":{"missing.$":"$.nope"},
-                "Catch":[{"ErrorEquals":["States.Runtime"],"Assign":{"y":"from-catcher"},"Next":"Done"}],
+                "Output":"{% $states.result.nope %}",
+                "Catch":[{"ErrorEquals":["States.QueryEvaluationError"],"Assign":{"y":"from-catcher"},"Next":"Done"}],
                 "End":true
             },
-            "Done":{"Type":"Pass","Parameters":{"x.$":"$x","y.$":"$y"},"End":true}
+            "Done":{"Type":"Pass","Output":{"x":"{% $x %}","y":"{% $y %}"},"End":true}
         }}),
     )
     .await;

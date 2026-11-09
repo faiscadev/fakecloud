@@ -2439,3 +2439,28 @@ fn batch_sync_surfaces_a_failed_job() {
     assert_eq!(status, ExecutionStatus::Failed);
     assert!(cause.unwrap().contains("job-1"));
 }
+
+/// A JSONata tolerance below zero is no count: it says so, not that it isn't an
+/// integer.
+#[test]
+fn a_negative_jsonata_tolerance_is_refused_as_negative() {
+    let state = json!({"Type": "Map", "ToleratedFailureCount": -1});
+    let (error, cause) =
+        FailureTolerance::resolve(&state, true, &json!({}), &json!({})).unwrap_err();
+    assert_eq!(error, "States.QueryEvaluationError");
+    assert_eq!(
+        cause,
+        "ToleratedFailureCount cannot be negative but was: -1"
+    );
+    assert_eq!(
+        crate::jsonata::failed_field(&cause),
+        Some("ToleratedFailureCount")
+    );
+    let two = json!({"Type": "Map", "ToleratedFailureCount": 2.0});
+    assert_eq!(
+        FailureTolerance::resolve(&two, true, &json!({}), &json!({}))
+            .unwrap()
+            .count,
+        Some(2)
+    );
+}

@@ -190,10 +190,7 @@ fn find_member<'m>(members: &'m Map<String, Value>, key: &str) -> Option<(&'m St
 }
 
 fn scalar_text(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    }
+    crate::io_processing::value_text(value)
 }
 
 fn to_epoch_millis(value: &Value) -> Option<i64> {
@@ -1050,14 +1047,17 @@ impl SdkService {
                 match self.shape(target) {
                     None => {
                         // As recorded, an S3 object uploaded by a Task with no type
-                        // of its own is stored as text. Other blob payloads go as
-                        // they are.
-                        if is_text_upload(&self.doc, operation)
-                            && !headers.contains_key(http::header::CONTENT_TYPE)
-                        {
+                        // of its own is stored as text; any other blob payload is
+                        // sent as bytes.
+                        if !headers.contains_key(http::header::CONTENT_TYPE) {
+                            let content_type = if is_text_upload(&self.doc, operation) {
+                                TEXT_UPLOAD_CONTENT_TYPE
+                            } else {
+                                "application/octet-stream"
+                            };
                             headers.insert(
                                 http::header::CONTENT_TYPE,
-                                HeaderValue::from_static(TEXT_UPLOAD_CONTENT_TYPE),
+                                HeaderValue::from_static(content_type),
                             );
                         }
                         Bytes::from(scalar_text(value))

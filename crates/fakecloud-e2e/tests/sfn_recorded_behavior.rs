@@ -1134,7 +1134,8 @@ async fn definitions_behave_as_recorded_from_aws() {
 /// `{name, definition, input?, recorded}`, recorded from AWS for the second review
 /// round: integer settings, I/O failures after branches succeed, intrinsic and
 /// Fail-path failures, JSONata Wait seconds, nested query languages, catchers,
-/// and a `ResultPath` conflict, which neither `Retry` nor `Catch` takes.
+/// and `ResultPath` conflicts and `States.Runtime` failures, which no `Retry` or
+/// `Catch` takes, even one naming them, in the state or in a branch or iteration.
 const REVIEW_RECORDED: &str = r###"[
  {
   "name": "tfc_2_0",
@@ -2552,6 +2553,477 @@ const REVIEW_RECORDED: &str = r###"[
     "ExecutionFailed"
    ]
   }
+ },
+ {
+  "name": "rpc_catch_named",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Parallel",
+     "Branches": [
+      {
+       "StartAt": "X",
+       "States": {
+        "X": {
+         "Type": "Pass",
+         "End": true
+        }
+       }
+      }
+     ],
+     "ResultPath": "$.a.b",
+     "Catch": [
+      {
+       "ErrorEquals": [
+        "States.ReferencePathConflict"
+       ],
+       "Next": "H"
+      }
+     ],
+     "End": true
+    },
+    "H": {
+     "Type": "Pass",
+     "End": true
+    }
+   }
+  },
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.ReferencePathConflict",
+   "cause": "Unable to apply step \"b\" to input {\"a\":1}",
+   "types": [
+    "ExecutionStarted",
+    "ParallelStateEntered",
+    "ParallelStateStarted",
+    "PassStateEntered",
+    "PassStateExited",
+    "ParallelStateSucceeded",
+    "ExecutionFailed"
+   ]
+  },
+  "input": "{\"a\":1}"
+ },
+ {
+  "name": "rpc_retry_named",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Parallel",
+     "Branches": [
+      {
+       "StartAt": "X",
+       "States": {
+        "X": {
+         "Type": "Pass",
+         "End": true
+        }
+       }
+      }
+     ],
+     "ResultPath": "$.a.b",
+     "Retry": [
+      {
+       "ErrorEquals": [
+        "States.ReferencePathConflict"
+       ],
+       "MaxAttempts": 1,
+       "IntervalSeconds": 1
+      }
+     ],
+     "End": true
+    }
+   }
+  },
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.ReferencePathConflict",
+   "cause": "Unable to apply step \"b\" to input {\"a\":1}",
+   "types": [
+    "ExecutionStarted",
+    "ParallelStateEntered",
+    "ParallelStateStarted",
+    "PassStateEntered",
+    "PassStateExited",
+    "ParallelStateSucceeded",
+    "ExecutionFailed"
+   ]
+  },
+  "input": "{\"a\":1}"
+ },
+ {
+  "name": "rt_catch_named",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Parallel",
+     "Branches": [
+      {
+       "StartAt": "X",
+       "States": {
+        "X": {
+         "Type": "Pass",
+         "End": true
+        }
+       }
+      }
+     ],
+     "ResultSelector": {
+      "x.$": "$.missing"
+     },
+     "Catch": [
+      {
+       "ErrorEquals": [
+        "States.Runtime"
+       ],
+       "Next": "H"
+      }
+     ],
+     "End": true
+    },
+    "H": {
+     "Type": "Pass",
+     "End": true
+    }
+   }
+  },
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.Runtime",
+   "cause": "An error occurred while executing the state 'A' (entered at the event id #2). The JSONPath '$.missing' specified for the field 'x.$' could not be found in the input '[{}]'",
+   "types": [
+    "ExecutionStarted",
+    "ParallelStateEntered",
+    "ParallelStateStarted",
+    "PassStateEntered",
+    "PassStateExited",
+    "ParallelStateSucceeded",
+    "ExecutionFailed"
+   ]
+  }
+ },
+ {
+  "name": "rt_retry_named",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Parallel",
+     "Branches": [
+      {
+       "StartAt": "X",
+       "States": {
+        "X": {
+         "Type": "Pass",
+         "End": true
+        }
+       }
+      }
+     ],
+     "ResultSelector": {
+      "x.$": "$.missing"
+     },
+     "Retry": [
+      {
+       "ErrorEquals": [
+        "States.Runtime"
+       ],
+       "MaxAttempts": 1,
+       "IntervalSeconds": 1
+      }
+     ],
+     "End": true
+    }
+   }
+  },
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.Runtime",
+   "cause": "An error occurred while executing the state 'A' (entered at the event id #2). The JSONPath '$.missing' specified for the field 'x.$' could not be found in the input '[{}]'",
+   "types": [
+    "ExecutionStarted",
+    "ParallelStateEntered",
+    "ParallelStateStarted",
+    "PassStateEntered",
+    "PassStateExited",
+    "ParallelStateSucceeded",
+    "ExecutionFailed"
+   ]
+  }
+ },
+ {
+  "name": "rt_task_catch_named",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Task",
+     "Resource": "arn:aws:states:::aws-sdk:sfn:listStateMachines",
+     "Parameters": {
+      "maxResults.$": "$.missing"
+     },
+     "Catch": [
+      {
+       "ErrorEquals": [
+        "States.Runtime"
+       ],
+       "Next": "H"
+      }
+     ],
+     "End": true
+    },
+    "H": {
+     "Type": "Pass",
+     "End": true
+    }
+   }
+  },
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.Runtime",
+   "cause": "An error occurred while executing the state 'A' (entered at the event id #2). The JSONPath '$.missing' specified for the field 'maxResults.$' could not be found in the input '{}'",
+   "types": [
+    "ExecutionStarted",
+    "TaskStateEntered",
+    "ExecutionFailed"
+   ]
+  }
+ },
+ {
+  "name": "branch_runtime",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Parallel",
+     "Branches": [
+      {
+       "StartAt": "X",
+       "States": {
+        "X": {
+         "Type": "Pass",
+         "End": true,
+         "InputPath": "$.missing"
+        }
+       }
+      }
+     ],
+     "End": true
+    }
+   }
+  },
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.Runtime",
+   "cause": "An error occurred while executing the state 'X' (entered at the event id #4). Invalid path '$.missing' : No results for path: $['missing']",
+   "types": [
+    "ExecutionStarted",
+    "ParallelStateEntered",
+    "ParallelStateStarted",
+    "PassStateEntered",
+    "ExecutionFailed"
+   ]
+  }
+ },
+ {
+  "name": "branch_runtime_catch_named",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Parallel",
+     "Branches": [
+      {
+       "StartAt": "X",
+       "States": {
+        "X": {
+         "Type": "Pass",
+         "End": true,
+         "InputPath": "$.missing"
+        }
+       }
+      }
+     ],
+     "Catch": [
+      {
+       "ErrorEquals": [
+        "States.Runtime"
+       ],
+       "Next": "H"
+      }
+     ],
+     "End": true
+    },
+    "H": {
+     "Type": "Pass",
+     "End": true
+    }
+   }
+  },
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.Runtime",
+   "cause": "An error occurred while executing the state 'X' (entered at the event id #4). Invalid path '$.missing' : No results for path: $['missing']",
+   "types": [
+    "ExecutionStarted",
+    "ParallelStateEntered",
+    "ParallelStateStarted",
+    "PassStateEntered",
+    "ExecutionFailed"
+   ]
+  }
+ },
+ {
+  "name": "iter_runtime",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Map",
+     "ItemProcessor": {
+      "StartAt": "X",
+      "States": {
+       "X": {
+        "Type": "Pass",
+        "End": true,
+        "InputPath": "$.missing"
+       }
+      }
+     },
+     "End": true
+    }
+   }
+  },
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.Runtime",
+   "cause": "An error occurred while executing the state 'X' (entered at the event id #5). Invalid path '$.missing' : No results for path: $['missing']",
+   "types": [
+    "ExecutionStarted",
+    "MapStateEntered",
+    "MapStateStarted",
+    "MapIterationStarted",
+    "PassStateEntered",
+    "ExecutionFailed"
+   ]
+  },
+  "input": "[{\"a\":1}]"
+ },
+ {
+  "name": "catch_rp_conflict_parallel",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Parallel",
+     "Branches": [
+      {
+       "StartAt": "X",
+       "States": {
+        "X": {
+         "Type": "Fail",
+         "Error": "Custom",
+         "Cause": "why"
+        }
+       }
+      }
+     ],
+     "Catch": [
+      {
+       "ErrorEquals": [
+        "Custom"
+       ],
+       "Next": "H",
+       "ResultPath": "$.a.b"
+      }
+     ],
+     "End": true
+    },
+    "H": {
+     "Type": "Pass",
+     "End": true
+    }
+   }
+  },
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.ReferencePathConflict",
+   "cause": "Unable to apply step \"b\" to input {\"a\":1}",
+   "types": [
+    "ExecutionStarted",
+    "ParallelStateEntered",
+    "ParallelStateStarted",
+    "FailStateEntered",
+    "ParallelStateFailed",
+    "ExecutionFailed"
+   ]
+  },
+  "input": "{\"a\":1}"
+ },
+ {
+  "name": "catch_rp_conflict_map",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Map",
+     "ItemsPath": "$.i",
+     "ItemProcessor": {
+      "StartAt": "X",
+      "States": {
+       "X": {
+        "Type": "Fail",
+        "Error": "Custom",
+        "Cause": "why"
+       }
+      }
+     },
+     "Catch": [
+      {
+       "ErrorEquals": [
+        "Custom"
+       ],
+       "Next": "H",
+       "ResultPath": "$.a.b"
+      }
+     ],
+     "End": true
+    },
+    "H": {
+     "Type": "Pass",
+     "End": true
+    }
+   }
+  },
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.ReferencePathConflict",
+   "cause": "Unable to apply step \"b\" to input {\"a\":1,\"i\":[1]}",
+   "types": [
+    "ExecutionStarted",
+    "MapStateEntered",
+    "MapStateStarted",
+    "MapIterationStarted",
+    "FailStateEntered",
+    "MapIterationFailed",
+    "MapStateFailed",
+    "ExecutionFailed"
+   ]
+  },
+  "input": "{\"a\":1,\"i\":[1]}"
  }
 ]"###;
 
@@ -2732,4 +3204,52 @@ async fn s3_get_object_fails_as_recorded_on_binary_and_oversized_bodies() {
         .await
         .unwrap();
     assert_eq!(fits.status(), &ExecutionStatus::Succeeded);
+}
+
+/// A map run ends with its state's own processing of the results: a failing
+/// `ResultSelector` fails the run, as it fails the state.
+#[tokio::test]
+async fn a_map_run_fails_with_its_result_selector() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let definition = serde_json::json!({"StartAt":"A","States":{"A":{
+        "Type":"Map",
+        "ItemProcessor":{
+            "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"EXPRESS"},
+            "StartAt":"X","States":{"X":{"Type":"Pass","End":true}}
+        },
+        "ResultSelector":{"x.$":"$.missing"},
+        "End":true
+    }}});
+    let described = run_with_input(&client, "map-run-selector", &definition.to_string(), "[1]")
+        .await
+        .unwrap();
+    assert_eq!(described.status(), &ExecutionStatus::Failed);
+    assert_eq!(described.error(), Some("States.Runtime"));
+    let runs = client
+        .list_map_runs()
+        .execution_arn(described.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let run = client
+        .describe_map_run()
+        .map_run_arn(runs.map_runs()[0].map_run_arn())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(run.status().as_str(), "FAILED");
+    let history = client
+        .get_execution_history()
+        .execution_arn(described.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let types: Vec<&str> = history
+        .events()
+        .iter()
+        .map(|e| e.r#type().as_str())
+        .collect();
+    assert!(types.contains(&"MapRunFailed"), "{types:?}");
+    assert!(types.contains(&"MapStateSucceeded"), "{types:?}");
 }

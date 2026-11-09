@@ -370,10 +370,7 @@ async fn execute_wait_state(
     input: &Value,
     ctx: &Value,
 ) -> Result<(), (String, String)> {
-    let text_of = |value: &Value| match value {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    };
+    let text_of = crate::io_processing::value_text;
 
     if let Some(seconds) = state_def.get("Seconds") {
         let seconds = seconds.as_u64().ok_or_else(|| {
@@ -873,12 +870,10 @@ async fn execute_map_state(
         start_map_run(shared_state, arn, execution_arn, state_def);
     }
 
-    let mut run_failure_recorded = true;
     let result = run_map_iterations(
         state_def,
         ctx,
         input,
-        &mut run_failure_recorded,
         delivery,
         dynamodb_state,
         registry,
@@ -887,24 +882,30 @@ async fn execute_map_state(
         map_run_arn.as_deref(),
     )
     .await;
+    let fail_run = |failure: &StateFailure, failed_event: bool| {
+        let Some(arn) = &map_run_arn else {
+            return;
+        };
+        finish_map_run(shared_state, arn, execution_arn, None, "FAILED");
+        if failed_event {
+            let (StateFailure::Own((error, cause)) | StateFailure::Ran((error, cause))) = failure;
+            add_event(
+                shared_state,
+                execution_arn,
+                "MapRunFailed",
+                0,
+                json!({ "error": error, "cause": cause }),
+            );
+        }
+    };
 
-    let map_output = match result {
-        Ok(map_output) => map_output,
-        Err(failure) => {
-            if let Some(arn) = &map_run_arn {
-                finish_map_run(shared_state, arn, execution_arn, None, "FAILED");
-            }
-            if let (Some(_), true) = (&map_run_arn, run_failure_recorded) {
-                let (StateFailure::Own((error, cause)) | StateFailure::Ran((error, cause))) =
-                    &failure;
-                add_event(
-                    shared_state,
-                    execution_arn,
-                    "MapRunFailed",
-                    0,
-                    json!({ "error": error, "cause": cause }),
-                );
-            }
+    let results = match result {
+        Ok(results) => results,
+        Err(MapRunError {
+            failure,
+            failed_event,
+        }) => {
+            fail_run(&failure, failed_event);
             return Err(failure);
         }
     };
@@ -918,31 +919,83 @@ async fn execute_map_state(
         json!({}),
     );
 
-    // Apply ResultSelector if present
-    let selected = if let Some(selector) = state_def.get("ResultSelector") {
-        apply_parameters(selector, &map_output, Some(ctx))?
-    } else {
-        map_output.clone()
+    // A map run ends with its state's own processing: one failing here fails it.
+    match finish_map_output(state_def, ctx, input, &results.output) {
+        Ok(output) => {
+            if let Some(arn) = &map_run_arn {
+                finish_map_run(
+                    shared_state,
+                    arn,
+                    execution_arn,
+                    Some(results.tallies),
+                    "SUCCEEDED",
+                );
+            }
+            Ok(output)
+        }
+        Err(failure) => {
+            let failure = StateFailure::Own(failure);
+            fail_run(&failure, true);
+            Err(failure)
+        }
+    }
+}
+
+/// A Map state's `ResultSelector`, `ResultPath`, `OutputPath` and (JSONPath)
+/// `Assign`, applied to its iterations' results.
+fn finish_map_output(
+    state_def: &Value,
+    ctx: &Value,
+    input: &Value,
+    map_output: &Value,
+) -> Result<Value, (String, String)> {
+    let selected = match state_def.get("ResultSelector") {
+        Some(selector) => apply_parameters(selector, map_output, Some(ctx))?,
+        None => map_output.clone(),
     };
-
-    // Apply ResultPath
     let after_result = apply_result_path(input, &selected, state_def["ResultPath"].as_str())?;
-
-    // Apply OutputPath
     let output = match state_def["OutputPath"].as_str() {
         Some("null") => json!({}),
         output_path => apply_output_path(&after_result, output_path)?,
     };
     if !crate::jsonata::is_jsonata(state_def) {
-        crate::variables::assign_jsonpath(state_def.get("Assign"), &map_output, Some(ctx))?;
+        crate::variables::assign_jsonpath(state_def.get("Assign"), map_output, Some(ctx))?;
     }
-
     Ok(output)
+}
+
+/// A Map's iterations, done: their results and the map run's tallies
+/// (succeeded, failed).
+struct MapResults {
+    output: Value,
+    tallies: (i64, i64),
+}
+
+/// How a Map's iterations failed, and whether its map run records it with a
+/// `MapRunFailed` event: as recorded, a tolerance that isn't one does not.
+struct MapRunError {
+    failure: StateFailure,
+    failed_event: bool,
+}
+
+impl From<StateFailure> for MapRunError {
+    fn from(failure: StateFailure) -> Self {
+        MapRunError {
+            failure,
+            failed_event: true,
+        }
+    }
+}
+
+impl From<(String, String)> for MapRunError {
+    fn from(failure: (String, String)) -> Self {
+        StateFailure::Own(failure).into()
+    }
 }
 
 /// How many failed iterations a map run tolerates. With neither limit set, none;
 /// when both are set, passing either fails the run.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct FailureTolerance {
     count: Option<u64>,
     percentage: Option<f64>,
@@ -975,26 +1028,24 @@ impl FailureTolerance {
             None => None,
             // As recorded: a JSONata expression's whole number counts, `2.0`
             // too; a path's value must be an integer as it stands.
-            Some(value) if jsonata => Some(
-                crate::jsonata::whole_number(&value)
-                    .and_then(|n| u64::try_from(n).ok())
-                    .ok_or_else(|| {
-                        (
-                            "States.QueryEvaluationError".to_string(),
-                            format!(
-                                "The ToleratedFailureCount field cannot be parsed as an \
-                                 integer: {value}"
-                            ),
-                        )
-                    })?,
-            ),
+            Some(value) if jsonata => {
+                let query = |cause: String| ("States.QueryEvaluationError".to_string(), cause);
+                let whole = crate::jsonata::whole_number(&value).ok_or_else(|| {
+                    query(format!(
+                        "The ToleratedFailureCount field cannot be parsed as an integer: {value}"
+                    ))
+                })?;
+                // Worded as a negative Wait `Seconds` is, as recorded there.
+                Some(u64::try_from(whole).map_err(|_| {
+                    query(format!(
+                        "ToleratedFailureCount cannot be negative but was: {value}"
+                    ))
+                })?)
+            }
             Some(value) => Some(value.as_u64().ok_or_else(|| {
                 match state_def["ToleratedFailureCountPath"].as_str() {
                     Some(path) => {
-                        let text = match &value {
-                            Value::String(text) => text.clone(),
-                            other => other.to_string(),
-                        };
+                        let text = crate::io_processing::value_text(&value);
                         crate::io_processing::runtime_error(format!(
                             "The ToleratedFailureCountPath field refers to value \"{text}\" which \
                          is not a valid integer: {path}"
@@ -1094,14 +1145,13 @@ async fn run_map_iterations(
     state_def: &Value,
     ctx: &Value,
     input: &Value,
-    run_failure_recorded: &mut bool,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
     map_run_arn: Option<&str>,
-) -> Result<Value, StateFailure> {
+) -> Result<MapResults, MapRunError> {
     let jsonata = crate::jsonata::is_jsonata(state_def);
     let input_path = state_def["InputPath"].as_str();
 
@@ -1155,12 +1205,11 @@ async fn run_map_iterations(
         match items_value {
             Value::Array(items) => items,
             other => {
-                return Err(StateFailure::Own(crate::io_processing::runtime_error(
-                    format!(
-                        "Map state input must be an array but was: {}",
-                        json_type_name(&other)
-                    ),
-                )))
+                return Err(crate::io_processing::runtime_error(format!(
+                    "Map state input must be an array but was: {}",
+                    json_type_name(&other)
+                ))
+                .into())
             }
         }
     };
@@ -1194,9 +1243,12 @@ async fn run_map_iterations(
         json!({ "length": total_items }),
     );
     // As recorded, a tolerance that isn't one fails the state once it has started.
-    // A tolerance that isn't one records no failed map run, as recorded.
-    let tolerance = FailureTolerance::resolve(state_def, jsonata, &effective_input, ctx)
-        .inspect_err(|_| *run_failure_recorded = false)?;
+    let tolerance = FailureTolerance::resolve(state_def, jsonata, &effective_input, ctx).map_err(
+        |failure| MapRunError {
+            failure: StateFailure::Own(failure),
+            failed_event: false,
+        },
+    )?;
     if let Some(arn) = map_run_arn {
         set_map_run_total(
             shared_state,
@@ -1341,6 +1393,14 @@ async fn run_map_iterations(
                 );
                 results.push((index, output));
             }
+            // As recorded, an inline iteration failing so that the execution
+            // ends records no MapIterationFailed: the execution fails at once. A
+            // map run's iterations are child executions, which fail on their own.
+            Some(Err((error, cause)))
+                if !is_distributed && crate::error_handling::ends_execution(&error) =>
+            {
+                return Err(StateFailure::Ran((error, cause)).into());
+            }
             Some(Err((error, cause))) => {
                 add_event(
                     shared_state,
@@ -1353,7 +1413,7 @@ async fn run_map_iterations(
                 // An inline Map fails with the iteration's own error, at once.
                 // A map run finishes its window and reports the threshold.
                 if !is_distributed && tolerance.exceeded(failure_count, total_items) {
-                    return Err(StateFailure::Ran((error, cause)));
+                    return Err(StateFailure::Ran((error, cause)).into());
                 }
             }
             None => {}
@@ -1395,28 +1455,24 @@ async fn run_map_iterations(
                 "FAILED",
             );
         }
-        return Err(StateFailure::Ran((
-            THRESHOLD_ERROR.to_string(),
-            THRESHOLD_CAUSE.to_string(),
-        )));
+        return Err(
+            StateFailure::Ran((THRESHOLD_ERROR.to_string(), THRESHOLD_CAUSE.to_string())).into(),
+        );
     }
 
     // Every iteration is accounted for and the tolerated-failure threshold was
-    // not exceeded: the map run's outcome is whether its results were delivered.
-    if let Some(arn) = map_run_arn {
-        finish_map_run(
-            shared_state,
-            arn,
-            execution_arn,
-            Some((succeeded_count, failure_count as i64)),
-            if map_output.is_ok() {
-                "SUCCEEDED"
-            } else {
-                "FAILED"
-            },
-        );
+    // not exceeded. Results that weren't delivered fail the map run; otherwise
+    // it ends with the state's own processing of them.
+    let tallies = (succeeded_count, failure_count as i64);
+    match map_output {
+        Ok(output) => Ok(MapResults { output, tallies }),
+        Err(failure) => {
+            if let Some(arn) = map_run_arn {
+                finish_map_run(shared_state, arn, execution_arn, Some(tallies), "FAILED");
+            }
+            Err(failure.into())
+        }
     }
-    Ok(map_output?)
 }
 
 /// Build a MapRun ARN for a distributed Map running inside `execution_arn`.

@@ -79,8 +79,8 @@ pub enum PathError {
     /// A definite path matched nothing. Carries the normalized path
     /// (`$['a'][0]`) as Jayway reports it.
     NoResults(String),
-    /// A definite path reached an object without the property it names next:
-    /// the property (`['b']`) and the normalized path to the object (`$['a']`).
+    /// A definite path asked an array for a property: the property (`['b']`)
+    /// and the normalized path to the array (`$['a']`).
     MissingProperty { property: String, parent: String },
 }
 
@@ -131,18 +131,23 @@ impl JsonPath {
         )
     }
 
-    /// Why a definite path matched nothing: the first object it found without
-    /// the property it names, as Jayway reports it, or else no results.
+    /// Why a definite path matched nothing: the first array it asked for a
+    /// property, as Jayway reports it, or else no results.
     fn definite_miss(&self, root: &Value) -> PathError {
         let mut current = root;
         let mut parent = String::from("$");
         for segment in &self.segments {
             let next = match segment {
-                // As recorded, an array has no properties either: `$.missing` on
-                // `[{}]` is `Property ['missing'] not found in path $`.
-                Segment::Names(names) => match current.as_object().map(|o| o.get(&names[0])) {
-                    Some(Some(next)) => next,
-                    Some(None) | None if current.is_object() || current.is_array() => {
+                // As recorded, a property an object lacks is no results
+                // (`$.missing` on `{}`: `No results for path: $['missing']`),
+                // while an array has no properties at all (`$.missing` on
+                // `[{}]`: `Property ['missing'] not found in path $`).
+                Segment::Names(names) => match current {
+                    Value::Object(object) => match object.get(&names[0]) {
+                        Some(next) => next,
+                        None => break,
+                    },
+                    Value::Array(_) => {
                         let mut property = String::new();
                         render_segment(segment, &mut property);
                         return PathError::MissingProperty { property, parent };
@@ -742,10 +747,7 @@ mod tests {
         let d = doc();
         assert_eq!(
             evaluate(&d, "$.store.missing").unwrap_err(),
-            PathError::MissingProperty {
-                property: "['missing']".into(),
-                parent: "$['store']".into()
-            }
+            PathError::NoResults("$['store']['missing']".into())
         );
         assert!(matches!(
             evaluate(&d, "$.store.book[9]"),
@@ -753,7 +755,7 @@ mod tests {
         ));
         assert!(matches!(
             evaluate(&d, "$.store.bicycle.color.x"),
-            Err(PathError::NoResults(_) | PathError::MissingProperty { .. })
+            Err(PathError::NoResults(_))
         ));
     }
 

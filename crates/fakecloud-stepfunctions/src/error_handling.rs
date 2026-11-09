@@ -1,20 +1,27 @@
 use serde_json::Value;
 
 /// Reserved error names that a wildcard `ErrorEquals` never matches. AWS
-/// documents that `States.Runtime` and `States.DataLimitExceeded` always fail
-/// the execution and cannot be caught or retried by a `States.ALL` (or
-/// `States.TaskFailed`) wildcard; a `ResultPath` conflict behaves the same, as
-/// recorded.
+/// documents that `States.Runtime` and `States.DataLimitExceeded` cannot be
+/// caught or retried by a `States.ALL` (or `States.TaskFailed`) wildcard.
 const NON_WILDCARD_ERRORS: [&str; 3] = [
     "States.Runtime",
     "States.DataLimitExceeded",
     crate::io_processing::REFERENCE_PATH_CONFLICT,
 ];
 
+/// Failures that end the execution at once: as recorded, no `Retry` or `Catch`
+/// takes them, not even one naming them in `ErrorEquals`, and the state they
+/// happen in (or that runs the branch or iteration they happen in) records no
+/// `<Type>StateFailed`.
+const EXECUTION_ENDING_ERRORS: [&str; 2] = [
+    "States.Runtime",
+    crate::io_processing::REFERENCE_PATH_CONFLICT,
+];
+
 /// Whether a failure ends the execution whatever the state's `Retry` and
-/// `Catch` wildcards say.
+/// `Catch` say, even when they name it.
 pub(crate) fn ends_execution(error: &str) -> bool {
-    NON_WILDCARD_ERRORS.contains(&error)
+    EXECUTION_ENDING_ERRORS.contains(&error)
 }
 
 /// A query failing inside a Task isn't the task failing: as recorded,
@@ -29,7 +36,11 @@ const QUERY_ERROR: &str = "States.QueryEvaluationError";
 ///   reserved names). It applies only when the error came from a Task state, so
 ///   e.g. a Parallel/Map branch's `States.Runtime` is not swallowed by it.
 /// * Any other pattern is an exact error-name match.
+/// * Nothing matches a failure that ends the execution (see [`ends_execution`]).
 fn pattern_matches(pattern: &str, error: &str, is_task_error: bool) -> bool {
+    if ends_execution(error) {
+        return false;
+    }
     match pattern {
         "States.ALL" => !NON_WILDCARD_ERRORS.contains(&error),
         "States.TaskFailed" => {
@@ -232,6 +243,20 @@ mod tests {
             "Next": "Handler"
         })];
         assert_eq!(find_catcher(&catchers, "SomeBranchError", false), None);
+    }
+
+    // Recorded: not even its own name catches or retries States.Runtime or
+    // States.ReferencePathConflict.
+    #[test]
+    fn named_execution_ending_errors_are_never_matched() {
+        for error in ["States.Runtime", "States.ReferencePathConflict"] {
+            let catchers = vec![json!({"ErrorEquals": [error], "Next": "H"})];
+            assert_eq!(find_catcher(&catchers, error, true), None);
+            let retriers = vec![json!({"ErrorEquals": [error], "MaxAttempts": 1})];
+            assert_eq!(should_retry(&retriers, error, 0, true), None);
+        }
+        let catchers = vec![json!({"ErrorEquals": ["States.DataLimitExceeded"], "Next": "H"})];
+        assert!(find_catcher(&catchers, "States.DataLimitExceeded", true).is_some());
     }
 
     // M2: States.ALL must NOT catch States.Runtime or States.DataLimitExceeded.

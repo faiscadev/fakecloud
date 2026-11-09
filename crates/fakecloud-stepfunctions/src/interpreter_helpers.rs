@@ -283,6 +283,7 @@ pub(crate) fn run_states<'a>(
             let advance = settle_advance(
                 advance,
                 &entry,
+                attempt,
                 state_type,
                 jsonata_state.then_some(&state_input),
                 jsonata_ctx.as_ref(),
@@ -399,9 +400,11 @@ pub(crate) fn fail_own(
 /// assignments, and the catcher's `Assign` and (in JSONata) `Output` apply. The
 /// state exits once they have, with what the catcher produced, as recorded; a
 /// failure in them is the execution's.
+#[allow(clippy::too_many_arguments)]
 fn settle_advance(
     advance: Advance,
     entry: &StateEntry<'_>,
+    attempt: u32,
     state_type: &str,
     jsonata_input: Option<&Value>,
     jsonata_ctx: Option<&Value>,
@@ -421,7 +424,7 @@ fn settle_advance(
                     true,
                 ),
                 _ => {
-                    let ctx = entry.context(shared_state, execution_arn, 0);
+                    let ctx = entry.context(shared_state, execution_arn, attempt);
                     crate::variables::assign_jsonpath(
                         caught.catcher.get("Assign"),
                         &caught.error_output,
@@ -712,8 +715,21 @@ fn fail_field(
         crate::intrinsics::evaluate_with_context(path, input, Some(ctx))
             .map_err(|e| e.into_states_error(path))?
     } else {
-        crate::io_processing::resolve_with_context(input, Some(ctx), path).map_err(|_| {
-            let scope = if path.starts_with("$$") { ctx } else { input };
+        crate::io_processing::resolve_with_context(input, Some(ctx), path).map_err(|error| {
+            // A variable reference reads within the variable; one that isn't
+            // defined says so.
+            let variable = crate::variables::split_reference(path)
+                .map(|(name, _)| crate::variables::lookup(name));
+            let scope = match &variable {
+                Some(Some(value)) => value,
+                Some(None) => {
+                    return crate::io_processing::runtime_error(
+                        crate::io_processing::path_error_cause(path, &error),
+                    )
+                }
+                None if path.starts_with("$$") => ctx,
+                None => input,
+            };
             (
                 "States.Runtime".to_string(),
                 format!(

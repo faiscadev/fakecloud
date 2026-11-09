@@ -287,6 +287,9 @@ pub(crate) fn failed_field(cause: &str) -> Option<&str> {
     if cause.starts_with("Seconds ") {
         return Some("Seconds");
     }
+    if let Some((field, _)) = cause.split_once(" cannot be negative") {
+        return Some(field);
+    }
     // `The Timestamp field cannot be parsed ...`, `The Seconds field ...`.
     cause
         .strip_prefix("The ")
@@ -336,6 +339,15 @@ fn prepare_wait(
                 json_type_name(&seconds)
             )));
         }
+        // A whole number beyond a 64-bit integer is a wait too long, which the
+        // Wait reports when it runs.
+        if seconds
+            .as_f64()
+            .is_some_and(|n| n.fract() == 0.0 && n > i64::MAX as f64)
+        {
+            prepared["Seconds"] = json!(u64::MAX);
+            return Ok(());
+        }
         let Some(whole) = whole_number(&seconds) else {
             return Err(query_error(format!(
                 "The Seconds field cannot be parsed as an integer: {seconds}"
@@ -351,10 +363,7 @@ fn prepare_wait(
     }
     if let Some(template) = state_def.get("Timestamp") {
         let timestamp = eval_template("Timestamp", template, scope)?;
-        let text = match &timestamp {
-            Value::String(text) => text.clone(),
-            other => other.to_string(),
-        };
+        let text = crate::io_processing::value_text(&timestamp);
         if chrono::DateTime::parse_from_rfc3339(&text).is_err() {
             return Err(query_error(format!(
                 "The Timestamp field cannot be parsed as an ISO-8601 extended offset date-time \
@@ -774,6 +783,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(two["Seconds"], 2);
+        let (huge, _) = prepare_state(
+            &json!({"Type": "Wait", "Seconds": "{% 1e30 %}"}),
+            &json!({}),
+            &json!({}),
+        )
+        .unwrap();
+        assert_eq!(huge["Seconds"], u64::MAX);
         assert_eq!(
             wait_error(json!({"Type": "Wait", "Timestamp": "{% 'not-a-date' %}"})),
             "The Timestamp field cannot be parsed as an ISO-8601 extended offset date-time \
