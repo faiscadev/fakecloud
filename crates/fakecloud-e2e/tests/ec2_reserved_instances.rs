@@ -5,8 +5,8 @@
 mod helpers;
 
 use aws_sdk_ec2::types::{
-    InstanceType, OfferingClassType, OfferingTypeValues, ReservedInstanceLimitPrice,
-    ReservedInstanceState, Scope, Tenancy,
+    DeleteQueuedReservedInstancesErrorCode, InstanceType, OfferingClassType, OfferingTypeValues,
+    ReservedInstanceLimitPrice, ReservedInstanceState, Scope, Tenancy,
 };
 use helpers::TestServer;
 
@@ -112,4 +112,101 @@ async fn an_unknown_offering_or_a_low_limit_price_is_refused() {
         .unwrap()
         .reserved_instances()
         .is_empty());
+}
+
+async fn region_offering(c: &aws_sdk_ec2::Client) -> String {
+    c.describe_reserved_instances_offerings()
+        .instance_type(InstanceType::M5Large)
+        .offering_class(OfferingClassType::Convertible)
+        .max_duration(31_536_000)
+        .send()
+        .await
+        .unwrap()
+        .reserved_instances_offerings()[0]
+        .reserved_instances_offering_id()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_queued_purchase_waits_and_can_be_deleted() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let offering = region_offering(&c).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let at = aws_smithy_types::DateTime::from_secs(now + 86_400);
+    let id = c
+        .purchase_reserved_instances_offering()
+        .reserved_instances_offering_id(&offering)
+        .instance_count(1)
+        .purchase_time(at)
+        .send()
+        .await
+        .unwrap()
+        .reserved_instances_id()
+        .unwrap()
+        .to_string();
+    let state = |id: String| {
+        let c = c.clone();
+        async move {
+            let r = c
+                .describe_reserved_instances()
+                .reserved_instances_ids(id)
+                .send()
+                .await
+                .unwrap();
+            let ri = r.reserved_instances()[0].clone();
+            (ri.state().cloned(), ri.start().map(|t| t.secs()))
+        }
+    };
+    assert_eq!(
+        state(id.clone()).await,
+        (Some(ReservedInstanceState::Queued), Some(now + 86_400))
+    );
+
+    let deleted = c
+        .delete_queued_reserved_instances()
+        .reserved_instances_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        deleted.successful_queued_purchase_deletions()[0].reserved_instances_id(),
+        Some(id.as_str())
+    );
+    assert!(deleted.failed_queued_purchase_deletions().is_empty());
+    assert_eq!(
+        state(id.clone()).await.0,
+        Some(ReservedInstanceState::QueuedDeleted)
+    );
+    let again = c
+        .delete_queued_reserved_instances()
+        .reserved_instances_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(again.successful_queued_purchase_deletions().is_empty());
+    assert_eq!(
+        again.failed_queued_purchase_deletions()[0]
+            .error()
+            .and_then(|e| e.code()),
+        Some(&DeleteQueuedReservedInstancesErrorCode::ReservedInstancesNotInQueuedState)
+    );
+
+    // A time in the past is refused.
+    let err = c
+        .purchase_reserved_instances_offering()
+        .reserved_instances_offering_id(&offering)
+        .instance_count(1)
+        .purchase_time(aws_smithy_types::DateTime::from_secs(now - 3_600))
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidParameterValue")
+    );
 }

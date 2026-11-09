@@ -1,6 +1,7 @@
 //! Reserved Instances (offerings, purchases, listings, modifications,
 //! exchange quotes) and Dedicated Hosts.
 
+use chrono::Timelike;
 use fakecloud_aws::ec2query::{ec2_elem, ec2_list};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
@@ -68,6 +69,7 @@ pub(crate) fn describe_reserved_instances(
     let wanted = indexed_list(&req.query_params, "ReservedInstancesId");
     let mut accounts = svc.state.write();
     let state = accounts.regional_mut(&req.account_id, &req.region);
+    settle_queued(state, chrono::Utc::now());
     let mut items: Vec<String> = state
         .reserved_instances
         .values()
@@ -363,10 +365,75 @@ pub(crate) fn describe_reserved_instances_offerings(
     ))
 }
 
+/// A queued purchase whose time has come is made: it reads `active` from then
+/// on, as AWS applies the reservation once the scheduled payment succeeds.
+fn settle_queued(state: &mut Ec2State, now: chrono::DateTime<chrono::Utc>) {
+    for r in state.reserved_instances.values_mut() {
+        if r.state == "queued" && parse_time(&r.start).is_some_and(|start| start <= now) {
+            r.state = "active".to_string();
+        }
+    }
+}
+
+fn parse_time(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// When a purchase is made: now, or the requested `PurchaseTime` for a queued
+/// one (`Some` only for a time still ahead).
+///
+/// Documented: only Region-scoped reservations can be queued, and at most
+/// three years ahead. Inferred, not recorded: the codes and messages, a time
+/// in the past being refused rather than bought now, and a time within the
+/// current second counting as now.
+fn queued_purchase_time(
+    raw: Option<&String>,
+    zonal: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, AwsServiceError> {
+    let Some(raw) = raw.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let at = parse_time(raw).ok_or_else(|| {
+        crate::service_helpers::invalid_parameter_value(format!(
+            "Invalid value '{raw}' for PurchaseTime. It must be a UTC timestamp \
+             (YYYY-MM-DDTHH:MM:SSZ)."
+        ))
+    })?;
+    let this_second = now.with_nanosecond(0).unwrap_or(now);
+    if at < this_second {
+        return Err(crate::service_helpers::invalid_parameter_value(format!(
+            "PurchaseTime ({raw}) must not be in the past."
+        )));
+    }
+    if at <= now {
+        return Ok(None);
+    }
+    if zonal {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "InvalidParameterCombination",
+            "A purchase can be queued only for a Reserved Instance with a scope of Region.",
+        ));
+    }
+    let horizon = now
+        .checked_add_months(chrono::Months::new(36))
+        .unwrap_or(now);
+    if at > horizon {
+        return Err(crate::service_helpers::invalid_parameter_value(format!(
+            "PurchaseTime ({raw}) must be no more than three years in the future."
+        )));
+    }
+    Ok(Some(at))
+}
+
 /// Buys `InstanceCount` of an offering DescribeReservedInstancesOfferings
-/// lists in this Region. The purchase is made at once, as AWS makes one with no
-/// `PurchaseTime`; it reads `payment-pending` until its payment settles, which
-/// here is the first DescribeReservedInstances after it (AWS gives no delay).
+/// lists in this Region. Without a `PurchaseTime` ahead the purchase is made
+/// at once, as AWS makes it; it reads `payment-pending` until its payment
+/// settles, which here is the first DescribeReservedInstances after it (AWS
+/// gives no delay). With one, it is `queued` until that time, then `active`.
 pub(crate) fn purchase_reserved_instances_offering(
     svc: &Ec2Service,
     req: &AwsRequest,
@@ -408,9 +475,11 @@ pub(crate) fn purchase_reserved_instances_offering(
             ));
         }
     }
+    let now = chrono::Utc::now();
+    let queued_at = queued_purchase_time(params.get("PurchaseTime"), offering.zone.is_some(), now)?;
     crate::service_helpers::refuse_dry_run(params)?;
     let id = uuid::Uuid::new_v4().to_string();
-    let start = chrono::Utc::now();
+    let start = queued_at.unwrap_or(now);
     let end = start + chrono::Duration::seconds(offering.duration);
     let stamp =
         |t: chrono::DateTime<chrono::Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -426,7 +495,12 @@ pub(crate) fn purchase_reserved_instances_offering(
                 availability_zone: offering.zone.clone().unwrap_or_default(),
                 instance_count: count,
                 product_description: offering.product.to_string(),
-                state: "payment-pending".to_string(),
+                state: if queued_at.is_some() {
+                    "queued"
+                } else {
+                    "payment-pending"
+                }
+                .to_string(),
                 duration: offering.duration,
                 fixed_price: FIXED_PRICE.to_string(),
                 usage_price: USAGE_PRICE.to_string(),
@@ -666,19 +740,60 @@ pub(crate) fn accept_reserved_instances_exchange_quote(
     ))
 }
 
+/// Cancels queued purchases. Each id is deleted only while still queued: it
+/// then reads `queued-deleted` and is never made. Any other is reported back
+/// per item with the modelled codes (`reserved-instances-id-invalid` for no
+/// such reservation, `reserved-instances-not-in-queued-state` for one already
+/// made or deleted); the messages are inferred.
 pub(crate) fn delete_queued_reserved_instances(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let ids = indexed_list(&req.query_params, "ReservedInstancesId");
-    let success: Vec<String> = ids
-        .iter()
-        .map(|id| ec2_elem("reservedInstancesId", id))
-        .collect();
+    if ids.is_empty() {
+        return Err(crate::service_helpers::missing_parameter(
+            "ReservedInstancesId",
+        ));
+    }
+    crate::service_helpers::refuse_dry_run(&req.query_params)?;
+    let mut accounts = svc.state.write();
+    let state = accounts.regional_mut(&req.account_id, &req.region);
+    settle_queued(state, chrono::Utc::now());
+    let mut success = Vec::new();
+    let mut failed = Vec::new();
+    for id in &ids {
+        let failure = match state.reserved_instances.get_mut(id) {
+            None => Some((
+                "reserved-instances-id-invalid",
+                format!("The Reserved Instances ID '{id}' does not exist."),
+            )),
+            Some(r) if r.state != "queued" => Some((
+                "reserved-instances-not-in-queued-state",
+                format!(
+                    "The Reserved Instances '{id}' cannot be deleted because they are in the \
+                     {} state, not queued.",
+                    r.state
+                ),
+            )),
+            Some(r) => {
+                r.state = "queued-deleted".to_string();
+                None
+            }
+        };
+        match failure {
+            None => success.push(ec2_elem("reservedInstancesId", id)),
+            Some((code, message)) => failed.push(format!(
+                "<error>{}{}</error>{}",
+                ec2_elem("code", code),
+                ec2_elem("message", &message),
+                ec2_elem("reservedInstancesId", id)
+            )),
+        }
+    }
     let body = format!(
         "{}{}",
         ec2_list("successfulQueuedPurchaseDeletionSet", &success),
-        ec2_list("failedQueuedPurchaseDeletionSet", &[])
+        ec2_list("failedQueuedPurchaseDeletionSet", &failed)
     );
     Ok(Ec2Service::respond(
         "DeleteQueuedReservedInstances",
@@ -1075,5 +1190,170 @@ mod tests {
         );
         // None of them bought anything.
         assert!(!describe(&svc).contains("<item>"));
+    }
+
+    fn region_offering(svc: &Ec2Service) -> String {
+        offering_ids(
+            svc,
+            &[
+                ("InstanceType", "m5.large"),
+                ("OfferingClass", "convertible"),
+                ("MaxDuration", "31536000"),
+            ],
+        )
+        .remove(0)
+    }
+
+    fn stamp(t: chrono::DateTime<chrono::Utc>) -> String {
+        t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    fn queue(svc: &Ec2Service, offering: &str, at: &str) -> Result<AwsResponse, AwsServiceError> {
+        purchase(
+            svc,
+            &[
+                ("ReservedInstancesOfferingId", offering),
+                ("InstanceCount", "1"),
+                ("PurchaseTime", at),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_queued_purchase_is_made_at_its_time() {
+        let svc = Ec2Service::new();
+        let offering = region_offering(&svc);
+        let at = chrono::Utc::now() + chrono::Duration::days(1);
+        let ri = body(queue(&svc, &offering, &stamp(at)));
+        let id = elems(&ri, "reservedInstancesId").remove(0);
+        let out = describe(&svc);
+        assert_eq!(elems(&out, "state"), ["queued"], "{out}");
+        let start = chrono::DateTime::parse_from_rfc3339(&elems(&out, "start")[0]).unwrap();
+        let end = chrono::DateTime::parse_from_rfc3339(&elems(&out, "end")[0]).unwrap();
+        assert_eq!(start.timestamp(), at.timestamp());
+        assert_eq!((end - start).num_seconds(), 31_536_000);
+        // Still queued on another read before its time.
+        assert_eq!(elems(&describe(&svc), "state"), ["queued"]);
+        // Once the clock reaches it, it is active.
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.regional_mut("000000000000", "us-east-1");
+            settle_queued(state, at + chrono::Duration::seconds(1));
+            assert_eq!(state.reserved_instances[&id].state, "active");
+        }
+        // A time within the current second is a purchase made now.
+        let now = chrono::Utc::now();
+        assert_eq!(
+            queued_purchase_time(Some(&stamp(now)), false, now).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_purchase_time_is_validated() {
+        let svc = Ec2Service::new();
+        let offering = region_offering(&svc);
+        let code = |r: Result<AwsResponse, AwsServiceError>| err_of(r).code().to_string();
+        let now = chrono::Utc::now();
+        assert_eq!(
+            code(queue(
+                &svc,
+                &offering,
+                &stamp(now - chrono::Duration::hours(1))
+            )),
+            "InvalidParameterValue"
+        );
+        assert_eq!(
+            code(queue(
+                &svc,
+                &offering,
+                &stamp(now + chrono::Duration::days(3 * 365 + 2))
+            )),
+            "InvalidParameterValue"
+        );
+        assert_eq!(
+            code(queue(&svc, &offering, "tomorrow")),
+            "InvalidParameterValue"
+        );
+        // Up to three years ahead is fine.
+        body(queue(
+            &svc,
+            &offering,
+            &stamp(now + chrono::Duration::days(3 * 365 - 1)),
+        ));
+        // A zonal reservation cannot be queued.
+        let zonal = offering_ids(
+            &svc,
+            &[
+                ("InstanceType", "m5.large"),
+                ("AvailabilityZone", "us-east-1a"),
+            ],
+        )
+        .remove(0);
+        assert_eq!(
+            code(queue(&svc, &zonal, &stamp(now + chrono::Duration::days(1)))),
+            "InvalidParameterCombination"
+        );
+    }
+
+    #[test]
+    fn only_queued_purchases_are_deleted() {
+        let svc = Ec2Service::new();
+        let offering = region_offering(&svc);
+        let at = chrono::Utc::now() + chrono::Duration::days(1);
+        let queued = elems(
+            &body(queue(&svc, &offering, &stamp(at))),
+            "reservedInstancesId",
+        )
+        .remove(0);
+        let made = elems(
+            &body(purchase(
+                &svc,
+                &[
+                    ("ReservedInstancesOfferingId", &offering),
+                    ("InstanceCount", "1"),
+                ],
+            )),
+            "reservedInstancesId",
+        )
+        .remove(0);
+        let delete = |ids: &[&str]| {
+            let params: Vec<(String, &str)> = ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (format!("ReservedInstancesId.{}", i + 1), *id))
+                .collect();
+            let params: Vec<(&str, &str)> = params.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            body(delete_queued_reserved_instances(
+                &svc,
+                &req("DeleteQueuedReservedInstances", &params),
+            ))
+        };
+        let out = delete(&[&queued, &made, "e5a2ff3b-7d14-494f-90af-0b5d00000000"]);
+        let (ok, failed) = out.split_once("<failedQueuedPurchaseDeletionSet>").unwrap();
+        assert_eq!(elems(ok, "reservedInstancesId"), [queued.as_str()]);
+        assert_eq!(
+            elems(failed, "code"),
+            [
+                "reserved-instances-not-in-queued-state",
+                "reserved-instances-id-invalid"
+            ]
+        );
+        assert_eq!(
+            elems(failed, "reservedInstancesId"),
+            [made.as_str(), "e5a2ff3b-7d14-494f-90af-0b5d00000000"]
+        );
+        // Deleted, it is never made, and cannot be deleted twice.
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.regional_mut("000000000000", "us-east-1");
+            settle_queued(state, at + chrono::Duration::days(1));
+            assert_eq!(state.reserved_instances[&queued].state, "queued-deleted");
+        }
+        let again = delete(&[&queued]);
+        assert_eq!(
+            elems(&again, "code"),
+            ["reserved-instances-not-in-queued-state"]
+        );
     }
 }
