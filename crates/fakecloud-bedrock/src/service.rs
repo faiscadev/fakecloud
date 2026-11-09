@@ -1741,27 +1741,15 @@ impl AwsService for BedrockService {
                         .await;
                     }
                 }
-                // Resolve the override once: the stream carries its text and
+                // Resolve the override once: the stream carries what it says and
                 // introspection records the body InvokeModel returns for the
                 // same call, so both read alike.
                 let custom =
                     crate::prompt::resolve_override(&self.state, &req, &model_id, &req.body);
-                let response_text = match &custom {
-                    Some(c) => crate::streaming::override_text(&model_id, c.clone()),
-                    None => crate::streaming::fallback_text(&model_id, &req.body),
-                };
-                let input_tokens = crate::prompt::count_tokens(
-                    &crate::prompt::extract_prompt_text(&model_id, &req.body),
-                )
-                .max(1);
-                let output_tokens = crate::prompt::count_tokens(&response_text).max(1);
-                let body = crate::streaming::build_invoke_stream_from_deltas(
+                let body = crate::streaming::build_offline_invoke_stream(
                     &model_id,
-                    std::slice::from_ref(&response_text),
-                    &[],
-                    crate::upstream::StopKind::EndTurn,
-                    input_tokens,
-                    output_tokens,
+                    &req.body,
+                    custom.as_deref(),
                 );
                 let input: serde_json::Value =
                     serde_json::from_slice(&req.body).unwrap_or_default();

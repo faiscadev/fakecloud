@@ -14,7 +14,7 @@ For the control plane (CreateAgent, knowledge bases, action groups, flows), see 
 
 - **InvokeAgent** — `POST /agents/{agentId}/agentAliases/{agentAliasId}/sessions/{sessionId}/text`. Returns `application/vnd.amazon.eventstream` with real framed events: `chunk` (assistant text), `trace` (orchestration / pre-processing / post-processing / knowledge-base lookup / action-group invocation), and optional `returnControl` (when an action group is declared `RETURN_CONTROL`).
 - **InvokeInlineAgent** — pass the agent definition in the request, no `agentId` needed. Same eventstream contract as InvokeAgent.
-- **InvokeFlow**: execute a prepared flow. Runs the flow by walking its connections, evaluating condition nodes; nodes that would call a model or service reply synthetically. Eventstream of `flowTraceEvent` with `enableTrace`, `flowOutputEvent` from each `Output` node reached, then `flowCompletionEvent`.
+- **InvokeFlow**: execute a prepared flow. Runs the flow in dependency order, so a node joining branches waits for all of them. Input expressions support the documented JsonPath subset (`$.data`, `.name`, `[int]`, `[int, int]`, `[int:int]`, `*`). Condition nodes evaluate their conditions, an iterator sends each array item through the nodes after it in turn and a collector gathers the results; nodes that would call a model or service reply synthetically. DoWhile loop nodes are refused with a `ValidationException` when reached, as are a condition naming an unknown input and a condition node with no branch to take. Eventstream of `flowTraceEvent` with `enableTrace`, `flowOutputEvent` from each `Output` node reached, once per item inside an iterator (or a synthetic `FlowOutputNode` when the definition has no `Output` node), then `flowCompletionEvent`.
 
 ### Retrieval
 
@@ -77,7 +77,7 @@ The eventstream encoder produces AWS-compliant binary frames: 12-byte prelude (t
 curl http://localhost:4566/_fakecloud/bedrock-agent-runtime/invocations
 ```
 
-Each row carries `{invocationId, op, agentId?, flowId?, sessionId?, input, output, outputChunks, trace?, citations[], invokedAt, durationMs}`. `op` is one of `invoke_agent`, `invoke_inline_agent`, `invoke_flow`, `retrieve`, `retrieve_and_generate`, `create_invocation`.
+Each row carries `{invocationId, op, agentId?, flowId?, sessionId?, input, output, outputChunks, trace?, citations[], flowOutputs[], invokedAt, durationMs}`. `flowOutputs` lists every `{nodeName, document}` an `invoke_flow` produced, empty when the run reached no output node. `op` is one of `invoke_agent`, `invoke_inline_agent`, `invoke_flow`, `retrieve`, `retrieve_and_generate`, `create_invocation`.
 
 Wrapped by `getInvocations()` on the `bedrockAgentRuntime` sub-client in every first-party SDK.
 

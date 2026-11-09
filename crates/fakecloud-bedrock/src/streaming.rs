@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 
+use crate::upstream::StopKind;
+
 /// Encode data as an AWS event-stream message.
 /// The event stream binary format:
 ///   [total_byte_length:4] [headers_byte_length:4] [prelude_crc:4]
@@ -141,6 +143,7 @@ pub(crate) fn build_converse_stream_response(
     response_text: &str,
     stop_reason: &str,
     forced_tool: Option<&str>,
+    tools: &[crate::upstream::ToolCall],
     input_tokens: u64,
     output_tokens: u64,
 ) -> Vec<u8> {
@@ -149,21 +152,34 @@ pub(crate) fn build_converse_stream_response(
     push_event(&mut body, "messageStart", &json!({ "role": "assistant" }));
 
     // A text block opens with its first delta: `ContentBlockStart` is a union
-    // with no text member, so there is nothing a start event could say.
-    push_event(
-        &mut body,
-        "contentBlockDelta",
-        &json!({ "contentBlockIndex": 0, "delta": { "text": response_text } }),
-    );
-    push_event(
-        &mut body,
-        "contentBlockStop",
-        &json!({ "contentBlockIndex": 0 }),
-    );
+    // with no text member, so there is nothing a start event could say. A reply
+    // of only tool calls has no text block.
+    let has_text = !response_text.is_empty() || tools.is_empty();
+    if has_text {
+        push_event(
+            &mut body,
+            "contentBlockDelta",
+            &json!({ "contentBlockIndex": 0, "delta": { "text": response_text } }),
+        );
+        push_event(
+            &mut body,
+            "contentBlockStop",
+            &json!({ "contentBlockIndex": 0 }),
+        );
+    }
 
     // Optional forced toolUse content block (index 1), mirroring Converse.
     if let Some(tool_name) = forced_tool {
         push_tool_use_block(&mut body, 1, "tooluse_fakecloud_01", tool_name, "{}");
+    }
+    for (offset, tool) in tools.iter().enumerate() {
+        push_tool_use_block(
+            &mut body,
+            offset + usize::from(has_text),
+            &tool.id,
+            &tool.name,
+            &tool.input.to_string(),
+        );
     }
 
     push_event(
@@ -425,22 +441,6 @@ pub(crate) fn default_stream_text() -> &'static str {
     "This is a test response from the emulated model."
 }
 
-/// Generate the canned response text, checking for prompt-conditional and
-/// legacy custom overrides for the given call. When neither is set and
-/// `FAKECLOUD_BEDROCK_ECHO=1` is exported, the caller's prompt is
-/// reflected back so streaming tests can assert against their own input.
-pub(crate) fn get_response_text(
-    state: &crate::state::SharedBedrockState,
-    req: &fakecloud_core::service::AwsRequest,
-    model_id: &str,
-    body: &[u8],
-) -> String {
-    match crate::prompt::resolve_override(state, req, model_id, body) {
-        Some(custom) => override_text(model_id, custom),
-        None => fallback_text(model_id, body),
-    }
-}
-
 /// The reply text when no override is configured: the caller's prompt in
 /// echo mode, else the canned phrase.
 pub(crate) fn fallback_text(model_id: &str, body: &[u8]) -> String {
@@ -455,21 +455,139 @@ pub(crate) fn fallback_text(model_id: &str, body: &[u8]) -> String {
     default_stream_text().to_string()
 }
 
-/// Extract the assistant text from a configured simulation override. The
-/// override may be a provider-native JSON body (Anthropic `content[].text`
-/// or Converse `output.message.content[].text`) or an opaque raw string, in
-/// which case it is returned verbatim. `model_id` is currently unused but
-/// kept for symmetry with the provider-shaped extractors.
-pub(crate) fn override_text(_model_id: &str, custom: String) -> String {
-    if let Ok(parsed) = serde_json::from_str::<Value>(&custom) {
-        if let Some(text) = parsed["content"][0]["text"].as_str() {
-            return text.to_string();
+/// What a configured override says the model replied: its text, tool calls and,
+/// when it says, why it stopped. `stop` is `None` for an opaque string, or a body
+/// naming neither a stop reason nor a tool.
+pub(crate) struct OverrideReply {
+    pub(crate) text: String,
+    pub(crate) tools: Vec<crate::upstream::ToolCall>,
+    pub(crate) stop: Option<StopKind>,
+}
+
+/// Read an override, which is the body `InvokeModel` or `Converse` would return:
+/// any provider's native shape or Converse's, or an opaque string that is the
+/// text verbatim.
+pub(crate) fn parse_override(custom: &str) -> OverrideReply {
+    use crate::upstream::ToolCall;
+
+    let opaque = || OverrideReply {
+        text: custom.to_string(),
+        tools: Vec::new(),
+        stop: None,
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(custom) else {
+        return opaque();
+    };
+    let tool = |id: &Value, name: &Value, input: &Value, ordinal: usize| ToolCall {
+        id: id
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("tooluse_fakecloud_{ordinal:02}")),
+        name: name.as_str().unwrap_or_default().to_string(),
+        input: if input.is_null() {
+            json!({})
+        } else {
+            input.clone()
+        },
+    };
+
+    let mut text = String::new();
+    let mut tools = Vec::new();
+    let reason;
+    if let Some(blocks) = parsed["content"].as_array() {
+        for block in blocks {
+            text.push_str(block["text"].as_str().unwrap_or_default());
+            if block["type"] == "tool_use" {
+                tools.push(tool(
+                    &block["id"],
+                    &block["name"],
+                    &block["input"],
+                    tools.len(),
+                ));
+            }
         }
-        if let Some(text) = parsed["output"]["message"]["content"][0]["text"].as_str() {
-            return text.to_string();
+        reason = &parsed["stop_reason"];
+    } else if let Some(blocks) = parsed["output"]["message"]["content"].as_array() {
+        for block in blocks {
+            text.push_str(block["text"].as_str().unwrap_or_default());
+            let call = &block["toolUse"];
+            if call.is_object() {
+                tools.push(tool(
+                    &call["toolUseId"],
+                    &call["name"],
+                    &call["input"],
+                    tools.len(),
+                ));
+            }
         }
+        reason = &parsed["stopReason"];
+    } else if let Some(output) = parsed["results"][0]["outputText"].as_str() {
+        text.push_str(output);
+        reason = &parsed["results"][0]["completionReason"];
+    } else if let Some(output) = parsed["generation"].as_str() {
+        text.push_str(output);
+        reason = &parsed["stop_reason"];
+    } else if let Some(output) = parsed["generations"][0]["text"].as_str() {
+        text.push_str(output);
+        reason = &parsed["generations"][0]["finish_reason"];
+    } else if let Some(output) = parsed["outputs"][0]["text"].as_str() {
+        text.push_str(output);
+        reason = &parsed["outputs"][0]["stop_reason"];
+    } else {
+        return opaque();
     }
-    custom
+    // Content that holds nothing readable (an image block, say) isn't a reply
+    // this can stream, so the body itself stays the text.
+    if text.is_empty() && tools.is_empty() && !reason.is_string() {
+        return opaque();
+    }
+    let reason = reason.as_str();
+    let stop = (reason.is_some() || !tools.is_empty())
+        .then(|| crate::upstream::normalize_stop(reason, !tools.is_empty()));
+    OverrideReply { text, tools, stop }
+}
+
+/// `InvokeModelWithResponseStream` frames for a configured override.
+pub(crate) fn build_override_stream(model_id: &str, custom: &str, input_tokens: u64) -> Vec<u8> {
+    let reply = parse_override(custom);
+    let output_tokens = crate::prompt::count_tokens(&reply.text);
+    let deltas = if reply.text.is_empty() {
+        Vec::new()
+    } else {
+        vec![reply.text]
+    };
+    build_invoke_stream_from_deltas(
+        model_id,
+        &deltas,
+        &reply.tools,
+        reply.stop.unwrap_or(StopKind::EndTurn),
+        input_tokens,
+        output_tokens,
+    )
+}
+
+/// Offline `InvokeModelWithResponseStream`: a configured override, else the same
+/// fallback reply as `InvokeModel`, with usage counted as `count_tokens` counts it.
+pub(crate) fn build_offline_invoke_stream(
+    model_id: &str,
+    body: &[u8],
+    custom: Option<&str>,
+) -> Vec<u8> {
+    let input_tokens =
+        crate::prompt::count_tokens(&crate::prompt::extract_prompt_text(model_id, body));
+    if let Some(custom) = custom {
+        return build_override_stream(model_id, custom, input_tokens);
+    }
+    let text = fallback_text(model_id, body);
+    let output_tokens = crate::prompt::count_tokens(&text);
+    build_invoke_stream_from_deltas(
+        model_id,
+        std::slice::from_ref(&text),
+        &[],
+        StopKind::EndTurn,
+        input_tokens,
+        output_tokens,
+    )
 }
 
 #[cfg(test)]
@@ -483,6 +601,19 @@ mod tests {
     use parking_lot::RwLock;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    /// The text a call replies with.
+    fn get_response_text(
+        state: &crate::state::SharedBedrockState,
+        req: &fakecloud_core::service::AwsRequest,
+        model_id: &str,
+        body: &[u8],
+    ) -> String {
+        match crate::prompt::resolve_override(state, req, model_id, body) {
+            Some(custom) => parse_override(&custom).text,
+            None => fallback_text(model_id, body),
+        }
+    }
 
     fn shared() -> crate::state::SharedBedrockState {
         let multi: MultiAccountState<BedrockState> =
@@ -509,6 +640,153 @@ mod tests {
             access_key_id: None,
             principal: None,
         }
+    }
+
+    /// The chunk payloads of an `InvokeModelWithResponseStream`.
+    fn chunks(stream: &[u8]) -> Vec<Value> {
+        frames(stream)
+            .into_iter()
+            .map(|(_, payload)| {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(payload["bytes"].as_str().unwrap())
+                    .unwrap();
+                serde_json::from_slice(&bytes).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_tool_use_override_streams_its_tool_and_stop_reason() {
+        let custom = json!({
+            "content": [
+                {"type": "text", "text": "calling"},
+                {"type": "tool_use", "id": "t1", "name": "calc", "input": {"a": 1}}
+            ],
+            "stop_reason": "tool_use"
+        })
+        .to_string();
+        let got = chunks(&build_override_stream("anthropic.claude-3", &custom, 2));
+        let text: Vec<&Value> = got
+            .iter()
+            .filter(|chunk| chunk["delta"]["type"] == "text_delta")
+            .collect();
+        assert_eq!(text.len(), 1);
+        assert_eq!(text[0]["delta"]["text"], "calling");
+        assert!(got
+            .iter()
+            .any(|chunk| chunk["content_block"]["type"] == "tool_use"
+                && chunk["content_block"]["id"] == "t1"));
+        assert!(got
+            .iter()
+            .any(|chunk| chunk["delta"]["partial_json"] == "{\"a\":1}"));
+        assert!(got
+            .iter()
+            .any(|chunk| chunk["delta"]["stop_reason"] == "tool_use"));
+    }
+
+    #[test]
+    fn a_stop_reason_in_an_override_is_honoured_for_each_family() {
+        let cases = [
+            (
+                "anthropic.claude-3",
+                r#"{"content":[{"type":"text","text":"x"}],"stop_reason":"max_tokens"}"#,
+            ),
+            (
+                "amazon.titan-text",
+                r#"{"results":[{"outputText":"x","completionReason":"LENGTH"}]}"#,
+            ),
+            (
+                "meta.llama3",
+                r#"{"generation":"x","stop_reason":"length"}"#,
+            ),
+            (
+                "cohere.command",
+                r#"{"generations":[{"text":"x","finish_reason":"MAX_TOKENS"}]}"#,
+            ),
+            (
+                "mistral.mistral",
+                r#"{"outputs":[{"text":"x","stop_reason":"length"}]}"#,
+            ),
+        ];
+        for (model, custom) in cases {
+            let reply = parse_override(custom);
+            assert_eq!(reply.text, "x", "{custom}");
+            assert_eq!(reply.stop, Some(StopKind::MaxTokens), "{custom}");
+            let stream = build_override_stream(model, custom, 1);
+            assert!(!chunks(&stream).is_empty(), "{model}");
+        }
+    }
+
+    #[test]
+    fn a_converse_shaped_override_carries_its_tools() {
+        let reply = parse_override(
+            &json!({
+                "output": {"message": {"content": [
+                    {"toolUse": {"toolUseId": "t", "name": "calc", "input": {}}}
+                ]}},
+                "stopReason": "tool_use"
+            })
+            .to_string(),
+        );
+        assert!(reply.text.is_empty());
+        assert_eq!(reply.tools[0].id, "t");
+        assert_eq!(reply.stop, Some(StopKind::ToolUse));
+    }
+
+    #[test]
+    fn an_override_without_a_readable_reply_is_opaque_text() {
+        for custom in [
+            "plain words",
+            r#"{"label":"ham"}"#,
+            r#"{"content":[{"type":"image"}]}"#,
+        ] {
+            let reply = parse_override(custom);
+            assert_eq!(reply.text, custom);
+            assert!(reply.tools.is_empty());
+            assert_eq!(reply.stop, None);
+        }
+    }
+
+    #[test]
+    fn families_without_tool_calls_end_normally_rather_than_on_a_tool_stop() {
+        let tool = crate::upstream::ToolCall {
+            id: "t".to_string(),
+            name: "calc".to_string(),
+            input: json!({}),
+        };
+        for (model, field) in [
+            ("amazon.titan-text", "completionReason"),
+            ("meta.llama3", "stop_reason"),
+            ("cohere.command", "finish_reason"),
+        ] {
+            let stream = build_invoke_stream_from_deltas(
+                model,
+                &[],
+                std::slice::from_ref(&tool),
+                StopKind::ToolUse,
+                1,
+                1,
+            );
+            let last = chunks(&stream).pop().unwrap();
+            let stop = last[field].as_str().unwrap();
+            assert!(
+                matches!(stop, "FINISH" | "stop" | "COMPLETE"),
+                "{model}: {stop}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_text_counts_no_tokens_in_a_stream() {
+        let stream = build_override_stream("anthropic.claude-3", "", 0);
+        let got = chunks(&stream);
+        assert_eq!(got[0]["message"]["usage"]["input_tokens"], 0);
+        let delta = got.iter().find(|c| c["type"] == "message_delta").unwrap();
+        assert_eq!(delta["usage"]["output_tokens"], 0);
+
+        let offline = build_offline_invoke_stream("anthropic.claude-3", b"{}", Some(""));
+        assert_eq!(chunks(&offline)[0]["message"]["usage"]["input_tokens"], 0);
     }
 
     /// Parse prelude to verify framing and sizes.
@@ -576,7 +854,7 @@ mod tests {
 
     #[test]
     fn converse_stream_payloads_are_the_events_own_members() {
-        let out = build_converse_stream_response("hello world", "end_turn", None, 5, 7);
+        let out = build_converse_stream_response("hello world", "end_turn", None, &[], 5, 7);
         assert_eq!(
             frames(&out),
             vec![
@@ -606,7 +884,7 @@ mod tests {
 
     #[test]
     fn converse_stream_forced_tool_block_has_the_modeled_shape() {
-        let out = build_converse_stream_response("", "tool_use", Some("calculator"), 3, 0);
+        let out = build_converse_stream_response("", "tool_use", Some("calculator"), &[], 3, 0);
         let frames = frames(&out);
         let start = frames
             .iter()
@@ -775,7 +1053,7 @@ mod tests {
 
     #[test]
     fn build_converse_stream_response_emits_dynamic_token_counts() {
-        let out = build_converse_stream_response("text", "end_turn", None, 42, 7);
+        let out = build_converse_stream_response("text", "end_turn", None, &[], 42, 7);
         let s = String::from_utf8_lossy(&out);
         assert!(s.contains("\"inputTokens\":42"));
         assert!(s.contains("\"outputTokens\":7"));

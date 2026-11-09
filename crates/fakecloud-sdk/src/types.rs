@@ -1393,6 +1393,9 @@ pub struct BedrockAgentRuntimeInvocation {
     pub trace: Option<serde_json::Value>,
     #[serde(default)]
     pub citations: Vec<serde_json::Value>,
+    /// Every output an `InvokeFlow` produced, as `{nodeName, document}`.
+    #[serde(default)]
+    pub flow_outputs: Vec<serde_json::Value>,
     pub invoked_at: String,
     pub duration_ms: u64,
 }

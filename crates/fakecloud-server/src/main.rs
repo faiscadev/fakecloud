@@ -5575,7 +5575,6 @@ async fn main() {
                     fakecloud_bedrock::guardrails::check_text(
                         &bedrock_state,
                         check.account_id,
-                        check.region,
                         check.guardrail_id,
                         check.guardrail_version,
                         check.source,
@@ -12317,6 +12316,7 @@ async fn main() {
                                 "outputChunks": inv.output_chunks,
                                 "trace": inv.trace,
                                 "citations": inv.citations,
+                                "flowOutputs": inv.flow_outputs,
                                 "invokedAt": inv.timestamp.to_rfc3339(),
                                 "durationMs": inv.duration_ms,
                             }));

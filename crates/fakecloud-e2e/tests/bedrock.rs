@@ -2957,6 +2957,93 @@ async fn bedrock_converse_stream_text_matches_converse() {
     assert_eq!(&delta_text(&events), text);
 }
 
+/// A configured override that calls a tool streams that call and its stop reason,
+/// on both stream operations, rather than its JSON as text.
+#[tokio::test]
+async fn bedrock_streams_honor_an_overrides_tool_use_and_stop_reason() {
+    use aws_sdk_bedrockruntime::types::{
+        ContentBlockDelta, ContentBlockStart, ConverseStreamOutput, ResponseStream, StopReason,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+    let fc = fakecloud_sdk::FakeCloud::new(server.endpoint());
+    fc.bedrock()
+        .set_response_rules(
+            STREAM_MODEL,
+            &[fakecloud_sdk::types::BedrockResponseRule {
+                prompt_contains: None,
+                response: serde_json::json!({
+                    "content": [
+                        {"type": "text", "text": "checking"},
+                        {"type": "tool_use", "id": "t1", "name": "calc", "input": {"a": 1}}
+                    ],
+                    "stop_reason": "tool_use"
+                })
+                .to_string(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let converse = client
+        .converse_stream()
+        .model_id(STREAM_MODEL)
+        .messages(user_message("hello"))
+        .send()
+        .await
+        .unwrap();
+    let events = collect_converse_stream(converse).await;
+    assert_eq!(delta_text(&events), "checking");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ConverseStreamOutput::ContentBlockStart(start)
+            if matches!(start.start(), Some(ContentBlockStart::ToolUse(tool))
+                if tool.tool_use_id() == "t1" && tool.name() == "calc")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ConverseStreamOutput::ContentBlockDelta(delta)
+            if matches!(delta.delta(), Some(ContentBlockDelta::ToolUse(tool))
+                if tool.input() == "{\"a\":1}")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ConverseStreamOutput::MessageStop(stop) if stop.stop_reason() == &StopReason::ToolUse
+    )));
+
+    let body = serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+    let invoke = client
+        .invoke_model_with_response_stream()
+        .model_id(STREAM_MODEL)
+        .content_type("application/json")
+        .body(Blob::new(serde_json::to_vec(&body).unwrap()))
+        .send()
+        .await
+        .unwrap();
+    let mut stream = invoke.body;
+    let mut chunks: Vec<serde_json::Value> = Vec::new();
+    while let Some(event) = stream.recv().await.expect("chunk must decode") {
+        let ResponseStream::Chunk(part) = event else {
+            panic!("unexpected stream event {event:?}");
+        };
+        chunks.push(serde_json::from_slice(part.bytes().unwrap().as_ref()).unwrap());
+    }
+    assert!(chunks
+        .iter()
+        .any(|chunk| chunk["content_block"]["id"] == "t1"));
+    assert!(chunks
+        .iter()
+        .any(|chunk| chunk["delta"]["stop_reason"] == "tool_use"));
+    assert!(!chunks.iter().any(|chunk| chunk["delta"]["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("tool_use"))));
+}
+
 #[tokio::test]
 async fn bedrock_converse_stream_sdk_decodes_forced_tool_use() {
     use aws_sdk_bedrockruntime::types::{

@@ -1,5 +1,6 @@
 pub mod arns;
 pub(crate) mod eventstream;
+pub(crate) mod flow_expression;
 pub(crate) mod flow_run;
 mod flows;
 pub(crate) mod service;

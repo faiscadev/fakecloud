@@ -76,7 +76,6 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 /// What a guardrail is asked to check.
 pub struct GuardrailRequest<'a> {
     pub account_id: &'a str,
-    pub region: &'a str,
     pub guardrail_id: &'a str,
     pub guardrail_version: &'a str,
     /// `INPUT` or `OUTPUT`.
@@ -772,6 +771,7 @@ async fn handle_invoke_agent(
             output_chunks: 1,
             trace: None,
             citations: Vec::new(),
+            flow_outputs: Vec::new(),
             timestamp: Utc::now(),
             duration_ms: start.elapsed().as_millis() as u64,
         });
@@ -807,8 +807,8 @@ fn validated_flow_input(body: &Value) -> Result<&Value, AwsServiceError> {
     if !input["nodeName"].is_string() {
         return Err(validation("inputs.nodeName is required"));
     }
-    if !input["nodeOutputName"].is_string() {
-        return Err(validation("inputs.nodeOutputName is required"));
+    if !input["nodeOutputName"].is_null() && !input["nodeOutputName"].is_string() {
+        return Err(validation("inputs.nodeOutputName must be a string"));
     }
     if input["content"]["document"].is_null() {
         return Err(validation("inputs.content.document is required"));
@@ -852,7 +852,13 @@ async fn handle_invoke_flow(
         other => other.to_string(),
     };
     let start_node = first_input["nodeName"].as_str().unwrap_or_default();
-    let start_output = first_input["nodeOutputName"].as_str().unwrap_or_default();
+    let start_output = first_input["nodeOutputName"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            crate::flow_run::default_input_output(flow.definition.as_ref(), start_node)
+        });
+    let start_output = start_output.as_str();
     crate::flow_run::validate_input(flow.definition.as_ref(), start_node, start_output)
         .map_err(|message| validation(&message))?;
 
@@ -902,9 +908,14 @@ async fn handle_invoke_flow(
             session_id: None,
             input: input.clone(),
             output: document.clone(),
-            output_chunks: 1,
+            output_chunks: flow_result.outputs.len() as u32,
             trace: None,
             citations: Vec::new(),
+            flow_outputs: flow_result
+                .outputs
+                .iter()
+                .map(|(node, value)| json!({ "nodeName": node, "document": value }))
+                .collect(),
             timestamp: Utc::now(),
             duration_ms: start.elapsed().as_millis() as u64,
         });
@@ -986,6 +997,7 @@ async fn handle_invoke_inline_agent(
             output_chunks: 1,
             trace: None,
             citations: Vec::new(),
+            flow_outputs: Vec::new(),
             timestamp: Utc::now(),
             duration_ms: start.elapsed().as_millis() as u64,
         });
@@ -1109,6 +1121,7 @@ async fn handle_retrieve(
             output_chunks: 1,
             trace: Some(json!({ "knowledgeBaseId": kb_id })),
             citations: Vec::new(),
+            flow_outputs: Vec::new(),
             timestamp: Utc::now(),
             duration_ms: start.elapsed().as_millis() as u64,
         });
@@ -1174,6 +1187,7 @@ async fn handle_retrieve_and_generate(
             output_chunks: 1,
             trace: None,
             citations: citations.clone(),
+            flow_outputs: Vec::new(),
             timestamp: Utc::now(),
             duration_ms: start.elapsed().as_millis() as u64,
         });
@@ -1267,7 +1281,6 @@ fn rag_answer(
     for (source, content) in [("INPUT", query), ("OUTPUT", text.as_str())] {
         let verdict = check(&GuardrailRequest {
             account_id: &req.account_id,
-            region: &req.region,
             guardrail_id: id,
             guardrail_version: version,
             source,
@@ -1338,6 +1351,7 @@ async fn handle_retrieve_and_generate_stream(
             output_chunks: 1,
             trace: None,
             citations: citations.clone(),
+            flow_outputs: Vec::new(),
             timestamp: Utc::now(),
             duration_ms: 0,
         });

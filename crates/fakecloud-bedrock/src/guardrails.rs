@@ -370,61 +370,68 @@ pub(crate) fn create_guardrail_version(
     ))
 }
 
-/// Handle the ApplyGuardrail API — evaluate content against a guardrail.
+/// A guardrail's DRAFT or numbered version, as content evaluation sees it.
+fn guardrail_view<'a>(
+    state: &'a crate::state::BedrockState,
+    guardrail_id: &str,
+    guardrail_version: &str,
+) -> Option<GuardrailView<'a>> {
+    if guardrail_version == "DRAFT" {
+        state
+            .guardrails
+            .get(guardrail_id)
+            .map(GuardrailView::from_guardrail)
+    } else {
+        state
+            .guardrail_versions
+            .get(&(guardrail_id.to_string(), guardrail_version.to_string()))
+            .map(GuardrailView::from_version)
+    }
+}
+
+fn guardrail_not_found(guardrail_id: &str, guardrail_version: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::NOT_FOUND,
+        "ResourceNotFoundException",
+        format!("Guardrail {guardrail_id} version {guardrail_version} not found"),
+    )
+}
+
+/// What a guardrail decides about `text`: the assessments that fired, and the
+/// message to answer with when any did.
+fn evaluate(view: &GuardrailView<'_>, source: &str, text: &str) -> (Vec<Value>, Option<String>) {
+    let assessments = evaluate_content_view(view, text);
+    if assessments.is_empty() {
+        return (assessments, None);
+    }
+    let message = if source == "INPUT" {
+        view.blocked_input_messaging
+    } else {
+        view.blocked_outputs_messaging
+    };
+    (assessments, Some(message.to_string()))
+}
+
 /// Evaluate `text` against a guardrail for another service: `Some` with the text
 /// to reply with when the guardrail intervened.
 pub fn check_text(
     state: &SharedBedrockState,
     account_id: &str,
-    region: &str,
     guardrail_id: &str,
     guardrail_version: &str,
     source: &str,
     text: &str,
 ) -> Result<Option<String>, AwsServiceError> {
-    let body = json!({ "content": [{ "text": { "text": text } }], "source": source }).to_string();
-    let req = AwsRequest {
-        service: "bedrock".to_string(),
-        action: "ApplyGuardrail".to_string(),
-        region: region.to_string(),
-        account_id: account_id.to_string(),
-        request_id: uuid::Uuid::new_v4().to_string(),
-        headers: http::HeaderMap::new(),
-        query_params: std::collections::HashMap::new(),
-        body: bytes::Bytes::new(),
-        body_stream: parking_lot::Mutex::new(None),
-        path_segments: Vec::new(),
-        raw_path: "/".to_string(),
-        raw_query: String::new(),
-        method: http::Method::POST,
-        is_query_protocol: false,
-        access_key_id: None,
-        principal: None,
-    };
-    let response = apply_guardrail(
-        state,
-        &req,
-        guardrail_id,
-        guardrail_version,
-        body.as_bytes(),
-    )?;
-    let parsed: Value = match &response.body {
-        fakecloud_core::service::ResponseBody::Bytes(bytes) => {
-            serde_json::from_slice(bytes).unwrap_or_default()
-        }
-        fakecloud_core::service::ResponseBody::File { .. } => Value::Null,
-    };
-    if parsed["action"] != "GUARDRAIL_INTERVENED" {
-        return Ok(None);
-    }
-    Ok(Some(
-        parsed["outputs"][0]["text"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-    ))
+    let guardrail_id = guardrail_key(guardrail_id);
+    let accounts = state.read();
+    let view = accounts
+        .get(account_id)
+        .and_then(|s| guardrail_view(s, guardrail_id, guardrail_version))
+        .ok_or_else(|| guardrail_not_found(guardrail_id, guardrail_version))?;
+    Ok(evaluate(&view, source, text).1)
 }
 
+/// Handle the ApplyGuardrail API: evaluate content against a guardrail.
 pub(crate) fn apply_guardrail(
     state: &SharedBedrockState,
     req: &AwsRequest,
@@ -441,22 +448,8 @@ pub(crate) fn apply_guardrail(
 
     // Borrow a GuardrailView over DRAFT or a numbered version, avoiding
     // the 13-field clone needed to synthesize a temporary Guardrail.
-    let not_found_err = || {
-        AwsServiceError::aws_error(
-            StatusCode::NOT_FOUND,
-            "ResourceNotFoundException",
-            format!("Guardrail {guardrail_id} version {guardrail_version} not found"),
-        )
-    };
-
-    let view = if guardrail_version == "DRAFT" {
-        let g = s.guardrails.get(guardrail_id).ok_or_else(not_found_err)?;
-        GuardrailView::from_guardrail(g)
-    } else {
-        let key = (guardrail_id.to_string(), guardrail_version.to_string());
-        let gv = s.guardrail_versions.get(&key).ok_or_else(not_found_err)?;
-        GuardrailView::from_version(gv)
-    };
+    let view = guardrail_view(s, guardrail_id, guardrail_version)
+        .ok_or_else(|| guardrail_not_found(guardrail_id, guardrail_version))?;
 
     // Extract text from content blocks
     // Content blocks can be: {"text": {"text": "..."}} (GuardrailTextBlock union variant)
@@ -477,20 +470,15 @@ pub(crate) fn apply_guardrail(
         }
     }
 
-    let assessments = evaluate_content_view(&view, &all_text);
-    let action = if assessments.is_empty() {
-        "NONE"
-    } else {
+    let source = input["source"].as_str().unwrap_or("INPUT");
+    let (assessments, blocked) = evaluate(&view, source, &all_text);
+    let action = if blocked.is_some() {
         "GUARDRAIL_INTERVENED"
+    } else {
+        "NONE"
     };
 
-    let source = input["source"].as_str().unwrap_or("INPUT");
-    let outputs = if action == "GUARDRAIL_INTERVENED" {
-        let msg = if source == "INPUT" {
-            view.blocked_input_messaging
-        } else {
-            view.blocked_outputs_messaging
-        };
+    let outputs = if let Some(msg) = blocked {
         vec![json!({"text": msg})]
     } else {
         content_blocks
@@ -1178,9 +1166,7 @@ mod tests {
             .default_mut()
             .guardrails
             .insert("g".to_string(), g);
-        let check = |text: &str, id: &str| {
-            check_text(&state, account, "us-east-1", id, "DRAFT", "INPUT", text)
-        };
+        let check = |text: &str, id: &str| check_text(&state, account, id, "DRAFT", "INPUT", text);
         assert_eq!(check("fine", "g").unwrap(), None);
         assert!(check("this is forbidden", "g")
             .unwrap()

@@ -574,6 +574,7 @@ async fn invoke_flow_validates_its_input() {
         serde_json::json!([]),
         serde_json::json!([{"nodeName": "Input"}]),
         serde_json::json!([{"nodeName": "Input", "nodeOutputName": "document"}]),
+        serde_json::json!([{"nodeName": "Input", "nodeOutputName": 1, "content": {"document": "x"}}]),
         serde_json::json!([{"nodeName": "Nope", "nodeOutputName": "document", "content": {"document": "x"}}]),
     ] {
         let response = http
@@ -586,6 +587,150 @@ async fn invoke_flow_validates_its_input() {
             .unwrap();
         assert_eq!(response.status(), 400, "{inputs}");
     }
+}
+
+/// A flow of `Input -> Iterator -> Output`, with the node inputs' expressions.
+fn iterating_flow(array_expression: &str) -> serde_json::Value {
+    let data = |source: &str, output: &str, target: &str, input: &str| {
+        serde_json::json!({
+            "name": format!("{source}To{target}"),
+            "type": "Data",
+            "source": source,
+            "target": target,
+            "configuration": {"data": {"sourceOutput": output, "targetInput": input}}
+        })
+    };
+    serde_json::json!({
+        "nodes": [
+            {"name": "Input", "type": "Input", "configuration": {"input": {}},
+             "outputs": [{"name": "document", "type": "Object"}]},
+            {"name": "Each", "type": "Iterator", "configuration": {"iterator": {}},
+             "inputs": [{"name": "array", "type": "Array", "expression": array_expression}],
+             "outputs": [{"name": "arrayItem", "type": "String"}, {"name": "arraySize", "type": "Number"}]},
+            {"name": "End", "type": "Output", "configuration": {"output": {}},
+             "inputs": [{"name": "document", "type": "String", "expression": "$.data"}]}
+        ],
+        "connections": [
+            data("Input", "document", "Each", "array"),
+            data("Each", "arrayItem", "End", "document")
+        ]
+    })
+}
+
+#[tokio::test]
+async fn invoke_flow_iterates_and_introspection_lists_every_output() {
+    let server = TestServer::start().await;
+    let endpoint = server.endpoint().to_string();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+    let http = reqwest::Client::new();
+    let agent = server.bedrock_agent_client().await;
+    let prepare = |flow_id: String| {
+        let agent = agent.clone();
+        async move {
+            agent
+                .prepare_flow()
+                .flow_identifier(flow_id)
+                .send()
+                .await
+                .expect("prepare flow");
+        }
+    };
+
+    let create = |name: &str, expression: &str| {
+        http.post(format!("{endpoint}/flows/"))
+            .header("content-type", "application/json")
+            .header("authorization", auth)
+            .body(
+                serde_json::json!({
+                    "name": name,
+                    "executionRoleArn": ROLE,
+                    "definition": iterating_flow(expression),
+                })
+                .to_string(),
+            )
+            .send()
+    };
+    let created: serde_json::Value = create("iterating", "$.data.items[1:]")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let flow_id = created["id"].as_str().unwrap();
+    prepare(flow_id.to_string()).await;
+
+    // nodeOutputName is optional on FlowInput.
+    let response = http
+        .post(format!("{endpoint}/flows/{flow_id}/aliases/TSTALIASID"))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(
+            serde_json::json!({"inputs": [{
+                "nodeName": "Input",
+                "content": {"document": {"items": ["skip", "a", "b"]}}
+            }]})
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let events = decode_events(&response.bytes().await.unwrap());
+    let outputs: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|(kind, _)| kind == "flowOutputEvent")
+        .map(|(_, payload)| &payload["content"]["document"])
+        .collect();
+    assert_eq!(outputs, ["a", "b"]);
+
+    let rows: serde_json::Value = http
+        .get(format!(
+            "{endpoint}/_fakecloud/bedrock-agent-runtime/invocations"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = &rows["invocations"][0];
+    assert_eq!(row["outputChunks"], 2);
+    assert_eq!(
+        row["flowOutputs"],
+        serde_json::json!([
+            {"nodeName": "End", "document": "a"},
+            {"nodeName": "End", "document": "b"}
+        ])
+    );
+
+    // A malformed expression is refused rather than running on null.
+    let created: serde_json::Value = create("malformed", "$.database")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    prepare(created["id"].as_str().unwrap().to_string()).await;
+    let response = http
+        .post(format!(
+            "{endpoint}/flows/{}/aliases/TSTALIASID",
+            created["id"].as_str().unwrap()
+        ))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(
+            serde_json::json!({"inputs": [{
+                "nodeName": "Input",
+                "content": {"document": {"items": []}}
+            }]})
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let error = response.text().await.unwrap();
+    assert!(error.contains("not valid"), "{error}");
 }
 
 /// Each event-stream frame's `:event-type` and JSON payload.
