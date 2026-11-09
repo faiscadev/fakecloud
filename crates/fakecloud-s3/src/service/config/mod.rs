@@ -160,6 +160,7 @@ mod bucket_inventory;
 mod cors;
 pub(crate) use cors::validate_cors_xml;
 mod encryption;
+pub(crate) use encryption::validate_bucket_encryption_xml;
 mod intelligent_tiering;
 mod lifecycle;
 mod logging;

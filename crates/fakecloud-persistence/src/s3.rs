@@ -77,6 +77,11 @@ pub struct BucketMeta {
     /// whose GetBucketLocation still reports `EU`).
     #[serde(default)]
     pub legacy_eu_location: bool,
+    /// Created with the defaults S3 gives new buckets (ACLs disabled, Block
+    /// Public Access on, SSE-S3 with SSE-C blocked). Absent in metadata
+    /// written by older builds, which reads as a bucket from before them.
+    #[serde(default)]
+    pub new_bucket_defaults: bool,
 }
 
 fn default_time() -> DateTime<Utc> {

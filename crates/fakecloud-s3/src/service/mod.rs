@@ -3268,6 +3268,18 @@ pub(crate) const BUCKET_CANNED_ACLS: [&str; 8] = [
 /// (`com.amazonaws.s3#BucketCannedACL` omits it), so the bucket-side question
 /// never has this answer. The header is still accepted on a bucket, resolving to
 /// the owner's FULL_CONTROL, which is what S3 ignoring it produces.
+/// Whether a bucket created with canned ACL `acl` needs an `acl.toml`.
+///
+/// `private` grants the owner FULL_CONTROL and nobody else, and
+/// `aws-exec-read` resolves to the same here (its READ grant to the EC2
+/// service's canonical user is not modeled): exactly the grant the loader
+/// reconstructs for a bucket with no sidecar. Writing one would record an
+/// explicit ACL the bucket does not have. Shared by CreateBucket and the
+/// CloudFormation `AccessControl` property.
+pub(crate) fn canned_acl_needs_sidecar(acl: &str) -> bool {
+    !matches!(acl, "private" | "aws-exec-read")
+}
+
 pub(crate) fn acl_reaches_past_owner(acl: &str, owner_id: &str) -> bool {
     acl == "aws-exec-read"
         || !canned_acl_grants(acl, owner_id).iter().all(|g| {

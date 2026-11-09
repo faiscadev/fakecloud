@@ -2021,13 +2021,14 @@ fn bucket_encryption_put_get_delete_round_trip() {
     assert!(body.contains("AES256"));
     assert!(body.contains("<BucketKeyEnabled>false</BucketKeyEnabled>"));
 
-    // Deleting resets to the SSE-S3 default (SSE-C blocked) rather than
-    // leaving the bucket without default encryption.
+    // Deleting resets to the bucket's SSE-S3 default rather than leaving it
+    // without default encryption. `seed_bucket` builds a bucket from before
+    // the new-bucket defaults, whose default is plain SSE-S3.
     let del = svc.delete_bucket_encryption("123456789012", "b").unwrap();
     assert_eq!(del.status, StatusCode::NO_CONTENT);
     let get = svc.get_bucket_encryption("123456789012", "b").unwrap();
     let body = std::str::from_utf8(get.body.expect_bytes()).unwrap();
-    assert_eq!(body, crate::state::DEFAULT_BUCKET_ENCRYPTION_XML);
+    assert_eq!(body, crate::state::LEGACY_BUCKET_ENCRYPTION_XML);
 }
 
 #[test]
@@ -12646,4 +12647,63 @@ fn encryption_blocks_sse_c_reads_only_the_blocked_list() {
     assert!(!encryption_blocks_sse_c(
         "<Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule>"
     ));
+}
+
+#[test]
+fn create_bucket_answers_for_an_existing_name_before_judging_its_acl() {
+    let svc = make_service();
+    create_plain(&svc, "taken");
+    // Same owner, us-east-1: the re-create is the idempotent 200 whatever ACL
+    // it asks for, not an ownership or Block Public Access refusal.
+    for acl in ["public-read", "log-delivery-write"] {
+        let mut again = make_request(Method::PUT, "/taken", &[], b"");
+        again.headers.insert("x-amz-acl", acl.parse().unwrap());
+        let resp = svc.create_bucket("123456789012", &again, "taken").unwrap();
+        assert_eq!(resp.status, StatusCode::OK, "{acl}");
+    }
+    // Another account: the name is taken.
+    let mut other = make_request(Method::PUT, "/taken", &[], b"");
+    other
+        .headers
+        .insert("x-amz-acl", "public-read".parse().unwrap());
+    assert_aws_err(
+        svc.create_bucket("222222222222", &other, "taken"),
+        "BucketAlreadyExists",
+    );
+    // Same owner in another region: BucketAlreadyOwnedByYou.
+    let mut elsewhere = make_request(
+        Method::PUT,
+        "/taken",
+        &[],
+        b"<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>",
+    );
+    elsewhere.region = "eu-west-1".to_string();
+    elsewhere
+        .headers
+        .insert("x-amz-acl", "public-read".parse().unwrap());
+    assert_aws_err(
+        svc.create_bucket("123456789012", &elsewhere, "taken"),
+        "BucketAlreadyOwnedByYou",
+    );
+}
+
+#[test]
+fn delete_bucket_encryption_resets_to_the_bucket_own_default() {
+    let svc = make_service();
+    // A bucket from before the new-bucket defaults (as loaded from an older
+    // snapshot) resets to plain SSE-S3, SSE-C allowed.
+    seed_bucket(&svc, "legacy");
+    svc.delete_bucket_encryption("123456789012", "legacy")
+        .unwrap();
+    let legacy = body_of(svc.get_bucket_encryption("123456789012", "legacy").unwrap());
+    assert_eq!(legacy, crate::state::LEGACY_BUCKET_ENCRYPTION_XML);
+    // A new bucket resets to SSE-S3 with SSE-C blocked.
+    create_plain(&svc, "fresh-reset");
+    svc.delete_bucket_encryption("123456789012", "fresh-reset")
+        .unwrap();
+    let fresh = body_of(
+        svc.get_bucket_encryption("123456789012", "fresh-reset")
+            .unwrap(),
+    );
+    assert_eq!(fresh, crate::state::DEFAULT_BUCKET_ENCRYPTION_XML);
 }

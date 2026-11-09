@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::checksum::{ChecksumAlgorithm, ChecksumType};
 
 /// An ACL grant entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AclGrant {
     pub grantee_type: String, // "CanonicalUser" or "Group"
     pub grantee_id: Option<String>,
@@ -226,6 +226,11 @@ pub struct S3Bucket {
     /// eu-west-1 (where AWS places the bucket) while GetBucketLocation keeps
     /// answering `EU`, as it does on AWS.
     pub legacy_eu_location: bool,
+    /// Created with the defaults S3 applies to new buckets (see
+    /// [`S3Bucket::apply_new_bucket_defaults`]). Decides which default
+    /// encryption the bucket falls back to: a bucket from before them reads
+    /// back, and resets on DeleteBucketEncryption, to plain SSE-S3.
+    pub new_bucket_defaults: bool,
 }
 
 impl S3Bucket {
@@ -273,6 +278,7 @@ impl S3Bucket {
             metadata_configuration: None,
             metadata_table_configuration: None,
             legacy_eu_location: false,
+            new_bucket_defaults: false,
         }
     }
 
@@ -286,9 +292,45 @@ impl S3Bucket {
     /// persisted by an older build must come back with exactly the settings it
     /// was stored with: AWS did not apply these defaults to existing buckets.
     pub fn apply_new_bucket_defaults(&mut self) {
+        self.new_bucket_defaults = true;
         self.ownership_controls = Some(ownership_controls_xml(DEFAULT_OBJECT_OWNERSHIP));
         self.public_access_block = Some(DEFAULT_PUBLIC_ACCESS_BLOCK_XML.to_string());
-        self.encryption_config = Some(DEFAULT_BUCKET_ENCRYPTION_XML.to_string());
+        self.encryption_config = Some(self.default_encryption_xml().to_string());
+    }
+
+    /// The default encryption this bucket has when none is configured, and
+    /// what DeleteBucketEncryption resets it to: SSE-S3 with SSE-C blocked
+    /// for a bucket created with the new-bucket defaults, plain SSE-S3 for
+    /// one from before them.
+    pub fn default_encryption_xml(&self) -> &'static str {
+        if self.new_bucket_defaults {
+            DEFAULT_BUCKET_ENCRYPTION_XML
+        } else {
+            LEGACY_BUCKET_ENCRYPTION_XML
+        }
+    }
+
+    /// The three create-time settings and the subresource each persists as,
+    /// in the state the bucket holds them. Both creation paths (CreateBucket
+    /// and CloudFormation) write exactly these after applying their overrides.
+    pub fn new_bucket_settings(
+        &self,
+    ) -> [(fakecloud_persistence::BucketSubresource, Option<&str>); 3] {
+        use fakecloud_persistence::BucketSubresource;
+        [
+            (
+                BucketSubresource::Ownership,
+                self.ownership_controls.as_deref(),
+            ),
+            (
+                BucketSubresource::PublicAccessBlock,
+                self.public_access_block.as_deref(),
+            ),
+            (
+                BucketSubresource::Encryption,
+                self.encryption_config.as_deref(),
+            ),
+        ]
     }
 }
 
@@ -342,27 +384,11 @@ pub fn ownership_controls_xml(ownership: &str) -> String {
 
 /// Whether a stored default-encryption document blocks SSE-C uploads.
 pub fn encryption_blocks_sse_c(xml: &str) -> bool {
-    let mut rest = xml;
-    while let Some(start) = rest.find("<BlockedEncryptionTypes>") {
-        let after = &rest[start + "<BlockedEncryptionTypes>".len()..];
-        let end = after
-            .find("</BlockedEncryptionTypes>")
-            .unwrap_or(after.len());
-        let block = &after[..end];
-        let mut values = block;
-        while let Some(s) = values.find("<EncryptionType>") {
-            let v = &values[s + "<EncryptionType>".len()..];
-            let Some(e) = v.find("</EncryptionType>") else {
-                break;
-            };
-            if v[..e].trim() == "SSE-C" {
-                return true;
-            }
-            values = &v[e..];
-        }
-        rest = &after[end..];
-    }
-    false
+    use crate::service::notifications::extract_all_xml_values;
+    extract_all_xml_values(xml, "BlockedEncryptionTypes")
+        .iter()
+        .flat_map(|block| extract_all_xml_values(block, "EncryptionType"))
+        .any(|v| v.trim() == "SSE-C")
 }
 
 /// A recorded S3 notification event for introspection.

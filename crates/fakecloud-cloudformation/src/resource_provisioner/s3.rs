@@ -67,24 +67,15 @@ impl ResourceProvisioner {
         let region = self.region.clone();
         let mut bucket = S3Bucket::new(bucket_name, &self.region, &state.account_id);
         // Translate every modeled CFN property (VersioningConfiguration,
-        // BucketEncryption, PublicAccessBlockConfiguration,
-        // NotificationConfiguration, Tags, Website/Cors/Lifecycle/Logging) into
-        // the S3 bucket state and persist each subresource through the SAME
-        // store path the PutBucket* handlers use. Previously only BucketName was
-        // read, so a CREATE_COMPLETE bucket surfaced with none of its
-        // protections and S3->Lambda/SQS/SNS notifications never fired.
-        // A new bucket starts from the defaults S3 gives every bucket it creates
-        // (ACLs disabled, Block Public Access on, SSE-S3 with SSE-C blocked);
-        // the template's properties apply over them.
+        // BucketEncryption, PublicAccessBlockConfiguration, OwnershipControls,
+        // AccessControl, NotificationConfiguration, Tags,
+        // Website/Cors/Lifecycle/Logging) over the defaults S3 gives every new
+        // bucket, and write the bucket through to the S3 disk store -- meta
+        // first, then its subresources, through the same store paths the
+        // CreateBucket / PutBucket* handlers use -- so a CFN-provisioned bucket
+        // survives a restart. A failed write leaves nothing behind.
         fakecloud_s3::apply_cfn_new_bucket(&mut bucket, props, &self.s3_store)?;
-        // Write the bucket through to the S3 disk store, exactly as the real
-        // CreateBucket handler does, so a CFN-provisioned bucket survives a
-        // restart instead of living only in the in-memory map.
-        let meta = bucket_meta_snapshot(&bucket);
         state.buckets.insert(bucket_name.to_string(), bucket);
-        self.s3_store
-            .put_bucket_meta(bucket_name, &meta)
-            .map_err(|e| format!("failed to persist bucket {bucket_name}: {e}"))?;
 
         Ok(bucket_attributes(bucket_name, &region))
     }

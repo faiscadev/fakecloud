@@ -36,54 +36,111 @@ use crate::state::S3Bucket;
 
 const XMLNS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 
-/// Apply the config properties of an `AWS::S3::Bucket` CloudFormation resource
-/// to `bucket`, persisting each touched subresource through `store` exactly as
-/// the corresponding `PutBucket*` handler does. Used by both the create and
-/// update provisioner paths so a stack that turns on versioning/encryption in a
-/// follow-up update is not a silent no-op.
+/// Subresource writes a property application staged, applied to the store
+/// only once every property has validated: `Some` puts the payload, `None`
+/// deletes the subresource. `meta_dirty` marks a change to a field that lives
+/// in the bucket meta (versioning, EventBridge).
+#[derive(Default)]
+struct StagedWrites {
+    subresources: Vec<(BucketSubresource, Option<String>)>,
+    meta_dirty: bool,
+}
+
+impl StagedWrites {
+    fn put(&mut self, kind: BucketSubresource, payload: String) {
+        self.subresources.push((kind, Some(payload)));
+    }
+
+    fn persist(&self, store: &Arc<dyn S3Store>, bucket: &str) -> Result<(), String> {
+        for (kind, payload) in &self.subresources {
+            match payload {
+                Some(body) => persist_sub(store, bucket, *kind, body)?,
+                None => store
+                    .delete_bucket_subresource(bucket, *kind)
+                    .map_err(|e| persist_err(&format!("{kind:?}"), bucket, e))?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Create the bucket an `AWS::S3::Bucket` resource describes: the settings S3
+/// gives every new bucket (ACLs disabled, Block Public Access on, SSE-S3 with
+/// SSE-C blocked) with the template's properties applied over them.
+/// CloudFormation creates the bucket through CreateBucket, so a template that
+/// sets none of these properties gets exactly what the API gives.
 ///
-/// Only properties actually present in `props` are applied; absent properties
-/// leave the existing bucket state untouched (matching CFN update semantics for
-/// the properties we model).
-/// Give a bucket an `AWS::S3::Bucket` resource is creating the settings S3
-/// applies to every new bucket (ACLs disabled, Block Public Access on, SSE-S3
-/// with SSE-C blocked), persisted like CreateBucket persists them, then apply
-/// the template's properties over them. CloudFormation creates the bucket
-/// through CreateBucket, so a template that sets none of these properties gets
-/// exactly what the API gives.
+/// Every property validates before anything is written. The store then gets
+/// the bucket meta first, the three create-time settings as the bucket holds
+/// them (the routine CreateBucket uses), and the template's other
+/// subresources. A write that fails partway removes everything this create
+/// wrote, so no half-created bucket is left to load on the next restart.
 pub fn apply_cfn_new_bucket(
     bucket: &mut S3Bucket,
     props: &Value,
     store: &Arc<dyn S3Store>,
 ) -> Result<(), String> {
     bucket.apply_new_bucket_defaults();
-    // Template properties first, so a refused AccessControl / OwnershipControls
-    // combination fails before the defaults are written for a bucket that is
-    // never created.
-    apply_cfn_bucket_properties(bucket, props, store)?;
-    let obj = props.as_object();
-    let has = |k: &str| obj.is_some_and(|o| o.get(k).is_some_and(|v| !v.is_null()));
-    if !has("OwnershipControls") {
-        if let Some(xml) = &bucket.ownership_controls {
-            persist_sub(store, &bucket.name, BucketSubresource::Ownership, xml)?;
+    let staged = stage_cfn_bucket_properties(bucket, props)?;
+    let name = bucket.name.clone();
+    // Same rules as CreateBucket for a name whose directory outlived its
+    // bucket: data the loader refused is never cleared by a create, and any
+    // other leftover (after a reset, or a create or delete that stopped
+    // partway) is cleared so the new bucket does not inherit it.
+    if store.bucket_load_refused(&name) && store.bucket_state_exists(&name) {
+        return Err(format!(
+            "The requested bucket name is not available: {name} holds persisted data that \
+             could not be read at load. Repair it in the data path and restart, or remove the \
+             directory to free the name. (Service: S3, Status Code: 409, Error Code: \
+             BucketAlreadyExists)"
+        ));
+    }
+    if store.bucket_state_exists(&name) {
+        store
+            .delete_bucket(&name)
+            .map_err(|e| persist_err("leftover state", &name, e))?;
+    }
+    if store.bucket_load_refused(&name) {
+        store
+            .clear_bucket_load_refusal(&name)
+            .map_err(|e| persist_err("load refusal", &name, e))?;
+    }
+    let written = (|| {
+        store
+            .put_bucket_meta(&name, &bucket_meta_snapshot(bucket))
+            .map_err(|e| persist_err("meta", &name, e))?;
+        for (kind, payload) in bucket.new_bucket_settings() {
+            if let Some(body) = payload {
+                persist_sub(store, &name, kind, body)?;
+            }
         }
-    }
-    if bucket.public_access_block.as_deref() == Some(crate::state::DEFAULT_PUBLIC_ACCESS_BLOCK_XML)
-    {
-        persist_sub(
-            store,
-            &bucket.name,
+        // The create-time settings were just written from the bucket's final
+        // state, so the template's own writes of them are redundant here.
+        let settings = [
+            BucketSubresource::Ownership,
             BucketSubresource::PublicAccessBlock,
-            crate::state::DEFAULT_PUBLIC_ACCESS_BLOCK_XML,
-        )?;
-    }
-    if bucket.encryption_config.as_deref() == Some(crate::state::DEFAULT_BUCKET_ENCRYPTION_XML) {
-        persist_sub(
-            store,
-            &bucket.name,
             BucketSubresource::Encryption,
-            crate::state::DEFAULT_BUCKET_ENCRYPTION_XML,
-        )?;
+        ];
+        let rest = StagedWrites {
+            subresources: staged
+                .subresources
+                .iter()
+                .filter(|(kind, _)| !settings.contains(kind))
+                .cloned()
+                .collect(),
+            meta_dirty: false,
+        };
+        rest.persist(store, &name)
+    })();
+    if let Err(e) = written {
+        if let Err(cleanup) = store.delete_bucket(&name) {
+            tracing::warn!(
+                bucket = %name,
+                error = %cleanup,
+                "could not remove the partly written state of a failed CloudFormation bucket create",
+            );
+        }
+        return Err(e);
     }
     Ok(())
 }
@@ -136,18 +193,48 @@ fn cfn_object_ownership(v: &Value) -> Result<Option<String>, String> {
     Ok(Some(value.to_string()))
 }
 
+/// Apply the config properties of an `AWS::S3::Bucket` CloudFormation resource
+/// to an existing `bucket` (a stack update), persisting each touched
+/// subresource through `store` exactly as the corresponding `PutBucket*`
+/// handler does, so a follow-up update that turns on versioning/encryption is
+/// not a silent no-op.
+///
+/// Only properties actually present in `props` are applied; absent properties
+/// leave the existing bucket state untouched (matching CFN update semantics for
+/// the properties we model). Every property validates before anything is
+/// written.
 pub fn apply_cfn_bucket_properties(
     bucket: &mut S3Bucket,
     props: &Value,
     store: &Arc<dyn S3Store>,
 ) -> Result<(), String> {
+    let staged = stage_cfn_bucket_properties(bucket, props)?;
+    staged.persist(store, &bucket.name)?;
+    if staged.meta_dirty {
+        let meta = bucket_meta_snapshot(bucket);
+        store
+            .put_bucket_meta(&bucket.name, &meta)
+            .map_err(|e| persist_err("meta", &bucket.name, e))?;
+    }
+    Ok(())
+}
+
+/// Validate every property, then apply them to `bucket` in memory and return
+/// the subresource writes that make them durable.
+fn stage_cfn_bucket_properties(
+    bucket: &mut S3Bucket,
+    props: &Value,
+) -> Result<StagedWrites, String> {
+    let mut staged = StagedWrites::default();
     let Some(obj) = props.as_object() else {
-        return Ok(());
+        return Ok(staged);
     };
 
     // OwnershipControls and AccessControl are resolved against each other and
-    // against the Block Public Access the template ends up with, before
-    // anything is persisted, with the refusals S3 itself gives.
+    // against the Block Public Access the template ends up with, with the
+    // refusals S3 itself gives -- but only for what the template changes. A
+    // stack update re-sends unchanged properties, and an unchanged ownership
+    // rule or ACL is not a new request to S3 that could be refused.
     let ownership = match obj.get("OwnershipControls") {
         Some(v) => cfn_object_ownership(v)?,
         None => None,
@@ -162,20 +249,29 @@ pub fn apply_cfn_bucket_properties(
     let pab_xml = obj
         .get("PublicAccessBlockConfiguration")
         .and_then(build_public_access_block_xml);
-    let final_ownership_enforced = match &ownership {
-        Some(o) => o == "BucketOwnerEnforced",
-        None => {
-            crate::service::config::ownership_xml_enforced(bucket.ownership_controls.as_deref())
-        }
-    };
+    let current_ownership = bucket
+        .ownership_controls
+        .as_deref()
+        .and_then(|xml| crate::service::extract_xml_value(xml, "ObjectOwnership"));
+    let ownership_changed = ownership
+        .as_ref()
+        .is_some_and(|o| current_ownership.as_ref() != Some(o));
     let owner_id = bucket.acl_owner_id.clone();
-    let acl_grants = canned.map(|acl| crate::service::canned_acl_grants(acl, &owner_id));
-    if final_ownership_enforced {
-        let reaches_past_owner = match canned {
-            Some(acl) => crate::service::acl_reaches_past_owner(acl, &owner_id),
-            None => !crate::service::config::grants_are_owner_only(&bucket.acl_grants, &owner_id),
+    let acl_grants = canned
+        .map(|acl| crate::service::canned_acl_grants(acl, &owner_id))
+        .filter(|grants| *grants != bucket.acl_grants);
+    if ownership_changed || acl_grants.is_some() {
+        let final_ownership_enforced = match &ownership {
+            Some(o) => o == "BucketOwnerEnforced",
+            None => {
+                crate::service::config::ownership_xml_enforced(bucket.ownership_controls.as_deref())
+            }
         };
-        if reaches_past_owner {
+        let reaches_past_owner = match (canned, &acl_grants) {
+            (Some(acl), Some(_)) => crate::service::acl_reaches_past_owner(acl, &owner_id),
+            _ => !crate::service::config::grants_are_owner_only(&bucket.acl_grants, &owner_id),
+        };
+        if final_ownership_enforced && reaches_past_owner {
             return Err(
                 "Bucket cannot have ACLs set with ObjectOwnership's BucketOwnerEnforced setting \
                  (Service: S3, Status Code: 400, Error Code: InvalidBucketAclWithObjectOwnership)"
@@ -197,11 +293,16 @@ pub fn apply_cfn_bucket_properties(
             );
         }
     }
+    // Held to PutBucketEncryption's own validator, failing the resource with
+    // the error that operation gives.
+    let encryption_xml = obj.get("BucketEncryption").and_then(build_encryption_xml);
+    if let Some(xml) = &encryption_xml {
+        crate::service::config::validate_bucket_encryption_xml(xml)
+            .map_err(|e| format!("{}: {}", e.code(), e.message()))?;
+    }
 
-    // Validate before persisting anything. Each property below writes through
-    // to the store as it goes, so a validation failure partway would leave the
-    // bucket with some subresources written and others not. Bound once so the
-    // string that was validated is the same one that gets stored.
+    // Bound once so the string that was validated is the same one that gets
+    // stored.
     // An absent `CorsConfiguration` is a no-op, and an empty `CorsRules: []`
     // expresses "no CORS" — but `CorsRules` present with the wrong shape (a
     // typo, or an intrinsic that resolved to an object or string) is a property
@@ -250,59 +351,58 @@ pub fn apply_cfn_bucket_properties(
             .map_err(|(code, message)| format!("{code}: {message}"))?;
     }
     // `versioning` and `eventbridge_enabled` live in the bucket meta snapshot,
-    // so a single `put_bucket_meta` at the end covers both — mirroring how the
+    // so a single `put_bucket_meta` covers both, mirroring how the
     // versioning/notification handlers persist them.
-    let mut meta_dirty = false;
 
     if let Some(v) = obj.get("VersioningConfiguration") {
         if let Some(status) = v.get("Status").and_then(Value::as_str) {
             if status == "Enabled" || status == "Suspended" {
                 bucket.versioning = Some(status.to_string());
-                meta_dirty = true;
+                staged.meta_dirty = true;
             }
         }
     }
 
-    if let Some(enc) = obj.get("BucketEncryption") {
-        if let Some(xml) = build_encryption_xml(enc) {
-            bucket.encryption_config = Some(xml.clone());
-            persist_sub(store, &bucket.name, BucketSubresource::Encryption, &xml)?;
-        }
+    if let Some(xml) = encryption_xml {
+        bucket.encryption_config = Some(xml.clone());
+        staged.put(BucketSubresource::Encryption, xml);
     }
 
     if let Some(xml) = pab_xml {
         bucket.public_access_block = Some(xml.clone());
-        persist_sub(
-            store,
-            &bucket.name,
-            BucketSubresource::PublicAccessBlock,
-            &xml,
-        )?;
+        staged.put(BucketSubresource::PublicAccessBlock, xml);
     }
 
     if let Some(grants) = acl_grants {
-        let snap = AclSnapshot {
-            owner_id: owner_id.clone(),
-            grants: grants.iter().map(AclGrantSnapshot::from).collect(),
-        };
-        let payload = toml::to_string(&snap)
-            .map_err(|e| format!("failed to serialize ACL for bucket {}: {e}", bucket.name))?;
-        persist_sub(store, &bucket.name, BucketSubresource::Acl, &payload)?;
+        // As CreateBucket does, an ACL the loader reconstructs on its own
+        // (`private`, `aws-exec-read`) gets no `acl.toml`, and one that does
+        // need it replaces whatever is there.
+        if canned.is_some_and(crate::service::canned_acl_needs_sidecar) {
+            let snap = AclSnapshot {
+                owner_id: owner_id.clone(),
+                grants: grants.iter().map(AclGrantSnapshot::from).collect(),
+            };
+            let payload = toml::to_string(&snap)
+                .map_err(|e| format!("failed to serialize ACL for bucket {}: {e}", bucket.name))?;
+            staged.put(BucketSubresource::Acl, payload);
+        } else {
+            staged.subresources.push((BucketSubresource::Acl, None));
+        }
         bucket.acl_grants = grants;
     }
 
     if let Some(o) = ownership {
         let xml = crate::state::ownership_controls_xml(&o);
-        persist_sub(store, &bucket.name, BucketSubresource::Ownership, &xml)?;
-        bucket.ownership_controls = Some(xml);
+        bucket.ownership_controls = Some(xml.clone());
+        staged.put(BucketSubresource::Ownership, xml);
     }
 
     if let Some(nc) = obj.get("NotificationConfiguration") {
         let (xml, eventbridge) = build_notification_xml(nc);
         bucket.notification_config = Some(xml.clone());
         bucket.eventbridge_enabled = eventbridge;
-        meta_dirty = true;
-        persist_sub(store, &bucket.name, BucketSubresource::Notification, &xml)?;
+        staged.meta_dirty = true;
+        staged.put(BucketSubresource::Notification, xml);
     }
 
     if let Some(tags) = obj.get("Tags") {
@@ -312,14 +412,14 @@ pub fn apply_cfn_bucket_properties(
                 tags: bucket.tags.clone(),
             })
             .unwrap_or_default();
-            persist_sub(store, &bucket.name, BucketSubresource::Tags, &payload)?;
+            staged.put(BucketSubresource::Tags, payload);
         }
     }
 
     if let Some(w) = obj.get("WebsiteConfiguration") {
         if let Some(xml) = build_website_xml(w) {
             bucket.website_config = Some(xml.clone());
-            persist_sub(store, &bucket.name, BucketSubresource::Website, &xml)?;
+            staged.put(BucketSubresource::Website, xml);
         }
     }
 
@@ -344,13 +444,11 @@ pub fn apply_cfn_bucket_properties(
                 // The exact string validated above, before any subresource was
                 // persisted.
                 bucket.cors_config = Some(xml.clone());
-                persist_sub(store, &bucket.name, BucketSubresource::Cors, &xml)?;
+                staged.put(BucketSubresource::Cors, xml);
             }
             None => {
                 bucket.cors_config = None;
-                store
-                    .delete_bucket_subresource(&bucket.name, BucketSubresource::Cors)
-                    .map_err(|e| persist_err("Cors", &bucket.name, e))?;
+                staged.subresources.push((BucketSubresource::Cors, None));
             }
         }
     }
@@ -358,24 +456,18 @@ pub fn apply_cfn_bucket_properties(
     if let Some(l) = obj.get("LifecycleConfiguration") {
         if let Some(xml) = build_lifecycle_xml(l) {
             bucket.lifecycle_config = Some(xml.clone());
-            persist_sub(store, &bucket.name, BucketSubresource::Lifecycle, &xml)?;
+            staged.put(BucketSubresource::Lifecycle, xml);
         }
     }
 
     if let Some(lg) = obj.get("LoggingConfiguration") {
         if let Some(xml) = build_logging_xml(lg) {
             bucket.logging_config = Some(xml.clone());
-            persist_sub(store, &bucket.name, BucketSubresource::Logging, &xml)?;
+            staged.put(BucketSubresource::Logging, xml);
         }
     }
 
-    if meta_dirty {
-        let meta = bucket_meta_snapshot(bucket);
-        store
-            .put_bucket_meta(&bucket.name, &meta)
-            .map_err(|e| persist_err("meta", &bucket.name, e))?;
-    }
-    Ok(())
+    Ok(staged)
 }
 
 fn persist_sub(
@@ -490,22 +582,19 @@ fn build_encryption_xml(enc: &Value) -> Option<String> {
 
 fn build_public_access_block_xml(pab: &Value) -> Option<String> {
     let obj = pab.as_object()?;
+    // CloudFormation sends the whole configuration in one PutPublicAccessBlock,
+    // where an omitted flag is `false`. So every flag is written, and an empty
+    // `PublicAccessBlockConfiguration: {}` turns all four off rather than
+    // leaving the new bucket's all-on default in place.
     let mut body = String::new();
-    // The CFN property keys match the REST element names 1:1. `GetPublicAccessBlock`
-    // fills any missing field with `false`, so emitting only the provided ones
-    // round-trips faithfully.
     for key in [
         "BlockPublicAcls",
         "IgnorePublicAcls",
         "BlockPublicPolicy",
         "RestrictPublicBuckets",
     ] {
-        if let Some(b) = obj.get(key).and_then(as_bool) {
-            body.push_str(&format!("<{key}>{b}</{key}>"));
-        }
-    }
-    if body.is_empty() {
-        return None;
+        let b = obj.get(key).and_then(as_bool).unwrap_or(false);
+        body.push_str(&format!("<{key}>{b}</{key}>"));
     }
     Some(wrap("PublicAccessBlockConfiguration", &body))
 }
@@ -995,6 +1084,298 @@ mod tests {
         S3Bucket::new("b", "us-east-1", "123456789012")
     }
 
+    /// A store that records the subresource writes and bucket removals it is
+    /// asked for, and fails the write of one subresource kind -- the disk
+    /// error a CloudFormation create must clean up after.
+    #[derive(Default)]
+    struct RecordingStore {
+        fail_kind: Option<BucketSubresource>,
+        calls: parking_lot::Mutex<Vec<String>>,
+    }
+
+    impl RecordingStore {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().clone()
+        }
+    }
+
+    impl S3Store for RecordingStore {
+        fn load(
+            &self,
+        ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::S3StateSnapshot> {
+            fakecloud_persistence::MemoryS3Store.load()
+        }
+        fn put_bucket_meta(
+            &self,
+            bucket: &str,
+            _meta: &fakecloud_persistence::BucketMeta,
+        ) -> fakecloud_persistence::StoreResult<()> {
+            self.calls.lock().push(format!("meta {bucket}"));
+            Ok(())
+        }
+        fn put_bucket_subresource(
+            &self,
+            bucket: &str,
+            kind: BucketSubresource,
+            _payload: &str,
+        ) -> fakecloud_persistence::StoreResult<()> {
+            if self.fail_kind == Some(kind) {
+                return Err(StoreError::Other("disk full".to_string()));
+            }
+            self.calls.lock().push(format!("put {bucket} {kind:?}"));
+            Ok(())
+        }
+        fn delete_bucket_subresource(
+            &self,
+            bucket: &str,
+            kind: BucketSubresource,
+        ) -> fakecloud_persistence::StoreResult<()> {
+            self.calls.lock().push(format!("delete {bucket} {kind:?}"));
+            Ok(())
+        }
+        fn delete_bucket(&self, bucket: &str) -> fakecloud_persistence::StoreResult<()> {
+            self.calls.lock().push(format!("delete-bucket {bucket}"));
+            Ok(())
+        }
+        fn put_object(
+            &self,
+            _bucket: &str,
+            _key: &str,
+            _version: Option<&str>,
+            _body: fakecloud_persistence::BodySource,
+            _meta: &fakecloud_persistence::ObjectMeta,
+        ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
+            Err(StoreError::NotSupported)
+        }
+        fn put_object_meta(
+            &self,
+            _bucket: &str,
+            _key: &str,
+            _version: Option<&str>,
+            _meta: &fakecloud_persistence::ObjectMeta,
+        ) -> fakecloud_persistence::StoreResult<()> {
+            Err(StoreError::NotSupported)
+        }
+        fn delete_object(
+            &self,
+            _bucket: &str,
+            _key: &str,
+            _version: Option<&str>,
+        ) -> fakecloud_persistence::StoreResult<()> {
+            Err(StoreError::NotSupported)
+        }
+        fn open_object_body(
+            &self,
+            _body: &fakecloud_persistence::BodyRef,
+        ) -> fakecloud_persistence::StoreResult<bytes::Bytes> {
+            Err(StoreError::NotSupported)
+        }
+        fn mpu_create(
+            &self,
+            _bucket: &str,
+            _upload_id: &str,
+            _init: &fakecloud_persistence::MpuInit,
+        ) -> fakecloud_persistence::StoreResult<()> {
+            Err(StoreError::NotSupported)
+        }
+        fn mpu_put_part(
+            &self,
+            _bucket: &str,
+            _upload_id: &str,
+            _part_number: u32,
+            _body: fakecloud_persistence::BodySource,
+            _etag: &str,
+            _checksum: Option<fakecloud_persistence::PartChecksum<'_>>,
+        ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
+            Err(StoreError::NotSupported)
+        }
+        fn mpu_abort(
+            &self,
+            _bucket: &str,
+            _upload_id: &str,
+        ) -> fakecloud_persistence::StoreResult<()> {
+            Err(StoreError::NotSupported)
+        }
+        fn mpu_complete(
+            &self,
+            _bucket: &str,
+            _upload_id: &str,
+            _final_key: &str,
+            _version: Option<&str>,
+            _meta: &fakecloud_persistence::ObjectMeta,
+        ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
+            Err(StoreError::NotSupported)
+        }
+    }
+
+    #[test]
+    fn cfn_create_writes_meta_first_and_cleans_up_a_failed_write() {
+        let rec = Arc::new(RecordingStore::default());
+        let store: Arc<dyn S3Store> = rec.clone();
+        let mut b = bucket();
+        apply_cfn_new_bucket(
+            &mut b,
+            &json!({ "Tags": [{ "Key": "k", "Value": "v" }] }),
+            &store,
+        )
+        .unwrap();
+        let calls = rec.calls();
+        assert_eq!(
+            calls.first().map(String::as_str),
+            Some("meta b"),
+            "{calls:?}"
+        );
+        for kind in ["Ownership", "PublicAccessBlock", "Encryption", "Tags"] {
+            assert!(
+                calls.contains(&format!("put b {kind}")),
+                "{kind}: {calls:?}"
+            );
+        }
+        assert!(
+            !calls.iter().any(|c| c.starts_with("delete-bucket")),
+            "{calls:?}"
+        );
+
+        // The Tags write fails after meta and the create-time settings were
+        // written: the whole bucket comes back off the store.
+        let rec = Arc::new(RecordingStore {
+            fail_kind: Some(BucketSubresource::Tags),
+            ..Default::default()
+        });
+        let store: Arc<dyn S3Store> = rec.clone();
+        let mut b = bucket();
+        let err = apply_cfn_new_bucket(
+            &mut b,
+            &json!({ "Tags": [{ "Key": "k", "Value": "v" }] }),
+            &store,
+        )
+        .unwrap_err();
+        assert!(err.contains("disk full"), "{err}");
+        let calls = rec.calls();
+        assert_eq!(
+            calls.first().map(String::as_str),
+            Some("meta b"),
+            "{calls:?}"
+        );
+        assert_eq!(
+            calls.last().map(String::as_str),
+            Some("delete-bucket b"),
+            "{calls:?}"
+        );
+
+        // A refused property writes nothing at all.
+        let rec = Arc::new(RecordingStore::default());
+        let store: Arc<dyn S3Store> = rec.clone();
+        let mut b = bucket();
+        apply_cfn_new_bucket(
+            &mut b,
+            &json!({ "AccessControl": "LogDeliveryWrite" }),
+            &store,
+        )
+        .unwrap_err();
+        assert!(rec.calls().is_empty(), "{:?}", rec.calls());
+    }
+
+    #[test]
+    fn cfn_owner_only_acls_get_no_acl_sidecar() {
+        for (acl, sidecar) in [
+            ("Private", false),
+            ("AwsExecRead", false),
+            ("LogDeliveryWrite", true),
+        ] {
+            let rec = Arc::new(RecordingStore::default());
+            let store: Arc<dyn S3Store> = rec.clone();
+            let mut b = bucket();
+            apply_cfn_new_bucket(
+                &mut b,
+                &json!({
+                    "AccessControl": acl,
+                    "OwnershipControls": { "Rules": [{ "ObjectOwnership": "ObjectWriter" }] }
+                }),
+                &store,
+            )
+            .unwrap();
+            assert_eq!(
+                rec.calls().contains(&"put b Acl".to_string()),
+                sidecar,
+                "{acl}: {:?}",
+                rec.calls()
+            );
+        }
+    }
+
+    #[test]
+    fn cfn_update_checks_ownership_only_for_what_the_template_changes() {
+        // A bucket whose ownership is BucketOwnerEnforced while its stored ACL
+        // still grants others (a state an older build could persist).
+        let mut b = bucket();
+        b.apply_new_bucket_defaults();
+        b.acl_grants.extend(crate::service::canned_acl_grants(
+            "log-delivery-write",
+            "123456789012",
+        ));
+        let unchanged = json!({
+            "OwnershipControls": { "Rules": [{ "ObjectOwnership": "BucketOwnerEnforced" }] }
+        });
+        apply_cfn_bucket_properties(&mut b, &unchanged, &store()).unwrap();
+        apply_cfn_bucket_properties(&mut b, &json!({}), &store()).unwrap();
+
+        // Changing to BucketOwnerEnforced over such an ACL is refused.
+        let mut b = bucket();
+        b.apply_new_bucket_defaults();
+        b.ownership_controls = Some(crate::state::ownership_controls_xml("ObjectWriter"));
+        b.acl_grants.extend(crate::service::canned_acl_grants(
+            "log-delivery-write",
+            "123456789012",
+        ));
+        let err = apply_cfn_bucket_properties(&mut b, &unchanged, &store()).unwrap_err();
+        assert!(err.contains("InvalidBucketAclWithObjectOwnership"), "{err}");
+    }
+
+    #[test]
+    fn cfn_empty_public_access_block_turns_every_flag_off() {
+        for pab in [json!({}), json!({ "Unknown": true })] {
+            let mut b = bucket();
+            apply_cfn_new_bucket(
+                &mut b,
+                &json!({ "PublicAccessBlockConfiguration": pab }),
+                &store(),
+            )
+            .unwrap();
+            let xml = b.public_access_block.unwrap();
+            for flag in [
+                "BlockPublicAcls",
+                "IgnorePublicAcls",
+                "BlockPublicPolicy",
+                "RestrictPublicBuckets",
+            ] {
+                assert!(
+                    xml.contains(&format!("<{flag}>false</{flag}>")),
+                    "{flag}: {xml}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cfn_encryption_is_held_to_put_bucket_encryption_validation() {
+        let mut b = bucket();
+        let err = apply_cfn_new_bucket(
+            &mut b,
+            &json!({
+                "BucketEncryption": {
+                    "ServerSideEncryptionConfiguration": [{
+                        "ServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" },
+                        "BlockedEncryptionTypes": { "EncryptionType": ["SSE-KMS"] }
+                    }]
+                }
+            }),
+            &store(),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("MalformedXML:"), "{err}");
+    }
+
     #[test]
     fn new_cfn_bucket_gets_the_create_bucket_defaults() {
         let mut b = bucket();
@@ -1244,6 +1625,8 @@ mod tests {
         .unwrap();
         let xml = b.public_access_block.unwrap();
         assert!(xml.contains("<BlockPublicAcls>true</BlockPublicAcls>"));
+        // An omitted flag is false, as in the PutPublicAccessBlock CFN sends.
+        assert!(xml.contains("<BlockPublicPolicy>false</BlockPublicPolicy>"));
     }
 
     #[test]

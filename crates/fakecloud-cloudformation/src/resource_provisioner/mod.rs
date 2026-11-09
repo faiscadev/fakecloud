@@ -96,7 +96,6 @@ use fakecloud_route53::{
     model::{HealthCheckConfig, ResourceRecordSet},
     SharedRoute53State, StoredHealthCheck,
 };
-use fakecloud_s3::persistence::bucket_meta_snapshot;
 use fakecloud_s3::{S3Bucket, SharedS3State};
 use fakecloud_secretsmanager::{RotationRules, Secret, SecretVersion, SharedSecretsManagerState};
 use fakecloud_servicediscovery::SharedServiceDiscoveryState;
