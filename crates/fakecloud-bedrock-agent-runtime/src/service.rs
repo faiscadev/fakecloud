@@ -863,13 +863,19 @@ async fn handle_invoke_flow(
         .map_err(|message| validation(&message))?;
 
     let start = std::time::Instant::now();
+    // A node failing is a failure of the run, not of the request: the stream has
+    // started, so it carries what ran and then the error.
     let flow_result = crate::flow_run::run(
         flow.definition.as_ref(),
         start_node,
         start_output,
         input_document,
-    )
-    .map_err(|message| validation(&message))?;
+    );
+    let status = if flow_result.failure.is_some() {
+        "Failed"
+    } else {
+        "Succeeded"
+    };
     let document = flow_result
         .outputs
         .first()
@@ -896,10 +902,8 @@ async fn handle_invoke_flow(
                 existing.status
             )));
         }
-        s.flow_executions.insert(
-            key,
-            new_execution(req, flow, execution_id.clone(), "Succeeded"),
-        );
+        s.flow_executions
+            .insert(key, new_execution(req, flow, execution_id.clone(), status));
         s.invocations.push(InvocationRecord {
             invocation_id: execution_id.clone(),
             op: "invoke_flow".to_string(),
@@ -931,7 +935,17 @@ async fn handle_invoke_flow(
     for (node, value) in &flow_result.outputs {
         frame.extend(crate::eventstream::flow_output_frame(node, value));
     }
-    frame.extend(crate::eventstream::flow_completion_frame());
+    // `FlowCompletionReason` is only `SUCCESS` or `INPUT_REQUIRED`, so a failed
+    // run ends on the stream's `validationException` member instead of a
+    // completion event. Every failure here is the definition or the data it was
+    // given not fitting a node.
+    match &flow_result.failure {
+        Some(message) => frame.extend(crate::eventstream::exception_frame(
+            "validationException",
+            message,
+        )),
+        None => frame.extend(crate::eventstream::flow_completion_frame()),
+    }
     let mut headers = http::HeaderMap::new();
     if let Ok(value) = http::HeaderValue::from_str(&execution_id) {
         headers.insert("x-amz-bedrock-flow-execution-id", value);
@@ -3322,6 +3336,71 @@ mod tests {
             format!("arn:aws-cn:bedrock:cn-north-1:{ACCT}:flow/{FLOW}/alias/{ALIAS_V1}/execution/my-execution-1")
         );
         assert_eq!(exec.execution_role_arn.as_deref(), Some(V1_ROLE));
+    }
+
+    #[tokio::test]
+    async fn a_node_failing_ends_the_stream_with_an_exception_not_a_400() {
+        let (svc, agent_state) = flow_svc();
+        let failing = json!({
+            "nodes": [
+                {"name": "Input", "type": "Input", "outputs": [{"name": "document", "type": "String"}]},
+                {"name": "First", "type": "Output",
+                 "inputs": [{"name": "document", "type": "String", "expression": "$.data"}]},
+                {"name": "Each", "type": "Iterator",
+                 "inputs": [{"name": "array", "type": "Array", "expression": "$.data"}],
+                 "outputs": [{"name": "arrayItem", "type": "String"}, {"name": "arraySize", "type": "Number"}]},
+                {"name": "End", "type": "Output",
+                 "inputs": [{"name": "document", "type": "String", "expression": "$.data"}]}
+            ],
+            "connections": [
+                {"name": "a", "type": "Data", "source": "Input", "target": "First",
+                 "configuration": {"data": {"sourceOutput": "document", "targetInput": "document"}}},
+                {"name": "b", "type": "Data", "source": "Input", "target": "Each",
+                 "configuration": {"data": {"sourceOutput": "document", "targetInput": "array"}}},
+                {"name": "c", "type": "Data", "source": "Each", "target": "End",
+                 "configuration": {"data": {"sourceOutput": "arrayItem", "targetInput": "document"}}}
+            ]
+        });
+        agent_state
+            .write()
+            .get_or_create(ACCT, "cn-north-1")
+            .flows
+            .insert(FLOW.into(), flow(FLOW, failing, DRAFT_ROLE));
+        let resp = handle_invoke_flow(
+            &svc,
+            &cn_request(),
+            &json!({
+                "flowIdentifier": FLOW,
+                "flowAliasIdentifier": "TSTALIASID",
+                "inputs": [{"nodeName": "Input", "content": {"document": "not an array"}}],
+                "executionId": "failing-run",
+            }),
+        )
+        .await
+        .expect("a node failure is reported in the stream");
+        assert_eq!(resp.status, StatusCode::OK);
+        let stream = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        // What ran before the failure is streamed, then the exception, and no
+        // completion event.
+        assert!(stream.contains("flowOutputEvent"), "{stream}");
+        assert!(stream.contains(":exception-type"), "{stream}");
+        assert!(stream.contains("validationException"), "{stream}");
+        assert!(stream.contains("needs an array input"), "{stream}");
+        assert!(!stream.contains("flowCompletionEvent"), "{stream}");
+
+        let accts = svc.state.read();
+        let account = &accts.accounts[ACCT];
+        let exec = &account.flow_executions
+            [&crate::flows::execution_map_key(FLOW, "TSTALIASID", "failing-run")];
+        assert_eq!(exec.status, "Failed");
+        assert!(exec.ended_at.is_some());
+        let row = account
+            .invocations
+            .iter()
+            .find(|row| row.invocation_id == "failing-run")
+            .expect("the failed run is recorded");
+        assert_eq!(row.output, "not an array");
+        assert_eq!(row.output_chunks, 1);
     }
 
     #[tokio::test]

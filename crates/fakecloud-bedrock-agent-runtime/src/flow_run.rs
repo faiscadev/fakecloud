@@ -5,8 +5,13 @@
 //! model or another service produces a synthetic reply.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 
 use chrono::Utc;
+use fakecloud_bedrock_agent::flow_graph::{
+    ambiguous_iteration, cycle_error, source_output, target_input, Graph, IterationBody,
+    ITERATOR_ITEM_OUTPUT, ITERATOR_SIZE_OUTPUT,
+};
 use serde_json::{json, Value};
 
 /// The name output events carry when a definition has no output node of its own.
@@ -24,14 +29,11 @@ const SYNTHETIC_NODE_TYPES: [&str; 8] = [
     "InlineCode",
 ];
 
-const ITERATOR_ITEM_OUTPUT: &str = "arrayItem";
-const ITERATOR_SIZE_OUTPUT: &str = "arraySize";
 const COLLECTOR_OUTPUT: &str = "collectedArray";
 
-/// How deep iterators can nest and how many nodes one invocation can run. Items
-/// multiply through nested iterators, and a request's array is the caller's word,
-/// not a workload to run unbounded on a request thread.
-const MAX_ITERATOR_NESTING: usize = 8;
+/// How many nodes one invocation can run. Items multiply through nested
+/// iterators, and a request's array is the caller's word, not a workload to run
+/// unbounded on a request thread.
 const MAX_NODE_RUNS: usize = 100_000;
 
 /// What one run of a flow produces.
@@ -41,6 +43,9 @@ pub(crate) struct FlowRun {
     pub traces: Vec<Value>,
     /// Each output node reached and the document it received.
     pub outputs: Vec<(String, Value)>,
+    /// Why the run stopped before finishing, when a node failed. What ran before
+    /// the failure stays in `traces` and `outputs`: the stream had already sent it.
+    pub failure: Option<String>,
 }
 
 /// A field's `FlowNodeIODataType` as a trace reports it. A `String` field was
@@ -90,116 +95,23 @@ pub(crate) fn validate_input(
     Ok(())
 }
 
-/// A flow definition's connections, indexed by the nodes they join.
-struct Graph<'a> {
-    nodes: HashMap<&'a str, &'a Value>,
-    /// Node names in declaration order, which is the order ties run in.
-    order: Vec<&'a str>,
-    incoming: HashMap<&'a str, Vec<&'a Value>>,
-    outgoing: HashMap<&'a str, Vec<&'a Value>>,
+/// An iterator's scope: its body, or why it has none. A broken scope is only an
+/// error once the iterator is reached, so a branch the run never takes can't fail
+/// it.
+type Scope<'a> = Rc<Result<IterationBody<'a>, String>>;
+
+/// How one set of nodes is scheduled, worked out once and reused for every pass
+/// over the set (every item of the iterator whose body it is).
+struct Plan<'a> {
+    /// What runs, in declaration order: the nodes outside any iteration, and
+    /// each outermost iterator standing in for its whole body.
+    units: Vec<&'a str>,
+    /// The scope of each iterator among `units`.
+    scopes: HashMap<&'a str, Scope<'a>>,
+    /// How many units each unit waits on, and which units wait on it.
+    waiting: HashMap<&'a str, usize>,
+    followers: HashMap<&'a str, Vec<&'a str>>,
 }
-
-impl<'a> Graph<'a> {
-    fn new(nodes: &'a [Value], connections: &'a [Value]) -> Self {
-        let mut graph = Graph {
-            nodes: HashMap::new(),
-            order: Vec::new(),
-            incoming: HashMap::new(),
-            outgoing: HashMap::new(),
-        };
-        for node in nodes {
-            let name = node["name"].as_str().unwrap_or_default();
-            if graph.nodes.insert(name, node).is_none() {
-                graph.order.push(name);
-            }
-        }
-        for connection in connections {
-            let source = connection["source"].as_str().unwrap_or_default();
-            let target = connection["target"].as_str().unwrap_or_default();
-            graph.outgoing.entry(source).or_default().push(connection);
-            graph.incoming.entry(target).or_default().push(connection);
-        }
-        graph
-    }
-
-    fn incoming(&self, name: &str, kind: &str) -> Vec<&'a Value> {
-        let edges = self.incoming.get(name).map(Vec::as_slice).unwrap_or(&[]);
-        edges
-            .iter()
-            .copied()
-            .filter(|c| c["type"] == kind)
-            .collect()
-    }
-
-    fn data_edges(&self, source: &str, output: &str) -> Vec<&'a Value> {
-        let edges = self.outgoing.get(source).map(Vec::as_slice).unwrap_or(&[]);
-        edges
-            .iter()
-            .copied()
-            .filter(|c| c["type"] == "Data" && source_output(c) == output)
-            .collect()
-    }
-
-    fn node_type(&self, name: &str) -> Option<&'a str> {
-        self.nodes.get(name).and_then(|node| node["type"].as_str())
-    }
-
-    /// What one iterator repeats per item: everything `arrayItem` reaches, up to
-    /// the collector that closes this iterator. `arraySize` is a single value, so
-    /// what only it feeds runs once, outside.
-    fn iteration_body(&self, iterator: &'a str) -> Result<HashSet<&'a str>, String> {
-        let mut body = HashSet::new();
-        let mut seen = HashSet::new();
-        let mut pending = vec![(iterator, 0usize)];
-        while let Some((name, depth)) = pending.pop() {
-            for edge in self.outgoing.get(name).into_iter().flatten() {
-                if name == iterator && source_output(edge) == ITERATOR_SIZE_OUTPUT {
-                    continue;
-                }
-                let target = edge["target"].as_str().unwrap_or_default();
-                let target_depth = match self.node_type(target) {
-                    None => continue,
-                    Some("Collector") if depth == 0 => continue,
-                    Some("Collector") => depth - 1,
-                    Some("Iterator") if target == iterator => {
-                        return Err(cycle_error());
-                    }
-                    Some("Iterator") if depth == MAX_ITERATOR_NESTING => {
-                        return Err(format!(
-                            "Iterators are nested more than {MAX_ITERATOR_NESTING} deep under node {iterator}."
-                        ));
-                    }
-                    Some("Iterator") => depth + 1,
-                    Some(_) => depth,
-                };
-                body.insert(target);
-                if seen.insert((target, target_depth)) {
-                    pending.push((target, target_depth));
-                }
-            }
-        }
-        Ok(body)
-    }
-}
-
-fn cycle_error() -> String {
-    "The flow's connections form a cycle, so a node would wait on its own output.".to_string()
-}
-
-fn source_output(edge: &Value) -> &str {
-    edge["configuration"]["data"]["sourceOutput"]
-        .as_str()
-        .unwrap_or("document")
-}
-
-fn target_input(edge: &Value) -> &str {
-    edge["configuration"]["data"]["targetInput"]
-        .as_str()
-        .unwrap_or("document")
-}
-
-/// A node's inputs by name, and their trace fields.
-type GatheredInputs = (Vec<(String, Value)>, Vec<Value>);
 
 /// One run's progress through a [`Graph`].
 struct Walk<'a> {
@@ -211,39 +123,81 @@ struct Walk<'a> {
     taken: HashSet<(&'a str, &'a str)>,
     /// What each collector has gathered so far.
     collected: HashMap<&'a str, Vec<Value>>,
+    /// Each iterator's scope, computed the first time a plan needs it.
+    scopes: HashMap<&'a str, Scope<'a>>,
     node_runs: usize,
 }
 
 impl<'a> Walk<'a> {
-    /// Run `members`, each only once everything that could feed it has settled,
-    /// so a node joining several branches sees all of them. An iterator stands in
-    /// for its whole body here: nothing in the body starts before everything the
-    /// body needs from outside it has settled, and whatever follows the body
-    /// waits for the last item.
-    fn settle(&mut self, members: &[&'a str]) -> Result<(), String> {
+    fn scope(&mut self, iterator: &'a str) -> Scope<'a> {
+        let graph = self.graph;
+        self.scopes
+            .entry(iterator)
+            .or_insert_with(|| Rc::new(graph.iteration_body(iterator)))
+            .clone()
+    }
+
+    /// Schedule `members`, each to run only once everything that could feed it
+    /// has settled, so a node joining several branches sees all of them. An
+    /// iterator stands in for its whole body here: nothing in the body starts
+    /// before everything the body needs from outside it has settled, and
+    /// whatever follows the body waits for the last item.
+    fn plan(&mut self, members: &[&'a str]) -> Plan<'a> {
         let graph = self.graph;
         let member_set: HashSet<&str> = members.iter().copied().collect();
+        let iterators: Vec<(&'a str, Scope<'a>)> = members
+            .iter()
+            .copied()
+            .filter(|name| graph.node_type(name) == Some("Iterator"))
+            .map(|name| (name, self.scope(name)))
+            .collect();
+        let inside = |name: &str, others: &[(&'a str, Scope<'a>)]| {
+            others.iter().any(|(other, scope)| {
+                *other != name
+                    && scope
+                        .as_ref()
+                        .as_ref()
+                        .is_ok_and(|body| body.contains(name))
+            })
+        };
+        // An iterator inside another belongs to that one's pass.
+        let outermost: Vec<(&'a str, Scope<'a>)> = iterators
+            .iter()
+            .filter(|(name, _)| !inside(name, &iterators))
+            .cloned()
+            .collect();
 
-        let mut bodies: HashMap<&'a str, HashSet<&'a str>> = HashMap::new();
-        for name in members {
-            if graph.node_type(name) == Some("Iterator") {
-                bodies.insert(name, graph.iteration_body(name)?);
+        let mut scopes: HashMap<&'a str, Scope<'a>> = HashMap::new();
+        for (i, (first, first_scope)) in outermost.iter().enumerate() {
+            let Ok(first_body) = first_scope.as_ref() else {
+                continue;
+            };
+            for (second, second_scope) in &outermost[i + 1..] {
+                let Ok(second_body) = second_scope.as_ref() else {
+                    continue;
+                };
+                if let Some(node) = first_body
+                    .members
+                    .iter()
+                    .find(|node| second_body.contains(node))
+                {
+                    let error = Rc::new(Err(ambiguous_iteration(node, first, second)));
+                    scopes.entry(*first).or_insert_with(|| error.clone());
+                    scopes.entry(*second).or_insert(error);
+                }
             }
         }
         let mut stands_in_for: HashMap<&'a str, &'a str> = HashMap::new();
-        for (iterator, body) in &bodies {
-            // An iterator inside another belongs to that one's pass.
-            if !bodies
-                .iter()
-                .any(|(other, others)| other != iterator && others.contains(iterator))
-            {
-                stands_in_for.extend(body.iter().map(|node| (*node, *iterator)));
+        for (iterator, scope) in outermost {
+            let scope = scopes.entry(iterator).or_insert(scope);
+            if let Ok(body) = scope.as_ref() {
+                stands_in_for.extend(body.members.iter().map(|node| (*node, iterator)));
             }
         }
         let unit = |name: &'a str| stands_in_for.get(name).copied().unwrap_or(name);
 
-        let mut waiting: HashMap<&str, usize> = HashMap::new();
-        let mut followers: HashMap<&str, Vec<&'a str>> = HashMap::new();
+        let mut waiting: HashMap<&'a str, usize> = HashMap::new();
+        let mut followers: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
         for name in members {
             for edge in graph.incoming.get(name).into_iter().flatten() {
                 let Some(source) = edge["source"].as_str() else {
@@ -256,31 +210,51 @@ impl<'a> Walk<'a> {
                 followers.entry(unit(source)).or_default().push(unit(name));
             }
         }
-
-        let units: Vec<&'a str> = members
+        let units = members
             .iter()
             .copied()
             .filter(|name| unit(name) == *name)
             .collect();
-        let mut ready: VecDeque<&'a str> = units
+        Plan {
+            units,
+            scopes,
+            waiting,
+            followers,
+        }
+    }
+
+    /// Run one pass over a planned set of nodes.
+    fn settle(&mut self, plan: &Plan<'a>) -> Result<(), String> {
+        let mut waiting = plan.waiting.clone();
+        let mut followers = plan.followers.clone();
+        let mut ready: VecDeque<&'a str> = plan
+            .units
             .iter()
             .copied()
             .filter(|name| !waiting.contains_key(name))
             .collect();
-        let mut settled = 0;
         while let Some(name) = ready.pop_front() {
-            settled += 1;
-            self.run_node(name, bodies.get(name))?;
+            self.run_node(name, plan.scopes.get(name).cloned())?;
             for follower in followers.remove(name).unwrap_or_default() {
                 let count = waiting.entry(follower).or_default();
                 *count -= 1;
                 if *count == 0 {
+                    waiting.remove(follower);
                     ready.push_back(follower);
                 }
             }
         }
-        if settled < units.len() {
-            return Err(cycle_error());
+        // Units still waiting sit on a cycle (or behind one). That only stops
+        // the run when the cycle is reached: one no branch leads into never runs.
+        for name in plan
+            .units
+            .iter()
+            .copied()
+            .filter(|name| waiting.contains_key(name))
+        {
+            if self.is_reached(name)? {
+                return Err(cycle_error());
+            }
         }
         Ok(())
     }
@@ -327,11 +301,7 @@ impl<'a> Walk<'a> {
         Ok(delivered || self.collected.contains_key(name))
     }
 
-    fn run_node(
-        &mut self,
-        name: &'a str,
-        iteration_body: Option<&HashSet<&'a str>>,
-    ) -> Result<(), String> {
+    fn run_node(&mut self, name: &'a str, scope: Option<Scope<'a>>) -> Result<(), String> {
         if !self.is_reached(name)? {
             return Ok(());
         }
@@ -363,9 +333,12 @@ impl<'a> Walk<'a> {
             }
             "Condition" => self.run_condition(name, node, &inputs)?,
             "Iterator" => {
-                let body = iteration_body
-                    .ok_or_else(|| format!("Iterator node {name} has no iteration scope."))?;
-                self.run_iterator(name, &inputs, body)?;
+                let scope =
+                    scope.ok_or_else(|| format!("Iterator node {name} has no iteration scope."))?;
+                match scope.as_ref() {
+                    Ok(body) => self.run_iterator(name, &inputs, body)?,
+                    Err(error) => return Err(error.clone()),
+                }
             }
             "Collector" => {
                 let items = self.collected.remove(name).unwrap_or_default();
@@ -459,7 +432,7 @@ impl<'a> Walk<'a> {
         &mut self,
         name: &'a str,
         inputs: &[(String, Value)],
-        body: &HashSet<&'a str>,
+        body: &IterationBody<'a>,
     ) -> Result<(), String> {
         let graph = self.graph;
         let array = inputs
@@ -473,6 +446,7 @@ impl<'a> Walk<'a> {
 
         // What the iterator and its body hand to the collectors that close it.
         let handoffs: Vec<&'a Value> = body
+            .members
             .iter()
             .copied()
             .chain([name])
@@ -490,15 +464,11 @@ impl<'a> Walk<'a> {
             self.collected.entry(target).or_default();
         }
 
-        let members: Vec<&'a str> = graph
-            .order
-            .iter()
-            .copied()
-            .filter(|node| body.contains(node))
-            .collect();
+        // The body's graph doesn't change from one item to the next.
+        let plan = self.plan(&body.members);
         for item in items {
             self.emit(name, ITERATOR_ITEM_OUTPUT, item.clone());
-            self.settle(&members)?;
+            self.settle(&plan)?;
             for edge in &handoffs {
                 let source = edge["source"].as_str().unwrap_or_default();
                 let target = edge["target"].as_str().unwrap_or_default();
@@ -515,14 +485,20 @@ impl<'a> Walk<'a> {
                 }));
                 self.collected.entry(target).or_default().push(value);
             }
+            // Forget what this item ran, so the next one starts clean. A branch
+            // a condition outside the body took into it stays taken: that
+            // condition ran once, for every item.
             self.produced.retain(|(node, output), _| {
                 !(body.contains(node) || (*node == name && *output == ITERATOR_ITEM_OUTPUT))
             });
-            self.taken.retain(|(_, target)| !body.contains(target));
+            self.taken.retain(|(source, _)| !body.contains(source));
         }
         Ok(())
     }
 }
+
+/// A node's inputs by name, and their trace fields.
+type GatheredInputs = (Vec<(String, Value)>, Vec<Value>);
 
 /// One connection's value as the input it feeds: the value after the input's
 /// expression, and its trace field.
@@ -571,13 +547,14 @@ pub(crate) fn default_input_output(definition: Option<&Value>, node: &str) -> St
         .to_string()
 }
 
-/// Run a definition from its input node.
+/// Run a definition from its input node. A node that fails ends the run there,
+/// with what ran before it kept and the reason in [`FlowRun::failure`].
 pub(crate) fn run(
     definition: Option<&Value>,
     start_node: &str,
     start_output: &str,
     document: &Value,
-) -> Result<FlowRun, String> {
+) -> FlowRun {
     let empty = Vec::new();
     let nodes = definition
         .and_then(|d| d["nodes"].as_array())
@@ -588,10 +565,10 @@ pub(crate) fn run(
 
     // A definition with nowhere for output to go still answers the caller.
     if !nodes.iter().any(|node| node["type"] == "Output") {
-        return Ok(FlowRun {
-            traces: Vec::new(),
+        return FlowRun {
             outputs: vec![(DEFAULT_OUTPUT_NODE.to_string(), synthetic_reply(document))],
-        });
+            ..FlowRun::default()
+        };
     }
 
     let graph = Graph::new(nodes, connections);
@@ -601,6 +578,7 @@ pub(crate) fn run(
         produced: HashMap::new(),
         taken: HashSet::new(),
         collected: HashMap::new(),
+        scopes: HashMap::new(),
         node_runs: 0,
     };
     walk.emit(start_node, start_output, document.clone());
@@ -610,8 +588,11 @@ pub(crate) fn run(
         .copied()
         .filter(|name| *name != start_node)
         .collect();
-    walk.settle(&members)?;
-    Ok(walk.run)
+    let plan = walk.plan(&members);
+    if let Err(failure) = walk.settle(&plan) {
+        walk.run.failure = Some(failure);
+    }
+    walk.run
 }
 
 fn push_output_trace(
@@ -650,36 +631,36 @@ fn push_output_trace(
     }));
 }
 
-/// The first condition that holds, or the `default` condition (one with no
-/// expression) when none does.
+/// The first condition that holds, in the order they are declared ("If more
+/// than one condition is satisfied, the earlier condition takes precedence"), or
+/// the `default` condition (one with no expression) when none does. Conditions
+/// are evaluated one at a time and only until one holds, so a later condition
+/// never runs once an earlier one is satisfied. One that does run and refers to
+/// an input nothing delivered a value to (its branch wasn't taken) isn't
+/// satisfied, and evaluation moves on to the next; one naming something that
+/// isn't an input of the node fails it.
 fn first_satisfied_condition(
     node: &Value,
     inputs: &[(String, Value)],
 ) -> Result<Option<String>, String> {
+    let empty = Vec::new();
     let conditions = node["configuration"]["condition"]["conditions"]
         .as_array()
-        .cloned()
-        .unwrap_or_default();
-    // Parse them all first: a broken later condition is broken whichever earlier
-    // one holds.
+        .unwrap_or(&empty);
     let declared: Option<HashSet<&str>> = node["inputs"]
         .as_array()
         .map(|declared| declared.iter().filter_map(|i| i["name"].as_str()).collect());
-    let mut parsed = Vec::new();
     let mut fallback = None;
-    for condition in &conditions {
+    for condition in conditions {
         let name = condition["name"].as_str().unwrap_or_default();
         match condition["expression"].as_str() {
-            Some(expression) => parsed.push((
-                name,
-                ConditionParser::new(expression, inputs, declared.as_ref())?,
-            )),
-            None => fallback = Some(name.to_string()),
-        }
-    }
-    for (name, condition) in parsed {
-        if condition.evaluate()? {
-            return Ok(Some(name.to_string()));
+            Some(expression) => {
+                let parser = ConditionParser::new(expression, inputs, declared.as_ref())?;
+                if !parser.lacks_input && parser.evaluate()? {
+                    return Ok(Some(name.to_string()));
+                }
+            }
+            None => fallback = fallback.or_else(|| Some(name.to_string())),
         }
     }
     Ok(fallback)
@@ -701,11 +682,16 @@ enum Token {
 struct ConditionParser {
     tokens: Vec<Token>,
     at: usize,
+    /// Whether the expression names an input no connection delivered a value
+    /// to. Comparisons are defined over values only, so such a condition can't
+    /// be satisfied.
+    lacks_input: bool,
 }
 
 impl ConditionParser {
-    /// `declared` is the node's input names: a name outside them is no input, and
-    /// a declared one no connection delivered has no value to compare.
+    /// `declared` is the node's input names: a name outside them is no input (an
+    /// error), and a declared one no connection delivered leaves the condition
+    /// unsatisfiable.
     fn new(
         expression: &str,
         inputs: &[(String, Value)],
@@ -714,6 +700,7 @@ impl ConditionParser {
         let bad = || format!("The condition expression '{expression}' is not valid.");
         let chars: Vec<char> = expression.chars().collect();
         let mut tokens = Vec::new();
+        let mut lacks_input = false;
         let mut i = 0;
         while i < chars.len() {
             let c = chars[i];
@@ -777,20 +764,24 @@ impl ConditionParser {
                                     "The condition expression '{expression}' refers to {name}, which isn't an input of the node."
                                 ));
                             }
-                            let value = inputs.iter().find(|(input, _)| input == name);
-                            let (_, value) = value.ok_or_else(|| {
-                                format!(
-                                    "The condition expression '{expression}' refers to input {name}, which received no value."
-                                )
-                            })?;
-                            Token::Operand(value.clone())
+                            match inputs.iter().find(|(input, _)| input == name) {
+                                Some((_, value)) => Token::Operand(value.clone()),
+                                None => {
+                                    lacks_input = true;
+                                    Token::Operand(Value::Null)
+                                }
+                            }
                         }
                     });
                 }
                 _ => return Err(bad()),
             }
         }
-        Ok(Self { tokens, at: 0 })
+        Ok(Self {
+            tokens,
+            at: 0,
+            lacks_input,
+        })
     }
 
     fn evaluate(mut self) -> Result<bool, String> {
@@ -881,6 +872,20 @@ impl ConditionParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`super::run`], with a failed run as its failure.
+    fn run(
+        definition: Option<&Value>,
+        start_node: &str,
+        start_output: &str,
+        document: &Value,
+    ) -> Result<FlowRun, String> {
+        let mut result = super::run(definition, start_node, start_output, document);
+        match result.failure.take() {
+            Some(failure) => Err(failure),
+            None => Ok(result),
+        }
+    }
 
     fn holds(expression: &str, inputs: &[(&str, Value)]) -> bool {
         let inputs: Vec<(String, Value)> = inputs
@@ -1278,6 +1283,164 @@ mod tests {
     }
 
     #[test]
+    fn a_condition_outside_an_iterator_gates_its_body_for_every_item() {
+        let definition = json!({
+            "nodes": [
+                input_node(),
+                {
+                    "name": "Check", "type": "Condition",
+                    "configuration": {"condition": {"conditions": [
+                        {"name": "some", "expression": "count > 0"},
+                        {"name": "default"}
+                    ]}},
+                    "inputs": [{"name": "count", "type": "Number", "expression": "$.data.count"}]
+                },
+                node("Each", "Iterator", &["array"], &["arrayItem", "arraySize"]),
+                prompt("Model", &["item"]),
+                output_node("End"),
+                output_node("None")
+            ],
+            "connections": [
+                edge(("Start", "document"), ("Check", "count")),
+                edge(("Start", "document"), ("Each", "array")),
+                edge(("Each", "arrayItem"), ("Model", "item")),
+                {"name": "s", "type": "Conditional", "source": "Check", "target": "Model",
+                 "configuration": {"conditional": {"condition": "some"}}},
+                {"name": "n", "type": "Conditional", "source": "Check", "target": "None",
+                 "configuration": {"conditional": {"condition": "default"}}},
+                edge(("Model", "modelCompletion"), ("End", "document")),
+                data_edge("Start", "None")
+            ]
+        });
+        // The iterator's array is the expression's whole input here, so take
+        // the items from `items`.
+        let mut definition = definition;
+        definition["nodes"][2]["inputs"][0]["expression"] = json!("$.data.items");
+        let result = run(
+            Some(&definition),
+            "Start",
+            "document",
+            &json!({"count": 3, "items": ["a", "b", "c"]}),
+        )
+        .unwrap();
+        assert_eq!(
+            outputs_of(&result),
+            [
+                ("End", &json!("Flow output for input: a")),
+                ("End", &json!("Flow output for input: b")),
+                ("End", &json!("Flow output for input: c"))
+            ]
+        );
+    }
+
+    /// Two iterators off one input, and a third node they both feed.
+    fn two_iterators_sharing(shared: bool) -> Value {
+        let mut connections = vec![
+            edge(("Start", "document"), ("Gate", "value")),
+            json!({"name": "a", "type": "Conditional", "source": "Gate", "target": "One",
+                   "configuration": {"conditional": {"condition": "one"}}}),
+            json!({"name": "b", "type": "Conditional", "source": "Gate", "target": "Two",
+                   "configuration": {"conditional": {"condition": "default"}}}),
+            edge(("Start", "document"), ("One", "array")),
+            edge(("Start", "document"), ("Two", "array")),
+            edge(("One", "arrayItem"), ("Shared", "a")),
+            edge(("Shared", "modelCompletion"), ("End", "document")),
+        ];
+        if shared {
+            connections.push(edge(("Two", "arrayItem"), ("Shared", "b")));
+        } else {
+            connections.push(edge(("Two", "arrayItem"), ("Other", "document")));
+        }
+        json!({
+            "nodes": [
+                input_node(),
+                {
+                    "name": "Gate", "type": "Condition",
+                    "configuration": {"condition": {"conditions": [
+                        {"name": "one", "expression": "value == 'never'"},
+                        {"name": "default"}
+                    ]}},
+                    "inputs": [{"name": "value", "type": "Array", "expression": "$.data"}]
+                },
+                node("One", "Iterator", &["array"], &["arrayItem", "arraySize"]),
+                node("Two", "Iterator", &["array"], &["arrayItem", "arraySize"]),
+                prompt("Shared", &["a", "b"]),
+                output_node("Other"),
+                output_node("End")
+            ],
+            "connections": connections
+        })
+    }
+
+    #[test]
+    fn a_node_two_unnested_iterators_repeat_fails_the_iterator_that_reaches_it() {
+        let definition = two_iterators_sharing(true);
+        for _ in 0..8 {
+            let error = run(Some(&definition), "Start", "document", &json!([1])).unwrap_err();
+            assert!(error.contains("ambiguous"), "{error}");
+            assert!(
+                error.contains("Shared") && error.contains("One") && error.contains("Two"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_broken_iterator_the_run_never_reaches_fails_nothing() {
+        // `One` would nest past the limit, but the gate only ever takes `Two`.
+        let mut definition = two_iterators_sharing(false);
+        let nodes = definition["nodes"].as_array_mut().unwrap();
+        let mut connections = Vec::new();
+        let mut previous = ("One".to_string(), "arrayItem");
+        for depth in 0..=fakecloud_bedrock_agent::flow_graph::MAX_ITERATOR_NESTING {
+            let name = format!("Deep{depth}");
+            nodes.push(node(
+                &name,
+                "Iterator",
+                &["array"],
+                &["arrayItem", "arraySize"],
+            ));
+            connections.push(edge((&previous.0, previous.1), (&name, "array")));
+            previous = (name, "arrayItem");
+        }
+        definition["connections"]
+            .as_array_mut()
+            .unwrap()
+            .append(&mut connections);
+        let result = run(Some(&definition), "Start", "document", &json!([1, 2])).unwrap();
+        assert_eq!(
+            outputs_of(&result),
+            [("Other", &json!(1)), ("Other", &json!(2))]
+        );
+        // Reached, the same iterator fails the run.
+        definition["nodes"][1]["configuration"]["condition"]["conditions"][0]["expression"] =
+            json!("value != 'never'");
+        let error = run(Some(&definition), "Start", "document", &json!([1])).unwrap_err();
+        assert!(error.contains("nested more than"), "{error}");
+    }
+
+    #[test]
+    fn a_failed_run_keeps_what_ran_before_the_failure() {
+        let definition = json!({
+            "nodes": [
+                input_node(),
+                output_node("First"),
+                node("Each", "Iterator", &["array"], &["arrayItem", "arraySize"]),
+                output_node("End")
+            ],
+            "connections": [
+                data_edge("Start", "First"),
+                edge(("Start", "document"), ("Each", "array")),
+                edge(("Each", "arrayItem"), ("End", "document"))
+            ]
+        });
+        let result = super::run(Some(&definition), "Start", "document", &json!("nope"));
+        assert_eq!(outputs_of(&result), [("First", &json!("nope"))]);
+        assert!(result.failure.as_deref().unwrap().contains("array"));
+        assert!(trace_kinds(&result).contains(&"nodeInputTrace:Each".to_string()));
+    }
+
+    #[test]
     fn runaway_iteration_is_refused() {
         let definition = iterator_definition(false);
         let document = Value::Array(vec![json!(1); MAX_NODE_RUNS + 1]);
@@ -1330,20 +1493,93 @@ mod tests {
 
     #[test]
     fn a_condition_naming_no_input_is_an_error() {
-        // Previously `Missing != 1` was true because Missing read as null, and a
-        // broken later condition went unnoticed when an earlier one held.
-        for conditions in [
+        // Previously `Missing != 1` was true because Missing read as null.
+        let definition = condition_definition(
             json!([{"name": "c", "expression": "Missing != 1"}, {"name": "default"}]),
+            &["c", "default"],
+        );
+        let error = run(Some(&definition), "Start", "document", &json!(1)).unwrap_err();
+        assert!(error.contains("Missing"), "{error}");
+    }
+
+    #[test]
+    fn conditions_are_evaluated_in_order_and_only_until_one_holds() {
+        // A broken condition after the one that holds never runs.
+        let definition = condition_definition(
             json!([
                 {"name": "c", "expression": "value == 1"},
                 {"name": "d", "expression": "Missing != 1"},
                 {"name": "default"}
             ]),
-        ] {
-            let definition = condition_definition(conditions, &["c", "default"]);
-            let error = run(Some(&definition), "Start", "document", &json!(1)).unwrap_err();
-            assert!(error.contains("Missing"), "{error}");
-        }
+            &["c", "default"],
+        );
+        let result = run(Some(&definition), "Start", "document", &json!(1)).unwrap();
+        assert_eq!(
+            result.traces[2]["conditionNodeResultTrace"]["satisfiedConditions"],
+            json!([{"conditionName": "c"}])
+        );
+    }
+
+    #[test]
+    fn a_condition_on_an_input_no_branch_delivered_is_not_satisfied() {
+        // `Gate` sends the number to `Upper` only when it's big; `Check` reads
+        // both, so for a small number `upper` never gets a value.
+        let definition = json!({
+            "nodes": [
+                input_node(),
+                {
+                    "name": "Gate", "type": "Condition",
+                    "configuration": {"condition": {"conditions": [
+                        {"name": "big", "expression": "value > 5"},
+                        {"name": "default"}
+                    ]}},
+                    "inputs": [{"name": "value", "type": "Number", "expression": "$.data"}]
+                },
+                prompt("Upper", &["document"]),
+                {
+                    "name": "Check", "type": "Condition",
+                    "configuration": {"condition": {"conditions": [
+                        {"name": "fromUpper", "expression": "upper == 'x'"},
+                        {"name": "small", "expression": "raw < 5"},
+                        {"name": "default"}
+                    ]}},
+                    "inputs": [
+                        {"name": "upper", "type": "String", "expression": "$.data"},
+                        {"name": "raw", "type": "Number", "expression": "$.data"}
+                    ]
+                },
+                output_node("Small"),
+                output_node("Other"),
+                output_node("Nowhere")
+            ],
+            "connections": [
+                edge(("Start", "document"), ("Gate", "value")),
+                edge(("Start", "document"), ("Upper", "document")),
+                {"name": "g", "type": "Conditional", "source": "Gate", "target": "Upper",
+                 "configuration": {"conditional": {"condition": "big"}}},
+                {"name": "gd", "type": "Conditional", "source": "Gate", "target": "Nowhere",
+                 "configuration": {"conditional": {"condition": "default"}}},
+                edge(("Upper", "modelCompletion"), ("Check", "upper")),
+                edge(("Start", "document"), ("Check", "raw")),
+                {"name": "u", "type": "Conditional", "source": "Check", "target": "Other",
+                 "configuration": {"conditional": {"condition": "fromUpper"}}},
+                {"name": "s", "type": "Conditional", "source": "Check", "target": "Small",
+                 "configuration": {"conditional": {"condition": "small"}}},
+                {"name": "d", "type": "Conditional", "source": "Check", "target": "Other",
+                 "configuration": {"conditional": {"condition": "default"}}},
+                data_edge("Start", "Small"),
+                data_edge("Start", "Other"),
+                data_edge("Start", "Nowhere")
+            ]
+        });
+        let small = run(Some(&definition), "Start", "document", &json!(2)).unwrap();
+        assert_eq!(
+            outputs_of(&small),
+            [("Nowhere", &json!(2)), ("Small", &json!(2))]
+        );
+        // A big number gives `upper` a value, which isn't 'x', and isn't small.
+        let big = run(Some(&definition), "Start", "document", &json!(9)).unwrap();
+        assert_eq!(outputs_of(&big), [("Other", &json!(9))]);
     }
 
     #[test]

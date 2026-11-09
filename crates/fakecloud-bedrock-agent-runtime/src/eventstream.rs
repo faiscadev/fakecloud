@@ -126,6 +126,22 @@ pub fn flow_completion_frame() -> Vec<u8> {
     )
 }
 
+/// Build an in-stream exception frame, how a stream already under way reports
+/// an error: `:message-type` `exception`, the union member's name as
+/// `:exception-type`, and the error's members as the payload.
+pub fn exception_frame(exception_type: &str, message: &str) -> Vec<u8> {
+    let body = serde_json::to_vec(&serde_json::json!({ "message": message }))
+        .expect("static JSON shape never fails");
+    encode_frame(
+        &[
+            (":exception-type", exception_type),
+            (":content-type", "application/json"),
+            (":message-type", "exception"),
+        ],
+        &body,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +205,18 @@ mod tests {
         assert_eq!(body["nodeName"], "StartNode");
         assert!(body.get("nodeType").is_none());
         assert_eq!(body["content"]["document"], "document text");
+    }
+
+    #[test]
+    fn exception_frame_names_its_exception() {
+        let (headers, body) = decode_frame(&exception_frame("validationException", "bad"));
+        assert!(headers.contains(&(":message-type".to_string(), "exception".to_string())));
+        assert!(headers.contains(&(
+            ":exception-type".to_string(),
+            "validationException".to_string()
+        )));
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body, serde_json::json!({"message": "bad"}));
     }
 
     #[test]

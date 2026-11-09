@@ -206,10 +206,16 @@ mod tests {
             apply("$.data.numbers[*]", &input).unwrap(),
             json!([1, 2, 3, 5, 8])
         );
-        // One result from a wildcard is that result, not an array of it.
+        // One result from a wildcard is that result, not an array of it: the
+        // guide's `*` returns its results in an array "if there are multiple
+        // results", in place of a name or an index alike.
         assert_eq!(
             apply("$.data.*.flowers", &input).unwrap(),
             json!(["lily", "daisy"])
+        );
+        assert_eq!(
+            apply("$.data.only[*]", &json!({"only": [7]})).unwrap(),
+            json!(7)
         );
     }
 

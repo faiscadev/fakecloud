@@ -703,34 +703,68 @@ async fn invoke_flow_iterates_and_introspection_lists_every_output() {
         ])
     );
 
-    // A malformed expression is refused rather than running on null.
+    // A malformed expression fails the node rather than running on null. The
+    // request itself was fine, so the stream starts and ends on the error.
     let created: serde_json::Value = create("malformed", "$.database")
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    prepare(created["id"].as_str().unwrap().to_string()).await;
-    let response = http
-        .post(format!(
-            "{endpoint}/flows/{}/aliases/TSTALIASID",
-            created["id"].as_str().unwrap()
-        ))
-        .header("content-type", "application/json")
-        .header("authorization", auth)
-        .body(
-            serde_json::json!({"inputs": [{
-                "nodeName": "Input",
-                "content": {"document": {"items": []}}
-            }]})
-            .to_string(),
+    let malformed_id = created["id"].as_str().unwrap().to_string();
+    prepare(malformed_id.clone()).await;
+    let runtime = server.bedrock_agent_runtime_client().await;
+    let mut stream = runtime
+        .invoke_flow()
+        .flow_identifier(&malformed_id)
+        .flow_alias_identifier("TSTALIASID")
+        .execution_id("malformed-run")
+        .inputs(
+            aws_sdk_bedrockagentruntime::types::FlowInput::builder()
+                .node_name("Input")
+                .content(
+                    aws_sdk_bedrockagentruntime::types::FlowInputContent::Document(
+                        aws_smithy_types::Document::Object(
+                            [(
+                                "items".to_string(),
+                                aws_smithy_types::Document::Array(Vec::new()),
+                            )]
+                            .into(),
+                        ),
+                    ),
+                )
+                .build()
+                .unwrap(),
         )
         .send()
         .await
-        .unwrap();
-    assert_eq!(response.status(), 400);
-    let error = response.text().await.unwrap();
-    assert!(error.contains("not valid"), "{error}");
+        .expect("a node failure doesn't fail the request")
+        .response_stream;
+    let error = loop {
+        match stream.recv().await {
+            Ok(Some(event)) => assert!(
+                !event.is_flow_completion_event(),
+                "a failed run doesn't complete: {event:?}"
+            ),
+            Ok(None) => panic!("the stream ended without reporting the failure"),
+            Err(error) => break error,
+        }
+    };
+    let error = error.into_service_error();
+    assert!(error.is_validation_exception(), "{error:?}");
+    assert!(
+        error.message().is_some_and(|m| m.contains("not valid")),
+        "{error:?}"
+    );
+    let execution = runtime
+        .get_flow_execution()
+        .flow_identifier(&malformed_id)
+        .flow_alias_identifier("TSTALIASID")
+        .execution_identifier("malformed-run")
+        .send()
+        .await
+        .expect("the failed run is an execution");
+    assert_eq!(execution.status(), &FlowExecutionStatus::Failed);
 }
 
 /// Each event-stream frame's `:event-type` and JSON payload.
