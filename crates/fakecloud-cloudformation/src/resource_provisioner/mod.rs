@@ -2601,13 +2601,30 @@ impl ResourceProvisioner {
     /// deleted, as on AWS: a resource removed out of band never fails a stack's
     /// delete.
     pub fn delete_resource(&self, resource: &StackResource) -> Result<(), String> {
-        self.delete_resource_unchecked(resource).or_else(|e| {
-            if is_not_found_error(&e) {
-                Ok(())
-            } else {
-                Err(e)
-            }
+        self.keeping_teardowns_on_failure(|| {
+            self.delete_resource_unchecked(resource).or_else(|e| {
+                if is_not_found_error(&e, &resource.physical_id) {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
         })
+    }
+
+    /// Run a delete, dropping any container teardown it queued if it then failed:
+    /// a resource whose delete failed stays on the stack, so its backing
+    /// containers must not be reaped.
+    fn keeping_teardowns_on_failure(
+        &self,
+        delete: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let queued = self.pending_container_teardowns.lock().len();
+        let result = delete();
+        if result.is_err() {
+            self.pending_container_teardowns.lock().truncate(queued);
+        }
+        result
     }
 
     fn delete_resource_unchecked(&self, resource: &StackResource) -> Result<(), String> {
@@ -4245,19 +4262,40 @@ fn parse_firehose_s3_destination(
     Ok(destination)
 }
 
-/// Whether a delete failed only because the resource is already gone: an AWS
-/// not-found code (`...NotFound`, `NoSuch...`, `ResourceNotFoundException`) or a
-/// service's not-found message. Every provisioner reports failures as text, so
-/// this is the one place that decides it.
-pub(crate) fn is_not_found_error(error: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        "NotFound",
-        "NoSuch",
-        "not found",
-        "does not exist",
-        "doesn't exist",
-    ];
-    MARKERS.iter().any(|m| error.contains(m))
+/// Whether a delete failed only because the resource is already gone, which AWS
+/// treats as deleted. Either the error's AWS code says not found (`*.NotFound`,
+/// `NoSuch*`, `ResourceNotFoundException`, `EntityNotFound`,
+/// `EntityNotFoundException`), or its message names `physical_id` itself as not
+/// found. A message about some other missing resource (a dependency) is a real
+/// failure.
+pub(crate) fn is_not_found_error(error: &str, physical_id: &str) -> bool {
+    if error_code(error).is_some_and(|code| {
+        code.ends_with(".NotFound")
+            || code.starts_with("NoSuch")
+            || matches!(
+                code,
+                "ResourceNotFoundException" | "EntityNotFound" | "EntityNotFoundException"
+            )
+    }) {
+        return true;
+    }
+    const PHRASES: &[&str] = &["not found", "does not exist", "doesn't exist"];
+    !physical_id.is_empty()
+        && error.contains(physical_id)
+        && PHRASES.iter().any(|p| error.contains(p))
+}
+
+/// The AWS error code a provisioner error carries: `EC2 <Action> failed (<Code>):
+/// ...` from `ec2_dispatch`, or a leading `<Code>: ...` from the other service
+/// dispatchers.
+fn error_code(error: &str) -> Option<&str> {
+    let code = if let Some(rest) = error.strip_prefix("EC2 ") {
+        rest.split_once(" failed (")?.1.split_once("):")?.0
+    } else {
+        error.split_once(": ")?.0
+    };
+    (!code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '.'))
+        .then_some(code)
 }
 
 #[cfg(test)]
@@ -5734,21 +5772,43 @@ mod tests {
     /// an EC2 `*.NotFound` code, a `NoSuch*` code, or a not-found message.
     #[test]
     fn deleting_a_resource_already_gone_succeeds() {
-        for gone in [
-            "EC2 DeleteNatGateway failed (InvalidNatGatewayID.NotFound): no such gateway",
-            "NoSuchBucket: The specified bucket does not exist",
-            "ResourceNotFoundException: Requested resource not found",
-            "Database db not found",
-            "Job queue q does not exist",
+        for (gone, id) in [
+            (
+                "EC2 DeleteNatGateway failed (InvalidNatGatewayID.NotFound): no such gateway",
+                "nat-1",
+            ),
+            ("NoSuchBucket: The specified bucket does not exist", "b"),
+            (
+                "ResourceNotFoundException: Requested resource not found",
+                "t",
+            ),
+            ("EntityNotFoundException: Database db not found", "db|t"),
+            // Batch reports its own resource missing under a generic code.
+            ("ClientException: Job queue q1 does not exist", "q1"),
         ] {
-            assert!(is_not_found_error(gone), "{gone}");
+            assert!(is_not_found_error(gone, id), "{gone}");
         }
-        for real in [
-            "Resource handler returned message: \"The specified public key is in use.\"",
-            "The user pool cannot be deleted because deletion protection is activated.",
-            "Invalid Glue table physical id: x",
+        for (real, id) in [
+            // A dependency missing is a real failure, not the resource gone.
+            (
+                "ClientException: Compute environment ce-other does not exist",
+                "q1",
+            ),
+            (
+                "DependencyViolation: subnet-9 not found in the VPC",
+                "vpc-1",
+            ),
+            (
+                "Resource handler returned message: \"The specified public key is in use.\"",
+                "K1",
+            ),
+            (
+                "The user pool cannot be deleted because deletion protection is activated.",
+                "p",
+            ),
+            ("Invalid Glue table physical id: x", "x"),
         ] {
-            assert!(!is_not_found_error(real), "{real}");
+            assert!(!is_not_found_error(real, id), "{real}");
         }
 
         let prov = make_provisioner();
@@ -5764,6 +5824,31 @@ mod tests {
         };
         prov.delete_resource(&table)
             .expect("a table whose database is gone is already deleted");
+    }
+
+    /// A delete that fails leaves its resource on the stack, so the container
+    /// teardown it queued is dropped rather than reaped; one that succeeds keeps it.
+    #[test]
+    fn a_failed_delete_does_not_reap_its_containers() {
+        let prov = make_provisioner();
+        let queue = |prov: &ResourceProvisioner, ok: bool| {
+            prov.keeping_teardowns_on_failure(|| {
+                prov.pending_container_teardowns.lock().push(
+                    ContainerTeardownIntent::Ec2Instance {
+                        instance_id: "i-1".into(),
+                    },
+                );
+                if ok {
+                    Ok(())
+                } else {
+                    Err("DependencyViolation: in use".into())
+                }
+            })
+        };
+        assert!(queue(&prov, false).is_err());
+        assert!(prov.pending_container_teardowns.lock().is_empty());
+        queue(&prov, true).unwrap();
+        assert_eq!(prov.pending_container_teardowns.lock().len(), 1);
     }
 
     /// A CloudFront resource something still names fails to delete with

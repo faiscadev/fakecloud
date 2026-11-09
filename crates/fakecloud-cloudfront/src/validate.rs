@@ -687,6 +687,8 @@ fn reference_exists(reference: Reference<'_>, account: Option<&AccountState>) ->
             a.continuous_deployment_policies.contains_key(id)
         }
         Reference::TrustStore(id) => a.trust_stores.contains_key(id),
+        // By ID only: this check refuses a name or ARN, so a stored association
+        // only ever holds an ID, and the in-use match compares IDs too.
         Reference::ConnectionFunction(id) => a.connection_functions.values().any(|f| f.id == id),
         Reference::KeyGroup { id, .. } => a.key_groups.contains_key(id),
         Reference::FieldLevelEncryption(id) => a.field_level_encryptions.contains_key(id),
