@@ -1,134 +1,34 @@
 name: Release build check
 
-# Dry-runs every release.yml build leg (glibc 2.17 via cargo-zigbuild, static
-# musl, macOS), for both the stripped release binary and the release-debug
-# binary, on PRs that can affect them. release.yml only builds on tag push, and
-# its `release` job needs every matrix leg, so a leg that only fails at release
-# time would block the whole release. The matrix and the build and verify steps
-# below are copied from release.yml's `build` job, in the same order; keep them
-# in sync.
+# Dry-runs every release build leg (Linux glibc 2.17 via cargo-zigbuild, static
+# musl, macOS) for both the stripped release binary and the release-debug
+# binary, on PRs that can affect them. release.yml only builds on tag push,
+# and its `release` job needs every leg, so a leg that only fails at release
+# time would block the whole release. Both workflows call the same
+# build-binaries.yml, so this check runs exactly what the release runs.
 
 on:
   pull_request:
     paths:
       - ".github/workflows/release.yml"
       - ".github/workflows/release-build-check.yml"
+      - ".github/workflows/build-binaries.yml"
+      - "scripts/verify-release-binary.sh"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "crates/fakecloud-server/Cargo.toml"
+      - "crates/*/Cargo.toml"
+      - "**/build.rs"
+      - ".cargo/**"
+      - "rust-toolchain*"
       - "install.sh"
-      - "scripts/verify-linux-binary.sh"
   workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   build:
-    name: Build ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    # Two full builds per target: the stripped binary and release-debug.
-    timeout-minutes: 150
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Linux glibc builds link against glibc 2.17 through cargo-zigbuild
-          # (the `.2.17` suffix on zig_target), not the runner's own glibc
-          # (2.39 on ubuntu-24.04). A plain `cargo build` on the runner
-          # produced binaries that refuse to start on Amazon Linux 2, RHEL 8,
-          # Debian 11 and Ubuntu 20.04 ("GLIBC_2.3x not found"). 2.17 is the
-          # oldest glibc Rust's std still supports, so the binary runs on
-          # every glibc distro that is still around.
-          - name: linux-amd64
-            runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            zig_target: x86_64-unknown-linux-gnu.2.17
-          - name: linux-arm64
-            runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            zig_target: aarch64-unknown-linux-gnu.2.17
-          # Fully static musl builds for Alpine and other musl distros,
-          # where the glibc binary cannot run at all. install.sh picks these
-          # automatically on musl systems.
-          - name: linux-amd64-musl
-            runner: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            zig_target: x86_64-unknown-linux-musl
-          - name: linux-arm64-musl
-            runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            zig_target: aarch64-unknown-linux-musl
-          - name: darwin-amd64
-            runner: macos-14
-            target: x86_64-apple-darwin
-          - name: darwin-arm64
-            runner: macos-14
-            target: aarch64-apple-darwin
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: release-check-${{ matrix.target }}
-
-      - name: Install zig + cargo-zigbuild
-        if: matrix.zig_target != ''
-        run: |
-          python3 -m pip install --user --break-system-packages "ziglang==${ZIG_VERSION}"
-          cargo install --locked cargo-zigbuild --version "${CARGO_ZIGBUILD_VERSION}"
-        env:
-          ZIG_VERSION: "0.16.0"
-          CARGO_ZIGBUILD_VERSION: "0.23.4"
-
-      - name: Build (Linux, cargo-zigbuild)
-        if: matrix.zig_target != ''
-        # vendored-openssl: the RDS MySQL client links OpenSSL through
-        # native-tls; vendoring builds it from source and links it statically
-        # so the binary does not depend on the runner's libssl.so.3.
-        # LIBZ_SYS_STATIC / LZMA_API_STATIC: build zlib / liblzma from source
-        # and link them statically instead of picking up the runner's shared
-        # libraries, which zig's sysroot does not see.
-        env:
-          LIBZ_SYS_STATIC: "1"
-          LZMA_API_STATIC: "1"
-        run: cargo zigbuild --release --locked --target ${{ matrix.zig_target }} --bin fakecloud --features vendored-openssl
-
-      # Release binaries are stripped, so a panic backtrace has no function
-      # names. A published release-debug binary lets anyone reproduce a crash
-      # with names and line numbers, with no toolchain.
-      - name: Build release-debug (Linux, cargo-zigbuild)
-        if: matrix.zig_target != ''
-        env:
-          LIBZ_SYS_STATIC: "1"
-          LZMA_API_STATIC: "1"
-        run: cargo zigbuild --profile release-debug --locked --target ${{ matrix.zig_target }} --bin fakecloud --features vendored-openssl
-
-      - name: Verify Linux binary portability
-        if: matrix.zig_target != ''
-        shell: bash
-        run: |
-          for profile in release release-debug; do
-            scripts/verify-linux-binary.sh "target/${{ matrix.target }}/$profile/fakecloud" "${{ matrix.target }}"
-          done
-
-      - name: Build (macOS)
-        if: matrix.zig_target == ''
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin fakecloud
-
-      - name: Build release-debug (macOS)
-        if: matrix.zig_target == ''
-        run: cargo build --profile release-debug --locked --target ${{ matrix.target }} --bin fakecloud
-
-      # The release-debug tree is a second full optimized build. Drop it before
-      # rust-cache saves target/, so the cache holds one build per target and
-      # stays within the runner disk and the repo cache quota.
-      - name: Drop release-debug build from the cache
-        if: always()
-        shell: bash
-        run: rm -rf target/${{ matrix.target }}/release-debug target/release-debug
+    name: Build
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      package: false

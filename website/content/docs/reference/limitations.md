@@ -61,7 +61,7 @@ Evaluation covers `Allow` / `Deny` with Deny precedence, `Action` / `NotAction` 
 
 Release binaries are stripped to keep them small. A panic message still names the source file and line, but a backtrace has no function names.
 
-Every release also publishes `fakecloud-<tag>-<platform>-debug.tar.gz`, the same code built with symbols and line numbers. `<tag>` is the release tag including its leading `v`, and `<platform>` is the same name the regular archive uses (for example `fakecloud-v0.51.0-linux-amd64-debug.tar.gz`). To get a usable backtrace, run the debug binary and reproduce the crash:
+Every release after v0.51.0 also publishes `fakecloud-<tag>-<platform>-debug.tar.gz`, the same code built with symbols and line numbers. `<tag>` is the release tag including its leading `v`, and `<platform>` is the same name the regular archive uses (for example `fakecloud-v1.2.3-linux-amd64-debug.tar.gz` for tag `v1.2.3`). To get a usable backtrace, run the debug binary and reproduce the crash:
 
 ```sh
 tar xzf fakecloud-<tag>-<platform>-debug.tar.gz
