@@ -4,11 +4,36 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// A parsed Smithy service model.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ServiceModel {
     pub service_name: String,
     pub operations: Vec<Operation>,
     pub shapes: HashMap<String, Shape>,
+    /// The service shape's id, when the model has one.
+    pub service_shape_id: Option<String>,
+    /// Whether the service carries `aws.protocols#restXml`.
+    pub rest_xml: bool,
+    /// The service shape's `smithy.api#xmlNamespace`: the default namespace
+    /// of every restXml request body's root element.
+    pub xml_namespace: Option<XmlNamespace>,
+    /// Each structure's / union's member names in the order the model file
+    /// declares them. `ShapeType`'s member lists are built from a
+    /// `serde_json::Map`, whose iteration order is alphabetical or
+    /// declaration order depending on whether some other crate in the build
+    /// enables serde_json's `preserve_order`; serializers that must follow
+    /// the model's order (restXml bodies) read this instead.
+    pub member_order: HashMap<String, Vec<String>>,
+    /// Operations whose `aws.protocols#httpChecksum` trait sets
+    /// `requestChecksumRequired`, by operation name.
+    pub request_checksum_required: HashMap<String, RequestChecksum>,
+}
+
+/// An operation's required request checksum (`aws.protocols#httpChecksum`
+/// with `requestChecksumRequired`, or `smithy.api#httpChecksumRequired`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestChecksum {
+    /// The input member that selects the algorithm, if the trait names one.
+    pub algorithm_member: Option<String>,
 }
 
 /// A parsed operation from the model.
@@ -160,8 +185,6 @@ pub struct ShapeTraits {
     /// `smithy.api#httpQueryParams` -- a map member whose entries become query
     /// parameters.
     pub http_query_params: bool,
-    /// `aws.protocols#restXml` on a service shape.
-    pub rest_xml: bool,
     /// `smithy.api#mediaType` on a string shape. A string with a media type
     /// bound to an HTTP header is sent base64-encoded.
     pub media_type: Option<String>,
@@ -172,13 +195,8 @@ pub struct ShapeTraits {
     pub xml_list_member_name: Option<String>,
     pub xml_map_key_name: Option<String>,
     pub xml_map_value_name: Option<String>,
-    /// A structure's or union's member names in the order the model file
-    /// declares them. `ShapeType`'s member list is built from a
-    /// `serde_json::Map`, whose iteration order is alphabetical or
-    /// declaration order depending on whether some other crate in the build
-    /// enables serde_json's `preserve_order`; serializers that must follow
-    /// the model's order (restXml bodies) read this instead.
-    pub member_order: Vec<String>,
+    /// `smithy.api#timestampFormat` on a list's `member`.
+    pub list_member_timestamp_format: Option<String>,
 }
 
 /// A `smithy.api#xmlNamespace` value.
@@ -205,8 +223,8 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
 
 /// Parse a Smithy JSON AST model from a string.
 pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
-    let root: Value =
-        serde_json::from_str(content).map_err(|e| format!("Failed to parse model: {}", e))?;
+    let (root, mut member_order) = parse_json_recording_member_order(content)
+        .map_err(|e| format!("Failed to parse model: {}", e))?;
 
     let smithy_version = root
         .get("smithy")
@@ -228,11 +246,18 @@ pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
     // lenient acceptance hack; the strict probe matches only the op's own
     // directly-declared error shapes.
     let mut service_name = String::new();
+    let mut service_shape_id = None;
+    let mut rest_xml = false;
+    let mut xml_namespace = None;
     let mut operation_targets: Vec<String> = Vec::new();
 
     for (shape_id, shape_def) in raw_shapes {
         if shape_def.get("type").and_then(|v| v.as_str()) == Some("service") {
             service_name = shape_id.split('#').next().unwrap_or(shape_id).to_string();
+            service_shape_id = Some(shape_id.clone());
+            let traits = shape_def.get("traits").and_then(|v| v.as_object());
+            rest_xml = traits.is_some_and(|t| t.contains_key("aws.protocols#restXml"));
+            xml_namespace = parse_traits(traits).xml_namespace;
             if let Some(ops) = shape_def.get("operations").and_then(|v| v.as_array()) {
                 for op in ops {
                     if let Some(target) = op.get("target").and_then(|v| v.as_str()) {
@@ -253,16 +278,20 @@ pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
     }
 
     // Parse all shapes
-    let mut member_orders = declared_member_orders(content);
     let mut shapes = HashMap::new();
     for (shape_id, shape_def) in raw_shapes {
-        if let Some(mut shape) = parse_shape(shape_id, shape_def) {
-            if let Some(order) = member_orders.remove(shape_id) {
-                shape.traits.member_order = order;
-            }
+        if let Some(shape) = parse_shape(shape_id, shape_def) {
             shapes.insert(shape_id.clone(), shape);
         }
     }
+    // Only structures and unions serialize members in order.
+    member_order.retain(|id, _| {
+        matches!(
+            shapes.get(id).map(|s| &s.shape_type),
+            Some(ShapeType::Structure { .. }) | Some(ShapeType::Union { .. })
+        )
+    });
+    let mut request_checksum_required = HashMap::new();
 
     // Build operation list
     let mut operations = Vec::new();
@@ -308,6 +337,26 @@ pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
                 })
                 .unwrap_or((None, None, None));
 
+            let op_traits = shape_def.get("traits").and_then(|v| v.as_object());
+            let http_checksum = op_traits.and_then(|t| t.get("aws.protocols#httpChecksum"));
+            let required = op_traits
+                .is_some_and(|t| t.contains_key("smithy.api#httpChecksumRequired"))
+                || http_checksum
+                    .and_then(|c| c.get("requestChecksumRequired"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+            if required {
+                request_checksum_required.insert(
+                    name.clone(),
+                    RequestChecksum {
+                        algorithm_member: http_checksum
+                            .and_then(|c| c.get("requestAlgorithmMember"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                    },
+                );
+            }
+
             let op = Operation {
                 name,
                 input_shape,
@@ -328,56 +377,120 @@ pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
         service_name,
         operations,
         shapes,
+        service_shape_id,
+        rest_xml,
+        xml_namespace,
+        member_order,
+        request_checksum_required,
     })
 }
 
-/// Each shape's `members` keys in declaration order, read straight from the
-/// model text so the result does not depend on serde_json's `preserve_order`
+/// Parse the model JSON into a `Value`, recording each shape's `members`
+/// keys in declaration order in the same pass. The order is captured from
+/// the token stream, so it does not depend on serde_json's `preserve_order`
 /// feature.
-fn declared_member_orders(content: &str) -> HashMap<String, Vec<String>> {
-    use serde::de::{IgnoredAny, MapAccess, Visitor};
+fn parse_json_recording_member_order(
+    content: &str,
+) -> Result<(Value, HashMap<String, Vec<String>>), serde_json::Error> {
+    use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+    use std::cell::RefCell;
 
-    /// The keys of a JSON object, in order, values ignored.
-    struct Keys(Vec<String>);
-    impl<'de> Deserialize<'de> for Keys {
-        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-            struct V;
-            impl<'de> Visitor<'de> for V {
-                type Value = Keys;
-                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    f.write_str("a JSON object")
-                }
-                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
-                    let mut keys = Vec::new();
-                    while let Some((k, IgnoredAny)) = map.next_entry::<String, IgnoredAny>()? {
-                        keys.push(k);
-                    }
-                    Ok(Keys(keys))
-                }
-            }
-            d.deserialize_map(V)
+    /// Where in the document the value being read sits.
+    #[derive(Clone)]
+    enum At {
+        Root,
+        Shapes,
+        Shape(String),
+        Members(String),
+        Other,
+    }
+
+    struct Seed<'a> {
+        at: At,
+        orders: &'a RefCell<HashMap<String, Vec<String>>>,
+    }
+
+    impl<'de> DeserializeSeed<'de> for Seed<'_> {
+        type Value = Value;
+        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Value, D::Error> {
+            d.deserialize_any(self)
         }
     }
 
-    #[derive(Deserialize)]
-    struct RawShape {
-        #[serde(default)]
-        members: Option<Keys>,
-    }
-    #[derive(Deserialize)]
-    struct RawModel {
-        #[serde(default)]
-        shapes: HashMap<String, RawShape>,
+    impl<'de> Visitor<'de> for Seed<'_> {
+        type Value = Value;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON value")
+        }
+        fn visit_bool<E>(self, v: bool) -> Result<Value, E> {
+            Ok(Value::Bool(v))
+        }
+        fn visit_i64<E>(self, v: i64) -> Result<Value, E> {
+            Ok(Value::from(v))
+        }
+        fn visit_u64<E>(self, v: u64) -> Result<Value, E> {
+            Ok(Value::from(v))
+        }
+        fn visit_f64<E>(self, v: f64) -> Result<Value, E> {
+            Ok(serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number))
+        }
+        fn visit_str<E>(self, v: &str) -> Result<Value, E> {
+            Ok(Value::String(v.to_string()))
+        }
+        fn visit_string<E>(self, v: String) -> Result<Value, E> {
+            Ok(Value::String(v))
+        }
+        fn visit_unit<E>(self) -> Result<Value, E> {
+            Ok(Value::Null)
+        }
+        fn visit_none<E>(self) -> Result<Value, E> {
+            Ok(Value::Null)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+            let mut items = Vec::new();
+            while let Some(v) = seq.next_element_seed(Seed {
+                at: At::Other,
+                orders: self.orders,
+            })? {
+                items.push(v);
+            }
+            Ok(Value::Array(items))
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+            let mut out = serde_json::Map::new();
+            let mut keys = Vec::new();
+            while let Some(key) = map.next_key::<String>()? {
+                let child = match (&self.at, key.as_str()) {
+                    (At::Root, "shapes") => At::Shapes,
+                    (At::Shapes, id) => At::Shape(id.to_string()),
+                    (At::Shape(id), "members") => At::Members(id.clone()),
+                    _ => At::Other,
+                };
+                if matches!(self.at, At::Members(_)) {
+                    keys.push(key.clone());
+                }
+                let value = map.next_value_seed(Seed {
+                    at: child,
+                    orders: self.orders,
+                })?;
+                out.insert(key, value);
+            }
+            if let At::Members(id) = self.at {
+                self.orders.borrow_mut().insert(id, keys);
+            }
+            Ok(Value::Object(out))
+        }
     }
 
-    serde_json::from_str::<RawModel>(content)
-        .map(|m| {
-            m.shapes
-                .into_iter()
-                .filter_map(|(id, shape)| shape.members.map(|k| (id, k.0)))
-                .collect()
-        })
-        .unwrap_or_default()
+    let orders = RefCell::new(HashMap::new());
+    let mut de = serde_json::Deserializer::from_str(content);
+    let value = Seed {
+        at: At::Root,
+        orders: &orders,
+    }
+    .deserialize(&mut de)?;
+    de.end()?;
+    Ok((value, orders.into_inner()))
 }
 
 fn collect_resource_operations(
@@ -438,6 +551,12 @@ fn parse_shape(shape_id: &str, def: &Value) -> Option<Shape> {
     traits.xml_list_member_name = element_xml_name("member");
     traits.xml_map_key_name = element_xml_name("key");
     traits.xml_map_value_name = element_xml_name("value");
+    traits.list_member_timestamp_format = def
+        .get("member")
+        .and_then(|v| v.get("traits"))
+        .and_then(|t| t.get("smithy.api#timestampFormat"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let shape_type = match type_str {
         "structure" => {
@@ -704,8 +823,6 @@ fn parse_traits(raw: Option<&serde_json::Map<String, Value>>) -> ShapeTraits {
 
     traits.http_query_params = raw.contains_key("smithy.api#httpQueryParams");
 
-    traits.rest_xml = raw.contains_key("aws.protocols#restXml");
-
     if let Some(mt) = raw.get("smithy.api#mediaType").and_then(|v| v.as_str()) {
         traits.media_type = Some(mt.to_string());
     }
@@ -740,16 +857,9 @@ fn parse_traits(raw: Option<&serde_json::Map<String, Value>>) -> ShapeTraits {
 }
 
 impl ServiceModel {
-    /// The model's service shape, if it was parsed.
-    pub fn service_shape(&self) -> Option<&Shape> {
-        self.shapes
-            .values()
-            .find(|s| matches!(s.shape_type, ShapeType::Service))
-    }
-
     /// Whether the service speaks `aws.protocols#restXml`.
     pub fn is_rest_xml(&self) -> bool {
-        self.service_shape().is_some_and(|s| s.traits.rest_xml)
+        self.rest_xml
     }
 }
 

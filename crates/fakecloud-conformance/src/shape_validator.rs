@@ -1203,6 +1203,7 @@ mod tests {
             service_name: "test".to_string(),
             operations: Vec::new(),
             shapes,
+            ..Default::default()
         }
     }
 
@@ -1569,6 +1570,7 @@ mod tests {
             service_name: "test".to_string(),
             operations: Vec::new(),
             shapes,
+            ..Default::default()
         }
     }
 
@@ -1664,6 +1666,7 @@ mod tests {
             service_name: "test".to_string(),
             operations: Vec::new(),
             shapes,
+            ..Default::default()
         }
     }
 
@@ -1727,6 +1730,7 @@ mod tests {
             service_name: "test".to_string(),
             operations: Vec::new(),
             shapes,
+            ..Default::default()
         }
     }
 
@@ -1782,6 +1786,7 @@ mod tests {
             service_name: "test".to_string(),
             operations: Vec::new(),
             shapes,
+            ..Default::default()
         }
     }
 

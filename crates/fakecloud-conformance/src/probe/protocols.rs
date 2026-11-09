@@ -244,7 +244,7 @@ pub(super) fn probe_rest(
                         op,
                         model,
                         &variant.input,
-                        xml_body.as_deref().unwrap_or("").as_bytes(),
+                        xml_body.as_deref().unwrap_or_default(),
                     ));
                     if let Some(ct) = content_type {
                         if !headers

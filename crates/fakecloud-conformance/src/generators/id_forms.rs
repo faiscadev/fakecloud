@@ -218,7 +218,6 @@ fn merged_traits(target: &ShapeTraits, member: &ShapeTraits) -> ShapeTraits {
             .clone()
             .or_else(|| target.http_prefix_headers.clone()),
         http_query_params: member.http_query_params || target.http_query_params,
-        rest_xml: member.rest_xml || target.rest_xml,
         media_type: member
             .media_type
             .clone()
@@ -226,7 +225,7 @@ fn merged_traits(target: &ShapeTraits, member: &ShapeTraits) -> ShapeTraits {
         xml_list_member_name: target.xml_list_member_name.clone(),
         xml_map_key_name: target.xml_map_key_name.clone(),
         xml_map_value_name: target.xml_map_value_name.clone(),
-        member_order: target.member_order.clone(),
+        list_member_timestamp_format: target.list_member_timestamp_format.clone(),
     }
 }
 
@@ -308,6 +307,7 @@ mod tests {
             service_name: "lambda".to_string(),
             operations: vec![op_with_uri("GetFunction", "test#GetFunctionRequest")],
             shapes,
+            ..Default::default()
         };
 
         let variants = generate(&model, "GetFunction", &HashMap::new());
@@ -382,6 +382,7 @@ mod tests {
             service_name: "iam".to_string(),
             operations: vec![op_with_uri("GetThing", "test#NamedRequest")],
             shapes,
+            ..Default::default()
         };
         assert!(generate(&model, "GetThing", &HashMap::new()).is_empty());
     }
@@ -407,6 +408,7 @@ mod tests {
             service_name: "lambda".to_string(),
             operations: vec![op],
             shapes,
+            ..Default::default()
         };
         assert!(generate(&model, "Foo", &HashMap::new()).is_empty());
     }

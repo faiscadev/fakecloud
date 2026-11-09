@@ -778,7 +778,7 @@ pub(super) fn legacy_rest_request(
     };
     let has_body = matches!(method, reqwest::Method::POST | reqwest::Method::PUT);
     let body = if has_body {
-        Some(serde_json::to_string(&variant.input).unwrap_or_else(|_| "{}".to_string()))
+        Some(serde_json::to_vec(&variant.input).unwrap_or_else(|_| b"{}".to_vec()))
     } else {
         None
     };
@@ -1016,8 +1016,16 @@ pub(super) fn build_http_request_from_model(
     );
     let body = if model.is_rest_xml() {
         // restXml bodies are XML documents built from the binding traits,
-        // not the JSON the generators produce.
+        // not the JSON the generators produce, and the header members are
+        // bound by the shared restXml binder (http-date timestamps, prefix
+        // headers, @mediaType, computed integrity headers) over that body.
         let (body, content_type) = super::rest_xml::rest_xml_body(op, model, input);
+        headers = super::rest_headers::bind_headers(
+            op,
+            model,
+            input,
+            body.as_deref().unwrap_or_default(),
+        );
         if let Some(ct) = content_type {
             if !headers
                 .iter()
@@ -1028,7 +1036,7 @@ pub(super) fn build_http_request_from_model(
         }
         body
     } else if let Some(v) = payload_value {
-        Some(value_to_body(&v))
+        Some(value_to_body(&v).into_bytes())
     } else if is_bodyless_method {
         None
     } else {
@@ -1037,9 +1045,9 @@ pub(super) fn build_http_request_from_model(
             remaining.remove(name);
         }
         if remaining.is_empty() {
-            Some("{}".to_string())
+            Some(b"{}".to_vec())
         } else {
-            Some(serde_json::to_string(&serde_json::Value::Object(remaining)).unwrap_or_default())
+            Some(serde_json::to_vec(&serde_json::Value::Object(remaining)).unwrap_or_default())
         }
     };
 

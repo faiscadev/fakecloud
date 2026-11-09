@@ -55,7 +55,9 @@ fn is_payload(model: &ServiceModel, member: &Member) -> bool {
 /// The restXml request body for `op` with `input`, and its `Content-Type`.
 ///
 /// - `@httpPayload` structure/union: an XML document rooted at the payload.
-/// - `@httpPayload` blob/string: the raw value.
+/// - `@httpPayload` blob: the bytes the generator's base64 text encodes (the
+///   JSON form of a blob is base64; the wire form is the raw bytes).
+/// - `@httpPayload` string: the raw value.
 /// - No payload member: the unbound members wrapped in the input shape's
 ///   element, or no body when the input has no unbound members at all.
 ///
@@ -64,7 +66,7 @@ pub(super) fn rest_xml_body(
     op: &crate::smithy::Operation,
     model: &ServiceModel,
     input: &Value,
-) -> (Option<String>, Option<&'static str>) {
+) -> (Option<Vec<u8>>, Option<&'static str>) {
     let Some(input_shape) = op.input_shape.as_deref() else {
         return (None, None);
     };
@@ -85,18 +87,28 @@ pub(super) fn rest_xml_body(
             Some(ShapeType::Structure { .. }) | Some(ShapeType::Union { .. }) => {
                 let (name, ns) = payload_root(model, payload);
                 (
-                    Some(serialize_root(
-                        model,
-                        &name,
-                        ns.as_ref(),
-                        &payload.target,
-                        value,
-                    )),
+                    Some(
+                        serialize_root(model, &name, ns.as_ref(), &payload.target, value)
+                            .into_bytes(),
+                    ),
                     Some("application/xml"),
                 )
             }
-            Some(ShapeType::Blob) => (json_scalar_text(value), Some("application/octet-stream")),
-            _ => (json_scalar_text(value), Some("text/plain")),
+            Some(ShapeType::Blob) => (
+                json_scalar_text(value).map(|text| {
+                    use base64::Engine as _;
+                    // Text that is not base64 (a deliberately malformed
+                    // variant) is sent as its own bytes.
+                    base64::engine::general_purpose::STANDARD
+                        .decode(text.as_bytes())
+                        .unwrap_or_else(|_| text.into_bytes())
+                }),
+                Some("application/octet-stream"),
+            ),
+            _ => (
+                json_scalar_text(value).map(String::into_bytes),
+                Some("text/plain"),
+            ),
         };
     }
 
@@ -120,13 +132,16 @@ pub(super) fn rest_xml_body(
         }
     }
     (
-        Some(serialize_root(
-            model,
-            &name,
-            ns.as_ref(),
-            input_shape,
-            &Value::Object(body_value),
-        )),
+        Some(
+            serialize_root(
+                model,
+                &name,
+                ns.as_ref(),
+                input_shape,
+                &Value::Object(body_value),
+            )
+            .into_bytes(),
+        ),
         Some("application/xml"),
     )
 }
@@ -182,9 +197,7 @@ pub(super) fn input_root(
 }
 
 fn service_namespace(model: &ServiceModel) -> Option<XmlNamespace> {
-    model
-        .service_shape()
-        .and_then(|s| s.traits.xml_namespace.clone())
+    model.xml_namespace.clone()
 }
 
 /// Write `<name ...>content</name>` for `value` of shape `shape_id`.
@@ -210,7 +223,7 @@ fn write_element(
     }
     match shape.map(|s| &s.shape_type) {
         Some(ShapeType::Structure { members }) | Some(ShapeType::Union { members }) => {
-            let members = declared_order(members, shape.map(|s| &s.traits));
+            let members = declared_order(model, shape_id, members);
             let obj = value.as_object();
             // Attributes go on the open tag.
             if let Some(obj) = obj {
@@ -340,9 +353,13 @@ fn write_member(model: &ServiceModel, out: &mut String, member: &Member, value: 
 
 /// `members` in the model's declaration order. AWS SDKs serialize elements
 /// in that order, and some services validate bodies against an XSD sequence.
-fn declared_order<'a>(members: &'a [Member], traits: Option<&ShapeTraits>) -> Vec<&'a Member> {
+pub(super) fn declared_order<'a>(
+    model: &ServiceModel,
+    shape_id: &str,
+    members: &'a [Member],
+) -> Vec<&'a Member> {
     let mut ordered: Vec<&Member> = members.iter().collect();
-    if let Some(order) = traits.map(|t| &t.member_order).filter(|o| !o.is_empty()) {
+    if let Some(order) = model.member_order.get(shape_id) {
         ordered.sort_by_key(|m| {
             order
                 .iter()
@@ -488,36 +505,91 @@ fn json_scalar_text(value: &Value) -> Option<String> {
     }
 }
 
-/// Re-render an RFC 3339 `YYYY-MM-DDTHH:MM:SS[.fff]Z` timestamp (the form the
-/// generators emit) in `format`. Anything that does not parse is sent
-/// unchanged, so a deliberately malformed value still reaches the handler.
+/// A parsed RFC 3339 instant: whole seconds since the epoch (UTC) and the
+/// fractional-second digits exactly as written.
+struct Instant {
+    epoch: i64,
+    fraction: String,
+}
+
+/// Re-render an RFC 3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.f+](Z|+HH:MM|-HH:MM)`)
+/// in `format`: `date-time` (the default) is normalized to UTC with `Z`,
+/// `epoch-seconds` is decimal seconds, `http-date` is IMF-fixdate (whole
+/// seconds; the format has no fraction). Fractional seconds are kept where
+/// the format can carry them. Anything that does not parse is sent unchanged,
+/// so a deliberately malformed value still reaches the handler.
 pub(super) fn format_timestamp(s: &str, format: Option<&str>) -> String {
-    let Some(epoch) = parse_rfc3339_utc(s) else {
+    let Some(t) = parse_rfc3339(s) else {
         return s.to_string();
     };
+    let frac = if t.fraction.is_empty() {
+        String::new()
+    } else {
+        format!(".{}", t.fraction)
+    };
     match format {
-        Some("epoch-seconds") => epoch.to_string(),
-        Some("http-date") => http_date(epoch),
-        _ => s.to_string(),
+        Some("epoch-seconds") => {
+            if t.epoch < 0 && !t.fraction.is_empty() {
+                // -1 + .5 is -0.5: the fraction reduces the magnitude.
+                let value: f64 = format!("{}{frac}", t.epoch + 1).parse().unwrap_or(0.0) - 1.0;
+                value.to_string()
+            } else {
+                format!("{}{frac}", t.epoch)
+            }
+        }
+        Some("http-date") => http_date(t.epoch),
+        _ => {
+            let (y, mo, d, h, mi, sec) = civil(t.epoch);
+            format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{sec:02}{frac}Z")
+        }
     }
 }
 
-fn parse_rfc3339_utc(s: &str) -> Option<i64> {
-    let s = s.strip_suffix('Z')?;
-    let (date, time) = s.split_once('T')?;
+fn parse_rfc3339(s: &str) -> Option<Instant> {
+    let (date, time) = s.split_once(['T', 't'])?;
     let mut d = date.splitn(3, '-');
     let year: i64 = d.next()?.parse().ok()?;
     let month: i64 = d.next()?.parse().ok()?;
     let day: i64 = d.next()?.parse().ok()?;
-    let time = time.split('.').next()?;
-    let mut t = time.splitn(3, ':');
+    // Split the UTC offset off the time of day.
+    let (clock, offset_secs) = if let Some(c) = time.strip_suffix(['Z', 'z']) {
+        (c, 0)
+    } else {
+        let idx = time.rfind(['+', '-'])?;
+        let (c, off) = time.split_at(idx);
+        let sign = if off.starts_with('-') { -1 } else { 1 };
+        let (oh, om) = off[1..].split_once(':')?;
+        let oh: i64 = oh.parse().ok()?;
+        let om: i64 = om.parse().ok()?;
+        if oh > 23 || om > 59 {
+            return None;
+        }
+        (c, sign * (oh * 3600 + om * 60))
+    };
+    let (hms, fraction) = match clock.split_once('.') {
+        Some((hms, f)) if !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()) => {
+            (hms, f.to_string())
+        }
+        Some(_) => return None,
+        None => (clock, String::new()),
+    };
+    let mut t = hms.splitn(3, ':');
     let hour: i64 = t.next()?.parse().ok()?;
     let minute: i64 = t.next()?.parse().ok()?;
     let second: i64 = t.next()?.parse().ok()?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
         return None;
     }
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
+    Some(Instant {
+        epoch: days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second
+            - offset_secs,
+        fraction,
+    })
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date.
@@ -531,14 +603,11 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn http_date(epoch: i64) -> String {
-    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
+/// `(year, month, day, hour, minute, second)` of a UTC epoch second; the
+/// inverse of `days_from_civil`.
+fn civil(epoch: i64) -> (i64, i64, i64, i64, i64, i64) {
     let days = epoch.div_euclid(86_400);
     let secs = epoch.rem_euclid(86_400);
-    // Inverse of `days_from_civil`.
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -548,18 +617,40 @@ fn http_date(epoch: i64) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day, secs / 3600, (secs % 3600) / 60, secs % 60)
+}
+
+fn http_date(epoch: i64) -> String {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (year, month, day, h, mi, sec) = civil(epoch);
     format!(
         "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
-        DAYS[days.rem_euclid(7) as usize],
+        DAYS[epoch.div_euclid(86_400).rem_euclid(7) as usize],
         day,
         MONTHS[(month - 1) as usize],
         year,
-        secs / 3600,
-        (secs % 3600) / 60,
-        secs % 60
+        h,
+        mi,
+        sec
     )
 }
 
+/// Escape text for an XML 1.0 element or attribute.
+///
+/// Tab, LF and CR are legal XML characters; LF and CR are written as
+/// character references so attribute-value and line-ending normalization
+/// cannot rewrite them. The remaining C0 controls (U+0000-U+0008, U+000B,
+/// U+000C, U+000E-U+001F) and U+FFFE/U+FFFF are not XML 1.0 characters at
+/// all, not even as `&#x..;` references, so no SDK can put them in a
+/// well-formed body: one that emits the reference produces a document every
+/// conforming parser rejects. The probe keeps the body well-formed instead and
+/// sends U+FFFD in their place, so the request still reaches the handler with
+/// a visibly altered value. (The generators draw strings from alphanumeric and
+/// base64 alphabets, so this only matters for values copied from model
+/// examples.)
 fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -569,11 +660,10 @@ fn escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            // Control characters as character references, as the AWS SDK
-            // XML writers do, so line endings survive XML normalization.
-            c if (c as u32) < 0x20 && c != '\t' => {
-                out.push_str(&format!("&#x{:X};", c as u32));
-            }
+            '\t' => out.push('\t'),
+            '\n' => out.push_str("&#xA;"),
+            '\r' => out.push_str("&#xD;"),
+            c if (c as u32) < 0x20 || c == '\u{FFFE}' || c == '\u{FFFF}' => out.push('\u{FFFD}'),
             c => out.push(c),
         }
     }
@@ -687,7 +777,7 @@ mod tests {
         let input = json!({"Id": "abc", "Token": "tok", "Config": config});
         let (body, ct) = rest_xml_body(op(&m, "PutThing"), &m, &input);
         assert_eq!(ct, Some("application/xml"));
-        body.unwrap()
+        String::from_utf8(body.unwrap()).unwrap()
     }
 
     #[test]
@@ -835,9 +925,64 @@ mod tests {
         let (body, ct) = rest_xml_body(op(&m, "CreateWidget"), &m, &input);
         assert_eq!(ct, Some("application/xml"));
         assert_eq!(
-            body.unwrap(),
+            String::from_utf8(body.unwrap()).unwrap(),
             r#"<CreateWidgetRequest xmlns="https://svc.example/doc/"><Name>n</Name><Comment>c</Comment></CreateWidgetRequest>"#
         );
+    }
+
+    #[test]
+    fn timestamps_keep_fractions_and_accept_offsets() {
+        assert_eq!(
+            format_timestamp("2024-01-01T00:00:00.123Z", Some("epoch-seconds")),
+            "1704067200.123"
+        );
+        assert_eq!(
+            format_timestamp("2024-01-01T02:00:00.5+02:00", None),
+            "2024-01-01T00:00:00.5Z"
+        );
+        assert_eq!(
+            format_timestamp("2023-12-31T19:00:00-05:00", Some("http-date")),
+            "Mon, 01 Jan 2024 00:00:00 GMT"
+        );
+        assert_eq!(
+            format_timestamp("1969-12-31T23:59:59.5Z", Some("epoch-seconds")),
+            "-0.5"
+        );
+    }
+
+    #[test]
+    fn illegal_xml_characters_never_reach_the_body() {
+        let body = put_thing_body(json!({"Name": "a\u{0}b\u{8}c\u{FFFF}d\te"}));
+        assert!(
+            body.contains("<Name>a\u{FFFD}b\u{FFFD}c\u{FFFD}d\te</Name>"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn blob_payload_is_the_decoded_bytes() {
+        let m = parse_model_str(
+            r##"{
+                "smithy": "2.0",
+                "shapes": {
+                    "t#Svc": {"type": "service", "operations": [{"target": "t#Put"}],
+                              "traits": {"aws.protocols#restXml": {}}},
+                    "t#Put": {"type": "operation", "input": {"target": "t#PutRequest"},
+                              "traits": {"smithy.api#http": {"method": "PUT", "uri": "/o"}}},
+                    "t#PutRequest": {"type": "structure", "members": {
+                        "Body": {"target": "t#Blob", "traits": {"smithy.api#httpPayload": {}}}}},
+                    "t#Blob": {"type": "blob"}
+                }
+            }"##,
+        )
+        .unwrap();
+        let op = m.operations.iter().find(|o| o.name == "Put").unwrap();
+        let (body, ct) = rest_xml_body(op, &m, &json!({"Body": "/wA="}));
+        assert_eq!(body.unwrap(), vec![0xFF, 0x00]);
+        assert_eq!(ct, Some("application/octet-stream"));
+        // Text that is not base64 goes out as its own bytes.
+        let (body, _) = rest_xml_body(op, &m, &json!({"Body": "not base64!"}));
+        assert_eq!(body.unwrap(), b"not base64!");
     }
 
     #[test]
@@ -906,7 +1051,7 @@ mod tests {
                         http::HeaderValue::from_str(v).unwrap(),
                     );
                 }
-                let body = body.unwrap_or_default();
+                let body = String::from_utf8(body.unwrap_or_default()).unwrap();
                 let req = AwsRequest {
                     service: "cloudfront".into(),
                     action: String::new(),
