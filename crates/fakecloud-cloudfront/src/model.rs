@@ -1017,12 +1017,26 @@ impl ViewerCertificate {
             self.cloud_front_default_certificate = Some(true);
             self.certificate = None;
             self.certificate_source = Some("cloudfront".to_string());
-            // Recorded from real AWS on 2026-11-09.
-            self.ssl_support_method
-                .get_or_insert_with(|| if multi_tenant { "sni-only" } else { "vip" }.to_string());
-            // "CloudFront automatically sets the security policy to TLSv1
-            // regardless of the value that you set here."
-            self.minimum_protocol_version = Some("TLSv1".to_string());
+            // Recorded from real AWS on 2026-11-09. A standard distribution overwrites
+            // whatever method it was given, and takes the documented policy:
+            // "CloudFront automatically sets the security policy to TLSv1 regardless
+            // of the value that you set here." A multi-tenant one refuses `vip` before
+            // this point. Given `sni-only` and no policy it reports TLSv1.2_2021, and
+            // given neither, TLSv1. Keeping a policy it was given is inferred; it also
+            // makes this idempotent.
+            if multi_tenant {
+                let policy = if self.ssl_support_method.is_some() {
+                    "TLSv1.2_2021"
+                } else {
+                    "TLSv1"
+                };
+                self.minimum_protocol_version
+                    .get_or_insert_with(|| policy.to_string());
+                self.ssl_support_method = Some("sni-only".to_string());
+            } else {
+                self.ssl_support_method = Some("vip".to_string());
+                self.minimum_protocol_version = Some("TLSv1".to_string());
+            }
         }
     }
 }
@@ -1426,6 +1440,30 @@ mod tests {
             "<Comment></Comment><Logging><Enabled>false</Enabled></Logging>",
         );
         assert!(!parse(&xml).logging.unwrap().enabled);
+    }
+
+    /// A read-modify-write away from a custom certificate carries its method along.
+    #[test]
+    fn the_default_certificate_replaces_a_custom_certificates_ssl_method() {
+        // Recorded from real AWS on 2026-11-09.
+        for (multi_tenant, supplied, method, policy) in [
+            (false, Some("sni-only"), "vip", "TLSv1"),
+            (false, Some("vip"), "vip", "TLSv1"),
+            (true, Some("sni-only"), "sni-only", "TLSv1.2_2021"),
+            (true, None, "sni-only", "TLSv1"),
+        ] {
+            let mut vc = ViewerCertificate {
+                cloud_front_default_certificate: Some(true),
+                ssl_support_method: supplied.map(Into::into),
+                ..Default::default()
+            };
+            vc.ensure_aws_defaults(multi_tenant);
+            assert_eq!(vc.ssl_support_method.as_deref(), Some(method));
+            assert_eq!(vc.minimum_protocol_version.as_deref(), Some(policy));
+            // Read back and sent again, neither moves.
+            vc.ensure_aws_defaults(multi_tenant);
+            assert_eq!(vc.minimum_protocol_version.as_deref(), Some(policy));
+        }
     }
 
     #[test]

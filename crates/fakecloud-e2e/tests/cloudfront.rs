@@ -1549,6 +1549,98 @@ async fn cloudfront_update_cannot_change_immutable_members() {
     assert!(err.is_invalid_if_match_version(), "{err:?}");
 }
 
+/// Recorded from real AWS on 2026-11-09: refused for what doesn't exist rather than
+/// for being multi-tenant, with the certificate and web ACL rules that are specific.
+#[tokio::test]
+async fn cloudfront_references_and_multi_tenant_certificate_rules() {
+    use aws_sdk_cloudfront::error::ProvideErrorMetadata;
+
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+
+    let mut with_vip = tenant_only_config("e2e-ref-vip");
+    with_vip.viewer_certificate = Some(
+        ViewerCertificate::builder()
+            .cloud_front_default_certificate(true)
+            .ssl_support_method(SslSupportMethod::Vip)
+            .build(),
+    );
+    let mut with_classic_acl = tenant_only_config("e2e-ref-waf");
+    with_classic_acl.web_acl_id = Some("473e64fd-f30b-4765-81a0-62ad96dd167a".into());
+    let mut with_log_config = tenant_only_config("e2e-ref-log");
+    with_log_config
+        .default_cache_behavior
+        .as_mut()
+        .unwrap()
+        .realtime_log_config_arn =
+        Some("arn:aws:cloudfront::123456789012:realtime-log-config/none".into());
+    let mut with_encryption = minimal_config("e2e-ref-fle");
+    with_encryption
+        .default_cache_behavior
+        .as_mut()
+        .unwrap()
+        .field_level_encryption_id = Some("NONEXISTENT".into());
+    for (config, code, message) in [
+        (
+            with_vip,
+            "InvalidArgument",
+            "The parameter ViewerCertificate SSL support method provided is vip. Template \
+             distribution certificates should use sni-only.",
+        ),
+        (
+            with_classic_acl,
+            "InvalidWebACLId",
+            "Invalid webACL v2 identifier provided 473e64fd-f30b-4765-81a0-62ad96dd167a",
+        ),
+        (
+            with_log_config,
+            "InvalidArgument",
+            "The parameter RealtimeLogConfigArn is invalid or does not exist.",
+        ),
+        (
+            with_encryption,
+            "NoSuchFieldLevelEncryptionConfig",
+            "The specified field level encryption config does not exist.",
+        ),
+    ] {
+        let err = cf
+            .create_distribution()
+            .distribution_config(config)
+            .send()
+            .await
+            .unwrap_err()
+            .into_service_error();
+        assert_eq!((err.code(), err.message()), (Some(code), Some(message)));
+    }
+
+    // Given `sni-only` on the default certificate, a multi-tenant distribution
+    // reports the newer policy.
+    let mut with_sni = tenant_only_config("e2e-ref-sni");
+    with_sni.viewer_certificate = Some(
+        ViewerCertificate::builder()
+            .cloud_front_default_certificate(true)
+            .ssl_support_method(SslSupportMethod::SniOnly)
+            .build(),
+    );
+    let create = cf
+        .create_distribution()
+        .distribution_config(with_sni)
+        .send()
+        .await
+        .unwrap();
+    let vc = create
+        .distribution()
+        .unwrap()
+        .distribution_config()
+        .unwrap()
+        .viewer_certificate()
+        .unwrap();
+    assert_eq!(
+        vc.minimum_protocol_version().map(|v| v.as_str()),
+        Some("TLSv1.2_2021")
+    );
+}
+
 /// Recorded from real AWS on 2026-11-09.
 #[tokio::test]
 async fn cloudfront_negative_ttls_and_explicit_direct_mode() {

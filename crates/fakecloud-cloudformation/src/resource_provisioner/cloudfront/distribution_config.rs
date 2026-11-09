@@ -182,9 +182,6 @@ pub(super) fn cfn_distribution_config(
     };
 
     apply_schema_ttl_defaults(&mut config);
-    let invalid_request = |message: &str| {
-        format!("Invalid request provided: AWS::CloudFront::Distribution: {message}")
-    };
     // Before the API's own defaults fill it in.
     let omits_protocol_version = config
         .viewer_certificate
@@ -196,18 +193,23 @@ pub(super) fn cfn_distribution_config(
         Some(stored) => canonicalize_distribution_update(stored, &mut config),
         None => canonicalize_distribution_config(&mut config, ConfigRequest::Create),
     }
-    .map_err(|e| invalid_request(e.message().as_str()))?;
+    .map_err(|e| cfn_invalid_request(e.message().as_str()))?;
     // Recorded from real CloudFormation on 2026-11-09 for a multi-tenant template
     // with no `ViewerCertificate` at all. Taking one that names a certificate but
     // no protocol version to fail alike, and an explicit version to pass, is
     // inferred.
     if config.is_multi_tenant() && omits_protocol_version {
-        return Err(invalid_request(
+        return Err(cfn_invalid_request(
             "The parameter ViewerCertificate The specified distribution is configured for SNI \
              and the minimum SSL protocol version is specified as SSLv3. You cannot specify both.",
         ));
     }
     Ok(config)
+}
+
+/// The handler's wording for a refusal from the API it calls.
+pub(super) fn cfn_invalid_request(message: &str) -> String {
+    format!("Invalid request provided: AWS::CloudFront::Distribution: {message}")
 }
 
 /// Recorded from real CloudFormation on 2026-11-09: `MinTTL` 0, `DefaultTTL` 86400

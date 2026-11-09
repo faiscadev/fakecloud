@@ -26,7 +26,7 @@ use crate::state::{
 };
 use crate::validate::{
     canonicalize_distribution_config, canonicalize_distribution_update, validate_copy,
-    ConfigRequest,
+    validate_distribution_references, ConfigRequest,
 };
 use crate::xml_io;
 
@@ -707,6 +707,12 @@ impl CloudFrontService {
         canonicalize_distribution_config(&mut config, ConfigRequest::Create)?;
 
         let mut state = self.state.write();
+        validate_distribution_references(
+            &config,
+            state
+                .get(&req.account_id)
+                .unwrap_or(&crate::state::AccountState::default()),
+        )?;
         reject_domains_in_use(&state, config_aliases(&config), DomainOwner::New)?;
         let id = state.unused_id(generate_distribution_id, |a, id| {
             a.distributions.contains_key(id)
@@ -957,6 +963,13 @@ impl CloudFrontService {
             false
         } else {
             canonicalize_distribution_update(&stored, &mut new_config)?;
+            validate_distribution_references(
+                &new_config,
+                self.state
+                    .read()
+                    .get(&req.account_id)
+                    .unwrap_or(&crate::state::AccountState::default()),
+            )?;
             !configs_equal(&stored, &new_config)
         };
 
@@ -4493,7 +4506,7 @@ mod tests {
     <OriginRequestPolicyId>orp-123</OriginRequestPolicyId>
     <ResponseHeadersPolicyId>rhp-123</ResponseHeadersPolicyId>
     <TrustedKeyGroups>
-      <Enabled>true</Enabled>
+      <Enabled>false</Enabled>
       <Quantity>1</Quantity>
       <Items><KeyGroup>kg-123</KeyGroup></Items>
     </TrustedKeyGroups>

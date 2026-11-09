@@ -14,9 +14,8 @@ use crate::policies::{
 };
 use crate::router::Route;
 use crate::service::{
-    alias_refused_for_multi_tenant, aws_error, check_etag_shape, esc, extract_body_field,
-    generate_etag, generate_id_with_prefix, invalid_argument, no_such_distribution, xml_response,
-    CloudFrontService,
+    aws_error, check_etag_shape, esc, extract_body_field, generate_etag, generate_id_with_prefix,
+    invalid_argument, no_such_distribution, xml_response, CloudFrontService,
 };
 use crate::xml_io;
 
@@ -341,30 +340,59 @@ impl CloudFrontService {
         }
         let account = state.entry(&req.account_id);
 
-        // The target must exist, otherwise AWS returns EntityNotFound.
-        let target_ok = match &target {
-            Target::Tenant(tid) => account.distribution_tenants.contains_key(tid),
-            Target::Distribution(did) => account.distributions.contains_key(did),
-        };
-        if !target_ok {
+        // Recorded from real AWS on 2026-11-09: a domain nothing holds wins over an
+        // unknown target and a bad If-Match.
+        let domain_held = account.distribution_tenants.values().any(|t| {
+            t.domains
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(&parsed.domain))
+        }) || account.distributions.values().any(|d| {
+            d.config
+                .aliases
+                .as_ref()
+                .and_then(|al| al.items.as_ref())
+                .is_some_and(|i| {
+                    i.cname
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(&parsed.domain))
+                })
+        });
+        if !domain_held {
             return Err(aws_error(
                 StatusCode::NOT_FOUND,
                 "EntityNotFound",
-                format!("The target resource {} was not found", target.id()),
+                "The provided Domain Name is not associated with any Resource.",
             ));
         }
 
-        // Inferred from `AssociateAlias`: a multi-tenant distribution takes no alias
-        // however it arrives. Checked before the domain is detached from its owner.
-        if let Target::Distribution(did) = &target {
-            if account
-                .distributions
-                .get(did)
-                .is_some_and(|d| d.config.is_multi_tenant())
-            {
-                return Err(alias_refused_for_multi_tenant());
+        // The target must exist, otherwise AWS returns EntityNotFound. A multi-tenant
+        // distribution is allowed as one: the model documents the target's
+        // `DistributionId` as "The ID of the multi-tenant distribution", and real AWS
+        // couldn't be recorded here without an owned domain and certificate. Inferred,
+        // as is the optional If-Match checked after this, against the target's ETag.
+        let target_etag = match &target {
+            Target::Tenant(tid) => account
+                .distribution_tenants
+                .get(tid)
+                .map(|t| t.etag.clone()),
+            Target::Distribution(did) => account.distributions.get(did).map(|d| d.etag.clone()),
+        }
+        .ok_or_else(|| {
+            aws_error(
+                StatusCode::NOT_FOUND,
+                "EntityNotFound",
+                format!("The target resource {} was not found", target.id()),
+            )
+        })?;
+        if let Some(if_match) = req.headers.get(http::header::IF_MATCH) {
+            let if_match = if_match.to_str().unwrap_or_default();
+            check_etag_shape(if_match, &target_etag)?;
+            if if_match != target_etag {
+                return Err(precondition_failed());
             }
         }
+        let etag = generate_etag();
+
         // Detach the domain from whichever tenant or distribution currently
         // owns it, then attach it to the target. Domains are unique across
         // resources, so a plain move is correct.
@@ -380,18 +408,19 @@ impl CloudFrontService {
                 if let Some(t) = account.distribution_tenants.get_mut(tid) {
                     t.domains.push(parsed.domain.clone());
                     t.last_modified_time = Utc::now();
+                    t.etag = etag.clone();
                 }
             }
             Target::Distribution(did) => {
                 if let Some(d) = account.distributions.get_mut(did) {
                     add_alias(&mut d.config, &parsed.domain);
                     d.last_modified_time = Utc::now();
+                    d.etag = etag.clone();
                 }
             }
         }
         drop(state);
 
-        let etag = generate_id_with_prefix("E");
         let mut body = String::with_capacity(256);
         body.push_str(XML_DECL);
         body.push_str(&format!("<UpdateDomainAssociationResult xmlns=\"{NS}\">"));
@@ -785,6 +814,61 @@ mod tests {
             .await
             .unwrap();
         body_str(&resp)
+    }
+
+    /// Recorded from real AWS on 2026-11-09: the domain is looked up first.
+    #[tokio::test]
+    async fn update_domain_association_refuses_a_domain_nothing_holds() {
+        let svc = svc();
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<UpdateDomainAssociationRequest xmlns="{NS}">
+  <Domain>unheld.example.com</Domain>
+  <TargetResource><DistributionId>EABCDEFGHIJKLM</DistributionId></TargetResource>
+</UpdateDomainAssociationRequest>"#
+        );
+        let mut request = req(http::Method::POST, "/2020-05-31/domain-association", &body);
+        request
+            .headers
+            .insert(http::header::IF_MATCH, "garbage".parse().unwrap());
+        let err = svc.handle(request).await.err().expect("refused");
+        assert_eq!(
+            (err.code(), err.message().as_str()),
+            (
+                "EntityNotFound",
+                "The provided Domain Name is not associated with any Resource."
+            )
+        );
+    }
+
+    /// Inferred: the If-Match is checked after the domain and the target.
+    #[tokio::test]
+    async fn update_domain_association_checks_the_targets_if_match() {
+        let svc = svc();
+        create_tenant(&svc, "im-src", "imatch.example.com").await;
+        let t2 = create_tenant(&svc, "im-dst", "imatch2.example.com").await;
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<UpdateDomainAssociationRequest xmlns="{NS}">
+  <Domain>imatch.example.com</Domain>
+  <TargetResource><DistributionTenantId>{t2}</DistributionTenantId></TargetResource>
+</UpdateDomainAssociationRequest>"#
+        );
+        let with_if_match = |value: &str| {
+            let mut request = req(http::Method::POST, "/2020-05-31/domain-association", &body);
+            request
+                .headers
+                .insert(http::header::IF_MATCH, value.parse().unwrap());
+            request
+        };
+        let err = svc.handle(with_if_match("garbage")).await.err().unwrap();
+        assert_eq!(err.code(), "InvalidIfMatchVersion");
+        let err = svc
+            .handle(with_if_match("E00000000000A"))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "PreconditionFailed");
     }
 
     #[tokio::test]

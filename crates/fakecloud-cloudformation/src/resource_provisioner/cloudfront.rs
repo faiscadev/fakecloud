@@ -6,7 +6,7 @@ use super::*;
 
 mod distribution_config;
 
-use distribution_config::cfn_distribution_config;
+use distribution_config::{cfn_distribution_config, cfn_invalid_request};
 
 impl ResourceProvisioner {
     pub(crate) fn create_cf_origin_access_identity(
@@ -71,6 +71,14 @@ impl ResourceProvisioner {
 
         let caller_reference = format!("cfn-{}-{}", resource.logical_id, Uuid::new_v4().simple());
         let config = cfn_distribution_config(cfg, caller_reference, None)?;
+        fakecloud_cloudfront::validate_distribution_references(
+            &config,
+            self.cloudfront_state
+                .read()
+                .get(&self.account_id)
+                .unwrap_or(&fakecloud_cloudfront::AccountState::default()),
+        )
+        .map_err(|e| cfn_invalid_request(e.message().as_str()))?;
 
         // Mint distribution id + ARN + domain in the same shape the
         // CloudFront service uses.
@@ -141,16 +149,23 @@ impl ResourceProvisioner {
 
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        let stored = state
+            .distributions
+            .get(&existing.physical_id)
+            .ok_or_else(|| format!("Distribution {} not yet provisioned", existing.physical_id))?;
+        // CallerReference is immutable across an update; keep the stored one.
+        let config = cfn_distribution_config(
+            cfg,
+            stored.config.caller_reference.clone(),
+            Some(&stored.config),
+        )?;
+        fakecloud_cloudfront::validate_distribution_references(&config, state)
+            .map_err(|e| cfn_invalid_request(e.message().as_str()))?;
         let dist = state
             .distributions
             .get_mut(&existing.physical_id)
             .ok_or_else(|| format!("Distribution {} not yet provisioned", existing.physical_id))?;
-        // CallerReference is immutable across an update; keep the stored one.
-        dist.config = cfn_distribution_config(
-            cfg,
-            dist.config.caller_reference.clone(),
-            Some(&dist.config),
-        )?;
+        dist.config = config;
         dist.status = "InProgress".to_string();
         dist.last_modified_time = Utc::now();
         dist.etag = fakecloud_cloudfront::generate_etag();

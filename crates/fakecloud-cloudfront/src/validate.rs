@@ -12,6 +12,7 @@ use crate::model::{
     LambdaFunctionAssociations,
 };
 use crate::service::{aws_error, invalid_argument};
+use crate::state::AccountState;
 
 /// The `EventType` values CloudFront accepts for Lambda@Edge and CloudFront
 /// Functions associations.
@@ -142,6 +143,35 @@ fn validate_supplied_members(
                 return Err(refused_for_multi_tenant(member));
             }
         }
+        // Recorded from real AWS on 2026-11-09 with the default certificate; the same
+        // for a custom one is inferred.
+        if config
+            .viewer_certificate
+            .as_ref()
+            .and_then(|vc| vc.ssl_support_method.as_deref())
+            == Some("vip")
+        {
+            return Err(invalid_argument(
+                "The parameter ViewerCertificate SSL support method provided is vip. Template \
+                 distribution certificates should use sni-only.",
+            ));
+        }
+        // Recorded for a WAF Classic id. An empty id is no web ACL, as a config read
+        // back has it.
+        if let Some(id) = config.web_acl_id.as_deref().filter(|id| !id.is_empty()) {
+            if !(id.starts_with("arn:") && id.contains(":wafv2:")) {
+                return Err(aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidWebACLId",
+                    format!("Invalid webACL v2 identifier provided {id}"),
+                ));
+            }
+        }
+    } else if config.tenant_config.is_some() {
+        // Recorded from real AWS on 2026-11-09.
+        return Err(invalid_argument(
+            "The parameter TenantConfig cannot be set for a direct distribution.",
+        ));
     }
     let dcb = &config.default_cache_behavior;
     validate_cache_settings(
@@ -353,6 +383,83 @@ pub(crate) fn validate_copy(
          the maximum TTL. To create the staging distribution, update your TTL settings and try \
          again.",
     ))
+}
+
+/// That what a config names exists in the caller's account, on both distribution
+/// modes. Messages recorded from real AWS on 2026-11-09 on a multi-tenant
+/// distribution, and for the origin access identity on a standard one too. Their
+/// order, and applying the rest to standard distributions and to updates, is
+/// inferred.
+///
+/// IAM certificates, Lambda@Edge functions and logging buckets live in other
+/// services this crate can't see, so they aren't checked.
+pub fn validate_distribution_references(
+    config: &DistributionConfig,
+    account: &AccountState,
+) -> Result<(), AwsServiceError> {
+    for s3 in config
+        .origins
+        .items
+        .iter()
+        .flat_map(|i| &i.origin)
+        .filter_map(|o| o.s3_origin_config.as_ref())
+    {
+        let identity = s3.origin_access_identity.as_str();
+        // Empty means none: an origin using an origin access control has it so.
+        if !identity.is_empty()
+            && !identity
+                .strip_prefix("origin-access-identity/cloudfront/")
+                .is_some_and(|id| account.origin_access_identities.contains_key(id))
+        {
+            return Err(aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidOriginAccessIdentity",
+                "The specified origin access identity does not exist or is not valid.",
+            ));
+        }
+    }
+    let dcb = &config.default_cache_behavior;
+    let behaviors = std::iter::once((
+        dcb.trusted_key_groups.as_ref(),
+        dcb.field_level_encryption_id.as_deref(),
+        dcb.realtime_log_config_arn.as_deref(),
+    ))
+    .chain(config.cache_behavior_items().map(|b| {
+        (
+            b.trusted_key_groups.as_ref(),
+            b.field_level_encryption_id.as_deref(),
+            b.realtime_log_config_arn.as_deref(),
+        )
+    }));
+    for (key_groups, encryption_id, log_arn) in behaviors {
+        if let Some(groups) = key_groups.filter(|g| g.enabled) {
+            let mut names = groups.items.iter().flat_map(|i| &i.key_group);
+            if names.any(|g| !account.key_groups.contains_key(g)) {
+                return Err(aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "TrustedKeyGroupDoesNotExist",
+                    "One or more of your trusted keygroups do not exist.",
+                ));
+            }
+        }
+        if encryption_id
+            .is_some_and(|id| !id.is_empty() && !account.field_level_encryptions.contains_key(id))
+        {
+            return Err(aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchFieldLevelEncryptionConfig",
+                "The specified field level encryption config does not exist.",
+            ));
+        }
+        if log_arn
+            .is_some_and(|arn| !arn.is_empty() && !account.realtime_log_configs.contains_key(arn))
+        {
+            return Err(invalid_argument(
+                "The parameter RealtimeLogConfigArn is invalid or does not exist.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Validate a canonical `DistributionConfig` the way CloudFront does on
@@ -1105,6 +1212,127 @@ mod tests {
         let mut explicit_direct = standard.clone();
         explicit_direct.connection_mode = Some("direct".into());
         assert_eq!(update_refusal(&standard, explicit_direct), None);
+    }
+
+    /// Recorded from real AWS on 2026-11-09.
+    #[test]
+    fn multi_tenant_certificate_and_web_acl_rules_are_as_recorded() {
+        let mut vip = tenant_config();
+        vip.viewer_certificate.as_mut().unwrap().ssl_support_method = Some("vip".into());
+        assert_eq!(
+            refusal(&mut vip, ConfigRequest::Create),
+            invalid(
+                "The parameter ViewerCertificate SSL support method provided is vip. Template \
+                 distribution certificates should use sni-only."
+            )
+        );
+
+        let classic = "473e64fd-f30b-4765-81a0-62ad96dd167a";
+        let mut waf = tenant_config();
+        waf.web_acl_id = Some(classic.into());
+        assert_eq!(
+            refusal(&mut waf, ConfigRequest::Create),
+            Some((
+                "InvalidWebACLId".to_string(),
+                format!("Invalid webACL v2 identifier provided {classic}")
+            ))
+        );
+        waf.web_acl_id = Some("arn:aws:wafv2:us-east-1:123456789012:global/webacl/a/1".into());
+        assert_eq!(refusal(&mut waf, ConfigRequest::Create), None);
+        // A standard distribution may still use WAF Classic.
+        let mut standard = standard_config();
+        standard.web_acl_id = Some(classic.into());
+        assert_eq!(refusal(&mut standard, ConfigRequest::Create), None);
+    }
+
+    /// Recorded from real AWS on 2026-11-09.
+    #[test]
+    fn tenant_config_is_only_for_a_multi_tenant_distribution() {
+        let mut standard = standard_config();
+        standard.tenant_config = Some(Default::default());
+        assert_eq!(
+            refusal(&mut standard, ConfigRequest::Create),
+            invalid("The parameter TenantConfig cannot be set for a direct distribution.")
+        );
+        let mut tenant = tenant_config();
+        tenant.tenant_config = Some(Default::default());
+        assert_eq!(refusal(&mut tenant, ConfigRequest::Create), None);
+    }
+
+    /// Messages recorded from real AWS on 2026-11-09; the same on both modes.
+    #[test]
+    fn references_must_exist_on_both_modes() {
+        let empty = AccountState::default();
+        let check = |c: &DistributionConfig| {
+            validate_distribution_references(c, &empty)
+                .err()
+                .map(|e| (e.code().to_string(), e.message().to_string()))
+        };
+        for base in [standard_config(), tenant_config()] {
+            assert_eq!(check(&base), None);
+
+            let with_oai = |identity: &str| {
+                let mut c = base.clone();
+                c.origins.items.as_mut().unwrap().origin[0].s3_origin_config =
+                    Some(crate::model::S3OriginConfig {
+                        origin_access_identity: identity.into(),
+                        origin_read_timeout: None,
+                    });
+                c
+            };
+            assert_eq!(check(&with_oai("")), None);
+            assert_eq!(
+                check(&with_oai("origin-access-identity/cloudfront/E1NONE")),
+                Some((
+                    "InvalidOriginAccessIdentity".to_string(),
+                    "The specified origin access identity does not exist or is not valid."
+                        .to_string()
+                ))
+            );
+
+            let mut enabled = base.clone();
+            enabled.default_cache_behavior.trusted_key_groups =
+                Some(crate::model::TrustedKeyGroups {
+                    enabled: true,
+                    quantity: 1,
+                    items: Some(crate::model::TrustedKeyGroupIdList {
+                        key_group: vec!["kg-none".into()],
+                    }),
+                });
+            assert_eq!(
+                check(&enabled),
+                Some((
+                    "TrustedKeyGroupDoesNotExist".to_string(),
+                    "One or more of your trusted keygroups do not exist.".to_string()
+                ))
+            );
+            let mut disabled = enabled.clone();
+            disabled
+                .default_cache_behavior
+                .trusted_key_groups
+                .as_mut()
+                .unwrap()
+                .enabled = false;
+            assert_eq!(check(&disabled), None);
+
+            let mut encryption = base.clone();
+            encryption.default_cache_behavior.field_level_encryption_id = Some("fle-none".into());
+            assert_eq!(
+                check(&encryption),
+                Some((
+                    "NoSuchFieldLevelEncryptionConfig".to_string(),
+                    "The specified field level encryption config does not exist.".to_string()
+                ))
+            );
+
+            let mut logs = base.clone();
+            logs.default_cache_behavior.realtime_log_config_arn =
+                Some("arn:aws:cloudfront::123456789012:realtime-log-config/none".into());
+            assert_eq!(
+                check(&logs),
+                invalid("The parameter RealtimeLogConfigArn is invalid or does not exist.")
+            );
+        }
     }
 
     /// Recorded from real AWS on 2026-11-09.
