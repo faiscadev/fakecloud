@@ -181,6 +181,18 @@ pub struct DistributionConfig {
 }
 
 impl DistributionConfig {
+    pub fn is_multi_tenant(&self) -> bool {
+        self.connection_mode.as_deref() == Some("tenant-only")
+    }
+
+    /// The path-scoped behaviors, excluding the default one.
+    pub fn cache_behavior_items(&self) -> impl Iterator<Item = &CacheBehavior> {
+        self.cache_behaviors
+            .iter()
+            .filter_map(|b| b.items.as_ref())
+            .flat_map(|i| i.cache_behavior.iter())
+    }
+
     /// Make the config canonical: fill in what CloudFront fills in for members
     /// a request left out, so `GetDistribution` / `GetDistributionConfig` carry
     /// the same envelopes AWS returns. What a request supplied is kept, except
@@ -195,7 +207,12 @@ impl DistributionConfig {
     /// distribution's config stay absent on one. `ConnectionMode` itself stays
     /// absent on a standard distribution; only the summary reports `direct`.
     pub fn ensure_aws_defaults(&mut self) {
-        let multi_tenant = self.connection_mode.as_deref() == Some("tenant-only");
+        // Recorded from real AWS on 2026-11-09: an explicit `direct` is accepted
+        // and not echoed.
+        if self.connection_mode.as_deref() == Some("direct") {
+            self.connection_mode = None;
+        }
+        let multi_tenant = self.is_multi_tenant();
 
         self.default_root_object.get_or_insert_with(String::new);
         drop_empty(

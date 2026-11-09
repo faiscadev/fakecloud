@@ -57,6 +57,54 @@ pub fn canonicalize_distribution_config(
     validate_distribution_config(config)
 }
 
+/// An `UpdateDistribution` changing a stored config. A distribution's mode is the
+/// stored one, not the body's. Recorded from real AWS on 2026-11-09:
+/// - multi-tenant to standard fails on the `PriceClass` the body lacks;
+/// - standard to multi-tenant fails on the standard-only members the body has.
+///
+/// A body with those fixed still can't change the mode: that refusal, using the
+/// same `IllegalUpdate` code, is inferred.
+pub(crate) fn canonicalize_distribution_update(
+    stored: &DistributionConfig,
+    config: &mut DistributionConfig,
+) -> Result<(), AwsServiceError> {
+    validate_connection_mode(config)?;
+    if stored.is_multi_tenant() && !config.is_multi_tenant() {
+        return Err(illegal_update(if config.price_class.is_none() {
+            "Price class is missing for the resource"
+        } else {
+            MODE_IS_FIXED
+        }));
+    }
+    canonicalize_distribution_config(config, ConfigRequest::Update)?;
+    if config.is_multi_tenant() != stored.is_multi_tenant() {
+        return Err(illegal_update(MODE_IS_FIXED));
+    }
+    Ok(())
+}
+
+const MODE_IS_FIXED: &str = "The ConnectionMode of a distribution can't be changed.";
+
+fn illegal_update(message: &str) -> AwsServiceError {
+    aws_error(StatusCode::BAD_REQUEST, "IllegalUpdate", message)
+}
+
+/// Recorded from real AWS on 2026-11-09 on `CreateDistribution`; applying it to
+/// the other doors is inferred.
+fn validate_connection_mode(config: &DistributionConfig) -> Result<(), AwsServiceError> {
+    match config.connection_mode.as_deref() {
+        None | Some("direct") | Some("tenant-only") => Ok(()),
+        Some(other) => Err(aws_error(
+            StatusCode::BAD_REQUEST,
+            "MalformedXML",
+            format!(
+                "1 validation error detected: Value '{other}' at 'distributionConfig.connectionMode' \
+                 failed to satisfy constraint: Member must satisfy enum value set: [direct, tenant-only]"
+            ),
+        )),
+    }
+}
+
 /// The rules about what a request supplied, with messages recorded from real
 /// AWS on 2026-11-09 on `CreateDistribution` (default behavior and
 /// `CacheBehaviors`) and on `UpdateDistribution` (default behavior). Where several
@@ -67,41 +115,68 @@ fn validate_supplied_members(
     config: &DistributionConfig,
     request: ConfigRequest,
 ) -> Result<(), AwsServiceError> {
-    let multi_tenant = config.connection_mode.as_deref() == Some("tenant-only");
+    validate_connection_mode(config)?;
+    let multi_tenant = config.is_multi_tenant();
     if multi_tenant {
-        if config.is_ipv6_enabled.is_some() {
-            return Err(refused_for_multi_tenant("IsIPV6Enabled"));
-        }
-        if config.staging.is_some() {
-            return Err(refused_for_multi_tenant("Staging"));
-        }
-        if config.price_class.is_some() {
-            return Err(refused_for_multi_tenant("PriceClass"));
+        // Refused even when empty or set to the default.
+        for (member, supplied) in [
+            ("IsIPV6Enabled", config.is_ipv6_enabled.is_some()),
+            ("Staging", config.staging.is_some()),
+            ("PriceClass", config.price_class.is_some()),
+            ("Aliases", config.aliases.is_some()),
+            (
+                "ContinuousDeploymentPolicyId",
+                config.continuous_deployment_policy_id.is_some(),
+            ),
+            ("AnycastIpListId", config.anycast_ip_list_id.is_some()),
+        ] {
+            if supplied {
+                return Err(refused_for_multi_tenant(member));
+            }
         }
     }
     let dcb = &config.default_cache_behavior;
     validate_cache_settings(
         multi_tenant,
         request,
-        dcb.cache_policy_id.as_deref(),
-        dcb.forwarded_values.is_some(),
-        (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl),
+        &CacheSettings {
+            cache_policy_id: dcb.cache_policy_id.as_deref(),
+            has_forwarded_values: dcb.forwarded_values.is_some(),
+            has_smooth_streaming: dcb.smooth_streaming.is_some(),
+            has_trusted_signers: dcb.trusted_signers.is_some(),
+            min: dcb.min_ttl,
+            default: dcb.default_ttl,
+            max: dcb.max_ttl,
+        },
     )?;
-    for b in config
-        .cache_behaviors
-        .iter()
-        .filter_map(|b| b.items.as_ref())
-        .flat_map(|i| i.cache_behavior.iter())
-    {
+    for b in config.cache_behavior_items() {
         validate_cache_settings(
             multi_tenant,
             request,
-            b.cache_policy_id.as_deref(),
-            b.forwarded_values.is_some(),
-            (b.min_ttl, b.default_ttl, b.max_ttl),
+            &CacheSettings {
+                cache_policy_id: b.cache_policy_id.as_deref(),
+                has_forwarded_values: b.forwarded_values.is_some(),
+                has_smooth_streaming: b.smooth_streaming.is_some(),
+                has_trusted_signers: b.trusted_signers.is_some(),
+                min: b.min_ttl,
+                default: b.default_ttl,
+                max: b.max_ttl,
+            },
         )?;
     }
     Ok(())
+}
+
+/// What the cache-setting rules read from a behavior; the default behavior and
+/// `CacheBehaviors` entries share these members but no type.
+struct CacheSettings<'a> {
+    cache_policy_id: Option<&'a str>,
+    has_forwarded_values: bool,
+    has_smooth_streaming: bool,
+    has_trusted_signers: bool,
+    min: Option<i64>,
+    default: Option<i64>,
+    max: Option<i64>,
 }
 
 fn refused_for_multi_tenant(member: &str) -> AwsServiceError {
@@ -117,10 +192,17 @@ fn required(member: &str) -> AwsServiceError {
 fn validate_cache_settings(
     multi_tenant: bool,
     request: ConfigRequest,
-    cache_policy_id: Option<&str>,
-    has_forwarded_values: bool,
-    (min, default, max): (Option<i64>, Option<i64>, Option<i64>),
+    settings: &CacheSettings<'_>,
 ) -> Result<(), AwsServiceError> {
+    let &CacheSettings {
+        cache_policy_id,
+        has_forwarded_values,
+        has_smooth_streaming,
+        has_trusted_signers,
+        min,
+        default,
+        max,
+    } = settings;
     let has_policy = has_cache_policy(cache_policy_id);
     let ttls = [("MinTTL", min), ("DefaultTTL", default), ("MaxTTL", max)];
     let first_ttl_set = ttls
@@ -130,10 +212,16 @@ fn validate_cache_settings(
 
     // Recorded with a cache policy present too: the multi-tenant refusal wins.
     if multi_tenant {
-        if has_forwarded_values {
-            return Err(refused_for_multi_tenant("ForwardedValues"));
-        }
-        if let Some(member) = first_ttl_set {
+        let refused = [
+            ("ForwardedValues", has_forwarded_values),
+            ("SmoothStreaming", has_smooth_streaming),
+            ("TrustedSigners", has_trusted_signers),
+        ]
+        .iter()
+        .find(|(_, supplied)| *supplied)
+        .map(|(name, _)| *name)
+        .or(first_ttl_set);
+        if let Some(member) = refused {
             return Err(refused_for_multi_tenant(member));
         }
         if !has_policy {
@@ -156,9 +244,9 @@ fn validate_cache_settings(
         };
     }
 
-    let Some(min) = min else {
+    if min.is_none() {
         return Err(required("MinTTL"));
-    };
+    }
     if request == ConfigRequest::Update {
         if default.is_none() {
             return Err(required("DefaultTTL"));
@@ -170,6 +258,13 @@ fn validate_cache_settings(
     if !has_forwarded_values {
         return Err(required("ForwardedValues"));
     }
+    // Recorded for MinTTL, where it wins over TTLs out of order; the same for the
+    // other two is inferred.
+    if let Some((member, _)) = ttls.iter().find(|(_, v)| v.is_some_and(|ttl| ttl < 0)) {
+        return Err(invalid_argument(format!(
+            "The parameter {member} is not within allowed range."
+        )));
+    }
     match request {
         // Recorded: an update stores TTLs out of order as given.
         ConfigRequest::Update => Ok(()),
@@ -177,21 +272,35 @@ fn validate_cache_settings(
     }
 }
 
+/// Whether the TTLs present follow MinTTL <= DefaultTTL <= MaxTTL.
+fn ttls_in_order(min: Option<i64>, default: Option<i64>, max: Option<i64>) -> bool {
+    let present = [min, default, max];
+    let mut present = present.iter().flatten();
+    let Some(mut previous) = present.next() else {
+        return true;
+    };
+    present.all(|ttl| {
+        let ordered = previous <= ttl;
+        previous = ttl;
+        ordered
+    })
+}
+
 fn check_ttl_order(
-    min: i64,
+    min: Option<i64>,
     default: Option<i64>,
     max: Option<i64>,
 ) -> Result<(), AwsServiceError> {
+    if ttls_in_order(min, default, max) {
+        return Ok(());
+    }
     let message = match (default, max) {
-        (Some(default), Some(max)) if min > default || default > max => {
+        (Some(_), Some(_)) => {
             "MinTTL, MaxTTL and DefaultTTL should follow order MinTTL less than or equal to \
              DefaultTTL less than or equal to MaxTTL"
         }
-        (Some(default), None) if min > default => {
-            "MinTTL should be less than or equal to DefaultTTL"
-        }
-        (None, Some(max)) if min > max => "MinTTL should be less than or equal to MaxTTL",
-        _ => return Ok(()),
+        (Some(_), None) => "MinTTL should be less than or equal to DefaultTTL",
+        _ => "MinTTL should be less than or equal to MaxTTL",
     };
     Err(aws_error(
         StatusCode::BAD_REQUEST,
@@ -214,24 +323,16 @@ pub(crate) fn validate_copy(
             "Your request must specify Staging as true.",
         ));
     }
-    if primary.connection_mode.as_deref() == Some("tenant-only") {
+    if primary.is_multi_tenant() {
         return Err(invalid_argument(
             "You can't enable continuous deployment for a multi-tenant distribution.",
         ));
     }
     let dcb = &primary.default_cache_behavior;
-    let in_order =
-        |min: Option<i64>, default: Option<i64>, max: Option<i64>| match (min, default, max) {
-            (Some(min), Some(default), Some(max)) => min <= default && default <= max,
-            _ => true,
-        };
-    let all_in_order = in_order(dcb.min_ttl, dcb.default_ttl, dcb.max_ttl)
+    let all_in_order = ttls_in_order(dcb.min_ttl, dcb.default_ttl, dcb.max_ttl)
         && primary
-            .cache_behaviors
-            .iter()
-            .filter_map(|b| b.items.as_ref())
-            .flat_map(|i| i.cache_behavior.iter())
-            .all(|b| in_order(b.min_ttl, b.default_ttl, b.max_ttl));
+            .cache_behavior_items()
+            .all(|b| ttls_in_order(b.min_ttl, b.default_ttl, b.max_ttl));
     if all_in_order {
         return Ok(());
     }
@@ -285,12 +386,7 @@ pub fn validate_distribution_config(config: &DistributionConfig) -> Result<(), A
         dcb.lambda_function_associations.as_ref(),
         dcb.function_associations.as_ref(),
     )?;
-    for b in config
-        .cache_behaviors
-        .iter()
-        .filter_map(|b| b.items.as_ref())
-        .flat_map(|i| i.cache_behavior.iter())
-    {
+    for b in config.cache_behavior_items() {
         validate_behavior(
             &targets,
             &b.target_origin_id,
@@ -862,6 +958,145 @@ mod tests {
             canonicalize_distribution_config(&mut c, ConfigRequest::Create).unwrap();
             assert_eq!(c.http_version.as_deref(), Some(version));
         }
+    }
+
+    /// Recorded from real AWS on 2026-11-09.
+    #[test]
+    fn more_multi_tenant_members_are_refused_even_when_empty() {
+        let refused = |set: fn(&mut DistributionConfig)| {
+            let mut c = config();
+            c.connection_mode = Some("tenant-only".into());
+            c.default_cache_behavior.cache_policy_id = Some(POLICY.into());
+            set(&mut c);
+            refusal(&mut c, ConfigRequest::Create)
+        };
+        assert_eq!(
+            refused(|c| c.default_cache_behavior.smooth_streaming = Some(false)),
+            invalid(&tenant_refusal("SmoothStreaming"))
+        );
+        assert_eq!(
+            refused(|c| {
+                c.default_cache_behavior.trusted_signers = Some(Default::default());
+            }),
+            invalid(&tenant_refusal("TrustedSigners"))
+        );
+        assert_eq!(
+            refused(|c| c.aliases = Some(Default::default())),
+            invalid(&tenant_refusal("Aliases"))
+        );
+        assert_eq!(
+            refused(|c| c.continuous_deployment_policy_id = Some(String::new())),
+            invalid(&tenant_refusal("ContinuousDeploymentPolicyId"))
+        );
+        assert_eq!(
+            refused(|c| c.anycast_ip_list_id = Some(String::new())),
+            invalid(&tenant_refusal("AnycastIpListId"))
+        );
+    }
+
+    /// Recorded from real AWS on 2026-11-09.
+    #[test]
+    fn connection_mode_must_be_a_known_value() {
+        for mode in ["foo", "Tenant-Only"] {
+            let mut c = config();
+            c.connection_mode = Some(mode.into());
+            let expected = format!(
+                "1 validation error detected: Value '{mode}' at 'distributionConfig.connectionMode' \
+                 failed to satisfy constraint: Member must satisfy enum value set: [direct, tenant-only]"
+            );
+            assert_eq!(
+                refusal(&mut c, ConfigRequest::Create),
+                Some(("MalformedXML".to_string(), expected))
+            );
+        }
+        let mut direct = config();
+        direct.default_cache_behavior.cache_policy_id = Some(POLICY.into());
+        direct.connection_mode = Some("direct".into());
+        canonicalize_distribution_config(&mut direct, ConfigRequest::Create).unwrap();
+        assert_eq!(direct.connection_mode, None);
+        assert!(!direct.is_multi_tenant());
+    }
+
+    /// `MinTTL` recorded from real AWS on 2026-11-09, winning over TTLs out of
+    /// order; `DefaultTTL` and `MaxTTL` are inferred.
+    #[test]
+    fn negative_ttls_are_out_of_range() {
+        let (some, none) = (Some, None::<i64>);
+        let range = |member: &str| {
+            invalid(&format!(
+                "The parameter {member} is not within allowed range."
+            ))
+        };
+        for (case, expected) in [
+            (ttls(some(-5), none, none, LEGACY), range("MinTTL")),
+            (ttls(some(-5), some(-1), some(0), LEGACY), range("MinTTL")),
+            (ttls(some(0), some(-1), none, LEGACY), range("DefaultTTL")),
+            (ttls(some(0), none, some(-1), LEGACY), range("MaxTTL")),
+        ] {
+            assert_eq!(outcome(case, false, ConfigRequest::Create), expected);
+        }
+    }
+
+    fn standard_config() -> DistributionConfig {
+        let mut c = config();
+        c.default_cache_behavior.forwarded_values = Some(forwarded());
+        c.default_cache_behavior.min_ttl = Some(0);
+        canonicalize_distribution_config(&mut c, ConfigRequest::Create).unwrap();
+        c
+    }
+
+    fn tenant_config() -> DistributionConfig {
+        let mut c = config();
+        c.connection_mode = Some("tenant-only".into());
+        c.default_cache_behavior.cache_policy_id = Some(POLICY.into());
+        canonicalize_distribution_config(&mut c, ConfigRequest::Create).unwrap();
+        c
+    }
+
+    fn update_refusal(
+        stored: &DistributionConfig,
+        mut body: DistributionConfig,
+    ) -> Option<(String, String)> {
+        canonicalize_distribution_update(stored, &mut body)
+            .err()
+            .map(|e| (e.code().to_string(), e.message().to_string()))
+    }
+
+    fn illegal(message: &str) -> Option<(String, String)> {
+        Some(("IllegalUpdate".to_string(), message.to_string()))
+    }
+
+    /// Recorded from real AWS on 2026-11-09, apart from the bodies that fix the
+    /// members the recorded refusals name, whose refusal is inferred.
+    #[test]
+    fn an_update_cannot_change_the_mode() {
+        let tenant = tenant_config();
+        let price = "Price class is missing for the resource";
+        let mut dropped = tenant.clone();
+        dropped.connection_mode = None;
+        assert_eq!(update_refusal(&tenant, dropped.clone()), illegal(price));
+        let mut direct = tenant.clone();
+        direct.connection_mode = Some("direct".into());
+        assert_eq!(update_refusal(&tenant, direct), illegal(price));
+        dropped.price_class = Some("PriceClass_All".into());
+        assert_eq!(update_refusal(&tenant, dropped), illegal(MODE_IS_FIXED));
+
+        let standard = standard_config();
+        let mut flipped = standard.clone();
+        flipped.connection_mode = Some("tenant-only".into());
+        assert_eq!(
+            update_refusal(&standard, flipped),
+            invalid(&tenant_refusal("IsIPV6Enabled"))
+        );
+        let mut fixed = tenant_config();
+        fixed.caller_reference = standard.caller_reference.clone();
+        assert_eq!(update_refusal(&standard, fixed), illegal(MODE_IS_FIXED));
+
+        assert_eq!(update_refusal(&tenant, tenant.clone()), None);
+        assert_eq!(update_refusal(&standard, standard.clone()), None);
+        let mut explicit_direct = standard.clone();
+        explicit_direct.connection_mode = Some("direct".into());
+        assert_eq!(update_refusal(&standard, explicit_direct), None);
     }
 
     /// Recorded from real AWS `CopyDistribution` on 2026-11-09, except `false`.

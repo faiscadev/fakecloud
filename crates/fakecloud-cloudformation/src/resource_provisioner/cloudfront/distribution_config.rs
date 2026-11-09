@@ -178,26 +178,49 @@ pub(super) fn cfn_distribution_config(
             .map_err(at("CacheTagConfig"))?,
     };
 
-    apply_schema_min_ttl(&mut config);
+    apply_schema_ttl_defaults(&mut config);
+    let invalid_request = |message: &str| {
+        format!("Invalid request provided: AWS::CloudFront::Distribution: {message}")
+    };
+    // Before the API's own defaults fill it in.
+    let omits_protocol_version = config
+        .viewer_certificate
+        .as_ref()
+        .is_none_or(|vc| vc.minimum_protocol_version.is_none());
     // A template states the whole resource and omitted members take defaults,
     // on a stack update too, so both go through the rules of a create.
     canonicalize_distribution_config(&mut config, ConfigRequest::Create)
-        .map_err(|e| format!("{}: {}", e.code(), e.message()))?;
+        .map_err(|e| invalid_request(e.message().as_str()))?;
+    // Recorded from real CloudFormation on 2026-11-09 for a multi-tenant template
+    // with no `ViewerCertificate` at all. Taking one that names a certificate but
+    // no protocol version to fail alike, and an explicit version to pass, is
+    // inferred.
+    if config.is_multi_tenant() && omits_protocol_version {
+        return Err(invalid_request(
+            "The parameter ViewerCertificate The specified distribution is configured for SNI \
+             and the minimum SSL protocol version is specified as SSLv3. You cannot specify both.",
+        ));
+    }
     Ok(config)
 }
 
-/// `AWS::CloudFront::Distribution` documents `MinTTL` as defaulting to 0, while
-/// the API it calls requires the member on a behavior without a cache policy.
-/// A template that omits it must still deploy, so the default is applied here.
-/// A behavior on a cache policy, or any behavior of a multi-tenant distribution,
-/// must not carry the member at all.
-fn apply_schema_min_ttl(config: &mut DistributionConfig) {
-    if config.connection_mode.as_deref() == Some("tenant-only") {
+/// Recorded from real CloudFormation on 2026-11-09: `MinTTL` 0, `DefaultTTL` 86400
+/// and `MaxTTL` 31536000 are each filled in independently of the others and sent to
+/// the API, so unlike an API request's derivation `MaxTTL` 600 alone fails as out of
+/// order. A behavior on a cache policy, or any behavior of a multi-tenant
+/// distribution, must not carry them at all.
+fn apply_schema_ttl_defaults(config: &mut DistributionConfig) {
+    if config.is_multi_tenant() {
         return;
     }
+    let fill = |min: &mut Option<i64>, default: &mut Option<i64>, max: &mut Option<i64>| {
+        min.get_or_insert(0);
+        default.get_or_insert(86_400);
+        max.get_or_insert(31_536_000);
+    };
     let dcb = &mut config.default_cache_behavior;
     if !has_cache_policy(dcb.cache_policy_id.as_deref()) {
-        dcb.min_ttl.get_or_insert(0);
+        fill(&mut dcb.min_ttl, &mut dcb.default_ttl, &mut dcb.max_ttl);
     }
     for b in config
         .cache_behaviors
@@ -206,7 +229,7 @@ fn apply_schema_min_ttl(config: &mut DistributionConfig) {
         .flat_map(|i| &mut i.cache_behavior)
     {
         if !has_cache_policy(b.cache_policy_id.as_deref()) {
-            b.min_ttl.get_or_insert(0);
+            fill(&mut b.min_ttl, &mut b.default_ttl, &mut b.max_ttl);
         }
     }
 }
@@ -1232,12 +1255,12 @@ mod tests {
             "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
                                      "FunctionAssociations": [{"EventType": "viewer-request"}]}
         })));
-        assert!(err.starts_with("InvalidFunctionAssociation"), "{err}");
+        assert!(err.contains("A function association needs"), "{err}");
         let err = translate_err(&with(json!({
             "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
                                      "LambdaFunctionAssociations": [{"LambdaFunctionARN": "arn:l"}]}
         })));
-        assert!(err.starts_with("InvalidLambdaFunctionAssociation"), "{err}");
+        assert!(err.contains("A Lambda function association needs"), "{err}");
     }
 
     #[test]
@@ -1280,28 +1303,46 @@ mod tests {
         assert!(err.contains("MaxTTL is out of range"), "{err}");
     }
 
-    /// The resource documents `MinTTL` as defaulting to 0, so unlike the API a
-    /// template may omit it; the omitted-member derivation is the API's.
+    /// Recorded from real CloudFormation on 2026-11-09: omitted TTLs take their
+    /// schema defaults independently, unlike an API request's derivation.
     #[test]
-    fn a_template_omitting_min_ttl_deploys() {
-        let forwarded = json!({"QueryString": false});
+    fn omitted_ttls_take_independent_schema_defaults() {
         let config = translate(&with(json!({
             "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
-                                     "ForwardedValues": forwarded},
+                                     "ForwardedValues": {"QueryString": false}, "DefaultTTL": 600},
+            // Inferred from the default behavior.
             "CacheBehaviors": [{"PathPattern": "/x", "TargetOriginId": "o1",
                                 "ViewerProtocolPolicy": "allow-all",
-                                "ForwardedValues": forwarded, "MaxTTL": 600}]
+                                "ForwardedValues": {"QueryString": false}, "DefaultTTL": 600}]
         })));
         let dcb = &config.default_cache_behavior;
         assert_eq!(
             (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl),
-            (Some(0), Some(86_400), Some(31_536_000))
+            (Some(0), Some(600), Some(31_536_000))
         );
         let behaviors = config.cache_behaviors.unwrap().items.unwrap();
         let b = &behaviors.cache_behavior[0];
         assert_eq!(
             (b.min_ttl, b.default_ttl, b.max_ttl),
-            (Some(0), Some(600), Some(600))
+            (Some(0), Some(600), Some(31_536_000))
+        );
+
+        let order = "Invalid request provided: AWS::CloudFront::Distribution: MinTTL, MaxTTL and \
+                     DefaultTTL should follow order MinTTL less than or equal to DefaultTTL less \
+                     than or equal to MaxTTL";
+        for ttl in [json!({"MaxTTL": 600}), json!({"MinTTL": 100_000})] {
+            let mut cfg = base();
+            for (k, v) in ttl.as_object().unwrap() {
+                cfg["DefaultCacheBehavior"][k] = v.clone();
+            }
+            assert_eq!(translate_err(&cfg), order);
+        }
+        let mut negative = base();
+        negative["DefaultCacheBehavior"]["MinTTL"] = json!(-5);
+        assert_eq!(
+            translate_err(&negative),
+            "Invalid request provided: AWS::CloudFront::Distribution: The parameter MinTTL is \
+             not within allowed range."
         );
     }
 
@@ -1348,11 +1389,12 @@ mod tests {
         );
     }
 
-    /// The translated template meets the same refusals as an API create. That
-    /// CloudFormation surfaces them this way is inferred: it calls the API, and
-    /// the `MinTTL` it defaults leaves `ForwardedValues` as the missing member.
+    /// The translated template meets the same refusals as an API create, under
+    /// the handler's prefix. Recorded from real CloudFormation on 2026-11-09 for
+    /// the rows named below; the others are inferred from those.
     #[test]
     fn a_template_the_api_would_refuse_fails_with_the_apis_error() {
+        const PREFIX: &str = "Invalid request provided: AWS::CloudFront::Distribution: ";
         let behavior = |extra: Value| {
             let mut b = json!({"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all"});
             for (k, v) in extra.as_object().unwrap() {
@@ -1360,19 +1402,15 @@ mod tests {
             }
             with(json!({"DefaultCacheBehavior": b}))
         };
-        let err = translate_err(&behavior(json!({"MinTTL": 700, "MaxTTL": 600})));
-        assert_eq!(
-            err,
-            "InvalidTTLOrder: MinTTL should be less than or equal to MaxTTL"
-        );
         let err = translate_err(&behavior(json!({"DefaultTTL": 900, "MaxTTL": 800})));
         assert!(
-            err.starts_with("InvalidTTLOrder: MinTTL, MaxTTL and DefaultTTL"),
+            err.starts_with(&format!("{PREFIX}MinTTL, MaxTTL and DefaultTTL")),
             "{err}"
         );
         let err = translate_err(&behavior(json!({"CachePolicyId": "cp", "MinTTL": 0})));
         assert!(err.contains("The parameter MinTTL cannot be used"), "{err}");
 
+        // Recorded: nothing at all.
         let mut neither = base();
         neither["DefaultCacheBehavior"]
             .as_object_mut()
@@ -1380,22 +1418,36 @@ mod tests {
             .remove("ForwardedValues");
         assert_eq!(
             translate_err(&neither),
-            "InvalidArgument: The parameter ForwardedValues is required."
+            format!("{PREFIX}The parameter ForwardedValues is required.")
         );
 
+        let tls = json!({"CloudFrontDefaultCertificate": true, "MinimumProtocolVersion": "TLSv1"});
+        // Recorded: a multi-tenant template with no certificate is refused over the
+        // protocol default CloudFormation applies.
         let mut tenant = behavior(json!({"CachePolicyId": "cp"}));
         tenant["ConnectionMode"] = json!("tenant-only");
-        assert_eq!(translate(&tenant).default_cache_behavior.min_ttl, None);
+        assert_eq!(
+            translate_err(&tenant),
+            format!(
+                "{PREFIX}The parameter ViewerCertificate The specified distribution is configured \
+                 for SNI and the minimum SSL protocol version is specified as SSLv3. You cannot \
+                 specify both."
+            )
+        );
+        // Inferred: naming a version gets past that, with no schema TTLs added.
+        tenant["ViewerCertificate"] = tls.clone();
+        let config = translate(&tenant);
+        assert_eq!(config.default_cache_behavior.min_ttl, None);
         tenant["IPV6Enabled"] = json!(true);
         assert!(
             translate_err(&tenant).contains("IsIPV6Enabled field for a multi-tenant"),
             "IPV6Enabled"
         );
-        // A multi-tenant template's behavior gets no schema MinTTL added.
         neither["ConnectionMode"] = json!("tenant-only");
+        neither["ViewerCertificate"] = tls;
         assert_eq!(
             translate_err(&neither),
-            "InvalidArgument: The CachePolicyId field is required for a multi-tenant distribution."
+            format!("{PREFIX}The CachePolicyId field is required for a multi-tenant distribution.")
         );
     }
 
@@ -1468,13 +1520,13 @@ mod tests {
         let err = translate_err(&with(json!({
             "DefaultCacheBehavior": {"TargetOriginId": "nowhere", "ViewerProtocolPolicy": "allow-all"}
         })));
-        assert!(err.starts_with("NoSuchOrigin"), "{err}");
+        assert!(err.contains("One or more of your origins"), "{err}");
         let err = translate_err(&with(json!({
             "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
                                      "AllowedMethods": ["GET", "HEAD"],
                                      "CachedMethods": ["GET", "HEAD", "OPTIONS"]}
         })));
-        assert!(err.starts_with("InvalidArgument"), "{err}");
+        assert!(err.contains("CachedMethods must be"), "{err}");
     }
 
     #[test]

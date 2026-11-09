@@ -89,11 +89,13 @@ impl ResourceProvisioner {
             },
             |a, id| a.distributions.contains_key(id),
         );
+        // `E` and 13 upper-case alphanumerics, the shape of a real ETag: an
+        // `If-Match` of any other shape is refused as malformed once superseded.
         let etag_suffix: String = Uuid::new_v4()
             .simple()
             .to_string()
             .chars()
-            .take(7)
+            .take(13)
             .collect::<String>()
             .to_uppercase();
         let etag = format!("E{etag_suffix}");
@@ -146,11 +148,13 @@ impl ResourceProvisioner {
             .get("DistributionConfig")
             .ok_or_else(|| "DistributionConfig is required".to_string())?;
 
+        // `E` and 13 upper-case alphanumerics, the shape of a real ETag: an
+        // `If-Match` of any other shape is refused as malformed once superseded.
         let etag_suffix: String = Uuid::new_v4()
             .simple()
             .to_string()
             .chars()
-            .take(7)
+            .take(13)
             .collect::<String>()
             .to_uppercase();
 

@@ -10,7 +10,7 @@ mod helpers;
 
 use aws_sdk_cloudfront::types::builders::DistributionConfigBuilder;
 use aws_sdk_cloudfront::types::{
-    CacheBehavior, CacheBehaviors, CachedMethods, ConnectionMode, CookiePreference,
+    Aliases, CacheBehavior, CacheBehaviors, CachedMethods, ConnectionMode, CookiePreference,
     CustomErrorResponse, CustomErrorResponses, DefaultCacheBehavior, DistributionConfig,
     DistributionConfigWithTags, ForwardedValues, GeoRestriction, GeoRestrictionType, Headers,
     HttpVersion, ItemSelection, LoggingConfig, Method, MinimumProtocolVersion, Origin, Origins,
@@ -194,7 +194,8 @@ async fn cloudfront_errors_are_typed_sdk_errors() {
         .await
         .unwrap_err()
         .into_service_error();
-    assert!(err.is_precondition_failed(), "{err:?}");
+    // Recorded from real AWS on 2026-11-09 for `UpdateDistribution`.
+    assert!(err.is_invalid_if_match_version(), "{err:?}");
 }
 
 #[tokio::test]
@@ -1276,6 +1277,252 @@ async fn cloudfront_update_requires_every_ttl_but_not_their_order() {
     );
 }
 
+/// Recorded from real AWS on 2026-11-09.
+#[tokio::test]
+async fn cloudfront_update_cannot_change_the_mode_and_checks_if_match_first() {
+    use aws_sdk_cloudfront::error::ProvideErrorMetadata;
+
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+
+    let tenant = cf
+        .create_distribution()
+        .distribution_config(tenant_only_config("e2e-flip-tenant"))
+        .send()
+        .await
+        .unwrap();
+    let tenant_id = tenant.distribution().unwrap().id().to_string();
+    let read = cf
+        .get_distribution_config()
+        .id(&tenant_id)
+        .send()
+        .await
+        .unwrap();
+    let mut dropped = read.distribution_config().unwrap().clone();
+    dropped.connection_mode = None;
+    let err = cf
+        .update_distribution()
+        .id(&tenant_id)
+        .if_match(read.e_tag().unwrap())
+        .distribution_config(dropped)
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert!(err.is_illegal_update(), "{err:?}");
+    assert_eq!(
+        err.message(),
+        Some("Price class is missing for the resource")
+    );
+
+    let standard = cf
+        .create_distribution()
+        .distribution_config(minimal_config("e2e-flip-standard"))
+        .send()
+        .await
+        .unwrap();
+    let standard_id = standard.distribution().unwrap().id().to_string();
+    let read = cf
+        .get_distribution_config()
+        .id(&standard_id)
+        .send()
+        .await
+        .unwrap();
+    let mut flipped = read.distribution_config().unwrap().clone();
+    flipped.connection_mode = Some(ConnectionMode::TenantOnly);
+    let err = cf
+        .update_distribution()
+        .id(&standard_id)
+        .if_match(read.e_tag().unwrap())
+        .distribution_config(flipped.clone())
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(
+        err.message(),
+        Some("You can't specify the IsIPV6Enabled field for a multi-tenant distribution.")
+    );
+
+    // A wrong If-Match wins over a config that would be refused.
+    let err = cf
+        .update_distribution()
+        .id(&standard_id)
+        .if_match("E2STALEETAG")
+        .distribution_config(flipped.clone())
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert!(err.is_invalid_if_match_version(), "{err:?}");
+    assert_eq!(
+        err.message(),
+        Some("The If-Match version is missing or not valid for the resource.")
+    );
+
+    let err = cf
+        .update_distribution()
+        .id("E000000000000")
+        .if_match("E2X")
+        .distribution_config(flipped)
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert!(err.is_no_such_distribution(), "{err:?}");
+    assert_eq!(err.message(), Some("Id format is invalid"));
+}
+
+/// Recorded from real AWS on 2026-11-09.
+#[tokio::test]
+async fn cloudfront_if_match_superseded_and_malformed_differ() {
+    use aws_sdk_cloudfront::error::ProvideErrorMetadata;
+
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(minimal_config("e2e-stale"))
+        .send()
+        .await
+        .unwrap();
+    let id = create.distribution().unwrap().id().to_string();
+    let first_etag = create.e_tag().unwrap().to_string();
+    let mut changed = minimal_config("e2e-stale");
+    changed.comment = "changed".to_string();
+    cf.update_distribution()
+        .id(&id)
+        .if_match(&first_etag)
+        .distribution_config(changed.clone())
+        .send()
+        .await
+        .unwrap();
+    let precondition = "The request failed because it didn't meet the preconditions in one or \
+                        more request-header fields.";
+
+    let err = cf
+        .update_distribution()
+        .id(&id)
+        .if_match(&first_etag)
+        .distribution_config(minimal_config("e2e-stale"))
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert!(err.is_precondition_failed(), "{err:?}");
+    assert_eq!(err.message(), Some(precondition));
+
+    // A superseded ETag doesn't outrank an invalid config.
+    let mut invalid = minimal_config("e2e-stale");
+    invalid.default_cache_behavior.as_mut().unwrap().min_ttl = None;
+    let err = cf
+        .update_distribution()
+        .id(&id)
+        .if_match(&first_etag)
+        .distribution_config(invalid.clone())
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(err.message(), Some(MIN_REQUIRED_MESSAGE));
+
+    // A malformed one does.
+    let err = cf
+        .update_distribution()
+        .id(&id)
+        .if_match("garbage")
+        .distribution_config(invalid)
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert!(err.is_invalid_if_match_version(), "{err:?}");
+
+    let err = cf
+        .delete_distribution()
+        .id(&id)
+        .if_match(&first_etag)
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert!(err.is_precondition_failed(), "{err:?}");
+    assert_eq!(err.message(), Some(precondition));
+    let err = cf
+        .delete_distribution()
+        .id(&id)
+        .if_match("garbage")
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert!(err.is_invalid_if_match_version(), "{err:?}");
+    assert_eq!(
+        err.message(),
+        Some("The If-Match version is missing or not valid for the resource.")
+    );
+
+    for (unknown, message) in [
+        (
+            "EABCDEFGHIJKLM",
+            "The specified distribution does not exist.",
+        ),
+        ("E000000000000", "Id format is invalid"),
+    ] {
+        let err = cf
+            .get_distribution()
+            .id(unknown)
+            .send()
+            .await
+            .unwrap_err()
+            .into_service_error();
+        assert!(err.is_no_such_distribution(), "{err:?}");
+        assert_eq!(err.message(), Some(message));
+    }
+}
+
+/// Recorded from real AWS on 2026-11-09.
+#[tokio::test]
+async fn cloudfront_negative_ttls_and_explicit_direct_mode() {
+    use aws_sdk_cloudfront::error::ProvideErrorMetadata;
+
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+
+    let mut negative = minimal_config("e2e-negative");
+    let b = negative.default_cache_behavior.as_mut().unwrap();
+    (b.min_ttl, b.default_ttl, b.max_ttl) = (Some(-5), Some(-1), Some(0));
+    let err = cf
+        .create_distribution()
+        .distribution_config(negative)
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(
+        (err.code(), err.message()),
+        (
+            Some("InvalidArgument"),
+            Some("The parameter MinTTL is not within allowed range.")
+        )
+    );
+
+    let mut direct = minimal_config("e2e-direct-mode");
+    direct.connection_mode = Some(ConnectionMode::Direct);
+    let create = cf
+        .create_distribution()
+        .distribution_config(direct)
+        .send()
+        .await
+        .unwrap();
+    let config = create
+        .distribution()
+        .unwrap()
+        .distribution_config()
+        .unwrap();
+    assert_eq!(config.connection_mode(), None);
+}
+
 /// Recorded from real AWS `CopyDistribution` on 2026-11-09.
 #[tokio::test]
 async fn cloudfront_copy_refusals_are_as_recorded() {
@@ -1449,6 +1696,12 @@ async fn cloudfront_multi_tenant_distributions_behave_as_recorded() {
     with_staging.staging = Some(false);
     let mut with_price_class = tenant_only_config("e2e-mt-price");
     with_price_class.price_class = Some(PriceClass::PriceClass100);
+    let mut with_aliases = tenant_only_config("e2e-mt-aliases");
+    with_aliases.aliases = Some(Aliases::builder().quantity(0).build().unwrap());
+    let mut with_policy_id = tenant_only_config("e2e-mt-cdp");
+    with_policy_id.continuous_deployment_policy_id = Some(String::new());
+    let mut with_anycast = tenant_only_config("e2e-mt-anycast");
+    with_anycast.anycast_ip_list_id = Some(String::new());
     let mut with_both = tenant_only_config("e2e-mt-both");
     with_both.is_ipv6_enabled = Some(false);
     with_both.staging = Some(false);
@@ -1461,7 +1714,14 @@ async fn cloudfront_multi_tenant_distributions_behave_as_recorded() {
         (with_ipv6, "IsIPV6Enabled"),
         (with_staging, "Staging"),
         (with_price_class, "PriceClass"),
+        (with_aliases, "Aliases"),
+        (with_policy_id, "ContinuousDeploymentPolicyId"),
+        (with_anycast, "AnycastIpListId"),
         (with_both, "IsIPV6Enabled"),
+        (
+            behavior("e2e-mt-smooth", |b| b.smooth_streaming = Some(false)),
+            "SmoothStreaming",
+        ),
         (behavior("e2e-mt-min", |b| b.min_ttl = Some(0)), "MinTTL"),
         (
             behavior("e2e-mt-def", |b| b.default_ttl = Some(60)),

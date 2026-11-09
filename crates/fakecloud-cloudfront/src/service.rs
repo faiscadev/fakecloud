@@ -23,7 +23,10 @@ use crate::state::{
     CloudFrontAccounts, CloudFrontSnapshot, DomainOwner, SharedCloudFrontState, StoredDistribution,
     StoredInvalidation, Tag, CLOUDFRONT_SNAPSHOT_SCHEMA_VERSION,
 };
-use crate::validate::{canonicalize_distribution_config, validate_copy, ConfigRequest};
+use crate::validate::{
+    canonicalize_distribution_config, canonicalize_distribution_update, validate_copy,
+    ConfigRequest,
+};
 use crate::xml_io;
 
 /// CloudFront mutating actions share these prefixes; everything else
@@ -929,33 +932,33 @@ impl CloudFrontService {
             .id
             .as_deref()
             .ok_or_else(|| invalid_argument("missing distribution id"))?;
-        let if_match = req
-            .headers
-            .get(IF_MATCH)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidIfMatchVersion",
-                    "Missing If-Match header for UpdateDistribution",
-                )
-            })?
-            .to_string();
+        // Recorded from real AWS on 2026-11-09, in this order: existence, the
+        // If-Match value's shape, the config's rules, and only then whether the
+        // If-Match is current.
+        let (stored, stored_etag) = self
+            .state
+            .read()
+            .get(&req.account_id)
+            .and_then(|a| a.distributions.get(id))
+            .map(|d| (d.config.clone(), d.etag.clone()))
+            .ok_or_else(|| no_such_distribution(id))?;
+        let if_match = if_match_of_distribution(req, &stored_etag)?;
         let mut new_config: DistributionConfig = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid DistributionConfig XML: {e}")))?;
-        canonicalize_distribution_config(&mut new_config, ConfigRequest::Update)?;
+        // What `GetDistributionConfig` returned, sent back as it was, is accepted
+        // whatever the rules say: a config persisted before a rule existed is
+        // already stored, so this changes nothing. Compared before any defaults
+        // are filled in, so a body that dropped a member doesn't count.
+        if !configs_equal(&stored, &new_config) {
+            canonicalize_distribution_update(&stored, &mut new_config)?;
+        }
 
         let mut state = self.state.write();
-        if state
-            .get(&route.account)
-            .is_some_and(|a| a.distributions.contains_key(id))
-        {
-            reject_domains_in_use(
-                &state,
-                config_aliases(&new_config),
-                DomainOwner::Distribution(id),
-            )?;
-        }
+        reject_domains_in_use(
+            &state,
+            config_aliases(&new_config),
+            DomainOwner::Distribution(id),
+        )?;
         let account = state
             .accounts
             .get_mut(&req.account_id)
@@ -965,11 +968,7 @@ impl CloudFrontService {
             .get_mut(id)
             .ok_or_else(|| no_such_distribution(id))?;
         if dist.etag != if_match {
-            return Err(aws_error(
-                StatusCode::PRECONDITION_FAILED,
-                "PreconditionFailed",
-                "If-Match header does not match the current ETag",
-            ));
+            return Err(superseded_if_match());
         }
         // ETag stability: only bump the ETag and flip status back to
         // InProgress when the new config actually differs from what we
@@ -1007,18 +1006,6 @@ impl CloudFrontService {
             .id
             .as_deref()
             .ok_or_else(|| invalid_argument("missing distribution id"))?;
-        let if_match = req
-            .headers
-            .get(IF_MATCH)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidIfMatchVersion",
-                    "Missing If-Match header for DeleteDistribution",
-                )
-            })?
-            .to_string();
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -1029,12 +1016,8 @@ impl CloudFrontService {
                 .distributions
                 .get(id)
                 .ok_or_else(|| no_such_distribution(id))?;
-            if dist.etag != if_match {
-                return Err(aws_error(
-                    StatusCode::PRECONDITION_FAILED,
-                    "PreconditionFailed",
-                    "If-Match header does not match the current ETag",
-                ));
+            if if_match_of_distribution(req, &dist.etag)? != dist.etag {
+                return Err(superseded_if_match());
             }
             if dist.config.enabled {
                 return Err(aws_error(
@@ -1315,6 +1298,9 @@ impl CloudFrontService {
         config.caller_reference = parsed.caller_reference;
         config.enabled = parsed.enabled.unwrap_or(true);
         config.staging = staging;
+        // Inferred: a policy attaches a staging distribution to its primary, so
+        // the copy isn't itself attached to one.
+        config.continuous_deployment_policy_id = Some(String::new());
         config.ensure_aws_defaults();
         let now = Utc::now();
         let etag = generate_etag();
@@ -1901,7 +1887,7 @@ fn build_distribution_list_xml(
             rfc3339(&d.last_modified_time)
         ));
         out.push_str(&format!("<DomainName>{}</DomainName>", esc(&d.domain_name)));
-        let multi_tenant = d.config.connection_mode.as_deref() == Some("tenant-only");
+        let multi_tenant = d.config.is_multi_tenant();
         let aliases = d.config.aliases.clone().unwrap_or_default();
         out.push_str(&render_inline("Aliases", &aliases));
         let origins = d.config.origins.clone();
@@ -2288,11 +2274,63 @@ pub(crate) fn invalid_argument(msg: impl Into<String>) -> AwsServiceError {
     aws_error(StatusCode::BAD_REQUEST, "InvalidArgument", msg)
 }
 
+/// Recorded from real AWS on 2026-11-09 on `GetDistribution` and
+/// `UpdateDistribution`: `EABCDEFGHIJKLM` for the first message and
+/// `E000000000000` for the second. Treating every all-digit id alike, and the
+/// other operations taking a distribution id the same way, is inferred.
 fn no_such_distribution(id: &str) -> AwsServiceError {
+    let all_digits = id
+        .strip_prefix('E')
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()));
     aws_error(
         StatusCode::NOT_FOUND,
         "NoSuchDistribution",
-        format!("The specified distribution does not exist: {id}"),
+        if all_digits {
+            "Id format is invalid"
+        } else {
+            "The specified distribution does not exist."
+        },
+    )
+}
+
+/// The `If-Match` of an update or delete, refused if missing or not shaped like an
+/// ETag, without yet deciding whether it is current. Recorded from real AWS on
+/// 2026-11-09 for a malformed value; a missing one getting the same answer is
+/// inferred from the message. The current ETag always passes, so a config stored
+/// with an ETag of another shape stays reachable.
+fn if_match_of_distribution(req: &AwsRequest, current: &str) -> Result<String, AwsServiceError> {
+    req.headers
+        .get(IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| *v == current || is_etag_shaped(v))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidIfMatchVersion",
+                "The If-Match version is missing or not valid for the resource.",
+            )
+        })
+}
+
+/// Real ETags look like `E23ZP02F085DFQ` and `ETVPDKIKX0DER`: `E` and 12 or 13
+/// upper-case alphanumerics. The bounds are inferred from those, and from
+/// `E2STALEETAG` and `E2X` being refused. [`generate_etag`] issues this shape.
+fn is_etag_shaped(value: &str) -> bool {
+    value.strip_prefix('E').is_some_and(|rest| {
+        (12..=13).contains(&rest.len())
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    })
+}
+
+/// A real but superseded ETag. Recorded from real AWS on 2026-11-09.
+fn superseded_if_match() -> AwsServiceError {
+    aws_error(
+        StatusCode::PRECONDITION_FAILED,
+        "PreconditionFailed",
+        "The request failed because it didn't meet the preconditions in one or more request-header fields.",
     )
 }
 
@@ -2998,6 +3036,268 @@ mod tests {
         assert_eq!(
             (err.code(), err.message().as_str()),
             ("InvalidArgument", message)
+        );
+    }
+
+    /// Store a config as a snapshot from before a rule existed would have left it,
+    /// then read it back and put it unchanged.
+    async fn old_shape_round_trip(mutate: fn(&mut DistributionConfig)) {
+        let state = make_state();
+        let svc = CloudFrontService::new(state.clone());
+        let create = svc
+            .handle(create_request(&minimal_dist_config_xml("old-shape")))
+            .await
+            .unwrap();
+        let id = id_in(&create);
+        {
+            let mut guard = state.write();
+            let stored = guard
+                .accounts
+                .get_mut(DEFAULT_ACCOUNT)
+                .unwrap()
+                .distributions
+                .get_mut(&id)
+                .unwrap();
+            mutate(&mut stored.config);
+            stored.config.ensure_aws_defaults();
+        }
+        let read = svc
+            .handle(make_request(
+                http::Method::GET,
+                &format!("/2020-05-31/distribution/{id}/config"),
+                "",
+                "",
+            ))
+            .await
+            .unwrap();
+        let etag = etag_of(&read);
+        let body = std::str::from_utf8(read.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        let mut put = make_request(
+            http::Method::PUT,
+            &format!("/2020-05-31/distribution/{id}/config"),
+            "",
+            &body,
+        );
+        put.headers.insert(IF_MATCH, etag.parse().unwrap());
+        let put = svc.handle(put).await.expect("an unchanged PUT succeeds");
+        assert_eq!(etag_of(&put), etag, "a no-op keeps the ETag");
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_put_of_an_old_shape_config_succeeds() {
+        // Legacy TTLs with neither ForwardedValues nor a cache policy.
+        old_shape_round_trip(|c| {
+            c.default_cache_behavior.forwarded_values = None;
+        })
+        .await;
+        // A cache policy alongside TTLs.
+        old_shape_round_trip(|c| {
+            c.default_cache_behavior.cache_policy_id = Some("cp".into());
+        })
+        .await;
+        // Multi-tenant with legacy settings.
+        old_shape_round_trip(|c| {
+            c.connection_mode = Some("tenant-only".into());
+        })
+        .await;
+    }
+
+    /// Dropping a member from the stored config isn't "unchanged", even though
+    /// the defaults would fill it back in.
+    #[tokio::test]
+    async fn a_put_that_drops_a_ttl_is_not_treated_as_unchanged() {
+        let svc = CloudFrontService::new(make_state());
+        let create = svc
+            .handle(create_request(&minimal_dist_config_xml("drop-ttl")))
+            .await
+            .unwrap();
+        let id = id_in(&create);
+        let mut put = make_request(
+            http::Method::PUT,
+            &format!("/2020-05-31/distribution/{id}/config"),
+            "",
+            &minimal_dist_config_xml("drop-ttl").replace("<MinTTL>0</MinTTL>", ""),
+        );
+        put.headers
+            .insert(IF_MATCH, etag_of(&create).parse().unwrap());
+        let err = svc.handle(put).await.err().expect("refused");
+        assert_eq!(err.message(), "The parameter MinTTL is required.");
+    }
+
+    #[test]
+    fn issued_etags_have_the_shape_of_real_ones() {
+        assert!(is_etag_shaped(&generate_etag()));
+        // Real ETags, recorded from AWS on 2026-11-09.
+        assert!(is_etag_shaped("E23ZP02F085DFQ"));
+        assert!(is_etag_shaped("ETVPDKIKX0DER"));
+        for refused in [
+            "garbage",
+            "E2STALEETAG",
+            "E2X",
+            "e23zp02f085dfq",
+            "E23ZP02F085DFQX",
+        ] {
+            assert!(!is_etag_shaped(refused), "{refused}");
+        }
+    }
+
+    /// Recorded from real AWS on 2026-11-09: the stale check comes after the config
+    /// rules, and a superseded ETag gets a different answer from a malformed one.
+    #[tokio::test]
+    async fn superseded_and_malformed_if_match_differ_on_update_and_delete() {
+        let svc = CloudFrontService::new(make_state());
+        let body = minimal_dist_config_xml("stale");
+        let create = svc.handle(create_request(&body)).await.unwrap();
+        let id = id_in(&create);
+        let first_etag = etag_of(&create);
+        let path = format!("/2020-05-31/distribution/{id}/config");
+        let put = |body: &str, etag: &str| {
+            let mut put = make_request(http::Method::PUT, &path, "", body);
+            put.headers.insert(IF_MATCH, etag.parse().unwrap());
+            put
+        };
+        let changed = body.replace("allow-all", "https-only");
+        svc.handle(put(&changed, &first_etag)).await.unwrap();
+        let invalid = body.replace("<MinTTL>0</MinTTL>", "");
+        let malformed = "The If-Match version is missing or not valid for the resource.";
+
+        // Superseded: the config is judged first, then the staleness.
+        let err = svc.handle(put(&invalid, &first_etag)).await.err().unwrap();
+        assert_eq!(err.message(), "The parameter MinTTL is required.");
+        let err = svc.handle(put(&body, &first_etag)).await.err().unwrap();
+        assert_eq!(
+            (err.code(), err.message().as_str()),
+            (
+                "PreconditionFailed",
+                "The request failed because it didn't meet the preconditions in one or more request-header fields."
+            )
+        );
+        // An unchanged body gets no pass on staleness.
+        let err = svc.handle(put(&changed, &first_etag)).await.err().unwrap();
+        assert_eq!(err.code(), "PreconditionFailed");
+
+        // Malformed: refused whatever the config.
+        for value in ["garbage", "E2STALEETAG"] {
+            let err = svc.handle(put(&invalid, value)).await.err().unwrap();
+            assert_eq!(
+                (err.code(), err.message().as_str()),
+                ("InvalidIfMatchVersion", malformed)
+            );
+        }
+
+        let delete = |etag: &str| {
+            let mut delete = make_request(
+                http::Method::DELETE,
+                &format!("/2020-05-31/distribution/{id}"),
+                "",
+                "",
+            );
+            delete.headers.insert(IF_MATCH, etag.parse().unwrap());
+            delete
+        };
+        let err = svc.handle(delete(&first_etag)).await.err().unwrap();
+        assert_eq!(err.code(), "PreconditionFailed");
+        let err = svc.handle(delete("garbage")).await.err().unwrap();
+        assert_eq!(err.code(), "InvalidIfMatchVersion");
+    }
+
+    /// Recorded from real AWS on 2026-11-09 on Get and Update.
+    #[tokio::test]
+    async fn unknown_distribution_messages_follow_the_id_shape() {
+        let svc = CloudFrontService::new(make_state());
+        for (id, message) in [
+            (
+                "EABCDEFGHIJKLM",
+                "The specified distribution does not exist.",
+            ),
+            ("E000000000000", "Id format is invalid"),
+        ] {
+            let path = format!("/2020-05-31/distribution/{id}");
+            let err = svc
+                .handle(make_request(http::Method::GET, &path, "", ""))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(
+                (err.code(), err.message().as_str()),
+                ("NoSuchDistribution", message)
+            );
+            let mut put = make_request(
+                http::Method::PUT,
+                &format!("{path}/config"),
+                "",
+                "<DistributionConfig/>",
+            );
+            put.headers.insert(IF_MATCH, "E2X".parse().unwrap());
+            let err = svc.handle(put).await.err().unwrap();
+            assert_eq!(err.message(), message);
+        }
+    }
+
+    /// Recorded from real AWS on 2026-11-09: these outrank an invalid config.
+    #[tokio::test]
+    async fn an_update_settles_existence_and_if_match_before_the_config() {
+        let svc = CloudFrontService::new(make_state());
+        let create = svc
+            .handle(create_request(&minimal_dist_config_xml("order")))
+            .await
+            .unwrap();
+        let id = id_in(&create);
+        let invalid = "<DistributionConfig/>";
+
+        let mut stale = make_request(
+            http::Method::PUT,
+            &format!("/2020-05-31/distribution/{id}/config"),
+            "",
+            invalid,
+        );
+        stale
+            .headers
+            .insert(IF_MATCH, "E2STALEETAG".parse().unwrap());
+        let err = svc.handle(stale).await.err().expect("refused");
+        assert_eq!(
+            (err.code(), err.message().as_str()),
+            (
+                "InvalidIfMatchVersion",
+                "The If-Match version is missing or not valid for the resource."
+            )
+        );
+
+        let mut unknown = make_request(
+            http::Method::PUT,
+            "/2020-05-31/distribution/E000000000000/config",
+            "",
+            invalid,
+        );
+        unknown.headers.insert(IF_MATCH, "E2X".parse().unwrap());
+        let err = svc.handle(unknown).await.err().expect("refused");
+        assert_eq!(
+            (err.code(), err.message().as_str()),
+            ("NoSuchDistribution", "Id format is invalid")
+        );
+    }
+
+    /// Inferred: the copy isn't itself attached to the primary's policy.
+    #[tokio::test]
+    async fn a_staging_copy_is_not_attached_to_the_primarys_policy() {
+        let svc = CloudFrontService::new(make_state());
+        let create = svc
+            .handle(create_request(&minimal_dist_config_xml("cdp").replace(
+                "<Enabled>true</Enabled>",
+                "<Enabled>true</Enabled><ContinuousDeploymentPolicyId>cdp-1</ContinuousDeploymentPolicyId>",
+            )))
+            .await
+            .unwrap();
+        let mut copy = copy_request(&id_in(&create), &etag_of(&create), "cdp-copy", "");
+        copy.headers.insert("Staging", "true".parse().unwrap());
+        let copied = svc.handle(copy).await.unwrap();
+        let body = std::str::from_utf8(copied.body.expect_bytes()).unwrap();
+        assert!(
+            body.contains("<ContinuousDeploymentPolicyId></ContinuousDeploymentPolicyId>")
+                || body.contains("<ContinuousDeploymentPolicyId/>"),
+            "{body}"
         );
     }
 
