@@ -254,9 +254,9 @@ pub(crate) fn prepare_state(
                 ],
                 &scope,
             )?;
-            if let Some(items) = state_def.get("Items") {
-                run_input = eval_template(items, &scope)?;
-            }
+            // `Items` stays apart from the input: `$states.input` in `ItemSelector`
+            // is still the state's input.
+            eval_fields(&mut prepared, &["Items"], &scope)?;
             for field in ["ItemReader", "ResultWriter"] {
                 if let Some(part) = prepared.get_mut(field) {
                     if let Some(arguments) = part.get("Arguments").cloned() {
@@ -277,9 +277,14 @@ fn apply_assign(assign: &Value, scope: &Scope<'_>) -> Result<(), StateError> {
     let Some(pairs) = assign.as_object() else {
         return Ok(());
     };
-    // References read the values from state entry; new ones apply to the next state.
-    for (name, template) in pairs {
-        crate::variables::stage(name.clone(), eval_template(template, scope)?);
+    // References read the values from state entry; new ones apply to the next
+    // state. All of them evaluate before any is staged.
+    let evaluated = pairs
+        .iter()
+        .map(|(name, template)| Ok((name.clone(), eval_template(template, scope)?)))
+        .collect::<Result<Vec<_>, StateError>>()?;
+    for (name, value) in evaluated {
+        crate::variables::stage(name, value);
     }
     Ok(())
 }
@@ -299,25 +304,16 @@ pub(crate) fn finish_state(
         result: (!error_output).then_some(&produced),
         error_output: error_output.then_some(&produced),
     };
+    // Nothing is staged unless both fields evaluate: a state failing here keeps
+    // none of its assignments.
+    let output = match holder.get("Output") {
+        Some(output) => Some(eval_template(output, &scope)?),
+        None => None,
+    };
     if let Some(assign) = holder.get("Assign") {
         apply_assign(assign, &scope)?;
     }
-    match holder.get("Output") {
-        Some(output) => eval_template(output, &scope),
-        None => Ok(produced),
-    }
-}
-
-/// The catcher that sent a state to `next`, when a catcher did: a state's own
-/// `Next` is its normal transition.
-pub(crate) fn catcher_for<'d>(state_def: &'d Value, next: &str) -> Option<&'d Value> {
-    if state_def["Next"].as_str() == Some(next) {
-        return None;
-    }
-    state_def["Catch"]
-        .as_array()?
-        .iter()
-        .find(|catcher| catcher["Next"].as_str() == Some(next))
+    Ok(output.unwrap_or(produced))
 }
 
 /// Run a JSONata Choice state's rules: the rule or default taken and its output.
@@ -503,12 +499,5 @@ mod tests {
             choose(&state, &small, &context).unwrap(),
             Some(("Small".to_string(), small.clone()))
         );
-    }
-
-    #[test]
-    fn catcher_is_only_found_off_the_normal_path() {
-        let state = json!({"Next": "A", "Catch": [{"Next": "C"}, {"Next": "A"}]});
-        assert!(catcher_for(&state, "A").is_none());
-        assert!(catcher_for(&state, "C").is_some());
     }
 }

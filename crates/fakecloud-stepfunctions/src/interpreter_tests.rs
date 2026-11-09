@@ -918,12 +918,11 @@ fn apply_state_catcher_matches_wildcard_and_stashes_error() {
         ]
     });
     let input = json!({ "a": 1 });
-    let (next, new_input) =
-        apply_state_catcher(&state_def, &input, "Boom", "it exploded", true).unwrap();
-    assert_eq!(next, "H");
-    assert_eq!(new_input["a"], json!(1));
-    assert_eq!(new_input["caught"]["Error"], json!("Boom"));
-    assert_eq!(new_input["caught"]["Cause"], json!("it exploded"));
+    let caught = apply_state_catcher(&state_def, &input, "Boom", "it exploded", true).unwrap();
+    assert_eq!(caught.next, "H");
+    assert_eq!(caught.output["a"], json!(1));
+    assert_eq!(caught.output["caught"]["Error"], json!("Boom"));
+    assert_eq!(caught.output["caught"]["Cause"], json!("it exploded"));
 }
 
 #[test]
@@ -2339,4 +2338,117 @@ fn lambda_invoke_function_name_resolves_in_the_execution_region() {
         qualify_lambda_function_ref("arn:aws:lambda:us-west-2:111122223333:function:f", exec),
         "arn:aws:lambda:us-west-2:111122223333:function:f"
     );
+}
+
+/// A Batch stand-in whose job stays RUNNING for a while, then ends as told.
+struct ScriptedBatch {
+    final_status: &'static str,
+    actions: parking_lot::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl fakecloud_core::service::AwsService for ScriptedBatch {
+    fn service_name(&self) -> &str {
+        "batch"
+    }
+
+    async fn handle(
+        &self,
+        request: fakecloud_core::service::AwsRequest,
+    ) -> Result<fakecloud_core::service::AwsResponse, fakecloud_core::service::AwsServiceError>
+    {
+        let mut actions = self.actions.lock();
+        actions.push(request.action.clone());
+        let polls = actions.iter().filter(|a| *a == "DescribeJobs").count();
+        let body = match request.action.as_str() {
+            "SubmitJob" => json!({"jobName": "j", "jobId": "job-1"}),
+            _ => {
+                let status = if polls < 2 {
+                    "RUNNING"
+                } else {
+                    self.final_status
+                };
+                json!({"jobs": [{"jobId": "job-1", "status": status, "jobName": "j"}]})
+            }
+        };
+        Ok(fakecloud_core::service::AwsResponse::json(
+            http::StatusCode::OK,
+            body.to_string(),
+        ))
+    }
+
+    fn supported_actions(&self) -> &[&str] {
+        &[]
+    }
+}
+
+fn run_batch_sync(
+    final_status: &'static str,
+) -> (
+    Arc<ScriptedBatch>,
+    ExecutionStatus,
+    Option<String>,
+    Option<String>,
+) {
+    let batch = Arc::new(ScriptedBatch {
+        final_status,
+        actions: parking_lot::Mutex::new(Vec::new()),
+    });
+    let mut registry = fakecloud_core::registry::ServiceRegistry::new();
+    registry.register(batch.clone());
+    let handle: crate::service::SharedServiceRegistry = Arc::new(std::sync::OnceLock::new());
+    let _ = handle.set(Arc::new(registry));
+
+    let state = make_state();
+    let arn = "arn:aws:states:us-east-1:123456789012:execution:test:batch-sync";
+    create_execution(&state, arn, Some("{}".to_string()));
+    let def = json!({"StartAt": "T", "States": {"T": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::batch:submitJob.sync",
+        "Parameters": {"JobName": "j", "JobQueue": "q", "JobDefinition": "d"},
+        "End": true
+    }}});
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(execute_state_machine(
+            state.clone(),
+            arn.to_string(),
+            def.to_string(),
+            Some("{}".to_string()),
+            None,
+            None,
+            Some(handle),
+            None,
+        ));
+    let (status, output, cause) = {
+        let accounts = state.read();
+        let exec = accounts.by_arn(arn).unwrap().executions.get(arn).unwrap();
+        (exec.status, exec.output.clone(), exec.cause.clone())
+    };
+    (batch, status, output, cause)
+}
+
+#[test]
+fn batch_sync_waits_for_the_job_to_succeed() {
+    let (batch, status, output, _) = run_batch_sync("SUCCEEDED");
+    assert_eq!(status, ExecutionStatus::Succeeded);
+    let polls = batch
+        .actions
+        .lock()
+        .iter()
+        .filter(|a| *a == "DescribeJobs")
+        .count();
+    assert!(polls >= 2, "polled {polls} times");
+    let output: Value = serde_json::from_str(&output.unwrap()).unwrap();
+    assert_eq!(output["Status"], "SUCCEEDED");
+    assert_eq!(output["JobId"], "job-1");
+}
+
+#[test]
+fn batch_sync_surfaces_a_failed_job() {
+    let (_, status, _, cause) = run_batch_sync("FAILED");
+    assert_eq!(status, ExecutionStatus::Failed);
+    assert!(cause.unwrap().contains("job-1"));
 }

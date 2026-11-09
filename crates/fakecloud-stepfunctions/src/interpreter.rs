@@ -9,8 +9,7 @@ use fakecloud_aws::arn::arn_resource;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_dynamodb::SharedDynamoDbState;
 
-use crate::choice::evaluate_choice;
-use crate::error_handling::{find_catcher, should_retry};
+use crate::error_handling::should_retry;
 use crate::io_processing::{apply_input_path, apply_output_path, apply_result_path};
 use crate::optimized_results::{
     dynamodb_metadata, glue_start_job_run_result, lambda_invoke_metadata, sns_metadata,
@@ -142,6 +141,8 @@ pub(crate) enum Advance {
     End(Value),
     /// Fail the state machine with the given error and cause.
     Fail(String, String),
+    /// A failure a catcher took; the state loop applies the catcher's fields.
+    Caught(CaughtError),
 }
 
 /// `Assign` on a JSONPath Wait state reads the effective input.
@@ -424,6 +425,42 @@ async fn execute_wait_state(
     Ok(())
 }
 
+/// Turn a Task's raw result into its output.
+#[allow(clippy::too_many_arguments)]
+fn finish_task_result(
+    state_def: &Value,
+    name: &str,
+    input: &Value,
+    result: Value,
+    entered: chrono::DateTime<Utc>,
+    attempt: u32,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Result<Value, (String, String)> {
+    let result_path = state_def["ResultPath"].as_str();
+    let output_path = state_def["OutputPath"].as_str();
+    let ctx = context_object(shared_state, execution_arn, name, entered, attempt);
+    let selected = match state_def.get("ResultSelector") {
+        Some(selector) => apply_parameters(selector, &result, Some(&ctx))?,
+        None => result.clone(),
+    };
+    let after_result = if result_path == Some("null") {
+        input.clone()
+    } else {
+        apply_result_path(input, &selected, result_path)
+    };
+    let output = if output_path == Some("null") {
+        json!({})
+    } else {
+        apply_output_path(&after_result, output_path)?
+    };
+    // `$` is the raw result. Staged last: a state failing above assigns nothing.
+    if !crate::jsonata::is_jsonata(state_def) {
+        crate::variables::assign_jsonpath(state_def.get("Assign"), &result, Some(&ctx))?;
+    }
+    Ok(output)
+}
+
 /// Execute a Task state: invoke the resource (Lambda, SQS, SNS, EventBridge, DynamoDB),
 /// apply I/O processing, handle Retry.
 #[allow(clippy::too_many_arguments)]
@@ -443,8 +480,6 @@ async fn execute_task_state(
     let base_ctx = context_object(shared_state, execution_arn, name, entered, 0);
 
     let input_path = state_def["InputPath"].as_str();
-    let result_path = state_def["ResultPath"].as_str();
-    let output_path = state_def["OutputPath"].as_str();
 
     let effective_input = if input_path == Some("null") {
         json!({})
@@ -579,32 +614,16 @@ async fn execute_task_state(
                                 }),
                             );
 
-                            let selected = if let Some(selector) = state_def.get("ResultSelector") {
-                                let ctx = context_object(
-                                    shared_state,
-                                    execution_arn,
-                                    name,
-                                    entered,
-                                    attempt,
-                                );
-                                apply_parameters(selector, &output, Some(&ctx))?
-                            } else {
-                                output
-                            };
-
-                            let after_result = if result_path == Some("null") {
-                                input.clone()
-                            } else {
-                                apply_result_path(input, &selected, result_path)
-                            };
-
-                            let output = if output_path == Some("null") {
-                                json!({})
-                            } else {
-                                apply_output_path(&after_result, output_path)?
-                            };
-
-                            return Ok(output);
+                            return finish_task_result(
+                                state_def,
+                                name,
+                                input,
+                                output,
+                                entered,
+                                attempt,
+                                shared_state,
+                                execution_arn,
+                            );
                         }
                         Err((error, cause)) => {
                             add_event(
@@ -640,34 +659,16 @@ async fn execute_task_state(
                     }),
                 );
 
-                if !crate::jsonata::is_jsonata(state_def) {
-                    let ctx = context_object(shared_state, execution_arn, name, entered, attempt);
-                    crate::variables::assign_jsonpath(
-                        state_def.get("Assign"),
-                        &result,
-                        Some(&ctx),
-                    )?;
-                }
-                let selected = if let Some(selector) = state_def.get("ResultSelector") {
-                    let ctx = context_object(shared_state, execution_arn, name, entered, attempt);
-                    apply_parameters(selector, &result, Some(&ctx))?
-                } else {
-                    result
-                };
-
-                let after_result = if result_path == Some("null") {
-                    input.clone()
-                } else {
-                    apply_result_path(input, &selected, result_path)
-                };
-
-                let output = if output_path == Some("null") {
-                    json!({})
-                } else {
-                    apply_output_path(&after_result, output_path)?
-                };
-
-                return Ok(output);
+                return finish_task_result(
+                    state_def,
+                    name,
+                    input,
+                    result,
+                    entered,
+                    attempt,
+                    shared_state,
+                    execution_arn,
+                );
             }
             Err((error, cause)) => {
                 add_event(
@@ -756,15 +757,12 @@ async fn execute_parallel_state(
     }
 
     let branch_output = Value::Array(results);
-    if !crate::jsonata::is_jsonata(state_def) {
-        crate::variables::assign_jsonpath(state_def.get("Assign"), &branch_output, Some(ctx))?;
-    }
 
     // Apply ResultSelector if present
     let selected = if let Some(selector) = state_def.get("ResultSelector") {
         apply_parameters(selector, &branch_output, Some(ctx))?
     } else {
-        branch_output
+        branch_output.clone()
     };
 
     // Apply ResultPath
@@ -780,6 +778,9 @@ async fn execute_parallel_state(
     } else {
         apply_output_path(&after_result, output_path)?
     };
+    if !crate::jsonata::is_jsonata(state_def) {
+        crate::variables::assign_jsonpath(state_def.get("Assign"), &branch_output, Some(ctx))?;
+    }
 
     Ok(output)
 }
@@ -893,12 +894,12 @@ impl FailureTolerance {
     }
 }
 
-/// Stops a failing map run starting new iterations. As recorded (40 items,
-/// concurrency 2, no tolerance: 3 ran, 37 stayed pending), the dispatcher has one
-/// `MaxConcurrency` window committed beyond the iterations already finished when
-/// the threshold is crossed.
+/// Stops a failing Map starting new iterations. For a map run, as recorded (40
+/// items, concurrency 2, no tolerance: 3 ran, 37 stayed pending), the dispatcher
+/// has one `MaxConcurrency` window committed beyond the iterations already
+/// finished when the threshold is crossed. An inline Map has no such window.
 struct MapProgress {
-    concurrency: usize,
+    window: usize,
     started: std::sync::atomic::AtomicUsize,
     finished: std::sync::atomic::AtomicUsize,
     failed: std::sync::atomic::AtomicUsize,
@@ -907,9 +908,9 @@ struct MapProgress {
 }
 
 impl MapProgress {
-    fn new(concurrency: usize) -> Self {
+    fn new(window: usize) -> Self {
         Self {
-            concurrency,
+            window,
             started: Default::default(),
             finished: Default::default(),
             failed: Default::default(),
@@ -934,7 +935,7 @@ impl MapProgress {
         }
         let failed = self.failed.fetch_add(1, SeqCst) + 1;
         if tolerance.exceeded(failed, total) {
-            let limit = finished + self.concurrency;
+            let limit = finished + self.window;
             let _ = self
                 .start_limit
                 .compare_exchange(usize::MAX, limit, SeqCst, SeqCst);
@@ -991,12 +992,15 @@ async fn run_map_iterations(
     let items = if let Some(item_reader) = state_def.get("ItemReader") {
         read_items_from_s3(item_reader, &effective_input, ctx, registry, execution_arn).await?
     } else {
-        let items_path = state_def["ItemsPath"].as_str().unwrap_or("$");
-        let items_value = crate::io_processing::resolve_reference_with_context(
-            &effective_input,
-            Some(ctx),
-            items_path,
-        )?;
+        // A JSONata state's `Items`, already evaluated, or a JSONPath `ItemsPath`.
+        let items_value = match state_def.get("Items") {
+            Some(items) => items.clone(),
+            None => crate::io_processing::resolve_reference_with_context(
+                &effective_input,
+                Some(ctx),
+                state_def["ItemsPath"].as_str().unwrap_or("$"),
+            )?,
+        };
         match items_value {
             Value::Array(items) => items,
             other => {
@@ -1073,7 +1077,11 @@ async fn run_map_iterations(
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_concurrency));
     let is_distributed = map_run_arn.is_some();
-    let progress = Arc::new(MapProgress::new(effective_concurrency));
+    let progress = Arc::new(MapProgress::new(if is_distributed {
+        effective_concurrency
+    } else {
+        0
+    }));
 
     // Process all items
     let mut handles = Vec::new();
@@ -1091,17 +1099,19 @@ async fn run_map_iterations(
             .acquire_owned()
             .await
             .map_err(|_| ("States.Runtime".to_string(), "Semaphore closed".to_string()))?;
-        let may_start = !is_distributed || progress.may_start();
+        let may_start = progress.may_start();
         let recorded_input = result_writer.map(|_| item_input.clone());
         let progress = progress.clone();
 
-        add_event(
-            shared_state,
-            execution_arn,
-            "MapIterationStarted",
-            0,
-            json!({ "index": index }),
-        );
+        if may_start {
+            add_event(
+                shared_state,
+                execution_arn,
+                "MapIterationStarted",
+                0,
+                json!({ "index": index }),
+            );
+        }
 
         // A distributed Map's iterations cannot read outer variables.
         let scope = crate::variables::child_scope(!is_distributed);
@@ -1234,15 +1244,12 @@ async fn run_map_iterations(
         );
     }
     let map_output = map_output?;
-    if !crate::jsonata::is_jsonata(state_def) {
-        crate::variables::assign_jsonpath(state_def.get("Assign"), &map_output, Some(ctx))?;
-    }
 
     // Apply ResultSelector if present
     let selected = if let Some(selector) = state_def.get("ResultSelector") {
         apply_parameters(selector, &map_output, Some(ctx))?
     } else {
-        map_output
+        map_output.clone()
     };
 
     // Apply ResultPath
@@ -1258,6 +1265,9 @@ async fn run_map_iterations(
     } else {
         apply_output_path(&after_result, output_path)?
     };
+    if !crate::jsonata::is_jsonata(state_def) {
+        crate::variables::assign_jsonpath(state_def.get("Assign"), &map_output, Some(ctx))?;
+    }
 
     Ok(output)
 }
@@ -1906,15 +1916,34 @@ async fn invoke_aws_sdk_integration(
         )
     })?;
 
+    // A `.sync` Task nothing can wait for fails before it starts anything, rather
+    // than reporting a job it never watched.
+    if sync_form.is_some() && !has_sync_waiter(&service_name, &operation) {
+        return Err((
+            "States.TaskFailed".to_string(),
+            format!(
+                "`.sync` is not supported for {service_name}:{operation} yet; supported: \
+                 ecs:RunTask, athena:StartQueryExecution, glue:StartJobRun, \
+                 states:StartExecution, batch:SubmitJob, codebuild:StartBuild"
+            ),
+        ));
+    }
+
+    let caller = Caller {
+        registry: &registry_arc,
+        account_id,
+        region,
+        principal,
+    };
+
+    // AWS Batch is REST, so its waiter speaks the service's own protocol.
+    if sync_form.is_some() && service.protocol() != "json" {
+        return sync_wait_batch_job(&service, &caller, &operation, input, timeout_seconds).await;
+    }
+
     // An `aws-sdk:*` Task, and any integration over a protocol other than JSON,
     // takes the service's own protocol end to end.
     if (!optimized && sync_form.is_none()) || service.protocol() != "json" {
-        let caller = Caller {
-            registry: &registry_arc,
-            account_id,
-            region,
-            principal,
-        };
         return service
             .invoke(&caller, &operation, input, DateStyle::Iso)
             .await
@@ -1966,6 +1995,7 @@ async fn invoke_aws_sdk_integration(
             service.result_json("GetQueryExecution", &described, DateStyle::EpochMillis)
         }
         ("glue", _) => service.result_json("GetJobRun", &described, DateStyle::EpochMillis),
+        ("codebuild", _) => service.result_json("StartBuild", &described, DateStyle::EpochMillis),
         _ => described,
     })
 }
@@ -2095,6 +2125,116 @@ async fn call_sdk_action(
 const SYNC_DEFAULT_TIMEOUT_SECS: u64 = 300;
 const SYNC_POLL_INTERVAL_MS: u64 = 200;
 
+fn has_sync_waiter(service_name: &str, operation: &str) -> bool {
+    matches!(
+        (service_name, operation),
+        ("ecs", "RunTask")
+            | ("athena", "StartQueryExecution")
+            | ("states", "StartExecution")
+            | ("glue", "StartJobRun")
+            | ("batch", "SubmitJob")
+            | ("codebuild", "StartBuild")
+    )
+}
+
+/// `batch:submitJob.sync`: submit, then poll `DescribeJobs` until the job ends.
+async fn sync_wait_batch_job(
+    service: &crate::sdk_protocol::SdkService,
+    caller: &Caller<'_>,
+    operation: &str,
+    input: &Value,
+    timeout_seconds: Option<u64>,
+) -> Result<Value, (String, String)> {
+    let failed = |failure: crate::sdk_protocol::SdkFailure| {
+        crate::sdk_protocol::task_error(service, &failure)
+    };
+    let submitted = service
+        .invoke(caller, operation, input, DateStyle::EpochMillis)
+        .await
+        .map_err(failed)?;
+    let job_id = submitted["JobId"].as_str().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "batch:submitJob.sync: response missing JobId".to_string(),
+        )
+    })?;
+    let deadline = sync_deadline(timeout_seconds);
+    loop {
+        let described = service
+            .invoke(
+                caller,
+                "DescribeJobs",
+                &json!({ "Jobs": [job_id] }),
+                DateStyle::EpochMillis,
+            )
+            .await
+            .map_err(failed)?;
+        let job = &described["Jobs"][0];
+        match job["Status"].as_str() {
+            Some("SUCCEEDED") => return Ok(job.clone()),
+            Some("FAILED") => return Err(("States.TaskFailed".to_string(), job.to_string())),
+            _ => {}
+        }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err((
+                "States.Timeout".to_string(),
+                format!(
+                    "batch:submitJob.sync timed out after {}s for job {job_id}",
+                    sync_timeout_secs(timeout_seconds)
+                ),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(SYNC_POLL_INTERVAL_MS)).await;
+    }
+}
+
+/// `codebuild:startBuild.sync`: poll `BatchGetBuilds` until the build ends. The
+/// result is `{ build }`, the shape `StartBuild` returns.
+async fn sync_wait_codebuild_build(
+    registry: &Arc<fakecloud_core::registry::ServiceRegistry>,
+    initial: &Value,
+    account_id: &str,
+    region: &str,
+    timeout_seconds: Option<u64>,
+) -> Result<Value, (String, String)> {
+    let build_id = initial["build"]["id"].as_str().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "codebuild:startBuild.sync: response missing build.id".to_string(),
+        )
+    })?;
+    let deadline = sync_deadline(timeout_seconds);
+    loop {
+        let described = call_sdk_action(
+            registry,
+            "codebuild",
+            "BatchGetBuilds",
+            &json!({ "ids": [build_id] }),
+            account_id,
+            region,
+        )
+        .await?;
+        let build = &described["builds"][0];
+        match build["buildStatus"].as_str() {
+            Some("SUCCEEDED") => return Ok(json!({ "build": build })),
+            Some("FAILED" | "FAULT" | "STOPPED" | "TIMED_OUT") => {
+                return Err(("States.TaskFailed".to_string(), build.to_string()))
+            }
+            _ => {}
+        }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err((
+                "States.Timeout".to_string(),
+                format!(
+                    "codebuild:startBuild.sync timed out after {}s for build {build_id}",
+                    sync_timeout_secs(timeout_seconds)
+                ),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(SYNC_POLL_INTERVAL_MS)).await;
+    }
+}
+
 /// Dispatch `.sync` waiters by service+action. Each waiter polls the
 /// matching describe-style API until the downstream operation reaches a
 /// terminal state, then returns the full describe response.
@@ -2118,6 +2258,9 @@ async fn sync_wait(
         }
         ("states", "StartExecution") => {
             sync_wait_states_start_execution(registry, initial, account_id, region, timeout_seconds).await
+        }
+        ("codebuild", "StartBuild") => {
+            sync_wait_codebuild_build(registry, initial, account_id, region, timeout_seconds).await
         }
         ("glue", "StartJobRun") => {
             // Poll the real Glue `GetJobRun` (the job run was created by the

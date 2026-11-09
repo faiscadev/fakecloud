@@ -101,6 +101,18 @@ pub(crate) fn commit() {
     });
 }
 
+/// Forget what the current state staged: only a catcher's `Assign` applies when a
+/// state fails.
+pub(crate) fn discard_staged() {
+    let _ = CURRENT.try_with(|scope| {
+        scope
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    });
+}
+
 /// The variable a path addresses and the path within it: `$order.items[0]` is
 /// `order` and `$.items[0]`. `None` for `$`, `$.x`, `$[0]` and `$$...`.
 pub(crate) fn split_reference(path: &str) -> Option<(&str, String)> {
@@ -166,6 +178,16 @@ mod tests {
             assert_eq!(lookup("x"), None);
             commit();
             assert_eq!(lookup("x"), Some(json!(1)));
+        }));
+    }
+
+    #[test]
+    fn discarded_assignments_never_apply() {
+        run(in_scope(VariableScope::root(), async {
+            stage("x".to_string(), json!(1));
+            discard_staged();
+            commit();
+            assert_eq!(lookup("x"), None);
         }));
     }
 

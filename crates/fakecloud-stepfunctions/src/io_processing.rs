@@ -47,7 +47,7 @@ pub fn resolve_path(root: &Value, path: &str) -> Result<Value, PathError> {
 /// for InputPath / OutputPath / ItemsPath / SecondsPath and friends:
 /// `Invalid path '$.x' : No results for path: $['x']`.
 pub fn resolve_reference(root: &Value, path: &str) -> Result<Value, StatesError> {
-    resolve_path(root, path).map_err(|e| runtime_error(path_error_cause(path, &e)))
+    resolve_with_context(root, None, path).map_err(|e| runtime_error(path_error_cause(path, &e)))
 }
 
 /// [`resolve_reference`] for a path that may address the context object

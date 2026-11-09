@@ -84,16 +84,56 @@ pub(crate) fn run_states<'a>(
                 )
             });
             let original_def = state_def.clone();
-            let (state_def, run_input) =
-                if let (Some(input), Some(ctx)) = (&states_input, &jsonata_ctx) {
-                    if state_type == "Choice" {
-                        (state_def, current_input)
-                    } else {
-                        crate::jsonata::prepare_state(&state_def, input, ctx)?
+            let prepared = match (&states_input, &jsonata_ctx) {
+                (Some(input), Some(ctx)) if state_type != "Choice" => {
+                    crate::jsonata::prepare_state(&state_def, input, ctx)
+                }
+                _ => Ok((state_def, current_input)),
+            };
+            let (state_def, run_input) = match prepared {
+                Ok(prepared) => prepared,
+                Err((error, cause)) => {
+                    // The state was entered, and failed before it could run.
+                    let input = states_input.as_ref().unwrap_or(&Value::Null);
+                    add_event(
+                        shared_state,
+                        execution_arn,
+                        &format!("{state_type}StateEntered"),
+                        0,
+                        json!({
+                            "name": current_state,
+                            "input": serde_json::to_string(input).expect("serde_json::Value serialization is infallible"),
+                        }),
+                    );
+                    add_evaluation_failure(
+                        shared_state,
+                        execution_arn,
+                        &current_state,
+                        &error,
+                        &cause,
+                    );
+                    let advance = advance_from_error(&original_def, input, error, cause, false);
+                    match settle_advance(
+                        advance,
+                        &current_state,
+                        states_input.as_ref(),
+                        jsonata_ctx.as_ref(),
+                        shared_state,
+                        execution_arn,
+                    ) {
+                        Advance::Next(next, new_input) => {
+                            effective_input = new_input;
+                            current_state = next;
+                            continue;
+                        }
+                        Advance::End(output) => return Ok(output),
+                        Advance::Fail(error, cause) => return Err((error, cause)),
+                        Advance::Caught(_) => {
+                            unreachable!("settle_advance resolves every catcher")
+                        }
                     }
-                } else {
-                    (state_def, current_input)
-                };
+                }
+            };
 
             let advance = match state_type.as_str() {
                 "Choice" if jsonata_state => run_jsonata_choice_state(
@@ -188,11 +228,25 @@ pub(crate) fn run_states<'a>(
             };
 
             let advance = match (&states_input, &jsonata_ctx) {
-                (Some(input), Some(ctx)) if state_type != "Choice" => {
-                    finish_jsonata_state(&original_def, input, ctx, advance)
-                }
+                (Some(input), Some(ctx)) if state_type != "Choice" => finish_jsonata_state(
+                    &original_def,
+                    &current_state,
+                    input,
+                    ctx,
+                    advance,
+                    shared_state,
+                    execution_arn,
+                ),
                 _ => advance,
             };
+            let advance = settle_advance(
+                advance,
+                &current_state,
+                states_input.as_ref(),
+                jsonata_ctx.as_ref(),
+                shared_state,
+                execution_arn,
+            );
 
             crate::variables::commit();
 
@@ -203,32 +257,100 @@ pub(crate) fn run_states<'a>(
                 }
                 Advance::End(output) => return Ok(output),
                 Advance::Fail(error, cause) => return Err((error, cause)),
+                Advance::Caught(_) => unreachable!("settle_advance resolves every catcher"),
             }
         }
     })
 }
 
-/// Apply a JSONata state's `Assign` and `Output`, or its catcher's when the state
-/// was caught, to where the state ended up.
+fn add_evaluation_failure(
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+    state: &str,
+    error: &str,
+    cause: &str,
+) {
+    add_event(
+        shared_state,
+        execution_arn,
+        "EvaluationFailed",
+        0,
+        json!({ "error": error, "cause": cause, "state": state }),
+    );
+}
+
+/// Resolve a catcher's transition: a failed state keeps none of its own
+/// assignments, and the catcher's `Assign` and (in JSONata) `Output` apply.
+fn settle_advance(
+    advance: Advance,
+    name: &str,
+    jsonata_input: Option<&Value>,
+    jsonata_ctx: Option<&Value>,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Advance {
+    match advance {
+        Advance::Caught(caught) => {
+            crate::variables::discard_staged();
+            let settled = match (jsonata_input, jsonata_ctx) {
+                (Some(input), Some(ctx)) => crate::jsonata::finish_state(
+                    &caught.catcher,
+                    input,
+                    ctx,
+                    caught.error_output,
+                    true,
+                ),
+                _ => {
+                    let ctx =
+                        context_object(shared_state, execution_arn, name, chrono::Utc::now(), 0);
+                    crate::variables::assign_jsonpath(
+                        caught.catcher.get("Assign"),
+                        &caught.error_output,
+                        Some(&ctx),
+                    )
+                    .map(|()| caught.output)
+                }
+            };
+            match settled {
+                Ok(output) => Advance::Next(caught.next, output),
+                // A catcher has nothing further to go to.
+                Err((error, cause)) => Advance::Fail(error, cause),
+            }
+        }
+        Advance::Fail(error, cause) => {
+            crate::variables::discard_staged();
+            Advance::Fail(error, cause)
+        }
+        settled => settled,
+    }
+}
+
+/// Apply a JSONata state's `Assign` and `Output` to where the state ended up. A
+/// failing expression fails the state the way any other error does, so its
+/// catchers see it.
 fn finish_jsonata_state(
     state_def: &Value,
+    name: &str,
     input: &Value,
     ctx: &Value,
     advance: Advance,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
 ) -> Advance {
-    let finish = |holder: &Value, produced: Value, error_output: bool| {
-        crate::jsonata::finish_state(holder, input, ctx, produced, error_output)
-    };
     let finished = match advance {
-        Advance::Next(next, produced) => match crate::jsonata::catcher_for(state_def, &next) {
-            Some(catcher) => finish(catcher, produced, true),
-            None => finish(state_def, produced, false),
+        Advance::Next(next, produced) => {
+            crate::jsonata::finish_state(state_def, input, ctx, produced, false)
+                .map(|output| Advance::Next(next, output))
         }
-        .map(|output| Advance::Next(next, output)),
-        Advance::End(produced) => finish(state_def, produced, false).map(Advance::End),
-        failed => Ok(failed),
+        Advance::End(produced) => {
+            crate::jsonata::finish_state(state_def, input, ctx, produced, false).map(Advance::End)
+        }
+        other => Ok(other),
     };
-    finished.unwrap_or_else(|(error, cause)| Advance::Fail(error, cause))
+    finished.unwrap_or_else(|(error, cause)| {
+        add_evaluation_failure(shared_state, execution_arn, name, &error, &cause);
+        advance_from_error(state_def, input, error, cause, false)
+    })
 }
 
 /// A JSONata Choice state: its rules are `Condition` expressions.
@@ -353,7 +475,7 @@ pub(crate) fn advance_from_error(
     is_task_error: bool,
 ) -> Advance {
     match apply_state_catcher(state_def, input, &error, &cause, is_task_error) {
-        Some((next, new_input)) => Advance::Next(next, new_input),
+        Some(caught) => Advance::Caught(caught),
         None => Advance::Fail(error, cause),
     }
 }
@@ -505,24 +627,12 @@ pub(crate) fn run_choice_state(
     };
 
     let ctx = context_object(shared_state, execution_arn, name, chrono::Utc::now(), 0);
-    let chosen = match evaluate_choice(state_def, &processed_input, Some(&ctx)) {
+    let chosen = match crate::choice::choose_transition(state_def, &processed_input, Some(&ctx)) {
         Ok(chosen) => chosen,
         Err((error, cause)) => return Advance::Fail(error, cause),
     };
     match chosen {
-        Some(next) => {
-            // `Assign` belongs to the rule taken, or the state for its Default.
-            let rule = state_def["Choices"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|rule| rule["Next"].as_str() == Some(next.as_str()))
-                .unwrap_or(state_def);
-            if let Err((error, cause)) =
-                crate::variables::assign_jsonpath(rule.get("Assign"), &processed_input, Some(&ctx))
-            {
-                return Advance::Fail(error, cause);
-            }
+        Some((next, holder)) => {
             // A Choice state has no Parameters/ResultPath, so its effective
             // result is the InputPath-filtered input; OutputPath then filters
             // what flows to the next state. Previously the raw input was
@@ -536,6 +646,14 @@ pub(crate) fn run_choice_state(
                     Err((error, cause)) => return Advance::Fail(error, cause),
                 }
             };
+            // `Assign` belongs to the rule taken, or the state for its Default.
+            if let Err((error, cause)) = crate::variables::assign_jsonpath(
+                holder.get("Assign"),
+                &processed_input,
+                Some(&ctx),
+            ) {
+                return Advance::Fail(error, cause);
+            }
             add_event(
                 shared_state,
                 execution_arn,
@@ -585,9 +703,6 @@ pub(crate) fn execute_pass_state(
     } else {
         transformed
     };
-    if !crate::jsonata::is_jsonata(state_def) {
-        crate::variables::assign_jsonpath(state_def.get("Assign"), &result, context)?;
-    }
 
     let after_result = if result_path == Some("null") {
         input.clone()
@@ -595,11 +710,15 @@ pub(crate) fn execute_pass_state(
         apply_result_path(input, &result, result_path)
     };
 
-    if output_path == Some("null") {
-        Ok(json!({}))
+    let output = if output_path == Some("null") {
+        json!({})
     } else {
-        apply_output_path(&after_result, output_path)
+        apply_output_path(&after_result, output_path)?
+    };
+    if !crate::jsonata::is_jsonata(state_def) {
+        crate::variables::assign_jsonpath(state_def.get("Assign"), &result, context)?;
     }
+    Ok(output)
 }
 
 /// Send a message to an SQS queue via DeliveryBus.
@@ -1546,6 +1665,15 @@ pub(crate) fn next_state(state_def: &Value) -> NextState {
     }
 }
 
+/// A state's failure going to a catcher.
+pub(crate) struct CaughtError {
+    pub(crate) next: String,
+    /// The next state's input under the catcher's `ResultPath`.
+    pub(crate) output: Value,
+    pub(crate) error_output: Value,
+    pub(crate) catcher: Value,
+}
+
 /// Find the first `Catch` clause on `state_def` that matches `error` and
 /// apply its `ResultPath` to produce the state to transition to and the
 /// new effective input. Returns None when no catcher applies, in which
@@ -1556,23 +1684,21 @@ pub(crate) fn apply_state_catcher(
     error: &str,
     cause: &str,
     is_task_error: bool,
-) -> Option<(String, Value)> {
-    let catchers = state_def["Catch"].as_array().cloned().unwrap_or_default();
-    let (next, result_path) = find_catcher(&catchers, error, is_task_error)?;
+) -> Option<CaughtError> {
+    let catchers = state_def["Catch"].as_array()?;
+    let (next, result_path, catcher) =
+        crate::error_handling::matching_catcher(catchers, error, is_task_error)?;
     let error_output = json!({
         "Error": error,
         "Cause": cause,
     });
-    if !crate::jsonata::is_jsonata(state_def) {
-        let catcher = catchers
-            .iter()
-            .find(|c| c["Next"].as_str() == Some(next.as_str()));
-        if let Some(assign) = catcher.and_then(|c| c.get("Assign")) {
-            let _ = crate::variables::assign_jsonpath(Some(assign), &error_output, None);
-        }
-    }
-    let new_input = apply_result_path(effective_input, &error_output, result_path.as_deref());
-    Some((next, new_input))
+    let output = apply_result_path(effective_input, &error_output, result_path.as_deref());
+    Some(CaughtError {
+        next,
+        output,
+        error_output,
+        catcher: catcher.clone(),
+    })
 }
 
 /// Extract the region from an execution ARN (`arn:aws:states:region:account_id:...`).

@@ -784,3 +784,380 @@ async fn jsonata_catch_assign_reaches_the_enclosing_scope() {
     .await;
     assert_eq!(output, json!("Bad"));
 }
+
+// A `.sync` nothing can wait for fails before starting anything.
+#[tokio::test]
+async fn sync_without_a_waiter_fails_loudly_and_starts_nothing() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let machine = create_machine(
+        &client,
+        "no-waiter",
+        json!({"StartAt":"T","States":{"T":{
+            "Type":"Task",
+            "Resource":"arn:aws:states:::sqs:createQueue.sync",
+            "Parameters":{"QueueName":"never-made"},
+            "End":true
+        }}}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(machine)
+        .send()
+        .await
+        .unwrap();
+    let desc = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(desc.error(), Some("States.TaskFailed"));
+    assert!(desc.cause().unwrap().contains("not supported"), "{desc:?}");
+
+    let queues = server
+        .sqs_client()
+        .await
+        .list_queues()
+        .send()
+        .await
+        .unwrap();
+    assert!(queues.queue_urls().is_empty(), "{queues:?}");
+}
+
+#[tokio::test]
+async fn wait_for_task_token_assigns_from_the_callback_output() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let child = create_machine(
+        &client,
+        "token-child",
+        json!({"StartAt":"Send","States":{"Send":{
+            "Type":"Task",
+            "Resource":"arn:aws:states:::aws-sdk:sfn:sendTaskSuccess",
+            "Parameters":{"TaskToken.$":"$.token","Output":{"value":7}},
+            "End":true
+        }}}),
+    )
+    .await;
+
+    let output = run_parent(
+        &client,
+        json!({"StartAt":"Wait","States":{
+            "Wait":{
+                "Type":"Task",
+                "Resource":"arn:aws:states:::states:startExecution.waitForTaskToken",
+                "Parameters":{"StateMachineArn":child,"Input":{"token.$":"$$.Task.Token"}},
+                "Assign":{"got.$":"$.value"},
+                "Next":"Read"
+            },
+            "Read":{"Type":"Pass","Parameters":{"got.$":"$got"},"End":true}
+        }}),
+    )
+    .await;
+    assert_eq!(output, json!({"got": 7}));
+}
+
+// A catcher sharing the state's `Next` is still a catcher, and two sharing a
+// `Next` keep their own fields.
+#[tokio::test]
+async fn catchers_are_matched_not_inferred_from_next() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let output = run_parent(
+        &client,
+        json!({"QueryLanguage":"JSONata","StartAt":"Boom","States":{
+            "Boom":{
+                "Type":"Parallel",
+                "Branches":[{"StartAt":"F","States":{"F":{"Type":"Fail","Error":"Second","Cause":"c"}}}],
+                "Catch":[
+                    {"ErrorEquals":["First"],"Output":{"which":"first"},"Next":"Done"},
+                    {"ErrorEquals":["Second"],"Output":{"which":"second"},"Assign":{"caught":"{% $states.errorOutput.Error %}"},"Next":"Done"}
+                ],
+                "Next":"Done"
+            },
+            "Done":{"Type":"Pass","Output":{"in":"{% $states.input %}","caught":"{% $caught %}"},"End":true}
+        }}),
+    )
+    .await;
+    assert_eq!(
+        output,
+        json!({"in": {"which": "second"}, "caught": "Second"})
+    );
+}
+
+#[tokio::test]
+async fn jsonpath_catcher_assign_reads_error_and_context() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let output = run_parent(
+        &client,
+        json!({"StartAt":"Boom","States":{
+            "Boom":{
+                "Type":"Parallel",
+                "Branches":[{"StartAt":"F","States":{"F":{"Type":"Fail","Error":"Bad","Cause":"c"}}}],
+                "Catch":[{
+                    "ErrorEquals":["States.ALL"],
+                    "Assign":{"error.$":"$.Error","state.$":"$$.State.Name"},
+                    "Next":"Done"
+                }],
+                "End":true
+            },
+            "Done":{"Type":"Pass","Parameters":{"error.$":"$error","state.$":"$state"},"End":true}
+        }}),
+    )
+    .await;
+    assert_eq!(output, json!({"error": "Bad", "state": "Boom"}));
+}
+
+#[tokio::test]
+async fn a_failing_catcher_assign_fails_the_execution() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let machine = create_machine(
+        &client,
+        "bad-catch",
+        json!({"StartAt":"Boom","States":{
+            "Boom":{
+                "Type":"Parallel",
+                "Branches":[{"StartAt":"F","States":{"F":{"Type":"Fail","Error":"Bad","Cause":"c"}}}],
+                "Catch":[{"ErrorEquals":["States.ALL"],"Assign":{"x.$":"$.missing"},"Next":"Done"}],
+                "End":true
+            },
+            "Done":{"Type":"Succeed"}
+        }}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(machine)
+        .send()
+        .await
+        .unwrap();
+    let desc = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(desc.status().as_str(), "FAILED", "{desc:?}");
+    assert_eq!(desc.error(), Some("States.Runtime"));
+}
+
+#[tokio::test]
+async fn jsonata_item_selector_reads_the_state_input() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let output = run_parent(
+        &client,
+        json!({"QueryLanguage":"JSONata","StartAt":"Seed","States":{
+            "Seed":{"Type":"Pass","Output":{"factor":3},"Next":"Each"},
+            "Each":{
+                "Type":"Map",
+                "Items":[1,2],
+                "ItemSelector":{"v":"{% $states.context.Map.Item.Value * $states.input.factor %}"},
+                "ItemProcessor":{
+                    "StartAt":"P",
+                    "States":{"P":{"Type":"Pass","Output":"{% $states.input.v %}","End":true}}
+                },
+                "End":true
+            }
+        }}),
+    )
+    .await;
+    assert_eq!(output, json!([3, 6]));
+}
+
+// Rules sharing a target, and a Default equal to one, keep their own Assign.
+#[tokio::test]
+async fn choice_assign_belongs_to_the_rule_taken() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = |value: i32| {
+        json!({"StartAt":"Seed","States":{
+            "Seed":{"Type":"Pass","Result":{"n":value},"Next":"Pick"},
+            "Pick":{
+                "Type":"Choice",
+                "Choices":[
+                    {"Variable":"$.n","NumericEquals":1,"Assign":{"which":"one"},"Next":"Done"},
+                    {"Variable":"$.n","NumericEquals":2,"Assign":{"which":"two"},"Next":"Done"}
+                ],
+                "Assign":{"which":"default"},
+                "Default":"Done"
+            },
+            "Done":{"Type":"Pass","Parameters":{"which.$":"$which"},"End":true}
+        }})
+    };
+    for (value, expected) in [(1, "one"), (2, "two"), (3, "default")] {
+        let arn = create_machine(&client, &format!("rule-{value}"), definition(value)).await;
+        let started = client
+            .start_execution()
+            .state_machine_arn(arn)
+            .send()
+            .await
+            .unwrap();
+        let desc = wait_terminal(&client, started.execution_arn()).await;
+        let output: Value = serde_json::from_str(desc.output().expect("output")).unwrap();
+        assert_eq!(output["which"], expected, "{value}");
+    }
+}
+
+// On AWS a query error is an ordinary state failure.
+#[tokio::test]
+async fn jsonata_errors_reach_the_states_catchers() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    // Before the state runs (`Items`), and after it (`Output`).
+    for (name, field, template) in [
+        ("before", "Items", "{% $states.input.missing %}"),
+        ("after", "Output", "{% $states.result.missing %}"),
+    ] {
+        let mut map = json!({
+            "Type":"Map",
+            "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+            "Catch":[{
+                "ErrorEquals":["States.QueryEvaluationError"],
+                "Output":{"caught":"{% $states.errorOutput.Error %}"},
+                "Next":"Done"
+            }],
+            "End":true
+        });
+        map[field] = json!(template);
+        if name == "after" {
+            map["Items"] = json!([1]);
+        }
+        let machine = create_machine(
+            &client,
+            &format!("catch-{name}"),
+            json!({"QueryLanguage":"JSONata","StartAt":"M","States":{
+                "M":map,
+                "Done":{"Type":"Pass","End":true}
+            }}),
+        )
+        .await;
+        let started = client
+            .start_execution()
+            .state_machine_arn(machine)
+            .send()
+            .await
+            .unwrap();
+        let desc = wait_terminal(&client, started.execution_arn()).await;
+        assert_eq!(desc.status().as_str(), "SUCCEEDED", "{name}: {desc:?}");
+        let output: Value = serde_json::from_str(desc.output().unwrap()).unwrap();
+        assert_eq!(
+            output,
+            json!({"caught": "States.QueryEvaluationError"}),
+            "{name}"
+        );
+
+        let history = client
+            .get_execution_history()
+            .execution_arn(started.execution_arn())
+            .send()
+            .await
+            .unwrap();
+        let types: Vec<&str> = history
+            .events()
+            .iter()
+            .map(|e| e.r#type().as_str())
+            .collect();
+        assert!(types.contains(&"MapStateEntered"), "{name}: {types:?}");
+        assert!(types.contains(&"EvaluationFailed"), "{name}: {types:?}");
+    }
+}
+
+// `$var` works wherever a path does, except ResultPath.
+#[tokio::test]
+async fn input_and_output_paths_read_variables() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let output = run_parent(
+        &client,
+        json!({"StartAt":"Set","States":{
+            "Set":{"Type":"Pass","Assign":{"data":{"a":{"b":1},"c":2}},"Next":"In"},
+            "In":{"Type":"Pass","InputPath":"$data.a","ResultPath":"$.copied","OutputPath":"$data","Next":"Out"},
+            "Out":{"Type":"Pass","End":true}
+        }}),
+    )
+    .await;
+    assert_eq!(output, json!({"a": {"b": 1}, "c": 2}));
+
+    let refused = client
+        .create_state_machine()
+        .name("result-path-variable")
+        .role_arn(ROLE)
+        .definition(
+            json!({"StartAt":"P","States":{"P":{"Type":"Pass","ResultPath":"$x","End":true}}})
+                .to_string(),
+        )
+        .send()
+        .await
+        .expect_err("ResultPath can't name a variable")
+        .into_service_error();
+    assert!(refused.is_invalid_definition(), "{refused:?}");
+}
+
+// An inline Map stops at its first failure rather than running the rest.
+#[tokio::test]
+async fn inline_map_stops_starting_iterations_after_a_failure() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let machine = create_machine(
+        &client,
+        "inline-stop",
+        json!({"StartAt":"M","States":{"M":{
+            "Type":"Map",
+            "MaxConcurrency":1,
+            "ItemProcessor":{"StartAt":"F","States":{"F":{"Type":"Fail","Error":"Bad","Cause":"c"}}},
+            "End":true
+        }}}),
+    )
+    .await;
+    let items: Vec<i32> = (0..100).collect();
+    let started = client
+        .start_execution()
+        .state_machine_arn(machine)
+        .input(json!(items).to_string())
+        .send()
+        .await
+        .unwrap();
+    let desc = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(desc.error(), Some("Bad"));
+    let history = client
+        .get_execution_history()
+        .execution_arn(started.execution_arn())
+        .max_results(1000)
+        .send()
+        .await
+        .unwrap();
+    let iterations = history
+        .events()
+        .iter()
+        .filter(|e| e.r#type().as_str() == "MapIterationStarted")
+        .count();
+    assert!(iterations <= 2, "started {iterations}");
+}
+
+// A state failing after its result keeps none of its assignments; only the
+// catcher's apply.
+#[tokio::test]
+async fn a_state_failing_after_its_result_assigns_nothing() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let output = run_parent(
+        &client,
+        json!({"StartAt":"Seed","States":{
+            "Seed":{"Type":"Pass","Assign":{"x":"before"},"Next":"Boom"},
+            "Boom":{
+                "Type":"Parallel",
+                "Branches":[{"StartAt":"P","States":{"P":{"Type":"Pass","Result":1,"End":true}}}],
+                "Assign":{"x":"from-state"},
+                "ResultSelector":{"missing.$":"$.nope"},
+                "Catch":[{"ErrorEquals":["States.Runtime"],"Assign":{"y":"from-catcher"},"Next":"Done"}],
+                "End":true
+            },
+            "Done":{"Type":"Pass","Parameters":{"x.$":"$x","y.$":"$y"},"End":true}
+        }}),
+    )
+    .await;
+    assert_eq!(output, json!({"x": "before", "y": "from-catcher"}));
+}
