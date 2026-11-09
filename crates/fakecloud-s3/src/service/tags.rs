@@ -83,6 +83,11 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
 
         let mut response_headers = HeaderMap::new();
+        // The sidecar to rewrite: snapshotted from the very object the tags
+        // landed on, so persistence can never pick a different version than
+        // the in-memory update did (`versionId=null` matches an object with no
+        // id, which an equality lookup would miss).
+        let tagged: fakecloud_persistence::ObjectMeta;
 
         if let Some(ref vid) = version_id {
             // Version-specific tagging. `null` names the version of an
@@ -90,7 +95,7 @@ impl S3Service {
             // same as `resolve_object` reads it: GetObjectTagging and
             // PutObjectTagging both accept `versionId=null` on an unversioned
             // bucket (recorded against S3).
-            let mut found = false;
+            let mut snapshot = None;
             let is_version = |o: &crate::state::S3Object| {
                 o.version_id.as_deref() == Some(vid.as_str())
                     || (vid == "null" && o.version_id.is_none())
@@ -117,12 +122,12 @@ impl S3Service {
                     }
                     obj.tags = tags.clone().into_iter().collect();
                     response_headers.insert("x-amz-version-id", vid.parse().unwrap());
-                    found = true;
+                    snapshot = Some(object_meta_snapshot(obj));
                 }
             }
 
             // Also check current object
-            if !found {
+            if snapshot.is_none() {
                 if let Some(obj) = b.objects.get_mut(key) {
                     if is_version(obj) {
                         if obj.is_delete_marker {
@@ -138,7 +143,7 @@ impl S3Service {
                         }
                         obj.tags = tags.into_iter().collect();
                         response_headers.insert("x-amz-version-id", vid.parse().unwrap());
-                        found = true;
+                        snapshot = Some(object_meta_snapshot(obj));
                     }
                 }
             }
@@ -148,14 +153,14 @@ impl S3Service {
             // malformed one -- every id but `null` -- elsewhere (recorded:
             // PutObjectTagging `versionId=t` on an unversioned bucket is 400
             // InvalidArgument "Invalid version id specified").
-            if !found && b.versioning.is_none() && vid != "null" {
+            if snapshot.is_none() && b.versioning.is_none() && vid != "null" {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "InvalidArgument",
                     "Invalid version id specified",
                 ));
             }
-            if !found {
+            let Some(meta) = snapshot else {
                 return Err(AwsServiceError::aws_error_with_fields(
                     StatusCode::NOT_FOUND,
                     "NoSuchVersion",
@@ -165,7 +170,8 @@ impl S3Service {
                         ("VersionId".to_string(), vid.to_string()),
                     ],
                 ));
-            }
+            };
+            tagged = meta;
         } else {
             let obj = b
                 .objects
@@ -178,32 +184,15 @@ impl S3Service {
             if let Some(ref vid) = obj.version_id {
                 response_headers.insert("x-amz-version-id", vid.parse().unwrap());
             }
+            tagged = object_meta_snapshot(obj);
         }
 
-        if let Some(b2) = state.buckets.get(bucket) {
-            if let Some(ref vid) = version_id {
-                let versioned = b2
-                    .object_versions
-                    .get(key)
-                    .and_then(|vs| vs.iter().find(|o| o.version_id.as_deref() == Some(vid)));
-                let target = versioned.or_else(|| {
-                    b2.objects
-                        .get(key)
-                        .filter(|o| o.version_id.as_deref() == Some(vid))
-                });
-                if let Some(obj) = target {
-                    let meta = object_meta_snapshot(obj);
-                    self.store
-                        .put_object_meta(bucket, key, Some(vid.as_str()), &meta)
-                        .map_err(super::persistence_error)?;
-                }
-            } else if let Some(obj) = b2.objects.get(key) {
-                let meta = object_meta_snapshot(obj);
-                self.store
-                    .put_object_meta(bucket, key, meta.version_id.as_deref(), &meta)
-                    .map_err(super::persistence_error)?;
-            }
-        }
+        // An object without an id and one with the id `null` share the same
+        // sidecar slot, so the snapshot's own id addresses it either way.
+        self.store
+            .put_object_meta(bucket, key, tagged.version_id.as_deref(), &tagged)
+            .map_err(super::persistence_error)?;
+
         Ok(AwsResponse {
             status: StatusCode::OK,
             content_type: "application/xml".to_string(),

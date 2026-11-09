@@ -2247,3 +2247,61 @@ async fn persistence_checksums_and_annotations_survive_restart() {
     assert_eq!(got.headers()["x-amz-checksum-sha512"], sha512.as_str());
     assert_eq!(&got.bytes().await.unwrap()[..], b"note");
 }
+
+#[tokio::test]
+async fn persistence_null_version_object_tagging_survives_restart() {
+    // `versionId=null` addresses an object written to an unversioned bucket,
+    // which carries no version id. The tags must reach its sidecar, not just
+    // memory.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut server = TestServer::start_persistent(tmp.path()).await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("null-tag-bucket")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_object()
+        .bucket("null-tag-bucket")
+        .key("k.txt")
+        .body(ByteStream::from_static(b"body"))
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_object_tagging()
+        .bucket("null-tag-bucket")
+        .key("k.txt")
+        .version_id("null")
+        .tagging(
+            Tagging::builder()
+                .tag_set(Tag::builder().key("stage").value("one").build().unwrap())
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    server.restart().await;
+    let client = server.s3_client().await;
+
+    for version in [None, Some("null")] {
+        let tags = client
+            .get_object_tagging()
+            .bucket("null-tag-bucket")
+            .key("k.txt")
+            .set_version_id(version.map(str::to_string))
+            .send()
+            .await
+            .unwrap();
+        let ts = tags.tag_set();
+        assert!(
+            ts.len() == 1 && ts[0].key() == "stage" && ts[0].value() == "one",
+            "versionId=null tags lost across restart (read with {version:?}): {ts:?}"
+        );
+    }
+}
