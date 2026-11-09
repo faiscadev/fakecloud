@@ -166,34 +166,20 @@ fn assign_wait_variables(
 }
 
 async fn run_wait_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: Value,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let entered_event_id = add_event(
-        shared_state,
-        execution_arn,
-        "WaitStateEntered",
-        0,
-        json!({
-            "name": name,
-            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
-        }),
-    );
-
-    let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
-    if let Err((error, cause)) = execute_wait_state(state_def, &input, &ctx).await {
-        return Advance::Fail(
-            error,
-            crate::jsonata::in_state_cause(name, entered_event_id, &cause),
-        );
+    let ctx = entry.context(shared_state, execution_arn, 0);
+    if let Err(failure) = execute_wait_state(state_def, &input, &ctx).await {
+        return fail_own(shared_state, execution_arn, entry, failure);
     }
-    if let Err((error, cause)) =
-        assign_wait_variables(name, state_def, &input, shared_state, execution_arn)
+    if let Err(failure) =
+        assign_wait_variables(entry.name, state_def, &input, shared_state, execution_arn)
     {
-        return Advance::Fail(error, cause);
+        return fail_own(shared_state, execution_arn, entry, failure);
     }
 
     add_state_exit_event(
@@ -201,9 +187,9 @@ async fn run_wait_state(
         shared_state,
         execution_arn,
         "WaitStateExited",
-        entered_event_id,
+        entry.entered,
         json!({
-            "name": name,
+            "name": entry.name,
             "output": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
         }),
     );
@@ -211,12 +197,58 @@ async fn run_wait_state(
     advance_from_next(state_def, input)
 }
 
+/// How a Task, Parallel or Map state failed.
+#[derive(Debug)]
+pub(crate) enum StateFailure {
+    /// Its own fields failed: paths, templates, expressions or settings. It is
+    /// reported in the state (see [`own_failure`]).
+    Own((String, String)),
+    /// What it ran failed: a task's resource, a branch or an iteration. That has
+    /// been recorded where it happened, and the failure goes on as it is.
+    Ran((String, String)),
+}
+
+impl From<(String, String)> for StateFailure {
+    fn from(failure: (String, String)) -> Self {
+        StateFailure::Own(failure)
+    }
+}
+
+/// A Task, Parallel or Map state's outcome: its output on to the next state, or
+/// its failure.
+fn task_like_outcome(
+    entry: &StateEntry<'_>,
+    state_def: &Value,
+    exited_type: &str,
+    result: Result<Value, StateFailure>,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Advance {
+    match result {
+        Ok(output) => {
+            add_state_exit_event(
+                state_def,
+                shared_state,
+                execution_arn,
+                exited_type,
+                entry.entered,
+                json!({
+                    "name": entry.name,
+                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
+                }),
+            );
+            advance_from_next(state_def, output)
+        }
+        Err(StateFailure::Own(failure)) => fail_own(shared_state, execution_arn, entry, failure),
+        Err(StateFailure::Ran((error, cause))) => Advance::Fail(error, cause),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_task_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: Value,
-    entered_event_id: i64,
     attempt: &mut u32,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
@@ -225,7 +257,7 @@ async fn run_task_state(
     execution_arn: &str,
 ) -> Advance {
     let result = execute_task_state(
-        name,
+        entry,
         state_def,
         &input,
         attempt,
@@ -234,57 +266,37 @@ async fn run_task_state(
         registry,
         shared_state,
         execution_arn,
-        entered_event_id,
     )
     .await;
-
-    match result {
-        Ok(output) => {
-            add_state_exit_event(
-                state_def,
-                shared_state,
-                execution_arn,
-                "TaskStateExited",
-                entered_event_id,
-                json!({
-                    "name": name,
-                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
-                }),
-            );
-            advance_from_next(state_def, output)
-        }
-        Err((error, cause)) => {
-            let cause = note_query_failure(
-                shared_state,
-                execution_arn,
-                name,
-                entered_event_id,
-                &error,
-                cause,
-            );
-            Advance::Fail(error, cause)
-        }
-    }
+    task_like_outcome(
+        entry,
+        state_def,
+        "TaskStateExited",
+        result,
+        shared_state,
+        execution_arn,
+    )
 }
 
+/// A Parallel state, on attempt `attempt` of the whole state.
 #[allow(clippy::too_many_arguments)]
 async fn run_parallel_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: Value,
-    entered_event_id: i64,
+    attempt: u32,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
+    let ctx = entry.context(shared_state, execution_arn, attempt);
     let result = execute_parallel_state(
         state_def,
         &ctx,
         &input,
-        entered_event_id,
+        entry.entered,
         delivery,
         dynamodb_state,
         registry,
@@ -292,54 +304,35 @@ async fn run_parallel_state(
         execution_arn,
     )
     .await;
-
-    match result {
-        Ok(output) => {
-            add_state_exit_event(
-                state_def,
-                shared_state,
-                execution_arn,
-                "ParallelStateExited",
-                entered_event_id,
-                json!({
-                    "name": name,
-                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
-                }),
-            );
-            advance_from_next(state_def, output)
-        }
-        Err((error, cause)) => {
-            let cause = note_query_failure(
-                shared_state,
-                execution_arn,
-                name,
-                entered_event_id,
-                &error,
-                cause,
-            );
-            Advance::Fail(error, cause)
-        }
-    }
+    task_like_outcome(
+        entry,
+        state_def,
+        "ParallelStateExited",
+        result,
+        shared_state,
+        execution_arn,
+    )
 }
 
+/// A Map state, on attempt `attempt` of the whole state.
 #[allow(clippy::too_many_arguments)]
 async fn run_map_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: Value,
-    entered_event_id: i64,
+    attempt: u32,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
+    let ctx = entry.context(shared_state, execution_arn, attempt);
     let result = execute_map_state(
         state_def,
         &ctx,
         &input,
-        entered_event_id,
+        entry.entered,
         delivery,
         dynamodb_state,
         registry,
@@ -347,34 +340,26 @@ async fn run_map_state(
         execution_arn,
     )
     .await;
+    task_like_outcome(
+        entry,
+        state_def,
+        "MapStateExited",
+        result,
+        shared_state,
+        execution_arn,
+    )
+}
 
-    match result {
-        Ok(output) => {
-            add_state_exit_event(
-                state_def,
-                shared_state,
-                execution_arn,
-                "MapStateExited",
-                entered_event_id,
-                json!({
-                    "name": name,
-                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
-                }),
-            );
-            advance_from_next(state_def, output)
-        }
-        Err((error, cause)) => {
-            let cause = note_query_failure(
-                shared_state,
-                execution_arn,
-                name,
-                entered_event_id,
-                &error,
-                cause,
-            );
-            Advance::Fail(error, cause)
-        }
+/// The longest a Wait state waits, in seconds, as recorded: one more fails it.
+const MAX_WAIT_SECONDS: u64 = 2_147_483_646;
+
+fn wait_delay(seconds: u64) -> Result<tokio::time::Duration, (String, String)> {
+    if seconds > MAX_WAIT_SECONDS {
+        return Err(crate::io_processing::runtime_error(
+            "Wait state delay is too long.".to_string(),
+        ));
     }
+    Ok(tokio::time::Duration::from_secs(seconds))
 }
 
 /// Execute a Wait state: pause execution for a specified duration or until a timestamp.
@@ -396,7 +381,7 @@ async fn execute_wait_state(
                 "The Seconds field must be a non-negative integer but was: {seconds}"
             ))
         })?;
-        tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
+        tokio::time::sleep(wait_delay(seconds)?).await;
         return Ok(());
     }
 
@@ -408,7 +393,7 @@ async fn execute_wait_state(
                 text_of(&val)
             ))
         })?;
-        tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
+        tokio::time::sleep(wait_delay(seconds)?).await;
         return Ok(());
     }
 
@@ -507,7 +492,7 @@ fn within_result_limit(resource: &str, result: Value) -> Result<Value, (String, 
 /// apply I/O processing, handle Retry.
 #[allow(clippy::too_many_arguments)]
 async fn execute_task_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: &Value,
     attempt: &mut u32,
@@ -516,10 +501,11 @@ async fn execute_task_state(
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
-    entered_event_id: i64,
-) -> Result<Value, (String, String)> {
+) -> Result<Value, StateFailure> {
+    let name = entry.name;
+    let entered = entry.entered_at;
+    let entered_event_id = entry.entered;
     let resource = state_def["Resource"].as_str().unwrap_or("").to_string();
-    let entered = Utc::now();
     let base_ctx = context_object(shared_state, execution_arn, name, entered, 0);
 
     let input_path = state_def["InputPath"].as_str();
@@ -530,7 +516,10 @@ async fn execute_task_state(
         apply_input_path(input, input_path)?
     };
 
-    let retriers = state_def["Retry"].as_array().cloned().unwrap_or_default();
+    let retriers: &[Value] = state_def["Retry"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let timeout_seconds = state_def["TimeoutSeconds"].as_u64();
     let heartbeat_seconds = state_def["HeartbeatSeconds"].as_u64();
 
@@ -584,7 +573,8 @@ async fn execute_task_state(
             if let Some((_, token_ctx)) = &task_token {
                 ctx["Task"] = token_ctx["Task"].clone();
             }
-            match crate::jsonata::eval_template(
+            // On failure nothing was scheduled; the state loop decides on `Retry`.
+            crate::jsonata::eval_template(
                 "Arguments",
                 arguments,
                 &crate::jsonata::Scope {
@@ -593,11 +583,7 @@ async fn execute_task_state(
                     result: None,
                     error_output: None,
                 },
-            ) {
-                Ok(arguments) => arguments,
-                // Nothing was scheduled; the state loop decides on `Retry`.
-                Err(failure) => return Err(failure),
-            }
+            )?
         } else {
             effective_input.clone()
         };
@@ -663,7 +649,7 @@ async fn execute_task_state(
                                 }),
                             );
 
-                            return finish_task_result(
+                            return Ok(finish_task_result(
                                 state_def,
                                 name,
                                 input,
@@ -672,7 +658,7 @@ async fn execute_task_state(
                                 *attempt,
                                 shared_state,
                                 execution_arn,
-                            );
+                            )?);
                         }
                         Err((error, cause)) => {
                             add_event(
@@ -683,8 +669,7 @@ async fn execute_task_state(
                                 json!({ "error": error, "cause": cause }),
                             );
 
-                            if let Some(delay_ms) = should_retry(&retriers, &error, *attempt, true)
-                            {
+                            if let Some(delay_ms) = should_retry(retriers, &error, *attempt, true) {
                                 *attempt += 1;
                                 // Honour the ASL-computed backoff (already bounded
                                 // by MaxDelaySeconds inside `should_retry`).
@@ -693,7 +678,7 @@ async fn execute_task_state(
                                 continue;
                             }
 
-                            return Err((error, cause));
+                            return Err(StateFailure::Ran((error, cause)));
                         }
                     }
                 }
@@ -709,7 +694,7 @@ async fn execute_task_state(
                     }),
                 );
 
-                return finish_task_result(
+                return Ok(finish_task_result(
                     state_def,
                     name,
                     input,
@@ -718,7 +703,7 @@ async fn execute_task_state(
                     *attempt,
                     shared_state,
                     execution_arn,
-                );
+                )?);
             }
             Err((error, cause)) => {
                 add_event(
@@ -729,7 +714,7 @@ async fn execute_task_state(
                     json!({ "error": error, "cause": cause }),
                 );
 
-                if let Some(delay_ms) = should_retry(&retriers, &error, *attempt, true) {
+                if let Some(delay_ms) = should_retry(retriers, &error, *attempt, true) {
                     *attempt += 1;
                     // Honour the ASL-computed backoff (already bounded by
                     // MaxDelaySeconds inside `should_retry`).
@@ -737,7 +722,7 @@ async fn execute_task_state(
                     continue;
                 }
 
-                return Err((error, cause));
+                return Err(StateFailure::Ran((error, cause)));
             }
         }
     }
@@ -755,7 +740,7 @@ async fn execute_parallel_state(
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
-) -> Result<Value, (String, String)> {
+) -> Result<Value, StateFailure> {
     let input_path = state_def["InputPath"].as_str();
     let result_path = state_def["ResultPath"].as_str();
     let output_path = state_def["OutputPath"].as_str();
@@ -765,6 +750,15 @@ async fn execute_parallel_state(
     } else {
         apply_input_path(input, input_path)?
     };
+    // A JSONPath state's `Parameters` give each branch its input, evaluated per
+    // attempt (`$$.State.RetryCount`), as recorded. A JSONata state's
+    // `Arguments` were evaluated into `input` when it was prepared.
+    let effective_input = match state_def.get("Parameters") {
+        Some(template) if !crate::jsonata::is_jsonata(state_def) => {
+            apply_parameters(template, &effective_input, Some(ctx))?
+        }
+        _ => effective_input,
+    };
 
     let branches = state_def["Branches"]
         .as_array()
@@ -772,10 +766,10 @@ async fn execute_parallel_state(
         .unwrap_or_default();
 
     if branches.is_empty() {
-        return Err((
+        return Err(StateFailure::Own((
             "States.Runtime".to_string(),
             "Parallel state has no Branches".to_string(),
-        ));
+        )));
     }
 
     add_event(
@@ -811,10 +805,12 @@ async fn execute_parallel_state(
                 "States.Runtime".to_string(),
                 format!("Branch execution panicked: {e}"),
             )
-        })??;
-        results.push(result);
+        })?;
+        results.push(result.map_err(StateFailure::Ran)?);
     }
 
+    // The branches have succeeded, whatever becomes of their results, as
+    // recorded: a failing `ResultSelector` follows this event.
     add_event(
         shared_state,
         execution_arn,
@@ -866,7 +862,7 @@ async fn execute_map_state(
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
-) -> Result<Value, (String, String)> {
+) -> Result<Value, StateFailure> {
     // A distributed Map (`ItemProcessor.ProcessorConfig.Mode == "DISTRIBUTED"`)
     // materialises a MapRun record that `ListMapRuns` / `DescribeMapRun`
     // surface, from before it reads its items. Inline Map states do not create
@@ -885,10 +881,12 @@ async fn execute_map_state(
         start_map_run(shared_state, arn, execution_arn, state_def);
     }
 
+    let mut run_failure_recorded = true;
     let result = run_map_iterations(
         state_def,
         ctx,
         input,
+        &mut run_failure_recorded,
         delivery,
         dynamodb_state,
         registry,
@@ -898,26 +896,59 @@ async fn execute_map_state(
     )
     .await;
 
-    if let (Some(arn), Err((error, cause))) = (&map_run_arn, &result) {
-        finish_map_run(shared_state, arn, execution_arn, None, "FAILED");
-        add_event(
-            shared_state,
-            execution_arn,
-            "MapRunFailed",
-            0,
-            json!({ "error": error, "cause": cause }),
-        );
+    let map_output = match result {
+        Ok(map_output) => map_output,
+        Err(failure) => {
+            if let Some(arn) = &map_run_arn {
+                finish_map_run(shared_state, arn, execution_arn, None, "FAILED");
+            }
+            if let (Some(_), true) = (&map_run_arn, run_failure_recorded) {
+                let (StateFailure::Own((error, cause)) | StateFailure::Ran((error, cause))) =
+                    &failure;
+                add_event(
+                    shared_state,
+                    execution_arn,
+                    "MapRunFailed",
+                    0,
+                    json!({ "error": error, "cause": cause }),
+                );
+            }
+            return Err(failure);
+        }
+    };
+    // The iterations have succeeded, whatever becomes of their results, as
+    // recorded: a failing `ResultSelector` follows this event.
+    add_event(
+        shared_state,
+        execution_arn,
+        "MapStateSucceeded",
+        entered_event_id,
+        json!({}),
+    );
+
+    // Apply ResultSelector if present
+    let selected = if let Some(selector) = state_def.get("ResultSelector") {
+        apply_parameters(selector, &map_output, Some(ctx))?
+    } else {
+        map_output.clone()
+    };
+
+    // Apply ResultPath
+    let after_result = match state_def["ResultPath"].as_str() {
+        Some("null") => input.clone(),
+        result_path => apply_result_path(input, &selected, result_path),
+    };
+
+    // Apply OutputPath
+    let output = match state_def["OutputPath"].as_str() {
+        Some("null") => json!({}),
+        output_path => apply_output_path(&after_result, output_path)?,
+    };
+    if !crate::jsonata::is_jsonata(state_def) {
+        crate::variables::assign_jsonpath(state_def.get("Assign"), &map_output, Some(ctx))?;
     }
-    if result.is_ok() {
-        add_event(
-            shared_state,
-            execution_arn,
-            "MapStateSucceeded",
-            entered_event_id,
-            json!({}),
-        );
-    }
-    result
+
+    Ok(output)
 }
 
 /// How many failed iterations a map run tolerates. With neither limit set, none;
@@ -929,7 +960,12 @@ struct FailureTolerance {
 }
 
 impl FailureTolerance {
-    fn resolve(state_def: &Value, input: &Value, ctx: &Value) -> Result<Self, (String, String)> {
+    fn resolve(
+        state_def: &Value,
+        jsonata: bool,
+        input: &Value,
+        ctx: &Value,
+    ) -> Result<Self, (String, String)> {
         let resolved = |path: &str, field: &str| -> Result<Option<Value>, (String, String)> {
             match state_def[path].as_str() {
                 Some(reference) => crate::io_processing::resolve_reference_with_context(
@@ -948,8 +984,35 @@ impl FailureTolerance {
         };
         let count = match resolved("ToleratedFailureCountPath", "ToleratedFailureCount")? {
             None => None,
+            // As recorded: a JSONata expression's whole number counts, `2.0`
+            // too; a path's value must be an integer as it stands.
+            Some(value) if jsonata => Some(
+                crate::jsonata::whole_number(&value)
+                    .and_then(|n| u64::try_from(n).ok())
+                    .ok_or_else(|| {
+                        (
+                            "States.QueryEvaluationError".to_string(),
+                            format!(
+                                "The ToleratedFailureCount field cannot be parsed as an \
+                                 integer: {value}"
+                            ),
+                        )
+                    })?,
+            ),
             Some(value) => Some(value.as_u64().ok_or_else(|| {
-                invalid("ToleratedFailureCount", &value, "a non-negative integer")
+                match state_def["ToleratedFailureCountPath"].as_str() {
+                    Some(path) => {
+                        let text = match &value {
+                            Value::String(text) => text.clone(),
+                            other => other.to_string(),
+                        };
+                        crate::io_processing::runtime_error(format!(
+                            "The ToleratedFailureCountPath field refers to value \"{text}\" which \
+                         is not a valid integer: {path}"
+                        ))
+                    }
+                    None => invalid("ToleratedFailureCount", &value, "a non-negative integer"),
+                }
             })?),
         };
         let percentage = match resolved(
@@ -1042,16 +1105,16 @@ async fn run_map_iterations(
     state_def: &Value,
     ctx: &Value,
     input: &Value,
+    run_failure_recorded: &mut bool,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
     map_run_arn: Option<&str>,
-) -> Result<Value, (String, String)> {
+) -> Result<Value, StateFailure> {
+    let jsonata = crate::jsonata::is_jsonata(state_def);
     let input_path = state_def["InputPath"].as_str();
-    let result_path = state_def["ResultPath"].as_str();
-    let output_path = state_def["OutputPath"].as_str();
 
     let effective_input = if input_path == Some("null") {
         json!({})
@@ -1081,7 +1144,15 @@ async fn run_map_iterations(
 
     // Read items from ItemReader (S3) or ItemsPath
     let items = if let Some(item_reader) = state_def.get("ItemReader") {
-        read_items_from_s3(item_reader, &effective_input, ctx, registry, execution_arn).await?
+        read_items_from_s3(
+            item_reader,
+            jsonata,
+            &effective_input,
+            ctx,
+            registry,
+            execution_arn,
+        )
+        .await?
     } else {
         // A JSONata state's `Items`, already evaluated, or a JSONPath `ItemsPath`.
         let items_value = match state_def.get("Items") {
@@ -1095,9 +1166,11 @@ async fn run_map_iterations(
         match items_value {
             Value::Array(items) => items,
             other => {
-                return Err(crate::io_processing::runtime_error(format!(
-                    "Map state input must be an array but was: {}",
-                    json_type_name(&other)
+                return Err(StateFailure::Own(crate::io_processing::runtime_error(
+                    format!(
+                        "Map state input must be an array but was: {}",
+                        json_type_name(&other)
+                    ),
                 )))
             }
         }
@@ -1106,7 +1179,7 @@ async fn run_map_iterations(
     // Apply ItemBatcher if present
     let batch_config = state_def.get("ItemBatcher").cloned();
     let batched_items = if let Some(ref batcher) = batch_config {
-        apply_item_batcher(&items, batcher, &effective_input, ctx)?
+        apply_item_batcher(&items, batcher, jsonata, &effective_input, ctx)?
     } else {
         items
     };
@@ -1123,7 +1196,6 @@ async fn run_map_iterations(
             )
         })?;
 
-    let tolerance = FailureTolerance::resolve(state_def, &effective_input, ctx)?;
     let total_items = batched_items.len();
     add_event(
         shared_state,
@@ -1132,6 +1204,10 @@ async fn run_map_iterations(
         0,
         json!({ "length": total_items }),
     );
+    // As recorded, a tolerance that isn't one fails the state once it has started.
+    // A tolerance that isn't one records no failed map run, as recorded.
+    let tolerance = FailureTolerance::resolve(state_def, jsonata, &effective_input, ctx)
+        .inspect_err(|_| *run_failure_recorded = false)?;
     if let Some(arn) = map_run_arn {
         set_map_run_total(
             shared_state,
@@ -1148,13 +1224,17 @@ async fn run_map_iterations(
     // running in the background. `$` paths read the Map state's effective
     // input; the current item is exposed through the context object as
     // `$$.Map.Item.Value` / `$$.Map.Item.Index`, as on AWS.
-    let item_inputs: Vec<Value> = match state_def.get("ItemSelector") {
+    // `Parameters` is a JSONPath Map's older name for `ItemSelector`.
+    let item_selector = state_def
+        .get("ItemSelector")
+        .or_else(|| (!jsonata).then(|| state_def.get("Parameters")).flatten());
+    let item_inputs: Vec<Value> = match item_selector {
         Some(selector) => {
             let mut out = Vec::with_capacity(batched_items.len());
             for (index, batch_item) in batched_items.into_iter().enumerate() {
                 let mut item_ctx = ctx.clone();
                 item_ctx["Map"] = json!({"Item": {"Value": batch_item, "Index": index}});
-                let selected = if crate::jsonata::is_jsonata(state_def) {
+                let selected = if jsonata {
                     crate::jsonata::eval_template(
                         "ItemSelector",
                         selector,
@@ -1284,7 +1364,7 @@ async fn run_map_iterations(
                 // An inline Map fails with the iteration's own error, at once.
                 // A map run finishes its window and reports the threshold.
                 if !is_distributed && tolerance.exceeded(failure_count, total_items) {
-                    return Err((error, cause));
+                    return Err(StateFailure::Ran((error, cause)));
                 }
             }
             None => {}
@@ -1302,6 +1382,7 @@ async fn run_map_iterations(
         (Some(writer), Some(config)) => {
             write_map_results(
                 writer,
+                jsonata,
                 config,
                 &effective_input,
                 ctx,
@@ -1325,7 +1406,10 @@ async fn run_map_iterations(
                 "FAILED",
             );
         }
-        return Err((THRESHOLD_ERROR.to_string(), THRESHOLD_CAUSE.to_string()));
+        return Err(StateFailure::Ran((
+            THRESHOLD_ERROR.to_string(),
+            THRESHOLD_CAUSE.to_string(),
+        )));
     }
 
     // Every iteration is accounted for and the tolerated-failure threshold was
@@ -1343,33 +1427,7 @@ async fn run_map_iterations(
             },
         );
     }
-    let map_output = map_output?;
-
-    // Apply ResultSelector if present
-    let selected = if let Some(selector) = state_def.get("ResultSelector") {
-        apply_parameters(selector, &map_output, Some(ctx))?
-    } else {
-        map_output.clone()
-    };
-
-    // Apply ResultPath
-    let after_result = if result_path == Some("null") {
-        input.clone()
-    } else {
-        apply_result_path(input, &selected, result_path)
-    };
-
-    // Apply OutputPath
-    let output = if output_path == Some("null") {
-        json!({})
-    } else {
-        apply_output_path(&after_result, output_path)?
-    };
-    if !crate::jsonata::is_jsonata(state_def) {
-        crate::variables::assign_jsonpath(state_def.get("Assign"), &map_output, Some(ctx))?;
-    }
-
-    Ok(output)
+    Ok(map_output?)
 }
 
 /// Build a MapRun ARN for a distributed Map running inside `execution_arn`.
@@ -1489,6 +1547,7 @@ fn s3_caller<'a>(
 /// Read items from S3 for distributed Map mode ItemReader.
 async fn read_items_from_s3(
     item_reader: &Value,
+    jsonata: bool,
     effective_input: &Value,
     ctx: &Value,
     registry: &Option<SharedServiceRegistry>,
@@ -1508,7 +1567,7 @@ async fn read_items_from_s3(
         })?;
 
     let params = match item_reader.get("Parameters") {
-        Some(template) => apply_parameters(template, effective_input, Some(ctx))?,
+        Some(template) => resolve_template(template, jsonata, effective_input, ctx)?,
         None => json!({}),
     };
     let config = item_reader
@@ -1541,6 +1600,7 @@ async fn read_items_from_s3(
 #[allow(clippy::too_many_arguments)]
 async fn write_map_results(
     result_writer: &Value,
+    jsonata: bool,
     config: crate::map_s3::WriterConfig<'_>,
     effective_input: &Value,
     ctx: &Value,
@@ -1569,7 +1629,7 @@ async fn write_map_results(
     }
 
     let params = match result_writer.get("Parameters") {
-        Some(template) => apply_parameters(template, effective_input, Some(ctx))?,
+        Some(template) => resolve_template(template, jsonata, effective_input, ctx)?,
         None => json!({}),
     };
     let bucket = params["Bucket"].as_str().ok_or_else(|| {
@@ -1593,10 +1653,27 @@ async fn write_map_results(
     .await
 }
 
+/// A JSONPath payload template resolved against the state's input. A JSONata
+/// state's was evaluated when the state was prepared, and is taken as it is: a
+/// key its expressions produced that ends in `.$` is not a path.
+fn resolve_template(
+    template: &Value,
+    jsonata: bool,
+    effective_input: &Value,
+    ctx: &Value,
+) -> Result<Value, (String, String)> {
+    if jsonata {
+        Ok(template.clone())
+    } else {
+        apply_parameters(template, effective_input, Some(ctx))
+    }
+}
+
 /// Apply ItemBatcher configuration to group items into batches.
 fn apply_item_batcher(
     items: &[Value],
     batcher: &Value,
+    jsonata: bool,
     effective_input: &Value,
     ctx: &Value,
 ) -> Result<Vec<Value>, (String, String)> {
@@ -1624,11 +1701,10 @@ fn apply_item_batcher(
     };
     let max_per_batch = limit("MaxItemsPerBatch")?.unwrap_or(u64::MAX) as usize;
     let max_bytes = limit("MaxInputBytesPerBatch")?.unwrap_or(0) as usize;
-    let batch_input = match batcher.get("BatchInput") {
-        // A JSONata state's has been evaluated already, and holds no `.$` keys.
-        Some(template) => Some(apply_parameters(template, effective_input, Some(ctx))?),
-        None => None,
-    };
+    let batch_input = batcher
+        .get("BatchInput")
+        .map(|template| resolve_template(template, jsonata, effective_input, ctx))
+        .transpose()?;
 
     let mut batches: Vec<Vec<Value>> = Vec::new();
     let mut current_batch: Vec<Value> = Vec::new();

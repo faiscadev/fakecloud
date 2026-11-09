@@ -45,7 +45,7 @@ pub fn resolve_path(root: &Value, path: &str) -> Result<Value, PathError> {
 
 /// Resolve a path, mapping a miss to the `States.Runtime` error AWS raises
 /// for InputPath / OutputPath / ItemsPath / SecondsPath and friends:
-/// `Invalid path '$.x' : No results for path: $['x']`.
+/// `Invalid path '$.x' : Property ['x'] not found in path $`.
 pub fn resolve_reference(root: &Value, path: &str) -> Result<Value, StatesError> {
     resolve_with_context(root, None, path).map_err(|e| runtime_error(path_error_cause(path, &e)))
 }
@@ -86,6 +86,11 @@ pub fn path_error_cause(path: &str, err: &PathError) -> String {
     match err {
         PathError::NoResults(norm) => {
             format!("Invalid path '{path}' : No results for path: {norm}")
+        }
+        // As recorded: `Invalid path '$.missing' : Property ['missing'] not found
+        // in path $`.
+        PathError::MissingProperty { property, parent } => {
+            format!("Invalid path '{path}' : Property {property} not found in path {parent}")
         }
         PathError::Invalid(msg) => format!("Invalid path '{path}' : {msg}"),
     }
@@ -189,9 +194,10 @@ mod tests {
     #[test]
     fn test_resolve_path_missing() {
         let input = json!({"a": 1});
+        let error = resolve_path(&input, "$.missing").unwrap_err();
         assert_eq!(
-            resolve_path(&input, "$.missing").unwrap_err(),
-            PathError::NoResults("$['missing']".into())
+            path_error_cause("$.missing", &error),
+            "Invalid path '$.missing' : Property ['missing'] not found in path $"
         );
     }
 
@@ -360,7 +366,10 @@ mod missing_path_tests {
     fn missing_input_path_is_states_runtime() {
         let (err, cause) = apply_input_path(&json!({"a": 1}), Some("$.x")).unwrap_err();
         assert_eq!(err, "States.Runtime");
-        assert_eq!(cause, "Invalid path '$.x' : No results for path: $['x']");
+        assert_eq!(
+            cause,
+            "Invalid path '$.x' : Property ['x'] not found in path $"
+        );
         let (err, _) = apply_output_path(&json!({"a": 1}), Some("$.a.b")).unwrap_err();
         assert_eq!(err, "States.Runtime");
         // A present null is fine.

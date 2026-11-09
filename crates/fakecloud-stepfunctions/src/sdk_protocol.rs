@@ -55,17 +55,57 @@ pub(crate) struct SdkService {
     doc: Value,
 }
 
-/// A payload that isn't text fails in the SDK client, not the service: no status,
-/// no request id, and the code and message exactly as recorded.
-const NOT_TEXT_PREFIX: &str = "Failed to convert '";
-const INVALID_CONTENT: &str = "InvalidContent";
+/// Where an SDK call failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureOrigin {
+    /// The service answered with an error (or could not be reached).
+    Service,
+    /// The SDK client could not use what the service answered: no status, no
+    /// request id, and the code and message exactly as recorded.
+    Client,
+}
 
-/// The failure of an SDK call as the service reported it.
+/// The failure of an SDK call.
 #[derive(Debug)]
 pub(crate) struct SdkFailure {
     pub(crate) code: String,
     pub(crate) message: String,
     pub(crate) status: u16,
+    pub(crate) origin: FailureOrigin,
+}
+
+/// Why a service's answer could not be read into a result.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReplyError {
+    /// A blob payload member whose bytes aren't text, as the SDK client refuses it.
+    NotText { member: String },
+    /// A body that doesn't parse as the protocol says.
+    Unreadable(String),
+}
+
+impl From<String> for ReplyError {
+    fn from(message: String) -> Self {
+        ReplyError::Unreadable(message)
+    }
+}
+
+impl From<ReplyError> for SdkFailure {
+    fn from(error: ReplyError) -> Self {
+        match error {
+            ReplyError::NotText { member } => SdkFailure {
+                code: "InvalidContent".to_string(),
+                message: format!("Failed to convert '{member}' to string"),
+                status: 0,
+                origin: FailureOrigin::Client,
+            },
+            ReplyError::Unreadable(message) => SdkFailure {
+                code: "InternalError".to_string(),
+                message,
+                status: 500,
+                origin: FailureOrigin::Service,
+            },
+        }
+    }
 }
 
 /// A raw service response.
@@ -500,6 +540,10 @@ impl SdkService {
                         format!("{prefix}.{wire}")
                     };
                     let inner = member["t"].as_str().unwrap_or("~s");
+                    // An absent value is no parameter, a timestamp's included.
+                    if member_value.is_null() {
+                        continue;
+                    }
                     if inner == "~t" {
                         let wire = timestamp_wire(member_value, member["tf"].as_str(), "date-time");
                         out.push((path, scalar_text(&wire)));
@@ -580,6 +624,9 @@ impl SdkService {
                     }
                     let member_target = member["t"].as_str().unwrap_or("~s");
                     if member_target == "~t" {
+                        if member_value.is_null() {
+                            continue;
+                        }
                         let text = timestamp_wire(member_value, member["tf"].as_str(), "date-time");
                         inner.push_str(&self.xml_in(wire, "~s", &text, false));
                         continue;
@@ -743,19 +790,7 @@ impl SdkService {
     ) -> Result<Value, SdkFailure> {
         let raw = self.send(caller, operation, parameters).await?;
         self.parse_reply(operation, raw, style)
-            .map_err(|message| SdkFailure {
-                code: if message.starts_with(NOT_TEXT_PREFIX) {
-                    INVALID_CONTENT.to_string()
-                } else {
-                    "InternalError".to_string()
-                },
-                status: if message.starts_with(NOT_TEXT_PREFIX) {
-                    0
-                } else {
-                    500
-                },
-                message,
-            })
+            .map_err(SdkFailure::from)
     }
 
     /// Run one operation and return its raw response.
@@ -772,6 +807,7 @@ impl SdkService {
                 code: "ServiceUnavailable".to_string(),
                 message: format!("{} is not available", self.doc["n"]),
                 status: 503,
+                origin: FailureOrigin::Service,
             })?;
         let response = match service.handle(request).await {
             Ok(response) => response,
@@ -780,6 +816,7 @@ impl SdkService {
                     code: err.code().to_string(),
                     message: err.message(),
                     status: err.status().as_u16(),
+                    origin: FailureOrigin::Service,
                 };
                 return Err(self
                     .missing_bucket_failure(caller, parameters, &failure)
@@ -794,12 +831,14 @@ impl SdkService {
                 code: "InternalError".to_string(),
                 message,
                 status: 500,
+                origin: FailureOrigin::Service,
             })?;
         if status >= 400 {
             return Err(SdkFailure {
                 code: status.to_string(),
                 message: String::from_utf8_lossy(&body).into_owned(),
                 status,
+                origin: FailureOrigin::Service,
             });
         }
         Ok(RawReply {
@@ -835,6 +874,7 @@ impl SdkService {
                 code: "NoSuchBucket".to_string(),
                 message: "The specified bucket does not exist".to_string(),
                 status: 404,
+                origin: FailureOrigin::Service,
             }),
             _ => None,
         }
@@ -852,6 +892,7 @@ impl SdkService {
                 code: "ServiceUnavailable".to_string(),
                 message: format!("{} is not available", self.doc["n"]),
                 status: 503,
+                origin: FailureOrigin::Service,
             })?;
         let mut request = AwsRequest {
             service: registered,
@@ -903,6 +944,7 @@ impl SdkService {
             code: "ValidationException".to_string(),
             message,
             status: 400,
+            origin: FailureOrigin::Service,
         };
         let method = self.op_field(operation, 0);
         let (template, fixed_query) = {
@@ -1007,17 +1049,15 @@ impl SdkService {
                 let target = member["t"].as_str().unwrap_or("~b");
                 match self.shape(target) {
                     None => {
-                        // As recorded, an object uploaded by a Task with no type of
-                        // its own is stored as text.
-                        if !headers.contains_key(http::header::CONTENT_TYPE) {
-                            let content_type = if operation == "PutObject" {
-                                "text/plain; charset=UTF-8"
-                            } else {
-                                "application/octet-stream"
-                            };
+                        // As recorded, an S3 object uploaded by a Task with no type
+                        // of its own is stored as text. Other blob payloads go as
+                        // they are.
+                        if is_text_upload(&self.doc, operation)
+                            && !headers.contains_key(http::header::CONTENT_TYPE)
+                        {
                             headers.insert(
                                 http::header::CONTENT_TYPE,
-                                HeaderValue::from_static(content_type),
+                                HeaderValue::from_static(TEXT_UPLOAD_CONTENT_TYPE),
                             );
                         }
                         Bytes::from(scalar_text(value))
@@ -1090,7 +1130,7 @@ impl SdkService {
         operation: &str,
         reply: RawReply,
         style: DateStyle,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ReplyError> {
         let target = self.output_shape(operation);
         match self.protocol() {
             "json" => {
@@ -1119,7 +1159,7 @@ impl SdkService {
         target: &str,
         reply: &RawReply,
         style: DateStyle,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ReplyError> {
         let xml = self.protocol() == "restXml";
         let empty = Map::new();
         let members = self
@@ -1173,8 +1213,9 @@ impl SdkService {
                     // A blob payload (an S3 object's data) reads as its text, as
                     // recorded; bytes that aren't text fail the task.
                     let member = upper_first(name);
-                    let body = std::str::from_utf8(&reply.body)
-                        .map_err(|_| format!("{NOT_TEXT_PREFIX}{member}' to string"))?;
+                    let Ok(body) = std::str::from_utf8(&reply.body) else {
+                        return Err(ReplyError::NotText { member });
+                    };
                     out.insert(member, json!(body));
                 } else if !reply.body.is_empty() {
                     let value = if xml {
@@ -1205,6 +1246,15 @@ impl SdkService {
         }
         Ok(Value::Object(out))
     }
+}
+
+/// What an S3 `PutObject` Task stores when it names no `ContentType`, as recorded.
+const TEXT_UPLOAD_CONTENT_TYPE: &str = "text/plain; charset=UTF-8";
+
+/// Whether an operation's blob payload is uploaded as text by default: only S3's
+/// `PutObject`.
+fn is_text_upload(doc: &Value, operation: &str) -> bool {
+    doc["r"] == "s3" && operation == "PutObject"
 }
 
 fn set_query(request: &mut AwsRequest, query: Vec<(String, String)>) {
@@ -1246,7 +1296,7 @@ pub(crate) async fn read_body(body: ResponseBody) -> Result<Bytes, String> {
 /// An `aws-sdk` failure as a state error: the SDK exception name and its message.
 pub(crate) fn task_error(service: &SdkService, failure: &SdkFailure) -> (String, String) {
     let prefix = service.error_prefix();
-    if failure.code == INVALID_CONTENT {
+    if failure.origin == FailureOrigin::Client {
         return (
             format!("{prefix}.{}", failure.code),
             failure.message.clone(),
@@ -1291,6 +1341,30 @@ mod tests {
         assert_eq!(svc("iam").protocol(), "query");
         assert_eq!(svc("ec2").protocol(), "ec2");
         assert!(service("nosuchservice").is_none());
+    }
+
+    #[test]
+    fn a_null_timestamp_is_no_query_parameter() {
+        let cloudwatch = svc("cloudwatch");
+        let mut out = Vec::new();
+        cloudwatch.query_in(
+            "",
+            cloudwatch.input_shape("GetMetricStatistics"),
+            &json!({"Namespace": "n", "StartTime": null, "EndTime": "2026-11-09T12:58:06Z"}),
+            &mut out,
+        );
+        let names: Vec<&str> = out.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"Namespace"), "{names:?}");
+        assert!(names.contains(&"EndTime"), "{names:?}");
+        assert!(!names.contains(&"StartTime"), "{names:?}");
+    }
+
+    #[test]
+    fn only_s3_put_object_defaults_to_a_text_upload() {
+        assert!(is_text_upload(&svc("s3").doc, "PutObject"));
+        assert!(!is_text_upload(&svc("s3").doc, "UploadPart"));
+        assert!(!is_text_upload(&svc("lambda").doc, "PutObject"));
+        assert!(!is_text_upload(&svc("lambda").doc, "Invoke"));
     }
 
     #[test]
@@ -1551,15 +1625,17 @@ mod tests {
             status: 200,
             body: Bytes::from_static(&[0xff, 0x00, 0xfe]),
         };
-        let message = s3
+        let error = s3
             .parse_reply("GetObject", reply, DateStyle::Iso)
             .unwrap_err();
-        assert_eq!(message, "Failed to convert 'Body' to string");
-        let failure = SdkFailure {
-            code: INVALID_CONTENT.to_string(),
-            message,
-            status: 0,
-        };
+        assert_eq!(
+            error,
+            ReplyError::NotText {
+                member: "Body".to_string()
+            }
+        );
+        let failure = SdkFailure::from(error);
+        assert_eq!(failure.origin, FailureOrigin::Client);
         assert_eq!(
             task_error(&s3, &failure),
             (

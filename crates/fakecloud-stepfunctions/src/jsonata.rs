@@ -287,10 +287,12 @@ pub(crate) fn failed_field(cause: &str) -> Option<&str> {
     if cause.starts_with("Seconds ") {
         return Some("Seconds");
     }
-    if cause.starts_with("The Timestamp field") {
-        return Some("Timestamp");
-    }
-    None
+    // `The Timestamp field cannot be parsed ...`, `The Seconds field ...`.
+    cause
+        .strip_prefix("The ")
+        .and_then(|rest| rest.split_once(" field "))
+        .map(|(field, _)| field)
+        .filter(|field| !field.contains(' '))
 }
 
 fn json_type_name(value: &Value) -> &'static str {
@@ -302,6 +304,15 @@ fn json_type_name(value: &Value) -> &'static str {
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     }
+}
+
+/// A JSONata number that is a whole number, `2.0` included, as recorded.
+pub(crate) fn whole_number(value: &Value) -> Option<i64> {
+    if let Some(n) = value.as_i64() {
+        return Some(n);
+    }
+    let n = value.as_f64()?;
+    (n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64).then_some(n as i64)
 }
 
 /// A Wait state's expressions, checked as recorded.
@@ -325,12 +336,18 @@ fn prepare_wait(
                 json_type_name(&seconds)
             )));
         }
-        if seconds.as_f64().is_some_and(|n| n < 0.0) {
+        let Some(whole) = whole_number(&seconds) else {
+            return Err(query_error(format!(
+                "The Seconds field cannot be parsed as an integer: {seconds}"
+            )));
+        };
+        if whole < 0 {
             return Err(query_error(format!(
                 "Seconds cannot be negative but was: {seconds}"
             )));
         }
-        prepared["Seconds"] = seconds;
+        // How long is too long is the Wait's to say, when it runs.
+        prepared["Seconds"] = json!(whole);
     }
     if let Some(template) = state_def.get("Timestamp") {
         let timestamp = eval_template("Timestamp", template, scope)?;
@@ -741,6 +758,22 @@ mod tests {
             wait_error(json!({"Type": "Wait", "Seconds": "{% -1 %}"})),
             "Seconds cannot be negative but was: -1"
         );
+        // Recorded: a fraction is no integer, negative or not; `2.0` is one.
+        assert_eq!(
+            wait_error(json!({"Type": "Wait", "Seconds": "{% 1.5 %}"})),
+            "The Seconds field cannot be parsed as an integer: 1.5"
+        );
+        assert_eq!(
+            wait_error(json!({"Type": "Wait", "Seconds": "{% -1.5 %}"})),
+            "The Seconds field cannot be parsed as an integer: -1.5"
+        );
+        let (two, _) = prepare_state(
+            &json!({"Type": "Wait", "Seconds": "{% 2.0 %}"}),
+            &json!({}),
+            &json!({}),
+        )
+        .unwrap();
+        assert_eq!(two["Seconds"], 2);
         assert_eq!(
             wait_error(json!({"Type": "Wait", "Timestamp": "{% 'not-a-date' %}"})),
             "The Timestamp field cannot be parsed as an ISO-8601 extended offset date-time \
@@ -776,6 +809,14 @@ mod tests {
              returned nothing (undefined)."
         );
         assert_eq!(failed_field(&cause), Some("Output"));
+        assert_eq!(
+            failed_field("The ToleratedFailureCount field cannot be parsed as an integer: 2.5"),
+            Some("ToleratedFailureCount")
+        );
+        assert_eq!(
+            failed_field("The Seconds field cannot be parsed as an integer: 1.5"),
+            Some("Seconds")
+        );
         assert_eq!(
             in_state_cause("A", 2, "x"),
             "An error occurred while executing the state 'A' (entered at the event id #2). x"

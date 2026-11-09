@@ -16,7 +16,7 @@ pub struct IntrinsicError(pub String);
 
 impl std::fmt::Display for IntrinsicError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "States.IntrinsicFailure: {}", self.0)
+        write!(f, "{}", self.0)
     }
 }
 
@@ -34,7 +34,7 @@ const MAX_NESTING: usize = 10;
 #[derive(Debug, Clone)]
 pub enum CallError {
     /// The function itself failed (bad arguments, unknown function, ...):
-    /// surfaced as `States.IntrinsicFailure`.
+    /// surfaced as `States.Runtime`, naming the call, as recorded.
     Intrinsic(IntrinsicError),
     /// A JSONPath argument matched nothing: surfaced as `States.Runtime`, as
     /// for every other path that matches nothing.
@@ -42,10 +42,20 @@ pub enum CallError {
 }
 
 impl CallError {
-    /// The `(error, cause)` pair the state fails with.
-    pub fn into_states_error(self) -> (String, String) {
+    /// The `(error, cause)` pair a state fails with when evaluating `call`. As
+    /// recorded, a failing function is a `States.Runtime` failure, which no
+    /// `Retry` or `Catch` wildcard takes: `There was an error while evaluating the
+    /// intrinsic function: States.MathAdd($.s, 1). Invalid arguments in
+    /// States.MathAdd`.
+    pub fn into_states_error(self, call: &str) -> (String, String) {
         match self {
-            CallError::Intrinsic(e) => ("States.IntrinsicFailure".to_string(), e.0),
+            CallError::Intrinsic(e) => (
+                "States.Runtime".to_string(),
+                format!(
+                    "There was an error while evaluating the intrinsic function: {call}. {}",
+                    e.0
+                ),
+            ),
             CallError::Path(cause) => ("States.Runtime".to_string(), cause),
         }
     }
@@ -59,7 +69,7 @@ impl From<IntrinsicError> for CallError {
 
 /// Evaluate an ASL intrinsic call against `input`. Returns the
 /// computed value or an error string suitable for surfacing as
-/// `States.IntrinsicFailure`.
+/// a failing state.
 pub fn evaluate(call: &str, input: &Value) -> Result<Value, IntrinsicError> {
     evaluate_with_context(call, input, None).map_err(|e| match e {
         CallError::Intrinsic(e) => e,
@@ -393,9 +403,7 @@ fn fn_format(raw: Option<&str>, args: &[Value]) -> Result<Value, IntrinsicError>
             }
             '{' if matches!(chars.peek(), Some('}')) => {
                 chars.next();
-                let v = args.get(idx).ok_or_else(|| {
-                    IntrinsicError("States.Format placeholder count exceeds args".into())
-                })?;
+                let v = args.get(idx).ok_or_else(format_arity_error)?;
                 idx += 1;
                 match v {
                     Value::String(s) => out.push_str(s),
@@ -406,7 +414,19 @@ fn fn_format(raw: Option<&str>, args: &[Value]) -> Result<Value, IntrinsicError>
             _ => out.push(c),
         }
     }
+    if idx != args.len() {
+        return Err(format_arity_error());
+    }
     Ok(Value::String(out))
+}
+
+/// As recorded, for a template with more placeholders than arguments.
+fn format_arity_error() -> IntrinsicError {
+    IntrinsicError(
+        "Invalid arguments in States.Format: number of arguments do not match the occurrences \
+         of {}."
+            .into(),
+    )
 }
 
 fn fn_json_to_string(args: &[Value]) -> Result<Value, IntrinsicError> {
@@ -421,8 +441,11 @@ fn fn_string_to_json(args: &[Value]) -> Result<Value, IntrinsicError> {
     let s = args[0]
         .as_str()
         .ok_or_else(|| IntrinsicError("States.StringToJson arg must be a string".into()))?;
-    serde_json::from_str(s)
-        .map_err(|e| IntrinsicError(format!("States.StringToJson parse failed: {e}")))
+    serde_json::from_str(s).map_err(|e| {
+        IntrinsicError(format!(
+            "Cannot convert String to Json in States.StringToJson, caused by: {e}"
+        ))
+    })
 }
 
 fn fn_array_partition(args: &[Value]) -> Result<Value, IntrinsicError> {
@@ -457,7 +480,10 @@ fn fn_array_range(args: &[Value]) -> Result<Value, IntrinsicError> {
     let end = arg_as_i64(&args[1])?;
     let step = arg_as_i64(&args[2])?;
     if step == 0 {
-        return Err(IntrinsicError("ArrayRange step must be != 0".into()));
+        // As recorded.
+        return Err(IntrinsicError(
+            "Invalid arguments in States.ArrayRange".into(),
+        ));
     }
     // Compute the element count in i128 so extreme operands cannot overflow,
     // and enforce the AWS cap before allocating anything.
@@ -517,8 +543,14 @@ fn fn_base64_encode(args: &[Value]) -> Result<Value, IntrinsicError> {
 fn fn_base64_decode(args: &[Value]) -> Result<Value, IntrinsicError> {
     need_args(args, 1, "States.Base64Decode")?;
     let s = arg_as_str(&args[0])?;
+    // As recorded, characters outside the alphabet are skipped: `%%%` decodes
+    // to the empty string.
+    let alphabet: Vec<u8> = s
+        .bytes()
+        .filter(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        .collect();
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(s.as_bytes())
+        .decode(&alphabet)
         .map_err(|e| IntrinsicError(format!("Base64Decode failed: {e}")))?;
     let decoded = String::from_utf8(bytes)
         .map_err(|e| IntrinsicError(format!("Base64Decode utf8 failed: {e}")))?;
@@ -638,8 +670,10 @@ fn fn_math_add(args: &[Value]) -> Result<Value, IntrinsicError> {
     // Otherwise fall back to floating-point addition. This covers fractional
     // operands (which the old i64 coercion truncated) and integers too large
     // for i64. AWS treats numbers as given, so no truncation is applied.
-    let a = arg_as_f64(&args[0])?;
-    let b = arg_as_f64(&args[1])?;
+    // As recorded for a non-number operand.
+    let invalid = |_| IntrinsicError("Invalid arguments in States.MathAdd".into());
+    let a = arg_as_f64(&args[0]).map_err(invalid)?;
+    let b = arg_as_f64(&args[1]).map_err(invalid)?;
     Ok(json!(a + b))
 }
 
@@ -935,14 +969,64 @@ mod tests {
 
     #[test]
     fn missing_path_argument_is_runtime_error() {
-        let err = evaluate_with_context("States.Format('{}', $.nope)", &json!({}), None)
+        let call = "States.Format('{}', $.nope)";
+        let err = evaluate_with_context(call, &json!({}), None)
             .unwrap_err()
-            .into_states_error();
+            .into_states_error(call);
         assert_eq!(err.0, "States.Runtime");
-        let err = evaluate_with_context("States.ArrayGetItem($.a, -1)", &json!({"a": [1]}), None)
+        let call = "States.ArrayGetItem($.a, -1)";
+        let err = evaluate_with_context(call, &json!({"a": [1]}), None)
             .unwrap_err()
-            .into_states_error();
-        assert_eq!(err.0, "States.IntrinsicFailure");
+            .into_states_error(call);
+        assert_eq!(err.0, "States.Runtime");
+        assert!(err.1.starts_with(
+            "There was an error while evaluating the intrinsic function: \
+             States.ArrayGetItem($.a, -1). "
+        ));
+    }
+
+    /// Recorded: `States.Base64Decode('%%%')` is the empty string.
+    #[test]
+    fn base64_decode_skips_characters_outside_the_alphabet() {
+        assert_eq!(
+            evaluate("States.Base64Decode($.s)", &json!({"s": "%%%"})).unwrap(),
+            json!("")
+        );
+        assert_eq!(
+            evaluate("States.Base64Decode($.s)", &json!({"s": "aGk="})).unwrap(),
+            json!("hi")
+        );
+    }
+
+    /// Recorded: the causes of failing functions.
+    #[test]
+    fn failing_functions_read_as_recorded() {
+        let cause = |call: &str, input: Value| {
+            evaluate_with_context(call, &input, None)
+                .unwrap_err()
+                .into_states_error(call)
+                .1
+        };
+        assert_eq!(
+            cause("States.MathAdd($.s, 1)", json!({"s": "x"})),
+            "There was an error while evaluating the intrinsic function: States.MathAdd($.s, 1). \
+             Invalid arguments in States.MathAdd"
+        );
+        assert_eq!(
+            cause("States.Format('{} {}', $.a)", json!({"a": "1"})),
+            "There was an error while evaluating the intrinsic function: States.Format('{} {}', \
+             $.a). Invalid arguments in States.Format: number of arguments do not match the \
+             occurrences of {}."
+        );
+        assert_eq!(
+            cause("States.ArrayRange(1, 2, 0)", json!({})),
+            "There was an error while evaluating the intrinsic function: States.ArrayRange(1, 2, \
+             0). Invalid arguments in States.ArrayRange"
+        );
+        assert!(cause("States.StringToJson($.x)", json!({"x": "not json"})).starts_with(
+            "There was an error while evaluating the intrinsic function: States.StringToJson($.x). \
+             Cannot convert String to Json in States.StringToJson, caused by: "
+        ));
     }
 
     #[test]

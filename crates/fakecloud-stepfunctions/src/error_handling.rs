@@ -45,13 +45,13 @@ pub fn find_catcher(
 }
 
 /// The first catcher that matches `error`: where it goes, its `ResultPath`, and
-/// the catcher itself.
-pub(crate) fn matching_catcher<'c>(
-    catchers: &'c [Value],
+/// its position in `catchers`.
+pub(crate) fn matching_catcher(
+    catchers: &[Value],
     error: &str,
     is_task_error: bool,
-) -> Option<(String, Option<String>, &'c Value)> {
-    for catcher in catchers {
+) -> Option<(String, Option<String>, usize)> {
+    for (index, catcher) in catchers.iter().enumerate() {
         let error_equals = match catcher["ErrorEquals"].as_array() {
             Some(arr) => arr,
             None => continue,
@@ -72,7 +72,7 @@ pub(crate) fn matching_catcher<'c>(
             } else {
                 catcher["ResultPath"].as_str().map(|s| s.to_string())
             };
-            return Some((next, result_path, catcher));
+            return Some((next, result_path, index));
         }
     }
     None

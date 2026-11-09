@@ -760,24 +760,28 @@ fn check_jsonata_holder(holder: &Value, path: &str, errors: &mut Vec<String>) {
 }
 
 /// Everything a state's shape can get wrong independently of the rest, collected
-/// so a definition reports them together, as AWS does. `parent_jsonata` is whether
-/// the machine (or the state enclosing this `States`) sets JSONata as a whole.
+/// so a definition reports them together, as AWS does. `machine_jsonata` is whether
+/// the machine sets JSONata as a whole; every state then is JSONata. Under a
+/// JSONPath machine a state's own language holds, which by now (the definition's
+/// languages propagated) is what it declares or inherits from its enclosing
+/// state, and a JSONPath state inside a JSONata Parallel or Map is allowed, as
+/// recorded.
 fn collect_state_schema_errors(
     at: &str,
     states: &serde_json::Map<String, Value>,
-    parent_jsonata: bool,
+    machine_jsonata: bool,
     errors: &mut Vec<String>,
 ) {
     for (name, state) in states {
         let path = format!("{at}/States/{name}");
         let declared = state["QueryLanguage"].as_str();
-        if parent_jsonata && declared == Some("JSONPath") {
+        if machine_jsonata && declared == Some("JSONPath") {
             errors.push(schema_detail(format!(
                 "'QueryLanguage' can not be 'JSONPath' if set to 'JSONata' for whole state \
                  machine at {path}"
             )));
         }
-        let jsonata = parent_jsonata || declared == Some("JSONata");
+        let jsonata = machine_jsonata || declared == Some("JSONata");
         let (language, other, wrong_fields) = if jsonata {
             ("JSONata", "JSONPath", JSONPATH_ONLY_FIELDS)
         } else {
@@ -819,6 +823,49 @@ fn collect_state_schema_errors(
         if kind == "Wait" {
             check_exactly_one(state, WAIT_DURATION_FIELDS, &path, errors);
         }
+        // A literal count is an integer in range (`2.0` is not one, as recorded);
+        // a JSONata expression's value is checked when it runs.
+        let integer_fields: &[(&str, Option<i64>)] = match kind {
+            "Wait" => &[("Seconds", Some(MAX_TIMEOUT_SECONDS as i64))],
+            "Map" => &[("ToleratedFailureCount", None)],
+            _ => &[],
+        };
+        for (field, max) in integer_fields {
+            let Some(value) = state.get(*field) else {
+                continue;
+            };
+            if jsonata && value.is_string() {
+                continue;
+            }
+            let problem = match value.as_i64() {
+                None if value.is_u64() => max.map(|max| format!("Maximum value is {max}")),
+                None => Some("Expected value of type Integer".to_string()),
+                Some(n) if n < 0 => Some("Minimum value is 0".to_string()),
+                Some(n) => max
+                    .filter(|max| n > *max)
+                    .map(|max| format!("Maximum value is {max}")),
+            };
+            if let Some(problem) = problem {
+                errors.push(schema_detail(format!("{problem} at {path}/{field}")));
+            }
+        }
+        if kind == "Fail" && !jsonata {
+            for field in ["ErrorPath", "CausePath"] {
+                let Some(value) = state.get(field) else {
+                    continue;
+                };
+                let valid = value.as_str().is_some_and(|text| {
+                    (text.starts_with('$') && is_reference_or_context_path(text))
+                        || crate::intrinsics::is_intrinsic_call(text)
+                });
+                if !valid {
+                    errors.push(schema_detail(format!(
+                        "The value must be a valid Reference Path or a valid intrinsic function \
+                         call at {path}/{field}"
+                    )));
+                }
+            }
+        }
 
         if jsonata {
             check_jsonata_holder(state, &path, errors);
@@ -831,11 +878,10 @@ fn collect_state_schema_errors(
 
         for key in ["ItemProcessor", "Iterator"] {
             if let Some(nested) = state[key]["States"].as_object() {
-                let nested_jsonata = jsonata || state[key]["QueryLanguage"] == "JSONata";
                 collect_state_schema_errors(
                     &format!("{path}/{key}"),
                     nested,
-                    nested_jsonata,
+                    machine_jsonata,
                     errors,
                 );
             }
@@ -847,11 +893,10 @@ fn collect_state_schema_errors(
             .enumerate()
         {
             if let Some(nested) = branch["States"].as_object() {
-                let nested_jsonata = jsonata || branch["QueryLanguage"] == "JSONata";
                 collect_state_schema_errors(
-                    &format!("{path}/Branches/{index}"),
+                    &format!("{path}/Branches[{index}]"),
                     nested,
-                    nested_jsonata,
+                    machine_jsonata,
                     errors,
                 );
             }
@@ -933,7 +978,7 @@ fn collect_variable_errors(
         {
             if let Some(nested) = branch["States"].as_object() {
                 collect_variable_errors(
-                    &format!("{state_path}/Branches/{index}"),
+                    &format!("{state_path}/Branches[{index}]"),
                     nested,
                     &visible,
                     errors,
@@ -1011,7 +1056,7 @@ fn validate_states_are_objects(at: &str, def: &Value) -> Result<(), AwsServiceEr
             .flatten()
             .enumerate()
         {
-            validate_states_are_objects(&format!("{path}/Branches/{index}"), branch)?;
+            validate_states_are_objects(&format!("{path}/Branches[{index}]"), branch)?;
         }
     }
     Ok(())
@@ -1105,7 +1150,7 @@ fn validate_integration_schemas(
                     .enumerate()
                 {
                     if let Some(nested) = branch["States"].as_object() {
-                        validate_integration_schemas(&format!("{path}/Branches/{index}"), nested)?;
+                        validate_integration_schemas(&format!("{path}/Branches[{index}]"), nested)?;
                     }
                 }
             }
@@ -1169,12 +1214,6 @@ fn validate_state_paths(state_name: &str, state: &Value) -> Result<(), AwsServic
             }
         }
     }
-    for field in ["ErrorPath", "CausePath"] {
-        if let Some(path) = state.get(field) {
-            validate_payload_template(state_name, field, &serde_json::json!({ "value.$": path }))?;
-        }
-    }
-
     match state.get("Type").and_then(|v| v.as_str()) {
         Some("Choice") => {
             if let Some(choices) = state.get("Choices").and_then(|v| v.as_array()) {
@@ -1770,9 +1809,9 @@ mod integration_schema_tests {
         assert!(
             error.contains(
                 "There should only be one of the following fields: [Next, End] at \
-                 /States/P/Branches/0/States/W, SCHEMA_VALIDATION_FAILED: This object should have \
+                 /States/P/Branches[0]/States/W, SCHEMA_VALIDATION_FAILED: This object should have \
                  only one of the following fields: [SecondsPath, Seconds, TimestampPath, \
-                 Timestamp] at /States/P/Branches/0/States/W"
+                 Timestamp] at /States/P/Branches[0]/States/W"
             ),
             "{error}"
         );
@@ -1914,8 +1953,96 @@ mod integration_schema_tests {
             message(fail(serde_json::json!("States.Format('{}', $.a)"))),
             None
         );
-        assert!(message(fail(serde_json::json!("not a path"))).is_some());
+        // Recorded.
+        assert_eq!(
+            message(fail(serde_json::json!("notapath"))).unwrap(),
+            "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: The value must be a \
+             valid Reference Path or a valid intrinsic function call at /States/F/ErrorPath'"
+        );
         assert!(message(fail(serde_json::json!(5))).is_some());
+        let cause = serde_json::json!({"StartAt": "F", "States": {"F": {"Type": "Fail", "Error": "e", "CausePath": "notapath"}}});
+        assert!(message(cause)
+            .unwrap()
+            .contains("intrinsic function call at /States/F/CausePath"));
+    }
+
+    /// Recorded: a literal count must be an integer, `2.0` included.
+    #[test]
+    fn literal_counts_must_be_integers() {
+        let map = |count: serde_json::Value| {
+            serde_json::json!({"StartAt":"M","States":{"M":{
+                "Type":"Map",
+                "ToleratedFailureCount": count,
+                "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                "End":true
+            }}})
+        };
+        for bad in [serde_json::json!(2.0), serde_json::json!(2.5)] {
+            assert_eq!(
+                message(map(bad)).unwrap(),
+                "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: Expected value of \
+                 type Integer at /States/M/ToleratedFailureCount'"
+            );
+        }
+        assert_eq!(message(map(serde_json::json!(2))), None);
+        assert!(message(map(serde_json::json!(-1)))
+            .unwrap()
+            .contains("Minimum value is 0 at /States/M/ToleratedFailureCount"));
+        let literal = |seconds: i64| serde_json::json!({"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":seconds,"End":true}}});
+        assert_eq!(message(literal(99_999_999)), None);
+        assert_eq!(
+            message(literal(100_000_000)).unwrap(),
+            "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: Maximum value is \
+             99999999 at /States/W/Seconds'"
+        );
+        assert!(message(literal(-1))
+            .unwrap()
+            .contains("Minimum value is 0 at /States/W/Seconds"));
+        let wait = serde_json::json!({"QueryLanguage":"JSONata","StartAt":"W","States":{
+            "W":{"Type":"Wait","Seconds":1.5,"End":true}
+        }});
+        assert!(message(wait)
+            .unwrap()
+            .contains("Expected value of type Integer at /States/W/Seconds"));
+        let expression = serde_json::json!({"QueryLanguage":"JSONata","StartAt":"W","States":{
+            "W":{"Type":"Wait","Seconds":"{% 1 %}","End":true}
+        }});
+        assert_eq!(message(expression), None);
+    }
+
+    /// Recorded: only a machine-wide JSONata refuses a JSONPath state; under a
+    /// JSONata Parallel or Map in a JSONPath machine one is allowed.
+    #[test]
+    fn jsonpath_states_are_refused_only_under_a_jsonata_machine() {
+        let parallel = |machine: Option<&str>, state: Option<&str>| {
+            let mut def = serde_json::json!({"StartAt":"A","States":{"A":{
+                "Type":"Parallel",
+                "Branches":[{"StartAt":"X","States":{"X":{"Type":"Pass","QueryLanguage":"JSONPath","End":true}}}],
+                "End":true
+            }}});
+            if let Some(language) = machine {
+                def["QueryLanguage"] = serde_json::json!(language);
+            }
+            if let Some(language) = state {
+                def["States"]["A"]["QueryLanguage"] = serde_json::json!(language);
+            }
+            def
+        };
+        assert_eq!(message(parallel(None, Some("JSONata"))), None);
+        assert_eq!(
+            message(parallel(Some("JSONata"), None)).unwrap(),
+            "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: 'QueryLanguage' can \
+             not be 'JSONPath' if set to 'JSONata' for whole state machine at \
+             /States/A/Branches[0]/States/X'"
+        );
+        let map = serde_json::json!({"StartAt":"A","States":{"A":{
+            "Type":"Map",
+            "QueryLanguage":"JSONata",
+            "Items":"{% [1] %}",
+            "ItemProcessor":{"StartAt":"X","States":{"X":{"Type":"Pass","QueryLanguage":"JSONPath","End":true}}},
+            "End":true
+        }}});
+        assert_eq!(message(map), None);
     }
 
     #[test]
