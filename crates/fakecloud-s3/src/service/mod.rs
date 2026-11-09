@@ -363,6 +363,63 @@ impl S3Service {
         }
         Ok(WriteAclHeaders { canned, grants })
     }
+
+    /// Refuse a write that asks for SSE-C on a bucket whose default encryption
+    /// blocks it (`BlockedEncryptionTypes` = SSE-C, the default for buckets
+    /// created since April 2026). S3 rejects such PutObject, CopyObject,
+    /// PostObject and multipart-upload requests with 403 AccessDenied; reads
+    /// of existing SSE-C objects are unaffected. `sse_c_algorithm` is the
+    /// request's `x-amz-server-side-encryption-customer-algorithm` (the
+    /// destination one on a copy, never the copy-source one).
+    pub(crate) fn reject_blocked_sse_c(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+        sse_c_algorithm: Option<&str>,
+    ) -> Result<(), AwsServiceError> {
+        if sse_c_algorithm.is_none_or(|v| v.trim().is_empty()) {
+            return Ok(());
+        }
+        let blocked = {
+            let accts = self.state.read();
+            accts
+                .get(account_id)
+                .and_then(|s| s.buckets.get(bucket))
+                .and_then(|b| b.encryption_config.as_deref())
+                .is_some_and(crate::state::encryption_blocks_sse_c)
+        };
+        if !blocked {
+            return Ok(());
+        }
+        let user = req
+            .principal
+            .as_ref()
+            .map(|p| p.arn.clone())
+            .unwrap_or_else(|| {
+                Arn::global_in(&req.region, "iam", &req.account_id, "root").to_string()
+            });
+        let resource = Arn::s3_in(&req.region, &format!("{bucket}/{key}"));
+        Err(AwsServiceError::aws_error(
+            StatusCode::FORBIDDEN,
+            "AccessDenied",
+            format!(
+                "User: {user} is not authorized to perform: s3:PutObject on resource: \
+                 \"{resource}\" because this bucket has blocked upload requests that specify \
+                 Server Side Encryption with Customer provided keys (SSE-C). Please specify a \
+                 different server-side encryption type"
+            ),
+        ))
+    }
+}
+
+/// The request's `x-amz-server-side-encryption-customer-algorithm`, the
+/// header that makes an object write SSE-C.
+pub(crate) fn sse_c_algorithm_header(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-amz-server-side-encryption-customer-algorithm")
+        .and_then(|v| v.to_str().ok())
 }
 
 /// Map a [`StoreError`] from the persistence layer to a 500 InternalError

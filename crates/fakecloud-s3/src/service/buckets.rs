@@ -304,7 +304,12 @@ impl S3Service {
         // matches the stored XML case-sensitively, so accepting a differently
         // cased value here would refuse an ACL at create that the very next
         // PutBucketAcl would then happily set.
-        let ownership_enforced = ownership_header == Some("BucketOwnerEnforced");
+        //
+        // A create that names no ownership gets BucketOwnerEnforced, the default
+        // S3 has applied to every new bucket since April 2023, so an ACL on such
+        // a create is refused exactly as if the header had said so.
+        let ownership = ownership_header.unwrap_or(crate::state::DEFAULT_OBJECT_OWNERSHIP);
+        let ownership_enforced = ownership == "BucketOwnerEnforced";
         // Shared with the `s3:PutBucketAcl` authorization in `iam_actions_for`,
         // which asks the same question and must not answer it differently.
         let acl_requests_grants = grant_headers_present
@@ -314,6 +319,22 @@ impl S3Service {
                 StatusCode::BAD_REQUEST,
                 "InvalidBucketAclWithObjectOwnership",
                 "Bucket cannot have ACLs set with ObjectOwnership's BucketOwnerEnforced setting",
+            ));
+        }
+        // A new bucket starts with every Block Public Access flag on, so a create
+        // asking for a public ACL fails even with ACLs enabled: S3's documented
+        // path is to create the bucket, delete or relax its public access block,
+        // then PutBucketAcl.
+        let requested_grants = if grant_headers_present {
+            header_grants.clone()
+        } else {
+            canned_acl_grants(acl_header.unwrap_or("private"), &req.account_id)
+        };
+        if super::config::grants_are_public(&requested_grants) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidBucketAclWithBlockPublicAccessError",
+                "Bucket cannot have public ACLs set with BlockPublicAccess enabled",
             ));
         }
         // `aws-exec-read` resolves to owner-only here (its READ grant to the EC2
@@ -428,6 +449,10 @@ impl S3Service {
         } else {
             canned_acl_grants(acl, &req.account_id)
         };
+        // Ownership, Block Public Access and default encryption as S3 sets
+        // them on every new bucket; the ownership header, when given, replaces
+        // the default ownership below.
+        b.apply_new_bucket_defaults();
         if object_lock_enabled {
             b.versioning = Some("Enabled".to_string());
             b.object_lock_config = Some(
@@ -439,15 +464,7 @@ impl S3Service {
             );
         }
 
-        // Handle x-amz-object-ownership header
-        if let Some(ownership) = ownership_header {
-            b.ownership_controls = Some(format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                 <OwnershipControls xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                 <Rule><ObjectOwnership>{ownership}</ObjectOwnership></Rule>\
-                 </OwnershipControls>"
-            ));
-        }
+        b.ownership_controls = Some(crate::state::ownership_controls_xml(ownership));
 
         let tags_snapshot = if create_tags.is_empty() {
             None
@@ -563,6 +580,16 @@ impl S3Service {
             bucket,
             BucketSubresource::Ownership,
             b.ownership_controls.as_deref(),
+        )?;
+        self.put_bucket_subresource_if_set(
+            bucket,
+            BucketSubresource::PublicAccessBlock,
+            b.public_access_block.as_deref(),
+        )?;
+        self.put_bucket_subresource_if_set(
+            bucket,
+            BucketSubresource::Encryption,
+            b.encryption_config.as_deref(),
         )?;
         state.buckets.insert(bucket.to_string(), b);
 

@@ -26,7 +26,9 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use fakecloud_aws::xml::xml_escape;
-use fakecloud_persistence::{BucketSubresource, S3Store, StoreError, TagsSnapshot};
+use fakecloud_persistence::{
+    AclGrantSnapshot, AclSnapshot, BucketSubresource, S3Store, StoreError, TagsSnapshot,
+};
 
 use crate::persistence::bucket_meta_snapshot;
 use crate::service::notifications::normalize_notification_ids;
@@ -43,6 +45,97 @@ const XMLNS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 /// Only properties actually present in `props` are applied; absent properties
 /// leave the existing bucket state untouched (matching CFN update semantics for
 /// the properties we model).
+/// Give a bucket an `AWS::S3::Bucket` resource is creating the settings S3
+/// applies to every new bucket (ACLs disabled, Block Public Access on, SSE-S3
+/// with SSE-C blocked), persisted like CreateBucket persists them, then apply
+/// the template's properties over them. CloudFormation creates the bucket
+/// through CreateBucket, so a template that sets none of these properties gets
+/// exactly what the API gives.
+pub fn apply_cfn_new_bucket(
+    bucket: &mut S3Bucket,
+    props: &Value,
+    store: &Arc<dyn S3Store>,
+) -> Result<(), String> {
+    bucket.apply_new_bucket_defaults();
+    // Template properties first, so a refused AccessControl / OwnershipControls
+    // combination fails before the defaults are written for a bucket that is
+    // never created.
+    apply_cfn_bucket_properties(bucket, props, store)?;
+    let obj = props.as_object();
+    let has = |k: &str| obj.is_some_and(|o| o.get(k).is_some_and(|v| !v.is_null()));
+    if !has("OwnershipControls") {
+        if let Some(xml) = &bucket.ownership_controls {
+            persist_sub(store, &bucket.name, BucketSubresource::Ownership, xml)?;
+        }
+    }
+    if bucket.public_access_block.as_deref() == Some(crate::state::DEFAULT_PUBLIC_ACCESS_BLOCK_XML)
+    {
+        persist_sub(
+            store,
+            &bucket.name,
+            BucketSubresource::PublicAccessBlock,
+            crate::state::DEFAULT_PUBLIC_ACCESS_BLOCK_XML,
+        )?;
+    }
+    if bucket.encryption_config.as_deref() == Some(crate::state::DEFAULT_BUCKET_ENCRYPTION_XML) {
+        persist_sub(
+            store,
+            &bucket.name,
+            BucketSubresource::Encryption,
+            crate::state::DEFAULT_BUCKET_ENCRYPTION_XML,
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether `bucket`'s Block Public Access refuses `policy_json` as a public
+/// bucket policy, which is what PutBucketPolicy checks and so what an
+/// `AWS::S3::BucketPolicy` resource is held to as well.
+pub fn bucket_policy_blocked(bucket: &S3Bucket, policy_json: &str) -> bool {
+    bucket.public_access_block.as_deref().is_some_and(|xml| {
+        crate::service::config::PublicAccessBlockFlags::parse(xml).block_public_policy
+    }) && crate::service::config::policy_is_public(policy_json)
+}
+
+/// The canned ACL an `AccessControl` value names.
+fn cfn_canned_acl(value: &str) -> Option<&'static str> {
+    Some(match value {
+        "Private" => "private",
+        "PublicRead" => "public-read",
+        "PublicReadWrite" => "public-read-write",
+        "AuthenticatedRead" => "authenticated-read",
+        "AwsExecRead" => "aws-exec-read",
+        "LogDeliveryWrite" => "log-delivery-write",
+        "BucketOwnerRead" => "bucket-owner-read",
+        "BucketOwnerFullControl" => "bucket-owner-full-control",
+        _ => return None,
+    })
+}
+
+/// `OwnershipControls.Rules[0].ObjectOwnership`, validated.
+fn cfn_object_ownership(v: &Value) -> Result<Option<String>, String> {
+    if v.is_null() {
+        return Ok(None);
+    }
+    let rules = v
+        .get("Rules")
+        .and_then(Value::as_array)
+        .ok_or("OwnershipControls: Rules must be a list with one rule")?;
+    let [rule] = rules.as_slice() else {
+        return Err("OwnershipControls: Rules must hold exactly one rule".to_string());
+    };
+    let value = rule
+        .get("ObjectOwnership")
+        .and_then(Value::as_str)
+        .ok_or("OwnershipControls: ObjectOwnership is required")?;
+    if !crate::service::OBJECT_OWNERSHIP_VALUES.contains(&value) {
+        return Err(format!(
+            "OwnershipControls: invalid ObjectOwnership value: {value}"
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
 pub fn apply_cfn_bucket_properties(
     bucket: &mut S3Bucket,
     props: &Value,
@@ -51,6 +144,59 @@ pub fn apply_cfn_bucket_properties(
     let Some(obj) = props.as_object() else {
         return Ok(());
     };
+
+    // OwnershipControls and AccessControl are resolved against each other and
+    // against the Block Public Access the template ends up with, before
+    // anything is persisted, with the refusals S3 itself gives.
+    let ownership = match obj.get("OwnershipControls") {
+        Some(v) => cfn_object_ownership(v)?,
+        None => None,
+    };
+    let canned = match obj.get("AccessControl") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => {
+            Some(cfn_canned_acl(s).ok_or_else(|| format!("AccessControl: invalid value: {s}"))?)
+        }
+        Some(_) => return Err("AccessControl: must be a string".to_string()),
+    };
+    let pab_xml = obj
+        .get("PublicAccessBlockConfiguration")
+        .and_then(build_public_access_block_xml);
+    let final_ownership_enforced = match &ownership {
+        Some(o) => o == "BucketOwnerEnforced",
+        None => {
+            crate::service::config::ownership_xml_enforced(bucket.ownership_controls.as_deref())
+        }
+    };
+    let owner_id = bucket.acl_owner_id.clone();
+    let acl_grants = canned.map(|acl| crate::service::canned_acl_grants(acl, &owner_id));
+    if final_ownership_enforced {
+        let reaches_past_owner = match canned {
+            Some(acl) => crate::service::acl_reaches_past_owner(acl, &owner_id),
+            None => !crate::service::config::grants_are_owner_only(&bucket.acl_grants, &owner_id),
+        };
+        if reaches_past_owner {
+            return Err(
+                "Bucket cannot have ACLs set with ObjectOwnership's BucketOwnerEnforced setting \
+                 (Service: S3, Status Code: 400, Error Code: InvalidBucketAclWithObjectOwnership)"
+                    .to_string(),
+            );
+        }
+    }
+    if let Some(grants) = &acl_grants {
+        let effective_pab = pab_xml.as_deref().or(bucket.public_access_block.as_deref());
+        let blocks = effective_pab.is_some_and(|x| {
+            crate::service::config::PublicAccessBlockFlags::parse(x).block_public_acls
+        });
+        if blocks && crate::service::config::grants_are_public(grants) {
+            return Err(
+                "Bucket cannot have public ACLs set with BlockPublicAccess enabled \
+                 (Service: S3, Status Code: 400, Error Code: \
+                 InvalidBucketAclWithBlockPublicAccessError)"
+                    .to_string(),
+            );
+        }
+    }
 
     // Validate before persisting anything. Each property below writes through
     // to the store as it goes, so a validation failure partway would leave the
@@ -124,16 +270,31 @@ pub fn apply_cfn_bucket_properties(
         }
     }
 
-    if let Some(pab) = obj.get("PublicAccessBlockConfiguration") {
-        if let Some(xml) = build_public_access_block_xml(pab) {
-            bucket.public_access_block = Some(xml.clone());
-            persist_sub(
-                store,
-                &bucket.name,
-                BucketSubresource::PublicAccessBlock,
-                &xml,
-            )?;
-        }
+    if let Some(xml) = pab_xml {
+        bucket.public_access_block = Some(xml.clone());
+        persist_sub(
+            store,
+            &bucket.name,
+            BucketSubresource::PublicAccessBlock,
+            &xml,
+        )?;
+    }
+
+    if let Some(grants) = acl_grants {
+        let snap = AclSnapshot {
+            owner_id: owner_id.clone(),
+            grants: grants.iter().map(AclGrantSnapshot::from).collect(),
+        };
+        let payload = toml::to_string(&snap)
+            .map_err(|e| format!("failed to serialize ACL for bucket {}: {e}", bucket.name))?;
+        persist_sub(store, &bucket.name, BucketSubresource::Acl, &payload)?;
+        bucket.acl_grants = grants;
+    }
+
+    if let Some(o) = ownership {
+        let xml = crate::state::ownership_controls_xml(&o);
+        persist_sub(store, &bucket.name, BucketSubresource::Ownership, &xml)?;
+        bucket.ownership_controls = Some(xml);
     }
 
     if let Some(nc) = obj.get("NotificationConfiguration") {
@@ -297,6 +458,26 @@ fn build_encryption_xml(enc: &Value) -> Option<String> {
         body.push_str(&format!(
             "<BucketKeyEnabled>{bucket_key}</BucketKeyEnabled>"
         ));
+        // `BlockedEncryptionTypes.EncryptionType` is a list (flattened in the
+        // REST XML); a single string is accepted as a one-element list.
+        let blocked: Vec<&str> = match rule
+            .get("BlockedEncryptionTypes")
+            .and_then(|b| b.get("EncryptionType"))
+        {
+            Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+            Some(Value::String(s)) => vec![s.as_str()],
+            _ => Vec::new(),
+        };
+        if !blocked.is_empty() {
+            body.push_str("<BlockedEncryptionTypes>");
+            for t in blocked {
+                body.push_str(&format!(
+                    "<EncryptionType>{}</EncryptionType>",
+                    xml_escape(t)
+                ));
+            }
+            body.push_str("</BlockedEncryptionTypes>");
+        }
         body.push_str("</Rule>");
     }
     if body.is_empty() {
@@ -812,6 +993,128 @@ mod tests {
 
     fn bucket() -> S3Bucket {
         S3Bucket::new("b", "us-east-1", "123456789012")
+    }
+
+    #[test]
+    fn new_cfn_bucket_gets_the_create_bucket_defaults() {
+        let mut b = bucket();
+        apply_cfn_new_bucket(&mut b, &json!({}), &store()).unwrap();
+        assert!(crate::service::config::ownership_xml_enforced(
+            b.ownership_controls.as_deref()
+        ));
+        assert_eq!(
+            b.public_access_block.as_deref(),
+            Some(crate::state::DEFAULT_PUBLIC_ACCESS_BLOCK_XML)
+        );
+        assert_eq!(
+            b.encryption_config.as_deref(),
+            Some(crate::state::DEFAULT_BUCKET_ENCRYPTION_XML)
+        );
+    }
+
+    #[test]
+    fn cfn_ownership_controls_and_access_control_follow_the_api_rules() {
+        // AccessControl under the default ownership is refused, as CreateBucket
+        // refuses an ACL with BucketOwnerEnforced.
+        let mut b = bucket();
+        let err = apply_cfn_new_bucket(
+            &mut b,
+            &json!({ "AccessControl": "LogDeliveryWrite" }),
+            &store(),
+        )
+        .unwrap_err();
+        assert!(err.contains("InvalidBucketAclWithObjectOwnership"), "{err}");
+
+        // With ACLs enabled the ACL applies.
+        let mut b = bucket();
+        apply_cfn_new_bucket(
+            &mut b,
+            &json!({
+                "AccessControl": "LogDeliveryWrite",
+                "OwnershipControls": { "Rules": [{ "ObjectOwnership": "ObjectWriter" }] }
+            }),
+            &store(),
+        )
+        .unwrap();
+        assert!(b
+            .ownership_controls
+            .as_deref()
+            .unwrap()
+            .contains("<ObjectOwnership>ObjectWriter</ObjectOwnership>"));
+        assert!(b.acl_grants.iter().any(|g| g
+            .grantee_uri
+            .as_deref()
+            .is_some_and(|u| u.contains("LogDelivery"))));
+
+        // A public ACL needs the template to lift Block Public Access.
+        let mut b = bucket();
+        let err = apply_cfn_new_bucket(
+            &mut b,
+            &json!({
+                "AccessControl": "PublicRead",
+                "OwnershipControls": { "Rules": [{ "ObjectOwnership": "ObjectWriter" }] }
+            }),
+            &store(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("InvalidBucketAclWithBlockPublicAccessError"),
+            "{err}"
+        );
+        let mut b = bucket();
+        apply_cfn_new_bucket(
+            &mut b,
+            &json!({
+                "AccessControl": "PublicRead",
+                "OwnershipControls": { "Rules": [{ "ObjectOwnership": "ObjectWriter" }] },
+                "PublicAccessBlockConfiguration": {
+                    "BlockPublicAcls": false, "IgnorePublicAcls": false,
+                    "BlockPublicPolicy": false, "RestrictPublicBuckets": false
+                }
+            }),
+            &store(),
+        )
+        .unwrap();
+        assert!(crate::service::config::grants_are_public(&b.acl_grants));
+    }
+
+    #[test]
+    fn bucket_policy_blocked_follows_block_public_policy() {
+        let public = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::b/*"}]}"#;
+        let scoped = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"cloudtrail.amazonaws.com"},"Action":"s3:PutObject","Resource":"arn:aws:s3:::b/*"}]}"#;
+        let mut b = bucket();
+        apply_cfn_new_bucket(&mut b, &json!({}), &store()).unwrap();
+        assert!(bucket_policy_blocked(&b, public));
+        assert!(!bucket_policy_blocked(&b, scoped));
+        let mut open = bucket();
+        apply_cfn_new_bucket(
+            &mut open,
+            &json!({ "PublicAccessBlockConfiguration": { "BlockPublicPolicy": false } }),
+            &store(),
+        )
+        .unwrap();
+        assert!(!bucket_policy_blocked(&open, public));
+    }
+
+    #[test]
+    fn cfn_encryption_carries_blocked_encryption_types() {
+        let mut b = bucket();
+        apply_cfn_bucket_properties(
+            &mut b,
+            &json!({
+                "BucketEncryption": {
+                    "ServerSideEncryptionConfiguration": [{
+                        "ServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" },
+                        "BlockedEncryptionTypes": { "EncryptionType": ["NONE"] }
+                    }]
+                }
+            }),
+            &store(),
+        )
+        .unwrap();
+        let xml = b.encryption_config.unwrap();
+        assert!(xml.contains("<BlockedEncryptionTypes><EncryptionType>NONE</EncryptionType></BlockedEncryptionTypes>"), "{xml}");
+        assert!(!crate::state::encryption_blocks_sse_c(&xml));
     }
 
     #[test]

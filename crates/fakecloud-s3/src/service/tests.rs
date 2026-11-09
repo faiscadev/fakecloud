@@ -1334,6 +1334,13 @@ fn content_md5(body: &[u8]) -> String {
     crate::checksum::checksum(crate::checksum::ChecksumAlgorithm::Md5, body)
 }
 
+/// Create the bucket with ACLs enabled, as a caller who needs ACLs must since
+/// S3 made BucketOwnerEnforced the default for new buckets.
+fn enable_acls(req: &mut AwsRequest) {
+    req.headers
+        .insert("x-amz-object-ownership", "ObjectWriter".parse().unwrap());
+}
+
 fn assert_aws_err(
     result: Result<AwsResponse, AwsServiceError>,
     expect_code: &str,
@@ -2014,12 +2021,13 @@ fn bucket_encryption_put_get_delete_round_trip() {
     assert!(body.contains("AES256"));
     assert!(body.contains("<BucketKeyEnabled>false</BucketKeyEnabled>"));
 
+    // Deleting resets to the SSE-S3 default (SSE-C blocked) rather than
+    // leaving the bucket without default encryption.
     let del = svc.delete_bucket_encryption("123456789012", "b").unwrap();
     assert_eq!(del.status, StatusCode::NO_CONTENT);
-    assert_aws_err(
-        svc.get_bucket_encryption("123456789012", "b"),
-        "ServerSideEncryptionConfigurationNotFoundError",
-    );
+    let get = svc.get_bucket_encryption("123456789012", "b").unwrap();
+    let body = std::str::from_utf8(get.body.expect_bytes()).unwrap();
+    assert_eq!(body, crate::state::DEFAULT_BUCKET_ENCRYPTION_XML);
 }
 
 #[test]
@@ -4235,19 +4243,26 @@ fn create_bucket_idempotent_same_region_us_east_1() {
 #[test]
 fn create_bucket_honors_grant_headers() {
     let svc = make_service();
+    // A grant to another account: a public grantee is refused at create by the
+    // default Block Public Access (see
+    // `create_bucket_refuses_a_public_acl_under_default_block_public_access`).
     let mut req = make_request(Method::PUT, "/granted", &[], b"");
     req.headers.insert(
         "x-amz-grant-read",
-        "uri=http://acs.amazonaws.com/groups/global/AllUsers"
+        "id=79a59df900b949e55d96a1e698fbacedfd6e09d98eacf8f8d5218e7cd47ef2be"
             .parse()
             .unwrap(),
     );
+    enable_acls(&mut req);
     svc.create_bucket("123456789012", &req, "granted").unwrap();
 
     let get = make_request(Method::GET, "/granted", &[("acl", "")], b"");
     let resp = svc.get_bucket_acl("123456789012", &get, "granted").unwrap();
     let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
-    assert!(body.contains("AllUsers"), "grant header ignored: {body}");
+    assert!(
+        body.contains("79a59df900b949e55d96a1e698fbacedfd6e09d98eacf8f8d5218e7cd47ef2be"),
+        "grant header ignored: {body}"
+    );
     assert!(body.contains("<Permission>READ</Permission>"), "{body}");
 }
 
@@ -4282,6 +4297,7 @@ fn create_bucket_keeps_an_email_grantee_instead_of_dropping_or_refusing_it() {
         "x-amz-grant-full-control",
         "emailAddress=someone@example.com".parse().unwrap(),
     );
+    enable_acls(&mut req);
     svc.create_bucket("123456789012", &req, "email-grant")
         .unwrap();
 
@@ -4400,6 +4416,7 @@ fn create_bucket_accepts_log_delivery_write_with_real_grants() {
     let mut req = make_request(Method::PUT, "/canned-logdelivery", &[], b"");
     req.headers
         .insert("x-amz-acl", "log-delivery-write".parse().unwrap());
+    enable_acls(&mut req);
     svc.create_bucket("123456789012", &req, "canned-logdelivery")
         .unwrap();
 
@@ -4423,6 +4440,7 @@ fn create_bucket_accepts_aws_exec_read_but_treats_it_as_granting_past_the_owner(
     let mut req = make_request(Method::PUT, "/aws-exec", &[], b"");
     req.headers
         .insert("x-amz-acl", "aws-exec-read".parse().unwrap());
+    enable_acls(&mut req);
     svc.create_bucket("123456789012", &req, "aws-exec").unwrap();
 
     let mut enforced = make_request(Method::PUT, "/aws-exec-enforced", &[], b"");
@@ -5062,7 +5080,8 @@ fn put_bucket_acl_rejects_a_body_that_is_not_an_access_control_policy() {
     // <AccessControlPolicy -- whitespace, JSON, a misspelled root. Treating
     // that as "drop every grant" wiped the bucket's ACL, persisted.
     let svc = make_service();
-    let create = make_request(Method::PUT, "/pba-junk", &[], b"");
+    let mut create = make_request(Method::PUT, "/pba-junk", &[], b"");
+    enable_acls(&mut create);
     svc.create_bucket("123456789012", &create, "pba-junk")
         .unwrap();
 
@@ -5122,6 +5141,7 @@ fn bucket_acl_email_grantee_round_trips_through_the_policy_body() {
         "x-amz-grant-read",
         "emailAddress=someone@example.com".parse().unwrap(),
     );
+    enable_acls(&mut create);
     svc.create_bucket("123456789012", &create, "email-rt")
         .unwrap();
 
@@ -5166,7 +5186,8 @@ fn bucket_acl_email_grantee_round_trips_through_the_policy_body() {
 #[test]
 fn put_bucket_acl_rejects_a_grantee_naming_nobody() {
     let svc = make_service();
-    let create = make_request(Method::PUT, "/pba-empty-id", &[], b"");
+    let mut create = make_request(Method::PUT, "/pba-empty-id", &[], b"");
+    enable_acls(&mut create);
     svc.create_bucket("123456789012", &create, "pba-empty-id")
         .unwrap();
 
@@ -5257,8 +5278,11 @@ fn put_bucket_acl_rejects_an_unknown_canned_value_instead_of_wiping_grants() {
 #[test]
 fn put_bucket_acl_honors_grant_headers() {
     let svc = make_service();
-    let create = make_request(Method::PUT, "/pba-grant", &[], b"");
+    let mut create = make_request(Method::PUT, "/pba-grant", &[], b"");
+    enable_acls(&mut create);
     svc.create_bucket("123456789012", &create, "pba-grant")
+        .unwrap();
+    svc.delete_public_access_block("123456789012", "pba-grant")
         .unwrap();
 
     let mut req = make_request(Method::PUT, "/pba-grant", &[("acl", "")], b"");
@@ -5284,7 +5308,8 @@ fn put_bucket_acl_rejects_a_request_that_names_no_acl() {
     // No canned header, no grant header, no body: malformed, not "drop every
     // grant". Without this the bucket's ACL was wiped to nothing, persisted.
     let svc = make_service();
-    let create = make_request(Method::PUT, "/pba-empty", &[], b"");
+    let mut create = make_request(Method::PUT, "/pba-empty", &[], b"");
+    enable_acls(&mut create);
     svc.create_bucket("123456789012", &create, "pba-empty")
         .unwrap();
 
@@ -5364,9 +5389,10 @@ fn create_bucket_ignores_an_unrecognized_grant_header() {
     let svc = make_service();
     let mut req = make_request(Method::PUT, "/odd-grant", &[], b"");
     req.headers
-        .insert("x-amz-acl", "public-read".parse().unwrap());
+        .insert("x-amz-acl", "log-delivery-write".parse().unwrap());
     req.headers
         .insert("x-amz-grant-nonsense", "id=whoever".parse().unwrap());
+    enable_acls(&mut req);
     svc.create_bucket("123456789012", &req, "odd-grant")
         .unwrap();
 
@@ -5375,7 +5401,10 @@ fn create_bucket_ignores_an_unrecognized_grant_header() {
         .get_bucket_acl("123456789012", &get, "odd-grant")
         .unwrap();
     let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
-    assert!(body.contains("AllUsers"), "canned ACL not applied: {body}");
+    assert!(
+        body.contains("s3/LogDelivery"),
+        "canned ACL not applied: {body}"
+    );
 }
 
 #[test]
@@ -5920,15 +5949,22 @@ fn create_bucket_with_object_ownership_header() {
 
 #[test]
 fn create_bucket_with_canned_acl_public_read() {
+    // The S3-documented way to a public-read bucket: create it with ACLs
+    // enabled, lift Block Public Access, then set the ACL.
     let svc = make_service();
     let mut req = make_request(Method::PUT, "/prb", &[], b"");
-    req.headers
-        .insert("x-amz-acl", "public-read".parse().unwrap());
+    enable_acls(&mut req);
     svc.create_bucket("123456789012", &req, "prb").unwrap();
+    svc.delete_public_access_block("123456789012", "prb")
+        .unwrap();
+    let mut put = make_request(Method::PUT, "/prb", &[("acl", "")], b"");
+    put.headers
+        .insert("x-amz-acl", "public-read".parse().unwrap());
+    svc.put_bucket_acl("123456789012", &put, "prb").unwrap();
     let accts = svc.state.read();
     let state = accts.get("123456789012").unwrap();
     let b = state.buckets.get("prb").unwrap();
-    assert!(!b.acl_grants.is_empty());
+    assert!(crate::service::config::grants_are_public(&b.acl_grants));
 }
 
 #[test]
@@ -12217,4 +12253,397 @@ fn delete_objects_replicates_markers_committed_before_a_failure() {
     let dst = bucket_of(&svc, "dst");
     assert!(dst.objects["a"].is_delete_marker);
     assert!(!dst.objects.contains_key("b"));
+}
+
+// ---- Defaults S3 applies to every new bucket ----
+
+fn create_plain(svc: &S3Service, name: &str) {
+    let req = make_request(Method::PUT, &format!("/{name}"), &[], b"");
+    svc.create_bucket("123456789012", &req, name).unwrap();
+}
+
+fn body_of(resp: AwsResponse) -> String {
+    std::str::from_utf8(resp.body.expect_bytes())
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn new_bucket_gets_sse_s3_owner_enforced_and_block_public_access() {
+    let svc = make_service();
+    create_plain(&svc, "fresh");
+
+    let enc = body_of(svc.get_bucket_encryption("123456789012", "fresh").unwrap());
+    assert!(enc.contains("<SSEAlgorithm>AES256</SSEAlgorithm>"), "{enc}");
+    assert!(
+        enc.contains("<BucketKeyEnabled>false</BucketKeyEnabled>"),
+        "{enc}"
+    );
+    assert!(
+        enc.contains(
+            "<BlockedEncryptionTypes><EncryptionType>SSE-C</EncryptionType></BlockedEncryptionTypes>"
+        ),
+        "{enc}"
+    );
+
+    let own = body_of(
+        svc.get_bucket_ownership_controls("123456789012", "fresh")
+            .unwrap(),
+    );
+    assert!(
+        own.contains("<ObjectOwnership>BucketOwnerEnforced</ObjectOwnership>"),
+        "{own}"
+    );
+
+    let pab = body_of(
+        svc.get_public_access_block("123456789012", "fresh")
+            .unwrap(),
+    );
+    for flag in [
+        "BlockPublicAcls",
+        "IgnorePublicAcls",
+        "BlockPublicPolicy",
+        "RestrictPublicBuckets",
+    ] {
+        assert!(
+            pab.contains(&format!("<{flag}>true</{flag}>")),
+            "{flag}: {pab}"
+        );
+    }
+}
+
+#[test]
+fn create_bucket_honours_the_object_ownership_header() {
+    let svc = make_service();
+    for ownership in [
+        "ObjectWriter",
+        "BucketOwnerPreferred",
+        "BucketOwnerEnforced",
+    ] {
+        let name = format!("own-{}", ownership.to_ascii_lowercase());
+        let mut req = make_request(Method::PUT, &format!("/{name}"), &[], b"");
+        req.headers
+            .insert("x-amz-object-ownership", ownership.parse().unwrap());
+        svc.create_bucket("123456789012", &req, &name).unwrap();
+        let own = body_of(
+            svc.get_bucket_ownership_controls("123456789012", &name)
+                .unwrap(),
+        );
+        assert!(
+            own.contains(&format!("<ObjectOwnership>{ownership}</ObjectOwnership>")),
+            "{own}"
+        );
+        // The other two defaults apply whatever the ownership.
+        svc.get_public_access_block("123456789012", &name).unwrap();
+        svc.get_bucket_encryption("123456789012", &name).unwrap();
+    }
+}
+
+#[test]
+fn create_bucket_refuses_an_acl_under_the_default_ownership() {
+    let svc = make_service();
+    let mut req = make_request(Method::PUT, "/acl-default", &[], b"");
+    req.headers
+        .insert("x-amz-acl", "log-delivery-write".parse().unwrap());
+    assert_aws_err(
+        svc.create_bucket("123456789012", &req, "acl-default"),
+        "InvalidBucketAclWithObjectOwnership",
+    );
+    let mut grant = make_request(Method::PUT, "/acl-default", &[], b"");
+    grant
+        .headers
+        .insert("x-amz-grant-read", "id=someone-else".parse().unwrap());
+    assert_aws_err(
+        svc.create_bucket("123456789012", &grant, "acl-default"),
+        "InvalidBucketAclWithObjectOwnership",
+    );
+    assert_aws_err(svc.head_bucket("123456789012", "acl-default"), "NotFound");
+
+    // `private` grants nothing past the owner, so it is accepted.
+    let mut private = make_request(Method::PUT, "/acl-private", &[], b"");
+    private
+        .headers
+        .insert("x-amz-acl", "private".parse().unwrap());
+    svc.create_bucket("123456789012", &private, "acl-private")
+        .unwrap();
+}
+
+#[test]
+fn create_bucket_refuses_a_public_acl_under_default_block_public_access() {
+    let svc = make_service();
+    for (header, value) in [
+        ("x-amz-acl", "public-read"),
+        ("x-amz-acl", "public-read-write"),
+        ("x-amz-acl", "authenticated-read"),
+        (
+            "x-amz-grant-read",
+            "uri=http://acs.amazonaws.com/groups/global/AllUsers",
+        ),
+    ] {
+        let mut req = make_request(Method::PUT, "/pub-acl", &[], b"");
+        req.headers.insert(header, value.parse().unwrap());
+        enable_acls(&mut req);
+        assert_aws_err(
+            svc.create_bucket("123456789012", &req, "pub-acl"),
+            "InvalidBucketAclWithBlockPublicAccessError",
+        );
+    }
+    assert_aws_err(svc.head_bucket("123456789012", "pub-acl"), "NotFound");
+}
+
+#[tokio::test]
+async fn owner_enforced_bucket_refuses_acl_writes_but_reads_owner_full_control() {
+    let svc = make_service();
+    create_plain(&svc, "enf");
+
+    let mut put_acl = make_request(Method::PUT, "/enf", &[("acl", "")], b"");
+    put_acl
+        .headers
+        .insert("x-amz-acl", "private".parse().unwrap());
+    assert_aws_err(
+        svc.put_bucket_acl("123456789012", &put_acl, "enf"),
+        "AccessControlListNotSupported",
+    );
+
+    let mut put = make_request(Method::PUT, "/enf/k", &[], b"x");
+    put.headers
+        .insert("x-amz-acl", "public-read".parse().unwrap());
+    assert_aws_err(
+        svc.put_object("123456789012", &put, "enf", "k").await,
+        "AccessControlListNotSupported",
+    );
+    let mut owner_fc = make_request(Method::PUT, "/enf/k", &[], b"x");
+    owner_fc
+        .headers
+        .insert("x-amz-acl", "bucket-owner-full-control".parse().unwrap());
+    svc.put_object("123456789012", &owner_fc, "enf", "k")
+        .await
+        .unwrap();
+
+    let mut put_obj_acl = make_request(Method::PUT, "/enf/k", &[("acl", "")], b"");
+    put_obj_acl
+        .headers
+        .insert("x-amz-acl", "private".parse().unwrap());
+    assert_aws_err(
+        svc.put_object_acl("123456789012", &put_obj_acl, "enf", "k"),
+        "AccessControlListNotSupported",
+    );
+
+    let get = make_request(Method::GET, "/enf", &[("acl", "")], b"");
+    let acl = body_of(svc.get_bucket_acl("123456789012", &get, "enf").unwrap());
+    assert_eq!(acl.matches("<Grant>").count(), 1, "{acl}");
+    assert!(
+        acl.contains("<Permission>FULL_CONTROL</Permission>"),
+        "{acl}"
+    );
+    let get_obj = make_request(Method::GET, "/enf/k", &[("acl", "")], b"");
+    let oacl = body_of(
+        svc.get_object_acl("123456789012", &get_obj, "enf", "k")
+            .unwrap(),
+    );
+    assert_eq!(oacl.matches("<Grant>").count(), 1, "{oacl}");
+}
+
+#[tokio::test]
+async fn disabling_acls_hides_object_grants_and_re_enabling_restores_them() {
+    let svc = make_service();
+    let mut create = make_request(Method::PUT, "/toggle", &[], b"");
+    enable_acls(&mut create);
+    svc.create_bucket("123456789012", &create, "toggle")
+        .unwrap();
+    let mut put = make_request(Method::PUT, "/toggle/k", &[], b"x");
+    put.headers.insert(
+        "x-amz-grant-read",
+        "id=79a59df900b949e55d96a1e698fbacedfd6e09d98eacf8f8d5218e7cd47ef2be"
+            .parse()
+            .unwrap(),
+    );
+    svc.put_object("123456789012", &put, "toggle", "k")
+        .await
+        .unwrap();
+
+    let set = |value: &str| {
+        let body = format!(
+            "<OwnershipControls><Rule><ObjectOwnership>{value}</ObjectOwnership></Rule></OwnershipControls>"
+        );
+        let req = make_request(
+            Method::PUT,
+            "/toggle",
+            &[("ownershipControls", "")],
+            body.as_bytes(),
+        );
+        svc.put_bucket_ownership_controls("123456789012", &req, "toggle")
+            .unwrap();
+    };
+    let get = make_request(Method::GET, "/toggle/k", &[("acl", "")], b"");
+    set("BucketOwnerEnforced");
+    let hidden = body_of(
+        svc.get_object_acl("123456789012", &get, "toggle", "k")
+            .unwrap(),
+    );
+    assert!(!hidden.contains("79a59df9"), "{hidden}");
+    set("ObjectWriter");
+    let restored = body_of(
+        svc.get_object_acl("123456789012", &get, "toggle", "k")
+            .unwrap(),
+    );
+    assert!(restored.contains("79a59df9"), "{restored}");
+}
+
+#[test]
+fn bucket_owner_enforced_cannot_be_applied_over_a_bucket_acl_granting_others() {
+    let svc = make_service();
+    let mut create = make_request(Method::PUT, "/shared", &[], b"");
+    create
+        .headers
+        .insert("x-amz-acl", "log-delivery-write".parse().unwrap());
+    enable_acls(&mut create);
+    svc.create_bucket("123456789012", &create, "shared")
+        .unwrap();
+    let req = make_request(
+        Method::PUT,
+        "/shared",
+        &[("ownershipControls", "")],
+        b"<OwnershipControls><Rule><ObjectOwnership>BucketOwnerEnforced</ObjectOwnership></Rule></OwnershipControls>",
+    );
+    assert_aws_err(
+        svc.put_bucket_ownership_controls("123456789012", &req, "shared"),
+        "InvalidBucketAclWithObjectOwnership",
+    );
+}
+
+#[test]
+fn deleting_ownership_and_public_access_block_really_removes_them() {
+    let svc = make_service();
+    create_plain(&svc, "del");
+    svc.delete_bucket_ownership_controls("123456789012", "del")
+        .unwrap();
+    assert_aws_err(
+        svc.get_bucket_ownership_controls("123456789012", "del"),
+        "OwnershipControlsNotFoundError",
+    );
+    svc.delete_public_access_block("123456789012", "del")
+        .unwrap();
+    assert_aws_err(
+        svc.get_public_access_block("123456789012", "del"),
+        "NoSuchPublicAccessBlockConfiguration",
+    );
+    // With the ownership controls gone ACLs work again, and with the block
+    // gone a public one is accepted.
+    let mut acl = make_request(Method::PUT, "/del", &[("acl", "")], b"");
+    acl.headers
+        .insert("x-amz-acl", "public-read".parse().unwrap());
+    svc.put_bucket_acl("123456789012", &acl, "del").unwrap();
+}
+
+#[test]
+fn default_block_public_access_refuses_public_policies_and_acls() {
+    let svc = make_service();
+    let mut create = make_request(Method::PUT, "/bpa", &[], b"");
+    enable_acls(&mut create);
+    svc.create_bucket("123456789012", &create, "bpa").unwrap();
+    let policy = br#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::bpa/*"}]}"#;
+    let req = make_request(Method::PUT, "/bpa", &[("policy", "")], policy);
+    assert_aws_err(
+        svc.put_bucket_policy("123456789012", &req, "bpa"),
+        "AccessDenied",
+    );
+    let mut acl = make_request(Method::PUT, "/bpa", &[("acl", "")], b"");
+    acl.headers
+        .insert("x-amz-acl", "public-read".parse().unwrap());
+    assert_aws_err(
+        svc.put_bucket_acl("123456789012", &acl, "bpa"),
+        "AccessDenied",
+    );
+}
+
+#[tokio::test]
+async fn sse_c_writes_are_refused_until_the_bucket_unblocks_them() {
+    let svc = make_service();
+    create_plain(&svc, "ssec");
+    let with_sse_c = |path: &str| {
+        let mut req = make_request(Method::PUT, path, &[], b"x");
+        req.headers.insert(
+            "x-amz-server-side-encryption-customer-algorithm",
+            "AES256".parse().unwrap(),
+        );
+        req
+    };
+    let err = assert_aws_err(
+        svc.put_object("123456789012", &with_sse_c("/ssec/k"), "ssec", "k")
+            .await,
+        "AccessDenied",
+    );
+    let AwsServiceError::AwsError {
+        status, message, ..
+    } = &err
+    else {
+        unreachable!()
+    };
+    assert_eq!(*status, StatusCode::FORBIDDEN);
+    assert!(
+        message.contains("blocked upload requests that specify Server Side Encryption with Customer provided keys (SSE-C)"),
+        "{message}"
+    );
+    assert_aws_err(
+        svc.create_multipart_upload("123456789012", &with_sse_c("/ssec/m"), "ssec", "m"),
+        "AccessDenied",
+    );
+    svc.put_object(
+        "123456789012",
+        &make_request(Method::PUT, "/ssec/src", &[], b"s"),
+        "ssec",
+        "src",
+    )
+    .await
+    .unwrap();
+    let mut copy = with_sse_c("/ssec/dst");
+    copy.headers
+        .insert("x-amz-copy-source", "ssec/src".parse().unwrap());
+    assert_aws_err(
+        svc.copy_object("123456789012", &copy, "ssec", "dst"),
+        "AccessDenied",
+    );
+
+    let unblock = make_request(
+        Method::PUT,
+        "/ssec",
+        &[("encryption", "")],
+        b"<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault><BlockedEncryptionTypes><EncryptionType>NONE</EncryptionType></BlockedEncryptionTypes></Rule></ServerSideEncryptionConfiguration>",
+    );
+    svc.put_bucket_encryption("123456789012", &unblock, "ssec")
+        .unwrap();
+    svc.put_object("123456789012", &with_sse_c("/ssec/k"), "ssec", "k")
+        .await
+        .unwrap();
+}
+
+#[test]
+fn put_bucket_encryption_rejects_an_unknown_encryption_type() {
+    let svc = make_service();
+    create_plain(&svc, "enc-type");
+    let req = make_request(
+        Method::PUT,
+        "/enc-type",
+        &[("encryption", "")],
+        b"<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault><BlockedEncryptionTypes><EncryptionType>SSE-KMS</EncryptionType></BlockedEncryptionTypes></Rule></ServerSideEncryptionConfiguration>",
+    );
+    assert_aws_err(
+        svc.put_bucket_encryption("123456789012", &req, "enc-type"),
+        "MalformedXML",
+    );
+}
+
+#[test]
+fn encryption_blocks_sse_c_reads_only_the_blocked_list() {
+    use crate::state::encryption_blocks_sse_c;
+    assert!(encryption_blocks_sse_c(
+        crate::state::DEFAULT_BUCKET_ENCRYPTION_XML
+    ));
+    assert!(!encryption_blocks_sse_c(
+        "<Rule><BlockedEncryptionTypes><EncryptionType>NONE</EncryptionType></BlockedEncryptionTypes></Rule>"
+    ));
+    assert!(!encryption_blocks_sse_c(
+        "<Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule>"
+    ));
 }

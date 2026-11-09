@@ -600,6 +600,50 @@ mod tests {
     }
 
     #[test]
+    fn bucket_from_an_older_snapshot_does_not_gain_the_new_bucket_defaults() {
+        // A bucket persisted before CreateBucket applied S3's new-bucket
+        // defaults has no ownership.toml, public_access_block.toml or
+        // encryption.toml. AWS left existing buckets as they were, so it must
+        // load with none of the three rather than having them invented.
+        let snap = BucketSnapshot {
+            meta: BucketMeta {
+                name: "legacy".into(),
+                acl_owner_id: "owner-xyz".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let b = s3_bucket_from_snapshot("legacy", snap, "us-east-1").unwrap();
+        assert!(b.ownership_controls.is_none());
+        assert!(b.public_access_block.is_none());
+        assert!(b.encryption_config.is_none());
+
+        // ...while a bucket persisted with them gets exactly what was stored.
+        let mut fresh = S3Bucket::new("fresh", "us-east-1", "owner-xyz");
+        fresh.apply_new_bucket_defaults();
+        let mut subresources = BTreeMap::new();
+        for (file, text) in [
+            ("ownership.toml", fresh.ownership_controls.clone()),
+            (
+                "public_access_block.toml",
+                fresh.public_access_block.clone(),
+            ),
+            ("encryption.toml", fresh.encryption_config.clone()),
+        ] {
+            subresources.insert(file.to_string(), text.unwrap());
+        }
+        let snap = BucketSnapshot {
+            meta: bucket_meta_snapshot(&fresh),
+            subresources,
+            ..Default::default()
+        };
+        let b = s3_bucket_from_snapshot("fresh", snap, "us-east-1").unwrap();
+        assert_eq!(b.ownership_controls, fresh.ownership_controls);
+        assert_eq!(b.public_access_block, fresh.public_access_block);
+        assert_eq!(b.encryption_config, fresh.encryption_config);
+    }
+
+    #[test]
     fn hydrate_bucket_without_acl_sidecar_gets_default_owner_grant() {
         let snap = BucketSnapshot {
             meta: BucketMeta {

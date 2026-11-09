@@ -98,6 +98,11 @@ impl ResourcePolicyProvider for S3ResourcePolicyProvider {
         let Some(bucket) = state.buckets.get(bucket_name) else {
             return false;
         };
+        // BucketOwnerEnforced disables ACLs: they "no longer affect access
+        // permissions", so no stored grant (bucket or object) can open access.
+        if crate::service::config::ownership_xml_enforced(bucket.ownership_controls.as_deref()) {
+            return false;
+        }
         // PublicAccessBlock.IgnorePublicAcls makes public ACLs inert, so a
         // bucket with it set is never publicly readable via ACL — matching
         // the read-path gate in objects/read.rs and AWS behavior.

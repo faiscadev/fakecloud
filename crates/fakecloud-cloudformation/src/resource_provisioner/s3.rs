@@ -73,7 +73,10 @@ impl ResourceProvisioner {
         // store path the PutBucket* handlers use. Previously only BucketName was
         // read, so a CREATE_COMPLETE bucket surfaced with none of its
         // protections and S3->Lambda/SQS/SNS notifications never fired.
-        fakecloud_s3::apply_cfn_bucket_properties(&mut bucket, props, &self.s3_store)?;
+        // A new bucket starts from the defaults S3 gives every bucket it creates
+        // (ACLs disabled, Block Public Access on, SSE-S3 with SSE-C blocked);
+        // the template's properties apply over them.
+        fakecloud_s3::apply_cfn_new_bucket(&mut bucket, props, &self.s3_store)?;
         // Write the bucket through to the S3 disk store, exactly as the real
         // CreateBucket handler does, so a CFN-provisioned bucket survives a
         // restart instead of living only in the in-memory map.
@@ -140,6 +143,9 @@ impl ResourceProvisioner {
             .buckets
             .get_mut(&bucket_name)
             .ok_or_else(|| format!("Bucket {bucket_name} not yet provisioned"))?;
+        if fakecloud_s3::bucket_policy_blocked(bucket, &policy) {
+            return Err(public_policy_blocked(&bucket_name));
+        }
         bucket.policy = Some(policy.clone());
         // Persist the policy subresource to disk, as PutBucketPolicy does.
         self.s3_store
@@ -175,6 +181,9 @@ impl ResourceProvisioner {
             .buckets
             .get_mut(&bucket_name)
             .ok_or_else(|| format!("Bucket {bucket_name} not yet provisioned"))?;
+        if fakecloud_s3::bucket_policy_blocked(bucket, &policy) {
+            return Err(public_policy_blocked(&bucket_name));
+        }
         bucket.policy = Some(policy.clone());
         self.s3_store
             .put_bucket_subresource(&bucket_name, BucketSubresource::Policy, &policy)
@@ -194,6 +203,16 @@ impl ResourceProvisioner {
             .map_err(|e| format!("failed to remove bucket policy for {bucket_name}: {e}"))?;
         Ok(())
     }
+}
+
+/// The failure S3 gives PutBucketPolicy for a public policy on a bucket whose
+/// Block Public Access sets `BlockPublicPolicy` (on by default for new buckets).
+fn public_policy_blocked(bucket: &str) -> String {
+    format!(
+        "User is not authorized to perform: s3:PutBucketPolicy on resource: \"arn:aws:s3:::{bucket}\" \
+         because public policies are blocked by the BlockPublicPolicy block public access setting. \
+         (Service: S3, Status Code: 403, Error Code: AccessDenied)"
+    )
 }
 
 /// Resolve the `Bucket` property (a Ref already resolved to the bucket name).

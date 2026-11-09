@@ -8,7 +8,7 @@ fakecloud implements **107 AWS services** with **7,657 operations**. **258,545/2
 
 | Service | Ops | Protocol | Control plane | Data plane | Known limitations |
 | --- | --- | --- | --- | --- | --- |
-| [S3](@/docs/services/s3.md) | 112 | REST-XML | Full | Full | `SelectObjectContent` returns real EventStream chunks. `WriteGetObjectResponse` stores body + metadata. Access points include data-plane routing. `PublicAccessBlock.IgnorePublicAcls` is enforced on `GetObject`. Object Lock compliance mode is enforced on single-object delete but not yet on batch delete. Multi-region access points are control-plane only. |
+| [S3](@/docs/services/s3.md) | 112 | REST-XML | Full | Full | `SelectObjectContent` returns real EventStream chunks. `WriteGetObjectResponse` stores body + metadata. Access points include data-plane routing. New buckets get AWS's defaults (ACLs disabled via `BucketOwnerEnforced`, Block Public Access on, SSE-S3 with SSE-C blocked). `PublicAccessBlock.IgnorePublicAcls` is enforced on `GetObject`. Object Lock compliance mode is enforced on single-object delete but not yet on batch delete. Multi-region access points are control-plane only. |
 | [SQS](@/docs/services/sqs.md) | 23 | JSON 1.1 (Query) | Full | Full | — |
 | [SNS](@/docs/services/sns.md) | 42 | JSON 1.1 (Query) | Full | Full | Email subscriptions deliver via SMTP relay when `FAKECLOUD_SMTP_RELAY_*` env is configured; otherwise they land in the introspection ledger. |
 | [EventBridge](@/docs/services/eventbridge.md) | 57 | JSON 1.1 | Full | Full | — |

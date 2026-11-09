@@ -33,6 +33,13 @@ impl S3Service {
                 return Err(malformed_encryption("SSEAlgorithm", &algo));
             }
         }
+        // `EncryptionType` is a closed enum (SSE-C, NONE). Anything else would
+        // be stored and then neither block nor allow anything.
+        for value in xml_values(&body_str, "EncryptionType") {
+            if !matches!(value, "SSE-C" | "NONE") {
+                return Err(malformed_encryption("EncryptionType", value));
+            }
+        }
         if let Some(kid) = extract_xml_value(&body_str, "KMSMasterKeyID") {
             // A real KMS key id / ARN / alias never contains control
             // characters. Reject any value that isn't a legal HTTP header
@@ -133,12 +140,35 @@ impl S3Service {
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        b.encryption_config = None;
+        // S3 never leaves a general purpose bucket without default encryption:
+        // DeleteBucketEncryption "resets the default encryption for the bucket
+        // as server-side encryption with Amazon S3 managed keys (SSE-S3)". The
+        // reset is to the configuration a new bucket gets, SSE-C block included.
+        // Persisted before memory changes, as the other config writes are.
+        let reset = crate::state::DEFAULT_BUCKET_ENCRYPTION_XML;
         self.store
-            .delete_bucket_subresource(bucket, BucketSubresource::Encryption)
+            .put_bucket_subresource(bucket, BucketSubresource::Encryption, reset)
             .map_err(crate::service::persistence_error)?;
+        b.encryption_config = Some(reset.to_string());
         Ok(empty_response(StatusCode::NO_CONTENT))
     }
+}
+
+/// Every trimmed text value of `<tag>` elements in `xml`.
+fn xml_values<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find(&open) {
+        let after = &rest[start + open.len()..];
+        let Some(end) = after.find(&close) else {
+            break;
+        };
+        out.push(after[..end].trim());
+        rest = &after[end + close.len()..];
+    }
+    out
 }
 
 /// Build a `MalformedXML` error for a bucket-encryption field whose value

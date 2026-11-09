@@ -3813,7 +3813,16 @@ async fn s3_multipart_upload_grant_headers() {
 
     // Create bucket via CLI
     let output = server
-        .aws_cli(&["s3api", "create-bucket", "--bucket", "mp-grant-bucket"])
+        // ACLs enabled: a new bucket defaults to BucketOwnerEnforced, which
+        // refuses an upload carrying a grant to another account.
+        .aws_cli(&[
+            "s3api",
+            "create-bucket",
+            "--bucket",
+            "mp-grant-bucket",
+            "--object-ownership",
+            "ObjectWriter",
+        ])
         .await;
     assert!(output.success(), "create-bucket failed");
 
@@ -4633,6 +4642,22 @@ async fn s3_bucket_policy_crud() {
         .await;
     assert!(output.success(), "create failed: {}", output.stderr_text());
 
+    // The policy is public, which the new bucket's default Block Public Access
+    // refuses; lift it first, as on AWS.
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "delete-public-access-block",
+            "--bucket",
+            "policy-bucket",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "delete pab failed: {}",
+        output.stderr_text()
+    );
+
     // Put bucket policy
     let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::policy-bucket/*"}]}"#;
     let output = server
@@ -4747,13 +4772,196 @@ async fn s3_bucket_encryption_crud() {
         output.stderr_text()
     );
 
-    // Get again — should fail
+    // Get again: S3 resets the bucket to its SSE-S3 default (SSE-C blocked)
+    // rather than leaving it without default encryption.
     let output = server
         .aws_cli(&["s3api", "get-bucket-encryption", "--bucket", "enc-bucket"])
         .await;
     assert!(
-        !output.success(),
-        "expected error after encryption deletion"
+        output.success(),
+        "get encryption after delete failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    let rule = &json["ServerSideEncryptionConfiguration"]["Rules"][0];
+    assert_eq!(
+        rule["ApplyServerSideEncryptionByDefault"]["SSEAlgorithm"],
+        "AES256"
+    );
+    assert_eq!(rule["BucketKeyEnabled"], false);
+}
+
+/// A new bucket carries what AWS gives every general purpose bucket it creates:
+/// SSE-S3 with SSE-C blocked, ACLs disabled (BucketOwnerEnforced) and every
+/// Block Public Access flag on, and the operations those settings govern
+/// behave accordingly.
+#[tokio::test]
+async fn s3_new_bucket_defaults() {
+    use aws_sdk_s3::types::{
+        BucketCannedAcl, EncryptionType, ObjectOwnership, ServerSideEncryption,
+    };
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("defaults")
+        .send()
+        .await
+        .unwrap();
+
+    let enc = client
+        .get_bucket_encryption()
+        .bucket("defaults")
+        .send()
+        .await
+        .expect("a new bucket has default encryption");
+    let rule = &enc.server_side_encryption_configuration().unwrap().rules()[0];
+    assert_eq!(
+        rule.apply_server_side_encryption_by_default()
+            .unwrap()
+            .sse_algorithm(),
+        &ServerSideEncryption::Aes256
+    );
+    assert_eq!(rule.bucket_key_enabled(), Some(false));
+    assert_eq!(
+        rule.blocked_encryption_types().unwrap().encryption_type(),
+        &[EncryptionType::SseC]
+    );
+
+    let own = client
+        .get_bucket_ownership_controls()
+        .bucket("defaults")
+        .send()
+        .await
+        .expect("a new bucket has ownership controls");
+    assert_eq!(
+        own.ownership_controls().unwrap().rules()[0].object_ownership(),
+        &ObjectOwnership::BucketOwnerEnforced
+    );
+    let pab = client
+        .get_public_access_block()
+        .bucket("defaults")
+        .send()
+        .await
+        .expect("a new bucket has a public access block");
+    let pab = pab.public_access_block_configuration().unwrap();
+    assert_eq!(pab.block_public_acls(), Some(true));
+    assert_eq!(pab.ignore_public_acls(), Some(true));
+    assert_eq!(pab.block_public_policy(), Some(true));
+    assert_eq!(pab.restrict_public_buckets(), Some(true));
+
+    // ACLs are disabled: setting one fails, reading one shows the owner only.
+    let err = client
+        .put_bucket_acl()
+        .bucket("defaults")
+        .acl(BucketCannedAcl::Private)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("AccessControlListNotSupported")
+    );
+    let acl = client
+        .get_bucket_acl()
+        .bucket("defaults")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(acl.grants().len(), 1);
+
+    // SSE-C is blocked.
+    let err = client
+        .put_object()
+        .bucket("defaults")
+        .key("k")
+        .sse_customer_algorithm("AES256")
+        .sse_customer_key("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+        .sse_customer_key_md5("ZOyWf7DU6ZVrgYkU1Q8s8Q==")
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap_err();
+    let code = err.raw_response().map(|r| r.status().as_u16());
+    assert_eq!(code, Some(403), "{err:?}");
+    assert_eq!(err.into_service_error().meta().code(), Some("AccessDenied"));
+
+    // Deleting encryption resets to the default; deleting the other two really
+    // removes them.
+    client
+        .delete_bucket_encryption()
+        .bucket("defaults")
+        .send()
+        .await
+        .unwrap();
+    let enc = client
+        .get_bucket_encryption()
+        .bucket("defaults")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        enc.server_side_encryption_configuration().unwrap().rules()[0]
+            .blocked_encryption_types()
+            .is_some()
+    );
+    client
+        .delete_bucket_ownership_controls()
+        .bucket("defaults")
+        .send()
+        .await
+        .unwrap();
+    let err = client
+        .get_bucket_ownership_controls()
+        .bucket("defaults")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("OwnershipControlsNotFoundError")
+    );
+    client
+        .delete_public_access_block()
+        .bucket("defaults")
+        .send()
+        .await
+        .unwrap();
+    let err = client
+        .get_public_access_block()
+        .bucket("defaults")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("NoSuchPublicAccessBlockConfiguration")
+    );
+
+    // A create asking for an ACL needs ACLs enabled, and a public one also
+    // needs the block off, which a new bucket never has.
+    let err = client
+        .create_bucket()
+        .bucket("defaults-acl")
+        .acl(BucketCannedAcl::PublicRead)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidBucketAclWithObjectOwnership")
+    );
+    let err = client
+        .create_bucket()
+        .bucket("defaults-acl")
+        .acl(BucketCannedAcl::PublicRead)
+        .object_ownership(ObjectOwnership::ObjectWriter)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidBucketAclWithBlockPublicAccessError")
     );
 }
 
@@ -5405,6 +5613,15 @@ async fn s3_object_acl_put_get() {
 
     client
         .create_bucket()
+        .bucket("obj-acl-bucket")
+        // A public-read object ACL needs ACLs enabled and the new bucket's
+        // default Block Public Access lifted, as on AWS.
+        .object_ownership(aws_sdk_s3::types::ObjectOwnership::ObjectWriter)
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_public_access_block()
         .bucket("obj-acl-bucket")
         .send()
         .await

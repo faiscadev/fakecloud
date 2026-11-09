@@ -275,6 +275,81 @@ impl S3Bucket {
             legacy_eu_location: false,
         }
     }
+
+    /// Apply the settings S3 gives every general purpose bucket it creates:
+    /// Object Ownership `BucketOwnerEnforced` (ACLs disabled, April 2023), all
+    /// four Block Public Access flags on (April 2023), and SSE-S3 default
+    /// encryption with SSE-C uploads blocked (April 2026).
+    ///
+    /// Only bucket creation calls this. `S3Bucket::new` stays bare because the
+    /// snapshot loader and tests build buckets through it too, and a bucket
+    /// persisted by an older build must come back with exactly the settings it
+    /// was stored with: AWS did not apply these defaults to existing buckets.
+    pub fn apply_new_bucket_defaults(&mut self) {
+        self.ownership_controls = Some(ownership_controls_xml(DEFAULT_OBJECT_OWNERSHIP));
+        self.public_access_block = Some(DEFAULT_PUBLIC_ACCESS_BLOCK_XML.to_string());
+        self.encryption_config = Some(DEFAULT_BUCKET_ENCRYPTION_XML.to_string());
+    }
+}
+
+/// Object Ownership a new bucket gets when CreateBucket names none.
+pub const DEFAULT_OBJECT_OWNERSHIP: &str = "BucketOwnerEnforced";
+
+/// Block Public Access a new bucket gets: every flag on.
+pub const DEFAULT_PUBLIC_ACCESS_BLOCK_XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<PublicAccessBlockConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+<BlockPublicAcls>true</BlockPublicAcls>\
+<IgnorePublicAcls>true</IgnorePublicAcls>\
+<BlockPublicPolicy>true</BlockPublicPolicy>\
+<RestrictPublicBuckets>true</RestrictPublicBuckets>\
+</PublicAccessBlockConfiguration>";
+
+/// Default encryption a new bucket gets, and what DeleteBucketEncryption
+/// resets a bucket to: SSE-S3, no bucket key, SSE-C uploads blocked.
+/// `BlockedEncryptionTypes.EncryptionType` is `xmlFlattened` in the model,
+/// so each value is a bare `<EncryptionType>` child.
+pub const DEFAULT_BUCKET_ENCRYPTION_XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+<Rule>\
+<ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault>\
+<BucketKeyEnabled>false</BucketKeyEnabled>\
+<BlockedEncryptionTypes><EncryptionType>SSE-C</EncryptionType></BlockedEncryptionTypes>\
+</Rule>\
+</ServerSideEncryptionConfiguration>";
+
+/// The stored `OwnershipControls` document for one `ObjectOwnership` value.
+pub fn ownership_controls_xml(ownership: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <OwnershipControls xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+         <Rule><ObjectOwnership>{ownership}</ObjectOwnership></Rule>\
+         </OwnershipControls>"
+    )
+}
+
+/// Whether a stored default-encryption document blocks SSE-C uploads.
+pub fn encryption_blocks_sse_c(xml: &str) -> bool {
+    let mut rest = xml;
+    while let Some(start) = rest.find("<BlockedEncryptionTypes>") {
+        let after = &rest[start + "<BlockedEncryptionTypes>".len()..];
+        let end = after
+            .find("</BlockedEncryptionTypes>")
+            .unwrap_or(after.len());
+        let block = &after[..end];
+        let mut values = block;
+        while let Some(s) = values.find("<EncryptionType>") {
+            let v = &values[s + "<EncryptionType>".len()..];
+            let Some(e) = v.find("</EncryptionType>") else {
+                break;
+            };
+            if v[..e].trim() == "SSE-C" {
+                return true;
+            }
+            values = &v[e..];
+        }
+        rest = &after[end..];
+    }
+    false
 }
 
 /// A recorded S3 notification event for introspection.

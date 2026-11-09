@@ -7078,6 +7078,52 @@ mod tests {
     }
 
     #[test]
+    fn s3_public_bucket_policy_needs_block_public_policy_off() {
+        let prov = make_provisioner();
+        let public_policy = |bucket: &str| {
+            serde_json::json!({
+                "Bucket": bucket,
+                "PolicyDocument": {"Version": "2012-10-17", "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": "s3:GetObject",
+                    "Resource": format!("arn:aws:s3:::{bucket}/*")
+                }]}
+            })
+        };
+        prov.create_resource(&make_resource(
+            "AWS::S3::Bucket",
+            "B",
+            serde_json::json!({"BucketName": "pub-default"}),
+        ))
+        .unwrap();
+        let err = prov
+            .create_resource(&make_resource(
+                "AWS::S3::BucketPolicy",
+                "BP",
+                public_policy("pub-default"),
+            ))
+            .unwrap_err();
+        assert!(err.contains("BlockPublicPolicy"), "{err}");
+
+        prov.create_resource(&make_resource(
+            "AWS::S3::Bucket",
+            "B2",
+            serde_json::json!({
+                "BucketName": "pub-open",
+                "PublicAccessBlockConfiguration": {"BlockPublicPolicy": false}
+            }),
+        ))
+        .unwrap();
+        prov.create_resource(&make_resource(
+            "AWS::S3::BucketPolicy",
+            "BP2",
+            public_policy("pub-open"),
+        ))
+        .unwrap();
+    }
+
+    #[test]
     fn s3_bucket_policy_stored_on_bucket_and_cleared_on_delete() {
         let prov = make_provisioner();
         let bucket = prov
@@ -7092,9 +7138,12 @@ mod tests {
             "BP",
             serde_json::json!({
                 "Bucket": bucket.physical_id.clone(),
+                // A principal-scoped grant: a `Principal:"*"` one is refused
+                // by the new bucket's default BlockPublicPolicy (see
+                // `s3_public_bucket_policy_needs_block_public_policy_off`).
                 "PolicyDocument": {"Version": "2012-10-17", "Statement": [{
                     "Effect": "Allow",
-                    "Principal": "*",
+                    "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
                     "Action": "s3:GetObject",
                     "Resource": "arn:aws:s3:::b1/*"
                 }]}
