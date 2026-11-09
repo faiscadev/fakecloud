@@ -39,4 +39,4 @@ pub use state::{
     parse_cloudfront_snapshot, CloudFrontAccounts, CloudFrontSnapshot, SharedCloudFrontState,
     StoredDistribution, CLOUDFRONT_SNAPSHOT_SCHEMA_VERSION,
 };
-pub use validate::validate_distribution_config;
+pub use validate::{canonicalize_distribution_config, ConfigRequest};

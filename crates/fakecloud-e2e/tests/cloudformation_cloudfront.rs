@@ -190,7 +190,8 @@ const DIST_TEMPLATE: &str = r#"{
           }],
           "DefaultCacheBehavior": {
             "TargetOriginId": "origin-1",
-            "ViewerProtocolPolicy": "redirect-to-https"
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "ForwardedValues": {"QueryString": false}
           }
         }
       }
@@ -290,7 +291,8 @@ const SPA_ERROR_TEMPLATE: &str = r#"{
           ],
           "DefaultCacheBehavior": {
             "TargetOriginId": "origin-1",
-            "ViewerProtocolPolicy": "allow-all"
+            "ViewerProtocolPolicy": "allow-all",
+            "ForwardedValues": {"QueryString": false}
           },
           "CustomErrorResponses": [
             {"ErrorCode": 403, "ResponseCode": 200, "ResponsePagePath": "/index.html", "ErrorCachingMinTTL": 300},
@@ -608,7 +610,7 @@ async fn cfn_distribution_with_a_minimal_template_reads_back_with_defaults() {
         "DistributionConfig": {
           "Enabled": true,
           "Origins": [{"Id": "o", "DomainName": "o.example.com", "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}}],
-          "DefaultCacheBehavior": {"TargetOriginId": "o", "ViewerProtocolPolicy": "allow-all"}
+          "DefaultCacheBehavior": {"TargetOriginId": "o", "ViewerProtocolPolicy": "allow-all", "ForwardedValues": {"QueryString": false}}
         }
       }
     }

@@ -10,11 +10,12 @@ mod helpers;
 
 use aws_sdk_cloudfront::types::builders::DistributionConfigBuilder;
 use aws_sdk_cloudfront::types::{
-    CacheBehavior, CacheBehaviors, CachedMethods, CookiePreference, CustomErrorResponse,
-    CustomErrorResponses, DefaultCacheBehavior, DistributionConfig, ForwardedValues,
-    GeoRestriction, GeoRestrictionType, Headers, HttpVersion, ItemSelection, LoggingConfig, Method,
-    MinimumProtocolVersion, Origin, Origins, Paths, PriceClass, Restrictions, SslSupportMethod,
-    ViewerCertificate, ViewerProtocolPolicy,
+    CacheBehavior, CacheBehaviors, CachedMethods, ConnectionMode, CookiePreference,
+    CustomErrorResponse, CustomErrorResponses, DefaultCacheBehavior, DistributionConfig,
+    DistributionConfigWithTags, ForwardedValues, GeoRestriction, GeoRestrictionType, Headers,
+    HttpVersion, ItemSelection, LoggingConfig, Method, MinimumProtocolVersion, Origin, Origins,
+    Paths, PriceClass, Restrictions, SslSupportMethod, Tags, ViewerCertificate,
+    ViewerProtocolPolicy,
 };
 use helpers::TestServer;
 
@@ -54,6 +55,8 @@ fn minimal_config(caller_ref: &str) -> DistributionConfig {
                         .unwrap(),
                 )
                 .min_ttl(0)
+                .default_ttl(86_400)
+                .max_ttl(31_536_000)
                 .build()
                 .unwrap(),
         )
@@ -341,6 +344,8 @@ async fn cloudfront_complex_config_roundtrips() {
                         .unwrap(),
                 )
                 .min_ttl(0)
+                .default_ttl(86_400)
+                .max_ttl(31_536_000)
                 .default_ttl(86400)
                 .max_ttl(31536000)
                 .forwarded_values(
@@ -368,6 +373,8 @@ async fn cloudfront_complex_config_roundtrips() {
                         .target_origin_id("origin-1")
                         .viewer_protocol_policy(ViewerProtocolPolicy::HttpsOnly)
                         .min_ttl(0)
+                        .default_ttl(86_400)
+                        .max_ttl(31_536_000)
                         .forwarded_values(
                             ForwardedValues::builder()
                                 .query_string(true)
@@ -490,6 +497,7 @@ fn bare_builder(caller_ref: &str) -> DistributionConfigBuilder {
             DefaultCacheBehavior::builder()
                 .target_origin_id("primary")
                 .viewer_protocol_policy(ViewerProtocolPolicy::AllowAll)
+                .cache_policy_id(MANAGED_CACHE_POLICY)
                 .build()
                 .unwrap(),
         )
@@ -576,8 +584,10 @@ async fn cloudfront_bare_config_reads_back_with_cloudfront_defaults() {
             .cloud_front_default_certificate(),
         Some(true)
     );
-    assert_eq!(summary.http_version(), &HttpVersion::Http2);
+    // Enum case, unlike the config's `http2` (recorded from real AWS 2026-11-09).
+    assert_eq!(summary.http_version().as_str(), "HTTP2");
     assert!(summary.is_ipv6_enabled());
+    assert_eq!(summary.connection_mode(), Some(&ConnectionMode::Direct));
 }
 
 #[tokio::test]
@@ -914,17 +924,6 @@ async fn cloudfront_copy_distribution_honors_the_staging_header() {
     let staging = staging.distribution().unwrap();
     assert_eq!(staging.distribution_config().unwrap().staging(), Some(true));
 
-    let plain = cf
-        .copy_distribution()
-        .primary_distribution_id(&primary)
-        .if_match(&etag)
-        .caller_reference("e2e-copy-plain")
-        .send()
-        .await
-        .unwrap();
-    let plain = plain.distribution().unwrap();
-    assert_eq!(plain.distribution_config().unwrap().staging(), Some(false));
-
     // The flag is stored, not just echoed.
     let read = cf
         .get_distribution_config()
@@ -938,33 +937,38 @@ async fn cloudfront_copy_distribution_honors_the_staging_header() {
     let items = list.distribution_list().unwrap().items();
     let summary_staging = |id: &str| items.iter().find(|d| d.id() == id).unwrap().staging();
     assert!(summary_staging(staging.id()));
-    assert!(!summary_staging(plain.id()));
     assert!(!summary_staging(&primary));
 }
 
+/// Values recorded from real AWS `CreateDistribution` on 2026-11-09.
 #[tokio::test]
 async fn cloudfront_omitted_ttls_follow_the_supplied_bounds() {
     let server = TestServer::start().await;
     let cf = server.cloudfront_client().await;
-    for (caller_ref, min, default, expected) in [
+    const DAY: i64 = 86_400;
+    const YEAR: i64 = 31_536_000;
+    const LONG: i64 = 40_000_000;
+    for (caller_ref, min, default, max, expected) in [
+        ("e2e-ttl-min0", 0, None, None, (0, DAY, YEAR)),
+        // The old inversion: MaxTTL 600 used to leave DefaultTTL at a day.
+        ("e2e-ttl-max600", 0, None, Some(600), (0, 600, 600)),
+        ("e2e-ttl-def600", 0, Some(600), None, (0, 600, YEAR)),
+        ("e2e-ttl-def90k", 0, Some(90_000), None, (0, 90_000, YEAR)),
+        ("e2e-ttl-deflong", 0, Some(LONG), None, (0, LONG, LONG)),
         (
-            "e2e-ttl-min",
-            Some(172_800),
+            "e2e-ttl-minhigh",
+            100_000,
             None,
-            (172_800, 172_800, 31_536_000),
-        ),
-        (
-            "e2e-ttl-default",
             None,
-            Some(40_000_000),
-            (0, 40_000_000, 40_000_000),
+            (100_000, 100_000, YEAR),
         ),
-        ("e2e-ttl-none", None, None, (0, 86_400, 31_536_000)),
+        ("e2e-ttl-minlong", LONG, None, None, (LONG, LONG, LONG)),
     ] {
         let mut config = minimal_config(caller_ref);
         let behavior = config.default_cache_behavior.as_mut().unwrap();
-        behavior.min_ttl = min;
+        behavior.min_ttl = Some(min);
         behavior.default_ttl = default;
+        behavior.max_ttl = max;
         let create = cf
             .create_distribution()
             .distribution_config(config)
@@ -988,4 +992,618 @@ async fn cloudfront_omitted_ttls_follow_the_supplied_bounds() {
             "{caller_ref}"
         );
     }
+}
+
+const ORDER_MESSAGE: &str = "MinTTL, MaxTTL and DefaultTTL should follow order MinTTL less than \
+                             or equal to DefaultTTL less than or equal to MaxTTL";
+const MIN_REQUIRED_MESSAGE: &str = "The parameter MinTTL is required.";
+const MANAGED_CACHE_POLICY: &str = "658327ea-f89d-4fab-a63d-7e88639e58f6";
+
+/// Applied to a config's `DefaultCacheBehavior`.
+type Settings = fn(&mut DefaultCacheBehavior);
+
+fn clear_ttls(b: &mut DefaultCacheBehavior) {
+    (b.min_ttl, b.default_ttl, b.max_ttl) = (None, None, None);
+}
+
+fn on_policy(b: &mut DefaultCacheBehavior) {
+    clear_ttls(b);
+    b.forwarded_values = None;
+    b.cache_policy_id = Some(MANAGED_CACHE_POLICY.into());
+}
+
+fn with_policy_message(member: &str) -> String {
+    format!(
+        "The parameter {member} cannot be used when a cache policy is associated to the cache behavior."
+    )
+}
+
+/// Codes and messages recorded from real AWS `CreateDistribution` on 2026-11-09.
+fn refused_on_create() -> Vec<(&'static str, Settings, &'static str, String)> {
+    let invalid = "InvalidArgument";
+    let order = "InvalidTTLOrder";
+    vec![
+        ("no-ttls", clear_ttls, invalid, MIN_REQUIRED_MESSAGE.into()),
+        (
+            "max-only",
+            |b| {
+                clear_ttls(b);
+                b.max_ttl = Some(600);
+            },
+            invalid,
+            MIN_REQUIRED_MESSAGE.into(),
+        ),
+        (
+            "neither",
+            |b| {
+                clear_ttls(b);
+                b.forwarded_values = None;
+            },
+            invalid,
+            MIN_REQUIRED_MESSAGE.into(),
+        ),
+        (
+            "min-without-forwarded-values",
+            |b| {
+                clear_ttls(b);
+                b.forwarded_values = None;
+                b.min_ttl = Some(0);
+            },
+            invalid,
+            "The parameter ForwardedValues is required.".into(),
+        ),
+        (
+            "min-above-default",
+            |b| (b.min_ttl, b.default_ttl, b.max_ttl) = (Some(700), Some(600), Some(800)),
+            order,
+            ORDER_MESSAGE.into(),
+        ),
+        (
+            "default-above-max",
+            |b| (b.min_ttl, b.default_ttl, b.max_ttl) = (Some(0), Some(900), Some(800)),
+            order,
+            ORDER_MESSAGE.into(),
+        ),
+        (
+            "min-above-max",
+            |b| (b.min_ttl, b.default_ttl, b.max_ttl) = (Some(700), None, Some(600)),
+            order,
+            "MinTTL should be less than or equal to MaxTTL".into(),
+        ),
+        (
+            "min-above-default-no-max",
+            |b| (b.min_ttl, b.default_ttl, b.max_ttl) = (Some(700), Some(600), None),
+            order,
+            "MinTTL should be less than or equal to DefaultTTL".into(),
+        ),
+        (
+            "policy-with-min-out-of-order",
+            |b| {
+                on_policy(b);
+                (b.min_ttl, b.max_ttl) = (Some(700), Some(600));
+            },
+            invalid,
+            with_policy_message("MinTTL"),
+        ),
+        (
+            "policy-with-default",
+            |b| {
+                on_policy(b);
+                b.default_ttl = Some(600);
+            },
+            invalid,
+            with_policy_message("DefaultTTL"),
+        ),
+        (
+            "policy-with-max",
+            |b| {
+                on_policy(b);
+                b.max_ttl = Some(600);
+            },
+            invalid,
+            with_policy_message("MaxTTL"),
+        ),
+        (
+            "policy-with-forwarded-values",
+            |b| {
+                let forwarded = b.forwarded_values.take();
+                on_policy(b);
+                b.forwarded_values = forwarded;
+            },
+            invalid,
+            with_policy_message("ForwardedValues"),
+        ),
+    ]
+}
+
+/// `InvalidTTLOrder` and `InvalidArgument` are modeled on these operations, so
+/// the SDK must surface them as the typed errors.
+#[tokio::test]
+async fn cloudfront_create_refuses_invalid_cache_settings() {
+    use aws_sdk_cloudfront::error::ProvideErrorMetadata;
+
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+
+    for (name, settings, code, message) in refused_on_create() {
+        let mut config = minimal_config(&format!("e2e-refuse-{name}"));
+        settings(config.default_cache_behavior.as_mut().unwrap());
+        let message = Some(message.as_str());
+
+        let err = cf
+            .create_distribution()
+            .distribution_config(config.clone())
+            .send()
+            .await
+            .unwrap_err()
+            .into_service_error();
+        assert_eq!((err.code(), err.message()), (Some(code), message), "{name}");
+        assert_eq!(
+            err.is_invalid_ttl_order(),
+            code == "InvalidTTLOrder",
+            "{name}"
+        );
+        assert_eq!(
+            err.is_invalid_argument(),
+            code == "InvalidArgument",
+            "{name}"
+        );
+
+        let err = cf
+            .create_distribution_with_tags()
+            .distribution_config_with_tags(
+                DistributionConfigWithTags::builder()
+                    .distribution_config(config)
+                    .tags(Tags::builder().build())
+                    .build(),
+            )
+            .send()
+            .await
+            .unwrap_err()
+            .into_service_error();
+        assert_eq!(
+            (err.code(), err.message()),
+            (Some(code), message),
+            "{name} tags"
+        );
+    }
+}
+
+/// Recorded from real AWS `UpdateDistribution` on 2026-11-09. Unlike a create,
+/// every TTL is required and they need not be in order.
+#[tokio::test]
+async fn cloudfront_update_requires_every_ttl_but_not_their_order() {
+    use aws_sdk_cloudfront::error::ProvideErrorMetadata;
+
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(minimal_config("e2e-update-rules"))
+        .send()
+        .await
+        .unwrap();
+    let id = create.distribution().unwrap().id().to_string();
+    let etag = create.e_tag().unwrap().to_string();
+
+    let refused: [(Settings, String); 5] = [
+        (
+            |b| b.default_ttl = None,
+            "The parameter DefaultTTL is required.".into(),
+        ),
+        (
+            |b| b.max_ttl = None,
+            "The parameter MaxTTL is required.".into(),
+        ),
+        (|b| b.min_ttl = None, MIN_REQUIRED_MESSAGE.into()),
+        (
+            |b| {
+                b.default_ttl = None;
+                b.max_ttl = Some(600);
+            },
+            "The parameter DefaultTTL is required.".into(),
+        ),
+        (
+            |b| b.cache_policy_id = Some(MANAGED_CACHE_POLICY.into()),
+            with_policy_message("MinTTL"),
+        ),
+    ];
+    for (settings, message) in refused {
+        let mut config = minimal_config("e2e-update-rules");
+        settings(config.default_cache_behavior.as_mut().unwrap());
+        let err = cf
+            .update_distribution()
+            .id(&id)
+            .if_match(&etag)
+            .distribution_config(config)
+            .send()
+            .await
+            .unwrap_err()
+            .into_service_error();
+        assert_eq!(
+            (err.code(), err.message()),
+            (Some("InvalidArgument"), Some(message.as_str()))
+        );
+    }
+
+    // The refused updates left the distribution as it was.
+    let read = cf.get_distribution_config().id(&id).send().await.unwrap();
+    assert_eq!(read.e_tag(), Some(etag.as_str()));
+
+    let mut if_match = etag;
+    for ttls in [(700, 600, 800), (700, 600, 600)] {
+        let mut config = minimal_config("e2e-update-rules");
+        let b = config.default_cache_behavior.as_mut().unwrap();
+        (b.min_ttl, b.default_ttl, b.max_ttl) = (Some(ttls.0), Some(ttls.1), Some(ttls.2));
+        let updated = cf
+            .update_distribution()
+            .id(&id)
+            .if_match(&if_match)
+            .distribution_config(config)
+            .send()
+            .await
+            .unwrap();
+        let dcb = updated
+            .distribution()
+            .unwrap()
+            .distribution_config()
+            .unwrap()
+            .default_cache_behavior()
+            .unwrap();
+        assert_eq!(
+            (dcb.min_ttl(), dcb.default_ttl(), dcb.max_ttl()),
+            (Some(ttls.0), Some(ttls.1), Some(ttls.2))
+        );
+        if_match = updated.e_tag().unwrap().to_string();
+    }
+
+    // With the TTLs left out of order, the staging copy is what gets refused.
+    let err = cf
+        .copy_distribution()
+        .primary_distribution_id(&id)
+        .if_match(&if_match)
+        .caller_reference("e2e-update-rules-copy")
+        .staging(true)
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(err.code(), Some("InvalidTTLOrder"));
+    assert!(
+        err.message()
+            .is_some_and(|m| m.starts_with("We couldn\u{2019}t create the staging distribution.")),
+        "{err:?}"
+    );
+}
+
+/// Recorded from real AWS `CopyDistribution` on 2026-11-09.
+#[tokio::test]
+async fn cloudfront_copy_refusals_are_as_recorded() {
+    use aws_sdk_cloudfront::error::ProvideErrorMetadata;
+
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(minimal_config("e2e-copy-rules"))
+        .send()
+        .await
+        .unwrap();
+    let err = cf
+        .copy_distribution()
+        .primary_distribution_id(create.distribution().unwrap().id())
+        .if_match(create.e_tag().unwrap())
+        .caller_reference("e2e-copy-rules-plain")
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(err.code(), Some("InvalidArgument"));
+    assert_eq!(
+        err.message(),
+        Some("Your request must specify Staging as true.")
+    );
+
+    let tenant = cf
+        .create_distribution()
+        .distribution_config(tenant_only_config("e2e-copy-rules-tenant"))
+        .send()
+        .await
+        .unwrap();
+    let err = cf
+        .copy_distribution()
+        .primary_distribution_id(tenant.distribution().unwrap().id())
+        .if_match(tenant.e_tag().unwrap())
+        .caller_reference("e2e-copy-rules-tenant-copy")
+        .staging(true)
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(err.code(), Some("InvalidArgument"));
+    assert_eq!(
+        err.message(),
+        Some("You can't enable continuous deployment for a multi-tenant distribution.")
+    );
+}
+
+/// Recorded from real AWS `CreateDistribution` on 2026-11-09: a `CacheBehaviors`
+/// entry meets the same checks as the default behavior.
+#[tokio::test]
+async fn cloudfront_checks_each_cache_behavior_like_the_default_one() {
+    use aws_sdk_cloudfront::error::ProvideErrorMetadata;
+
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+
+    let with_behavior = |caller_ref: &str, min, max| {
+        let mut config = minimal_config(caller_ref);
+        let dcb = config.default_cache_behavior.clone().unwrap();
+        config.cache_behaviors = Some(
+            CacheBehaviors::builder()
+                .quantity(1)
+                .items(
+                    CacheBehavior::builder()
+                        .path_pattern("/api/*")
+                        .target_origin_id("primary")
+                        .viewer_protocol_policy(ViewerProtocolPolicy::AllowAll)
+                        .set_forwarded_values(dcb.forwarded_values)
+                        .set_min_ttl(min)
+                        .set_max_ttl(max)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        );
+        config
+    };
+
+    let err = cf
+        .create_distribution()
+        .distribution_config(with_behavior("e2e-cb-required", None, None))
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(err.message(), Some(MIN_REQUIRED_MESSAGE));
+
+    let err = cf
+        .create_distribution()
+        .distribution_config(with_behavior("e2e-cb-order", Some(700), Some(600)))
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(err.code(), Some("InvalidTTLOrder"));
+
+    let create = cf
+        .create_distribution()
+        .distribution_config(with_behavior("e2e-cb-ok", Some(0), Some(600)))
+        .send()
+        .await
+        .unwrap();
+    let config = create
+        .distribution()
+        .unwrap()
+        .distribution_config()
+        .unwrap();
+    let behavior = &config.cache_behaviors().unwrap().items()[0];
+    assert_eq!(
+        (
+            behavior.min_ttl(),
+            behavior.default_ttl(),
+            behavior.max_ttl()
+        ),
+        (Some(0), Some(600), Some(600))
+    );
+}
+
+/// A cache policy alone is accepted, and its behavior carries no TTLs (recorded
+/// from real AWS on 2026-11-09).
+#[tokio::test]
+async fn cloudfront_a_cache_policy_behavior_has_no_ttls() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let mut config = minimal_config("e2e-policy-only");
+    let behavior = config.default_cache_behavior.as_mut().unwrap();
+    on_policy(behavior);
+    let create = cf
+        .create_distribution()
+        .distribution_config(config)
+        .send()
+        .await
+        .unwrap();
+    let dcb = create
+        .distribution()
+        .unwrap()
+        .distribution_config()
+        .unwrap()
+        .default_cache_behavior()
+        .unwrap();
+    assert_eq!(
+        (dcb.min_ttl(), dcb.default_ttl(), dcb.max_ttl()),
+        (None, None, None)
+    );
+}
+
+fn tenant_only_config(caller_ref: &str) -> DistributionConfig {
+    let mut config = minimal_config(caller_ref);
+    config.connection_mode = Some(ConnectionMode::TenantOnly);
+    let behavior = config.default_cache_behavior.as_mut().unwrap();
+    on_policy(behavior);
+    config
+}
+
+/// Recorded from real AWS on 2026-11-09.
+#[tokio::test]
+async fn cloudfront_multi_tenant_distributions_behave_as_recorded() {
+    use aws_sdk_cloudfront::error::ProvideErrorMetadata;
+
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+
+    let mut with_ipv6 = tenant_only_config("e2e-mt-ipv6");
+    with_ipv6.is_ipv6_enabled = Some(false);
+    let mut with_staging = tenant_only_config("e2e-mt-staging");
+    with_staging.staging = Some(false);
+    let mut with_price_class = tenant_only_config("e2e-mt-price");
+    with_price_class.price_class = Some(PriceClass::PriceClass100);
+    let mut with_both = tenant_only_config("e2e-mt-both");
+    with_both.is_ipv6_enabled = Some(false);
+    with_both.staging = Some(false);
+    let behavior = |caller_ref: &str, set: Settings| {
+        let mut config = tenant_only_config(caller_ref);
+        set(config.default_cache_behavior.as_mut().unwrap());
+        config
+    };
+    for (config, member) in [
+        (with_ipv6, "IsIPV6Enabled"),
+        (with_staging, "Staging"),
+        (with_price_class, "PriceClass"),
+        (with_both, "IsIPV6Enabled"),
+        (behavior("e2e-mt-min", |b| b.min_ttl = Some(0)), "MinTTL"),
+        (
+            behavior("e2e-mt-def", |b| b.default_ttl = Some(60)),
+            "DefaultTTL",
+        ),
+        (behavior("e2e-mt-max", |b| b.max_ttl = Some(60)), "MaxTTL"),
+        (
+            behavior("e2e-mt-fv", |b| {
+                b.cache_policy_id = None;
+                b.forwarded_values = Some(
+                    ForwardedValues::builder()
+                        .query_string(false)
+                        .cookies(
+                            CookiePreference::builder()
+                                .forward(ItemSelection::None)
+                                .build()
+                                .unwrap(),
+                        )
+                        .build()
+                        .unwrap(),
+                );
+            }),
+            "ForwardedValues",
+        ),
+    ] {
+        let err = cf
+            .create_distribution()
+            .distribution_config(config)
+            .send()
+            .await
+            .unwrap_err()
+            .into_service_error();
+        assert_eq!(err.code(), Some("InvalidArgument"));
+        assert_eq!(
+            err.message(),
+            Some(
+                format!("You can't specify the {member} field for a multi-tenant distribution.")
+                    .as_str()
+            )
+        );
+    }
+
+    let err = cf
+        .create_distribution()
+        .distribution_config(behavior("e2e-mt-neither", |b| b.cache_policy_id = None))
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(
+        err.message(),
+        Some("The CachePolicyId field is required for a multi-tenant distribution.")
+    );
+
+    let mut with_http_version = tenant_only_config("e2e-mt-http");
+    with_http_version.http_version = Some(HttpVersion::Http2);
+    let create = cf
+        .create_distribution()
+        .distribution_config(with_http_version)
+        .send()
+        .await
+        .unwrap();
+    let dist = create.distribution().unwrap();
+    let id = dist.id().to_string();
+    let config = dist.distribution_config().unwrap();
+    assert_eq!(config.default_root_object(), Some(""));
+    assert_eq!(config.web_acl_id(), Some(""));
+    assert_eq!(config.http_version(), Some(&HttpVersion::Http2));
+    assert_eq!(config.connection_mode(), Some(&ConnectionMode::TenantOnly));
+    assert_eq!(config.price_class(), None);
+    assert_eq!(config.is_ipv6_enabled(), None);
+    assert_eq!(config.staging(), None);
+    assert_eq!(config.continuous_deployment_policy_id(), None);
+    assert!(config.aliases().is_none());
+    assert_eq!(
+        config.viewer_certificate().unwrap().ssl_support_method(),
+        Some(&SslSupportMethod::SniOnly)
+    );
+    let dcb = config.default_cache_behavior().unwrap();
+    assert_eq!(dcb.smooth_streaming(), None);
+    assert!(dcb.trusted_signers().is_none());
+
+    // Read back and put unchanged, it is a no-op rather than a refusal.
+    let read = cf.get_distribution_config().id(&id).send().await.unwrap();
+    let updated = cf
+        .update_distribution()
+        .id(&id)
+        .if_match(read.e_tag().unwrap())
+        .distribution_config(read.distribution_config().unwrap().clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.e_tag(), read.e_tag());
+
+    let list = cf.list_distributions().send().await.unwrap();
+    let summary = &list.distribution_list().unwrap().items()[0];
+    assert_eq!(summary.aliases().unwrap().quantity(), 0);
+    assert!(!summary.is_ipv6_enabled());
+    assert!(!summary.staging());
+    assert_eq!(summary.http_version().as_str(), "HTTP2");
+    assert_eq!(summary.price_class().as_str(), "PriceClass_All");
+    assert_eq!(summary.web_acl_id(), "");
+    assert_eq!(summary.connection_mode(), Some(&ConnectionMode::TenantOnly));
+    assert!(summary.e_tag().is_some_and(|e| !e.is_empty()));
+}
+
+#[tokio::test]
+async fn cloudfront_a_standard_distribution_lists_as_direct() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(minimal_config("e2e-direct"))
+        .send()
+        .await
+        .unwrap();
+    let dist = create.distribution().unwrap();
+    assert_eq!(dist.distribution_config().unwrap().connection_mode(), None);
+    assert_eq!(
+        dist.distribution_config()
+            .unwrap()
+            .continuous_deployment_policy_id(),
+        Some("")
+    );
+    cf.create_distribution()
+        .distribution_config(tenant_only_config("e2e-direct-tenant"))
+        .send()
+        .await
+        .unwrap();
+
+    let list = cf.list_distributions().send().await.unwrap();
+    let list = list.distribution_list().unwrap();
+    let summary = list.items().iter().find(|d| d.id() == dist.id()).unwrap();
+    assert_eq!(summary.connection_mode(), Some(&ConnectionMode::Direct));
+
+    let by_mode = cf
+        .list_distributions_by_connection_mode()
+        .connection_mode(ConnectionMode::Direct)
+        .send()
+        .await
+        .unwrap();
+    let by_mode = by_mode.distribution_list().unwrap();
+    assert_eq!(by_mode.quantity(), 1);
+    assert_eq!(by_mode.items()[0].id(), dist.id());
 }

@@ -4984,7 +4984,8 @@ mod tests {
                     }
                 }],
                 "DefaultCacheBehavior": {
-                    "TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all"
+                    "TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
+                    "ForwardedValues": {"QueryString": false}
                 }
             }})
         };
@@ -5036,7 +5037,8 @@ mod tests {
                     "Origins": [{"Id": "o1", "DomainName": "ex.com",
                         "CustomOriginConfig": {"HTTPPort": 80, "HTTPSPort": 443,
                             "OriginProtocolPolicy": "http-only"}}],
-                    "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all"},
+                    "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
+                                             "ForwardedValues": {"QueryString": false}},
                     "CustomErrorResponses": [{"ErrorCode": 404, "ResponseCode": "200",
                         "ResponsePagePath": "/index.html"}],
                     "Logging": {"Bucket": "logs.s3.amazonaws.com", "IncludeCookies": true, "Prefix": "cf/"},

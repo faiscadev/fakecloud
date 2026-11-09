@@ -151,6 +151,8 @@ fn spa_config(
                         .unwrap(),
                 )
                 .min_ttl(0)
+                .default_ttl(86_400)
+                .max_ttl(31_536_000)
                 .build()
                 .unwrap(),
         );
@@ -198,6 +200,8 @@ fn spa_config(
                         .unwrap(),
                 )
                 .min_ttl(0)
+                .default_ttl(86_400)
+                .max_ttl(31_536_000)
                 .build()
                 .unwrap(),
         );

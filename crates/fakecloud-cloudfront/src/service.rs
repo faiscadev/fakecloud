@@ -23,7 +23,7 @@ use crate::state::{
     CloudFrontAccounts, CloudFrontSnapshot, DomainOwner, SharedCloudFrontState, StoredDistribution,
     StoredInvalidation, Tag, CLOUDFRONT_SNAPSHOT_SCHEMA_VERSION,
 };
-use crate::validate::validate_distribution_config;
+use crate::validate::{canonicalize_distribution_config, validate_copy, ConfigRequest};
 use crate::xml_io;
 
 /// CloudFront mutating actions share these prefixes; everything else
@@ -700,9 +700,7 @@ impl CloudFrontService {
             (parsed, Vec::new())
         };
 
-        config.ensure_aws_defaults();
-
-        validate_distribution_config(&config)?;
+        canonicalize_distribution_config(&mut config, ConfigRequest::Create)?;
 
         let mut state = self.state.write();
         reject_domains_in_use(&state, config_aliases(&config), DomainOwner::New)?;
@@ -945,8 +943,7 @@ impl CloudFrontService {
             .to_string();
         let mut new_config: DistributionConfig = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid DistributionConfig XML: {e}")))?;
-        new_config.ensure_aws_defaults();
-        validate_distribution_config(&new_config)?;
+        canonicalize_distribution_config(&mut new_config, ConfigRequest::Update)?;
 
         let mut state = self.state.write();
         if state
@@ -1137,9 +1134,9 @@ impl CloudFrontService {
         }
 
         // The "by-X" listings each have a distinct response root element.
-        // For the seven predicate ops whose match field is persisted on the
+        // For the eight predicate ops whose match field is persisted on the
         // distribution config we filter the live state; the remaining ops
-        // (owned-resource, connection-mode/function, trust-store,
+        // (owned-resource, connection-function, trust-store,
         // realtime-log-config) are not yet indexed and stay empty.
         let root = match action {
             "ListDistributionsByCachePolicyId"
@@ -1203,6 +1200,12 @@ impl CloudFrontService {
                 .into_iter()
                 .filter(|d| d.config.anycast_ip_list_id.as_deref() == Some(path_id))
                 .collect(),
+            // A standard distribution has no `ConnectionMode` in its config; its
+            // summary reports `direct`.
+            "ListDistributionsByConnectionMode" => all
+                .into_iter()
+                .filter(|d| d.config.connection_mode.as_deref().unwrap_or("direct") == path_id)
+                .collect(),
             _ => Vec::new(),
         };
 
@@ -1216,7 +1219,9 @@ impl CloudFrontService {
         } else if root == "DistributionList"
             && matches!(
                 action,
-                "ListDistributionsByWebACLId" | "ListDistributionsByAnycastIpListId"
+                "ListDistributionsByWebACLId"
+                    | "ListDistributionsByAnycastIpListId"
+                    | "ListDistributionsByConnectionMode"
             )
         {
             build_distribution_list_xml(
@@ -1289,6 +1294,7 @@ impl CloudFrontService {
                 "If-Match header does not match the current ETag",
             ));
         }
+        validate_copy(&primary.config, staging)?;
         if account
             .distributions
             .values()
@@ -1895,6 +1901,7 @@ fn build_distribution_list_xml(
             rfc3339(&d.last_modified_time)
         ));
         out.push_str(&format!("<DomainName>{}</DomainName>", esc(&d.domain_name)));
+        let multi_tenant = d.config.connection_mode.as_deref() == Some("tenant-only");
         let aliases = d.config.aliases.clone().unwrap_or_default();
         out.push_str(&render_inline("Aliases", &aliases));
         let origins = d.config.origins.clone();
@@ -1931,23 +1938,24 @@ fn build_distribution_list_xml(
         ));
         out.push_str(&format!(
             "<HttpVersion>{}</HttpVersion>",
-            esc(&d
-                .config
-                .http_version
-                .clone()
-                .unwrap_or_else(|| "http2".to_string()))
+            esc(summary_http_version(
+                d.config.http_version.as_deref().unwrap_or("http2")
+            ))
         ));
+        // Recorded from real AWS on 2026-11-09: a multi-tenant summary reports the
+        // members its config leaves out as IPv6 off and not staging.
         out.push_str(&format!(
             "<IsIPV6Enabled>{}</IsIPV6Enabled>",
-            d.config.is_ipv6_enabled.unwrap_or(true)
+            d.config.is_ipv6_enabled.unwrap_or(!multi_tenant)
         ));
         out.push_str(&format!(
             "<Staging>{}</Staging>",
             d.config.staging.unwrap_or(false)
         ));
-        if let Some(mode) = &d.config.connection_mode {
-            out.push_str(&format!("<ConnectionMode>{}</ConnectionMode>", esc(mode)));
-        }
+        out.push_str(&format!(
+            "<ConnectionMode>{}</ConnectionMode>",
+            esc(d.config.connection_mode.as_deref().unwrap_or("direct"))
+        ));
         if let Some(list) = &d.config.anycast_ip_list_id {
             out.push_str(&format!("<AnycastIpListId>{}</AnycastIpListId>", esc(list)));
         }
@@ -1962,6 +1970,19 @@ fn build_distribution_list_xml(
     out.push_str("</Items>");
     out.push_str(&format!("</{root}>"));
     out
+}
+
+/// A summary spells `HttpVersion` in enum case where the config has it lower
+/// case. Recorded from real AWS on 2026-11-09, except `http3`, which follows the
+/// others.
+fn summary_http_version(config_value: &str) -> &str {
+    match config_value {
+        "http1.1" => "HTTP1_1",
+        "http2" => "HTTP2",
+        "http3" => "HTTP3",
+        "http2and3" => "HTTP2and3",
+        other => other,
+    }
 }
 
 fn build_empty_distribution_id_list(root: &str) -> String {
@@ -2512,6 +2533,12 @@ mod tests {
         }
     }
 
+    /// Complete, so a config using them passes `UpdateDistribution` as well as
+    /// `CreateDistribution`.
+    const LEGACY_CACHE_SETTINGS: &str = "<ForwardedValues><QueryString>false</QueryString>\
+        <Cookies><Forward>none</Forward></Cookies></ForwardedValues>\
+        <MinTTL>0</MinTTL><DefaultTTL>86400</DefaultTTL><MaxTTL>31536000</MaxTTL>";
+
     fn minimal_dist_config_xml(caller_ref: &str) -> String {
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -2529,6 +2556,7 @@ mod tests {
   <DefaultCacheBehavior>
     <TargetOriginId>primary</TargetOriginId>
     <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+    {LEGACY_CACHE_SETTINGS}
   </DefaultCacheBehavior>
   <Comment></Comment>
   <Enabled>true</Enabled>
@@ -2629,6 +2657,7 @@ mod tests {
             "",
             "<CopyDistributionRequest><CallerReference>canon-copy</CallerReference></CopyDistributionRequest>",
         );
+        copy.headers.insert("Staging", "true".parse().unwrap());
         copy.headers.insert(
             IF_MATCH,
             http::HeaderValue::from_str(&etag_of(&create)).unwrap(),
@@ -2736,31 +2765,54 @@ mod tests {
             .unwrap();
         let id = id_in(&create);
         let etag = etag_of(&create);
-        for (caller_ref, header, body_extra, expected) in [
-            ("copy-true", Some("true"), "", true),
+        for (caller_ref, header) in [
+            ("copy-true", "true"),
             // The API reference spells the value `True`.
-            ("copy-title", Some("True"), "", true),
-            ("copy-false", Some("false"), "", false),
-            ("copy-none", None, "", false),
+            ("copy-title", "True"),
+        ] {
+            let mut copy = copy_request(&id, &etag, caller_ref, "");
+            copy.headers.insert("Staging", header.parse().unwrap());
+            let copied = svc.handle(copy).await.unwrap();
+            let body = std::str::from_utf8(copied.body.expect_bytes()).unwrap();
+            assert!(
+                body.contains("<Staging>true</Staging>"),
+                "{caller_ref}: {body}"
+            );
+        }
+        for (caller_ref, header, body_extra) in [
+            ("copy-false", Some("false"), ""),
+            ("copy-none", None, ""),
             // `Staging` is not a member of the request body.
-            ("copy-body", None, "<Staging>true</Staging>", false),
+            ("copy-body", None, "<Staging>true</Staging>"),
         ] {
             let mut copy = copy_request(&id, &etag, caller_ref, body_extra);
             if let Some(header) = header {
                 copy.headers.insert("Staging", header.parse().unwrap());
             }
-            let copied = svc.handle(copy).await.unwrap();
-            let body = std::str::from_utf8(copied.body.expect_bytes()).unwrap();
-            assert!(
-                body.contains(&format!("<Staging>{expected}</Staging>")),
-                "{caller_ref}: {body}"
-            );
+            let err = svc.handle(copy).await.err().expect("refused");
+            assert_eq!(err.message(), "Your request must specify Staging as true.");
         }
 
         let mut copy = copy_request(&id, &etag, "copy-bad", "");
         copy.headers.insert("Staging", "maybe".parse().unwrap());
         let err = svc.handle(copy).await.err().expect("invalid Staging");
         assert_eq!(err.code(), "InvalidArgument");
+    }
+
+    fn tenant_only_config_xml(caller_ref: &str) -> String {
+        minimal_dist_config_xml(caller_ref)
+            .replace(
+                LEGACY_CACHE_SETTINGS,
+                "<CachePolicyId>658327ea-f89d-4fab-a63d-7e88639e58f6</CachePolicyId>",
+            )
+            .replace(
+                "<Enabled>true</Enabled>",
+                "<Enabled>true</Enabled><ConnectionMode>tenant-only</ConnectionMode>",
+            )
+    }
+
+    fn create_request(body: &str) -> AwsRequest {
+        make_request(http::Method::POST, "/2020-05-31/distribution", "", body)
     }
 
     /// `DistributionSummary` requires these members with no carve-out for a
@@ -2774,10 +2826,7 @@ mod tests {
                 http::Method::POST,
                 "/2020-05-31/distribution",
                 "",
-                &minimal_dist_config_xml("summary-tenant").replace(
-                    "<Enabled>true</Enabled>",
-                    "<Enabled>true</Enabled><ConnectionMode>tenant-only</ConnectionMode>",
-                ),
+                &tenant_only_config_xml("summary-tenant"),
             ))
             .await
             .unwrap();
@@ -2792,9 +2841,22 @@ mod tests {
             .await
             .unwrap();
         let config = std::str::from_utf8(config.body.expect_bytes()).unwrap();
-        for absent in ["<Aliases>", "<PriceClass>", "<IsIPV6Enabled>", "<Staging>"] {
+        for absent in [
+            "<Aliases>",
+            "<PriceClass>",
+            "<IsIPV6Enabled>",
+            "<Staging>",
+            "<ContinuousDeploymentPolicyId>",
+            "<TrustedSigners>",
+            "<SmoothStreaming>",
+            "<MinTTL>",
+        ] {
             assert!(!config.contains(absent), "{absent} in {config}");
         }
+        assert!(
+            config.contains("<HttpVersion>http2</HttpVersion>"),
+            "{config}"
+        );
 
         let list = svc
             .handle(make_request(
@@ -2830,6 +2892,129 @@ mod tests {
         ] {
             assert!(body.contains(&format!("<{member}>")), "{member} in {body}");
         }
+        // The values, recorded from real AWS on 2026-11-09.
+        for tag in [
+            "<Aliases><Quantity>0</Quantity></Aliases>",
+            "<PriceClass>PriceClass_All</PriceClass>",
+            "<WebACLId></WebACLId>",
+            "<HttpVersion>HTTP2</HttpVersion>",
+            "<IsIPV6Enabled>false</IsIPV6Enabled>",
+            "<Staging>false</Staging>",
+            "<ConnectionMode>tenant-only</ConnectionMode>",
+            "<ETag>",
+        ] {
+            assert!(body.contains(tag), "missing {tag} in {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn listing_by_connection_mode_counts_a_standard_distribution_as_direct() {
+        let svc = CloudFrontService::new(make_state());
+        svc.handle(create_request(&minimal_dist_config_xml("mode-std")))
+            .await
+            .unwrap();
+        svc.handle(create_request(&tenant_only_config_xml("mode-tenant")))
+            .await
+            .unwrap();
+        for (mode, expected) in [("direct", "mode-std"), ("tenant-only", "mode-tenant")] {
+            let list = svc
+                .handle(make_request(
+                    http::Method::GET,
+                    &format!("/2020-05-31/distributionsByConnectionMode/{mode}"),
+                    "",
+                    "",
+                ))
+                .await
+                .unwrap();
+            let body = std::str::from_utf8(list.body.expect_bytes()).unwrap();
+            assert!(body.contains("<Quantity>1</Quantity>"), "{body}");
+            assert!(
+                body.contains(&format!("<ConnectionMode>{mode}</ConnectionMode>")),
+                "{expected}: {body}"
+            );
+        }
+    }
+
+    /// Each door refuses alike: a door that skipped the pre-default check could
+    /// never see the omission, because the defaults would have filled it in.
+    #[tokio::test]
+    async fn every_door_refuses_a_config_without_min_ttl() {
+        let svc = CloudFrontService::new(make_state());
+        let sparse = |r: &str| {
+            minimal_dist_config_xml(r).replace(
+                "<MinTTL>0</MinTTL><DefaultTTL>86400</DefaultTTL><MaxTTL>31536000</MaxTTL>",
+                "",
+            )
+        };
+        let message = "The parameter MinTTL is required.";
+
+        let err = svc
+            .handle(create_request(&sparse("door-create")))
+            .await
+            .err()
+            .expect("CreateDistribution refuses");
+        assert_eq!(
+            (err.code(), err.message().as_str()),
+            ("InvalidArgument", message)
+        );
+
+        let inner = sparse("door-tags").replace(r#"<?xml version="1.0" encoding="UTF-8"?>"#, "");
+        let err = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "WithTags",
+                &format!(
+                    "<DistributionConfigWithTags>{inner}<Tags><Items/></Tags></DistributionConfigWithTags>"
+                ),
+            ))
+            .await
+            .err()
+            .expect("CreateDistributionWithTags refuses");
+        assert_eq!(
+            (err.code(), err.message().as_str()),
+            ("InvalidArgument", message)
+        );
+
+        let create = svc
+            .handle(create_request(&minimal_dist_config_xml("door-update")))
+            .await
+            .unwrap();
+        let id = id_in(&create);
+        let mut update = make_request(
+            http::Method::PUT,
+            &format!("/2020-05-31/distribution/{id}/config"),
+            "",
+            &sparse("door-update"),
+        );
+        update
+            .headers
+            .insert(IF_MATCH, etag_of(&create).parse().unwrap());
+        let err = svc
+            .handle(update)
+            .await
+            .err()
+            .expect("UpdateDistribution refuses");
+        assert_eq!(
+            (err.code(), err.message().as_str()),
+            ("InvalidArgument", message)
+        );
+    }
+
+    #[tokio::test]
+    async fn copying_a_multi_tenant_distribution_is_refused() {
+        let svc = CloudFrontService::new(make_state());
+        let create = svc
+            .handle(create_request(&tenant_only_config_xml("copy-tenant")))
+            .await
+            .unwrap();
+        let mut copy = copy_request(&id_in(&create), &etag_of(&create), "copy-tenant-2", "");
+        copy.headers.insert("Staging", "true".parse().unwrap());
+        let err = svc.handle(copy).await.err().expect("refused");
+        assert_eq!(
+            err.message(),
+            "You can't enable continuous deployment for a multi-tenant distribution."
+        );
     }
 
     #[test]
@@ -2869,8 +3054,9 @@ mod tests {
             "<CertificateSource>cloudfront</CertificateSource>".to_string(),
             "<RestrictionType>none</RestrictionType>".to_string(),
             "<PriceClass>PriceClass_All</PriceClass>".to_string(),
-            "<HttpVersion>http2</HttpVersion>".to_string(),
+            "<HttpVersion>HTTP2</HttpVersion>".to_string(),
             "<IsIPV6Enabled>true</IsIPV6Enabled>".to_string(),
+            "<ConnectionMode>direct</ConnectionMode>".to_string(),
             format!("<ETag>{}</ETag>", etag_of(&create)),
         ] {
             assert!(body.contains(&tag), "missing {tag} in {body}");
