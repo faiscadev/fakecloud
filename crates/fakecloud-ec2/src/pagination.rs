@@ -865,12 +865,15 @@ mod dispatch_tests {
                 }
                 let xml = ok(&svc, action, &request).await;
                 let page = names(&xml);
-                assert!(page.len() <= size.parse().unwrap(), "{action}");
+                let size: usize = size.parse().unwrap();
+                assert!(page.len() <= size, "{action}");
+                let page_len = page.len();
                 walked.extend(page);
                 token = next_token(&xml);
                 if token.is_none() {
                     break;
                 }
+                assert_eq!(page_len, size, "{action}: a short page with a token");
             }
             assert_eq!(walked, full, "{action}");
         }

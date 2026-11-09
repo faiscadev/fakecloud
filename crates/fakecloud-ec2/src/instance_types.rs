@@ -173,6 +173,12 @@ impl InstanceTypeSpec {
         classes
     }
 
+    /// `ipv6AddressesPerInterface`: known only to be 0 on a type known to have no
+    /// IPv6. The dataset has no limit for the others.
+    pub(crate) fn ipv6_addresses_per_interface(&self) -> Option<u32> {
+        (self.ipv6_supported == Some(false)).then_some(0)
+    }
+
     /// The values `filter` compares against on this type, `None` when the
     /// catalog has no data behind that filter. An empty list never matches: the
     /// attribute is absent from this type, or unknown for it.
@@ -217,6 +223,9 @@ impl InstanceTypeSpec {
             }
             "network-info.ena-support" => known(self.ena_support.as_ref()),
             "network-info.ipv4-addresses-per-interface" => known(self.ipv4_per_interface),
+            "network-info.ipv6-addresses-per-interface" => {
+                known(self.ipv6_addresses_per_interface())
+            }
             "network-info.ipv6-supported" => known(self.ipv6_supported),
             "network-info.maximum-network-interfaces" => known(self.max_network_interfaces),
             "network-info.network-performance" => one(&self.network_performance),
@@ -378,6 +387,12 @@ mod tests {
         let inf = spec("inf1.xlarge").accelerator.as_ref().unwrap();
         assert_eq!((inf.kind.as_str(), inf.count), ("inference", None));
         assert!(spec("m5.large").accelerator.is_none());
+        // The dataset files DL1 under ASICs and has nothing else about it.
+        let dl1 = spec("dl1.24xlarge").accelerator.as_ref().unwrap();
+        assert_eq!(dl1.kind, "gpu");
+        assert_eq!(dl1.manufacturer.as_deref(), Some("habana"));
+        assert_eq!(dl1.name.as_deref(), Some("gaudi-hl-205"));
+        assert_eq!((dl1.count, dl1.total_memory_mib), (None, None));
     }
 
     #[test]

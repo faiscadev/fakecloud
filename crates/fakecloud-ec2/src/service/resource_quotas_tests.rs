@@ -1093,6 +1093,138 @@ fn requirements_validate_their_lists() {
 }
 
 #[test]
+fn requirements_refuse_a_bound_they_cannot_parse() {
+    let run = |extra: &[(&str, &str)]| {
+        let mut all = vec![
+            ("ArchitectureType.1", "x86_64"),
+            ("VirtualizationType.1", "hvm"),
+        ];
+        all.extend_from_slice(extra);
+        instance::get_instance_types_from_requirements(
+            &Ec2Service::new(),
+            &req("GetInstanceTypesFromInstanceRequirements", &all),
+        )
+    };
+    let vcpu = ("InstanceRequirements.VCpuCount.Min", "1");
+    let mem = ("InstanceRequirements.MemoryMiB.Min", "1");
+    for (member, value) in [
+        ("InstanceRequirements.VCpuCount.Min", "oops"),
+        ("InstanceRequirements.VCpuCount.Max", "2.5"),
+        ("InstanceRequirements.MemoryMiB.Max", "99999999999"),
+        ("InstanceRequirements.NetworkInterfaceCount.Min", "1.5"),
+        ("InstanceRequirements.BaselineEbsBandwidthMbps.Max", "x"),
+        ("InstanceRequirements.AcceleratorCount.Min", "1.5"),
+        ("InstanceRequirements.AcceleratorTotalMemoryMiB.Max", "x"),
+        ("InstanceRequirements.MemoryGiBPerVCpu.Min", "oops"),
+        ("InstanceRequirements.TotalLocalStorageGB.Max", "NaN"),
+        ("InstanceRequirements.NetworkBandwidthGbps.Min", "inf"),
+    ] {
+        let params = if member.ends_with("VCpuCount.Min") {
+            vec![mem, (member, value)]
+        } else {
+            vec![vcpu, mem, (member, value)]
+        };
+        assert_eq!(
+            code(run(&params)),
+            "InvalidParameterValue",
+            "{member}={value}"
+        );
+    }
+    // The double members take fractions, and an integer form of them.
+    for (member, value) in [
+        ("InstanceRequirements.MemoryGiBPerVCpu.Min", "0.5"),
+        ("InstanceRequirements.TotalLocalStorageGB.Min", "1"),
+        ("InstanceRequirements.NetworkBandwidthGbps.Max", "12.5"),
+    ] {
+        assert!(run(&[vcpu, mem, (member, value)]).is_ok(), "{member}");
+    }
+}
+
+#[test]
+fn a_local_storage_type_needs_a_disk_of_that_type() {
+    let ssd = types_from_requirements(&[("InstanceRequirements.LocalStorageType.1", "ssd")]);
+    assert!(ssd.contains(&"i3.large".to_string()));
+    assert!(!ssd.contains(&"d3.xlarge".to_string()), "hdd");
+    assert!(!ssd.contains(&"m5.large".to_string()), "known diskless");
+    assert!(!ssd.contains(&"p3.8xlarge".to_string()), "unknown storage");
+    let hdd = types_from_requirements(&[("InstanceRequirements.LocalStorageType.1", "hdd")]);
+    assert!(hdd.contains(&"d3.xlarge".to_string()));
+    assert!(!hdd.contains(&"m5.large".to_string()), "known diskless");
+    // With no list asked for, a type without disks is still in.
+    assert!(types_from_requirements(&[]).contains(&"m5.large".to_string()));
+}
+
+#[test]
+fn requirements_max_results_must_make_progress() {
+    let run = |size: &str| {
+        instance::get_instance_types_from_requirements(
+            &Ec2Service::new(),
+            &req(
+                "GetInstanceTypesFromInstanceRequirements",
+                &[
+                    ("ArchitectureType.1", "x86_64"),
+                    ("VirtualizationType.1", "hvm"),
+                    ("InstanceRequirements.VCpuCount.Min", "1"),
+                    ("InstanceRequirements.MemoryMiB.Min", "1"),
+                    ("MaxResults", size),
+                ],
+            ),
+        )
+    };
+    for bad in ["0", "-1", "2147483648"] {
+        assert_eq!(code(run(bad)), "InvalidParameterValue", "{bad}");
+    }
+    assert_eq!(items_of(&body(run("1"))).len(), 1);
+}
+
+#[test]
+fn dl1_counts_as_a_habana_gpu_not_an_inference_chip() {
+    let has =
+        |params: &[(&str, &str)], t: &str| types_from_requirements(params).contains(&t.to_string());
+    let dl1 = "dl1.24xlarge";
+    assert!(has(
+        &[("InstanceRequirements.AcceleratorType.1", "gpu")],
+        dl1
+    ));
+    assert!(!has(
+        &[("InstanceRequirements.AcceleratorType.1", "inference")],
+        dl1
+    ));
+    assert!(has(
+        &[("InstanceRequirements.AcceleratorManufacturer.1", "habana")],
+        dl1
+    ));
+    assert!(has(
+        &[("InstanceRequirements.AcceleratorName.1", "gaudi-hl-205")],
+        dl1
+    ));
+}
+
+#[test]
+fn ipv6_addresses_per_interface_filters_on_the_reported_zero() {
+    let names = |value: &str| {
+        items_of(&describe_types(&[
+            ("Filter.1.Name", "network-info.ipv6-addresses-per-interface"),
+            ("Filter.1.Value.1", value),
+        ]))
+    };
+    let zero = names("0");
+    assert!(zero.contains(&"c1.medium".to_string()), "{zero:?}");
+    assert!(!zero.contains(&"m7g.large".to_string()), "{zero:?}");
+    assert!(!zero.contains(&"p3.8xlarge".to_string()), "{zero:?}");
+    // What the response says, the filter finds.
+    for name in &zero {
+        let one = describe_types(&[("InstanceType.1", name)]);
+        assert!(
+            one.contains("<ipv6AddressesPerInterface>0<"),
+            "{name}: {one}"
+        );
+    }
+    // Any other limit is not in the data, so it matches nothing.
+    assert!(names("15").is_empty());
+}
+
+#[test]
 fn requirements_with_no_data_are_accepted_without_narrowing() {
     let base = types_from_requirements(&[]);
     for param in [
@@ -1210,7 +1342,15 @@ fn instance_type_offerings_follow_the_catalog() {
     assert_eq!(items_of(&one), ["m7g.large"], "{one}");
     assert!(one.contains("<locationType>availability-zone</locationType>"));
     assert!(one.contains("b</location>"), "{one}");
+    // An account here has no Outposts, so none of them offers anything.
     assert!(items_of(&offerings(&[("LocationType", "outpost")])).is_empty());
+    // An empty value is absent, as `validate_enum` treats it: the default.
+    let empty = offerings(&[("LocationType", "")]);
+    assert_eq!(items_of(&empty), items_of(&in_region));
+    assert!(
+        empty.contains("<locationType>region</locationType>"),
+        "{empty}"
+    );
     let r = crate::service::rest::describe_instance_type_offerings(
         &Ec2Service::new(),
         &req(

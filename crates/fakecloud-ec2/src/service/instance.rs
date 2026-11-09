@@ -2599,8 +2599,7 @@ fn ebs_info_xml(spec: &InstanceTypeSpec) -> String {
     )
 }
 
-/// Exists for every type, see [`ebs_info_xml`]. `ipv6AddressesPerInterface` is
-/// known only to be 0 on a type known to have no IPv6.
+/// Exists for every type, see [`ebs_info_xml`].
 fn network_info_xml(spec: &InstanceTypeSpec) -> String {
     format!(
         "<networkInfo>{}{}{}{}{}{}</networkInfo>",
@@ -2609,7 +2608,7 @@ fn network_info_xml(spec: &InstanceTypeSpec) -> String {
         known_elem("ipv4AddressesPerInterface", spec.ipv4_per_interface),
         known_elem(
             "ipv6AddressesPerInterface",
-            (spec.ipv6_supported == Some(false)).then_some(0),
+            spec.ipv6_addresses_per_interface(),
         ),
         known_elem("ipv6Supported", spec.ipv6_supported),
         known_elem("enaSupport", spec.ena_support.as_ref()),
@@ -2735,14 +2734,33 @@ pub(crate) fn describe_instance_types(
     ))
 }
 
-/// A `Min` / `Max` request member, each side optional.
-fn requirement_range(params: &HashMap<String, String>, member: &str) -> (Option<f64>, Option<f64>) {
+/// A bound of an `Integer` request member.
+fn integer_bound(value: &str) -> Option<f64> {
+    value.parse::<i32>().ok().map(f64::from)
+}
+
+/// A bound of a `Double` request member. No range compares against NaN or infinity.
+fn double_bound(value: &str) -> Option<f64> {
+    value.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// A `Min` / `Max` request member, each side optional. A side that was supplied
+/// and does not parse as the member's type is refused, not read as no constraint.
+fn requirement_range(
+    params: &HashMap<String, String>,
+    member: &str,
+    parse_bound: fn(&str) -> Option<f64>,
+) -> Result<(Option<f64>, Option<f64>), AwsServiceError> {
     let side = |name: &str| {
-        params
-            .get(&format!("InstanceRequirements.{member}.{name}"))
-            .and_then(|v| v.parse().ok())
+        let key = format!("InstanceRequirements.{member}.{name}");
+        match params.get(&key).filter(|v| !v.is_empty()) {
+            None => Ok(None),
+            Some(v) => parse_bound(v).map(Some).ok_or_else(|| {
+                invalid_parameter_value(format!("Value ({v}) for parameter {key} is invalid"))
+            }),
+        }
     };
-    (side("Min"), side("Max"))
+    Ok((side("Min")?, side("Max")?))
 }
 
 /// Within the range. A range was asked for and the value is unknown: no match.
@@ -2848,15 +2866,27 @@ impl InstanceRequirementsQuery {
         Ok(Self {
             architectures,
             virtualization_types,
-            vcpus: requirement_range(params, "VCpuCount"),
-            memory_mib: requirement_range(params, "MemoryMiB"),
-            memory_gib_per_vcpu: requirement_range(params, "MemoryGiBPerVCpu"),
-            network_interfaces: requirement_range(params, "NetworkInterfaceCount"),
-            local_storage_gb: requirement_range(params, "TotalLocalStorageGB"),
-            ebs_bandwidth_mbps: requirement_range(params, "BaselineEbsBandwidthMbps"),
-            network_bandwidth_gbps: requirement_range(params, "NetworkBandwidthGbps"),
-            accelerator_count: requirement_range(params, "AcceleratorCount"),
-            accelerator_memory_mib: requirement_range(params, "AcceleratorTotalMemoryMiB"),
+            vcpus: requirement_range(params, "VCpuCount", integer_bound)?,
+            memory_mib: requirement_range(params, "MemoryMiB", integer_bound)?,
+            memory_gib_per_vcpu: requirement_range(params, "MemoryGiBPerVCpu", double_bound)?,
+            network_interfaces: requirement_range(params, "NetworkInterfaceCount", integer_bound)?,
+            local_storage_gb: requirement_range(params, "TotalLocalStorageGB", double_bound)?,
+            ebs_bandwidth_mbps: requirement_range(
+                params,
+                "BaselineEbsBandwidthMbps",
+                integer_bound,
+            )?,
+            network_bandwidth_gbps: requirement_range(
+                params,
+                "NetworkBandwidthGbps",
+                double_bound,
+            )?,
+            accelerator_count: requirement_range(params, "AcceleratorCount", integer_bound)?,
+            accelerator_memory_mib: requirement_range(
+                params,
+                "AcceleratorTotalMemoryMiB",
+                integer_bound,
+            )?,
             accelerator_types: enum_list(
                 "AcceleratorType",
                 &["gpu", "fpga", "inference", "media"],
@@ -2986,7 +3016,10 @@ impl InstanceRequirementsQuery {
             && any_of(&self.generations, Some(generation))
             && (self.allowed_types.is_empty() || type_listed(&self.allowed_types))
             && !type_listed(&self.excluded_types)
-            && storage.is_none_or(|s| any_of(&self.local_storage_types, Some(&s.disk_type)))
+            && any_of(
+                &self.local_storage_types,
+                storage.map(|s| s.disk_type.as_str()),
+            )
             && inclusion_matches(&self.bare_metal, Some(t.bare_metal))
             && inclusion_matches(&self.burstable, Some(t.burstable))
             && inclusion_matches(&self.local_storage, t.instance_storage_supported)
@@ -3004,6 +3037,9 @@ pub(crate) fn get_instance_types_from_requirements(
     _svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    // The model bounds this one only by its Integer type. Below 1, a page would
+    // hold nothing and its token would lead back to itself.
+    crate::service_helpers::validate_max_results(&req.query_params, 1, i64::from(i32::MAX))?;
     require_struct(&req.query_params, "InstanceRequirements")?;
     let query = InstanceRequirementsQuery::parse(&req.query_params)?;
     let region = request_region(req);

@@ -4,10 +4,12 @@
 
 mod helpers;
 
+use aws_sdk_ec2::types::builders::InstanceRequirementsRequestBuilder;
 use aws_sdk_ec2::types::{
-    ArchitectureType, EbsOptimizedSupport, Filter, InstanceTypeHypervisor, InstanceTypeInfo,
-    LocationType, MemoryMiBRequest, PlacementGroupStrategy, VCpuCountRangeRequest,
-    VirtualizationType,
+    AcceleratorManufacturer, AcceleratorName, AcceleratorType, ArchitectureType, CpuManufacturer,
+    EbsOptimizedSupport, Filter, InstanceGeneration, InstanceRequirementsRequest,
+    InstanceTypeHypervisor, InstanceTypeInfo, LocalStorageType, LocationType, MemoryMiBRequest,
+    PlacementGroupStrategy, TotalLocalStorageGbRequest, VCpuCountRangeRequest, VirtualizationType,
 };
 use helpers::TestServer;
 
@@ -185,6 +187,7 @@ async fn unknown_and_unsupported_filters_are_rejected() {
         .expect_err("unsupported filter should fail");
     let text = format!("{err:?}");
     assert!(text.contains("network-info.efa-supported"), "{text}");
+    assert!(text.contains("UnsupportedOperation"), "{text}");
 }
 
 #[tokio::test]
@@ -325,6 +328,118 @@ async fn get_instance_types_from_requirements_evaluates_the_catalog() {
     assert!(names.contains(&"m7g.large".to_string()), "{names:?}");
     assert!(!names.contains(&"m5.large".to_string()), "{names:?}");
     assert!(!names.contains(&"t3.large".to_string()), "{names:?}");
+}
+
+/// Every type the real SDK's serialization of `requirements` matches, on top of
+/// the members EC2 requires.
+async fn from_requirements(
+    c: &aws_sdk_ec2::Client,
+    requirements: InstanceRequirementsRequestBuilder,
+) -> Vec<String> {
+    let requirements: InstanceRequirementsRequest = requirements
+        .v_cpu_count(VCpuCountRangeRequest::builder().min(1).build())
+        .memory_mib(MemoryMiBRequest::builder().min(1).build())
+        .build();
+    let mut pages = c
+        .get_instance_types_from_instance_requirements()
+        .architecture_types(ArchitectureType::X8664)
+        .architecture_types(ArchitectureType::Arm64)
+        .virtualization_types(VirtualizationType::Hvm)
+        .virtualization_types(VirtualizationType::Paravirtual)
+        .instance_requirements(requirements)
+        .into_paginator()
+        .send();
+    let mut names = Vec::new();
+    while let Some(page) = pages.next().await {
+        for t in page.unwrap().instance_types() {
+            names.push(t.instance_type().unwrap().to_string());
+        }
+    }
+    names
+}
+
+/// Each nested list reaches the handler under the name the SDK really sends, so
+/// it narrows the result: `in_` must stay listed and `out` must not.
+#[tokio::test]
+async fn the_sdks_nested_requirement_lists_are_honored() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let builder = InstanceRequirementsRequest::builder;
+
+    let cases: Vec<(&str, InstanceRequirementsRequestBuilder, &str, &str)> = vec![
+        (
+            "AcceleratorTypes",
+            builder().accelerator_types(AcceleratorType::Gpu),
+            "g4dn.xlarge",
+            "inf1.xlarge",
+        ),
+        (
+            "AcceleratorManufacturers",
+            builder().accelerator_manufacturers(AcceleratorManufacturer::Nvidia),
+            "g4dn.xlarge",
+            "g4ad.xlarge",
+        ),
+        (
+            "AcceleratorNames",
+            builder().accelerator_names(AcceleratorName::T4),
+            "g4dn.xlarge",
+            "g5.xlarge",
+        ),
+        (
+            "CpuManufacturers",
+            builder().cpu_manufacturers(CpuManufacturer::AmazonWebServices),
+            "m7g.large",
+            "m5.large",
+        ),
+        (
+            "InstanceGenerations",
+            builder().instance_generations(InstanceGeneration::Previous),
+            "c1.medium",
+            "m5.large",
+        ),
+        (
+            "AllowedInstanceTypes",
+            builder().allowed_instance_types("m7g.*"),
+            "m7g.large",
+            "m5.large",
+        ),
+        (
+            "ExcludedInstanceTypes",
+            builder().excluded_instance_types("m5.*"),
+            "m7g.large",
+            "m5.large",
+        ),
+        (
+            "LocalStorageTypes",
+            builder().local_storage_types(LocalStorageType::Hdd),
+            "d3.xlarge",
+            "i3.large",
+        ),
+        (
+            "TotalLocalStorageGB",
+            builder()
+                .total_local_storage_gb(TotalLocalStorageGbRequest::builder().min(1000.0).build()),
+            "d3.xlarge",
+            "m7g.large",
+        ),
+    ];
+    let unconstrained = from_requirements(&c, builder()).await;
+    for (member, requirements, in_, out) in cases {
+        let names = from_requirements(&c, requirements).await;
+        assert!(names.contains(&in_.to_string()), "{member}: {in_}");
+        assert!(!names.contains(&out.to_string()), "{member}: {out}");
+        assert!(names.len() < unconstrained.len(), "{member}");
+    }
+    // Without the list, the excluded examples are all listed.
+    for name in [
+        "inf1.xlarge",
+        "g4ad.xlarge",
+        "g5.xlarge",
+        "m5.large",
+        "i3.large",
+    ] {
+        assert!(unconstrained.contains(&name.to_string()), "{name}");
+    }
 }
 
 #[tokio::test]

@@ -50,7 +50,10 @@ catalog (the server then omits the element) rather than invented:
                            GPU / FPGA the count, a fractional GPU counting as
                            the 1 device it shares; GPU_model the manufacturer
                            and name; GPU_memory the total. Inference chips have
-                           no count, name or memory in the data
+                           no count, name or memory in the data. The dataset
+                           files dl1 (Habana Gaudi HL-205, which the API documents
+                           as GPUs) under its ASIC family with nothing else, so
+                           FAMILY_ACCELERATORS corrects its type and names it
     virtualization_types   linux_virtualization_types; empty there means hvm
                            (only old types list a set)
     ipv6_per_interface     0 when IPv6 is unsupported; otherwise not in the data
@@ -95,6 +98,10 @@ ACCELERATOR_FAMILIES = {
     "Machine Learning ASIC Instances": "inference",
     "Media Accelerator Instances": "media",
 }
+# Instance families the dataset's own family misclassifies. Checked before it.
+FAMILY_ACCELERATORS = {
+    "dl1": {"type": "gpu", "manufacturer": "habana", "name": "gaudi-hl-205"},
+}
 # The dataset's model name -> the API's AcceleratorName, where they differ by
 # more than case.
 ACCELERATOR_NAMES = {
@@ -133,6 +140,9 @@ def usage_classes(pricing):
 
 
 def accelerator_of(raw):
+    known = FAMILY_ACCELERATORS.get(raw["instance_type"].split(".")[0])
+    if known:
+        return dict(known)
     gpus, fpgas = raw["GPU"], raw["FPGA"]
     kind = ACCELERATOR_FAMILIES.get(raw["family"])
     if kind is None:
@@ -293,7 +303,7 @@ def write(entries, path):
     buf = io.BytesIO()
     with gzip.GzipFile(filename="", mode="wb", fileobj=buf, mtime=0, compresslevel=9) as gz:
         gz.write(data)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "wb") as f:
         f.write(buf.getvalue())
     print(f"{len(entries)} types, {len(data)} bytes raw, {buf.tell()} gzipped: {path}")

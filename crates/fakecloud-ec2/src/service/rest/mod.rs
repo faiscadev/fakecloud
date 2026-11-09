@@ -1012,10 +1012,12 @@ pub(crate) fn describe_instance_type_offerings(
     let location_type = req
         .query_params
         .get("LocationType")
+        .filter(|v| !v.is_empty())
         .map_or("region", String::as_str);
     let region = crate::service::instance::request_region(req);
     // The catalog holds the Regions that sell each type, so every zone of such a
-    // Region is reported as offering it. An outpost has no catalog of its own.
+    // Region is reported as offering it. An account here has no Outposts (there is
+    // no such resource, and `DescribeLocalGateways` is empty), so none is listed.
     let locations: Vec<String> = match location_type {
         "region" => vec![region.to_string()],
         "availability-zone" => crate::defaults::region_zones(region)
