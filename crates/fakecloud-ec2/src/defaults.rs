@@ -549,11 +549,10 @@ fn default_acl_association(account: &str, region: &str, subnet_id: &str) -> Netw
 /// once: `default_subnets_backfilled` records that it ran (bootstrap sets it),
 /// so a subnet deleted afterwards is never recreated.
 ///
-/// A default VPC with no default subnet at all is a state from before they
-/// were seeded, and gets one in every zone. Otherwise the state is from a build
-/// that seeded the Region's first three zones, so only the zones past them are
-/// filled in: a missing subnet in one of the first three was deleted on
-/// purpose. Each subnet takes the CIDR the seeding gives its zone, and is
+/// Only a state whose default subnets all sit in the Region's first three
+/// zones, as the build that seeded three left it, is filled in, and only past
+/// them: a missing subnet in one of the first three was deleted on purpose.
+/// Each subnet takes the CIDR the seeding gives its zone, and is
 /// skipped when another subnet of the default VPC already overlaps it; it is
 /// associated with the VPC's main route table and default network ACL.
 pub(crate) fn backfill_default_subnets(state: &mut Ec2State) {
@@ -572,16 +571,23 @@ pub(crate) fn backfill_default_subnets(state: &mut Ec2State) {
         state.default_subnets_backfilled = true;
         return;
     };
-    let has_default_subnets = state
+    // Only the shape an older build left, default subnets in none but the
+    // first three zones, is filled in. None at all is ambiguous (a build from
+    // before seeding, or every one deleted on purpose), so nothing is
+    // recreated; CreateDefaultSubnet restores one, as on AWS.
+    let all_zones = region_zones(&region);
+    let first_three: Vec<&str> = all_zones.iter().take(3).map(|(z, _)| z.as_str()).collect();
+    let defaults: Vec<&str> = state
         .subnets
         .values()
-        .any(|s| s.vpc_id == vpc_id && s.default_for_az);
-    let skip = if has_default_subnets { 3 } else { 0 };
-    let zones: Vec<(usize, (String, String))> = region_zones(&region)
-        .into_iter()
-        .enumerate()
-        .skip(skip)
+        .filter(|s| s.vpc_id == vpc_id && s.default_for_az)
+        .map(|s| s.availability_zone.as_str())
         .collect();
+    if defaults.is_empty() || defaults.iter().any(|z| !first_three.contains(z)) {
+        state.default_subnets_backfilled = true;
+        return;
+    }
+    let zones: Vec<(usize, (String, String))> = all_zones.into_iter().enumerate().skip(3).collect();
     for (idx, (az, zone_id)) in zones {
         let subnet = default_subnet(&account, &region, &vpc_id, idx, az, zone_id);
         let taken = state.subnets.contains_key(&subnet.subnet_id)
@@ -1102,15 +1108,26 @@ mod tests {
     }
 
     #[test]
-    fn backfill_gives_a_state_without_default_subnets_every_zone() {
-        // From before default subnets were seeded at all.
+    fn backfill_leaves_a_state_without_default_subnets_alone() {
+        // Ambiguous: from before seeding, or every one deleted. Nothing is
+        // recreated; the marker is set.
         let mut state = Ec2State::new("123456789012", "us-east-1");
         state.default_subnets_backfilled = false;
         delete_default_subnets(&mut state, |_| true);
-        assert!(default_zones(&state).is_empty());
         backfill_default_subnets(&mut state);
-        let fresh = Ec2State::new("123456789012", "us-east-1");
-        assert_eq!(default_zones(&state), default_zones(&fresh));
+        assert!(default_zones(&state).is_empty());
+        assert!(state.default_subnets_backfilled);
+    }
+
+    #[test]
+    fn backfill_skips_a_state_with_a_later_zone_already() {
+        // Has a default subnet past the first three: not the old shape.
+        let mut state = Ec2State::new("123456789012", "us-east-1");
+        state.default_subnets_backfilled = false;
+        delete_default_subnets(&mut state, |z| z == "us-east-1e" || z == "us-east-1f");
+        let before = default_zones(&state);
+        backfill_default_subnets(&mut state);
+        assert_eq!(default_zones(&state), before);
         assert!(state.default_subnets_backfilled);
     }
 

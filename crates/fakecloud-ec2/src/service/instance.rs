@@ -1744,9 +1744,18 @@ fn default_launch_place(
             .map(|(zone, _)| zone)
             .collect();
         if !dry_run {
+            // No zone sells it: always refused, with the check's own message
+            // where it gives one.
             if let Some(zone) = zones.first() {
                 refuse_zone_not_selling(instance_type, region, zone, false)?;
             }
+            return Err(AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "Unsupported",
+                format!(
+                    "Your requested instance type ({instance_type}) is not supported in {region}."
+                ),
+            ));
         }
         selling = zones;
     }

@@ -64,11 +64,17 @@ pub struct AutoScalingService {
 }
 
 /// The Region's zones, in DescribeAvailabilityZones order.
+/// `{region}a` for a Region with no zones on record, never the bare name.
 fn region_zones(region: &str) -> Vec<String> {
-    fakecloud_aws::regions::availability_zone_letters(region)
+    let zones: Vec<String> = fakecloud_aws::regions::availability_zone_letters(region)
         .chars()
         .map(|letter| format!("{region}{letter}"))
-        .collect()
+        .collect();
+    if zones.is_empty() {
+        vec![format!("{region}a")]
+    } else {
+        zones
+    }
 }
 
 /// What a place's refusal of a launch is remembered by: the instance type,
@@ -785,9 +791,7 @@ impl AutoScalingService {
             self.validate_subnets(req, v)?;
         }
         if azs.is_empty() {
-            if let Some(zone) = region_zones(&self.region_of(req)).into_iter().next() {
-                azs.push(zone);
-            }
+            azs.extend(region_zones(&self.region_of(req)).into_iter().take(1));
         }
 
         let tags = parse_tags(req);
@@ -1606,17 +1610,19 @@ impl AutoScalingService {
             subnets.iter().cloned().map(LaunchPlace::Subnet).collect()
         };
         // A subnet EC2 cannot resolve (no EC2 backend, or deleted since the
-        // group named it) counts as the Region's zone at its position, so the
-        // group still spreads over zones.
+        // group named it) counts as the group's zone at its position, else the
+        // Region's, so the group still spreads over zones.
         let place_zones: Vec<String> = places
             .iter()
             .enumerate()
             .map(|(i, p)| {
                 self.place_zone(p, account, &region, || {
-                    zones_of_region
-                        .get(i % zones_of_region.len().max(1))
-                        .cloned()
-                        .unwrap_or_else(|| region.clone())
+                    let zones = if azs.is_empty() {
+                        &zones_of_region
+                    } else {
+                        &azs
+                    };
+                    zones[i % zones.len()].clone()
                 })
             })
             .collect();
@@ -2707,6 +2713,17 @@ mod tests {
         assert!(group_instance_ids(&s, "h").is_empty());
     }
 
+    #[test]
+    fn every_zone_is_named_after_its_region() {
+        // A Region with no zones on record would get `{region}a`; the shared
+        // table gives an unknown Region three.
+        assert_eq!(
+            region_zones("xx-nowhere-9"),
+            ["xx-nowhere-9a", "xx-nowhere-9b", "xx-nowhere-9c"]
+        );
+        assert_eq!(region_zones("us-east-1").len(), 6);
+    }
+
     #[tokio::test]
     async fn a_subnet_ec2_does_not_have_is_refused() {
         let (s, ec2) = ec2_wired();
@@ -2764,7 +2781,7 @@ mod tests {
     }
 
     #[test]
-    fn without_ec2_subnets_spread_over_the_regions_zones() {
+    fn without_ec2_subnets_spread_over_the_groups_zones() {
         let s = svc();
         create_basic_asg(&s, "base");
         body(
@@ -2777,6 +2794,9 @@ mod tests {
                 ("MaxSize", "3"),
                 ("DesiredCapacity", "3"),
                 ("VPCZoneIdentifier", "subnet-1,subnet-2,subnet-3"),
+                ("AvailabilityZones.member.1", "us-east-1b"),
+                ("AvailabilityZones.member.2", "us-east-1c"),
+                ("AvailabilityZones.member.3", "us-east-1d"),
             ],
         );
         let mut zones: Vec<String> = s.state.read().accounts["123456789012"].groups["g"]
@@ -2785,7 +2805,8 @@ mod tests {
             .map(|i| i.availability_zone.clone())
             .collect();
         zones.sort();
-        assert_eq!(zones, ["us-east-1a", "us-east-1b", "us-east-1c"]);
+        // The group's own zones by position, before the Region's.
+        assert_eq!(zones, ["us-east-1b", "us-east-1c", "us-east-1d"]);
     }
 
     #[test]
