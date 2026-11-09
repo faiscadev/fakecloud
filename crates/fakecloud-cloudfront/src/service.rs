@@ -1620,13 +1620,7 @@ impl CloudFrontService {
             .map_err(|e| invalid_argument(format!("invalid request XML: {e}")))?;
         // Like DisassociateDistributionWebACL, this operation reports an
         // unknown distribution as EntityNotFound, not NoSuchDistribution.
-        let entity_not_found = || {
-            aws_error(
-                StatusCode::NOT_FOUND,
-                "EntityNotFound",
-                format!("The specified distribution does not exist: {id}"),
-            )
-        };
+        let entity_not_found = || crate::policies::entity_not_found("distribution", id);
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -1666,13 +1660,7 @@ impl CloudFrontService {
         let if_match = crate::policies::require_if_match(req)?;
         // DisassociateDistributionWebACL's Smithy model declares EntityNotFound
         // (not NoSuchDistribution) for unknown distribution IDs.
-        let entity_not_found = || {
-            aws_error(
-                StatusCode::NOT_FOUND,
-                "EntityNotFound",
-                format!("The specified distribution does not exist: {id}"),
-            )
-        };
+        let entity_not_found = || crate::policies::entity_not_found("distribution", id);
         let mut state = self.state.write();
         let account = state
             .accounts

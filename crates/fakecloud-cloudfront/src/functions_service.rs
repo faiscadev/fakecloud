@@ -83,7 +83,7 @@ impl CloudFrontService {
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = route_id(route, "Function")?;
-        let stage = validate_stage_query(&req.raw_query)?;
+        let stage = validate_stage_query_common(&req.raw_query)?;
         let state = self.state.read();
         let f = state
             .accounts
@@ -102,7 +102,7 @@ impl CloudFrontService {
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = route_id(route, "Function")?;
-        let stage = validate_stage_query(&req.raw_query)?;
+        let stage = validate_stage_query_common(&req.raw_query)?;
         let state = self.state.read();
         let f = state
             .accounts
@@ -1143,12 +1143,31 @@ fn parse_stage_query(query: &str) -> Option<String> {
 
 /// Validate the `Stage` query against the FunctionStage enum
 /// (DEVELOPMENT | LIVE). Returns InvalidArgument for unknown values; absent
-/// or valid is OK.
+/// or valid is OK. For operations that declare InvalidArgument.
 pub(crate) fn validate_stage_query(
     query: &str,
 ) -> Result<Option<String>, fakecloud_core::service::AwsServiceError> {
     let stage = parse_stage_query(query);
     validate_stage(stage.as_deref())?;
+    Ok(stage)
+}
+
+/// [`validate_stage_query`] for the read operations that do not declare
+/// InvalidArgument (DescribeFunction, GetFunction, GetConnectionFunction).
+/// AWS still rejects a value outside the enum; with no operation-specific
+/// code it answers with the documented common error `ValidationError` (400,
+/// "The input doesn't meet the required format or constraints").
+pub(crate) fn validate_stage_query_common(
+    query: &str,
+) -> Result<Option<String>, fakecloud_core::service::AwsServiceError> {
+    let stage = parse_stage_query(query);
+    if let Err(e) = validate_stage(stage.as_deref()) {
+        return Err(crate::service::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationError",
+            e.message(),
+        ));
+    }
     Ok(stage)
 }
 
@@ -1928,7 +1947,9 @@ mod tests {
                 .await
                 .err()
                 .expect("unknown stage must be rejected");
-            assert_eq!(err.code(), "InvalidArgument", "{path}");
+            // Neither operation declares InvalidArgument.
+            assert_eq!(err.code(), "ValidationError", "{path}");
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{path}");
         }
     }
 

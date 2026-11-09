@@ -794,6 +794,18 @@ pub(crate) fn not_found(kind: &str, id: &str) -> AwsServiceError {
     )
 }
 
+/// `EntityNotFound` (404): the code the newer CloudFront operations
+/// (tenants, connection functions/groups, web ACL association, domain
+/// association, managed certificates) declare for a missing resource, in
+/// place of the per-type `NoSuch*` codes.
+pub(crate) fn entity_not_found(kind: &str, id: &str) -> AwsServiceError {
+    aws_error(
+        StatusCode::NOT_FOUND,
+        "EntityNotFound",
+        format!("The specified {kind} does not exist: {id}"),
+    )
+}
+
 pub(crate) fn precondition_failed() -> AwsServiceError {
     aws_error(
         StatusCode::PRECONDITION_FAILED,

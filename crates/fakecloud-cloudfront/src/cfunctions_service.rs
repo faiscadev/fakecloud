@@ -126,7 +126,7 @@ impl CloudFrontService {
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = route_id(route, "ConnectionFunction")?;
-        let stage = crate::functions_service::validate_stage_query(&req.raw_query)?;
+        let stage = crate::functions_service::validate_stage_query_common(&req.raw_query)?;
         let state = self.state.read();
         let f = state
             .accounts
@@ -301,13 +301,7 @@ impl CloudFrontService {
                 .accounts
                 .get(&req.account_id)
                 .and_then(|a| a.connection_functions.get(&name).cloned())
-                .ok_or_else(|| {
-                    aws_error(
-                        StatusCode::NOT_FOUND,
-                        "EntityNotFound",
-                        format!("ConnectionFunction {name} does not exist"),
-                    )
-                })?
+                .ok_or_else(|| crate::policies::entity_not_found("ConnectionFunction", &name))?
         };
         if f.etag != if_match {
             return Err(precondition_failed());
@@ -811,16 +805,24 @@ mod tests {
             String::from_utf8_lossy(described.body.expect_bytes()).contains("<Stage>LIVE</Stage>")
         );
 
-        for path in [
-            "/2020-05-31/connection-function/cfn-view",
-            "/2020-05-31/connection-function/cfn-view/describe",
+        // DescribeConnectionFunction declares InvalidArgument;
+        // GetConnectionFunction does not, so it answers ValidationError.
+        for (path, code) in [
+            (
+                "/2020-05-31/connection-function/cfn-view",
+                "ValidationError",
+            ),
+            (
+                "/2020-05-31/connection-function/cfn-view/describe",
+                "InvalidArgument",
+            ),
         ] {
             let err = svc
                 .handle(get("Stage=BOGUS", path))
                 .await
                 .err()
                 .expect("unknown stage must be rejected");
-            assert_eq!(err.code(), "InvalidArgument", "{path}");
+            assert_eq!(err.code(), code, "{path}");
         }
     }
 }
