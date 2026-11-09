@@ -999,10 +999,70 @@ pub(crate) fn describe_instance_type_offerings(
         ],
     )?;
     validate_max_results(&req.query_params, 5, 1000)?;
+    let filters = parse_filters(&req.query_params);
+    if let Some(f) = filters
+        .iter()
+        .find(|f| !matches!(f.name.as_str(), "instance-type" | "location"))
+    {
+        return Err(invalid_parameter_value(format!(
+            "The filter '{}' is invalid",
+            f.name
+        )));
+    }
+    let location_type = req
+        .query_params
+        .get("LocationType")
+        .filter(|v| !v.is_empty())
+        .map_or("region", String::as_str);
+    let region = crate::service::instance::request_region(req);
+    // The catalog holds the Regions that sell each type, so every zone of such a
+    // Region is reported as offering it. An account here has no Outposts (there is
+    // no such resource, and `DescribeLocalGateways` is empty), so none is listed.
+    let locations: Vec<String> = match location_type {
+        "region" => vec![region.to_string()],
+        "availability-zone" => crate::defaults::region_zones(region)
+            .into_iter()
+            .map(|(zone, _)| zone)
+            .collect(),
+        "availability-zone-id" => crate::defaults::region_zones(region)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let passes = |name: &str, value: &str| {
+        filters.iter().filter(|f| f.name == name).all(|f| {
+            f.values
+                .iter()
+                .any(|p| crate::service_helpers::filter_value_matches(p, value))
+        })
+    };
+    let mut matching = Vec::new();
+    for t in crate::instance_types::catalog() {
+        if !t.offered_in(region) || !passes("instance-type", &t.name) {
+            continue;
+        }
+        for location in locations.iter().filter(|l| passes("location", l)) {
+            matching.push((t.name.as_str(), location.as_str()));
+        }
+    }
+    let (page, next_token) = crate::service::instance::catalog_page(&matching, req)?;
+    let items: Vec<String> = page
+        .iter()
+        .map(|(name, location)| {
+            format!(
+                "{}{}{}",
+                ec2_elem("instanceType", name),
+                ec2_elem("locationType", location_type),
+                ec2_elem("location", location),
+            )
+        })
+        .collect();
+    let token = next_token.map_or_else(String::new, |t| ec2_elem("nextToken", &t));
     Ok(Ec2Service::respond(
         "DescribeInstanceTypeOfferings",
         &req.request_id,
-        "",
+        &format!("{}{token}", ec2_list("instanceTypeOfferingSet", &items)),
     ))
 }
 

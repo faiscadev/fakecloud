@@ -79,7 +79,13 @@ jobs:
           # initContainer's default image.
           for img in registry.k8s.io/pause:3.10 redis:7-alpine postgres:16-alpine busybox:1.36 public.ecr.aws/docker/library/alpine:3.20; do
             pull "$img"
-            kind load docker-image "$img" --name fakecloud-k8s-test
+            # Save the one platform that was pulled. A plain `kind load
+            # docker-image` exports every platform in the manifest list, and
+            # the node's `ctr import --all-platforms` then fails on layers
+            # Docker's containerd image store never downloaded.
+            docker save --platform linux/amd64 -o /tmp/kind-image.tar "$img"
+            kind load image-archive /tmp/kind-image.tar --name fakecloud-k8s-test
+            rm -f /tmp/kind-image.tar
           done
 
       - name: Lambda K8s integration tests

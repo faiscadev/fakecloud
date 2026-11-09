@@ -4,6 +4,7 @@
 use fakecloud_aws::ec2query::{ec2_elem, ec2_list, ec2_return};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
+use crate::instance_types::CAPACITY_BLOCK_INSTANCE_TYPES;
 use crate::service::Ec2Service;
 use crate::service_helpers::{
     ec2_arn, filter_value_matches, gen_id, incorrect_state, indexed_list, invalid_parameter_value,
@@ -1391,20 +1392,6 @@ pub(crate) fn reject_capacity_reservation_billing_ownership(
 }
 
 // ---- capacity blocks ----
-
-/// Instance types sold as Capacity Blocks (EC2 User Guide, "Capacity Blocks
-/// for ML": supported instance types).
-const CAPACITY_BLOCK_INSTANCE_TYPES: &[&str] = &[
-    "p4d.24xlarge",
-    "p4de.24xlarge",
-    "p5.4xlarge",
-    "p5.48xlarge",
-    "p5e.48xlarge",
-    "p5en.48xlarge",
-    "p6-b200.48xlarge",
-    "trn1.32xlarge",
-    "trn2.48xlarge",
-];
 
 /// Capacity Blocks start at 11:30 UTC.
 const CAPACITY_BLOCK_START_HOUR: u32 = 11;
