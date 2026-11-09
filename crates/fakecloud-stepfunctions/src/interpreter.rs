@@ -226,17 +226,22 @@ fn task_like_outcome(
 ) -> Advance {
     match result {
         Ok(output) => {
-            add_state_exit_event(
-                state_def,
-                shared_state,
-                execution_arn,
-                exited_type,
-                entry.entered,
-                json!({
-                    "name": entry.name,
-                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
-                }),
-            );
+            // A JSONata state exits once its `Output` has evaluated: a Map's
+            // has by now (see `finish_map_output`), any other's hasn't.
+            let exits_here =
+                !crate::jsonata::is_jsonata(state_def) || exited_type == "MapStateExited";
+            if exits_here {
+                add_event(
+                    shared_state,
+                    execution_arn,
+                    exited_type,
+                    entry.entered,
+                    json!({
+                        "name": entry.name,
+                        "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
+                    }),
+                );
+            }
             advance_from_next(state_def, output)
         }
         Err(StateFailure::Own(failure)) => fail_own(shared_state, execution_arn, entry, failure),
@@ -941,14 +946,18 @@ async fn execute_map_state(
     }
 }
 
-/// A Map state's `ResultSelector`, `ResultPath`, `OutputPath` and (JSONPath)
-/// `Assign`, applied to its iterations' results.
+/// A Map state's own processing of its iterations' results: a JSONPath state's
+/// `ResultSelector`, `ResultPath`, `OutputPath` and `Assign`, a JSONata state's
+/// `Assign` and `Output`. A map run ends with it.
 fn finish_map_output(
     state_def: &Value,
     ctx: &Value,
     input: &Value,
     map_output: &Value,
 ) -> Result<Value, (String, String)> {
+    if crate::jsonata::is_jsonata(state_def) {
+        return crate::jsonata::finish_state(state_def, "", input, ctx, map_output.clone(), false);
+    }
     let selected = match state_def.get("ResultSelector") {
         Some(selector) => apply_parameters(selector, map_output, Some(ctx))?,
         None => map_output.clone(),
@@ -958,9 +967,7 @@ fn finish_map_output(
         Some("null") => json!({}),
         output_path => apply_output_path(&after_result, output_path)?,
     };
-    if !crate::jsonata::is_jsonata(state_def) {
-        crate::variables::assign_jsonpath(state_def.get("Assign"), map_output, Some(ctx))?;
-    }
+    crate::variables::assign_jsonpath(state_def.get("Assign"), map_output, Some(ctx))?;
     Ok(output)
 }
 

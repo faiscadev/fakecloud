@@ -222,15 +222,19 @@ pub(crate) fn run_states<'a>(
                             ),
                         };
                         match &jsonata_ctx {
-                            Some(ctx) if state_type != "Choice" => finish_jsonata_state(
-                                state_def,
-                                &entry,
-                                &state_input,
-                                ctx,
-                                advance,
-                                shared_state,
-                                execution_arn,
-                            ),
+                            // A Map applies its own `Assign` and `Output`, which
+                            // its map run ends with.
+                            Some(ctx) if !matches!(state_type, "Choice" | "Map") => {
+                                finish_jsonata_state(
+                                    state_def,
+                                    &entry,
+                                    &state_input,
+                                    ctx,
+                                    advance,
+                                    shared_state,
+                                    execution_arn,
+                                )
+                            }
                             _ => advance,
                         }
                     }

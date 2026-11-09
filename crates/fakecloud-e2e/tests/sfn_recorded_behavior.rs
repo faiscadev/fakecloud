@@ -3207,49 +3207,73 @@ async fn s3_get_object_fails_as_recorded_on_binary_and_oversized_bodies() {
 }
 
 /// A map run ends with its state's own processing of the results: a failing
-/// `ResultSelector` fails the run, as it fails the state.
+/// `ResultSelector`, or a JSONata `Output` or `Assign`, fails the run, as it
+/// fails the state.
 #[tokio::test]
-async fn a_map_run_fails_with_its_result_selector() {
+async fn a_map_run_fails_with_its_state_processing() {
     let server = TestServer::start().await;
     let client = server.sfn_client().await;
-    let definition = serde_json::json!({"StartAt":"A","States":{"A":{
-        "Type":"Map",
-        "ItemProcessor":{
-            "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"EXPRESS"},
-            "StartAt":"X","States":{"X":{"Type":"Pass","End":true}}
-        },
-        "ResultSelector":{"x.$":"$.missing"},
-        "End":true
+    let processor = serde_json::json!({
+        "ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"EXPRESS"},
+        "StartAt":"X","States":{"X":{"Type":"Pass","End":true}}
+    });
+    let jsonpath = serde_json::json!({"StartAt":"A","States":{"A":{
+        "Type":"Map","ItemProcessor":processor,"ResultSelector":{"x.$":"$.missing"},"End":true
     }}});
-    let described = run_with_input(&client, "map-run-selector", &definition.to_string(), "[1]")
-        .await
-        .unwrap();
-    assert_eq!(described.status(), &ExecutionStatus::Failed);
-    assert_eq!(described.error(), Some("States.Runtime"));
-    let runs = client
-        .list_map_runs()
-        .execution_arn(described.execution_arn())
-        .send()
-        .await
-        .unwrap();
-    let run = client
-        .describe_map_run()
-        .map_run_arn(runs.map_runs()[0].map_run_arn())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(run.status().as_str(), "FAILED");
-    let history = client
-        .get_execution_history()
-        .execution_arn(described.execution_arn())
-        .send()
-        .await
-        .unwrap();
-    let types: Vec<&str> = history
-        .events()
-        .iter()
-        .map(|e| e.r#type().as_str())
-        .collect();
-    assert!(types.contains(&"MapRunFailed"), "{types:?}");
-    assert!(types.contains(&"MapStateSucceeded"), "{types:?}");
+    let jsonata = |field: &str, value: Value| {
+        let mut state = serde_json::json!({
+            "Type":"Map","Items":"{% [1] %}","ItemProcessor":processor,"End":true
+        });
+        state[field] = value;
+        serde_json::json!({"QueryLanguage":"JSONata","StartAt":"A","States":{"A":state}})
+    };
+    for (name, definition, error) in [
+        ("map-run-selector", jsonpath, "States.Runtime"),
+        (
+            "map-run-output",
+            jsonata("Output", serde_json::json!("{% $states.result.missing %}")),
+            "States.QueryEvaluationError",
+        ),
+        (
+            "map-run-assign",
+            jsonata(
+                "Assign",
+                serde_json::json!({"x": "{% $states.result.missing %}"}),
+            ),
+            "States.QueryEvaluationError",
+        ),
+    ] {
+        let described = run_with_input(&client, name, &definition.to_string(), "[1]")
+            .await
+            .unwrap();
+        assert_eq!(described.status(), &ExecutionStatus::Failed, "{name}");
+        assert_eq!(described.error(), Some(error), "{name}");
+        let runs = client
+            .list_map_runs()
+            .execution_arn(described.execution_arn())
+            .send()
+            .await
+            .unwrap();
+        let run = client
+            .describe_map_run()
+            .map_run_arn(runs.map_runs()[0].map_run_arn())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(run.status().as_str(), "FAILED", "{name}");
+        let history = client
+            .get_execution_history()
+            .execution_arn(described.execution_arn())
+            .send()
+            .await
+            .unwrap();
+        let types: Vec<&str> = history
+            .events()
+            .iter()
+            .map(|e| e.r#type().as_str())
+            .collect();
+        assert!(types.contains(&"MapRunFailed"), "{name}: {types:?}");
+        assert!(types.contains(&"MapStateSucceeded"), "{name}: {types:?}");
+        assert!(!types.contains(&"MapStateExited"), "{name}: {types:?}");
+    }
 }
