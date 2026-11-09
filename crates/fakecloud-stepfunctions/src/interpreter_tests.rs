@@ -903,7 +903,9 @@ fn apply_state_catcher_matches_wildcard_and_stashes_error() {
         ]
     });
     let input = json!({ "a": 1 });
-    let caught = apply_state_catcher(&state_def, &input, "Boom", "it exploded", true).unwrap();
+    let caught = apply_state_catcher(&state_def, &input, "Boom", "it exploded", true)
+        .unwrap()
+        .unwrap();
     assert_eq!(caught.next, "H");
     assert_eq!(caught.output["a"], json!(1));
     assert_eq!(caught.output["caught"]["Error"], json!("Boom"));

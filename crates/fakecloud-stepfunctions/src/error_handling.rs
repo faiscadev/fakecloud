@@ -3,8 +3,19 @@ use serde_json::Value;
 /// Reserved error names that a wildcard `ErrorEquals` never matches. AWS
 /// documents that `States.Runtime` and `States.DataLimitExceeded` always fail
 /// the execution and cannot be caught or retried by a `States.ALL` (or
-/// `States.TaskFailed`) wildcard.
-const NON_WILDCARD_ERRORS: [&str; 2] = ["States.Runtime", "States.DataLimitExceeded"];
+/// `States.TaskFailed`) wildcard; a `ResultPath` conflict behaves the same, as
+/// recorded.
+const NON_WILDCARD_ERRORS: [&str; 3] = [
+    "States.Runtime",
+    "States.DataLimitExceeded",
+    crate::io_processing::REFERENCE_PATH_CONFLICT,
+];
+
+/// Whether a failure ends the execution whatever the state's `Retry` and
+/// `Catch` wildcards say.
+pub(crate) fn ends_execution(error: &str) -> bool {
+    NON_WILDCARD_ERRORS.contains(&error)
+}
 
 /// A query failing inside a Task isn't the task failing: as recorded,
 /// `States.TaskFailed` doesn't match it, though `States.ALL` and its own name do.

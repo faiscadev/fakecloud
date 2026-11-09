@@ -449,11 +449,7 @@ fn finish_task_result(
         Some(selector) => apply_parameters(selector, &result, Some(&ctx))?,
         None => result.clone(),
     };
-    let after_result = if result_path == Some("null") {
-        input.clone()
-    } else {
-        apply_result_path(input, &selected, result_path)
-    };
+    let after_result = apply_result_path(input, &selected, result_path)?;
     let output = if output_path == Some("null") {
         json!({})
     } else {
@@ -829,11 +825,7 @@ async fn execute_parallel_state(
     };
 
     // Apply ResultPath
-    let after_result = if result_path == Some("null") {
-        input.clone()
-    } else {
-        apply_result_path(input, &selected, result_path)
-    };
+    let after_result = apply_result_path(input, &selected, result_path)?;
 
     // Apply OutputPath
     let output = if output_path == Some("null") {
@@ -934,10 +926,7 @@ async fn execute_map_state(
     };
 
     // Apply ResultPath
-    let after_result = match state_def["ResultPath"].as_str() {
-        Some("null") => input.clone(),
-        result_path => apply_result_path(input, &selected, result_path),
-    };
+    let after_result = apply_result_path(input, &selected, state_def["ResultPath"].as_str())?;
 
     // Apply OutputPath
     let output = match state_def["OutputPath"].as_str() {

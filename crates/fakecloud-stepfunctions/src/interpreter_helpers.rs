@@ -255,9 +255,10 @@ pub(crate) fn run_states<'a>(
 
             let advance = match advance {
                 Advance::Fail(error, cause) if recoverable => {
-                    // As recorded, a `States.Runtime` failure ends the execution
-                    // with no `<Type>StateFailed` of its own.
-                    if !is_task && error != "States.Runtime" {
+                    // As recorded, a failure no wildcard takes (`States.Runtime`,
+                    // `States.ReferencePathConflict`) ends the execution with no
+                    // `<Type>StateFailed` of its own.
+                    if !is_task && !crate::error_handling::ends_execution(&error) {
                         add_event(
                             shared_state,
                             execution_arn,
@@ -617,7 +618,8 @@ pub(crate) fn advance_from_error(
     is_task_error: bool,
 ) -> Advance {
     match apply_state_catcher(state_def, input, &error, &cause, is_task_error) {
-        Some(caught) => Advance::Caught(caught),
+        Some(Ok(caught)) => Advance::Caught(caught),
+        Some(Err((error, cause))) => Advance::Fail(error, cause),
         None => Advance::Fail(error, cause),
     }
 }
@@ -849,11 +851,7 @@ pub(crate) fn execute_pass_state(
         transformed
     };
 
-    let after_result = if result_path == Some("null") {
-        input.clone()
-    } else {
-        apply_result_path(input, &result, result_path)
-    };
+    let after_result = apply_result_path(input, &result, result_path)?;
 
     let output = if output_path == Some("null") {
         json!({})
@@ -1830,7 +1828,7 @@ pub(crate) fn apply_state_catcher(
     error: &str,
     cause: &str,
     is_task_error: bool,
-) -> Option<CaughtError> {
+) -> Option<Result<CaughtError, (String, String)>> {
     let catchers = state_def["Catch"].as_array()?;
     let (next, result_path, index) =
         crate::error_handling::matching_catcher(catchers, error, is_task_error)?;
@@ -1838,14 +1836,19 @@ pub(crate) fn apply_state_catcher(
         "Error": error,
         "Cause": cause,
     });
-    let output = apply_result_path(effective_input, &error_output, result_path.as_deref());
-    Some(CaughtError {
+    // A catcher's `ResultPath` that can't be applied fails the execution
+    // (inferred from the state's own, as recorded).
+    let output = match apply_result_path(effective_input, &error_output, result_path.as_deref()) {
+        Ok(output) => output,
+        Err(conflict) => return Some(Err(conflict)),
+    };
+    Some(Ok(CaughtError {
         next,
         output,
         error_output,
         catcher: catchers[index].clone(),
         index,
-    })
+    }))
 }
 
 /// Extract the region from an execution ARN (`arn:aws:states:region:account_id:...`).

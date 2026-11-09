@@ -1133,7 +1133,8 @@ async fn definitions_behave_as_recorded_from_aws() {
 
 /// `{name, definition, input?, recorded}`, recorded from AWS for the second review
 /// round: integer settings, I/O failures after branches succeed, intrinsic and
-/// Fail-path failures, JSONata Wait seconds, nested query languages, catchers.
+/// Fail-path failures, JSONata Wait seconds, nested query languages, catchers,
+/// and a `ResultPath` conflict, which neither `Retry` nor `Catch` takes.
 const REVIEW_RECORDED: &str = r###"[
  {
   "name": "tfc_2_0",
@@ -2408,6 +2409,147 @@ const REVIEW_RECORDED: &str = r###"[
     "PassStateEntered",
     "PassStateExited",
     "ExecutionSucceeded"
+   ]
+  }
+ },
+ {
+  "name": "parallel_resultpath_fail",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Parallel",
+     "Branches": [
+      {
+       "StartAt": "X",
+       "States": {
+        "X": {
+         "Type": "Pass",
+         "End": true
+        }
+       }
+      }
+     ],
+     "ResultPath": "$.a.b",
+     "End": true
+    }
+   }
+  },
+  "input": "{\"a\":1}",
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.ReferencePathConflict",
+   "cause": "Unable to apply step \"b\" to input {\"a\":1}",
+   "types": [
+    "ExecutionStarted",
+    "ParallelStateEntered",
+    "ParallelStateStarted",
+    "PassStateEntered",
+    "PassStateExited",
+    "ParallelStateSucceeded",
+    "ExecutionFailed"
+   ]
+  }
+ },
+ {
+  "name": "parallel_resultpath_catch",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Parallel",
+     "Branches": [
+      {
+       "StartAt": "X",
+       "States": {
+        "X": {
+         "Type": "Pass",
+         "End": true
+        }
+       }
+      }
+     ],
+     "ResultPath": "$.a.b",
+     "Catch": [
+      {
+       "ErrorEquals": [
+        "States.ALL"
+       ],
+       "Next": "H"
+      }
+     ],
+     "End": true
+    },
+    "H": {
+     "Type": "Pass",
+     "End": true
+    }
+   }
+  },
+  "input": "{\"a\":1}",
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.ReferencePathConflict",
+   "cause": "Unable to apply step \"b\" to input {\"a\":1}",
+   "types": [
+    "ExecutionStarted",
+    "ParallelStateEntered",
+    "ParallelStateStarted",
+    "PassStateEntered",
+    "PassStateExited",
+    "ParallelStateSucceeded",
+    "ExecutionFailed"
+   ]
+  }
+ },
+ {
+  "name": "parallel_resultpath_retry",
+  "definition": {
+   "StartAt": "A",
+   "States": {
+    "A": {
+     "Type": "Parallel",
+     "Branches": [
+      {
+       "StartAt": "X",
+       "States": {
+        "X": {
+         "Type": "Pass",
+         "End": true
+        }
+       }
+      }
+     ],
+     "ResultPath": "$.a.b",
+     "Retry": [
+      {
+       "ErrorEquals": [
+        "States.ALL"
+       ],
+       "MaxAttempts": 2,
+       "IntervalSeconds": 1
+      }
+     ],
+     "End": true
+    }
+   }
+  },
+  "input": "{\"a\":1}",
+  "recorded": {
+   "status": "FAILED",
+   "output": null,
+   "error": "States.ReferencePathConflict",
+   "cause": "Unable to apply step \"b\" to input {\"a\":1}",
+   "types": [
+    "ExecutionStarted",
+    "ParallelStateEntered",
+    "ParallelStateStarted",
+    "PassStateEntered",
+    "PassStateExited",
+    "ParallelStateSucceeded",
+    "ExecutionFailed"
    ]
   }
  }
