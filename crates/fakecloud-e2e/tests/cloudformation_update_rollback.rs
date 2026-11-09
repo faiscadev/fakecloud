@@ -2084,3 +2084,201 @@ async fn unnamed_task_definition_replacement_gets_a_new_family() {
     let rows = last_operation(&cfn, "cfn-td").await;
     assert!(rows.iter().any(|r| r.1 == "DELETE_COMPLETE" && r.2 == old));
 }
+
+/// A nested child's export in use holds its parent's delete, as the recorded
+/// in-use delete does: accepted, and the stack stays.
+#[tokio::test]
+async fn a_nested_childs_export_in_use_blocks_the_parents_delete() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let child = json!({
+        "Resources": {"Inner": queue(30)},
+        "Outputs": {"O": {"Value": "x", "Export": {"Name": "cfn-kid-export"}}}
+    })
+    .to_string();
+    create(
+        &cfn,
+        "cfn-family",
+        &resources(json!({"Child": {
+            "Type": "AWS::CloudFormation::Stack",
+            "Properties": {"TemplateBody": child}
+        }})),
+    )
+    .await;
+    create(
+        &cfn,
+        "cfn-outsider",
+        &resources(json!({"Q": {
+            "Type": "AWS::SQS::Queue",
+            "Properties": {"QueueName": {
+                "Fn::Join": ["", [{"Fn::ImportValue": "cfn-kid-export"}, "-q"]]
+            }}
+        }})),
+    )
+    .await;
+
+    cfn.delete_stack()
+        .stack_name("cfn-family")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status(&cfn, "cfn-family").await, "CREATE_COMPLETE");
+
+    cfn.delete_stack()
+        .stack_name("cfn-outsider")
+        .send()
+        .await
+        .unwrap();
+    cfn.delete_stack()
+        .stack_name("cfn-family")
+        .send()
+        .await
+        .unwrap();
+    assert!(cfn
+        .describe_stacks()
+        .stack_name("cfn-family")
+        .send()
+        .await
+        .is_err());
+}
+
+/// Rewrite one stack in the on-disk snapshot, as a crash at a chosen moment of its
+/// cleanup would have left it.
+fn edit_snapshot(dir: &std::path::Path, stack: &str, edit: impl Fn(&mut Value)) {
+    fn find_stack<'a>(value: &'a mut Value, stack: &str) -> Option<&'a mut Value> {
+        if value.get("name").and_then(Value::as_str) == Some(stack)
+            && value.get("stack_id").is_some()
+        {
+            return Some(value);
+        }
+        match value {
+            Value::Object(members) => members.values_mut().find_map(|v| find_stack(v, stack)),
+            Value::Array(items) => items.iter_mut().find_map(|v| find_stack(v, stack)),
+            _ => None,
+        }
+    }
+    fn snapshot_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                snapshot_files(&path, out);
+            } else if path.to_string_lossy().contains("cloudformation") {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    snapshot_files(dir, &mut files);
+    let file = files.first().expect("a cloudformation snapshot");
+    let mut snapshot: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    let found = find_stack(&mut snapshot, stack).expect("the stack is in the snapshot");
+    edit(found);
+    std::fs::write(file, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+}
+
+/// Through a real restart: a stack the crash caught in its cleanup finishes
+/// deleting what it had left, whichever way the update was going.
+#[tokio::test]
+async fn a_restart_finishes_an_interrupted_cleanup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut server = TestServer::start_persistent(tmp.path()).await;
+    let cfn = server.cloudformation_client().await;
+
+    // Held stacks have a journal on disk to shape into a cleanup in progress.
+    let held = |extra: &str| {
+        resources(json!({
+            "Keep": queue(30),
+            extra: {"Type": "AWS::SNS::Topic", "Properties": {"TopicName": format!("cfn-rs-{extra}")}},
+            "Bad": {
+                "Type": "AWS::SQS::Queue",
+                "DependsOn": ["Keep", extra],
+                "Properties": {"QueueName": "not a valid name!"}
+            }
+        }))
+    };
+    let base = resources(json!({"Keep": queue(30)}));
+    for (stack, extra) in [("cfn-rs-update", "Doomed"), ("cfn-rs-rollback", "Added")] {
+        create(&cfn, stack, &base).await;
+        cfn.update_stack()
+            .stack_name(stack)
+            .template_body(held(extra))
+            .disable_rollback(true)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(status(&cfn, stack).await, "UPDATE_FAILED");
+    }
+    let sns = server.sns_client().await;
+    let topic_arn = |id: &str| format!("arn:aws:sns:us-east-1:123456789012:cfn-rs-{id}");
+    sns.get_topic_attributes()
+        .topic_arn(topic_arn("Doomed"))
+        .send()
+        .await
+        .expect("provisioned");
+
+    drop(cfn);
+    let dir = tmp.path().to_path_buf();
+    server
+        .restart_after(|| {
+            edit_snapshot(&dir, "cfn-rs-update", |stack| {
+                stack["status"] = json!("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS");
+                let doomed = stack["resources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["logical_id"] == "Doomed")
+                    .unwrap()
+                    .clone();
+                stack["pending_update"]["removed"] = json!([doomed]);
+                stack["pending_update"]["entries"] = json!([]);
+                stack["resources"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|r| r["logical_id"] != "Bad");
+                stack["pending_update"]["applied"] = json!({});
+            });
+            edit_snapshot(&dir, "cfn-rs-rollback", |stack| {
+                stack["status"] = json!("UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS");
+                let added = stack["resources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["logical_id"] == "Added")
+                    .unwrap()
+                    .clone();
+                stack["pending_update"]["rollback_deletes"] =
+                    json!([{"Created": {"resource": added, "released": false}}]);
+                stack["pending_update"]["entries"] = json!([]);
+            });
+        })
+        .await;
+
+    let cfn = server.cloudformation_client().await;
+    let sns = server.sns_client().await;
+    assert_eq!(status(&cfn, "cfn-rs-update").await, "UPDATE_COMPLETE");
+    assert_eq!(
+        status(&cfn, "cfn-rs-rollback").await,
+        "UPDATE_ROLLBACK_COMPLETE"
+    );
+    assert!(sns
+        .get_topic_attributes()
+        .topic_arn(topic_arn("Doomed"))
+        .send()
+        .await
+        .is_err());
+    assert!(sns
+        .get_topic_attributes()
+        .topic_arn(topic_arn("Added"))
+        .send()
+        .await
+        .is_err());
+    let rolled_back = physical_ids(&cfn, "cfn-rs-rollback").await;
+    assert_eq!(rolled_back.len(), 1, "{rolled_back:?}");
+    assert_eq!(rolled_back[0].0, "Keep");
+
+    // Both stay finished across another restart.
+    drop(cfn);
+    server.restart().await;
+    let cfn = server.cloudformation_client().await;
+    assert_eq!(status(&cfn, "cfn-rs-update").await, "UPDATE_COMPLETE");
+}

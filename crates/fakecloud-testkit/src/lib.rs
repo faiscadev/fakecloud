@@ -148,12 +148,24 @@ impl TestServer {
 
     /// Kill the current child and respawn with the same extra args/env.
     /// Uses port 0 so the OS assigns a free port, avoiding TIME_WAIT conflicts.
-    pub async fn restart(&mut self) {
+    /// Stop the server, run `edit` while nothing is running, and start it again:
+    /// for a test that needs what a crash at a chosen moment would leave on disk.
+    pub async fn restart_after(&mut self, edit: impl FnOnce()) {
+        self.stop_for_restart();
+        edit();
+        self.restart().await;
+    }
+
+    fn stop_for_restart(&mut self) {
         if let Some(mut child) = self.child.take() {
             let pid = child.id();
             graceful_kill(&mut child);
             sweep_instance_containers(&self.container_cli, pid);
         }
+    }
+
+    pub async fn restart(&mut self) {
+        self.stop_for_restart();
         let bin = find_binary();
         for _ in 0..5 {
             let mut cmd = Command::new(&bin);

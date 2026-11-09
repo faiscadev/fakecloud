@@ -1291,6 +1291,59 @@ impl CloudFormationService {
         self
     }
 
+    /// Finish the stack cleanups a restart interrupted, from the journals their
+    /// stacks kept. Run once at startup, with every service's state restored.
+    pub async fn resume_interrupted_cleanups(&self) {
+        let pending: Vec<(String, String, String, String, String)> = {
+            let accounts = self.state.read();
+            accounts
+                .iter()
+                .flat_map(|(account_id, account)| {
+                    account.regions.iter().flat_map(move |(region, state)| {
+                        crate::stack_update::cleanups_to_resume(state)
+                            .into_iter()
+                            .map(move |(id, name, status)| {
+                                (account_id.to_string(), region.clone(), id, name, status)
+                            })
+                    })
+                })
+                .collect()
+        };
+        for (account_id, region, stack_id, stack_name, status) in pending {
+            let journal = {
+                let mut accounts = self.state.write();
+                accounts
+                    .regional_get_mut(&account_id, &region)
+                    .and_then(|state| state.live_stack_mut(&stack_id))
+                    .and_then(|stack| stack.pending_update.take())
+            };
+            let Some(journal) = journal else {
+                continue;
+            };
+            tracing::info!(%stack_name, %status, "finishing a stack cleanup interrupted by a restart");
+            let provisioner = self.provisioner_deferred(&stack_id, &account_id, &region);
+            let engine = crate::stack_update::UpdateEngine::new(
+                &self.state,
+                &provisioner,
+                &account_id,
+                &region,
+                &stack_id,
+                &stack_name,
+            );
+            let outcome = engine.resume_cleanup(journal, &status);
+            self.finish_stack_operation(
+                &provisioner,
+                &stack_id,
+                &stack_name,
+                &account_id,
+                &region,
+                &outcome,
+            );
+            persist_touched_services(&self.snapshot_hooks, outcome.touched_types).await;
+        }
+        self.save_snapshot().await;
+    }
+
     /// Persist hook for callers that change CloudFormation state from outside
     /// the service (the reset endpoints): writes the current snapshot. `None`
     /// in memory mode.
@@ -2324,6 +2377,7 @@ impl CloudFormationService {
         // into spawn_blocking, so the post-provision drain (below) can back
         // freshly-inserted container resources with REAL containers.
         let container_spawns = provisioner.pending_container_spawns.clone();
+        let container_teardowns = provisioner.pending_container_teardowns.clone();
         let backing_handles = ContainerBackingHandles::from_provisioner(&provisioner)
             .with_snapshot_hooks(&snapshot_hooks);
 
@@ -2339,13 +2393,14 @@ impl CloudFormationService {
             let imports =
                 Self::collect_account_imports(&state, &account_id, &region, Some(&stack_name));
             tokio::task::spawn_blocking(move || {
-                provision_stack_resources(
+                let provisioned = provision_stack_resources(
                     &provisioner,
                     &resource_defs,
                     &template_body,
                     &parameters,
                     &imports,
-                )
+                );
+                (provisioner, provisioned)
             })
             .await
         };
@@ -2353,13 +2408,13 @@ impl CloudFormationService {
         // A spawn_blocking JoinError (panic) or a provisioning error both
         // roll the stack into CREATE_FAILED.
         let provisioned = match provision_result {
-            Ok(Ok(resources)) => Ok(resources),
-            Ok(Err(err)) => Err(err.message()),
+            Ok((provisioner, Ok(resources))) => Ok((provisioner, resources)),
+            Ok((_, Err(err))) => Err(err.message()),
             Err(join_err) => Err(format!("provisioning task failed: {join_err}")),
         };
 
-        let resources = match provisioned {
-            Ok(resources) => resources,
+        let (provisioner, resources) = match provisioned {
+            Ok(provisioned) => provisioned,
             Err(reason) => {
                 Self::mark_create_failed(
                     &state,
@@ -2376,13 +2431,6 @@ impl CloudFormationService {
             }
         };
 
-        // Provisioning succeeded: back any container-backed resources (RDS
-        // instances, ...) with REAL containers. Each spawn is detached so
-        // CreateStack never blocks on a container boot/pull — the record is
-        // already inserted as "creating" and flips to "available" when the
-        // container is up (the #1539/#1730 timeout lesson).
-        backing_handles.spawn_container_intents(std::mem::take(&mut *container_spawns.lock()));
-
         let outputs = Self::resolve_template_outputs(
             &template_body,
             &parameters,
@@ -2392,26 +2440,52 @@ impl CloudFormationService {
             &region,
         );
 
-        {
-            let mut accounts = state.write();
-            let st = accounts.regional_mut(&account_id, &region);
-            if let Some(stack) = st.stacks.get_mut(&stack_name) {
-                stack.status = "CREATE_COMPLETE".to_string();
-                stack.status_reason = None;
-                stack.resources = resources.clone();
-                stack.outputs = outputs.clone();
-            }
-            Self::sync_exports_imports(st, &stack_id, &stack_name, &outputs, &imported_names);
-
-            record_stack_events(st, &stack_id, &stack_name, &resources);
-            record_stack_status_event(
-                st,
-                &stack_id,
+        let conflict = Self::commit_created_stack(
+            &state,
+            &account_id,
+            &region,
+            &stack_name,
+            &stack_id,
+            &resources,
+            &outputs,
+            &imported_names,
+        );
+        if let Some(reason) = conflict {
+            // A stack that claimed the export while this one provisioned: nothing
+            // of this one has started, and what it provisioned goes.
+            container_spawns.lock().clear();
+            let touched: Vec<String> = resources.iter().map(|r| r.resource_type.clone()).collect();
+            tracing::warn!(%stack_name, %reason, "CreateStack lost an export name to a concurrent stack");
+            Self::roll_back_created_stack(
+                &state,
+                provisioner,
+                &account_id,
+                &region,
                 &stack_name,
-                "AWS::CloudFormation::Stack",
-                "CREATE_COMPLETE",
+                &stack_id,
+                resources,
+            )
+            .await;
+            backing_handles
+                .spawn_teardown_intents(std::mem::take(&mut *container_teardowns.lock()));
+            Self::send_stack_notification(
+                &delivery,
+                &notification_arns,
+                &stack_name,
+                &stack_id,
+                "ROLLBACK_COMPLETE",
             );
+            save_snapshot_static(state.clone(), snapshot_store, snapshot_lock).await;
+            persist_touched_services(&snapshot_hooks, touched).await;
+            return;
         }
+
+        // Provisioning succeeded: back any container-backed resources (RDS
+        // instances, ...) with REAL containers. Each spawn is detached so
+        // CreateStack never blocks on a container boot/pull — the record is
+        // already inserted as "creating" and flips to "available" when the
+        // container is up (the #1539/#1730 timeout lesson).
+        backing_handles.spawn_container_intents(std::mem::take(&mut *container_spawns.lock()));
 
         Self::send_stack_notification(
             &delivery,
@@ -2452,6 +2526,121 @@ impl CloudFormationService {
         // is not otherwise re-mutated) is written to disk and survives a
         // restart -- not just the CloudFormation stack metadata above.
         persist_touched_services(&snapshot_hooks, touched_types).await;
+    }
+
+    /// Make a provisioned stack `CREATE_COMPLETE` and register its exports, under
+    /// one lock with the check that no other stack owns them, since two creates
+    /// can both pass the pre-flight. Returns the reason when one does, with the
+    /// stack moved to `ROLLBACK_IN_PROGRESS` for the caller to finish.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_created_stack(
+        state: &SharedCloudFormationState,
+        account_id: &str,
+        region: &str,
+        stack_name: &str,
+        stack_id: &str,
+        resources: &[StackResource],
+        outputs: &[state::StackOutput],
+        imported_names: &[String],
+    ) -> Option<String> {
+        let mut accounts = state.write();
+        let st = accounts.regional_mut(account_id, region);
+        let names: Vec<String> = outputs
+            .iter()
+            .filter_map(|o| o.export_name.clone())
+            .collect();
+        record_stack_events(st, stack_id, stack_name, resources);
+        if let Some(reason) = crate::stack_update::export_conflict(st, stack_name, stack_id, &names)
+        {
+            if let Some(stack) = st.stacks.get_mut(stack_name) {
+                stack.status = "ROLLBACK_IN_PROGRESS".to_string();
+                stack.status_reason = None;
+            }
+            record_stack_status_event_with_reason(
+                st,
+                stack_id,
+                stack_name,
+                "AWS::CloudFormation::Stack",
+                "ROLLBACK_IN_PROGRESS",
+                Some(&format!("{reason}. Rollback requested by user.")),
+            );
+            return Some(reason);
+        }
+        if let Some(stack) = st.stacks.get_mut(stack_name) {
+            stack.status = "CREATE_COMPLETE".to_string();
+            stack.status_reason = None;
+            stack.resources = resources.to_vec();
+            stack.outputs = outputs.to_vec();
+        }
+        Self::sync_exports_imports(st, stack_id, stack_name, outputs, imported_names);
+        record_stack_status_event(
+            st,
+            stack_id,
+            stack_name,
+            "AWS::CloudFormation::Stack",
+            "CREATE_COMPLETE",
+        );
+        None
+    }
+
+    /// Delete what a create provisioned before losing its export name, on a
+    /// blocking thread since a custom resource's delete invokes a Lambda.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn roll_back_created_stack(
+        state: &SharedCloudFormationState,
+        provisioner: ResourceProvisioner,
+        account_id: &str,
+        region: &str,
+        stack_name: &str,
+        stack_id: &str,
+        resources: Vec<StackResource>,
+    ) {
+        let doomed = resources.clone();
+        let deleted = tokio::task::spawn_blocking(move || {
+            for resource in doomed.iter().rev() {
+                if !crate::stack_update::is_plain_retain(resource.deletion_policy.as_deref()) {
+                    let _ = provisioner.delete_resource(resource);
+                }
+            }
+        })
+        .await;
+        if let Err(err) = deleted {
+            tracing::error!(%err, "deleting a rolled-back stack's resources panicked");
+        }
+        let mut accounts = state.write();
+        let st = accounts.regional_mut(account_id, region);
+        for resource in resources.iter().rev() {
+            let retained =
+                crate::stack_update::is_plain_retain(resource.deletion_policy.as_deref());
+            let statuses: &[&str] = if retained {
+                &["DELETE_SKIPPED"]
+            } else {
+                &["DELETE_IN_PROGRESS", "DELETE_COMPLETE"]
+            };
+            for status in statuses {
+                record_event(
+                    st,
+                    stack_id,
+                    stack_name,
+                    &resource.logical_id,
+                    &resource.physical_id,
+                    &resource.resource_type,
+                    status,
+                );
+            }
+        }
+        if let Some(stack) = st.stacks.get_mut(stack_name) {
+            stack.status = "ROLLBACK_COMPLETE".to_string();
+            stack.resources.clear();
+            stack.outputs.clear();
+        }
+        record_stack_status_event(
+            st,
+            stack_id,
+            stack_name,
+            "AWS::CloudFormation::Stack",
+            "ROLLBACK_COMPLETE",
+        );
     }
 
     /// Roll a stack into CREATE_FAILED, record the lifecycle event, and
@@ -2590,22 +2779,9 @@ impl CloudFormationService {
 
                 // Block delete if any of this stack's exports are still
                 // imported by another live stack. Mirrors real CFN.
-                let owned_exports: Vec<String> = state
-                    .exports
-                    .iter()
-                    .filter(|(_, e)| e.exporting_stack_name == stack_name_for_notif)
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                let in_use = owned_exports.iter().find_map(|export| {
-                    let consumers: Vec<&str> = state
-                        .imports
-                        .get(export)?
-                        .iter()
-                        .map(String::as_str)
-                        .filter(|c| *c != stack_name_for_notif)
-                        .collect();
-                    (!consumers.is_empty()).then(|| (export.clone(), consumers.join(", ")))
-                });
+                let in_use = state
+                    .live_stack(&stack_id)
+                    .and_then(|s| crate::stack_update::family_export_in_use(state, s));
                 // Recorded: the call succeeds and the stack keeps its status. The
                 // event says why (its wording follows the recorded update case).
                 if let Some((export, consumers)) = in_use {

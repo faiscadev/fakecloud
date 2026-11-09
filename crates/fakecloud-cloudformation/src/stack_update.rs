@@ -38,6 +38,42 @@ use crate::state::{
 };
 use crate::template::{self, ParsedTemplate, ResourceDefinition};
 
+/// Points tests can act at between engine steps, where another request or a crash
+/// could land: `undo:<logical id>` before a resource's re-apply, `cleanup:<logical
+/// id>` before a cleanup delete.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnMut(&str)>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn set(hook: impl FnMut(&str) + 'static) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(crate) fn clear() {
+        HOOK.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    pub(crate) fn fire(point: &str) {
+        // Out of its slot while it runs, so it can call back into the engine.
+        let hook = HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(mut hook) = hook {
+            hook(point);
+            HOOK.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(hook);
+                }
+            });
+        }
+    }
+}
+
 const STACK_TYPE: &str = "AWS::CloudFormation::Stack";
 const REPLACEMENT_REASON: &str =
     "Requested update requires the creation of a new physical resource; hence creating one.";
@@ -145,9 +181,20 @@ pub struct SavedDefinition {
     properties: Value,
     deletion_policy: Option<String>,
     update_replace_policy: Option<String>,
+    #[serde(default)]
+    resource_type: String,
 }
 
 impl SavedDefinition {
+    fn of(def: &ResourceDefinition) -> Self {
+        Self {
+            properties: def.properties.clone(),
+            deletion_policy: def.deletion_policy.clone(),
+            update_replace_policy: def.update_replace_policy.clone(),
+            resource_type: def.resource_type.clone(),
+        }
+    }
+
     fn to_definition(&self, logical_id: &str, resource_type: &str) -> ResourceDefinition {
         ResourceDefinition {
             logical_id: logical_id.to_string(),
@@ -228,9 +275,14 @@ pub enum RollbackDelete {
     },
     Created {
         resource: StackResource,
+        /// A handler heard of this resource, so it hears of the delete too.
+        #[serde(default)]
+        released: bool,
     },
     Replacement {
         resource: StackResource,
+        #[serde(default)]
+        released: bool,
     },
 }
 
@@ -250,14 +302,33 @@ pub struct UpdateJournal {
     rollback_deletes: Vec<RollbackDelete>,
     #[serde(default)]
     restored: BTreeMap<String, StackResource>,
-    /// The forward pass's custom-resource invokes and container spawns have
-    /// already run (the update stopped at `UPDATE_FAILED`). Otherwise a rollback
-    /// discards them, since nothing outside fakecloud has seen those resources.
+    /// What each resource physically holds now, resolved. A held update's
+    /// template is the attempted one, which says nothing about the resources it
+    /// never reached, so this is what a retry compares against and what its undo
+    /// goes back to.
     #[serde(default)]
-    side_effects_released: bool,
+    applied: BTreeMap<String, SavedDefinition>,
+    /// How many leading `entries` an earlier attempt finished with, its stop at
+    /// `UPDATE_FAILED` having run their custom-resource invokes. A handler has
+    /// seen those and must hear about their undo; it has seen nothing of the
+    /// rest, and a rollback of them stays silent.
+    #[serde(default)]
+    released_entries: usize,
+    /// `RetainExceptOnCreate` of the rollback, which a rollback cleanup resumed
+    /// after a restart still has to honor.
+    #[serde(default)]
+    retain_except_on_create: bool,
 }
 
 impl UpdateJournal {
+    /// The nested stacks whose own journals wait on this one.
+    fn nested_children(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().filter_map(|entry| match entry {
+            JournalEntry::NestedUpdated { child_stack_id, .. } => Some(child_stack_id.as_str()),
+            _ => None,
+        })
+    }
+
     /// Physical resources this journal knows about that the stack's resource
     /// list no longer does, which a stack delete must not leak.
     pub(crate) fn orphans(&self) -> Vec<StackResource> {
@@ -268,8 +339,8 @@ impl UpdateJournal {
             }
         }
         for delete in &self.rollback_deletes {
-            if let RollbackDelete::Created { resource } | RollbackDelete::Replacement { resource } =
-                delete
+            if let RollbackDelete::Created { resource, .. }
+            | RollbackDelete::Replacement { resource, .. } = delete
             {
                 out.push(resource.clone());
             }
@@ -797,10 +868,25 @@ impl<'a> UpdateEngine<'a> {
     /// Claim the stack for an operation of `kind`, or say why it cannot start.
     /// One atomic step, so of two concurrent operations exactly one proceeds.
     pub(crate) fn begin(&self, kind: OperationKind) -> Result<(), String> {
+        self.claim(kind, false)
+    }
+
+    /// `begin` for a nested stack. A child its held parent left waiting for the
+    /// cleanup is claimable too: the parent's retry is what it was waiting for.
+    fn begin_nested(&self) -> Result<(), String> {
+        self.claim(OperationKind::Update, true)
+    }
+
+    fn claim(&self, kind: OperationKind, resuming_child: bool) -> Result<(), String> {
         let claimed = self.with_stack(|stack| {
             let allowed = match kind {
                 OperationKind::Create => stack.status == "REVIEW_IN_PROGRESS",
-                OperationKind::Update => status_allows_update(&stack.status),
+                OperationKind::Update => {
+                    status_allows_update(&stack.status)
+                        || (resuming_child
+                            && stack.status == "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS"
+                            && stack.pending_update.is_some())
+                }
             };
             if !allowed {
                 return Err(cannot_update_message(&stack.stack_id, &stack.status));
@@ -846,6 +932,7 @@ impl<'a> UpdateEngine<'a> {
             .unwrap_or_default();
         // An earlier `DisableRollback` failure left a journal: this operation
         // continues it, so a rollback still reaches the last stable state.
+        let continuing = stack.pending_update.is_some();
         let mut journal = stack
             .pending_update
             .clone()
@@ -865,7 +952,9 @@ impl<'a> UpdateEngine<'a> {
                 removed: Vec::new(),
                 rollback_deletes: Vec::new(),
                 restored: BTreeMap::new(),
-                side_effects_released: false,
+                applied: BTreeMap::new(),
+                released_entries: 0,
+                retain_except_on_create: false,
             });
         let retried: BTreeSet<String> = journal
             .entries
@@ -875,7 +964,27 @@ impl<'a> UpdateEngine<'a> {
             .collect();
         self.with_stack(|stack| stack.pending_update = None);
 
-        let previous = self.resolve_previous(&stack, input.imports);
+        // A continuing journal knows what each resource really holds; the stack's
+        // template is only what the held attempt asked for.
+        let previous: BTreeMap<String, ResourceDefinition> = if continuing {
+            journal
+                .applied
+                .iter()
+                .map(|(logical_id, saved)| {
+                    (
+                        logical_id.clone(),
+                        saved.to_definition(logical_id, &saved.resource_type),
+                    )
+                })
+                .collect()
+        } else {
+            let previous = self.resolve_previous(&stack, input.imports);
+            journal.applied = previous
+                .iter()
+                .map(|(logical_id, def)| (logical_id.clone(), SavedDefinition::of(def)))
+                .collect();
+            previous
+        };
 
         if let Some(conflict) = self.name_conflict(&stack, &input, &previous) {
             return self.validation_failed(journal, &input, &conflict);
@@ -930,8 +1039,34 @@ impl<'a> UpdateEngine<'a> {
             })
             .collect();
         new_outputs.sort();
-        self.with_state(|state| export_in_use(state, &self.stack_name, &new_outputs))
-            .flatten()
+        self.with_state(|state| {
+            if let Some(reason) = export_in_use(state, &self.stack_name, &new_outputs) {
+                return Some(reason);
+            }
+            // Removing a nested stack removes its exports too.
+            stack
+                .resources
+                .iter()
+                .filter(|r| {
+                    r.resource_type == STACK_TYPE
+                        && !input
+                            .parsed
+                            .resources
+                            .iter()
+                            .any(|def| def.logical_id == r.logical_id)
+                })
+                .find_map(|r| {
+                    let child = state
+                        .stacks
+                        .values()
+                        .find(|s| s.stack_id == r.physical_id)?;
+                    let (export, users) = family_export_in_use(state, child)?;
+                    Some(format!(
+                        "Delete canceled. Cannot delete export {export} as it is in use by {users}."
+                    ))
+                })
+        })
+        .flatten()
     }
 
     fn cancel_requested(&self) -> bool {
@@ -1093,11 +1228,12 @@ impl<'a> UpdateEngine<'a> {
     ) -> UpdateOutcome {
         if input.disable_rollback {
             let status = input.kind.failed();
-            journal.side_effects_released = true;
+            journal.released_entries = journal.entries.len();
             self.with_stack(|stack| {
                 stack.status = status.to_string();
                 stack.status_reason = Some(failure_reason.to_string());
-                // The next update diffs against what this one was applying.
+                // Recorded: `GetTemplate` shows the attempt from here on. A retry
+                // compares against the journal's applied definitions instead.
                 stack.template = input.template_body.to_string();
                 stack.parameters = input.parameters.clone();
                 stack.pending_update = Some(journal);
@@ -1355,6 +1491,9 @@ impl<'a> UpdateEngine<'a> {
             Some(CREATE_INITIATED_REASON),
         );
         self.upsert_resource(&resource);
+        journal
+            .applied
+            .insert(def.logical_id.clone(), SavedDefinition::of(&resolved));
         journal.entries.push(JournalEntry::Created {
             resource: resource.clone(),
         });
@@ -1395,11 +1534,7 @@ impl<'a> UpdateEngine<'a> {
                 ))
             }
         };
-        let saved = previous.map(|def| SavedDefinition {
-            properties: def.properties.clone(),
-            deletion_policy: def.deletion_policy.clone(),
-            update_replace_policy: def.update_replace_policy.clone(),
-        });
+        let saved = previous.map(SavedDefinition::of);
         let unchanged =
             !retried && previous.is_some_and(|old| old.properties == resolved.properties);
         if unchanged {
@@ -1464,6 +1599,9 @@ impl<'a> UpdateEngine<'a> {
                     existing.attributes.clone(),
                 );
                 self.upsert_resource(&updated);
+                journal
+                    .applied
+                    .insert(def.logical_id.clone(), SavedDefinition::of(&resolved));
                 journal.entries.push(JournalEntry::Updated {
                     before: existing.clone(),
                     after: updated.clone(),
@@ -1627,6 +1765,9 @@ impl<'a> UpdateEngine<'a> {
             Some(CREATE_INITIATED_REASON),
         );
         self.upsert_resource(&new);
+        journal
+            .applied
+            .insert(resolved.logical_id.clone(), SavedDefinition::of(resolved));
         self.touch(&new.resource_type, &new.physical_id);
         self.touch(&existing.resource_type, &existing.physical_id);
         // An unmodeled type's physical id is its logical id, and some ids are
@@ -1638,11 +1779,7 @@ impl<'a> UpdateEngine<'a> {
                 JournalEntry::Updated {
                     before: existing.clone(),
                     after: new.clone(),
-                    previous: previous.map(|def| SavedDefinition {
-                        properties: def.properties.clone(),
-                        deletion_policy: def.deletion_policy.clone(),
-                        update_replace_policy: def.update_replace_policy.clone(),
-                    }),
+                    previous: previous.map(SavedDefinition::of),
                 }
             } else {
                 JournalEntry::Replaced {
@@ -1729,7 +1866,7 @@ impl<'a> UpdateEngine<'a> {
             return Err(refused(reason, journal));
         }
         engine
-            .begin(OperationKind::Update)
+            .begin_nested()
             .map_err(|reason| refused(reason, journal))?;
         let imports = CloudFormationService::collect_account_imports(
             self.state,
@@ -1759,20 +1896,7 @@ impl<'a> UpdateEngine<'a> {
                 outcome.status,
                 outcome.reason.unwrap_or_default()
             );
-            // A child held at UPDATE_FAILED kept its journal, for the parent's
-            // own rollback to reach.
-            let entry = if outcome.status == OperationKind::Update.failed() {
-                JournalEntry::NestedUpdated {
-                    before: existing.clone(),
-                    child_stack_id: existing.physical_id.clone(),
-                    failed: true,
-                }
-            } else {
-                JournalEntry::UpdateFailed {
-                    before: existing.clone(),
-                    previous: None,
-                }
-            };
+            let entry = failed_child_entry(existing, &outcome.status);
             return Err(self.fail_update(existing, entry, journal, &reason));
         }
         let mut updated = existing.clone();
@@ -1787,6 +1911,9 @@ impl<'a> UpdateEngine<'a> {
             }
         }
         self.upsert_resource(&updated);
+        journal
+            .applied
+            .insert(existing.logical_id.clone(), SavedDefinition::of(resolved));
         journal.entries.push(JournalEntry::NestedUpdated {
             before: existing.clone(),
             child_stack_id: existing.physical_id.clone(),
@@ -1905,7 +2032,25 @@ impl<'a> UpdateEngine<'a> {
 
     /// Delete what the update left behind: removed resources and the old
     /// physical resources of replacements.
-    fn finish_success(&self, journal: UpdateJournal) -> UpdateOutcome {
+    fn store_journal(&self, journal: &UpdateJournal) {
+        self.with_stack(|stack| stack.pending_update = Some(journal.clone()));
+    }
+
+    fn reach_cleanup_of(&self, _logical_id: &str) {
+        #[cfg(test)]
+        test_hooks::fire(&format!("cleanup:{_logical_id}"));
+    }
+
+    /// Finish a cleanup a restart interrupted, from the journal the stack kept.
+    pub(crate) fn resume_cleanup(&self, journal: UpdateJournal, status: &str) -> UpdateOutcome {
+        if status == "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS" {
+            self.finish_rollback(journal)
+        } else {
+            self.finish_success(journal)
+        }
+    }
+
+    fn finish_success(&self, mut journal: UpdateJournal) -> UpdateOutcome {
         let kind = journal.kind;
         if kind == OperationKind::Update {
             let in_cleanup = self
@@ -1915,28 +2060,38 @@ impl<'a> UpdateEngine<'a> {
                 self.transition("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", None);
             }
         }
-        let removed = deletion_order(&journal.before, &journal.removed);
-        for resource in removed {
+        // On the stack, so a snapshot taken during the cleanup can finish it after
+        // a restart. Trimmed as it goes: a delete repeated after a crash is harmless,
+        // but one that already finished should not be redone.
+        self.store_journal(&journal);
+        for resource in deletion_order(&journal.before, &journal.removed) {
+            self.reach_cleanup_of(&resource.logical_id);
             self.delete_for_cleanup(&resource, resource.deletion_policy.as_deref());
             self.remove_resource(&resource.logical_id);
+            journal
+                .removed
+                .retain(|r| r.logical_id != resource.logical_id);
+            self.store_journal(&journal);
         }
-        for entry in &journal.entries {
-            match entry {
+        while !journal.entries.is_empty() {
+            match journal.entries.remove(0) {
                 // The new template's policy decides, as recorded both ways.
                 JournalEntry::Replaced { before, new } => {
-                    self.delete_for_cleanup(before, new.update_replace_policy.as_deref());
+                    self.reach_cleanup_of(&before.logical_id);
+                    self.delete_for_cleanup(&before, new.update_replace_policy.as_deref());
                 }
                 JournalEntry::NestedUpdated { child_stack_id, .. } => {
-                    let child = self.take_child(child_stack_id);
-                    if let Some((name, journal)) = child {
-                        let provisioner = self.provisioner.nested_provisioner(child_stack_id);
-                        let engine = self.nested_engine(&provisioner, child_stack_id, &name);
-                        let outcome = engine.finish_success(journal);
+                    let child = self.take_child(&child_stack_id);
+                    if let Some((name, child_journal)) = child {
+                        let provisioner = self.provisioner.nested_provisioner(&child_stack_id);
+                        let engine = self.nested_engine(&provisioner, &child_stack_id, &name);
+                        let outcome = engine.finish_success(child_journal);
                         self.touched.borrow_mut().extend(outcome.touched_types);
                     }
                 }
                 _ => {}
             }
+            self.store_journal(&journal);
         }
         let complete = kind.complete();
         self.with_stack(|stack| {
@@ -2035,24 +2190,49 @@ impl<'a> UpdateEngine<'a> {
             kind.rollback_in_progress(),
             Some(reason.unwrap_or(USER_INITIATED_REASON)),
         );
-        // Spawns queued by the forward pass are for resources this rollback
-        // undoes, and none of them has started. The queue is shared with nested
-        // stacks, so only the outermost rollback drains it.
-        if !options.nested && !journal.side_effects_released {
+        // Whatever is queued is this attempt's forward pass, for resources this
+        // rollback undoes, and none of it has run. An earlier attempt's stop
+        // already drained its own. The queues are shared with nested stacks, so
+        // only the outermost rollback empties them.
+        if !options.nested {
             self.provisioner.pending_container_spawns.lock().clear();
+            self.provisioner.pending_custom_invokes.lock().clear();
         }
 
         while let Some(entry) = journal.entries.pop() {
-            if let Err(logical_id) = self.undo(&entry, &mut journal, &options) {
+            let released = journal.entries.len() < journal.released_entries;
+            let mark = self.provisioner.pending_custom_invokes.lock().len();
+            let undone = self.undo(&entry, &mut journal, &options, released);
+            if !released {
+                self.provisioner
+                    .pending_custom_invokes
+                    .lock()
+                    .truncate(mark);
+            }
+            if let Err(logical_id) = undone {
                 journal.entries.push(entry);
-                return self.rollback_failed(journal, options.nested, &logical_id);
+                return self.rollback_failed(journal, &logical_id);
             }
         }
+        journal.released_entries = 0;
+        journal.retain_except_on_create = options.retain_except_on_create;
 
         if kind == OperationKind::Update {
             self.transition("UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS", None);
         }
-        for delete in std::mem::take(&mut journal.rollback_deletes) {
+        let mut outcome = self.finish_rollback(journal);
+        outcome.reason = reason.map(str::to_string);
+        outcome
+    }
+
+    /// A rollback's cleanup: delete what the update created, restore the baseline.
+    fn finish_rollback(&self, mut journal: UpdateJournal) -> UpdateOutcome {
+        let kind = journal.kind;
+        let retain_except_on_create = journal.retain_except_on_create;
+        // On the stack and trimmed as it goes, as in `finish_success`.
+        self.store_journal(&journal);
+        while !journal.rollback_deletes.is_empty() {
+            let delete = journal.rollback_deletes.remove(0);
             match delete {
                 RollbackDelete::Failed {
                     logical_id,
@@ -2060,9 +2240,11 @@ impl<'a> UpdateEngine<'a> {
                 } => {
                     self.resource_event(&logical_id, "", &resource_type, "DELETE_COMPLETE", None);
                 }
-                RollbackDelete::Created { resource } => {
+                RollbackDelete::Created { resource, released } => {
+                    self.reach_cleanup_of(&resource.logical_id);
+                    let mark = self.provisioner.pending_custom_invokes.lock().len();
                     self.touch(&resource.resource_type, &resource.physical_id);
-                    let retained = !options.retain_except_on_create
+                    let retained = !retain_except_on_create
                         && is_plain_retain(resource.deletion_policy.as_deref());
                     if retained {
                         self.resource_event(
@@ -2075,14 +2257,29 @@ impl<'a> UpdateEngine<'a> {
                     } else {
                         self.delete_with_events(&resource);
                     }
+                    if !released {
+                        self.provisioner
+                            .pending_custom_invokes
+                            .lock()
+                            .truncate(mark);
+                    }
                 }
                 // Recorded: deleted even under `UpdateReplacePolicy: Retain`, which
                 // is about the resource being replaced.
-                RollbackDelete::Replacement { resource } => {
+                RollbackDelete::Replacement { resource, released } => {
+                    self.reach_cleanup_of(&resource.logical_id);
+                    let mark = self.provisioner.pending_custom_invokes.lock().len();
                     self.touch(&resource.resource_type, &resource.physical_id);
                     self.delete_with_events(&resource);
+                    if !released {
+                        self.provisioner
+                            .pending_custom_invokes
+                            .lock()
+                            .truncate(mark);
+                    }
                 }
             }
+            self.store_journal(&journal);
         }
 
         let restored = std::mem::take(&mut journal.restored);
@@ -2117,13 +2314,10 @@ impl<'a> UpdateEngine<'a> {
                 &baseline.imported_names,
             );
         });
-        if !options.nested && !journal.side_effects_released {
-            self.provisioner.pending_custom_invokes.lock().clear();
-        }
         let status = kind.rollback_complete();
         self.transition(status, None);
         self.close_operation("SUCCEEDED");
-        self.outcome(status, false, reason.map(str::to_string))
+        self.outcome(status, false, None)
     }
 
     fn undo(
@@ -2131,11 +2325,13 @@ impl<'a> UpdateEngine<'a> {
         entry: &JournalEntry,
         journal: &mut UpdateJournal,
         options: &RollbackOptions,
+        released: bool,
     ) -> Result<(), String> {
         match entry {
             JournalEntry::Created { resource } => {
                 journal.rollback_deletes.push(RollbackDelete::Created {
                     resource: resource.clone(),
+                    released,
                 });
             }
             JournalEntry::CreateFailed {
@@ -2168,6 +2364,7 @@ impl<'a> UpdateEngine<'a> {
                 self.point_back(before, journal);
                 journal.rollback_deletes.push(RollbackDelete::Replacement {
                     resource: new.clone(),
+                    released,
                 });
             }
             JournalEntry::ReplaceFailed { before } => {
@@ -2182,6 +2379,10 @@ impl<'a> UpdateEngine<'a> {
                 child_stack_id,
                 ..
             } => {
+                // Skipping the child leaves it as it is, journal and all.
+                if options.skip.contains(&before.logical_id) {
+                    return self.skip_reapply(before, journal);
+                }
                 self.resource_event(
                     &before.logical_id,
                     &before.physical_id,
@@ -2190,6 +2391,14 @@ impl<'a> UpdateEngine<'a> {
                     None,
                 );
                 if let Some((name, child_journal)) = self.take_child(child_stack_id) {
+                    // `Child.Resource` names a resource inside the child.
+                    let child_prefix = format!("{}.", before.logical_id);
+                    let child_skip = options
+                        .skip
+                        .iter()
+                        .filter_map(|id| id.strip_prefix(&child_prefix))
+                        .map(str::to_string)
+                        .collect();
                     let provisioner = self.provisioner.nested_provisioner(child_stack_id);
                     let engine = self.nested_engine(&provisioner, child_stack_id, &name);
                     let outcome = engine.roll_back(
@@ -2197,7 +2406,9 @@ impl<'a> UpdateEngine<'a> {
                         RollbackOptions {
                             retain_except_on_create: options.retain_except_on_create,
                             nested: true,
-                            ..RollbackOptions::default()
+                            force: options.force,
+                            skip: child_skip,
+                            continued: options.continued,
                         },
                         None,
                     );
@@ -2260,6 +2471,8 @@ impl<'a> UpdateEngine<'a> {
             "UPDATE_IN_PROGRESS",
             None,
         );
+        #[cfg(test)]
+        test_hooks::fire(&format!("undo:{}", before.logical_id));
         let definition = previous.to_definition(&before.logical_id, &before.resource_type);
         let result = guarded(|| {
             if is_custom(&before.resource_type) {
@@ -2347,17 +2560,9 @@ impl<'a> UpdateEngine<'a> {
         Ok(())
     }
 
-    fn rollback_failed(
-        &self,
-        journal: UpdateJournal,
-        nested: bool,
-        logical_id: &str,
-    ) -> UpdateOutcome {
+    fn rollback_failed(&self, journal: UpdateJournal, logical_id: &str) -> UpdateOutcome {
         let status = journal.kind.rollback_failed();
         let reason = format!("The following resource(s) failed to update: [{logical_id}]. ");
-        if !nested && !journal.side_effects_released {
-            self.provisioner.pending_custom_invokes.lock().clear();
-        }
         self.with_stack(|stack| {
             stack.status_reason = Some(reason.clone());
             stack.pending_update = Some(journal);
@@ -2376,19 +2581,160 @@ impl<'a> UpdateEngine<'a> {
 /// had finished deciding, and takes the outcome it was on its way to.
 pub(crate) fn settle_interrupted_update(stack: &mut Stack) {
     match stack.status.as_str() {
-        "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS" => {
+        // With a journal, `resume_interrupted_cleanups` finishes these. Without
+        // one (a snapshot from before journals were kept here) there is nothing
+        // left to do but report the outcome it was on its way to.
+        "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS" if stack.pending_update.is_none() => {
             stack.status = "UPDATE_COMPLETE".to_string();
-            stack.pending_update = None;
         }
-        "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS" => {
+        "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS" if stack.pending_update.is_none() => {
             stack.status = "UPDATE_ROLLBACK_COMPLETE".to_string();
-            stack.pending_update = None;
         }
         "UPDATE_IN_PROGRESS" | "UPDATE_ROLLBACK_IN_PROGRESS" => {
             stack.status = "UPDATE_ROLLBACK_FAILED".to_string();
             stack.status_reason = Some("Interrupted by a server restart.".to_string());
         }
         _ => {}
+    }
+}
+
+/// Whether a cleanup status has a journal to finish from.
+fn resumable_cleanup(stack: &Stack) -> bool {
+    stack.pending_update.is_some()
+        && matches!(
+            stack.status.as_str(),
+            "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS" | "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS"
+        )
+}
+
+/// The stacks whose journal another stack's journal still needs, followed down
+/// through nested stacks: a parent's later cleanup or rollback finishes them.
+fn stacks_waited_on(state: &CloudFormationState) -> BTreeSet<String> {
+    let holds_on = |stack: &Stack| {
+        resumable_cleanup(stack)
+            || matches!(
+                stack.status.as_str(),
+                "UPDATE_FAILED" | "UPDATE_ROLLBACK_FAILED" | "CREATE_FAILED" | "ROLLBACK_FAILED"
+            )
+    };
+    let mut waited_on: BTreeSet<String> = BTreeSet::new();
+    loop {
+        let before = waited_on.len();
+        for stack in state.stacks.values() {
+            if holds_on(stack) || waited_on.contains(&stack.stack_id) {
+                if let Some(journal) = &stack.pending_update {
+                    waited_on.extend(journal.nested_children().map(str::to_string));
+                }
+            }
+        }
+        if waited_on.len() == before {
+            return waited_on;
+        }
+    }
+}
+
+/// The stacks to finish cleaning up after a restart, as `(id, name, status)`.
+pub(crate) fn cleanups_to_resume(state: &CloudFormationState) -> Vec<(String, String, String)> {
+    let waited_on = stacks_waited_on(state);
+    state
+        .stacks
+        .values()
+        .filter(|stack| resumable_cleanup(stack) && !waited_on.contains(&stack.stack_id))
+        .map(|stack| {
+            (
+                stack.stack_id.clone(),
+                stack.name.clone(),
+                stack.status.clone(),
+            )
+        })
+        .collect()
+}
+
+/// A stack's own name and id, and those of the stacks nested under it.
+fn stack_family(state: &CloudFormationState, stack: &Stack) -> Vec<(String, String)> {
+    let mut family = vec![(stack.name.clone(), stack.stack_id.clone())];
+    let mut next = 0;
+    while next < family.len() {
+        let id = family[next].1.clone();
+        next += 1;
+        let Some(current) = state.stacks.values().find(|s| s.stack_id == id) else {
+            continue;
+        };
+        for resource in &current.resources {
+            if resource.resource_type != STACK_TYPE
+                || family
+                    .iter()
+                    .any(|(_, known)| *known == resource.physical_id)
+            {
+                continue;
+            }
+            if let Some(child) = state
+                .stacks
+                .values()
+                .find(|s| s.stack_id == resource.physical_id)
+            {
+                family.push((child.name.clone(), child.stack_id.clone()));
+            }
+        }
+    }
+    family
+}
+
+/// An export `stack` or a stack nested under it owns that a stack outside that
+/// family imports, as `(export, importers)`.
+pub(crate) fn family_export_in_use(
+    state: &CloudFormationState,
+    stack: &Stack,
+) -> Option<(String, String)> {
+    let family = stack_family(state, stack);
+    let in_family = |name: &str| family.iter().any(|(member, _)| member == name);
+    state.exports.iter().find_map(|(name, export)| {
+        if !family
+            .iter()
+            .any(|(_, id)| *id == export.exporting_stack_id)
+        {
+            return None;
+        }
+        let consumers: Vec<&str> = state
+            .imports
+            .get(name)?
+            .iter()
+            .map(String::as_str)
+            .filter(|consumer| !in_family(consumer))
+            .collect();
+        (!consumers.is_empty()).then(|| (name.clone(), consumers.join(", ")))
+    })
+}
+
+/// The parent's undo entry for a child that did not update. A child held at
+/// `UPDATE_FAILED`, or stopped at `UPDATE_ROLLBACK_FAILED`, kept its journal for
+/// the parent's rollback to reach; one that rolled back has nothing left to undo.
+fn failed_child_entry(existing: &StackResource, child_status: &str) -> JournalEntry {
+    if child_status == OperationKind::Update.failed()
+        || child_status == OperationKind::Update.rollback_failed()
+    {
+        JournalEntry::NestedUpdated {
+            before: existing.clone(),
+            child_stack_id: existing.physical_id.clone(),
+            failed: true,
+        }
+    } else {
+        JournalEntry::UpdateFailed {
+            before: existing.clone(),
+            previous: None,
+        }
+    }
+}
+
+/// `settle_interrupted_update` for every stack of a region. A nested stack whose
+/// parent still holds a journal keeps its own: the parent's later cleanup or
+/// rollback needs it, and no status of the child's is final until then.
+pub(crate) fn settle_interrupted_updates(state: &mut CloudFormationState) {
+    let waited_on = stacks_waited_on(state);
+    for stack in state.stacks.values_mut() {
+        if !waited_on.contains(&stack.stack_id) {
+            settle_interrupted_update(stack);
+        }
     }
 }
 
@@ -2401,7 +2747,7 @@ struct ValidationConflict {
 /// `Retain` proper: `RetainExceptOnCreate` by definition does not keep what the
 /// failed operation created, and `Snapshot` keeps a copy of a resource, which a
 /// rollback of its creation has no use for.
-fn is_plain_retain(policy: Option<&str>) -> bool {
+pub(crate) fn is_plain_retain(policy: Option<&str>) -> bool {
     policy.is_some_and(|p| p.trim().eq_ignore_ascii_case("retain"))
 }
 
@@ -2446,8 +2792,19 @@ pub(crate) fn change_set_rows(
         physical_ids.insert(r.logical_id.clone(), r.physical_id.clone());
         attributes.insert(r.logical_id.clone(), r.attributes.clone());
     }
-    let previous: BTreeMap<String, Value> = stack
-        .and_then(|s| {
+    let held: Option<BTreeMap<String, Value>> =
+        stack
+            .and_then(|s| s.pending_update.as_ref())
+            .map(|journal| {
+                journal
+                    .applied
+                    .iter()
+                    .map(|(id, saved)| (id.clone(), saved.properties.clone()))
+                    .collect()
+            });
+    let previous: BTreeMap<String, Value> = held
+        .or_else(|| {
+            let s = stack?;
             let old = template::parse_template(&s.template, &s.parameters).ok()?;
             Some(
                 old.resources
@@ -2687,6 +3044,14 @@ mod tests {
             run_with(svc, name, template, |_| {})
         }
 
+        fn run_held(
+            svc: &CloudFormationService,
+            name: &str,
+            template: &Value,
+        ) -> (ResourceProvisioner, UpdateOutcome) {
+            run_full(svc, name, template, |_| {}, true)
+        }
+
         /// `run_on`, doing something between the claim and the run, which is
         /// where another request would land with the lock released.
         fn run_with(
@@ -2694,6 +3059,16 @@ mod tests {
             name: &str,
             template: &Value,
             between: impl FnOnce(&CloudFormationService),
+        ) -> (ResourceProvisioner, UpdateOutcome) {
+            run_full(svc, name, template, between, false)
+        }
+
+        fn run_full(
+            svc: &CloudFormationService,
+            name: &str,
+            template: &Value,
+            between: impl FnOnce(&CloudFormationService),
+            disable_rollback: bool,
         ) -> (ResourceProvisioner, UpdateOutcome) {
             let body = template.to_string();
             let stack_id = stack(svc, name).stack_id;
@@ -2717,7 +3092,7 @@ mod tests {
                 // Empty here, so the pre-flight sees nothing and only the commit
                 // can catch what `between` did.
                 export_names: Vec::new(),
-                disable_rollback: false,
+                disable_rollback,
                 retain_except_on_create: false,
                 nested: false,
             });
@@ -3384,6 +3759,7 @@ mod tests {
                     .status = status.to_string();
             };
             for (interrupted, settled) in [
+                // With no journal to finish from.
                 ("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", "UPDATE_COMPLETE"),
                 (
                     "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS",
@@ -3402,6 +3778,936 @@ mod tests {
             set_status("UPDATE_ROLLBACK_FAILED");
             call(&svc, "ContinueUpdateRollback", &[("StackName", "s")]).await;
             assert_eq!(stack(&svc, "s").status, "UPDATE_ROLLBACK_COMPLETE");
+        }
+
+        fn prefix_of(svc: &CloudFormationService, name: &str) -> String {
+            let firehose = svc.deps.firehose.read();
+            firehose.get(ACCOUNT).unwrap().streams(REGION).unwrap()[name]
+                .destination
+                .as_ref()
+                .unwrap()
+                .prefix
+                .clone()
+                .unwrap()
+        }
+
+        fn failing_queue(depends_on: &str) -> Value {
+            json!({
+                "Type": "AWS::SQS::Queue",
+                "DependsOn": depends_on,
+                "Properties": {"QueueName": "not a valid name!"}
+            })
+        }
+
+        async fn update_held(svc: &CloudFormationService, name: &str, template: &Value) {
+            call(
+                svc,
+                "UpdateStack",
+                &[
+                    ("StackName", name),
+                    ("TemplateBody", &template.to_string()),
+                    ("DisableRollback", "true"),
+                ],
+            )
+            .await;
+        }
+
+        /// Review finding: a retry diffed against the attempted template, so what
+        /// the failed attempt never reached was skipped as unchanged.
+        #[tokio::test]
+        async fn a_retry_applies_what_the_held_attempt_never_reached() {
+            let svc = make_service();
+            let template = |prefix: &str, bad: bool| {
+                let mut after = stream(Some("after"), prefix, None);
+                let mut resources = json!({"F": stream(Some("first"), prefix, None)});
+                if bad {
+                    resources["Bad"] = failing_queue("F");
+                    after["DependsOn"] = json!("Bad");
+                } else {
+                    after["DependsOn"] = json!("F");
+                }
+                resources["After"] = after;
+                json!({"Resources": resources})
+            };
+            create(&svc, "s", &template("v1/", false)).await;
+            update_held(&svc, "s", &template("v2/", true)).await;
+            assert_eq!(stack(&svc, "s").status, "UPDATE_FAILED");
+            assert_eq!(prefix_of(&svc, "first"), "v2/");
+            assert_eq!(prefix_of(&svc, "after"), "v1/", "never reached");
+
+            update(&svc, "s", &template("v2/", false)).await;
+            assert_eq!(stack(&svc, "s").status, "UPDATE_COMPLETE");
+            assert_eq!(prefix_of(&svc, "after"), "v2/", "the retry reaches it");
+        }
+
+        /// The same with nothing applied at all: a stop before the first resource
+        /// must not make the attempt's template look applied.
+        #[tokio::test]
+        async fn a_retry_after_a_validation_stop_applies_everything() {
+            let svc = make_service();
+            create(
+                &svc,
+                "other",
+                &json!({"Resources": {"T": stream(Some("held-name"), "a/", None)}}),
+            )
+            .await;
+            create(
+                &svc,
+                "s",
+                &json!({"Resources": {"F": stream(Some("one"), "v1/", None)}}),
+            )
+            .await;
+            let colliding = json!({"Resources": {
+                "F": stream(Some("one"), "v2/", None),
+                "New": stream(Some("held-name"), "a/", None),
+            }});
+            update_held(&svc, "s", &colliding).await;
+            assert_eq!(stack(&svc, "s").status, "UPDATE_FAILED");
+            assert_eq!(prefix_of(&svc, "one"), "v1/");
+
+            update(
+                &svc,
+                "s",
+                &json!({"Resources": {"F": stream(Some("one"), "v2/", None)}}),
+            )
+            .await;
+            assert_eq!(stack(&svc, "s").status, "UPDATE_COMPLETE");
+            assert_eq!(prefix_of(&svc, "one"), "v2/");
+        }
+
+        /// Review finding: a retry's undo went back to the held attempt's
+        /// definition, which was never applied.
+        #[tokio::test]
+        async fn a_retrys_rollback_reaches_the_last_stable_state() {
+            let svc = make_service();
+            create(
+                &svc,
+                "s",
+                &json!({"Resources": {"F": stream(Some("one"), "v1/", None)}}),
+            )
+            .await;
+            // This attempt fails on F itself, so F stays at v1.
+            let mut failing = stream(Some("one"), "v2/", None);
+            failing["Properties"]["ExtendedS3DestinationConfiguration"]["CompressionFormat"] =
+                json!("BROTLI");
+            update_held(&svc, "s", &json!({"Resources": {"F": failing}})).await;
+            assert_eq!(stack(&svc, "s").status, "UPDATE_FAILED");
+            assert_eq!(prefix_of(&svc, "one"), "v1/");
+
+            // The retry applies F, then fails on something else and rolls back.
+            update(
+                &svc,
+                "s",
+                &json!({"Resources": {
+                    "F": stream(Some("one"), "v3/", None),
+                    "Bad": failing_queue("F"),
+                }}),
+            )
+            .await;
+            let after = stack(&svc, "s");
+            assert_eq!(after.status, "UPDATE_ROLLBACK_COMPLETE");
+            assert_eq!(prefix_of(&svc, "one"), "v1/");
+            assert!(
+                after.template.contains("v1/"),
+                "the stable template: {}",
+                after.template
+            );
+        }
+
+        fn nested(child: Value) -> Value {
+            json!({
+                "Type": "AWS::CloudFormation::Stack",
+                "Properties": {"TemplateBody": child.to_string()}
+            })
+        }
+
+        fn child_with(prefix: &str, bad: bool) -> Value {
+            let mut resources = json!({"F": stream(Some("inner"), prefix, None)});
+            if bad {
+                resources["Bad"] = failing_queue("F");
+            }
+            json!({"Resources": resources})
+        }
+
+        fn child_id(svc: &CloudFormationService, parent: &str) -> String {
+            stack(svc, parent)
+                .resources
+                .iter()
+                .find(|r| r.logical_id == "Child")
+                .unwrap()
+                .physical_id
+                .clone()
+        }
+
+        fn stack_by_id(svc: &CloudFormationService, id: &str) -> Stack {
+            svc.state
+                .read()
+                .regional(ACCOUNT, REGION)
+                .unwrap()
+                .stacks
+                .values()
+                .find(|s| s.stack_id == id)
+                .unwrap()
+                .clone()
+        }
+
+        /// Review finding: a nested stack's imports outlived it, blocking its
+        /// exporter for good.
+        #[tokio::test]
+        async fn deleting_a_nested_stack_releases_what_it_imported() {
+            let svc = make_service();
+            create(
+                &svc,
+                "exporter",
+                &json!({
+                    "Resources": {"T": {"Type": "AWS::SNS::Topic"}},
+                    "Outputs": {"O": {"Value": "x", "Export": {"Name": "shared"}}}
+                }),
+            )
+            .await;
+            let importing = json!({"Resources": {"Q": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {"Tags": [{"Key": "k", "Value": {"Fn::ImportValue": "shared"}}]}
+            }}});
+            let anchor = json!({"Type": "AWS::SNS::Topic"});
+            create(&svc, "parent", &json!({"Resources": {"Anchor": anchor}})).await;
+            update(
+                &svc,
+                "parent",
+                &json!({"Resources": {"Anchor": anchor, "Child": nested(importing)}}),
+            )
+            .await;
+            assert_eq!(stack(&svc, "parent").status, "UPDATE_COMPLETE");
+            assert!(svc
+                .state
+                .read()
+                .regional(ACCOUNT, REGION)
+                .unwrap()
+                .imports
+                .contains_key("shared"));
+
+            update(&svc, "parent", &json!({"Resources": {"Anchor": anchor}})).await;
+            assert!(!svc
+                .state
+                .read()
+                .regional(ACCOUNT, REGION)
+                .unwrap()
+                .imports
+                .contains_key("shared"));
+
+            call(&svc, "DeleteStack", &[("StackName", "exporter")]).await;
+            assert!(svc
+                .state
+                .read()
+                .regional(ACCOUNT, REGION)
+                .unwrap()
+                .exports
+                .is_empty());
+        }
+
+        /// Review finding: a nested create took over another stack's export.
+        #[tokio::test]
+        async fn a_nested_create_cannot_take_another_stacks_export() {
+            let svc = make_service();
+            create(
+                &svc,
+                "owner",
+                &json!({
+                    "Resources": {"T": {"Type": "AWS::SNS::Topic"}},
+                    "Outputs": {"O": {"Value": "ours", "Export": {"Name": "shared"}}}
+                }),
+            )
+            .await;
+            let anchor = json!({"Type": "AWS::SNS::Topic"});
+            create(&svc, "parent", &json!({"Resources": {"Anchor": anchor}})).await;
+            let child = json!({
+                "Resources": {"Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {"QueueName": "child-must-not-exist"}
+                }},
+                "Outputs": {"O": {"Value": "theirs", "Export": {"Name": "shared"}}}
+            });
+            update(
+                &svc,
+                "parent",
+                &json!({"Resources": {"Anchor": anchor, "Child": nested(child)}}),
+            )
+            .await;
+            let parent = stack(&svc, "parent");
+            assert_eq!(parent.status, "UPDATE_ROLLBACK_COMPLETE");
+            assert!(
+                crate::service::tests::failure_reasons(&svc, &parent.stack_id)
+                    .iter()
+                    .any(|r| r.contains("was not successfully created")
+                        && r.contains(
+                            "Export with name shared is already exported by stack owner"
+                        ))
+            );
+            let accounts = svc.state.read();
+            assert_eq!(
+                accounts.regional(ACCOUNT, REGION).unwrap().exports["shared"].value,
+                "ours"
+            );
+            drop(accounts);
+            assert!(
+                !svc.deps
+                    .sqs
+                    .read()
+                    .regional(ACCOUNT, REGION)
+                    .is_some_and(|s| s.name_to_url.contains_key("child-must-not-exist")),
+                "nothing provisioned"
+            );
+        }
+
+        /// Review finding: a child stuck in its rollback was recorded as if nothing
+        /// was left to undo.
+        #[test]
+        fn a_child_that_kept_its_journal_stays_in_the_parents_undo() {
+            let existing = StackResource {
+                logical_id: "Child".to_string(),
+                physical_id: "arn:child".to_string(),
+                resource_type: STACK_TYPE.to_string(),
+                status: "UPDATE_COMPLETE".to_string(),
+                service_token: None,
+                attributes: BTreeMap::new(),
+                deletion_policy: None,
+                update_replace_policy: None,
+            };
+            for status in ["UPDATE_FAILED", "UPDATE_ROLLBACK_FAILED"] {
+                assert!(
+                    matches!(
+                        failed_child_entry(&existing, status),
+                        JournalEntry::NestedUpdated { failed: true, .. }
+                    ),
+                    "{status}"
+                );
+            }
+            assert!(matches!(
+                failed_child_entry(&existing, "UPDATE_ROLLBACK_COMPLETE"),
+                JournalEntry::UpdateFailed { previous: None, .. }
+            ));
+        }
+
+        async fn parent_held_on_child(svc: &CloudFormationService) -> String {
+            create(
+                svc,
+                "p",
+                &json!({"Resources": {"Anchor": {"Type": "AWS::SNS::Topic"}}}),
+            )
+            .await;
+            let anchor = json!({"Type": "AWS::SNS::Topic"});
+            update(
+                svc,
+                "p",
+                &json!({"Resources": {"Anchor": anchor, "Child": nested(child_with("v1/", false))}}),
+            )
+            .await;
+            assert_eq!(stack(svc, "p").status, "UPDATE_COMPLETE");
+            let child = child_id(svc, "p");
+            update_held(
+                svc,
+                "p",
+                &json!({"Resources": {"Anchor": anchor, "Child": nested(child_with("v2/", true))}}),
+            )
+            .await;
+            assert_eq!(stack(svc, "p").status, "UPDATE_FAILED");
+            assert_eq!(stack_by_id(svc, &child).status, "UPDATE_FAILED");
+            child
+        }
+
+        /// Review finding: a rollback reported success over a broken child, and
+        /// ignored `ResourcesToSkip` and `ForceRollback` for it.
+        #[tokio::test]
+        async fn a_broken_child_stops_the_parents_rollback_until_told_otherwise() {
+            let svc = make_service();
+            let child = parent_held_on_child(&svc).await;
+            remove_stream(&svc, "inner");
+            call(&svc, "RollbackStack", &[("StackName", "p")]).await;
+            assert_eq!(stack(&svc, "p").status, "UPDATE_ROLLBACK_FAILED");
+            assert_eq!(stack_by_id(&svc, &child).status, "UPDATE_ROLLBACK_FAILED");
+
+            // Skipping the child's resource by its dotted name reaches the child.
+            call(
+                &svc,
+                "ContinueUpdateRollback",
+                &[("StackName", "p"), ("ResourcesToSkip.member.1", "Child.F")],
+            )
+            .await;
+            assert_eq!(stack(&svc, "p").status, "UPDATE_ROLLBACK_COMPLETE");
+            assert_eq!(stack_by_id(&svc, &child).status, "UPDATE_ROLLBACK_COMPLETE");
+        }
+
+        #[tokio::test]
+        async fn skipping_the_child_itself_leaves_it_be() {
+            let svc = make_service();
+            let child = parent_held_on_child(&svc).await;
+            remove_stream(&svc, "inner");
+            call(&svc, "RollbackStack", &[("StackName", "p")]).await;
+            call(
+                &svc,
+                "ContinueUpdateRollback",
+                &[("StackName", "p"), ("ResourcesToSkip.member.1", "Child")],
+            )
+            .await;
+            assert_eq!(stack(&svc, "p").status, "UPDATE_ROLLBACK_COMPLETE");
+            assert_eq!(stack_by_id(&svc, &child).status, "UPDATE_ROLLBACK_FAILED");
+        }
+
+        #[tokio::test]
+        async fn force_rollback_reaches_the_child() {
+            let svc = make_service();
+            let child = parent_held_on_child(&svc).await;
+            remove_stream(&svc, "inner");
+            call(&svc, "RollbackStack", &[("StackName", "p")]).await;
+            call(
+                &svc,
+                "ContinueUpdateRollback",
+                &[("StackName", "p"), ("ForceRollback", "true")],
+            )
+            .await;
+            assert_eq!(stack(&svc, "p").status, "UPDATE_ROLLBACK_COMPLETE");
+            assert_eq!(stack_by_id(&svc, &child).status, "UPDATE_ROLLBACK_COMPLETE");
+        }
+
+        fn parent_after_child(prefix: &str, bad: bool) -> Value {
+            let mut resources = json!({"Child": nested(child_with(prefix, false))});
+            if bad {
+                resources["Bad"] = failing_queue("Child");
+            }
+            json!({"Resources": resources})
+        }
+
+        /// Review finding: a parent held after its child succeeded left the child in
+        /// a status the parent's retry could not claim.
+        #[tokio::test]
+        async fn a_parents_retry_can_change_a_child_waiting_for_cleanup() {
+            let svc = make_service();
+            create(
+                &svc,
+                "p",
+                &json!({"Resources": {"Anchor": {"Type": "AWS::SNS::Topic"}}}),
+            )
+            .await;
+            update(&svc, "p", &parent_after_child("v1/", false)).await;
+            let child = child_id(&svc, "p");
+            update_held(&svc, "p", &parent_after_child("v2/", true)).await;
+            assert_eq!(stack(&svc, "p").status, "UPDATE_FAILED");
+            assert_eq!(
+                stack_by_id(&svc, &child).status,
+                "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS"
+            );
+
+            update(&svc, "p", &parent_after_child("v3/", false)).await;
+            assert_eq!(stack(&svc, "p").status, "UPDATE_COMPLETE");
+            let after = stack_by_id(&svc, &child);
+            assert_eq!(after.status, "UPDATE_COMPLETE");
+            assert!(after.pending_update.is_none());
+            assert_eq!(prefix_of(&svc, "inner"), "v3/");
+        }
+
+        #[tokio::test]
+        async fn a_parents_rollback_undoes_a_child_waiting_for_cleanup() {
+            let svc = make_service();
+            create(
+                &svc,
+                "p",
+                &json!({"Resources": {"Anchor": {"Type": "AWS::SNS::Topic"}}}),
+            )
+            .await;
+            update(&svc, "p", &parent_after_child("v1/", false)).await;
+            let child = child_id(&svc, "p");
+            update_held(&svc, "p", &parent_after_child("v2/", true)).await;
+            call(&svc, "RollbackStack", &[("StackName", "p")]).await;
+            assert_eq!(stack(&svc, "p").status, "UPDATE_ROLLBACK_COMPLETE");
+            assert_eq!(stack_by_id(&svc, &child).status, "UPDATE_ROLLBACK_COMPLETE");
+            assert_eq!(prefix_of(&svc, "inner"), "v1/");
+        }
+
+        /// Review finding: the release of one attempt's invokes covered the next
+        /// attempt too.
+        #[tokio::test]
+        async fn a_retrys_rollback_silences_only_what_was_never_released() {
+            let svc = make_service();
+            create(
+                &svc,
+                "s",
+                &json!({"Resources": {"Anchor": {"Type": "AWS::SNS::Topic"}}}),
+            )
+            .await;
+            let anchor = json!({"Type": "AWS::SNS::Topic"});
+
+            // The first attempt holds, releasing its custom resource's Create.
+            let (first, outcome) = run_held(
+                &svc,
+                "s",
+                &json!({"Resources": {
+                    "Anchor": anchor,
+                    "Seen": custom("a"),
+                    "Bad": failing_queue("Seen"),
+                }}),
+            );
+            assert_eq!(outcome.status, "UPDATE_FAILED");
+            assert_eq!(first.pending_custom_invokes.lock().len(), 1, "released");
+
+            // The retry queues another Create, then fails and rolls back. Only the
+            // released resource's handler hears anything: its Delete.
+            let (second, outcome) = run_on(
+                &svc,
+                "s",
+                &json!({"Resources": {
+                    "Anchor": anchor,
+                    "Seen": custom("a"),
+                    "Unseen": custom("b"),
+                    "Bad": {
+                        "Type": "AWS::SQS::Queue",
+                        "DependsOn": ["Seen", "Unseen"],
+                        "Properties": {"QueueName": "not a valid name!"}
+                    },
+                }}),
+            );
+            assert_eq!(outcome.status, "UPDATE_ROLLBACK_COMPLETE");
+            let invokes = second.pending_custom_invokes.lock();
+            assert_eq!(invokes.len(), 1, "{invokes:?}");
+            let event: Value = serde_json::from_str(&invokes[0].payload).unwrap();
+            assert_eq!(event["RequestType"], "Delete");
+            assert_eq!(event["LogicalResourceId"], "Seen");
+            assert!(second.pending_container_spawns.lock().is_empty());
+        }
+
+        /// Review finding: a restart dropped the journal of a child its held parent
+        /// still needs.
+        #[tokio::test]
+        async fn a_restart_keeps_the_journal_of_a_child_a_held_parent_waits_on() {
+            let svc = make_service();
+            create(
+                &svc,
+                "p",
+                &json!({"Resources": {"Anchor": {"Type": "AWS::SNS::Topic"}}}),
+            )
+            .await;
+            update(&svc, "p", &parent_after_child("v1/", false)).await;
+            let child = child_id(&svc, "p");
+            update_held(&svc, "p", &parent_after_child("v2/", true)).await;
+
+            {
+                let mut accounts = svc.state.write();
+                settle_interrupted_updates(accounts.regional_get_mut(ACCOUNT, REGION).unwrap());
+            }
+            let waiting = stack_by_id(&svc, &child);
+            assert_eq!(waiting.status, "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS");
+            assert!(waiting.pending_update.is_some());
+
+            call(&svc, "RollbackStack", &[("StackName", "p")]).await;
+            assert_eq!(prefix_of(&svc, "inner"), "v1/");
+
+            // With no parent waiting and no journal, the same status settles.
+            let mut lone = stack_by_id(&svc, &child);
+            lone.status = "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS".to_string();
+            lone.pending_update = None;
+            let mut accounts = svc.state.write();
+            let state = accounts.regional_get_mut(ACCOUNT, REGION).unwrap();
+            let child_name = lone.name.clone();
+            state.stacks.insert(child_name.clone(), lone);
+            settle_interrupted_updates(state);
+            assert_eq!(state.stacks[&child_name].status, "UPDATE_COMPLETE");
+        }
+
+        /// Review finding: with the post-provision check gone, two creates could
+        /// both pass the pre-flight and the slower took the export. The window is
+        /// simulated: the rival registers after this stack provisioned.
+        #[tokio::test]
+        async fn a_create_losing_an_export_race_rolls_back_what_it_provisioned() {
+            let svc = make_service();
+            let template = json!({
+                "Resources": {"Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {"QueueName": "lost-race"}
+                }},
+                "Outputs": {"O": {"Value": "mine", "Export": {"Name": "raced"}}}
+            });
+            // The stack as CreateStack seeds it, already provisioned.
+            let body = template.to_string();
+            let stack_id = "arn:aws:cloudformation:us-east-1:123456789012:stack/late/1".to_string();
+            let provisioner = svc.provisioner(&stack_id, ACCOUNT, REGION);
+            let parsed = template::parse_template(&body, &BTreeMap::new()).unwrap();
+            let resources: Vec<StackResource> = parsed
+                .resources
+                .iter()
+                .map(|def| provisioner.create_resource(def).unwrap())
+                .collect();
+            {
+                let mut accounts = svc.state.write();
+                let state = accounts.regional_mut(ACCOUNT, REGION);
+                let seeded = Stack {
+                    name: "late".to_string(),
+                    stack_id: stack_id.clone(),
+                    template: body.clone(),
+                    status: "CREATE_IN_PROGRESS".to_string(),
+                    status_reason: None,
+                    resources: Vec::new(),
+                    parameters: BTreeMap::new(),
+                    tags: BTreeMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: None,
+                    description: None,
+                    notification_arns: Vec::new(),
+                    outputs: Vec::new(),
+                    enable_termination_protection: false,
+                    pending_update: None,
+                    cancel_requested: false,
+                };
+                state.stacks.insert("late".to_string(), seeded);
+                state.exports.insert(
+                    "raced".to_string(),
+                    crate::state::StackExport {
+                        value: "theirs".to_string(),
+                        exporting_stack_id: "arn:stack/rival/1".to_string(),
+                        exporting_stack_name: "rival".to_string(),
+                    },
+                );
+            }
+            let outputs = CloudFormationService::resolve_template_outputs(
+                &body,
+                &BTreeMap::new(),
+                &resources,
+                &svc.state,
+                ACCOUNT,
+                REGION,
+            );
+            let reason = CloudFormationService::commit_created_stack(
+                &svc.state,
+                ACCOUNT,
+                REGION,
+                "late",
+                &stack_id,
+                &resources,
+                &outputs,
+                &[],
+            )
+            .expect("the rival holds the export");
+            assert_eq!(
+                reason,
+                "Export with name raced is already exported by stack rival"
+            );
+            assert_eq!(stack(&svc, "late").status, "ROLLBACK_IN_PROGRESS");
+            CloudFormationService::roll_back_created_stack(
+                &svc.state,
+                provisioner,
+                ACCOUNT,
+                REGION,
+                "late",
+                &stack_id,
+                resources,
+            )
+            .await;
+
+            let after = stack(&svc, "late");
+            assert_eq!(after.status, "ROLLBACK_COMPLETE");
+            assert!(after.resources.is_empty());
+            assert!(!svc
+                .deps
+                .sqs
+                .read()
+                .regional(ACCOUNT, REGION)
+                .is_some_and(|s| s.name_to_url.contains_key("lost-race")));
+            let accounts = svc.state.read();
+            let state = accounts.regional(ACCOUNT, REGION).unwrap();
+            assert_eq!(state.exports["raced"].value, "theirs");
+            let log: Vec<&str> = state.events[&stack_id]
+                .iter()
+                .map(|e| e["ResourceStatus"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                log,
+                [
+                    "CREATE_IN_PROGRESS",
+                    "CREATE_COMPLETE",
+                    "ROLLBACK_IN_PROGRESS",
+                    "DELETE_IN_PROGRESS",
+                    "DELETE_COMPLETE",
+                    "ROLLBACK_COMPLETE"
+                ]
+            );
+        }
+
+        /// The child's own rollback fails during the parent's forward pass: the
+        /// stream it has to re-apply disappears just then. The parent must not
+        /// report success over it, and the journal it kept finishes the job.
+        #[tokio::test]
+        async fn a_childs_rollback_failing_during_the_parents_update_stops_the_parent() {
+            let svc = make_service();
+            create(
+                &svc,
+                "p",
+                &json!({"Resources": {"Anchor": {"Type": "AWS::SNS::Topic"}}}),
+            )
+            .await;
+            let anchor = json!({"Type": "AWS::SNS::Topic"});
+            update(
+                &svc,
+                "p",
+                &json!({"Resources": {"Anchor": anchor, "Child": nested(child_with("v1/", false))}}),
+            )
+            .await;
+            let child = child_id(&svc, "p");
+
+            let hooked = svc.clone();
+            test_hooks::set(move |point| {
+                if point == "undo:F" {
+                    remove_stream(&hooked, "inner");
+                }
+            });
+            update(
+                &svc,
+                "p",
+                &json!({"Resources": {"Anchor": anchor, "Child": nested(child_with("v2/", true))}}),
+            )
+            .await;
+            test_hooks::clear();
+
+            let parent = stack(&svc, "p");
+            assert_eq!(parent.status, "UPDATE_ROLLBACK_FAILED");
+            assert_eq!(
+                parent.status_reason.as_deref(),
+                Some("The following resource(s) failed to update: [Child]. ")
+            );
+            assert!(parent.pending_update.is_some());
+            let stuck = stack_by_id(&svc, &child);
+            assert_eq!(stuck.status, "UPDATE_ROLLBACK_FAILED");
+            assert!(stuck.pending_update.is_some());
+            let reasons = crate::service::tests::failure_reasons(&svc, &parent.stack_id);
+            assert!(
+                reasons
+                    .iter()
+                    .any(|r| r.contains("Currently in UPDATE_ROLLBACK_FAILED")),
+                "{reasons:?}"
+            );
+            assert!(
+                reasons
+                    .iter()
+                    .any(|r| r.contains("was not successfully rolled back")),
+                "{reasons:?}"
+            );
+
+            call(
+                &svc,
+                "ContinueUpdateRollback",
+                &[("StackName", "p"), ("ForceRollback", "true")],
+            )
+            .await;
+            assert_eq!(stack(&svc, "p").status, "UPDATE_ROLLBACK_COMPLETE");
+            assert_eq!(stack_by_id(&svc, &child).status, "UPDATE_ROLLBACK_COMPLETE");
+        }
+
+        /// What a snapshot written at `point` holds, for the restart half of a test.
+        fn snapshot_at(
+            svc: &CloudFormationService,
+            point: &'static str,
+        ) -> std::rc::Rc<std::cell::RefCell<Option<Vec<u8>>>> {
+            let taken = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let (slot, hooked) = (taken.clone(), svc.clone());
+            test_hooks::set(move |at| {
+                if at == point && slot.borrow().is_none() {
+                    let accounts = hooked.state.read();
+                    *slot.borrow_mut() = Some(serde_json::to_vec(&*accounts).unwrap());
+                }
+            });
+            taken
+        }
+
+        /// Restart: the state as restored from `bytes`, over the service's other
+        /// state, then the startup resume.
+        async fn restart_from(svc: &CloudFormationService, bytes: &[u8]) {
+            let mut restored: fakecloud_core::multi_account::MultiAccountState<
+                crate::state::CloudFormationAccountState,
+            > = serde_json::from_slice(bytes).unwrap();
+            crate::restore_stack_sets(&mut restored);
+            *svc.state.write() = restored;
+            svc.resume_interrupted_cleanups().await;
+        }
+
+        fn topics(svc: &CloudFormationService) -> Vec<String> {
+            let sns = svc.deps.sns.read();
+            sns.regional(ACCOUNT, REGION)
+                .map(|state| state.topics.keys().cloned().collect())
+                .unwrap_or_default()
+        }
+
+        /// A restart during an update's cleanup finishes deleting what it was
+        /// deleting: both the removed resource and the replaced one.
+        #[tokio::test]
+        async fn a_restart_finishes_an_updates_cleanup() {
+            let svc = make_service();
+            create(
+                &svc,
+                "s",
+                &json!({"Resources": {
+                    "Gone": {"Type": "AWS::SNS::Topic", "Properties": {"TopicName": "gone"}},
+                    "Also": {"Type": "AWS::SNS::Topic", "Properties": {"TopicName": "also"}},
+                    "F": stream(None, "a/", Some("arn:aws:kinesis:us-east-1:123456789012:stream/one")),
+                }}),
+            )
+            .await;
+            let old_stream = stack(&svc, "s")
+                .resources
+                .iter()
+                .find(|r| r.logical_id == "F")
+                .unwrap()
+                .physical_id
+                .clone();
+            let taken = snapshot_at(&svc, "cleanup:Also");
+            update(
+                &svc,
+                "s",
+                &json!({"Resources": {
+                    "F": stream(None, "a/", Some("arn:aws:kinesis:us-east-1:123456789012:stream/two")),
+                }}),
+            )
+            .await;
+            test_hooks::clear();
+            let bytes = taken.borrow().clone().expect("reached the cleanup");
+            let after_real_cleanup = stack(&svc, "s").resources[0].physical_id.clone();
+
+            // Back to the moment of the snapshot, service state included.
+            let new_stream = after_real_cleanup;
+            let provisioner = svc.provisioner("x", ACCOUNT, REGION);
+            let recreated = provisioner
+                .create_resource(&ResourceDefinition {
+                    logical_id: "Also".to_string(),
+                    resource_type: "AWS::SNS::Topic".to_string(),
+                    properties: json!({"TopicName": "also"}),
+                    deletion_policy: None,
+                    update_replace_policy: None,
+                })
+                .unwrap();
+            assert!(topics(&svc).contains(&recreated.physical_id));
+            assert_ne!(old_stream, new_stream);
+
+            restart_from(&svc, &bytes).await;
+            let settled = stack(&svc, "s");
+            assert_eq!(settled.status, "UPDATE_COMPLETE");
+            assert!(settled.pending_update.is_none());
+            assert_eq!(settled.resources.len(), 1);
+            assert_eq!(settled.resources[0].physical_id, new_stream);
+            assert!(
+                !topics(&svc).iter().any(|t| t.ends_with(":also")),
+                "the interrupted cleanup still deleted it"
+            );
+        }
+
+        /// The same for a rollback's cleanup, which also has a baseline to restore.
+        #[tokio::test]
+        async fn a_restart_finishes_a_rollbacks_cleanup() {
+            let svc = make_service();
+            create(
+                &svc,
+                "s",
+                &json!({"Resources": {"F": stream(Some("one"), "v1/", None)}}),
+            )
+            .await;
+            let before = stack(&svc, "s");
+            let taken = snapshot_at(&svc, "cleanup:Added");
+            update(
+                &svc,
+                "s",
+                &json!({"Resources": {
+                    "F": stream(Some("one"), "v2/", None),
+                    "Added": {"Type": "AWS::SNS::Topic", "Properties": {"TopicName": "added"}},
+                    "Bad": {
+                        "Type": "AWS::SQS::Queue",
+                        "DependsOn": ["F", "Added"],
+                        "Properties": {"QueueName": "not a valid name!"}
+                    },
+                }}),
+            )
+            .await;
+            test_hooks::clear();
+            let bytes = taken.borrow().clone().expect("reached the cleanup");
+
+            // Back to that moment: the topic the cleanup had yet to delete exists.
+            svc.provisioner("x", ACCOUNT, REGION)
+                .create_resource(&ResourceDefinition {
+                    logical_id: "Added".to_string(),
+                    resource_type: "AWS::SNS::Topic".to_string(),
+                    properties: json!({"TopicName": "added"}),
+                    deletion_policy: None,
+                    update_replace_policy: None,
+                })
+                .unwrap();
+
+            restart_from(&svc, &bytes).await;
+            let settled = stack(&svc, "s");
+            assert_eq!(settled.status, "UPDATE_ROLLBACK_COMPLETE");
+            assert!(settled.pending_update.is_none());
+            assert_eq!(settled.template, before.template);
+            assert_eq!(settled.resources.len(), 1);
+            assert!(!topics(&svc).iter().any(|t| t.ends_with(":added")));
+        }
+
+        fn exporting_child(export: &str) -> Value {
+            json!({
+                "Resources": {"T": {"Type": "AWS::SNS::Topic"}},
+                "Outputs": {"O": {"Value": "x", "Export": {"Name": export}}}
+            })
+        }
+
+        fn importer_of(export: &str) -> Value {
+            json!({"Resources": {"Q": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {"Tags": [{"Key": "k", "Value": {"Fn::ImportValue": export}}]}
+            }}})
+        }
+
+        /// A nested child's exports hold its parent's delete like the parent's own,
+        /// and an import inside the family does not count.
+        #[tokio::test]
+        async fn a_nested_childs_export_in_use_blocks_the_parents_delete() {
+            let svc = make_service();
+            let body = json!({"Resources": {
+                "Child": nested(exporting_child("kid-export")),
+                "Sibling": nested(importer_of("kid-export")),
+            }});
+            create(&svc, "family", &body).await;
+            assert_eq!(stack(&svc, "family").status, "CREATE_COMPLETE");
+            create(&svc, "outsider", &importer_of("kid-export")).await;
+
+            call(&svc, "DeleteStack", &[("StackName", "family")]).await;
+            let parent = stack(&svc, "family");
+            assert_eq!(parent.status, "CREATE_COMPLETE");
+            assert!(svc.state.read().regional(ACCOUNT, REGION).unwrap().events[&parent.stack_id]
+                .iter()
+                .any(|e| e["ResourceStatusReason"]
+                    == "Delete canceled. Cannot delete export kid-export as it is in use by outsider."));
+
+            call(&svc, "DeleteStack", &[("StackName", "outsider")]).await;
+            call(&svc, "DeleteStack", &[("StackName", "family")]).await;
+            assert_eq!(stack(&svc, "family").status, "DELETE_COMPLETE");
+            let accounts = svc.state.read();
+            let state = accounts.regional(ACCOUNT, REGION).unwrap();
+            assert!(state.exports.is_empty());
+            assert!(state.imports.is_empty());
+        }
+
+        /// Removing a nested stack from its parent is the same delete.
+        #[tokio::test]
+        async fn removing_a_nested_child_with_an_export_in_use_rolls_back() {
+            let svc = make_service();
+            let anchor = json!({"Type": "AWS::SNS::Topic"});
+            create(
+                &svc,
+                "family",
+                &json!({"Resources": {"Anchor": anchor, "Child": nested(exporting_child("kid-export"))}}),
+            )
+            .await;
+            create(&svc, "outsider", &importer_of("kid-export")).await;
+            update(&svc, "family", &json!({"Resources": {"Anchor": anchor}})).await;
+            let parent = stack(&svc, "family");
+            assert_eq!(parent.status, "UPDATE_ROLLBACK_COMPLETE");
+            assert_eq!(parent.resources.len(), 2, "the child is still there");
+            assert!(svc.state.read().regional(ACCOUNT, REGION).unwrap().events[&parent.stack_id]
+                .iter()
+                .any(|e| e["ResourceStatusReason"]
+                    == "Delete canceled. Cannot delete export kid-export as it is in use by outsider."));
         }
 
         /// With the lock released, another stack can claim an export name between

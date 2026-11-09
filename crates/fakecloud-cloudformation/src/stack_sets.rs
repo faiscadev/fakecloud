@@ -241,9 +241,7 @@ const OPERATION_INTERRUPTED: &str = "The operation was interrupted by a restart"
 pub fn restore_stack_sets(accounts: &mut MultiAccountState<CloudFormationAccountState>) {
     for (_, state) in accounts.iter_mut() {
         for region in state.regions.values_mut() {
-            for stack in region.stacks.values_mut() {
-                crate::stack_update::settle_interrupted_update(stack);
-            }
+            crate::stack_update::settle_interrupted_updates(region);
         }
     }
     migrate_legacy_stack_sets(accounts);

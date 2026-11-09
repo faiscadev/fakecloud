@@ -210,6 +210,20 @@ impl ResourceProvisioner {
         let parsed = crate::template::parse_template(&template_body, &child_parameters)
             .map_err(|e| format!("Failed to parse nested template: {e}"))?;
 
+        // Export names cannot depend on resources, so a taken one fails the child
+        // before it provisions anything, as it would a top-level stack.
+        if let Some(reason) = crate::service::CloudFormationService::export_collision(
+            &self.cloudformation_state,
+            &self.account_id,
+            &self.region,
+            &child_stack_name,
+            &child_stack_id,
+            &template_body,
+            &child_parameters,
+        ) {
+            return Err(self.failed_child_create(&child_stack_id, &child_stack_name, &reason));
+        }
+
         let child_resources = crate::service::provision_stack_resources(
             &child_provisioner,
             &parsed.resources,
@@ -250,38 +264,61 @@ impl ResourceProvisioner {
             cancel_requested: false,
         };
 
-        {
+        let conflict = {
             let mut accounts = self.cloudformation_state.write();
             let state = accounts.regional_mut(&self.account_id, &self.region);
-            state.stacks.insert(child_stack_name.clone(), stack);
-            crate::service::CloudFormationService::sync_exports_imports(
+            // Under one lock with the registration: a stack that claimed one of
+            // these names since the check above is seen here.
+            let names: Vec<String> = child_outputs
+                .iter()
+                .filter_map(|o| o.export_name.clone())
+                .collect();
+            match crate::stack_update::export_conflict(
                 state,
-                &child_stack_id,
                 &child_stack_name,
-                &child_outputs,
-                &imported_names,
-            );
+                &child_stack_id,
+                &names,
+            ) {
+                Some(reason) => Some(reason),
+                None => {
+                    state.stacks.insert(child_stack_name.clone(), stack);
+                    crate::service::CloudFormationService::sync_exports_imports(
+                        state,
+                        &child_stack_id,
+                        &child_stack_name,
+                        &child_outputs,
+                        &imported_names,
+                    );
 
-            crate::service::record_stack_status_event(
-                state,
-                &child_stack_id,
-                &child_stack_name,
-                "AWS::CloudFormation::Stack",
-                "CREATE_IN_PROGRESS",
-            );
-            crate::service::record_stack_events(
-                state,
-                &child_stack_id,
-                &child_stack_name,
-                &child_resources,
-            );
-            crate::service::record_stack_status_event(
-                state,
-                &child_stack_id,
-                &child_stack_name,
-                "AWS::CloudFormation::Stack",
-                "CREATE_COMPLETE",
-            );
+                    crate::service::record_stack_status_event(
+                        state,
+                        &child_stack_id,
+                        &child_stack_name,
+                        "AWS::CloudFormation::Stack",
+                        "CREATE_IN_PROGRESS",
+                    );
+                    crate::service::record_stack_events(
+                        state,
+                        &child_stack_id,
+                        &child_stack_name,
+                        &child_resources,
+                    );
+                    crate::service::record_stack_status_event(
+                        state,
+                        &child_stack_id,
+                        &child_stack_name,
+                        "AWS::CloudFormation::Stack",
+                        "CREATE_COMPLETE",
+                    );
+                    None
+                }
+            }
+        };
+        if let Some(reason) = conflict {
+            for resource in child_resources.iter().rev() {
+                let _ = self.delete_resource(resource);
+            }
+            return Err(self.failed_child_create(&child_stack_id, &child_stack_name, &reason));
         }
 
         let mut result = ProvisionResult::new(child_stack_id.clone());
@@ -291,6 +328,35 @@ impl ResourceProvisioner {
                 .insert(format!("Outputs.{}", output.key), output.value.clone());
         }
         Ok(result)
+    }
+
+    /// A child that failed like a top-level stack does on a taken export name: the
+    /// recorded events, under an id no stack keeps, since the parent deletes what
+    /// is left of it anyway. Returns the parent's failure reason.
+    fn failed_child_create(
+        &self,
+        child_stack_id: &str,
+        child_stack_name: &str,
+        reason: &str,
+    ) -> String {
+        let rollback_reason = format!("{reason}. Rollback requested by user.");
+        let mut accounts = self.cloudformation_state.write();
+        let state = accounts.regional_mut(&self.account_id, &self.region);
+        for (status, event_reason) in [
+            ("CREATE_IN_PROGRESS", Some("User Initiated")),
+            ("ROLLBACK_IN_PROGRESS", Some(rollback_reason.as_str())),
+            ("ROLLBACK_COMPLETE", None),
+        ] {
+            crate::service::record_stack_status_event_with_reason(
+                state,
+                child_stack_id,
+                child_stack_name,
+                "AWS::CloudFormation::Stack",
+                status,
+                event_reason,
+            );
+        }
+        format!("Embedded stack {child_stack_id} was not successfully created: {rollback_reason}")
     }
 
     pub(super) fn delete_cloudformation_stack(&self, physical_id: &str) -> Result<(), String> {
@@ -330,6 +396,11 @@ impl ResourceProvisioner {
                     state
                         .exports
                         .retain(|_, export| export.exporting_stack_id != stack_id);
+                    // What it imported is free to change now.
+                    for consumers in state.imports.values_mut() {
+                        consumers.retain(|consumer| consumer != &stack_name);
+                    }
+                    state.imports.retain(|_, consumers| !consumers.is_empty());
 
                     crate::service::record_stack_status_event(
                         state,
