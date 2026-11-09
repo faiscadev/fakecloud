@@ -144,6 +144,45 @@ pub struct ShapeTraits {
     /// repeated sibling elements named after the member (no wrapper), so an
     /// empty collection has no XML representation at all.
     pub xml_flattened: bool,
+    /// `smithy.api#xmlNamespace` -- the `xmlns` (or `xmlns:prefix`) declared
+    /// on the element. On a service shape it is the default namespace of
+    /// every restXml request body's root element.
+    pub xml_namespace: Option<XmlNamespace>,
+    /// `smithy.api#xmlAttribute` -- the member serializes as an attribute of
+    /// its parent element instead of a child element.
+    pub xml_attribute: bool,
+    /// `smithy.api#timestampFormat` (`date-time`, `epoch-seconds`,
+    /// `http-date`).
+    pub timestamp_format: Option<String>,
+    /// `smithy.api#httpPrefixHeaders("prefix")` -- a map member whose entries
+    /// become `{prefix}{key}: value` request headers.
+    pub http_prefix_headers: Option<String>,
+    /// `smithy.api#httpQueryParams` -- a map member whose entries become query
+    /// parameters.
+    pub http_query_params: bool,
+    /// `aws.protocols#restXml` on a service shape.
+    pub rest_xml: bool,
+    /// The `smithy.api#xmlName` on a list's `member`, or a map's `key` /
+    /// `value`. These live on the collection shape's member definitions, which
+    /// `ShapeType` does not keep, so they are carried on the collection
+    /// shape's own traits.
+    pub xml_list_member_name: Option<String>,
+    pub xml_map_key_name: Option<String>,
+    pub xml_map_value_name: Option<String>,
+    /// A structure's or union's member names in the order the model file
+    /// declares them. `ShapeType`'s member list is built from a
+    /// `serde_json::Map`, whose iteration order is alphabetical or
+    /// declaration order depending on whether some other crate in the build
+    /// enables serde_json's `preserve_order`; serializers that must follow
+    /// the model's order (restXml bodies) read this instead.
+    pub member_order: Vec<String>,
+}
+
+/// A `smithy.api#xmlNamespace` value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XmlNamespace {
+    pub uri: String,
+    pub prefix: Option<String>,
 }
 
 /// An example from `smithy.api#examples` trait on operations.
@@ -158,8 +197,13 @@ pub struct OperationExample {
 pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-    let root: Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+    parse_model_str(&content).map_err(|e| format!("{}: {}", path.display(), e))
+}
+
+/// Parse a Smithy JSON AST model from a string.
+pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
+    let root: Value =
+        serde_json::from_str(content).map_err(|e| format!("Failed to parse model: {}", e))?;
 
     let smithy_version = root
         .get("smithy")
@@ -206,9 +250,13 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
     }
 
     // Parse all shapes
+    let mut member_orders = declared_member_orders(content);
     let mut shapes = HashMap::new();
     for (shape_id, shape_def) in raw_shapes {
-        if let Some(shape) = parse_shape(shape_id, shape_def) {
+        if let Some(mut shape) = parse_shape(shape_id, shape_def) {
+            if let Some(order) = member_orders.remove(shape_id) {
+                shape.traits.member_order = order;
+            }
             shapes.insert(shape_id.clone(), shape);
         }
     }
@@ -280,6 +328,55 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
     })
 }
 
+/// Each shape's `members` keys in declaration order, read straight from the
+/// model text so the result does not depend on serde_json's `preserve_order`
+/// feature.
+fn declared_member_orders(content: &str) -> HashMap<String, Vec<String>> {
+    use serde::de::{IgnoredAny, MapAccess, Visitor};
+
+    /// The keys of a JSON object, in order, values ignored.
+    struct Keys(Vec<String>);
+    impl<'de> Deserialize<'de> for Keys {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> Visitor<'de> for V {
+                type Value = Keys;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a JSON object")
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
+                    let mut keys = Vec::new();
+                    while let Some((k, IgnoredAny)) = map.next_entry::<String, IgnoredAny>()? {
+                        keys.push(k);
+                    }
+                    Ok(Keys(keys))
+                }
+            }
+            d.deserialize_map(V)
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct RawShape {
+        #[serde(default)]
+        members: Option<Keys>,
+    }
+    #[derive(Deserialize)]
+    struct RawModel {
+        #[serde(default)]
+        shapes: HashMap<String, RawShape>,
+    }
+
+    serde_json::from_str::<RawModel>(content)
+        .map(|m| {
+            m.shapes
+                .into_iter()
+                .filter_map(|(id, shape)| shape.members.map(|k| (id, k.0)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn collect_resource_operations(
     raw_shapes: &serde_json::Map<String, Value>,
     resource_target: &str,
@@ -327,7 +424,17 @@ fn collect_resource_operations(
 fn parse_shape(shape_id: &str, def: &Value) -> Option<Shape> {
     let type_str = def.get("type").and_then(|v| v.as_str())?;
     let raw_traits = def.get("traits").and_then(|v| v.as_object());
-    let traits = parse_traits(raw_traits);
+    let mut traits = parse_traits(raw_traits);
+    let element_xml_name = |part: &str| {
+        def.get(part)
+            .and_then(|v| v.get("traits"))
+            .and_then(|t| t.get("smithy.api#xmlName"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+    traits.xml_list_member_name = element_xml_name("member");
+    traits.xml_map_key_name = element_xml_name("key");
+    traits.xml_map_value_name = element_xml_name("value");
 
     let shape_type = match type_str {
         "structure" => {
@@ -564,6 +671,38 @@ fn parse_traits(raw: Option<&serde_json::Map<String, Value>>) -> ShapeTraits {
 
     traits.xml_flattened = raw.contains_key("smithy.api#xmlFlattened");
 
+    if let Some(ns) = raw.get("smithy.api#xmlNamespace") {
+        if let Some(uri) = ns.get("uri").and_then(|v| v.as_str()) {
+            traits.xml_namespace = Some(XmlNamespace {
+                uri: uri.to_string(),
+                prefix: ns
+                    .get("prefix")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            });
+        }
+    }
+
+    traits.xml_attribute = raw.contains_key("smithy.api#xmlAttribute");
+
+    if let Some(fmt) = raw
+        .get("smithy.api#timestampFormat")
+        .and_then(|v| v.as_str())
+    {
+        traits.timestamp_format = Some(fmt.to_string());
+    }
+
+    if let Some(prefix) = raw
+        .get("smithy.api#httpPrefixHeaders")
+        .and_then(|v| v.as_str())
+    {
+        traits.http_prefix_headers = Some(prefix.to_string());
+    }
+
+    traits.http_query_params = raw.contains_key("smithy.api#httpQueryParams");
+
+    traits.rest_xml = raw.contains_key("aws.protocols#restXml");
+
     if let Some(default) = raw.get("smithy.api#default") {
         traits.default_value = Some(default.clone());
     }
@@ -591,6 +730,20 @@ fn parse_traits(raw: Option<&serde_json::Map<String, Value>>) -> ShapeTraits {
     }
 
     traits
+}
+
+impl ServiceModel {
+    /// The model's service shape, if it was parsed.
+    pub fn service_shape(&self) -> Option<&Shape> {
+        self.shapes
+            .values()
+            .find(|s| matches!(s.shape_type, ShapeType::Service))
+    }
+
+    /// Whether the service speaks `aws.protocols#restXml`.
+    pub fn is_rest_xml(&self) -> bool {
+        self.service_shape().is_some_and(|s| s.traits.rest_xml)
+    }
 }
 
 /// Resolve a shape ID to its short name (after the `#`).

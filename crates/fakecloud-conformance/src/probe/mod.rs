@@ -886,6 +886,8 @@ mod tests {
         for (status, code) in [
             (400, "MalformedXML"),
             (400, "InvalidArgument"),
+            (400, "MalformedACLError"),
+            (400, "MalformedPolicy"),
             (404, "NoSuchBucketPolicy"),
             (404, "NoSuchCORSConfiguration"),
             (404, "NoSuchLifecycleConfiguration"),
@@ -1205,6 +1207,7 @@ mod followup;
 mod protocols;
 mod response;
 mod rest_request;
+mod rest_xml;
 mod service_detection;
 use followup::*;
 use protocols::*;

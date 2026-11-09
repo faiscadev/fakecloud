@@ -25,6 +25,10 @@ sha2 = { workspace = true }
 fakecloud-conformance-macros = { path = "../fakecloud-conformance-macros" }
 fakecloud-testkit = { path = "../fakecloud-testkit", features = ["sdk-clients"] }
 fakecloud-cognito = { path = "../fakecloud-cognito" }
+fakecloud-cloudfront = { path = "../fakecloud-cloudfront" }
+bytes = { workspace = true }
+http = { workspace = true }
+parking_lot = { workspace = true }
 rcgen = { workspace = true, features = ["x509-parser"] }
 aws-config = "1"
 aws-sdk-sqs = "1"

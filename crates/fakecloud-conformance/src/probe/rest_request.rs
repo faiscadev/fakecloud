@@ -1014,7 +1014,20 @@ pub(super) fn build_http_request_from_model(
         method,
         reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::DELETE
     );
-    let body = if let Some(v) = payload_value {
+    let body = if model.is_rest_xml() {
+        // restXml bodies are XML documents built from the binding traits,
+        // not the JSON the generators produce.
+        let (body, content_type) = super::rest_xml::rest_xml_body(op, model, input);
+        if let Some(ct) = content_type {
+            if !headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            {
+                headers.push(("Content-Type".to_string(), ct.to_string()));
+            }
+        }
+        body
+    } else if let Some(v) = payload_value {
         Some(value_to_body(&v))
     } else if is_bodyless_method {
         None

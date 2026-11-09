@@ -204,6 +204,25 @@ fn merged_traits(target: &ShapeTraits, member: &ShapeTraits) -> ShapeTraits {
             .or_else(|| target.ec2_query_name.clone()),
         xml_name: member.xml_name.clone().or_else(|| target.xml_name.clone()),
         xml_flattened: member.xml_flattened || target.xml_flattened,
+        xml_namespace: member
+            .xml_namespace
+            .clone()
+            .or_else(|| target.xml_namespace.clone()),
+        xml_attribute: member.xml_attribute || target.xml_attribute,
+        timestamp_format: member
+            .timestamp_format
+            .clone()
+            .or_else(|| target.timestamp_format.clone()),
+        http_prefix_headers: member
+            .http_prefix_headers
+            .clone()
+            .or_else(|| target.http_prefix_headers.clone()),
+        http_query_params: member.http_query_params || target.http_query_params,
+        rest_xml: member.rest_xml || target.rest_xml,
+        xml_list_member_name: target.xml_list_member_name.clone(),
+        xml_map_key_name: target.xml_map_key_name.clone(),
+        xml_map_value_name: target.xml_map_value_name.clone(),
+        member_order: target.member_order.clone(),
     }
 }
 
