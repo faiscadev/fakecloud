@@ -1354,7 +1354,7 @@ fn flow_json(f: &Flow) -> Value {
     if let Some(ref k) = f.customer_encryption_key_arn {
         o["customerEncryptionKeyArn"] = json!(k);
     }
-    if let Some(ref def) = f.definition {
+    if let Some(def) = f.definition.as_ref().filter(|d| !d.is_null()) {
         o["definition"] = def.clone();
     }
     if let Some(ref validations) = f.validations {
@@ -2470,6 +2470,43 @@ mod tests {
             err.message(),
             "Alias routing configuration must point to a non draft version. Retry your request with a valid version."
         );
+        let (_, alias) = call(
+            &svc,
+            Method::POST,
+            &format!("/flows/{id}/aliases"),
+            &[],
+            json!({"name": "live", "routingConfiguration": [{"flowVersion": "1"}]}),
+        )
+        .await;
+        let alias_id = alias["id"].as_str().unwrap().to_string();
+        let err = try_call(
+            &svc,
+            Method::PUT,
+            &format!("/flows/{id}/aliases/{alias_id}"),
+            &[],
+            json!({"name": "live", "routingConfiguration": [{"flowVersion": "DRAFT"}]}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(err.code(), "ValidationException");
+        assert_eq!(
+            err.message(),
+            "Alias routing configuration must point to a non draft version. Retry your request with a valid version."
+        );
+        // The refused update left the alias routing to version 1.
+        let (_, got_alias) = call(
+            &svc,
+            Method::GET,
+            &format!("/flows/{id}/aliases/{alias_id}"),
+            &[],
+            json!({}),
+        )
+        .await;
+        assert_eq!(
+            got_alias["routingConfiguration"],
+            json!([{"flowVersion": "1"}])
+        );
     }
 
     #[tokio::test]
@@ -2784,6 +2821,120 @@ mod tests {
             state.prompts[prompt_id].arn,
             prompt["arn"].as_str().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_flow_without_validations_loads_unprepared_findings() {
+        let svc = BedrockAgentService::new(Arc::new(RwLock::new(BedrockAgentAccounts::new())));
+        let flow = body(
+            svc.create_flow(&cn_request(
+                json!({"name": "f", "definition": valid_flow_definition()}),
+            ))
+            .unwrap(),
+        );
+        let flow_id = flow["id"].as_str().unwrap().to_string();
+        svc.prepare_flow(&cn_request(json!({"flowIdentifier": flow_id})))
+            .unwrap();
+
+        // A snapshot written before flows stored their validation findings.
+        let mut raw = serde_json::to_value(&*svc.state.read()).unwrap();
+        let record = &mut raw["accounts"]["123456789012"]["flows"][&flow_id];
+        assert!(record.get("validations").is_some());
+        record.as_object_mut().unwrap().remove("validations");
+        let loaded: BedrockAgentAccounts = serde_json::from_value(raw).unwrap();
+        assert!(loaded.get("123456789012").unwrap().flows[&flow_id]
+            .validations
+            .is_none());
+
+        let svc = BedrockAgentService::new(Arc::new(RwLock::new(loaded)));
+        let got = body(
+            svc.get_flow(&cn_request(json!({"flowIdentifier": flow_id})))
+                .unwrap(),
+        );
+        assert_eq!(got["status"], "Prepared");
+        assert!(got.get("validations").is_none(), "{got}");
+    }
+
+    #[tokio::test]
+    async fn prepare_flow_refuses_a_stored_definition_with_duplicate_node_names() {
+        let svc = BedrockAgentService::new(Arc::new(RwLock::new(BedrockAgentAccounts::new())));
+        let flow = body(
+            svc.create_flow(&cn_request(
+                json!({"name": "f", "definition": valid_flow_definition()}),
+            ))
+            .unwrap(),
+        );
+        let flow_id = flow["id"].as_str().unwrap().to_string();
+        // A definition stored before node names had to be unique.
+        let mut legacy = valid_flow_definition();
+        let output = legacy["nodes"][1].clone();
+        legacy["nodes"].as_array_mut().unwrap().push(output);
+        svc.state
+            .write()
+            .accounts
+            .get_mut("123456789012")
+            .unwrap()
+            .flows
+            .get_mut(&flow_id)
+            .unwrap()
+            .definition = Some(legacy);
+
+        let err = svc
+            .prepare_flow(&cn_request(json!({"flowIdentifier": flow_id})))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ValidationException");
+        assert_eq!(err.message(), "Node name FlowOutputNode must be unique");
+        let got = body(
+            svc.get_flow(&cn_request(json!({"flowIdentifier": flow_id})))
+                .unwrap(),
+        );
+        assert_eq!(got["status"], "NotPrepared");
+        assert!(got.get("validations").is_none(), "{got}");
+    }
+
+    #[tokio::test]
+    async fn a_null_definition_is_no_definition() {
+        let svc = BedrockAgentService::new(Arc::new(RwLock::new(BedrockAgentAccounts::new())));
+        let empty = |id: &str| {
+            format!("You can\u{2019}t prepare flow {id} because its definition is empty. Update your flow with a definition and retry your request.")
+        };
+        let flow = body(
+            svc.create_flow(&cn_request(json!({"name": "f", "definition": null})))
+                .unwrap(),
+        );
+        let flow_id = flow["id"].as_str().unwrap().to_string();
+        assert!(flow.get("definition").is_none(), "{flow}");
+        let err = svc
+            .prepare_flow(&cn_request(json!({"flowIdentifier": flow_id})))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ValidationException");
+        assert_eq!(err.message(), empty(&flow_id));
+
+        // UpdateFlow with a null definition drops the one it had.
+        let updated = body(
+            svc.update_flow(&cn_request(json!({"flowIdentifier": flow_id, "name": "f",
+                "definition": valid_flow_definition()})))
+                .unwrap(),
+        );
+        assert!(updated.get("definition").is_some());
+        let updated = body(
+            svc.update_flow(&cn_request(json!({"flowIdentifier": flow_id, "name": "f",
+                "definition": null})))
+                .unwrap(),
+        );
+        assert!(updated.get("definition").is_none(), "{updated}");
+        let got = body(
+            svc.get_flow(&cn_request(json!({"flowIdentifier": flow_id})))
+                .unwrap(),
+        );
+        assert!(got.get("definition").is_none(), "{got}");
+        let err = svc
+            .prepare_flow(&cn_request(json!({"flowIdentifier": flow_id})))
+            .err()
+            .unwrap();
+        assert_eq!(err.message(), empty(&flow_id));
     }
 
     #[test]

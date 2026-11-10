@@ -54,6 +54,11 @@ fn check_alias_routing(body: &Value) -> Result<(), AwsServiceError> {
     Ok(())
 }
 
+/// A request's flow `definition`; an explicit `null` is no definition.
+fn definition_of(body: &Value) -> Option<Value> {
+    body.get("definition").filter(|d| !d.is_null()).cloned()
+}
+
 fn flow_not_found(id: &str) -> AwsServiceError {
     not_found(format!("Flow {id} not found"))
 }
@@ -424,57 +429,53 @@ fn validate_definition(definition: &Value) -> Vec<Value> {
     // don't reach), following connections in declaration order. A connection
     // back to a node still on the walk closes a cycle; the cycle is reported
     // by its first connection, the one leaving that node along the walk.
-    struct Walk<'a, 'e> {
-        edges: &'e BTreeMap<&'a str, Vec<(&'a str, &'a str)>>,
-        /// `true` while the node is on the walk, `false` once it is done.
-        state: BTreeMap<&'a str, bool>,
-        /// The walk so far: (node, connection taken out of it).
-        path: Vec<(&'a str, &'a str)>,
-        cyclic: Vec<(&'a str, &'a str, &'a str)>,
-    }
-    impl<'a> Walk<'a, '_> {
-        fn visit(&mut self, node: &'a str) {
-            self.state.insert(node, true);
-            for &(target, connection) in self.edges.get(node).into_iter().flatten() {
-                match self.state.get(target) {
-                    Some(true) => {
-                        let walked: Vec<(&str, &str)> = self
-                            .path
-                            .iter()
-                            .copied()
-                            .chain([(node, connection)])
-                            .collect();
-                        if let Some(i) = walked.iter().position(|(n, _)| *n == target) {
-                            let (from, via) = walked[i];
-                            let to = walked.get(i + 1).map_or(target, |(n, _)| *n);
-                            if !self.cyclic.iter().any(|(_, _, c)| *c == via) {
-                                self.cyclic.push((from, to, via));
-                            }
-                        }
+    // The walk keeps its own stack: a definition can chain far more nodes
+    // than a request thread's stack has frames for.
+    let mut cyclic: Vec<(&str, &str, &str)> = Vec::new();
+    {
+        let no_edges: Vec<(&str, &str)> = Vec::new();
+        let edges_of = |node: &str| edges.get(node).unwrap_or(&no_edges);
+        // Nodes the walk has finished with.
+        let mut done: BTreeSet<&str> = BTreeSet::new();
+        // Nodes on the walk -> their position in `stack`.
+        let mut on_walk: BTreeMap<&str, usize> = BTreeMap::new();
+        // (node, connections of it taken so far). For every frame but the
+        // top, the last one taken is the connection the walk followed out.
+        let mut stack: Vec<(&str, usize)> = Vec::new();
+        for &root in starts.iter().chain(order.iter()) {
+            if done.contains(root) || on_walk.contains_key(root) {
+                continue;
+            }
+            on_walk.insert(root, 0);
+            stack.push((root, 0));
+            while let Some(&(node, taken)) = stack.last() {
+                let Some(&(target, connection)) = edges_of(node).get(taken) else {
+                    on_walk.remove(node);
+                    done.insert(node);
+                    stack.pop();
+                    continue;
+                };
+                let top = stack.len() - 1;
+                stack[top].1 += 1;
+                if let Some(&i) = on_walk.get(target) {
+                    let (from, from_taken) = stack[i];
+                    let via = if i == top {
+                        connection
+                    } else {
+                        edges_of(from)[from_taken - 1].1
+                    };
+                    let to = stack.get(i + 1).map_or(target, |(n, _)| *n);
+                    if !cyclic.iter().any(|(_, _, c)| *c == via) {
+                        cyclic.push((from, to, via));
                     }
-                    Some(false) => {}
-                    None => {
-                        self.path.push((node, connection));
-                        self.visit(target);
-                        self.path.pop();
-                    }
+                } else if !done.contains(target) {
+                    on_walk.insert(target, stack.len());
+                    stack.push((target, 0));
                 }
             }
-            self.state.insert(node, false);
         }
     }
-    let mut walk = Walk {
-        edges: &edges,
-        state: BTreeMap::new(),
-        path: Vec::new(),
-        cyclic: Vec::new(),
-    };
-    for node in starts.iter().chain(order.iter()) {
-        if !walk.state.contains_key(node) {
-            walk.visit(node);
-        }
-    }
-    for (source, target, connection) in walk.cyclic {
+    for (source, target, connection) in cyclic {
         out.push(flow_validation(
             "Error",
             "CyclicConnection",
@@ -531,7 +532,7 @@ impl BedrockAgentService {
             created_at: now_dt,
             updated_at: now_dt,
             version: "DRAFT".to_string(),
-            definition: opt_json(&body, "definition"),
+            definition: definition_of(&body),
             arn: flow_arn(&req.region, &req.account_id, &id),
             customer_encryption_key_arn: opt_str(&body, "customerEncryptionKeyArn"),
             latest_version: 0,
@@ -590,7 +591,7 @@ impl BedrockAgentService {
             f.customer_encryption_key_arn = Some(k);
         }
         if body.get("definition").is_some() {
-            f.definition = opt_json(&body, "definition");
+            f.definition = definition_of(&body);
         }
         // An updated draft has to be prepared again before it can run, and
         // the last preparation's findings no longer describe it.
@@ -619,11 +620,16 @@ impl BedrockAgentService {
             .flows
             .get_mut(&id)
             .ok_or_else(|| flow_not_found(&id))?;
-        let definition = f.definition.as_ref().ok_or_else(|| {
+        // A null definition (stored before nulls were dropped) is no
+        // definition either.
+        let definition = f.definition.as_ref().filter(|d| !d.is_null()).ok_or_else(|| {
             validation(format!(
                 "You can\u{2019}t prepare flow {id} because its definition is empty. Update your flow with a definition and retry your request."
             ))
         })?;
+        // A definition stored before node names had to be unique can't be
+        // validated node by node; it is refused as CreateFlow refuses it.
+        check_definition(definition)?;
         // Preparing validates the definition: any error fails the flow, and
         // GetFlow reports every finding until the draft changes again.
         let validations = validate_definition(definition);
@@ -971,6 +977,67 @@ mod tests {
         );
         // ValidateFlowDefinition only checks the definition's shape.
         check_definition(&two).unwrap();
+    }
+
+    #[test]
+    fn a_very_long_chain_validates_without_exhausting_the_stack() {
+        // 50,000 nodes in a line, then a connection from the last back to
+        // the first: the cycle walk is as deep as the chain. Run on a thread
+        // with the 2 MiB stack a tokio worker has.
+        const LEN: usize = 50_000;
+        let link = |name: String, source: &str, target: &str| {
+            json!({"name": name, "type": "Data", "source": source, "target": target,
+                "configuration": {"data": {"sourceOutput": "out", "targetInput": "in"}}})
+        };
+        let mut nodes = vec![json!({"name": "FlowInputNode", "type": "Input",
+            "outputs": [{"name": "document", "type": "String"}]})];
+        let mut connections = vec![json!({"name": "Start", "type": "Data",
+            "source": "FlowInputNode", "target": "Step0",
+            "configuration": {"data": {"sourceOutput": "document", "targetInput": "in"}}})];
+        for i in 0..LEN {
+            nodes.push(json!({"name": format!("Step{i}"), "type": "Prompt",
+                "inputs": [{"name": "in", "type": "String", "expression": "$.data"},
+                           {"name": "back", "type": "String", "expression": "$.data"}],
+                "outputs": [{"name": "out", "type": "String"}]}));
+            if i + 1 < LEN {
+                connections.push(link(
+                    format!("Link{i}"),
+                    &format!("Step{i}"),
+                    &format!("Step{}", i + 1),
+                ));
+            }
+        }
+        let last = format!("Step{}", LEN - 1);
+        connections.push(
+            json!({"name": "Back", "type": "Data", "source": last, "target": "Step0",
+            "configuration": {"data": {"sourceOutput": "out", "targetInput": "back"}}}),
+        );
+        let definition = json!({"nodes": nodes, "connections": connections});
+
+        let validations = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || validate_definition(&definition))
+            .unwrap()
+            .join()
+            .expect("validation overflowed its stack");
+        let cyclic: Vec<&Value> = validations
+            .iter()
+            .filter(|v| v["type"] == "CyclicConnection")
+            .collect();
+        assert_eq!(cyclic.len(), 1, "{cyclic:?}");
+        // Reported by the cycle's first connection along the walk.
+        assert_eq!(
+            cyclic[0]["details"],
+            json!({"cyclicConnection": {"connection": "Link0"}})
+        );
+        // Every input after the first step's `back` is unfed, nothing else
+        // but the missing Output node is wrong, and every step is reached.
+        assert!(validations.iter().all(|v| {
+            v["type"] == "CyclicConnection"
+                || v["type"] == "MissingEndingNodes"
+                || v["type"] == "UnfulfilledNodeInput"
+        }));
+        assert!(!validations.iter().any(|v| v["type"] == "UnreachableNode"));
     }
 
     #[test]
