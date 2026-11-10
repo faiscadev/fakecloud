@@ -27,7 +27,7 @@ fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
     )
 }
 
-fn check_optional_int_range(
+pub(crate) fn check_optional_int_range(
     field: &str,
     v: Option<i64>,
     min: i64,
@@ -105,7 +105,7 @@ pub(crate) const LAMBDA_RUNTIMES: &[&str] = &[
     "provided.al2023",
 ];
 
-fn check_optional_enum(
+pub(crate) fn check_optional_enum(
     field: &str,
     v: Option<&str>,
     allowed: &[&str],
@@ -215,29 +215,9 @@ fn prevalidate_lambda(action: &str, req: &AwsRequest) -> Result<(), AwsServiceEr
             check_optional_len("S3Key", body["S3Key"].as_str(), 1, 1024)?;
             check_optional_len("S3ObjectVersion", body["S3ObjectVersion"].as_str(), 1, 1024)?;
         }
-        "CreateEventSourceMapping" | "UpdateEventSourceMapping" => {
-            // The mapping's numeric settings' `@range`s, and the function
-            // reference's `@length(1, 256)` (CreateEventSourceMapping's
-            // handler refuses a missing one; on Update it is optional).
-            check_optional_len("FunctionName", body["FunctionName"].as_str(), 1, 256)?;
-            check_optional_len("KMSKeyArn", body["KMSKeyArn"].as_str(), 0, 10000)?;
-            // Only CreateEventSourceMapping takes `StartingPosition`.
-            check_optional_enum(
-                "StartingPosition",
-                body["StartingPosition"].as_str(),
-                &["TRIM_HORIZON", "LATEST", "AT_TIMESTAMP"],
-            )?;
-            for (field, min, max) in [
-                ("BatchSize", 1, 10000),
-                ("MaximumBatchingWindowInSeconds", 0, 300),
-                ("ParallelizationFactor", 1, 10),
-                ("MaximumRecordAgeInSeconds", -1, 604800),
-                ("MaximumRetryAttempts", -1, 10000),
-                ("TumblingWindowInSeconds", 0, 900),
-            ] {
-                check_optional_int_range(field, body[field].as_i64(), min, max)?;
-            }
-        }
+        // CreateEventSourceMapping's checks run in its handler
+        // (`event_source::validate_create`), shared with CloudFormation.
+        "UpdateEventSourceMapping" => crate::event_source::validate_settings(&body)?,
         "UpdateAlias" => {
             check_optional_len("FunctionVersion", body["FunctionVersion"].as_str(), 1, 1024)?;
             check_optional_len("Description", body["Description"].as_str(), 0, 256)?;

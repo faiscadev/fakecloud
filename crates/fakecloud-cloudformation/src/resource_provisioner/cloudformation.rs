@@ -109,6 +109,7 @@ impl ResourceProvisioner {
             s3_store: self.s3_store.clone(),
             kms_hook: self.kms_hook.clone(),
             quota_provider: self.quota_provider.clone(),
+            event_source_lookup: self.event_source_lookup.clone(),
             account_id: self.account_id.clone(),
             region: self.region.clone(),
             stack_id: child_stack_id.to_string(),

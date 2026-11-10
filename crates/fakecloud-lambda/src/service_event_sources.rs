@@ -16,42 +16,22 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
-        let event_source_arn = body["EventSourceArn"]
-            .as_str()
-            .ok_or_else(crate::event_source::unrecognized)?
-            .to_string();
-        crate::extras::check_len("EventSourceArn", &event_source_arn, 0, 10000)?;
-        crate::event_source::validate(
-            &event_source_arn,
+        // The request checks CloudFormation's AWS::Lambda::EventSourceMapping
+        // runs too: settings, function reference, event source (shape,
+        // region, service, existence) and filter patterns.
+        let filter_patterns = crate::event_source::validate_create(
+            &body,
             &req.region,
             self.event_source_lookup.as_deref(),
         )?;
-
+        let event_source_arn = body["EventSourceArn"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         let function_name = body["FunctionName"]
             .as_str()
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterValueException",
-                    "FunctionName is required",
-                )
-            })?
+            .unwrap_or_default()
             .to_string();
-
-        // An event source mapping invokes a function of its own region; a
-        // function ARN from another region is refused like on AWS.
-        if let Some(region) = crate::service::function_ref_scope(&function_name).1 {
-            if region != req.region {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterValueException",
-                    format!(
-                        "Functions from '{region}' are not reachable in this region ('{}')",
-                        req.region
-                    ),
-                ));
-            }
-        }
 
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
@@ -97,59 +77,6 @@ impl LambdaService {
         let mapping_uuid = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        // Extract Filters[].Pattern strictly: any entry where
-        // `Pattern` is missing or not a string is a hard error,
-        // matching AWS. Doing this before `validate` keeps malformed
-        // values from being silently dropped by the lossy serializer.
-        // FilterCriteria itself must be an object (or absent) — non-
-        // object values would otherwise be silently dropped by
-        // `Value::get`, masking client bugs.
-        let filter_patterns: Vec<String> = match body.get("FilterCriteria") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Object(_)) => {
-                match body.get("FilterCriteria").and_then(|v| v.get("Filters")) {
-                    None => Vec::new(),
-                    Some(Value::Array(arr)) => {
-                        let mut out = Vec::with_capacity(arr.len());
-                        for f in arr {
-                            match f.get("Pattern") {
-                                Some(Value::String(s)) => out.push(s.clone()),
-                                _ => {
-                                    return Err(AwsServiceError::aws_error(
-                                        StatusCode::BAD_REQUEST,
-                                        "InvalidParameterValueException",
-                                        "FilterCriteria.Filters[].Pattern must be a string",
-                                    ));
-                                }
-                            }
-                        }
-                        out
-                    }
-                    Some(_) => {
-                        return Err(AwsServiceError::aws_error(
-                            StatusCode::BAD_REQUEST,
-                            "InvalidParameterValueException",
-                            "FilterCriteria.Filters must be an array",
-                        ));
-                    }
-                }
-            }
-            Some(_) => {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterValueException",
-                    "FilterCriteria must be an object",
-                ));
-            }
-        };
-        // AWS rejects malformed FilterCriteria at create time.
-        if let Err(err) = crate::filter::FilterSet::validate(filter_patterns.iter()) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValueException",
-                err,
-            ));
-        }
         let function_response_types: Vec<String> = body
             .get("FunctionResponseTypes")
             .and_then(|v| v.as_array())
@@ -382,7 +309,6 @@ impl LambdaService {
         let mut out = json!({
             "UUID": mapping.uuid,
             "FunctionArn": mapping.function_arn,
-            "EventSourceArn": mapping.event_source_arn,
             "BatchSize": mapping.batch_size,
             "State": mapping.state,
             "LastModified": mapping.last_modified.timestamp_millis() as f64 / 1000.0,
@@ -400,6 +326,10 @@ impl LambdaService {
             "StateTransitionReason": "User action",
         });
         let obj = out.as_object_mut().expect("json! built object");
+        // A self-managed Kafka source has no ARN, and AWS sends none.
+        if !mapping.event_source_arn.is_empty() {
+            obj.insert("EventSourceArn".into(), json!(mapping.event_source_arn));
+        }
         if !mapping.filter_patterns.is_empty() {
             obj.insert(
                 "FilterCriteria".into(),

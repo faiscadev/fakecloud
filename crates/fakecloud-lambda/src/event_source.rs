@@ -10,6 +10,7 @@
 //! (2026-11-10, `tests/fixtures/create-event-source-mapping-missing-source.json`).
 
 use http::StatusCode;
+use serde_json::Value;
 
 use fakecloud_core::service::AwsServiceError;
 
@@ -116,6 +117,101 @@ pub(crate) fn validate(
         }));
     }
     Ok(())
+}
+
+/// The settings CreateEventSourceMapping and UpdateEventSourceMapping both
+/// take, against their `@length` / `@range` / enum constraints.
+pub(crate) fn validate_settings(body: &Value) -> Result<(), AwsServiceError> {
+    use crate::service::{check_optional_enum, check_optional_int_range};
+    crate::extras::check_optional_len("FunctionName", body["FunctionName"].as_str(), 1, 256)?;
+    crate::extras::check_optional_len("KMSKeyArn", body["KMSKeyArn"].as_str(), 0, 10000)?;
+    // Only CreateEventSourceMapping takes `StartingPosition`.
+    check_optional_enum(
+        "StartingPosition",
+        body["StartingPosition"].as_str(),
+        &["TRIM_HORIZON", "LATEST", "AT_TIMESTAMP"],
+    )?;
+    for (field, min, max) in [
+        ("BatchSize", 1, 10000),
+        ("MaximumBatchingWindowInSeconds", 0, 300),
+        ("ParallelizationFactor", 1, 10),
+        ("MaximumRecordAgeInSeconds", -1, 604800),
+        ("MaximumRetryAttempts", -1, 10000),
+        ("TumblingWindowInSeconds", 0, 900),
+    ] {
+        check_optional_int_range(field, body[field].as_i64(), min, max)?;
+    }
+    Ok(())
+}
+
+/// Every check CreateEventSourceMapping makes of its request before
+/// looking at the function: the settings, the function reference, the event
+/// source ([`validate`]) and the filter patterns, which it returns. One path
+/// for the API and for CloudFormation's AWS::Lambda::EventSourceMapping, so
+/// a stack is refused exactly what a direct call is.
+pub fn validate_create(
+    body: &Value,
+    region: &str,
+    lookup: Option<&dyn EventSourceLookup>,
+) -> Result<Vec<String>, AwsServiceError> {
+    validate_settings(body)?;
+    match body["EventSourceArn"].as_str() {
+        Some(event_source_arn) => {
+            crate::extras::check_len("EventSourceArn", event_source_arn, 0, 10000)?;
+            validate(event_source_arn, region, lookup)?;
+        }
+        // A self-managed Kafka cluster is named by its bootstrap servers,
+        // not an ARN.
+        None if body["SelfManagedEventSource"].is_object() => {}
+        None => return Err(unrecognized()),
+    }
+    let function_name = body["FunctionName"]
+        .as_str()
+        .ok_or_else(|| invalid_parameter("FunctionName is required".to_string()))?;
+    // An event source mapping invokes a function of its own region; a
+    // function ARN from another region is refused like on AWS.
+    if let Some(function_region) = crate::service::function_ref_scope(function_name).1 {
+        if function_region != region {
+            return Err(invalid_parameter(format!(
+                "Functions from '{function_region}' are not reachable in this region ('{region}')"
+            )));
+        }
+    }
+    filter_patterns(body)
+}
+
+/// `FilterCriteria.Filters[].Pattern`, strictly: a missing or non-string
+/// pattern, a non-array `Filters`, a non-object `FilterCriteria` and a
+/// pattern the filter grammar refuses are each an error, as on AWS, rather
+/// than silently dropped.
+fn filter_patterns(body: &Value) -> Result<Vec<String>, AwsServiceError> {
+    let patterns: Vec<String> = match body.get("FilterCriteria") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Object(criteria)) => match criteria.get("Filters") {
+            None => Vec::new(),
+            Some(Value::Array(arr)) => arr
+                .iter()
+                .map(|f| match f.get("Pattern") {
+                    Some(Value::String(s)) => Ok(s.clone()),
+                    _ => Err(invalid_parameter(
+                        "FilterCriteria.Filters[].Pattern must be a string".to_string(),
+                    )),
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => {
+                return Err(invalid_parameter(
+                    "FilterCriteria.Filters must be an array".to_string(),
+                ))
+            }
+        },
+        Some(_) => {
+            return Err(invalid_parameter(
+                "FilterCriteria must be an object".to_string(),
+            ))
+        }
+    };
+    crate::filter::FilterSet::validate(patterns.iter()).map_err(invalid_parameter)?;
+    Ok(patterns)
 }
 
 /// The refusal for a mapping with no event source at all.

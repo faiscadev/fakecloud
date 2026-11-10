@@ -2376,6 +2376,105 @@ async fn lambda_alias_policy_grants_invoking_that_alias_only() {
     }
 }
 
+/// An AWS::Lambda::Permission on an alias (its FunctionName is the alias's
+/// `Ref`, the alias ARN) is that alias's grant: under strict IAM the
+/// grantee may invoke the alias and not the function.
+#[tokio::test]
+async fn cfn_alias_permission_grants_invoking_that_alias_only() {
+    let server = start_strict().await;
+    let boot = sdk_config_with(&server, "test", "test").await;
+    let cfn = aws_sdk_cloudformation::Client::new(&boot);
+    let template = r#"{
+      "Resources": {
+        "Func": {
+          "Type": "AWS::Lambda::Function",
+          "Properties": {
+            "FunctionName": "cfn-alias-perm-fn",
+            "Runtime": "python3.12",
+            "Handler": "index.handler",
+            "Role": "arn:aws:iam::123456789012:role/test-role",
+            "Code": {"ZipFile": "def handler(e, c):\n    return e\n"}
+          }
+        },
+        "Version": {
+          "Type": "AWS::Lambda::Version",
+          "Properties": {"FunctionName": {"Ref": "Func"}}
+        },
+        "Alias": {
+          "Type": "AWS::Lambda::Alias",
+          "Properties": {
+            "FunctionName": {"Ref": "Func"},
+            "FunctionVersion": {"Fn::GetAtt": ["Version", "Version"]},
+            "Name": "live"
+          }
+        },
+        "AliasPermission": {
+          "Type": "AWS::Lambda::Permission",
+          "Properties": {
+            "FunctionName": {"Ref": "Alias"},
+            "Action": "lambda:InvokeFunction",
+            "Principal": "arn:aws:iam::123456789012:user/cfn_alias_invoker"
+          }
+        }
+      }
+    }"#;
+    cfn.create_stack()
+        .stack_name("cfn-alias-perm")
+        .template_body(template)
+        .send()
+        .await
+        .unwrap();
+    let status = cfn
+        .describe_stacks()
+        .stack_name("cfn-alias-perm")
+        .send()
+        .await
+        .unwrap()
+        .stacks()[0]
+        .clone();
+    assert_eq!(
+        status.stack_status().unwrap().as_str(),
+        "CREATE_COMPLETE",
+        "{:?}",
+        status.stack_status_reason()
+    );
+    let lambda_boot = aws_sdk_lambda::Client::new(&boot);
+    let alias_policy = lambda_boot
+        .get_policy()
+        .function_name("cfn-alias-perm-fn")
+        .qualifier("live")
+        .send()
+        .await
+        .unwrap();
+    assert!(alias_policy.policy().unwrap().contains("cfn_alias_invoker"));
+
+    let (akid, secret) = bootstrap_user(&server, "cfn_alias_invoker").await;
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let lambda = aws_sdk_lambda::Client::new(&cfg);
+    if let Err(err) = lambda
+        .invoke()
+        .function_name("cfn-alias-perm-fn")
+        .qualifier("live")
+        .send()
+        .await
+    {
+        assert!(
+            !format!("{err:?}").contains("AccessDeniedException"),
+            "the stack's alias grant should admit this invocation: {err:?}"
+        );
+    }
+    let err = lambda
+        .invoke()
+        .function_name("cfn-alias-perm-fn")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("AccessDeniedException"),
+        "expected AccessDeniedException, got {err:?}"
+    );
+}
+
 #[tokio::test]
 async fn lambda_function_without_policy_denies_non_root_invoke() {
     // Sanity pair: same function shape but without AddPermission.

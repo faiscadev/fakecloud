@@ -466,3 +466,75 @@ fn collect_outputs(stack: &aws_sdk_cloudformation::types::Stack) -> AuxOutputs {
         layer_arn: layer_arn.expect("LayerArn"),
     }
 }
+
+/// A stack mapping a queue that does not exist fails that resource with
+/// CreateEventSourceMapping's own error, and what the stack had already
+/// created is rolled back.
+#[tokio::test]
+async fn an_event_source_mapping_to_a_missing_queue_fails_the_stack() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let template = r#"{
+      "Resources": {
+        "Func": {
+          "Type": "AWS::Lambda::Function",
+          "Properties": {
+            "FunctionName": "cfn-missing-source-fn",
+            "Runtime": "python3.12",
+            "Handler": "index.handler",
+            "Role": "arn:aws:iam::123456789012:role/r",
+            "Code": {"ZipFile": "def handler(e, c):\n    return e\n"}
+          }
+        },
+        "Esm": {
+          "Type": "AWS::Lambda::EventSourceMapping",
+          "Properties": {
+            "FunctionName": {"Ref": "Func"},
+            "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:cfn-missing-queue"
+          }
+        }
+      }
+    }"#;
+    cfn.create_stack()
+        .stack_name("cfn-missing-source")
+        .template_body(template)
+        .on_failure(OnFailure::Rollback)
+        .send()
+        .await
+        .unwrap();
+    let stack = cfn
+        .describe_stacks()
+        .stack_name("cfn-missing-source")
+        .send()
+        .await
+        .unwrap()
+        .stacks()[0]
+        .clone();
+    assert_eq!(stack.stack_status().unwrap().as_str(), "CREATE_FAILED");
+    let reason = stack.stack_status_reason().unwrap_or_default();
+    assert!(
+        reason.contains("Esm")
+            && reason.contains(
+                "Resource handler returned message: \"Error occurred while ReceiveMessage. \
+                 SQS Error Code: AWS.SimpleQueueService.NonExistentQueue. SQS Error Message: \
+                 The specified queue does not exist. (Service: Lambda, Status Code: 400"
+            )
+            && reason.contains("HandlerErrorCode: InvalidRequest"),
+        "{reason}"
+    );
+    // The function the stack created first was rolled back, and no mapping
+    // was left behind.
+    let lambda = server.lambda_client().await;
+    let err = lambda
+        .get_function()
+        .function_name("cfn-missing-source-fn")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("ResourceNotFoundException"),
+        "{err:?}"
+    );
+    let mappings = lambda.list_event_source_mappings().send().await.unwrap();
+    assert!(mappings.event_source_mappings().is_empty());
+}

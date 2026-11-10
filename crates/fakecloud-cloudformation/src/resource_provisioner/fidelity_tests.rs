@@ -739,7 +739,10 @@ fn sam_explicit_api_s3_event_and_auto_publish_alias_provision() {
         let lam = lam.regional(ACCT, "us-east-1").unwrap();
         assert_eq!(lam.aliases["sam-fn:live"].function_version, "1");
         assert!(lam.function_url_configs.contains_key("sam-fn:live"));
-        let policy = lam.functions["sam-fn"].policy.clone().unwrap();
+        // The permissions name the alias, so they are the alias's policy,
+        // not the function's (AWS keeps one per qualifier).
+        assert!(lam.functions["sam-fn"].policy.is_none());
+        let policy = lam.aliases["sam-fn:live"].policy.clone().unwrap();
         assert!(policy.contains("apigateway.amazonaws.com"), "{policy}");
         assert!(policy.contains("s3.amazonaws.com"), "{policy}");
         assert!(policy.contains("lambda:InvokeFunctionUrl"), "{policy}");
@@ -1072,4 +1075,57 @@ fn ecs_capacity_provider_matches_the_api_shape_and_rules() {
         "{m}"
     );
     assert!(stored.auto_scaling_group_provider.is_none());
+}
+
+/// AWS::Lambda::EventSourceMapping is refused what CreateEventSourceMapping
+/// refuses (one validation path), reported as the resource handler words it.
+#[test]
+fn an_event_source_mapping_to_a_missing_source_fails_the_resource() {
+    struct OnlyQueue;
+    impl fakecloud_lambda::event_source::EventSourceLookup for OnlyQueue {
+        fn exists(&self, arn: &str) -> Option<bool> {
+            Some(arn == "arn:aws:sqs:us-east-1:123456789012:real")
+        }
+    }
+    let mut prov = make_provisioner();
+    prov.event_source_lookup = Some(Arc::new(OnlyQueue));
+    create(
+        &prov,
+        "AWS::Lambda::Function",
+        "Fn",
+        function_props("esm-fn"),
+    );
+    let esm = |source: &str| json!({"FunctionName": "esm-fn", "EventSourceArn": source});
+    let err = create_err(
+        &prov,
+        "AWS::Lambda::EventSourceMapping",
+        "Missing",
+        esm("arn:aws:sqs:us-east-1:123456789012:missing"),
+    );
+    assert!(
+        err.starts_with(
+            "Resource handler returned message: \"Error occurred while ReceiveMessage. SQS \
+             Error Code: AWS.SimpleQueueService.NonExistentQueue."
+        ) && err.contains("(Service: Lambda, Status Code: 400")
+            && err.ends_with("HandlerErrorCode: InvalidRequest)"),
+        "{err}"
+    );
+    let err = create_err(&prov, "AWS::Lambda::EventSourceMapping", "Empty", esm(""));
+    assert!(
+        err.contains("at 'eventSourceArn' failed to satisfy constraint"),
+        "{err}"
+    );
+    let err = create_err(
+        &prov,
+        "AWS::Lambda::EventSourceMapping",
+        "Batch",
+        json!({"FunctionName": "esm-fn", "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:real", "BatchSize": 0}),
+    );
+    assert!(err.contains("BatchSize"), "{err}");
+    create(
+        &prov,
+        "AWS::Lambda::EventSourceMapping",
+        "Real",
+        esm("arn:aws:sqs:us-east-1:123456789012:real"),
+    );
 }

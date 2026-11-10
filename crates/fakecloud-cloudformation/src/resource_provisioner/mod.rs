@@ -1138,6 +1138,9 @@ pub struct ResourceProvisioner {
     /// Service Quotas, for the applied values of the quotas EC2 enforces.
     /// `None` outside the server wiring, where the AWS defaults apply.
     pub quota_provider: Option<Arc<dyn fakecloud_core::quota::QuotaProvider>>,
+    /// Whether a Lambda event source exists. `None` outside the server
+    /// wiring, where a mapping's source is not looked up.
+    pub event_source_lookup: Option<Arc<dyn fakecloud_lambda::event_source::EventSourceLookup>>,
     pub account_id: String,
     pub region: String,
     pub stack_id: String,
@@ -4843,6 +4846,7 @@ mod tests {
             s3_store: Arc::new(fakecloud_persistence::s3::MemoryS3Store::new()),
             kms_hook: None,
             quota_provider: None,
+            event_source_lookup: None,
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),
             stack_id: "arn:aws:cloudformation:us-east-1:123456789012:stack/test/00000000-0000-0000-0000-000000000000".to_string(),

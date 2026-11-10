@@ -591,6 +591,14 @@ impl ResourceProvisioner {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "FunctionName is required".to_string())?,
         );
+        // The checks CreateEventSourceMapping makes, source existence
+        // included, so the stack is refused what a direct call would be.
+        fakecloud_lambda::event_source::validate_create(
+            props,
+            &self.region,
+            self.event_source_lookup.as_deref(),
+        )
+        .map_err(|e| lambda_handler_error(&e))?;
         let cfg = parse_lambda_event_source_mapping_props(props)?;
 
         let mut accounts = self.lambda_state.write();
@@ -1520,4 +1528,21 @@ impl ResourceProvisioner {
             _ => None,
         }
     }
+}
+
+/// A Lambda API refusal as the CloudFormation resource handler reports it in
+/// the resource's status reason.
+fn lambda_handler_error(err: &fakecloud_core::service::AwsServiceError) -> String {
+    let request_id = Uuid::new_v4();
+    let handler_code = match err.status().as_u16() {
+        404 => "NotFound",
+        409 => "AlreadyExists",
+        _ => "InvalidRequest",
+    };
+    format!(
+        "Resource handler returned message: \"{} (Service: Lambda, Status Code: {}, Request ID: {request_id})\" (RequestToken: {}, HandlerErrorCode: {handler_code})",
+        err.message(),
+        err.status().as_u16(),
+        Uuid::new_v4(),
+    )
 }
