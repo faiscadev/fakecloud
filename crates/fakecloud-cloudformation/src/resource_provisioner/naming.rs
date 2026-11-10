@@ -72,6 +72,7 @@ pub(crate) fn name_rule(resource_type: &str) -> NameRule {
         "AWS::SQS::Queue" => NameRule::new(80),
         "AWS::SNS::Topic" => NameRule::new(256),
         "AWS::Lambda::Function" => NameRule::new(64),
+        "AWS::Lambda::CapacityProvider" => NameRule::new(140),
         "AWS::Lambda::LayerVersion" => NameRule::new(140),
         "AWS::DynamoDB::Table" => NameRule::new(255),
         "AWS::Kinesis::Stream" => NameRule::new(128),

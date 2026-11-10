@@ -41,9 +41,46 @@ impl LambdaService {
             self.iam_mode,
         )?;
 
+        if let Some(cpc) = &input.capacity_provider_config {
+            crate::capacity::validate_settings(
+                cpc,
+                &crate::capacity::FunctionSettings {
+                    runtime: &input.runtime,
+                    package_type: &input.package_type,
+                    memory_size: input.memory_size,
+                    snap_start: input.snap_start.as_ref(),
+                    vpc_config: input.vpc_config.as_ref(),
+                },
+            )?;
+        }
+
         let storage_limit = self.code_storage_limit(&req.account_id, &req.region);
         let caller = self.layer_caller(req);
         let mut accounts = self.state.write();
+        // The capacity provider must exist (in this region, and in the
+        // caller's account under strict IAM), and must have room for the
+        // versions this request creates.
+        let capacity_provider_config = match input.capacity_provider_config.take() {
+            Some(cpc) => {
+                let cpc = crate::capacity::resolve(
+                    &accounts,
+                    &cpc,
+                    &req.account_id,
+                    &req.region,
+                    self.iam_mode,
+                )?;
+                crate::capacity::validate_concurrency(&cpc, input.memory_size)?;
+                let adding =
+                    1 + usize::from(input.publish) + usize::from(input.publish_to_latest_published);
+                crate::capacity::check_version_quota(
+                    crate::capacity::versions_using(&accounts, &cpc.capacity_provider_arn).len(),
+                    adding,
+                    &cpc.capacity_provider_arn,
+                )?;
+                Some(cpc)
+            }
+            None => None,
+        };
         // Pre-resolve layer attachments before re-borrowing accounts mutably.
         // Layer ARNs may live in sibling accounts, which must share them.
         let layer_attachments = crate::layer_access::resolve_layer_attachments(
@@ -117,6 +154,7 @@ impl LambdaService {
             state_reason_code: None,
             last_update_status_reason: None,
             last_update_status_reason_code: None,
+            capacity_provider_config,
         };
         crate::quota::check_new_code(state, storage_limit, crate::quota::stored_code_size(&func))?;
 
@@ -148,7 +186,26 @@ impl LambdaService {
             });
         }
 
-        state.functions.insert(input.function_name, func);
+        let managed_instances = func.capacity_provider_config.is_some();
+        state.functions.insert(input.function_name.clone(), func);
+
+        // `PublishTo=LATEST_PUBLISHED` publishes `$LATEST.PUBLISHED` of a
+        // Lambda Managed Instances function; a Lambda (default) function has
+        // no such version and the member is ignored.
+        if input.publish_to_latest_published && managed_instances {
+            self.publish_latest_published_locked(state, &input.function_name, None)?;
+        }
+        // `Publish` creates version 1 from the initial configuration and
+        // answers with that version.
+        if input.publish {
+            let published = self.publish_locked(state, &input.function_name, None, storage_limit);
+            if published.is_err() {
+                // The function is created whole or not at all.
+                state.functions.remove(&input.function_name);
+                state.latest_published.remove(&input.function_name);
+            }
+            return published;
+        }
 
         Ok(AwsResponse::json(StatusCode::CREATED, response.to_string()))
     }
@@ -190,20 +247,16 @@ impl LambdaService {
         let (func, version_label) = match resolved_version {
             None => (live, "$LATEST".to_string()),
             Some(v) => {
-                let snap = state
-                    .function_version_snapshots
-                    .get(function_name)
-                    .and_then(|m| m.get(&v))
-                    .ok_or_else(|| {
-                        AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "ResourceNotFoundException",
-                            format!(
-                                "Function not found: {}:{v}",
-                                function_arn(&req.region, &state.account_id, function_name)
-                            ),
-                        )
-                    })?;
+                let snap = state.version_snapshot(function_name, &v).ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "ResourceNotFoundException",
+                        format!(
+                            "Function not found: {}:{v}",
+                            function_arn(&req.region, &state.account_id, function_name)
+                        ),
+                    )
+                })?;
                 (snap, v)
             }
         };
@@ -369,6 +422,7 @@ impl LambdaService {
         // is supplied).
         state.function_versions.remove(function_name);
         state.function_version_snapshots.remove(function_name);
+        state.latest_published.remove(function_name);
         // Aliases on this function disappear too.
         let prefix = format!("{function_name}:");
         state.aliases.retain(|k, _| !k.starts_with(&prefix));

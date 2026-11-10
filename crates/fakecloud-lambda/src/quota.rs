@@ -59,7 +59,7 @@ pub fn stored_code_size(func: &LambdaFunction) -> i64 {
 }
 
 /// Code storage `state` uses: every function's `$LATEST`, every published
-/// version and every layer version.
+/// version (numbered and `$LATEST.PUBLISHED`) and every layer version.
 pub fn code_storage_used(state: &LambdaState) -> i64 {
     let functions: i64 = state.functions.values().map(stored_code_size).sum();
     let versions: i64 = state
@@ -67,7 +67,12 @@ pub fn code_storage_used(state: &LambdaState) -> i64 {
         .values()
         .flat_map(|versions| versions.values())
         .map(stored_code_size)
-        .sum();
+        .sum::<i64>()
+        + state
+            .latest_published
+            .values()
+            .map(stored_code_size)
+            .sum::<i64>();
     let layers: i64 = state
         .layers
         .values()

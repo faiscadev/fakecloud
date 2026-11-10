@@ -1,6 +1,7 @@
 //! `LambdaService` `publish` family — extracted from service.rs by audit-2026-05-19.
 
 use super::*;
+use crate::state::LATEST_PUBLISHED;
 
 impl LambdaService {
     pub(crate) fn publish_version(
@@ -16,6 +17,7 @@ impl LambdaService {
         let supplied_revision = body["RevisionId"].as_str().map(String::from);
         let supplied_sha = body["CodeSha256"].as_str().map(String::from);
         let description_override = body["Description"].as_str().map(String::from);
+        let publish_to_latest_published = body["PublishTo"].as_str() == Some("LATEST_PUBLISHED");
         let storage_limit = self.code_storage_limit(account_id, &req.region);
 
         let mut accounts = self.state.write();
@@ -50,12 +52,47 @@ impl LambdaService {
             }
         }
 
+        if publish_to_latest_published {
+            // `$LATEST.PUBLISHED` exists only for Lambda Managed Instances
+            // functions; a Lambda (default) function refuses the value.
+            if func.capacity_provider_config.is_none() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    "LATEST_PUBLISHED' isn't a valid value for this field",
+                ));
+            }
+            return self.publish_latest_published_locked(
+                state,
+                function_name,
+                description_override.as_deref(),
+            );
+        }
+
         self.publish_locked(
             state,
             function_name,
             description_override.as_deref(),
             storage_limit,
         )
+    }
+
+    /// Create or republish the `$LATEST.PUBLISHED` version of the Lambda
+    /// Managed Instances function `function_name` under the caller's Lambda
+    /// lock, answering with its configuration.
+    pub(crate) fn publish_latest_published_locked(
+        &self,
+        state: &mut LambdaState,
+        function_name: &str,
+        description_override: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let snapshot = publish_latest_published(state, function_name, description_override)?;
+        let master = snapshot.function_arn.clone();
+        let mut config = self.function_config_json(&snapshot);
+        config["Version"] = json!(LATEST_PUBLISHED);
+        config["FunctionArn"] = json!(format!("{master}:{LATEST_PUBLISHED}"));
+        config["MasterArn"] = json!(master);
+        Ok(AwsResponse::json(StatusCode::CREATED, config.to_string()))
     }
 
     /// Publish `$LATEST` of `function_name` as a new version, under the
@@ -109,6 +146,15 @@ impl LambdaService {
 
         // The new version stores its own copy of the code.
         crate::quota::check_new_code(state, storage_limit, crate::quota::stored_code_size(func))?;
+        // A Lambda Managed Instances version takes a slot on its capacity
+        // provider.
+        if let Some(cpc) = &func.capacity_provider_config {
+            crate::capacity::check_version_quota(
+                crate::capacity::versions_in_state(state, &cpc.capacity_provider_arn).len(),
+                1,
+                &cpc.capacity_provider_arn,
+            )?;
+        }
 
         // Snapshot the function config + code for the new immutable version.
         let mut snapshot = func.clone();
@@ -216,6 +262,9 @@ impl LambdaService {
         if let Some(ref dc) = func.durable_config {
             config["DurableConfig"] = dc.clone();
         }
+        if let Some(ref cpc) = func.capacity_provider_config {
+            config["CapacityProviderConfig"] = crate::capacity::config_json(cpc);
+        }
         if let Some(ref s) = func.signing_profile_version_arn {
             config["SigningProfileVersionArn"] = json!(s);
         }
@@ -253,6 +302,44 @@ impl LambdaService {
         }
         config
     }
+}
+
+/// Create or republish the `$LATEST.PUBLISHED` version of the Lambda
+/// Managed Instances function `function_name` from its `$LATEST`. Each
+/// republish replaces the previous `$LATEST.PUBLISHED` (no numbered version
+/// is created); the first one takes a slot on the function's capacity
+/// provider. Returns the stored snapshot. Shared with CloudFormation's
+/// `PublishToLatestPublished`.
+pub fn publish_latest_published(
+    state: &mut LambdaState,
+    function_name: &str,
+    description_override: Option<&str>,
+) -> Result<LambdaFunction, AwsServiceError> {
+    let func = state
+        .functions
+        .get(function_name)
+        .ok_or_else(|| not_found_function(state, function_name))?;
+    if let Some(cpc) = &func.capacity_provider_config {
+        if !state.latest_published.contains_key(function_name) {
+            crate::capacity::check_version_quota(
+                crate::capacity::versions_in_state(state, &cpc.capacity_provider_arn).len(),
+                1,
+                &cpc.capacity_provider_arn,
+            )?;
+        }
+    }
+    let mut snapshot = func.clone();
+    snapshot.version = LATEST_PUBLISHED.to_string();
+    snapshot.master_arn = Some(func.function_arn.clone());
+    if let Some(desc) = description_override {
+        snapshot.description = desc.to_string();
+    }
+    snapshot.revision_id = uuid::Uuid::new_v4().to_string();
+    snapshot.last_modified = Utc::now();
+    state
+        .latest_published
+        .insert(function_name.to_string(), snapshot.clone());
+    Ok(snapshot)
 }
 
 /// `ResourceNotFoundException` for a function missing from `state`.

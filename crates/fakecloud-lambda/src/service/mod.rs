@@ -256,6 +256,22 @@ pub(crate) fn lambda_passed_role(iam_action: &str, body: &[u8]) -> Option<String
     role.as_str().filter(|r| !r.is_empty()).map(str::to_string)
 }
 
+/// The capacity provider a CreateFunction / UpdateFunctionConfiguration
+/// request assigns the function to, which the caller must hold
+/// `lambda:PassCapacityProvider` on.
+pub(crate) fn lambda_passed_capacity_provider(iam_action: &str, body: &[u8]) -> Option<String> {
+    if !matches!(iam_action, "CreateFunction" | "UpdateFunctionConfiguration") {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(body).ok()?;
+    v.get("CapacityProviderConfig")?
+        .get("LambdaManagedInstancesCapacityProviderConfig")?
+        .get("CapacityProviderArn")?
+        .as_str()
+        .filter(|a| !a.is_empty())
+        .map(str::to_string)
+}
+
 /// Strip an ARN, partial ARN, or trailing `:qualifier` from a Lambda
 /// `FunctionName` input down to the bare function name used as the
 /// state map key. AWS Lambda accepts four forms in URL path slots and
@@ -748,6 +764,14 @@ struct CreateFunctionInput {
     logging_config: Option<serde_json::Value>,
     image_config: Option<serde_json::Value>,
     durable_config: Option<serde_json::Value>,
+    /// `CapacityProviderConfig`, shape-checked but not yet resolved against
+    /// the capacity provider (that needs the state lock).
+    capacity_provider_config: Option<crate::state::FunctionCapacityProviderConfig>,
+    /// `Publish`: create version 1 from the initial configuration.
+    publish: bool,
+    /// `PublishTo=LATEST_PUBLISHED`: publish `$LATEST.PUBLISHED` (Lambda
+    /// Managed Instances functions only).
+    publish_to_latest_published: bool,
 }
 
 impl CreateFunctionInput {
@@ -867,10 +891,19 @@ impl CreateFunctionInput {
         let durable_config = body["DurableConfig"]
             .is_object()
             .then(|| body["DurableConfig"].clone());
+        let capacity_provider_config = crate::capacity::parse_config(body)?;
+        // A Lambda Managed Instances function defaults to the smallest size
+        // it can run with (2048 MB, 1 vCPU) instead of 128 MB.
+        let default_memory = if capacity_provider_config.is_some() {
+            crate::capacity::MIN_MANAGED_INSTANCES_MEMORY_MB
+        } else {
+            128
+        };
+        let runtime = body["Runtime"].as_str().unwrap_or("python3.12").to_string();
 
         Ok(Self {
             function_name,
-            runtime: body["Runtime"].as_str().unwrap_or("python3.12").to_string(),
+            runtime,
             role: body["Role"].as_str().unwrap_or("").to_string(),
             handler: body["Handler"]
                 .as_str()
@@ -878,7 +911,7 @@ impl CreateFunctionInput {
                 .to_string(),
             description: body["Description"].as_str().unwrap_or("").to_string(),
             timeout: body["Timeout"].as_i64().unwrap_or(3),
-            memory_size: body["MemorySize"].as_i64().unwrap_or(128),
+            memory_size: body["MemorySize"].as_i64().unwrap_or(default_memory),
             package_type,
             tags,
             environment,
@@ -897,6 +930,9 @@ impl CreateFunctionInput {
             logging_config,
             image_config,
             durable_config,
+            capacity_provider_config,
+            publish: body["Publish"].as_bool().unwrap_or(false),
+            publish_to_latest_published: body["PublishTo"].as_str() == Some("LATEST_PUBLISHED"),
         })
     }
 }
@@ -1116,6 +1152,7 @@ fn function_config_unchanged_for_publish(
         && prev.signing_profile_version_arn == live.signing_profile_version_arn
         && prev.signing_job_arn == live.signing_job_arn
         && prev.runtime_version_config == live.runtime_version_config
+        && prev.capacity_provider_config == live.capacity_provider_config
         && snap_start_apply_on_eq(prev.snap_start.as_ref(), live.snap_start.as_ref())
 }
 
@@ -1141,6 +1178,21 @@ fn snap_start_apply_on_eq(prev: Option<&Value>, live: Option<&Value>) -> bool {
 
 /// versions in the weight map. Returns `None` for `$LATEST` /
 /// unqualified invokes (caller uses the live `$LATEST` config).
+/// The qualifier an unqualified invoke of `function_name` runs: the
+/// `$LATEST.PUBLISHED` version of a Lambda Managed Instances function that
+/// has one, `None` (`$LATEST`) otherwise.
+pub(crate) fn default_invoke_qualifier(
+    state: &LambdaState,
+    function_name: &str,
+) -> Option<&'static str> {
+    let managed = state
+        .functions
+        .get(function_name)
+        .is_some_and(|f| f.capacity_provider_config.is_some());
+    (managed && state.latest_published.contains_key(function_name))
+        .then_some(crate::state::LATEST_PUBLISHED)
+}
+
 pub(crate) fn resolve_qualifier_to_version(
     state: &LambdaState,
     function_name: &str,
@@ -1149,6 +1201,9 @@ pub(crate) fn resolve_qualifier_to_version(
     let q = qualifier?;
     if q == "$LATEST" {
         return None;
+    }
+    if q == crate::state::LATEST_PUBLISHED {
+        return Some(q.to_string());
     }
     if q.chars().all(|c| c.is_ascii_digit()) {
         return Some(q.to_string());
@@ -1249,6 +1304,7 @@ mod functions;
 mod init;
 mod invoke;
 mod publish;
+pub use publish::publish_latest_published;
 
 impl LambdaService {
     pub fn new(state: SharedLambdaState) -> Self {
@@ -1583,7 +1639,8 @@ impl AwsService for LambdaService {
                 | "ListLayerVersions"
                 | "ListFunctionUrlConfigs"
                 | "ListProvisionedConcurrencyConfigs"
-                | "ListFunctionEventInvokeConfigs" => 50,
+                | "ListFunctionEventInvokeConfigs"
+                | "ListFunctionVersionsByCapacityProvider" => 50,
                 _ => 10000,
             };
             if !(1..=max).contains(&n) {
@@ -2157,9 +2214,19 @@ impl AwsService for LambdaService {
             return Vec::new();
         };
         let passed = lambda_passed_role(primary.action, &request.body);
+        let capacity_provider = lambda_passed_capacity_provider(primary.action, &request.body);
         let mut out = vec![primary];
         if let Some(role) = passed {
             out.push(fakecloud_core::auth::IamAction::pass_role(role));
+        }
+        // Assigning a function to a capacity provider also needs
+        // `lambda:PassCapacityProvider` on that provider.
+        if let Some(arn) = capacity_provider {
+            out.push(fakecloud_core::auth::IamAction {
+                service: "lambda",
+                action: "PassCapacityProvider",
+                resource: arn,
+            });
         }
         out
     }
@@ -2201,6 +2268,9 @@ mod service_event_sources;
 #[path = "../service_permissions.rs"]
 mod service_permissions;
 
+#[cfg(test)]
+#[path = "../capacity_service_tests.rs"]
+mod capacity_service_tests;
 #[cfg(test)]
 #[path = "../service_tests.rs"]
 mod tests;

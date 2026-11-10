@@ -429,9 +429,7 @@ fn resolve_policy_target_mut<'a>(
             )
         }),
         Some(v) => state
-            .function_version_snapshots
-            .get_mut(function_name)
-            .and_then(|m| m.get_mut(&v))
+            .version_snapshot_mut(function_name, &v)
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
@@ -464,20 +462,16 @@ fn resolve_policy_target_ref<'a>(
                 ),
             )
         }),
-        Some(v) => state
-            .function_version_snapshots
-            .get(function_name)
-            .and_then(|m| m.get(&v))
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFoundException",
-                    format!(
-                        "Function not found: {}:{v}",
-                        function_arn(region, &state.account_id, function_name)
-                    ),
-                )
-            }),
+        Some(v) => state.version_snapshot(function_name, &v).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!(
+                    "Function not found: {}:{v}",
+                    function_arn(region, &state.account_id, function_name)
+                ),
+            )
+        }),
     }
 }
 

@@ -106,6 +106,24 @@ impl ResourceProvisioner {
         // GetFunctionConfiguration echoes the right size without a
         // second state lookup.
         let layers: Vec<AttachedLayer> = self.resolve_lambda_layers(&cfg.layers)?;
+        let vpc_config = cfg
+            .vpc_config
+            .clone()
+            .map(|c| {
+                fakecloud_lambda::vpc::resolve_vpc_config(
+                    &self.ec2_state,
+                    &self.account_id,
+                    &self.region,
+                    &c,
+                )
+            })
+            .transpose()?;
+        let capacity_provider_config = self.resolve_lambda_capacity_provider(
+            &cfg,
+            vpc_config.as_ref(),
+            None,
+            1 + usize::from(cfg.publish_to_latest_published),
+        )?;
 
         let func = fakecloud_lambda::LambdaFunction {
             function_name: function_name.clone(),
@@ -132,17 +150,7 @@ impl ResourceProvisioner {
             tracing_mode: cfg.tracing_mode,
             kms_key_arn: cfg.kms_key_arn,
             ephemeral_storage_size: cfg.ephemeral_storage_size,
-            vpc_config: cfg
-                .vpc_config
-                .map(|c| {
-                    fakecloud_lambda::vpc::resolve_vpc_config(
-                        &self.ec2_state,
-                        &self.account_id,
-                        &self.region,
-                        &c,
-                    )
-                })
-                .transpose()?,
+            vpc_config,
             snap_start: cfg.snap_start,
             dead_letter_config_arn: cfg.dead_letter_config_arn,
             file_system_configs: cfg.file_system_configs,
@@ -157,6 +165,7 @@ impl ResourceProvisioner {
             state_reason_code: None,
             last_update_status_reason: None,
             last_update_status_reason_code: None,
+            capacity_provider_config,
         };
 
         // Pre-pull the runtime image in the background so the first Invoke of
@@ -213,11 +222,16 @@ impl ResourceProvisioner {
             fakecloud_lambda::quota::check_reservation(state, &function_name, reserved, limit)
                 .map_err(|e| super::quota::refusal("Lambda", e))?;
         }
+        let managed_instances = func.capacity_provider_config.is_some();
         state.functions.insert(function_name.clone(), func);
         if let Some(reserved) = cfg.reserved_concurrent_executions {
             state
                 .function_concurrency
                 .insert(function_name.clone(), reserved);
+        }
+        if cfg.publish_to_latest_published && managed_instances {
+            fakecloud_lambda::publish_latest_published(state, &function_name, None)
+                .map_err(|e| e.to_string())?;
         }
 
         // Capture every GetAtt-resolvable attribute eagerly. Output
@@ -242,6 +256,44 @@ impl ResourceProvisioner {
             Some(&validator),
             self.iam_mode,
         )
+        .map_err(|e| e.to_string())
+    }
+
+    /// The checks `CreateFunction` / `UpdateFunctionConfiguration` run on a
+    /// Lambda Managed Instances function's `CapacityProviderConfig`, against
+    /// the function's final settings. `current` is the function's present
+    /// config on an update; `adding` the versions the change puts on the
+    /// provider.
+    fn resolve_lambda_capacity_provider(
+        &self,
+        cfg: &LambdaFunctionProps,
+        vpc_config: Option<&serde_json::Value>,
+        current: Option<&fakecloud_lambda::FunctionCapacityProviderConfig>,
+        adding: usize,
+    ) -> Result<Option<fakecloud_lambda::FunctionCapacityProviderConfig>, String> {
+        let Some(cpc) = &cfg.capacity_provider_config else {
+            return Ok(None);
+        };
+        let accounts = self.lambda_state.read();
+        fakecloud_lambda::capacity::validate_function(
+            &accounts,
+            cpc,
+            &fakecloud_lambda::capacity::FunctionSettings {
+                runtime: &cfg.runtime,
+                package_type: &cfg.package_type,
+                memory_size: cfg.memory_size,
+                snap_start: cfg.snap_start.as_ref(),
+                vpc_config,
+            },
+            &fakecloud_lambda::capacity::Caller {
+                account: &self.account_id,
+                region: &self.region,
+                iam_mode: self.iam_mode,
+            },
+            current,
+            adding,
+        )
+        .map(Some)
         .map_err(|e| e.to_string())
     }
 
@@ -286,6 +338,32 @@ impl ResourceProvisioner {
                 )
             })
             .transpose()?;
+        // A Lambda (default) function cannot take a capacity provider after
+        // creation (UpdateFunctionConfiguration refuses it), nor can a Lambda
+        // Managed Instances function drop its own: either change replaces the
+        // function.
+        let current_cpc = self
+            .lambda_state
+            .read()
+            .regional(&self.account_id, &self.region)
+            .and_then(|s| s.functions.get(&function_name))
+            .map(|f| f.capacity_provider_config.clone());
+        let current_cpc = current_cpc.flatten();
+        if current_cpc.is_some() != cfg.capacity_provider_config.is_some() {
+            return Err(if current_cpc.is_none() {
+                "InvalidParameterValueException: CapacityProviderConfig isn't supported for Lambda Default functions.".to_string()
+            } else {
+                format!(
+                    "InvalidParameterValueException: CapacityProviderConfig can't be removed from Lambda Managed Instances function {function_name}"
+                )
+            });
+        }
+        let capacity_provider_config = self.resolve_lambda_capacity_provider(
+            &cfg,
+            vpc_config.as_ref(),
+            current_cpc.as_ref(),
+            1,
+        )?;
         let storage_limit = self.lambda_storage_limit();
         let concurrency_quota = self.lambda_concurrency_quota();
         let mut accounts = self.lambda_state.write();
@@ -323,6 +401,7 @@ impl ResourceProvisioner {
             func.image_uri = cfg.image_uri;
         }
         func.image_config = cfg.image_config;
+        func.capacity_provider_config = capacity_provider_config;
         // Tags are desired state: an empty or absent Tags property clears
         // them, as a stack update does in AWS.
         func.tags = cfg.tags;
@@ -344,7 +423,14 @@ impl ResourceProvisioner {
                 .map_err(|e| super::quota::refusal("Lambda", e))?;
         }
         let function_arn = func.function_arn.clone();
+        let managed_instances = func.capacity_provider_config.is_some();
         state.functions.insert(function_name.clone(), func);
+        // `PublishToLatestPublished` republishes `$LATEST.PUBLISHED` from the
+        // updated configuration.
+        if cfg.publish_to_latest_published && managed_instances {
+            fakecloud_lambda::publish_latest_published(state, &function_name, None)
+                .map_err(|e| e.to_string())?;
+        }
         // Reserved concurrency follows the template: set it when present,
         // remove it (DeleteFunctionConcurrency) when the property is dropped.
         match cfg.reserved_concurrent_executions {
@@ -368,6 +454,12 @@ impl ResourceProvisioner {
         let state = accounts.regional_mut(&self.account_id, &self.region);
         state.functions.remove(physical_id);
         state.function_concurrency.remove(physical_id);
+        // DeleteFunction removes every version with the function, so the
+        // capacity provider a Lambda Managed Instances function ran on is
+        // free to delete afterwards.
+        state.function_versions.remove(physical_id);
+        state.function_version_snapshots.remove(physical_id);
+        state.latest_published.remove(physical_id);
         Ok(())
     }
 
@@ -1231,5 +1323,159 @@ impl ResourceProvisioner {
         let state = accounts.regional_mut(&self.account_id, &self.region);
         state.event_invoke_configs.remove(physical_id);
         Ok(())
+    }
+}
+
+/// CloudFormation `[{Key, Value}]` tags as the Lambda tag map.
+fn lambda_cfn_tag_map(
+    tags: Option<&serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    tags.and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let k = t.get("Key")?.as_str()?;
+                    let v = t.get("Value")?.as_str()?;
+                    Some((k.to_string(), serde_json::Value::String(v.to_string())))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+impl ResourceProvisioner {
+    /// `AWS::Lambda::CapacityProvider`: a Lambda Managed Instances capacity
+    /// provider, created as `CreateCapacityProvider` creates it. The physical
+    /// id is the provider's name; `Arn` and `State` are its attributes.
+    pub(super) fn create_lambda_capacity_provider(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("CapacityProviderName")
+            .and_then(|v| v.as_str())
+            .map(|n| fakecloud_lambda::capacity::name_from_reference(n).to_string())
+            .unwrap_or_else(|| self.physical_name(resource));
+        let mut body = props.clone();
+        if !body.is_object() {
+            body = serde_json::json!({});
+        }
+        body["CapacityProviderName"] = serde_json::json!(name);
+        body["Tags"] = serde_json::Value::Object(lambda_cfn_tag_map(props.get("Tags")));
+        let cp = fakecloud_lambda::create_capacity_provider_in(
+            &self.lambda_state,
+            &self.account_id,
+            &self.region,
+            &body,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(ProvisionResult::new(cp.name.clone())
+            .with("Arn", cp.arn)
+            .with("State", cp.state))
+    }
+
+    /// Whether an `AWS::Lambda::CapacityProvider` update changes a property
+    /// that requires replacement: the name, `VpcConfig`, `PermissionsConfig`,
+    /// `InstanceRequirements` or `KmsKeyArn`. Scaling, telemetry and tags
+    /// update in place.
+    pub(super) fn lambda_capacity_provider_requires_replacement(
+        &self,
+        existing: &StackResource,
+        new_def: &ResourceDefinition,
+    ) -> bool {
+        let accounts = self.lambda_state.read();
+        let Some(cp) = accounts
+            .regional(&self.account_id, &self.region)
+            .and_then(|s| s.capacity_providers.get(&existing.physical_id))
+        else {
+            return true;
+        };
+        let props = &new_def.properties;
+        let name_changed = props
+            .get("CapacityProviderName")
+            .and_then(|v| v.as_str())
+            .is_some_and(|n| fakecloud_lambda::capacity::name_from_reference(n) != cp.name);
+        let null = serde_json::Value::Null;
+        let prop = |key: &str| props.get(key).unwrap_or(&null);
+        name_changed
+            || *prop("VpcConfig") != cp.vpc_config
+            || *prop("PermissionsConfig") != cp.permissions_config
+            || prop("InstanceRequirements") != cp.instance_requirements.as_ref().unwrap_or(&null)
+            || prop("KmsKeyArn").as_str() != cp.kms_key_arn.as_deref()
+    }
+
+    /// In-place `AWS::Lambda::CapacityProvider` update of its scaling
+    /// configuration and tags (`UpdateCapacityProvider` + tagging).
+    pub(super) fn update_lambda_capacity_provider(
+        &self,
+        existing: &StackResource,
+        new_def: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &new_def.properties;
+        let body = serde_json::json!({
+            "CapacityProviderScalingConfig": props
+                .get("CapacityProviderScalingConfig")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        });
+        let cp = fakecloud_lambda::update_capacity_provider_in(
+            &self.lambda_state,
+            &self.account_id,
+            &self.region,
+            &existing.physical_id,
+            &body,
+        )
+        .map_err(|e| e.to_string())?;
+        // Tags are desired state: an absent Tags property clears them.
+        let tags = lambda_cfn_tag_map(props.get("Tags"))
+            .into_iter()
+            .filter_map(|(k, v)| v.as_str().map(|v| (k, v.to_string())))
+            .collect();
+        if let Some(stored) = self
+            .lambda_state
+            .write()
+            .regional_mut(&self.account_id, &self.region)
+            .capacity_providers
+            .get_mut(&cp.name)
+        {
+            stored.tags = tags;
+        }
+        Ok(ProvisionResult::new(cp.name.clone())
+            .with("Arn", cp.arn)
+            .with("State", cp.state))
+    }
+
+    /// Delete an `AWS::Lambda::CapacityProvider`. A provider still used by a
+    /// function version fails the delete, as `DeleteCapacityProvider` does;
+    /// one already gone is a no-op.
+    pub(super) fn delete_lambda_capacity_provider(&self, physical_id: &str) -> Result<(), String> {
+        match fakecloud_lambda::delete_capacity_provider_in(
+            &self.lambda_state,
+            &self.account_id,
+            &self.region,
+            physical_id,
+        ) {
+            Ok(_) => Ok(()),
+            Err(e) if e.code() == "ResourceNotFoundException" => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub(super) fn get_att_lambda_capacity_provider(
+        &self,
+        physical_id: &str,
+        attribute: &str,
+    ) -> Option<String> {
+        let accounts = self.lambda_state.read();
+        let cp = accounts
+            .regional(&self.account_id, &self.region)?
+            .capacity_providers
+            .get(physical_id)?;
+        match attribute {
+            "Arn" => Some(cp.arn.clone()),
+            "State" => Some(cp.state.clone()),
+            _ => None,
+        }
     }
 }

@@ -124,7 +124,29 @@ pub struct LambdaFunction {
     /// (`EniLimitExceeded`, `InsufficientRolePermissions`, …).
     #[serde(default)]
     pub last_update_status_reason_code: Option<String>,
+    /// `CapacityProviderConfig` of a Lambda Managed Instances function: the
+    /// capacity provider it runs on. `None` for a Lambda (default) function.
+    /// Set by `CreateFunction` (it cannot be added later) and copied into
+    /// every published version.
+    #[serde(default)]
+    pub capacity_provider_config: Option<FunctionCapacityProviderConfig>,
 }
+
+/// `CapacityProviderConfig.LambdaManagedInstancesCapacityProviderConfig`
+/// of a function, as the caller supplied it (the ARN canonicalized to the
+/// provider's own).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FunctionCapacityProviderConfig {
+    pub capacity_provider_arn: String,
+    #[serde(default)]
+    pub per_execution_environment_max_concurrency: Option<i64>,
+    #[serde(default)]
+    pub execution_environment_memory_gib_per_vcpu: Option<f64>,
+}
+
+/// The qualifier of a Lambda Managed Instances function's
+/// `$LATEST.PUBLISHED` version.
+pub const LATEST_PUBLISHED: &str = "$LATEST.PUBLISHED";
 
 fn default_revision_id() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -297,11 +319,22 @@ pub struct LambdaState {
     /// belongs to one execution and records its outcome on Send*Callback*.
     #[serde(default)]
     pub durable_execution_callbacks: BTreeMap<String, DurableExecutionCallback>,
+    /// The `$LATEST.PUBLISHED` version of each Lambda Managed Instances
+    /// function, keyed by function name: the snapshot `PublishVersion` with
+    /// `PublishTo=LATEST_PUBLISHED` creates and replaces on every republish.
+    /// Kept apart from the numbered `function_version_snapshots`, which
+    /// `ListVersionsByFunction` and version numbering read.
+    #[serde(default)]
+    pub latest_published: BTreeMap<String, LambdaFunction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapacityProvider {
     pub name: String,
+    /// `arn:<p>:lambda:<region>:<account>:capacity-provider:<name>`.
+    /// Snapshots written before the ARN used `:` read `capacity-provider/`
+    /// and are canonicalized on load.
+    #[serde(deserialize_with = "deserialize_capacity_provider_arn")]
     pub arn: String,
     pub state: String,
     pub vpc_config: serde_json::Value,
@@ -311,13 +344,14 @@ pub struct CapacityProvider {
     pub kms_key_arn: Option<String>,
     pub tags: BTreeMap<String, String>,
     pub last_modified: DateTime<Utc>,
-    /// Function versions associated with the capacity provider, as
-    /// `function_name:qualifier` strings. Populated implicitly when a
-    /// function version references the provider; we don't yet write
-    /// from `CreateFunction`, but `ListFunctionVersionsByCapacityProvider`
-    /// can read whatever is staged here.
-    #[serde(default)]
-    pub function_versions: Vec<String>,
+}
+
+fn deserialize_capacity_provider_arn<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let arn = String::deserialize(deserializer)?;
+    Ok(arn.replacen(":capacity-provider/", ":capacity-provider:", 1))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -548,7 +582,34 @@ impl LambdaState {
             capacity_providers: BTreeMap::new(),
             durable_executions: BTreeMap::new(),
             durable_execution_callbacks: BTreeMap::new(),
+            latest_published: BTreeMap::new(),
         }
+    }
+
+    /// The published version `version` of `function_name`: a numbered
+    /// version, or the `$LATEST.PUBLISHED` version of a Lambda Managed
+    /// Instances function.
+    pub fn version_snapshot(&self, function_name: &str, version: &str) -> Option<&LambdaFunction> {
+        if version == LATEST_PUBLISHED {
+            return self.latest_published.get(function_name);
+        }
+        self.function_version_snapshots
+            .get(function_name)?
+            .get(version)
+    }
+
+    /// Mutable [`Self::version_snapshot`].
+    pub fn version_snapshot_mut(
+        &mut self,
+        function_name: &str,
+        version: &str,
+    ) -> Option<&mut LambdaFunction> {
+        if version == LATEST_PUBLISHED {
+            return self.latest_published.get_mut(function_name);
+        }
+        self.function_version_snapshots
+            .get_mut(function_name)?
+            .get_mut(version)
     }
 
     pub fn reset(&mut self) {
@@ -572,6 +633,7 @@ impl LambdaState {
         self.capacity_providers.clear();
         self.durable_executions.clear();
         self.durable_execution_callbacks.clear();
+        self.latest_published.clear();
     }
 }
 
@@ -719,6 +781,7 @@ impl SplitByRegion for LambdaState {
         follow_function!(aliases);
         follow_function!(function_versions);
         follow_function!(function_version_snapshots);
+        follow_function!(latest_published);
         follow_function!(function_url_configs);
         follow_function!(function_concurrency);
         follow_function!(provisioned_concurrency);

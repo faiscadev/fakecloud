@@ -501,6 +501,12 @@ struct LambdaFunctionProps {
     /// `ReservedConcurrentExecutions`, applied as the function's reserved
     /// concurrency (PutFunctionConcurrency).
     reserved_concurrent_executions: Option<i64>,
+    /// `CapacityProviderConfig`: the capacity provider a Lambda Managed
+    /// Instances function runs on (shape-checked, resolved at provision).
+    capacity_provider_config: Option<fakecloud_lambda::FunctionCapacityProviderConfig>,
+    /// `PublishToLatestPublished`: publish the `$LATEST.PUBLISHED` version
+    /// of a Lambda Managed Instances function.
+    publish_to_latest_published: bool,
 }
 
 /// Parse the `Properties` value of an `AWS::Lambda::Function` resource
@@ -529,10 +535,22 @@ fn parse_lambda_function_props(props: &serde_json::Value) -> Result<LambdaFuncti
         .unwrap_or_default()
         .to_string();
     let timeout = props.get("Timeout").and_then(|v| v.as_i64()).unwrap_or(3);
-    let memory_size = props
-        .get("MemorySize")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(128);
+    let capacity_provider_config = fakecloud_lambda::capacity::parse_config(props)
+        .map_err(|e| format!("{}: {}", e.code(), e.message()))?;
+    // A Lambda Managed Instances function defaults to 2048 MB, the smallest
+    // size it can run with.
+    let memory_size = props.get("MemorySize").and_then(|v| v.as_i64()).unwrap_or(
+        if capacity_provider_config.is_some() {
+            2048
+        } else {
+            128
+        },
+    );
+    let publish_to_latest_published = match props.get("PublishToLatestPublished") {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s.eq_ignore_ascii_case("true"),
+        _ => false,
+    };
     let architectures = props
         .get("Architectures")
         .and_then(|v| v.as_array())
@@ -692,6 +710,8 @@ fn parse_lambda_function_props(props: &serde_json::Value) -> Result<LambdaFuncti
         logging_config,
         image_config,
         reserved_concurrent_executions,
+        capacity_provider_config,
+        publish_to_latest_published,
     })
 }
 
@@ -1381,6 +1401,7 @@ impl ResourceProvisioner {
             "AWS::IoT::TopicRule" => self.create_iot_topic_rule(resource),
             "AWS::Lambda::Alias" => self.create_lambda_alias(resource),
             "AWS::Lambda::Version" => self.create_lambda_version(resource),
+            "AWS::Lambda::CapacityProvider" => self.create_lambda_capacity_provider(resource),
             "AWS::SecretsManager::Secret" => self.create_secrets_manager_secret(resource),
             "AWS::Kinesis::Stream" => self.create_kinesis_stream(resource),
             "AWS::Kinesis::StreamConsumer" => self.create_kinesis_stream_consumer(resource),
@@ -1790,6 +1811,14 @@ impl ResourceProvisioner {
             "AWS::IoT::TopicRule" => Some(self.update_iot_topic_rule(existing, new_def)?),
             "AWS::Lambda::Alias" => Some(self.update_lambda_alias(existing, new_def)?),
             "AWS::Lambda::Version" => Some(self.update_lambda_version(existing, new_def)?),
+            "AWS::Lambda::CapacityProvider"
+                if self.lambda_capacity_provider_requires_replacement(existing, new_def) =>
+            {
+                self.reprovision_resource(existing, new_def)?
+            }
+            "AWS::Lambda::CapacityProvider" => {
+                Some(self.update_lambda_capacity_provider(existing, new_def)?)
+            }
             "AWS::IAM::Role" => Some(self.update_iam_role(existing, new_def)?),
             "AWS::IAM::Policy" => Some(self.update_iam_inline_policy(existing, new_def)?),
             "AWS::IAM::ManagedPolicy" => Some(self.update_iam_policy(existing, new_def)?),
@@ -2345,6 +2374,9 @@ impl ResourceProvisioner {
             "AWS::Lambda::Function" => {
                 self.get_att_lambda_function(&resource.physical_id, attribute)
             }
+            "AWS::Lambda::CapacityProvider" => {
+                self.get_att_lambda_capacity_provider(&resource.physical_id, attribute)
+            }
             "AWS::IAM::Role" => self.get_att_iam_role(&resource.physical_id, attribute),
             "AWS::SQS::Queue" => self.get_att_sqs_queue(&resource.physical_id, attribute),
             "AWS::SNS::Topic" => self.get_att_sns_topic(&resource.physical_id, attribute),
@@ -2687,6 +2719,9 @@ impl ResourceProvisioner {
             }
             "AWS::Logs::DeliverySource" => self.delete_logs_delivery_source(&resource.physical_id),
             "AWS::Lambda::Function" => self.delete_lambda_function(&resource.physical_id),
+            "AWS::Lambda::CapacityProvider" => {
+                self.delete_lambda_capacity_provider(&resource.physical_id)
+            }
             "AWS::Lambda::Permission" => self.delete_lambda_permission(&resource.physical_id),
             "AWS::Lambda::EventInvokeConfig" => {
                 self.delete_lambda_event_invoke_config(&resource.physical_id)

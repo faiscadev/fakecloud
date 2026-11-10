@@ -26,7 +26,17 @@ impl LambdaService {
         // — qualifier, version snapshots, attached layers, code-zip
         // presence — but without the InvocationType branch (streaming
         // is always synchronous).
-        let qualifier = req.query_params.get("Qualifier").map(String::as_str);
+        let default_qualifier = {
+            let accounts = self.state.read();
+            accounts
+                .regional(account_id, &req.region)
+                .and_then(|s| crate::service::default_invoke_qualifier(s, function_name))
+        };
+        let qualifier = req
+            .query_params
+            .get("Qualifier")
+            .map(String::as_str)
+            .or(default_qualifier);
 
         let resolved_version: Option<String> = {
             let accounts = self.state.read();
@@ -44,9 +54,7 @@ impl LambdaService {
             let state = accounts.regional(account_id, &req.region).unwrap_or(&empty);
             let func = match resolved_version.as_deref() {
                 Some(v) => state
-                    .function_version_snapshots
-                    .get(function_name)
-                    .and_then(|m| m.get(v))
+                    .version_snapshot(function_name, v)
                     .cloned()
                     .or_else(|| state.functions.get(function_name).cloned()),
                 None => state.functions.get(function_name).cloned(),
