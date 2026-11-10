@@ -162,7 +162,20 @@ fn selecting_literals(uri: &str) -> (&str, Vec<&str>) {
 /// without `x-amz-copy-source` is PutObject, ListParts without `uploadId` is
 /// GetObject, AbortMultipartUpload without it is DeleteObject (204), and
 /// `GET /{Bucket}?analytics` without `id` is ListBucketAnalyticsConfigurations
-/// (200). UploadPart without `uploadId` still carries `partNumber`, which
+/// (200). The ListParts and AbortMultipartUpload recordings are also what
+/// shows `x-id` is not a selecting literal: their requests carried
+/// `x-id=ListParts` / `x-id=AbortMultipartUpload` and S3 still answered as
+/// GetObject / DeleteObject. GetObjectAnnotation without `annotationName` is
+/// the same case, from the model rather than a recording of its own (S3
+/// annotations could not be recorded): its route
+/// `GET /{Bucket}/{Key+}?annotation&x-id=GetObjectAnnotation` and
+/// ListObjectAnnotations' `GET /{Bucket}/{Key+}?annotation&x-id=ListObjectAnnotations`
+/// differ only in `x-id`, ListObjectAnnotations requires nothing beyond the
+/// bucket and key the request still carries, and `annotationName` is the one
+/// member that tells the two reads apart (GetObjectAnnotation's reference:
+/// "The name of the annotation to retrieve"). So the request without it is a
+/// ListObjectAnnotations request, which S3 answers with the object's
+/// annotation list, not an error. UploadPart without `uploadId` still carries `partNumber`, which
 /// PutObject does not bind, so it stays a real negative (S3: 400
 /// InvalidArgument "This operation does not accept partNumber without
 /// uploadId").
