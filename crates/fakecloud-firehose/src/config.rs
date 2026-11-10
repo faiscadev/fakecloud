@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use fakecloud_core::service::AwsServiceError;
@@ -27,6 +28,10 @@ pub struct DeliveryConfig {
     /// Set for Elasticsearch / OpenSearch Service destinations, whose S3
     /// fields describe the backup bucket.
     pub search: Option<crate::search::SearchDelivery>,
+    /// Positions of the records of the batch this configuration was captured for
+    /// that passed their source stream's retention while it retried. They keep
+    /// their positions, which the bulk retry state refers to, and are not delivered.
+    pub expired: BTreeSet<usize>,
 }
 
 pub(crate) fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
@@ -143,10 +148,16 @@ pub fn parse_s3_destination(value: &Value) -> Result<Option<S3Destination>, AwsS
     crate::service::parse_s3_destination(value)
 }
 
-pub(crate) fn s3_bucket_name(dest: &S3Destination) -> Result<&str, AwsServiceError> {
-    fakecloud_aws::arn::arn_resource(&dest.bucket_arn, "s3")
+/// The bucket a `BucketARN` names, whatever its name looks like: whether it
+/// exists is what decides, as on AWS.
+pub(crate) fn bucket_of_arn(arn: &str) -> Option<&str> {
+    fakecloud_aws::arn::arn_resource(arn, "s3")
         .and_then(|resource| resource.strip_prefix("::"))
         .filter(|bucket| !bucket.is_empty() && !bucket.contains(['/', ':']))
+}
+
+pub(crate) fn s3_bucket_name(dest: &S3Destination) -> Result<&str, AwsServiceError> {
+    bucket_of_arn(&dest.bucket_arn)
         .ok_or_else(|| invalid_argument("S3 destination requires a bucket ARN"))
 }
 
@@ -172,6 +183,7 @@ pub fn delivery_config(dest: &S3Destination) -> Result<DeliveryConfig, AwsServic
         buffering,
         encryption: delivery_encryption(dest.encryption_configuration.as_ref()),
         search: None,
+        expired: BTreeSet::new(),
     })
 }
 
@@ -207,7 +219,10 @@ mod tests {
                 json!({"CompressionFormat": "HADOOP_SNAPPY"}),
                 "HADOOP_SNAPPY",
             ),
-            (json!({"Prefix": "!{timestamp:yyyy}/"}), "Prefix"),
+            (
+                json!({"Prefix": "!{partitionKeyFromQuery:id}/", "ErrorOutputPrefix": "e/"}),
+                "Prefix",
+            ),
             (
                 json!({"CustomTimeZone": "America/New_York"}),
                 "CustomTimeZone",
@@ -405,7 +420,9 @@ mod tests {
         for codec in ["ZIP", "HADOOP_SNAPPY", "SNAPPY"] {
             unsupported(&destination(json!({"CompressionFormat": codec})));
         }
-        unsupported(&destination(json!({"Prefix": "!{timestamp:yyyy}/"})));
+        unsupported(&destination(
+            json!({"Prefix": "!{partitionKeyFromLambda:id}/", "ErrorOutputPrefix": "e/"}),
+        ));
         unsupported(&destination(json!({"CustomTimeZone": "America/New_York"})));
         for partition in ["aws", "aws-cn", "aws-us-gov"] {
             let dest = destination(json!({"BucketARN": format!("arn:{partition}:s3:::bucket")}));

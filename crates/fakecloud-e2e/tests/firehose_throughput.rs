@@ -488,6 +488,14 @@ async fn enabling_default_throughput_does_not_impose_the_reported_aws_limit() {
             assert!(!quota.enforced);
             assert_eq!(quota.enforcement_source, "auto_scaling_default");
         }
+        server
+            .s3_client()
+            .await
+            .create_bucket()
+            .bucket("unused-default-bucket")
+            .send()
+            .await
+            .unwrap();
         create_stream(
             &firehose,
             "default-throughput",
@@ -677,7 +685,24 @@ async fn other_account_and_region_quota_values_do_not_reject_the_producer() {
             )
             .build();
         let other_firehose = client(&other_sdk, 1);
-        create_stream(&other_firehose, bucket, bucket, false).await;
+        // A stream's bucket has to exist in its account.
+        let other_bucket = "fh-throughput-scope-other";
+        aws_sdk_s3::Client::from_conf(
+            aws_sdk_s3::config::Builder::from(&other_sdk)
+                .force_path_style(true)
+                .build(),
+        )
+        .create_bucket()
+        .bucket(other_bucket)
+        .create_bucket_configuration(
+            aws_sdk_s3::types::CreateBucketConfiguration::builder()
+                .location_constraint(aws_sdk_s3::types::BucketLocationConstraint::UsWest2)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+        create_stream(&other_firehose, bucket, other_bucket, false).await;
         assert_single_unavailable(
             other_firehose
                 .put_record()

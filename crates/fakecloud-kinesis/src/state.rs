@@ -102,7 +102,17 @@ pub struct KinesisShard {
     pub adjacent_parent_shard_id: Option<String>,
     pub is_open: bool,
     pub next_sequence_number: u128,
+    /// Sequence numbers of a shard created at another time never repeat, as on
+    /// AWS: this goes in their high digits. Zero in shards from older snapshots,
+    /// whose numbers stay as they were.
+    #[serde(default)]
+    pub sequence_incarnation: u64,
     pub records: Vec<KinesisRecord>,
+}
+
+/// What a shard created now puts in its sequence numbers.
+pub fn new_sequence_incarnation() -> u64 {
+    u64::try_from(Utc::now().timestamp_nanos_opt().unwrap_or_default()).unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -939,6 +949,7 @@ mod tests {
                 adjacent_parent_shard_id: None,
                 is_open: true,
                 next_sequence_number: 3,
+                sequence_incarnation: 0,
                 // Two records aged past the 24h window, one fresh.
                 records: vec![record_at("0", 48), record_at("1", 48), record_at("2", 1)],
             }],

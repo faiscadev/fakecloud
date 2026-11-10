@@ -1,0 +1,17 @@
+B	midnight	at night	at night	in the morning	in the morning	noon	in the afternoon	in the afternoon	in the evening	in the evening	at night	at night
+BB	ERR
+BBB	ERR
+BBBB	midnight	at night	at night	in the morning	in the morning	noon	in the afternoon	in the afternoon	in the evening	in the evening	at night	at night
+BBBBB	mi	at night	at night	in the morning	in the morning	n	in the afternoon	in the afternoon	in the evening	in the evening	at night	at night
+BBBBBB	ERR
+v	UTC	UTC	UTC	UTC	UTC	UTC	UTC	UTC	UTC	UTC	UTC	UTC
+vv	ERR
+vvv	ERR
+vvvv	Coordinated Universal Time	Coordinated Universal Time	Coordinated Universal Time	Coordinated Universal Time	Coordinated Universal Time	Coordinated Universal Time	Coordinated Universal Time	Coordinated Universal Time	Coordinated Universal Time	Coordinated Universal Time	Coordinated Universal Time	Coordinated Universal Time
+vvvvv	ERR
+a	AM	AM	AM	AM	AM	PM	PM	PM	PM	PM	PM	PM
+aa	ERR
+aaa	ERR
+aaaa	ERR
+aaaaa	ERR
+pH	0	0	5	6	FMTERR	FMTERR	FMTERR	FMTERR	FMTERR	FMTERR	FMTERR	FMTERR

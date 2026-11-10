@@ -184,6 +184,10 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             "AccessControlListNotSupported",
             "InvalidBucketAclWithObjectOwnership",
         ],
+        // Real Firehose answers input that fails the model's patterns, such as a
+        // `BucketARN` that is not an S3 ARN, with ValidationException, recorded on
+        // Create and on `ClusterEndpoint`. The Smithy model does not declare it.
+        "firehose" => &["ValidationException"],
         // EC2's Smithy model declares no per-operation `errors:` lists at all,
         // yet the EC2 Query API has a large, well-documented set of client
         // error codes every operation can return for a missing/invalid/
