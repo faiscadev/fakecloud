@@ -71,11 +71,24 @@ chosen from the engine version.
   does; the domain reports `Processing=true` (`Modifying`, or
   `UpgradingEngineVersion` with `UpgradeProcessing=true`) until the new node
   is healthy. Other changes leave the running cluster alone.
+  `DescribeDomainChangeProgress` reports the change `PROCESSING`
+  (`ApplyingChanges`) and `GetUpgradeStatus` the upgrade `IN_PROGRESS`
+  meanwhile; a new domain reports `Created=false` until its cluster is up,
+  and `DeleteDomain` returns `DomainProcessingStatus=Deleting`.
+- **Known difference: no blue/green overlap.** AWS keeps the old nodes
+  serving until the new ones take over; fakecloud stops the old container
+  before the new one is healthy, so the endpoint answers `503` (and Firehose
+  `DomainARN` deliveries retry) for the length of the replacement.
 - **Durability.** The data directory is a named volume. A persistent-mode
-  restart (`--storage-mode persistent`) brings each domain back on its volume
-  (re-attaching the old container when it still exists), reporting
+  restart (`--storage-mode persistent`) brings each domain back in a fresh
+  container on its persisted volume (a graceful shutdown removes the
+  containers, and the startup reaper removes a crashed process's), reporting
   `Processing=true` until it is healthy again. A reset removes every domain's
   container and volume.
+- **Liveness.** Every 30 seconds fakecloud probes each running cluster. One
+  whose container died or stopped (or whose node stops answering three
+  probes in a row) loses its endpoint, goes back to `Processing=true`
+  (`Modifying`) and is brought back up on its volume.
 - **CloudFormation.** `AWS::OpenSearchService::Domain` and
   `AWS::Elasticsearch::Domain` start the same cluster; a stack update that
   changes node settings or the engine version replaces it, and a stack delete

@@ -6856,6 +6856,7 @@ async fn main() {
         opensearch_service = opensearch_service.with_runtime(rt.clone());
     }
     opensearch_service.recover_persisted_containers().await;
+    opensearch_service.start_liveness_watch();
     if let Some(h) = opensearch_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("es", h);
     }

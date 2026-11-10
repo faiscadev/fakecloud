@@ -2414,3 +2414,114 @@ async fn a_processing_domain_reports_its_processing_status() {
         "UpgradingEngineVersion"
     );
 }
+
+/// While a container-backed domain is still coming up, or replacing its
+/// cluster, the status operations agree with `Processing`.
+#[tokio::test]
+async fn status_operations_agree_with_processing() {
+    use fakecloud_opensearch::backing::{CREATING, MODIFYING, UPGRADING};
+    let (svc, state) = service_with_state();
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain"),
+            json!({"DomainName": "agree"}),
+        ),
+    )
+    .await;
+    let set = |p: Option<&str>| {
+        state
+            .write()
+            .get_or_create("000000000000")
+            .domains
+            .get_mut("agree")
+            .unwrap()
+            .processing = p.map(str::to_string);
+    };
+    let describe = || {
+        req(
+            Method::GET,
+            &format!("{OS}/opensearch/domain/agree"),
+            json!({}),
+        )
+    };
+
+    // Creating: not Created yet, even across describes.
+    set(Some(CREATING));
+    for _ in 0..2 {
+        let s = json_of(&call(&svc, describe()).await);
+        assert_eq!(s["DomainStatus"]["Created"], false);
+        assert_eq!(s["DomainStatus"]["DomainProcessingStatus"], "Creating");
+    }
+    set(None);
+    assert_eq!(
+        json_of(&call(&svc, describe()).await)["DomainStatus"]["Created"],
+        true
+    );
+
+    // Modifying: the latest change is still being applied.
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain/agree/config"),
+            json!({"AdvancedOptions": {"indices.query.bool.max_clause_count": "2048"}}),
+        ),
+    )
+    .await;
+    let progress = || {
+        req(
+            Method::GET,
+            &format!("{OS}/opensearch/domain/agree/progress"),
+            json!({}),
+        )
+    };
+    set(Some(MODIFYING));
+    let p = json_of(&call(&svc, progress()).await)["ChangeProgressStatus"].clone();
+    assert_eq!(p["Status"], "PROCESSING");
+    assert_eq!(p["ConfigChangeStatus"], "ApplyingChanges");
+    assert_eq!(p["PendingProperties"], json!(["AdvancedOptions"]));
+    assert_eq!(p["CompletedProperties"], json!([]));
+    set(None);
+    let p = json_of(&call(&svc, progress()).await)["ChangeProgressStatus"].clone();
+    assert_eq!(p["Status"], "COMPLETED");
+    assert_eq!(p["ConfigChangeStatus"], "Completed");
+    assert_eq!(p["CompletedProperties"], json!(["AdvancedOptions"]));
+
+    // Upgrading: the upgrade is in progress.
+    let upgrade_status = || {
+        req(
+            Method::GET,
+            &format!("{OS}/opensearch/upgradeDomain/agree/status"),
+            json!({}),
+        )
+    };
+    set(Some(UPGRADING));
+    let u = json_of(&call(&svc, upgrade_status()).await);
+    assert_eq!(u["StepStatus"], "IN_PROGRESS");
+    assert_eq!(u["UpgradeStep"], "UPGRADE");
+    set(None);
+    assert_eq!(
+        json_of(&call(&svc, upgrade_status()).await)["StepStatus"],
+        "SUCCEEDED"
+    );
+
+    // Delete reports the domain as being deleted.
+    let deleted = json_of(
+        &call(
+            &svc,
+            req(
+                Method::DELETE,
+                &format!("{OS}/opensearch/domain/agree"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(
+        deleted["DomainStatus"]["DomainProcessingStatus"],
+        "Deleting"
+    );
+    assert_eq!(deleted["DomainStatus"]["Deleted"], true);
+}

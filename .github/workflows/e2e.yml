@@ -225,7 +225,10 @@ jobs:
           # and failed its partition on "Data limit exceeded").
           # ubuntu:22.04 is not named by any test: fakecloud runs it for EC2
           # instances launched from its default AMIs.
-          images=$( (grep -rhoE 'public\.ecr\.aws/[a-z0-9._/-]+:[A-Za-z0-9._-]+' \
+          # Elastic's own registry is included for the elasticsearch-oss
+          # images search domains run (it has no ECR Public mirror); it has no
+          # mirror entry below, so it is pulled from Elastic directly.
+          images=$( (grep -rhoE '(public\.ecr\.aws|docker\.elastic\.co)/[a-z0-9._/-]+:[A-Za-z0-9._-]+' \
             crates/fakecloud-e2e/tests; echo public.ecr.aws/docker/library/ubuntu:22.04) | sort -u)
           # Mirrors that serve the same image without ECR Public's anonymous
           # data cap, in the order to try them. Unmapped images fall back to

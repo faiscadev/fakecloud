@@ -18,7 +18,7 @@
 //! heap. Its data directory is a named volume scoped like the other data
 //! planes' ([`fakecloud_core::data_volume`]): replacing the container for a
 //! configuration change or an engine upgrade keeps every index, and a
-//! persistent-mode restart reattaches it. Every CLI call is time-bounded, so a
+//! persistent-mode restart brings the domain back on it. Every CLI call is time-bounded, so a
 //! wedged daemon fails a bring-up instead of hanging it.
 
 use std::collections::HashMap;
@@ -49,6 +49,9 @@ const HTTP_PORT: u16 = 9200;
 /// for test-sized indices.
 const HEAP: &str = "-Xms512m -Xmx512m";
 
+/// How long [`OpenSearchRuntime::stop_all`] waits for in-flight bring-ups to
+/// remove their own containers.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// Budget for a container-CLI call that only touches the local daemon.
 const CLI_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a freshly started node gets to answer `_cluster/health`. A JVM
@@ -235,7 +238,17 @@ impl DomainSpec {
             .and_then(|v| v.as_object())
             .map(|opts| {
                 opts.iter()
-                    .filter_map(|(k, v)| advanced_setting(k, v.as_str()?))
+                    .filter_map(|(k, v)| {
+                        // AWS takes string values, but SDKs and templates
+                        // also send booleans and numbers.
+                        let value = match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Bool(b) => b.to_string(),
+                            serde_json::Value::Number(n) => n.to_string(),
+                            _ => return None,
+                        };
+                        advanced_setting(k, &value)
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -246,19 +259,6 @@ impl DomainSpec {
             settings,
             volume: domain.data_volume_name(scope_tag),
         })
-    }
-
-    /// A short digest of the spec, carried as a container label so a
-    /// reattached container is reused only if it was started from this spec.
-    pub fn digest(&self) -> String {
-        let mut parts: Vec<String> = vec![
-            format!("{:?}", self.family),
-            self.image.clone(),
-            self.volume.clone(),
-        ];
-        parts.extend(self.settings.iter().map(|(k, v)| format!("{k}={v}")));
-        let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
-        fakecloud_core::data_volume::incarnation_id(&refs)
     }
 
     fn container_env(&self) -> Vec<String> {
@@ -288,6 +288,22 @@ pub enum RuntimeError {
 struct Tracked {
     running: RunningDomain,
     spec: DomainSpec,
+    /// Cleared by the liveness watch once the node is found dead, so a
+    /// configuration change re-converges it even when its spec is unchanged.
+    alive: bool,
+}
+
+/// What a liveness probe of a tracked cluster found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    /// It answers `_cluster/health`.
+    Healthy,
+    /// The container runs but the node doesn't answer (busy, or wedged).
+    Unresponsive,
+    /// The container is gone or no longer running.
+    Dead,
+    /// Nothing is tracked under the key.
+    Untracked,
 }
 
 /// Docker/Podman-backed search cluster runtime. Containers are keyed by the
@@ -296,9 +312,19 @@ struct Tracked {
 pub struct OpenSearchRuntime {
     cli: String,
     net: HostNetworking,
+    /// `fakecloud-<pid>`: the ownership label the startup reaper uses.
     instance_id: String,
+    /// Random per-process id. Two containerized fakecloud processes can share
+    /// a pid (both pid 1) and a Docker socket, so a domain's stale-container
+    /// reap matches this, never the pid label.
+    owner_id: String,
     http: reqwest::Client,
     containers: Arc<Mutex<HashMap<String, Tracked>>>,
+    /// The spec a bring-up of each domain is running right now.
+    inflight: Arc<Mutex<HashMap<String, DomainSpec>>>,
+    /// Set by [`Self::stop_all`]: no new container is started, and one being
+    /// started is removed instead of handed out.
+    closed: Arc<std::sync::atomic::AtomicBool>,
     /// One async lock per domain, so two bring-ups of one domain (a create
     /// racing a config change) never start two containers.
     locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
@@ -313,6 +339,11 @@ impl OpenSearchRuntime {
         }
         let cli = fakecloud_core::container_net::detect_container_cli()?;
         let net = HostNetworking::detect(&cli);
+        Self::with_cli(cli, net)
+    }
+
+    /// The runtime driving `cli` with `net`.
+    fn with_cli(cli: String, net: HostNetworking) -> Option<Self> {
         let http = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(5))
@@ -322,10 +353,76 @@ impl OpenSearchRuntime {
             cli,
             net,
             instance_id: format!("fakecloud-{}", std::process::id()),
+            owner_id: uuid::Uuid::new_v4().simple().to_string(),
             http,
             containers: Arc::new(Mutex::new(HashMap::new())),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             locks: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Record that a bring-up of `key` from `spec` is starting. Called by the
+    /// converger while it holds the state lock it read `spec` under, so a
+    /// configuration change made under that lock sees it.
+    pub fn begin_inflight(&self, key: &str, spec: &DomainSpec) {
+        self.inflight.lock().insert(key.to_string(), spec.clone());
+    }
+
+    /// The bring-up of `key` is done (settled, failed or abandoned).
+    pub fn end_inflight(&self, key: &str) {
+        self.inflight.lock().remove(key);
+    }
+
+    /// The spec an in-flight bring-up of `key` is starting from.
+    pub fn inflight_spec(&self, key: &str) -> Option<DomainSpec> {
+        self.inflight.lock().get(key).cloned()
+    }
+
+    /// Whether `key`'s tracked container was last seen alive (`false` when
+    /// untracked).
+    pub fn tracked_alive(&self, key: &str) -> bool {
+        self.containers.lock().get(key).is_some_and(|t| t.alive)
+    }
+
+    /// Probe `key`'s tracked cluster; a dead one is marked so.
+    pub async fn liveness(&self, key: &str) -> Liveness {
+        let Some(running) = self.containers.lock().get(key).map(|t| t.running.clone()) else {
+            return Liveness::Untracked;
+        };
+        if self.healthy(&running).await {
+            return Liveness::Healthy;
+        }
+        let state = self
+            .cli_call(&[
+                "inspect",
+                "--format",
+                "{{.State.Status}}",
+                &running.container_id,
+            ])
+            .await;
+        let verdict = match state {
+            // The daemon didn't answer: say nothing about the container.
+            Err(_) => Liveness::Unresponsive,
+            Ok(o) if !o.status.success() => Liveness::Dead,
+            Ok(o) if String::from_utf8_lossy(&o.stdout).trim() == "running" => {
+                Liveness::Unresponsive
+            }
+            Ok(_) => Liveness::Dead,
+        };
+        if verdict == Liveness::Dead {
+            self.mark_dead(key, &running.container_id);
+        }
+        verdict
+    }
+
+    /// Mark `key`'s tracked container dead, if it is still `container_id`.
+    pub fn mark_dead(&self, key: &str, container_id: &str) {
+        if let Some(t) = self.containers.lock().get_mut(key) {
+            if t.running.container_id == container_id {
+                t.alive = false;
+            }
+        }
     }
 
     pub fn cli_name(&self) -> &str {
@@ -342,32 +439,22 @@ impl OpenSearchRuntime {
 
     /// Bring `key`'s cluster up from `spec` and wait until it answers
     /// `_cluster/health`. A tracked container started from the same spec is
-    /// reused; one from another spec is replaced (the data volume stays).
-    /// `adopt` names a container a previous fakecloud process ran for the
-    /// domain: it is restarted and reused when it still exists and carries
-    /// this spec's digest.
+    /// reused; one from another spec, or a dead one, is replaced (the data
+    /// volume stays).
     pub async fn ensure_domain(
         &self,
         key: &str,
         spec: &DomainSpec,
-        adopt: Option<&str>,
     ) -> Result<RunningDomain, RuntimeError> {
         let lock = self.lock_for(key);
         let _held = lock.lock().await;
         let tracked = self.containers.lock().get(key).cloned();
         if let Some(t) = tracked {
-            if t.spec == *spec && self.healthy(&t.running).await {
+            if t.spec == *spec && t.alive && self.healthy(&t.running).await {
                 return Ok(t.running);
             }
             self.containers.lock().remove(key);
             self.remove_container(&t.running.container_id).await;
-        }
-        if let Some(cid) = adopt {
-            if let Some(running) = self.adopt(cid, spec).await {
-                self.track(key, &running, spec);
-                tracing::info!(domain = %key, container_id = %cid, "re-attached search cluster container");
-                return Ok(running);
-            }
         }
         let running = self.spawn(key, spec).await?;
         self.track(key, &running, spec);
@@ -380,6 +467,7 @@ impl OpenSearchRuntime {
             Tracked {
                 running: running.clone(),
                 spec: spec.clone(),
+                alive: true,
             },
         );
     }
@@ -411,6 +499,9 @@ impl OpenSearchRuntime {
         if let Some(t) = &tracked {
             self.remove_container(&t.running.container_id).await;
         }
+        // An untracked container (a create whose CLI call timed out) would
+        // still mount the volume and make its removal fail.
+        self.reap_stale(key).await;
         // Also the volume the tracked spec named, in case the caller's row
         // was already gone.
         let volumes = volume
@@ -439,10 +530,34 @@ impl OpenSearchRuntime {
                 _ => None,
             }
         };
+        let reap_untracked = stale.is_some() || !self.containers.lock().contains_key(key);
         if let Some(t) = stale {
             self.remove_container(&t.running.container_id).await;
         }
+        // Untracked leftovers of this domain hold the volume too; reap them
+        // unless a recreated incarnation's container is tracked (its own
+        // bring-ups reap for it).
+        if reap_untracked {
+            self.reap_stale(key).await;
+        }
         fakecloud_core::data_volume::remove_volume(&self.cli, &spec.volume).await;
+    }
+
+    /// Tear down a removed domain: `container_id` (already untracked by the
+    /// caller), any untracked leftover of the domain, then its data volume.
+    /// Serialized with bring-ups of the same ARN.
+    pub async fn teardown(&self, key: &str, container_id: Option<&str>, volume: Option<&str>) {
+        let lock = self.lock_for(key);
+        let _held = lock.lock().await;
+        if let Some(cid) = container_id {
+            self.remove_container(cid).await;
+        }
+        if !self.containers.lock().contains_key(key) {
+            self.reap_stale(key).await;
+        }
+        if let Some(v) = volume {
+            fakecloud_core::data_volume::remove_volume(&self.cli, v).await;
+        }
     }
 
     /// Remove one container by id (a removal handed off by [`Self::untrack`]).
@@ -456,13 +571,29 @@ impl OpenSearchRuntime {
     }
 
     /// Remove every tracked container (graceful shutdown). Data volumes stay:
-    /// persistent mode reattaches them, and memory mode's are removed with
+    /// persistent mode respawns on them, and memory mode's are removed with
     /// the process's other volumes.
+    ///
+    /// A bring-up still in flight is told to stop and given a few seconds to
+    /// remove its own container; whatever this process started that is still
+    /// around (tracked or not) is then removed by its owner label. A `create`
+    /// the CLI is still running when the process exits can outlive it; the
+    /// startup reaper removes that one.
     pub async fn stop_all(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
         let all: Vec<Tracked> = self.containers.lock().drain().map(|(_, t)| t).collect();
         for t in all {
             self.remove_container(&t.running.container_id).await;
         }
+        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        while !self.inflight.lock().is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        self.reap_owned(&[]).await;
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     async fn cli_call(&self, args: &[&str]) -> Result<std::process::Output, String> {
@@ -473,46 +604,12 @@ impl OpenSearchRuntime {
             .map_err(|e| format!("{} {}: {e}", self.cli, args.first().unwrap_or(&"")))
     }
 
-    async fn adopt(&self, container_id: &str, spec: &DomainSpec) -> Option<RunningDomain> {
-        let out = self
-            .cli_call(&[
-                "inspect",
-                "--format",
-                "{{index .Config.Labels \"fakecloud-opensearch-spec\"}}",
-                container_id,
-            ])
-            .await
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        if String::from_utf8_lossy(&out.stdout).trim() != spec.digest() {
-            // Started from an older spec (a config change the previous
-            // process never applied): replace it.
-            self.remove_container(container_id).await;
-            return None;
-        }
-        let started = self.cli_call(&["start", container_id]).await.ok()?;
-        if !started.status.success() {
-            self.remove_container(container_id).await;
-            return None;
-        }
-        let port = self.lookup_port(container_id).await.ok()?;
-        let running = RunningDomain {
-            container_id: container_id.to_string(),
-            host: self.net.sibling_host.clone(),
-            port,
-        };
-        match self.wait_ready(&running).await {
-            Ok(()) => Some(running),
-            Err(_) => {
-                self.remove_container(container_id).await;
-                None
-            }
-        }
-    }
-
     async fn spawn(&self, key: &str, spec: &DomainSpec) -> Result<RunningDomain, RuntimeError> {
+        if self.is_closed() {
+            return Err(RuntimeError::StartFailed(
+                "fakecloud is shutting down".into(),
+            ));
+        }
         self.reap_stale(key).await;
         if let Err(e) =
             fakecloud_core::container_image::ensure_image(&self.cli, None, &spec.image).await
@@ -536,7 +633,7 @@ impl OpenSearchRuntime {
             "--label".into(),
             format!("fakecloud-opensearch={key}"),
             "--label".into(),
-            format!("fakecloud-opensearch-spec={}", spec.digest()),
+            format!("fakecloud-opensearch-owner={}", self.owner_id),
             "--label".into(),
             format!("fakecloud-instance={}", self.instance_id),
             "-v".into(),
@@ -559,36 +656,44 @@ impl OpenSearchRuntime {
             ));
         }
         let container_id = String::from_utf8_lossy(&created.stdout).trim().to_string();
-        let started = self
-            .cli_call(&["start", &container_id])
-            .await
-            .map_err(RuntimeError::StartFailed)?;
-        if !started.status.success() {
-            let diag = self.diagnostics(&container_id).await;
-            return Err(RuntimeError::StartFailed(format!(
-                "container start failed: {}; {diag}",
-                String::from_utf8_lossy(&started.stderr).trim()
-            )));
+        if self.is_closed() {
+            self.remove_container(&container_id).await;
+            return Err(RuntimeError::StartFailed(
+                "fakecloud is shutting down".into(),
+            ));
         }
-        let port = match self.lookup_port(&container_id).await {
-            Ok(p) => p,
-            Err(e) => {
-                let diag = self.diagnostics(&container_id).await;
-                return Err(RuntimeError::StartFailed(format!("{e}; {diag}")));
+        match self.start_created(&container_id).await {
+            Ok(running) => {
+                tracing::info!(domain = %key, container_id = %container_id, image = %spec.image, "search cluster container started");
+                Ok(running)
             }
-        };
+            Err(why) => {
+                // Keep the reason and the node's last logs in the error, then
+                // remove the container: an untracked one would keep the data
+                // volume mounted and outlive every teardown.
+                let diag = self.diagnostics(&container_id).await;
+                self.remove_container(&container_id).await;
+                Err(RuntimeError::StartFailed(format!("{why}; {diag}")))
+            }
+        }
+    }
+
+    /// Start a created container and wait until its node is healthy.
+    async fn start_created(&self, container_id: &str) -> Result<RunningDomain, String> {
+        let started = self.cli_call(&["start", container_id]).await?;
+        if !started.status.success() {
+            return Err(format!(
+                "container start failed: {}",
+                String::from_utf8_lossy(&started.stderr).trim()
+            ));
+        }
+        let port = self.lookup_port(container_id).await?;
         let running = RunningDomain {
-            container_id: container_id.clone(),
+            container_id: container_id.to_string(),
             host: self.net.sibling_host.clone(),
             port,
         };
-        if let Err(why) = self.wait_ready(&running).await {
-            // Left in place for post-mortem; the next bring-up's stale reap and
-            // the shutdown sweep remove it.
-            let diag = self.diagnostics(&container_id).await;
-            return Err(RuntimeError::StartFailed(format!("{why}; {diag}")));
-        }
-        tracing::info!(domain = %key, container_id = %container_id, image = %spec.image, "search cluster container started");
+        self.wait_ready(&running).await?;
         Ok(running)
     }
 
@@ -626,6 +731,9 @@ impl OpenSearchRuntime {
     async fn wait_ready(&self, running: &RunningDomain) -> Result<(), String> {
         let start = Instant::now();
         while start.elapsed() < READY_TIMEOUT {
+            if self.is_closed() {
+                return Err("fakecloud is shutting down".to_string());
+            }
             if self.healthy(running).await {
                 return Ok(());
             }
@@ -649,20 +757,23 @@ impl OpenSearchRuntime {
             })
     }
 
-    /// Remove containers a previous failed bring-up of this domain left
-    /// behind (in this fakecloud process only).
+    /// Remove containers of this domain this fakecloud process started but no
+    /// longer tracks (a create whose CLI call timed out, a failed bring-up).
     async fn reap_stale(&self, key: &str) {
-        let Ok(out) = self
-            .cli_call(&[
-                "ps",
-                "-aq",
-                "--filter",
-                &format!("label=fakecloud-opensearch={key}"),
-                "--filter",
-                &format!("label=fakecloud-instance={}", self.instance_id),
-            ])
-            .await
-        else {
+        self.reap_owned(&[format!("label=fakecloud-opensearch={key}")])
+            .await;
+    }
+
+    /// Remove every container this process started that also matches the
+    /// `extra` `--filter` values.
+    async fn reap_owned(&self, extra: &[String]) {
+        let owner = format!("label=fakecloud-opensearch-owner={}", self.owner_id);
+        let mut args: Vec<&str> = vec!["ps", "-aq"];
+        for f in extra {
+            args.extend(["--filter", f.as_str()]);
+        }
+        args.extend(["--filter", owner.as_str()]);
+        let Ok(out) = self.cli_call(&args).await else {
             return;
         };
         if !out.status.success() {
@@ -694,6 +805,133 @@ impl OpenSearchRuntime {
             })
             .unwrap_or_else(|e| format!("<logs failed: {e}>"));
         format!("container state [{state}]; recent logs:\n{logs}")
+    }
+}
+
+/// A fake container engine for tests that drive the runtime without Docker:
+/// a shell-script CLI that logs every call and a tiny HTTP server standing
+/// in for every node's `_cluster/health`.
+#[doc(hidden)]
+pub mod fake {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::OpenSearchRuntime;
+    use fakecloud_core::container_net::HostNetworking;
+
+    pub struct FakeEngine {
+        pub dir: PathBuf,
+        pub healthy: Arc<AtomicBool>,
+        pub runtime: Arc<OpenSearchRuntime>,
+    }
+
+    impl FakeEngine {
+        /// Start the health server and write the CLI. Every node answers
+        /// health while [`Self::healthy`] is set.
+        pub async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let healthy = Arc::new(AtomicBool::new(true));
+            let flag = healthy.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                while let Ok((mut sock, _)) = listener.accept().await {
+                    let flag = flag.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 2048];
+                        let _ = sock.read(&mut buf).await;
+                        let (code, body) = if flag.load(Ordering::SeqCst) {
+                            ("200 OK", r#"{"status":"green"}"#)
+                        } else {
+                            ("503 Service Unavailable", r#"{"status":"red"}"#)
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 {code}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                    });
+                }
+            });
+            let dir = std::env::temp_dir().join(format!(
+                "fakecloud-opensearch-fake-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let d = dir.display();
+            // `create` mints a fresh id per call; `start` fails while
+            // `fail-start` exists; `inspect` reports `exited` while `dead`
+            // exists; `ps` prints `ps-out`.
+            let script = format!(
+                r#"#!/bin/sh
+echo "$*" >> "{d}/log"
+case "$1" in
+  create) n=$(($(cat "{d}/n" 2>/dev/null || echo 0) + 1)); echo "$n" > "{d}/n"; echo "cid$n" ;;
+  start) if [ -f "{d}/fail-start" ]; then echo "boom" >&2; exit 1; fi ;;
+  port) echo "0.0.0.0:{port}" ;;
+  inspect) if [ -f "{d}/dead" ]; then echo exited; else echo running; fi ;;
+  ps) cat "{d}/ps-out" 2>/dev/null ;;
+  logs) echo "fake node log" ;;
+esac
+exit 0
+"#
+            );
+            let cli = dir.join("cli");
+            std::fs::write(&cli, script).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let net = HostNetworking {
+                host_alias: "host.docker.internal".into(),
+                add_host_arg: None,
+                sibling_host: "127.0.0.1".into(),
+            };
+            let runtime =
+                Arc::new(OpenSearchRuntime::with_cli(cli.display().to_string(), net).unwrap());
+            Self {
+                dir,
+                healthy,
+                runtime,
+            }
+        }
+
+        /// Every CLI call so far, one line each.
+        pub fn calls(&self) -> Vec<String> {
+            std::fs::read_to_string(self.dir.join("log"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+
+        /// Create or remove a flag file (`fail-start`, `dead`).
+        pub fn flag(&self, name: &str, on: bool) {
+            let path = self.dir.join(name);
+            if on {
+                std::fs::write(path, "").unwrap();
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+
+        /// What `ps` lists.
+        pub fn set_ps(&self, ids: &str) {
+            std::fs::write(self.dir.join("ps-out"), ids).unwrap();
+        }
+
+        /// The owner label value this runtime's containers carry.
+        pub fn owner_id(&self) -> String {
+            self.runtime.owner_id.clone()
+        }
+    }
+
+    impl Drop for FakeEngine {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
@@ -809,7 +1047,29 @@ mod tests {
             serde_json::json!({"indices.fielddata.cache.size": "30"}),
         );
         let tuned_spec = DomainSpec::for_domain(&tuned, "d0").unwrap();
-        assert_ne!(tuned_spec.digest(), spec.digest());
+        assert_ne!(tuned_spec, spec);
+        // Booleans and numbers count like their string forms.
+        let typed = domain(
+            "OpenSearch_2.11",
+            serde_json::json!({
+                "indices.fielddata.cache.size": 30,
+                "rest.action.multi.allow_explicit_index": false,
+            }),
+        );
+        let typed_spec = DomainSpec::for_domain(&typed, "d0").unwrap();
+        assert_eq!(
+            typed_spec.settings,
+            vec![
+                (
+                    "indices.fielddata.cache.size".to_string(),
+                    "30%".to_string()
+                ),
+                (
+                    "rest.action.multi.allow_explicit_index".to_string(),
+                    "false".to_string()
+                ),
+            ]
+        );
         assert!(tuned_spec
             .container_env()
             .contains(&"indices.fielddata.cache.size=30%".to_string()));
