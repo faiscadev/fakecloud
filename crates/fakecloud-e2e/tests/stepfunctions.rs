@@ -1242,28 +1242,28 @@ async fn sfn_start_execution_with_name() {
 
     assert!(start.execution_arn().contains("my-execution"));
 
-    wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(
+        wait_for_execution(&client, start.execution_arn()).await,
+        "SUCCEEDED"
+    );
 
-    // Duplicate name with the SAME input is idempotent: AWS returns the
-    // existing execution ARN with HTTP 200 (not ExecutionAlreadyExists).
-    let dup = client
-        .start_execution()
-        .state_machine_arn(create.state_machine_arn())
-        .name("my-execution")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(dup.execution_arn(), start.execution_arn());
-
-    // Duplicate name with a DIFFERENT input must fail with ExecutionAlreadyExists.
-    let err = client
-        .start_execution()
-        .state_machine_arn(create.state_machine_arn())
-        .name("my-execution")
-        .input("{\"changed\": true}")
-        .send()
-        .await;
-    assert!(err.is_err());
+    // StartExecution is idempotent only while the execution runs: once it
+    // has closed, the same name is ExecutionAlreadyExists even with the same
+    // input, and so is a different input.
+    for input in [None, Some("{\"changed\": true}")] {
+        let err = client
+            .start_execution()
+            .state_machine_arn(create.state_machine_arn())
+            .name("my-execution")
+            .set_input(input.map(str::to_string))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.into_service_error().meta().code(),
+            Some("ExecutionAlreadyExists")
+        );
+    }
 }
 
 #[tokio::test]
@@ -4398,10 +4398,11 @@ async fn sfn_start_execution_idempotent_same_input() {
     let server = TestServer::start().await;
     let client = server.sfn_client().await;
 
+    // Idempotency holds only while the first execution is still running.
     let create = client
         .create_state_machine()
         .name("idem-sm")
-        .definition(simple_definition())
+        .definition(r#"{"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":30,"End":true}}}"#)
         .role_arn("arn:aws:iam::123456789012:role/test-role")
         .send()
         .await

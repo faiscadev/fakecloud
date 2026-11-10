@@ -2742,6 +2742,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_execution_same_name_same_input_conflicts_once_closed() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_sm(&svc, "dup-exec-closed");
+        let body = json!({
+            "stateMachineArn": arn,
+            "name": "same-name",
+            "input": "{\"a\":1}",
+        });
+        let req = make_request("StartExecution", &body.to_string());
+        let first = body_json(&svc.start_execution(&req).unwrap());
+        let exec_arn = first["executionArn"].as_str().unwrap().to_string();
+        svc.state
+            .write()
+            .by_arn_mut(&exec_arn)
+            .and_then(|s| s.executions.get_mut(&exec_arn))
+            .unwrap()
+            .status = ExecutionStatus::Succeeded;
+
+        // AWS: idempotent only while RUNNING; a closed execution conflicts.
+        let req = make_request("StartExecution", &body.to_string());
+        let err = expect_err(svc.start_execution(&req));
+        assert!(err.to_string().contains("ExecutionAlreadyExists"));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    fn parent_of(svc: &StepFunctionsService, exec_arn: &str) -> Option<String> {
+        svc.state
+            .read()
+            .by_arn(exec_arn)
+            .and_then(|s| s.executions.get(exec_arn))
+            .and_then(|e| e.parent_execution_arn.clone())
+    }
+
+    const PARENT_EXEC: &str = "arn:aws:states:us-east-1:123456789012:execution:parent:p";
+
+    #[tokio::test]
+    async fn start_execution_records_the_execution_starting_it() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_sm(&svc, "child-sm");
+        let req = make_request(
+            "StartExecution",
+            &json!({"stateMachineArn": arn}).to_string(),
+        );
+
+        let started = crate::state::STARTED_BY_EXECUTION
+            .scope(PARENT_EXEC.to_string(), async { svc.start_execution(&req) })
+            .await;
+        let child = body_json(&started.unwrap())["executionArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(parent_of(&svc, &child).as_deref(), Some(PARENT_EXEC));
+
+        // Started directly, an execution has no parent.
+        let direct = body_json(&svc.start_execution(&req).unwrap())["executionArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(parent_of(&svc, &direct), None);
+    }
+
+    #[tokio::test]
+    async fn idempotent_start_execution_never_reparents_the_running_execution() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_sm(&svc, "idem-child-sm");
+        let req = make_request(
+            "StartExecution",
+            &json!({"stateMachineArn": arn, "name": "fixed", "input": "{}"}).to_string(),
+        );
+        let first = body_json(&svc.start_execution(&req).unwrap())["executionArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A Task re-issuing the call gets the running execution back, but did
+        // not start it.
+        let again = crate::state::STARTED_BY_EXECUTION
+            .scope(PARENT_EXEC.to_string(), async { svc.start_execution(&req) })
+            .await;
+        assert_eq!(body_json(&again.unwrap())["executionArn"], first.as_str());
+        assert_eq!(parent_of(&svc, &first), None);
+    }
+
+    #[tokio::test]
     async fn start_execution_same_name_different_input_conflicts() {
         let svc = StepFunctionsService::new(make_state());
         let arn = create_sm(&svc, "dup-exec-diff");

@@ -49,11 +49,13 @@ impl StepFunctionsService {
         let exec_arn = state.execution_arn(&req.region, &sm_name, &execution_name);
 
         // Handle name collisions. For STANDARD workflows, StartExecution is
-        // idempotent: re-issuing the same name AND the same input returns the
-        // existing executionArn with HTTP 200, while a different input is a
-        // 400 ExecutionAlreadyExists. (EXPRESS has no idempotency.)
+        // idempotent while the execution runs: re-issuing the same name AND the
+        // same input returns the existing executionArn with HTTP 200, while a
+        // different input or a closed execution is a 400 ExecutionAlreadyExists.
+        // (EXPRESS has no idempotency.)
         if let Some(existing) = state.executions.get(&exec_arn) {
             let same_input = sm_type == crate::state::StateMachineType::Standard
+                && existing.status == ExecutionStatus::Running
                 && execution_input_matches(existing.input.as_deref(), input.as_deref());
             if same_input {
                 return Ok(AwsResponse::ok_json(json!({
@@ -62,7 +64,7 @@ impl StepFunctionsService {
                 })));
             }
             return Err(AwsServiceError::aws_error(
-                StatusCode::CONFLICT,
+                StatusCode::BAD_REQUEST,
                 "ExecutionAlreadyExists",
                 format!("Execution Already Exists: '{exec_arn}'"),
             ));
@@ -82,7 +84,9 @@ impl StepFunctionsService {
             error: None,
             cause: None,
             history_events: vec![],
-            parent_execution_arn: None,
+            parent_execution_arn: crate::state::STARTED_BY_EXECUTION
+                .try_with(Clone::clone)
+                .ok(),
             is_sync: false,
             billed_duration_ms: None,
             billed_memory_mb: None,

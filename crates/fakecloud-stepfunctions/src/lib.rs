@@ -20,7 +20,8 @@ pub use service::{
 };
 pub use state::{
     activity_arn, execution_arn, parse_stepfunctions_snapshot, state_machine_arn, states_arn,
-    Activity, AliasRoute, Execution, SharedStepFunctionsState, StateMachine, StateMachineAlias,
-    StateMachineStatus, StateMachineType, StateMachineVersion, StepFunctionsSnapshot,
-    StepFunctionsState, TaskTokenState, STEPFUNCTIONS_SNAPSHOT_SCHEMA_VERSION,
+    Activity, AliasRoute, Execution, ExecutionStatus, SharedStepFunctionsState, StateMachine,
+    StateMachineAlias, StateMachineStatus, StateMachineType, StateMachineVersion,
+    StepFunctionsSnapshot, StepFunctionsState, TaskTokenState,
+    STEPFUNCTIONS_SNAPSHOT_SCHEMA_VERSION,
 };
