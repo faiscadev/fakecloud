@@ -32,6 +32,7 @@ mod reset;
 mod runtime;
 mod servicequotas_admin;
 mod ses_smtp;
+mod sfn_execution_tree;
 mod sqs_lambda_poller;
 mod stepfunctions_delivery;
 mod support_attachments;
@@ -11445,62 +11446,18 @@ async fn main() {
                     async move {
                         let accounts = ss.read();
                         // The execution lives in the account and region its
-                        // ARN names; so do its children.
-                        let empty = fakecloud_stepfunctions::StepFunctionsState::new(
-                            accounts.default_account_id(),
-                            accounts.region(),
-                        );
-                        let state = accounts.by_arn(&arn).unwrap_or(&empty);
-                        // Index children by parent arn for O(N) tree build.
-                        let mut children_by_parent: std::collections::HashMap<
-                            String,
-                            Vec<&fakecloud_stepfunctions::Execution>,
-                        > = std::collections::HashMap::new();
-                        for exec in state.executions.values() {
-                            if let Some(parent) = exec.parent_execution_arn.as_ref() {
-                                children_by_parent
-                                    .entry(parent.clone())
-                                    .or_default()
-                                    .push(exec);
-                            }
-                        }
-                        fn build_node(
-                            exec: &fakecloud_stepfunctions::Execution,
-                            children_by_parent: &std::collections::HashMap<
-                                String,
-                                Vec<&fakecloud_stepfunctions::Execution>,
-                            >,
-                        ) -> types::StepFunctionsExecutionTreeNode {
-                            let kids = children_by_parent
-                                .get(&exec.execution_arn)
-                                .map(|v| {
-                                    let mut sorted = v.clone();
-                                    sorted.sort_by_key(|a| a.start_date);
-                                    sorted
-                                        .into_iter()
-                                        .map(|c| build_node(c, children_by_parent))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            types::StepFunctionsExecutionTreeNode {
-                                arn: exec.execution_arn.clone(),
-                                state_machine_arn: exec.state_machine_arn.clone(),
-                                status: exec.status.as_str().to_string(),
-                                started_at: exec.start_date.to_rfc3339(),
-                                stopped_at: exec.stop_date.map(|d| d.to_rfc3339()),
-                                children: kids,
-                            }
-                        }
-                        match state.executions.get(&arn) {
-                            Some(root) => (
+                        // ARN names; so do its children, since a Task starts
+                        // them in its own account and region.
+                        match accounts
+                            .by_arn(&arn)
+                            .and_then(|state| sfn_execution_tree::execution_tree(state, &arn))
+                        {
+                            Some(tree) => (
                                 axum::http::StatusCode::OK,
-                                axum::Json(serde_json::to_value(
-                                    types::StepFunctionsExecutionTreeResponse {
-                                        root_arn: root.execution_arn.clone(),
-                                        tree: build_node(root, &children_by_parent),
-                                    },
-                                )
-                                .unwrap_or_else(|_| serde_json::json!({}))),
+                                axum::Json(
+                                    serde_json::to_value(tree)
+                                        .unwrap_or_else(|_| serde_json::json!({})),
+                                ),
                             ),
                             None => (
                                 axum::http::StatusCode::NOT_FOUND,

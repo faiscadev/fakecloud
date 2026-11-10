@@ -379,15 +379,8 @@ async fn execution_tree_links_a_sync2_child_to_its_parent() {
     let desc = wait_terminal(&client, started.execution_arn()).await;
     assert_eq!(desc.status().as_str(), "SUCCEEDED", "{:?}", desc.cause());
 
-    let url = format!(
-        "{}/_fakecloud/stepfunctions/execution-tree/{}",
-        server.endpoint(),
-        started.execution_arn()
-    );
-    let tree: Value = reqwest::get(url).await.unwrap().json().await.unwrap();
-    let children = tree["tree"]["children"].as_array().expect("children");
-    assert_eq!(children.len(), 1, "{tree}");
-    assert_eq!(children[0]["stateMachineArn"], child);
+    let tree = execution_tree(&server, started.execution_arn()).await;
+    assert_eq!(only_child(&tree)["stateMachineArn"], child);
 }
 
 async fn execution_tree(server: &TestServer, arn: &str) -> Value {
@@ -447,7 +440,7 @@ async fn execution_tree_shows_a_sync_child_while_the_parent_waits() {
     let child = create_machine(
         &client,
         "slow-child",
-        json!({"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":3,"End":true}}}),
+        json!({"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":30,"End":true}}}),
     )
     .await;
     let parent = create_machine(
@@ -466,10 +459,14 @@ async fn execution_tree_shows_a_sync_child_while_the_parent_waits() {
         .await
         .unwrap();
 
+    // The child waits 30s, so it is still running whenever the poll finds it.
     let mut tree = Value::Null;
-    for _ in 0..40 {
+    for _ in 0..200 {
         tree = execution_tree(&server, started.execution_arn()).await;
-        if !tree["tree"]["children"].as_array().unwrap().is_empty() {
+        if tree["tree"]["children"]
+            .as_array()
+            .is_some_and(|children| !children.is_empty())
+        {
             break;
         }
         sleep(Duration::from_millis(50)).await;

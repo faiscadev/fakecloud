@@ -1971,10 +1971,7 @@ async fn invoke_resource(
                     &execution_role_arn(shared_state, execution_arn),
                     execution_arn,
                 ),
-                Parent {
-                    state: shared_state,
-                    execution_arn,
-                },
+                execution_arn,
             )
             .await;
         }
@@ -2000,10 +1997,7 @@ async fn invoke_resource(
                 &execution_role_arn(shared_state, execution_arn),
                 execution_arn,
             ),
-            Parent {
-                state: shared_state,
-                execution_arn,
-            },
+            execution_arn,
         )
         .await;
     }
@@ -2030,10 +2024,7 @@ async fn invoke_resource(
                     &execution_role_arn(shared_state, execution_arn),
                     execution_arn,
                 ),
-                Parent {
-                    state: shared_state,
-                    execution_arn,
-                },
+                execution_arn,
             )
             .await;
         }
@@ -2111,7 +2102,7 @@ async fn invoke_aws_sdk_integration(
     timeout_seconds: Option<u64>,
     optimized: bool,
     principal: Option<fakecloud_core::auth::Principal>,
-    parent: Parent<'_>,
+    parent_execution_arn: &str,
 ) -> Result<Value, (String, String)> {
     let registry_arc = resolve_registry(registry)?;
 
@@ -2196,14 +2187,10 @@ async fn invoke_aws_sdk_integration(
     // An `aws-sdk:*` Task, and any integration over a protocol other than JSON,
     // takes the service's own protocol end to end.
     if (!optimized && sync_form.is_none()) || service.protocol() != "json" {
-        let result = service
-            .invoke(&caller, &operation, input, DateStyle::Iso)
+        let call = service.invoke(&caller, &operation, input, DateStyle::Iso);
+        return started_by(&service_name, &operation, parent_execution_arn, call)
             .await
             .map_err(|failure| crate::sdk_protocol::task_error(&service, &failure));
-        if let Ok(started) = &result {
-            parent.link_started_child(&service_name, &operation, started);
-        }
-        return result;
     }
 
     // Optimized integrations: the waiters below read the camelCase wire shapes
@@ -2213,18 +2200,15 @@ async fn invoke_aws_sdk_integration(
     if sync_form.is_some() && service_name == "ecs" && wire_input.get("startedBy").is_none() {
         wire_input["startedBy"] = json!("AWS Step Functions");
     }
-    let initial = call_sdk_action(
+    let call = call_sdk_action(
         &registry_arc,
         &service_name,
         &operation,
         &wire_input,
         account_id,
         region,
-    )
-    .await?;
-    // Link a started child now, so `/execution-tree` shows it while a `.sync`
-    // Task waits on it and after it fails.
-    parent.link_started_child(&service_name, &operation, &initial);
+    );
+    let initial = started_by(&service_name, &operation, parent_execution_arn, call).await?;
 
     let Some(form) = sync_form else {
         return Ok(match (service_name.as_str(), operation.as_str()) {
@@ -2264,36 +2248,23 @@ async fn invoke_aws_sdk_integration(
     })
 }
 
-/// The execution a Task runs in, so an execution the Task starts records it as
-/// its parent for `/_fakecloud/stepfunctions/execution-tree`.
-#[derive(Clone, Copy)]
-struct Parent<'a> {
-    state: &'a SharedStepFunctionsState,
-    execution_arn: &'a str,
-}
-
-impl Parent<'_> {
-    /// Record this execution as the parent of the one a `states:StartExecution`
-    /// call started, read from the call's response (`executionArn` on the wire,
-    /// `ExecutionArn` in an `aws-sdk:sfn` result).
-    fn link_started_child(&self, service_name: &str, operation: &str, response: &Value) {
-        if service_name != "states" || operation != "StartExecution" {
-            return;
-        }
-        let Some(child_arn) = response
-            .get("executionArn")
-            .or_else(|| response.get("ExecutionArn"))
-            .and_then(Value::as_str)
-        else {
-            return;
-        };
-        let mut accounts = self.state.write();
-        if let Some(child) = accounts
-            .by_arn_mut(child_arn)
-            .and_then(|state| state.executions.get_mut(child_arn))
-        {
-            child.parent_execution_arn = Some(self.execution_arn.to_string());
-        }
+/// Run a Task's service call, telling a `states:StartExecution` it makes which
+/// execution is starting the child, so the child records its parent for
+/// `/_fakecloud/stepfunctions/execution-tree` from the moment it exists. Only a
+/// new execution takes the parent; an idempotent reply names one already
+/// running, which this Task did not start.
+async fn started_by<F: std::future::Future>(
+    service_name: &str,
+    operation: &str,
+    parent_execution_arn: &str,
+    call: F,
+) -> F::Output {
+    if service_name == "states" && operation == "StartExecution" {
+        crate::state::STARTED_BY_EXECUTION
+            .scope(parent_execution_arn.to_string(), call)
+            .await
+    } else {
+        call.await
     }
 }
 
