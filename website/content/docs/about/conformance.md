@@ -94,7 +94,7 @@ The real-AWS job is locked down hard:
 
 ### Why E2E isn't parity
 
-The E2E suite is much bigger (2,300+ tests, 107 services) but it doesn't run against real AWS — ever. Two reasons:
+The E2E suite is much bigger (2,800+ tests, 107 services) but it doesn't run against real AWS — ever. Two reasons:
 
 1. **A lot of E2E is testing fakecloud itself.** Introspection endpoints, persistence mode, `/_fakecloud/*/tick` processors, warm Lambda container introspection, forced SQS DLQ moves, auth event logs in Cognito — none of that exists on real AWS. Running those tests against AWS would be meaningless; they'd just fail at the first `/_fakecloud/*` request.
 
