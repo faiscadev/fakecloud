@@ -487,7 +487,7 @@ pub(crate) fn purchase_reserved_instances_offering(
     let count_raw = require(params, "InstanceCount")?;
     let offering_id = require(params, "ReservedInstancesOfferingId")?;
     validate_enum(params, "LimitPrice.CurrencyCode", &["USD"])?;
-    let count: i64 = count_raw.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
+    let count: i64 = parse_count(&count_raw).ok_or_else(|| {
         crate::service_helpers::invalid_parameter_value(format!(
             "Invalid value '{count_raw}' for InstanceCount. It must be a positive integer."
         ))
@@ -567,6 +567,20 @@ pub(crate) fn purchase_reserved_instances_offering(
 }
 
 // ---- shared by the secondary operations ----
+
+/// An instance count as the model types it: a positive Smithy `Integer`
+/// (32-bit), so nothing larger is ever stored or summed.
+fn parse_count(raw: &str) -> Option<i64> {
+    raw.parse::<i32>().ok().filter(|n| *n > 0).map(i64::from)
+}
+
+/// The sum of instance counts, `None` past what an instance count holds.
+fn checked_total(counts: impl IntoIterator<Item = i64>) -> Option<i64> {
+    counts
+        .into_iter()
+        .try_fold(0i64, |acc, n| acc.checked_add(n))
+        .filter(|t| *t <= i64::from(i32::MAX))
+}
 
 type Now = chrono::DateTime<chrono::Utc>;
 
@@ -855,7 +869,7 @@ pub(crate) fn create_reserved_instances_listing(
     if !uuid_shaped(&ri_id) {
         return Err(malformed_id(&ri_id, "reservedInstanceId"));
     }
-    let count: i64 = count_raw.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
+    let count: i64 = parse_count(&count_raw).ok_or_else(|| {
         crate::service_helpers::invalid_parameter_value(format!(
             "Value ({count_raw}) for parameter InstanceCount is invalid. InstanceCount must be \
              greater than zero."
@@ -917,9 +931,10 @@ pub(crate) fn create_reserved_instances_listing(
         .values()
         .filter(|l| l.reserved_instances_id == ri_id)
         .filter(|l| listing_status(l, Some(ri), now) == "active")
-        .map(|l| l.instance_count)
-        .sum();
-    let available = ri.instance_count - listed;
+        // Earlier versions stored unvalidated counts; never let one free capacity.
+        .map(|l| l.instance_count.max(0))
+        .fold(0i64, i64::saturating_add);
+    let available = ri.instance_count.saturating_sub(listed);
     if count > available {
         return Err(crate::service_helpers::invalid_parameter_value(format!(
             "Value ({count}) for parameter InstanceCount is invalid. Reserved Instances \
@@ -980,10 +995,15 @@ pub(crate) fn cancel_reserved_instances_listing(
         .filter(|v| !v.is_empty())
         .cloned()
         .ok_or_else(|| crate::service_helpers::missing_parameter("reservedInstancesListingId"))?;
-    if !uuid_shaped(&id) {
-        return Err(malformed_id(&id, "reservedInstanceListingId"));
-    }
-    let unknown = || invalid_input(" Invalid value for 'listingId'");
+    // A stored listing is looked up before the id format is checked: listings
+    // saved by earlier versions carry `ril-` ids and must stay cancellable.
+    let unknown = || {
+        if uuid_shaped(&id) {
+            invalid_input(" Invalid value for 'listingId'")
+        } else {
+            malformed_id(&id, "reservedInstanceListingId")
+        }
+    };
     let now = chrono::Utc::now();
     let mut accounts = svc.state.write();
     let state = accounts
@@ -1293,6 +1313,16 @@ fn size_factor(instance_type: &str) -> Option<f64> {
     None
 }
 
+/// A stored price times `scale`, written as prices are stored.
+fn scaled_price(raw: &str, scale: f64) -> String {
+    if (scale - 1.0).abs() < f64::EPSILON {
+        return raw.to_string();
+    }
+    let scaled = price(raw) * scale;
+    // Rounded to the micro-dollar, so 0.02 * 0.5 reads 0.01.
+    format!("{:?}", (scaled * 1e6).round() / 1e6)
+}
+
 fn family_of(instance_type: &str) -> &str {
     instance_type
         .split_once('.')
@@ -1340,7 +1370,7 @@ fn modification_targets(
     let mut out = Vec::new();
     for i in indexes {
         let count_raw = get(i, "InstanceCount").unwrap_or_default();
-        let count: i64 = count_raw.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
+        let count: i64 = parse_count(&count_raw).ok_or_else(|| {
             crate::service_helpers::invalid_parameter_value(format!(
                 "Invalid value '{count_raw}' for InstanceCount. Instance count must be greater \
                  than zero."
@@ -1578,9 +1608,10 @@ pub(crate) fn modify_reserved_instances(
             }
         }
     } else {
-        let have: i64 = sources.iter().map(|r| r.instance_count).sum();
-        let want: i64 = targets.iter().map(|t| t.count).sum();
-        if have != want {
+        let have = checked_total(sources.iter().map(|r| r.instance_count));
+        let want = checked_total(targets.iter().map(|t| t.count));
+        if have.is_none() || have != want {
+            let (have, want) = (have.unwrap_or(0), want.unwrap_or(0));
             return Err(crate::service_helpers::invalid_parameter_value(format!(
                 "The target configurations hold {want} instances; the Reserved Instances hold \
                  {have}. A modification keeps the instance count."
@@ -1630,9 +1661,18 @@ pub(crate) fn modify_reserved_instances(
         }
     }
     let start = timestamp(effective);
-    let duration =
-        parse_time(&first.end).map_or(first.duration, |end| (end - effective).num_seconds());
+    // The reservations keep their term; only when they run changes.
+    let duration = first.duration;
     for result in &results {
+        // A per-instance price follows the instance's size: half a source
+        // instance costs half as much.
+        let scale = match (
+            size_factor(&result.instance_type),
+            size_factor(&first.instance_type),
+        ) {
+            (Some(to), Some(from)) if from > 0.0 => to / from,
+            _ => 1.0,
+        };
         state.reserved_instances.insert(
             result.reserved_instances_id.clone(),
             ReservedInstances {
@@ -1647,8 +1687,8 @@ pub(crate) fn modify_reserved_instances(
                 product_description: first.product_description.clone(),
                 state: "active".to_string(),
                 duration,
-                fixed_price: first.fixed_price.clone(),
-                usage_price: first.usage_price.clone(),
+                fixed_price: scaled_price(&first.fixed_price, scale),
+                usage_price: scaled_price(&first.usage_price, scale),
                 scope: result.scope.clone(),
                 offering_class: first.offering_class.clone(),
                 offering_type: first.offering_type.clone(),
@@ -1824,7 +1864,14 @@ fn price(raw: &str) -> f64 {
 /// no shorter than the reservations', worth at least as much). Without an
 /// instance count, a target takes the fewest instances that are worth as
 /// much, as the EC2 console quotes it.
-fn exchange_quote(svc: &Ec2Service, req: &AwsRequest, now: Now) -> Result<Quote, AwsServiceError> {
+/// `state` is the request's account and Region, read under the guard the
+/// caller holds: a read guard to quote, the write guard Accept applies the
+/// exchange under, so nothing changes between the check and the exchange.
+fn exchange_quote(
+    state: Option<&Ec2State>,
+    req: &AwsRequest,
+    now: Now,
+) -> Result<Quote, AwsServiceError> {
     let params = &req.query_params;
     let ids = indexed_list(params, "ReservedInstanceId");
     if ids.is_empty() {
@@ -1865,8 +1912,6 @@ fn exchange_quote(svc: &Ec2Service, req: &AwsRequest, now: Now) -> Result<Quote,
     if offering_ids.iter().any(|id| !uuid_shaped(id)) {
         return Err(invalid_offering());
     }
-    let accounts = svc.state.read();
-    let state = accounts.regional(&req.account_id, &req.region);
     let found = |id: &str| {
         state
             .and_then(|s| s.reserved_instances.get(id))
@@ -1889,7 +1934,7 @@ fn exchange_quote(svc: &Ec2Service, req: &AwsRequest, now: Now) -> Result<Quote,
         let offering = Offering::from_id(region, id).ok_or_else(invalid_offering)?;
         let count = match get(target_indexes[pos], "InstanceCount") {
             None => None,
-            Some(raw) => Some(raw.parse::<i64>().ok().filter(|n| *n > 0).ok_or_else(|| {
+            Some(raw) => Some(parse_count(&raw).ok_or_else(|| {
                 crate::service_helpers::invalid_parameter_value(format!(
                     "Invalid value '{raw}' for InstanceCount."
                 ))
@@ -1961,11 +2006,12 @@ fn exchange_quote(svc: &Ec2Service, req: &AwsRequest, now: Now) -> Result<Quote,
     if offerings.iter().any(|(_, o, _)| Some(o.duration) != term) {
         fail("All target configurations must have the same term.".to_string());
     }
+    // A reservation's duration is its term; one persisted with another
+    // length counts as the nearest term.
     let longest_source_term = RI_TERM_SECONDS
         .iter()
         .copied()
-        .filter(|t| *t >= longest_source)
-        .min()
+        .min_by_key(|t| (t - longest_source).abs())
         .unwrap_or(longest_source);
     let expires = match term {
         Some(t) if t < longest_source_term => {
@@ -1996,9 +2042,13 @@ fn exchange_quote(svc: &Ec2Service, req: &AwsRequest, now: Now) -> Result<Quote,
                 remaining,
                 offering.duration as f64,
             );
+            // The fewest instances worth as much, bounded by what an
+            // instance count can hold.
             let count = count.unwrap_or_else(|| {
                 if unit.total > 0.0 {
-                    ((source_value.total / unit.total) - 1e-9).ceil().max(1.0) as i64
+                    ((source_value.total / unit.total) - 1e-9)
+                        .ceil()
+                        .clamp(1.0, f64::from(i32::MAX)) as i64
                 } else {
                     1
                 }
@@ -2038,7 +2088,12 @@ pub(crate) fn get_reserved_instances_exchange_quote(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let quote = exchange_quote(svc, req, chrono::Utc::now())?;
+    let accounts = svc.state.read();
+    let quote = exchange_quote(
+        accounts.regional(&req.account_id, &req.region),
+        req,
+        chrono::Utc::now(),
+    )?;
     Ok(Ec2Service::respond(
         "GetReservedInstancesExchangeQuote",
         &req.request_id,
@@ -2055,13 +2110,21 @@ pub(crate) fn accept_reserved_instances_exchange_quote(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let now = chrono::Utc::now();
-    let quote = exchange_quote(svc, req, now)?;
+    // Validated and applied under one write guard: a concurrent Accept or
+    // Modify of the same reservations sees them retired, not still active.
+    let mut accounts = svc.state.write();
+    let mut state = accounts.regional_get_mut(&req.account_id, &req.region);
+    let quote = exchange_quote(state.as_deref(), req, now)?;
     if let Some(why) = &quote.failure {
         return Err(crate::service_helpers::invalid_parameter_value(why.clone()));
     }
     let end = quote.expires.unwrap_or(now);
-    let mut accounts = svc.state.write();
-    let state = accounts.regional_mut(&req.account_id, &req.region);
+    // Every source was found, so the account and Region exist.
+    let Some(state) = state.as_mut() else {
+        return Err(crate::service_helpers::invalid_parameter_value(
+            "The Reserved Instances to exchange do not exist.",
+        ));
+    };
     for (r, _) in &quote.sources {
         if let Some(stored) = state.reserved_instances.get_mut(&r.id) {
             stored.retired_at = Some(timestamp(now));
@@ -2078,7 +2141,7 @@ pub(crate) fn accept_reserved_instances_exchange_quote(
                 instance_count: t.count,
                 product_description: t.offering.product.to_string(),
                 state: "payment-pending".to_string(),
-                duration: (end - now).num_seconds(),
+                duration: t.offering.duration,
                 fixed_price: FIXED_PRICE.to_string(),
                 usage_price: USAGE_PRICE.to_string(),
                 scope: scope_of(t.offering.zone.as_deref()).to_string(),
@@ -3070,6 +3133,43 @@ mod tests {
     }
 
     #[test]
+    fn listings_stored_by_earlier_versions_stay_cancellable_and_never_free_capacity() {
+        let svc = Ec2Service::new();
+        let ri = zonal_standard(&svc, "us-east-1a", "3");
+        let legacy = |id: &str, count: i64| crate::state::ReservedInstancesListing {
+            listing_id: id.to_string(),
+            reserved_instances_id: ri.clone(),
+            instance_count: count,
+            client_token: id.to_string(),
+            status: "active".to_string(),
+            status_message: "ACTIVE".to_string(),
+            price_schedules: Vec::new(),
+            create_date: timestamp(chrono::Utc::now()),
+            update_date: timestamp(chrono::Utc::now()),
+        };
+        with_state(&svc, |s| {
+            for l in [legacy("ril-1234abcd", 2), legacy("ril-negative", -5)] {
+                s.reserved_instances_listings
+                    .insert(l.listing_id.clone(), l);
+            }
+        });
+        // The negative count frees nothing: only one of three is unlisted.
+        assert_eq!(
+            refusal(create_listing(&svc, &listing_params(&ri, "2", "tok-a"))).0,
+            "InvalidParameterValue"
+        );
+        let out = body(call(
+            cancel_reserved_instances_listing,
+            &svc,
+            "CancelReservedInstancesListing",
+            &[("ReservedInstancesListingId", "ril-1234abcd")],
+        ));
+        assert_eq!(elems(&out, "status"), ["cancelled"]);
+        // Its two instances are free again.
+        body(create_listing(&svc, &listing_params(&ri, "3", "tok-b")));
+    }
+
+    #[test]
     fn a_listing_refuses_what_real_ec2_refuses() {
         let svc = Ec2Service::new();
         let ri = zonal_standard(&svc, "us-east-1a", "1");
@@ -3930,5 +4030,304 @@ mod tests {
         ]);
         // Nothing was exchanged.
         assert!(!describe(&svc).contains("retired"));
+    }
+
+    #[test]
+    fn concurrent_accepts_exchange_a_reservation_once() {
+        let svc = std::sync::Arc::new(Ec2Service::new());
+        let source = active_ri(
+            &svc,
+            &[
+                ("InstanceType", "m5.large"),
+                ("OfferingClass", "convertible"),
+                ("MaxDuration", "31536000"),
+            ],
+            "1",
+        );
+        let target = convertible(&svc, "m5.large", "31536000");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let (svc, barrier) = (svc.clone(), barrier.clone());
+                let (source, target) = (source.clone(), target.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    accept(
+                        &svc,
+                        &[
+                            ("ReservedInstanceId.1", &source),
+                            ("TargetConfiguration.1.OfferingId", &target),
+                        ],
+                    )
+                    .is_ok()
+                })
+            })
+            .collect();
+        let accepted = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(accepted, 1);
+        assert_eq!(elems(&describe(&svc), "reservedInstancesId").len(), 2);
+    }
+
+    #[test]
+    fn a_modified_reservation_keeps_its_term() {
+        let svc = Ec2Service::new();
+        let source = active_ri(
+            &svc,
+            &[
+                ("InstanceType", "m5.large"),
+                ("OfferingClass", "convertible"),
+                ("MaxDuration", "31536000"),
+            ],
+            "2",
+        );
+        // Bought moments ago, so the hour the modification takes effect from
+        // starts before the reservation did.
+        with_state(&svc, |s| {
+            let r = s.reserved_instances.get_mut(&source).unwrap();
+            let start = chrono::Utc::now() - chrono::Duration::seconds(3);
+            r.start = timestamp(start);
+            r.end = timestamp(start + chrono::Duration::seconds(r.duration));
+        });
+        let id = elems(
+            &body(modify(
+                &svc,
+                &[
+                    ("ReservedInstancesId.1", &source),
+                    (
+                        "ReservedInstancesConfigurationSetItemType.1.InstanceCount",
+                        "1",
+                    ),
+                    (
+                        "ReservedInstancesConfigurationSetItemType.1.Scope",
+                        "Region",
+                    ),
+                    (
+                        "ReservedInstancesConfigurationSetItemType.2.InstanceCount",
+                        "1",
+                    ),
+                    (
+                        "ReservedInstancesConfigurationSetItemType.2.Scope",
+                        "Region",
+                    ),
+                ],
+            )),
+            "reservedInstancesModificationId",
+        )
+        .remove(0);
+        fulfil(&svc, &id);
+        let made = with_state(&svc, |s| {
+            s.reserved_instances_modifications[&id].results[0]
+                .reserved_instances_id
+                .clone()
+        });
+        let (duration, end) = with_state(&svc, |s| {
+            let r = &s.reserved_instances[&made];
+            (r.duration, parse_time(&r.end).unwrap())
+        });
+        assert_eq!(duration, 31_536_000);
+        // Still a one-year reservation: a one-year target keeps its end, a
+        // three-year one starts a new term.
+        let one = convertible(&svc, "m5.large", "31536000");
+        let out = body(quote(
+            &svc,
+            &[
+                ("ReservedInstanceId.1", &made),
+                ("TargetConfiguration.1.OfferingId", &one),
+            ],
+        ));
+        assert_eq!(elems(&out, "isValidExchange"), ["true"], "{out}");
+        let expires = parse_time(&elems(&out, "outputReservedInstancesWillExpireAt")[0]).unwrap();
+        assert_eq!(expires.timestamp(), end.timestamp());
+        let three = convertible(&svc, "m5.large", "94608000");
+        let out = body(quote(
+            &svc,
+            &[
+                ("ReservedInstanceId.1", &made),
+                ("TargetConfiguration.1.OfferingId", &three),
+            ],
+        ));
+        let expires = parse_time(&elems(&out, "outputReservedInstancesWillExpireAt")[0]).unwrap();
+        assert!(
+            (expires - chrono::Utc::now()).num_seconds() > 94_607_000,
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_exchanged_reservation_keeps_its_term() {
+        let svc = Ec2Service::new();
+        let source = active_ri(
+            &svc,
+            &[
+                ("InstanceType", "m5.large"),
+                ("OfferingClass", "convertible"),
+                ("MinDuration", "94608000"),
+            ],
+            "1",
+        );
+        // Less than a year left of three.
+        with_state(&svc, |s| {
+            let r = s.reserved_instances.get_mut(&source).unwrap();
+            let end = chrono::Utc::now() + chrono::Duration::days(200);
+            r.end = timestamp(end);
+            r.start = timestamp(end - chrono::Duration::seconds(r.duration));
+        });
+        let three = convertible(&svc, "m5.large", "94608000");
+        body(accept(
+            &svc,
+            &[
+                ("ReservedInstanceId.1", &source),
+                ("TargetConfiguration.1.OfferingId", &three),
+            ],
+        ));
+        let made = with_state(&svc, |s| {
+            s.reserved_instances
+                .values()
+                .find(|r| r.id != source)
+                .map(|r| (r.id.clone(), r.duration))
+                .unwrap()
+        });
+        assert_eq!(made.1, 94_608_000);
+        // A three-year reservation, so a one-year target is a shorter term.
+        let one = convertible(&svc, "m5.large", "31536000");
+        let out = body(quote(
+            &svc,
+            &[
+                ("ReservedInstanceId.1", &made.0),
+                ("TargetConfiguration.1.OfferingId", &one),
+            ],
+        ));
+        assert_eq!(elems(&out, "isValidExchange"), ["false"], "{out}");
+    }
+
+    #[test]
+    fn instance_counts_beyond_an_integer_are_refused() {
+        let svc = Ec2Service::new();
+        let ri = zonal_standard(&svc, "us-east-1a", "1");
+        let too_many = "2147483648";
+        let offering = region_offering(&svc);
+        assert_eq!(
+            refusal(purchase(
+                &svc,
+                &[
+                    ("ReservedInstancesOfferingId", &offering),
+                    ("InstanceCount", too_many)
+                ]
+            ))
+            .0,
+            "InvalidParameterValue"
+        );
+        assert_eq!(
+            refusal(create_listing(&svc, &listing_params(&ri, too_many, "t"))).0,
+            "InvalidParameterValue"
+        );
+        const T: &str = "ReservedInstancesConfigurationSetItemType";
+        assert_eq!(
+            refusal(modify(
+                &svc,
+                &[
+                    ("ReservedInstancesId.1", &ri),
+                    (&format!("{T}.1.InstanceCount"), too_many),
+                    (&format!("{T}.1.AvailabilityZone"), "us-east-1b"),
+                ],
+            ))
+            .0,
+            "InvalidParameterValue"
+        );
+        // Two of the largest counts sum past it without overflowing.
+        let max = "2147483647";
+        assert_eq!(
+            refusal(modify(
+                &svc,
+                &[
+                    ("ReservedInstancesId.1", &ri),
+                    (&format!("{T}.1.InstanceCount"), max),
+                    (&format!("{T}.1.AvailabilityZone"), "us-east-1b"),
+                    (&format!("{T}.2.InstanceCount"), max),
+                    (&format!("{T}.2.AvailabilityZone"), "us-east-1c"),
+                ],
+            ))
+            .0,
+            "InvalidParameterValue"
+        );
+        let convertible_ri = active_ri(
+            &svc,
+            &[
+                ("InstanceType", "m5.large"),
+                ("OfferingClass", "convertible"),
+                ("MaxDuration", "31536000"),
+            ],
+            "1",
+        );
+        let target = convertible(&svc, "m5.large", "31536000");
+        assert_eq!(
+            refusal(quote(
+                &svc,
+                &[
+                    ("ReservedInstanceId.1", &convertible_ri),
+                    ("TargetConfiguration.1.OfferingId", &target),
+                    ("TargetConfiguration.1.InstanceCount", too_many),
+                ],
+            ))
+            .0,
+            "InvalidParameterValue"
+        );
+    }
+
+    #[test]
+    fn a_split_reservation_splits_its_price() {
+        let svc = Ec2Service::new();
+        let ri = active_ri(
+            &svc,
+            &[
+                ("InstanceType", "m5.xlarge"),
+                ("AvailabilityZone", "us-east-1a"),
+                ("MaxDuration", "31536000"),
+            ],
+            "1",
+        );
+        let id = elems(
+            &body(modify(
+                &svc,
+                &[
+                    ("ReservedInstancesId.1", &ri),
+                    (
+                        "ReservedInstancesConfigurationSetItemType.1.InstanceCount",
+                        "2",
+                    ),
+                    (
+                        "ReservedInstancesConfigurationSetItemType.1.InstanceType",
+                        "m5.large",
+                    ),
+                    (
+                        "ReservedInstancesConfigurationSetItemType.1.AvailabilityZone",
+                        "us-east-1a",
+                    ),
+                ],
+            )),
+            "reservedInstancesModificationId",
+        )
+        .remove(0);
+        fulfil(&svc, &id);
+        let made = with_state(&svc, |s| {
+            s.reserved_instances_modifications[&id].results[0]
+                .reserved_instances_id
+                .clone()
+        });
+        let out = body(describe_reserved_instances(
+            &svc,
+            &req(
+                "DescribeReservedInstances",
+                &[("ReservedInstancesId.1", &made)],
+            ),
+        ));
+        // Two m5.large at half the m5.xlarge's hourly price each: the same
+        // total value.
+        assert_eq!(elems(&out, "usagePrice"), ["0.01"], "{out}");
+        assert_eq!(elems(&out, "instanceCount"), ["2"]);
     }
 }
