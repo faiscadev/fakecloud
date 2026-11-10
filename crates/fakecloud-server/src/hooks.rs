@@ -100,9 +100,10 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
             .filter(|a| !a.is_empty())
             .unwrap_or(account_id)
             .to_string();
+        // Resolving an `aws/<service>` alias mints the AWS-managed key on
+        // first use; persist it like every other mint.
         let arn = self
-            .inner
-            .resolve_key_arn(&owner, region, key_id, service_principal)
+            .resolve_and_persist(&owner, region, key_id, service_principal)
             .map_err(|_| KmsKeyUnusable::NotFound)?;
         let short = arn.rsplit('/').next().unwrap_or_default().to_string();
         let (state, policy) = {
@@ -144,7 +145,7 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
             if !fakecloud_iam::evaluator::evaluate_resource_policy_only(&document, &request)
                 .is_allow()
             {
-                return Err(KmsKeyUnusable::AccessDenied);
+                return Err(KmsKeyUnusable::AccessDenied(arn));
             }
         }
         Ok(arn)
@@ -529,6 +530,36 @@ mod kms_hook_adapter_tests {
             .unwrap();
         assert_eq!(store.saves.load(Ordering::SeqCst), 2);
         assert_eq!(store.last_keys.load(Ordering::SeqCst), 2);
+    }
+
+    /// Lambda resolves an alias ARN as a durable `KMSKeyArn` (recorded:
+    /// `alias/aws/lambda` is refused for its key policy, naming the key). The
+    /// AWS-managed key the check mints is persisted like any other mint, so it
+    /// still exists after a restart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checking_an_aws_managed_alias_persists_the_minted_key() {
+        let (adapter, store) = adapter();
+        let err = adapter
+            .check_service_key_use(
+                "123456789012",
+                "us-east-1",
+                "arn:aws:kms:us-east-1:123456789012:alias/aws/lambda",
+                "lambda.amazonaws.com",
+                "arn:aws:lambda:us-east-1:123456789012:function:f",
+                &["kms:GenerateDataKey", "kms:Decrypt"],
+                &Default::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, fakecloud_core::delivery::KmsKeyUnusable::AccessDenied(ref k) if k.contains(":key/")),
+            "{err:?}"
+        );
+        assert_eq!(
+            store.saves.load(Ordering::SeqCst),
+            1,
+            "the minted key is saved"
+        );
+        assert_eq!(store.last_keys.load(Ordering::SeqCst), 1);
     }
 
     /// Outside a multi-thread runtime the save runs directly, still before

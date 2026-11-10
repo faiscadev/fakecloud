@@ -31,6 +31,14 @@ how KMS deletes keys.
 - `aws-round3-kms-disabled.jsonl`, `aws-round3-kms-pending-deletion.jsonl`:
   a customer managed key whose policy admits Lambda, then disabled, then
   scheduled for deletion, probed every 1.5 to 2 minutes for 17 minutes.
+- `aws-round4-kms-alias.jsonl`: `KMSKeyArn` given as an alias ARN. The
+  AWS-managed `alias/aws/lambda` (and its key ARN) is refused with
+  `AccessDeniedException` naming the key the alias resolves to: its key
+  policy (`aws-managed-lambda-key-policy.json`, which fakecloud mints the
+  `aws/lambda` key with) only lets the Lambda service principal derive data
+  keys, not decrypt them. A missing alias is `InvalidParameterValueException`
+  with KMS's alias message, and an ARN outside the function's region
+  (another service's ARN included) is refused before KMS is consulted.
 
 ## Customer managed keys (`DurableConfig.KMSKeyArn`)
 

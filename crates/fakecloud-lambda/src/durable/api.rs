@@ -8,8 +8,6 @@
 //! decode is `Invalid callback id`; one naming no open callback is
 //! `CallbackTimeoutException`.
 
-use std::time::Duration as StdDuration;
-
 use http::StatusCode;
 use serde_json::{json, Value};
 
@@ -23,12 +21,13 @@ use super::model::{self, callback_execution_arn, strip_event_data, TimeFormat};
 use super::runner::{self, DurableHub, DurableSettings, StartOutcome};
 use super::validate::invalid_parameter;
 
-/// How long a synchronous caller waits: until the execution ends, which its
-/// `ExecutionTimeout` bounds. AWS keeps the request open for the whole
-/// execution (recorded: a 1200 s execution answered after 1200 s, past the
-/// documented 15 minutes); the margin covers the scheduler tick.
-fn sync_wait(execution_timeout: i64) -> StdDuration {
-    StdDuration::from_secs(execution_timeout.max(1) as u64 + 30)
+/// The answer for a synchronous caller whose execution vanished (a reset of
+/// fakecloud's state) before it ended. A synchronous caller otherwise waits
+/// until the execution ends, which its `ExecutionTimeout` bounds: AWS keeps
+/// the request open for the whole execution (recorded: a 1200 s execution
+/// answered after 1200 s, past the documented 15 minutes).
+fn unavailable_message(arn: &str) -> String {
+    format!("Durable execution {arn} is no longer available")
 }
 
 fn not_found() -> AwsServiceError {
@@ -681,15 +680,7 @@ impl LambdaService {
             set_header(&mut resp, "x-amz-durable-execution-arn", &arn);
             return Some(Ok(resp));
         }
-        let ended = self
-            .durable
-            .wait_for_end(
-                account_id,
-                region,
-                &arn,
-                sync_wait(settings.execution_timeout),
-            )
-            .await;
+        let ended = self.durable.wait_for_end(account_id, region, &arn).await;
         let mut resp = match ended {
             Some(exec) => {
                 let (body, function_error) = runner::sync_response_body(&exec);
@@ -700,12 +691,10 @@ impl LambdaService {
                 resp
             }
             None => {
-                // Only a reset of fakecloud's state removes a running
-                // execution from under its caller.
                 return Some(Err(AwsServiceError::aws_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "ServiceException",
-                    format!("Durable execution {arn} is no longer available"),
+                    unavailable_message(&arn),
                 )));
             }
         };
@@ -725,7 +714,7 @@ pub async fn invoke_for_delivery(
     function_ref: &str,
     payload: &str,
 ) -> Option<Result<Vec<u8>, String>> {
-    let (account, region, arn, settings) = {
+    let (account, region, arn) = {
         let mut accounts = hub.state().write();
         let (account, region, name) = crate::state::function_location(
             function_ref,
@@ -758,24 +747,14 @@ pub async fn invoke_for_delivery(
         ) {
             StartOutcome::Started(a) | StartOutcome::Existing(a) | StartOutcome::Conflict(a) => a,
         };
-        (account, region, arn, settings)
+        (account, region, arn)
     };
     hub.request_persist();
     hub.kick();
-    Some(
-        match hub
-            .wait_for_end(
-                &account,
-                &region,
-                &arn,
-                sync_wait(settings.execution_timeout),
-            )
-            .await
-        {
-            Some(exec) => Ok(runner::sync_response_body(&exec).0),
-            None => Err(format!("Durable execution {arn} is no longer available")),
-        },
-    )
+    Some(match hub.wait_for_end(&account, &region, &arn).await {
+        Some(exec) => Ok(runner::sync_response_body(&exec).0),
+        None => Err(unavailable_message(&arn)),
+    })
 }
 
 /// `DurableExecutionName`: `^[a-zA-Z0-9-_]+$`, 1 to 64 characters.
@@ -1458,7 +1437,7 @@ mod tests {
                 "InvalidParameterValueException",
             ),
             (
-                KmsKeyUnusable::AccessDenied,
+                KmsKeyUnusable::AccessDenied("arn:aws:kms:us-east-1:123456789012:key/k".into()),
                 StatusCode::FORBIDDEN,
                 "AccessDeniedException",
             ),
@@ -1480,6 +1459,61 @@ mod tests {
             &json!({"ExecutionTimeout": 60})
         )
         .is_ok());
+    }
+
+    /// Recorded (aws-round4-kms-alias.jsonl): an alias whose key policy
+    /// refuses Lambda names the resolved key, a missing alias gets KMS's
+    /// alias message, and an ARN outside the function's region is refused
+    /// before KMS is asked.
+    #[test]
+    fn alias_and_foreign_key_arns_get_the_recorded_errors() {
+        use crate::durable::config::check_configured_key;
+        use fakecloud_core::delivery::KmsKeyUnusable;
+        let fa = "arn:aws:lambda:us-east-1:123456789012:function:f";
+        let cfg = |k: &str| json!({"ExecutionTimeout": 60, "KMSKeyArn": k});
+        let resolved = "arn:aws:kms:us-east-1:123456789012:key/24a82b2a";
+        let hook = StubKms(Some(KmsKeyUnusable::AccessDenied(resolved.into())));
+        let err = check_configured_key(
+            Some(&hook),
+            ACCOUNT,
+            "us-east-1",
+            fa,
+            &cfg("arn:aws:kms:us-east-1:123456789012:alias/aws/lambda"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err.code(), "AccessDeniedException");
+        assert_eq!(
+            err.message(),
+            format!("Lambda was unable to configure your durable function because KMS access was denied for key {resolved}. Please ensure your KMS key policy allows access to Lambda.")
+        );
+        let missing = "arn:aws:kms:us-east-1:123456789012:alias/fc-durable-no-such-alias";
+        let hook = StubKms(Some(KmsKeyUnusable::NotFound));
+        let err = check_configured_key(Some(&hook), ACCOUNT, "us-east-1", fa, &cfg(missing))
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.message(),
+            format!("Lambda was unable to configure your durable function because the specified KMS key {missing} was not found. Please check your KMS key settings. KMS Exception: NotFoundException KMS Message: Alias {missing} is not found.")
+        );
+        for foreign in [
+            "arn:aws:s3:::bucket",
+            "arn:aws:kms:eu-west-1:123456789012:key/k",
+        ] {
+            for hook in [
+                None,
+                Some(&StubKms(None) as &dyn fakecloud_core::delivery::KmsHook),
+            ] {
+                let err = check_configured_key(hook, ACCOUNT, "us-east-1", fa, &cfg(foreign))
+                    .err()
+                    .unwrap();
+                assert_eq!(err.code(), "InvalidParameterValueException");
+                assert_eq!(
+                    err.message(),
+                    format!("Lambda was unable to configure your durable function because the specified KMS key {foreign} is in a different region than the function. The KMS key must reside in the same region as the function.")
+                );
+            }
+        }
     }
 
     #[test]

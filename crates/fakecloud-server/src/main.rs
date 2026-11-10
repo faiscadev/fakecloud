@@ -12895,14 +12895,40 @@ async fn main() {
     firehose_engine
         .start()
         .expect("Firehose engine starts once after stores and snapshots load");
-    let serve_result = axum::serve(
+    let shutdown_started = Arc::new(tokio::sync::Notify::new());
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await;
-    // Axum has finished active requests. Close internal admission and drain
-    // before runtime cleanup can emit late logs or release S3 dependencies.
+    .with_graceful_shutdown({
+        let shutdown_started = shutdown_started.clone();
+        async move {
+            shutdown_signal().await;
+            shutdown_started.notify_one();
+        }
+    });
+    // Graceful shutdown waits for in-flight requests, but only for
+    // SHUTDOWN_GRACE: some requests legitimately stay open far longer (a
+    // synchronous durable Invoke waits for its whole execution, up to a
+    // year, and so do API Gateway proxies and Cognito triggers onto durable
+    // functions). Durable executions are persisted and resume after a
+    // restart, so dropping their waiting callers loses nothing.
+    let serve_result = tokio::select! {
+        result = std::future::IntoFuture::into_future(serve) => result,
+        () = async {
+            shutdown_started.notified().await;
+            tokio::time::sleep(runtime::SHUTDOWN_GRACE).await;
+        } => {
+            tracing::warn!(
+                grace_secs = runtime::SHUTDOWN_GRACE.as_secs(),
+                "requests still in flight after the shutdown grace period; dropping them"
+            );
+            Ok(())
+        }
+    };
+    // Active requests have finished (or been dropped after the grace
+    // period). Close internal admission and drain before runtime cleanup can
+    // emit late logs or release S3 dependencies.
     let report = firehose_engine.shutdown().await;
     kinesis_lambda_firehose_poller
         .sync_firehose_checkpoints()

@@ -589,6 +589,85 @@ async fn durable_execution_survives_a_restart() {
     assert_eq!(result["approval"], "\"after-restart\"");
 }
 
+/// A synchronous invoke waiting on a durable execution's callback does not
+/// hold the server's shutdown past its grace period, and the execution,
+/// persisted, resumes after the restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_inflight_sync_invoke_does_not_block_shutdown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_path = tmp.path().display().to_string();
+    let mut server = TestServer::start_full(
+        &[],
+        &["--storage-mode", "persistent", "--data-path", &data_path],
+    )
+    .await;
+    let client = server.lambda_client().await;
+    create_durable_function(&client, "durable-shutdown").await;
+    let waiting = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            client
+                .invoke()
+                .function_name("durable-shutdown:$LATEST")
+                .durable_execution_name("shutdown-1")
+                .payload(Blob::new(br#"{"n":5,"callback":true}"#.to_vec()))
+                .send()
+                .await
+        })
+    };
+    let arn = loop {
+        let listed = client
+            .list_durable_executions_by_function()
+            .function_name("durable-shutdown")
+            .send()
+            .await
+            .unwrap();
+        if let Some(e) = listed.durable_executions().first() {
+            break e.durable_execution_arn().to_string();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let callback_id = wait_for_callback(&client, &arn).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        !waiting.is_finished(),
+        "the sync invoke waits for the callback"
+    );
+    // 5 s grace, then the drains and container cleanup.
+    let took = tokio::task::block_in_place(|| server.terminate(Duration::from_secs(30)))
+        .expect("the server exits on its own while the invoke is still waiting");
+    assert!(
+        took >= Duration::from_secs(4),
+        "in-flight requests get the grace period: {took:?}"
+    );
+    assert!(
+        waiting.await.unwrap().is_err(),
+        "the waiting caller is dropped"
+    );
+
+    server.restart().await;
+    let client = server.lambda_client().await;
+    client
+        .send_durable_execution_callback_success()
+        .callback_id(&callback_id)
+        .result(Blob::new(b"\"resumed\"".to_vec()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_until_done(&client, &arn).await,
+        ExecutionStatus::Succeeded
+    );
+    let done = client
+        .get_durable_execution()
+        .durable_execution_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(done.result().unwrap()).unwrap();
+    assert_eq!(result["doubled"], 10);
+}
+
 /// An event source mapping onto a durable function's version starts a
 /// durable execution per batch, not a plain invocation.
 #[tokio::test]

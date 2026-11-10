@@ -434,8 +434,9 @@ pub enum KmsKeyUnusable {
     Disabled,
     /// The key is in another non-usable state (`PendingDeletion`, ...).
     InvalidState(String),
-    /// The key policy does not allow the service principal.
-    AccessDenied,
+    /// The key policy of the (resolved) key, whose ARN this carries, does
+    /// not allow the service principal.
+    AccessDenied(String),
 }
 
 /// Cross-service KMS hook: services that accept a `KmsKeyId` (Secrets

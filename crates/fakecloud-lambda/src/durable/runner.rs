@@ -58,10 +58,21 @@ struct HubInner {
     chained_live: Mutex<HashSet<(String, String)>>,
     /// A snapshot write is in flight.
     persisting: AtomicBool,
+    /// Chained invokes dispatched (first runs and re-runs after a restart).
+    chained_dispatches: std::sync::atomic::AtomicU64,
     /// KMS, for the customer managed keys of durable functions.
     kms: RwLock<Option<Arc<dyn fakecloud_core::delivery::KmsHook>>>,
     started: AtomicBool,
+    /// Signalled on every recorded change, so callers waiting for an
+    /// execution to end re-check it.
+    changed: tokio::sync::Notify,
 }
+
+/// How long past an execution's own deadline a caller keeps waiting for the
+/// scheduler to record its timeout.
+const DEADLINE_GRACE: chrono::Duration = chrono::Duration::seconds(30);
+/// Re-check interval for changes that do not signal (a state reset).
+const WAIT_RECHECK: StdDuration = StdDuration::from_secs(1);
 
 /// The configuration a durable function's executions run with.
 pub(crate) struct DurableSettings {
@@ -197,8 +208,10 @@ impl DurableHub {
                 running: Mutex::new(HashSet::new()),
                 chained_live: Mutex::new(HashSet::new()),
                 persisting: AtomicBool::new(false),
+                chained_dispatches: std::sync::atomic::AtomicU64::new(0),
                 kms: RwLock::new(None),
                 started: AtomicBool::new(false),
+                changed: tokio::sync::Notify::new(),
             }),
         }
     }
@@ -230,6 +243,7 @@ impl DurableHub {
     /// Persist the Lambda state on the scheduler's next pass.
     pub(crate) fn request_persist(&self) {
         self.inner.persist_pending.store(true, Ordering::Release);
+        self.inner.changed.notify_waiters();
     }
 
     /// Run the scheduler now instead of at the next tick.
@@ -346,8 +360,11 @@ impl DurableHub {
                             {
                                 continue;
                             }
+                            // A call whose outcome is held for the end of the
+                            // parent's invocation has returned; it is not lost.
                             let lost = c.dispatched
                                 && c.child_execution_arn.is_none()
+                                && c.deferred.is_none()
                                 && !chained_live.contains(&(arn.clone(), op.id.clone()));
                             if !c.dispatched || lost {
                                 pending_dispatch.push((
@@ -383,6 +400,9 @@ impl DurableHub {
                 }
             }
             for (account, region, arn, op_id, function_ref, redispatch) in pending_dispatch {
+                self.inner
+                    .chained_dispatches
+                    .fetch_add(1, Ordering::Relaxed);
                 if let Some(job) = dispatch_chained(
                     &mut accounts,
                     &account,
@@ -571,29 +591,41 @@ impl DurableHub {
         self.inner.kick.notify_one();
     }
 
-    /// Wait until `arn` is no longer running, up to `max_wait`.
+    /// Wait until `arn` is no longer running and return its final record.
+    /// The execution's own deadline bounds the wait (the scheduler times it
+    /// out there), so a caller that reattaches to an existing execution waits
+    /// as long as that execution can run, whatever the function is
+    /// configured with now. `None` when the execution no longer exists (a
+    /// reset of fakecloud's state) or is still running well past its
+    /// deadline.
     pub(crate) async fn wait_for_end(
         &self,
         account: &str,
         region: &str,
         arn: &str,
-        max_wait: StdDuration,
     ) -> Option<DurableExecution> {
-        let deadline = tokio::time::Instant::now() + max_wait;
         loop {
-            let snapshot = {
+            let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            // Registered before the check, so a change between the check
+            // and the wait still wakes this caller.
+            changed.as_mut().enable();
+            {
                 let accounts = self.inner.state.read();
-                accounts
+                let exec = accounts
                     .regional(account, region)
-                    .and_then(|st| st.durable_executions.get(arn))
-                    .cloned()
-            };
-            match snapshot {
-                Some(e) if !e.is_running() => return Some(e),
-                Some(_) if tokio::time::Instant::now() < deadline => {}
-                _ => return None,
+                    .and_then(|st| st.durable_executions.get(arn))?;
+                if !exec.is_running() {
+                    return Some(exec.clone());
+                }
+                if exec.deadline() + DEADLINE_GRACE < model::now() {
+                    return None;
+                }
             }
-            tokio::time::sleep(StdDuration::from_millis(100)).await;
+            tokio::select! {
+                _ = &mut changed => {}
+                _ = tokio::time::sleep(WAIT_RECHECK) => {}
+            }
         }
     }
 }
@@ -990,6 +1022,84 @@ mod tests {
                 .filter(|ev| ev["EventType"] == "ChainedInvokeStarted")
                 .count();
             assert_eq!(started, 1);
+        });
+    }
+
+    /// A waiting caller wakes on the change that ends the execution (no
+    /// polling interval), and its wait is bounded by the execution's own
+    /// deadline rather than by the function's current configuration.
+    #[tokio::test]
+    async fn waiting_callers_wake_when_the_execution_ends() {
+        let hub = hub_with(&[("f", true)]);
+        let arn = start(&hub);
+        // Reconfiguring the function does not shorten waits on executions
+        // that already started with the longer timeout.
+        with_exec(&hub, &arn, |e| e.execution_timeout = 3600);
+        {
+            let mut accounts = hub.state().write();
+            let f = accounts
+                .regional_mut(ACCOUNT, "us-east-1")
+                .functions
+                .get_mut("f")
+                .unwrap();
+            f.durable_config = Some(json!({"ExecutionTimeout": 1}));
+        }
+        let waiter = {
+            let hub = hub.clone();
+            let arn = arn.clone();
+            tokio::spawn(async move { hub.wait_for_end(ACCOUNT, "us-east-1", &arn).await })
+        };
+        tokio::time::sleep(StdDuration::from_millis(1500)).await;
+        assert!(!waiter.is_finished(), "still running, still waiting");
+        with_exec(&hub, &arn, |e| {
+            engine::finish(e, SUCCEEDED, Some("\"done\"".into()), None, model::now())
+        });
+        hub.request_persist();
+        let end = tokio::time::timeout(StdDuration::from_millis(500), waiter)
+            .await
+            .expect("woken by the change, not the recheck interval")
+            .unwrap();
+        assert_eq!(end.map(|e| e.status), Some(SUCCEEDED.to_string()));
+    }
+
+    /// A plain target that returns while the parent's invocation is still
+    /// running holds its outcome until that invocation ends; the scheduler
+    /// must not mistake it for a call lost with a previous process and run
+    /// the target again on every pass.
+    #[tokio::test]
+    async fn a_call_returned_during_the_invocation_runs_exactly_once() {
+        // The target has no code, so the dispatch completes it at once.
+        let hub = hub_with(&[("f", true), ("target", false)]);
+        let arn = start(&hub);
+        with_exec(&hub, &arn, |e| {
+            engine::begin_invocation(e, "r1", model::now());
+            let token = e.invocation.as_ref().unwrap().token.clone().unwrap();
+            engine::checkpoint(
+                e,
+                &token,
+                None,
+                &[json!({"Id":"ci","Type":"CHAINED_INVOKE","Action":"START","ChainedInvokeOptions":{"FunctionName":"target"}})],
+                model::now(),
+            )
+            .unwrap();
+        });
+        // The invocation is live in this process.
+        hub.inner.running.lock().insert(arn.clone());
+        for _ in 0..4 {
+            hub.pass();
+        }
+        assert_eq!(hub.inner.chained_dispatches.load(Ordering::Relaxed), 1);
+        with_exec(&hub, &arn, |e| {
+            let op = e.op("ci").unwrap();
+            assert_eq!(op.status, OpStatus::Started);
+            assert!(op.chained.as_ref().unwrap().deferred.is_some());
+            assert!(engine::complete_invocation(
+                e,
+                "r1",
+                InvocationOutcome::Output(json!({"Status":"PENDING"})),
+                model::now()
+            ));
+            assert_eq!(e.op("ci").unwrap().status, OpStatus::Failed);
         });
     }
 

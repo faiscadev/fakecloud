@@ -166,7 +166,17 @@ pub(crate) fn check_configured_key(
     function_arn: &str,
     cfg: &Value,
 ) -> Result<(), AwsServiceError> {
-    let (Some(hook), Some(key)) = (hook, cfg.get("KMSKeyArn").and_then(Value::as_str)) else {
+    let Some(key) = cfg.get("KMSKeyArn").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    // Recorded: any ARN outside the function's region (another service's
+    // ARN included) is refused before KMS is consulted.
+    if !key.is_empty() && key.split(':').nth(3) != Some(region) {
+        return Err(invalid_parameter(format!(
+            "Lambda was unable to configure your durable function because the specified KMS key {key} is in a different region than the function. The KMS key must reside in the same region as the function."
+        )));
+    }
+    let Some(hook) = hook else {
         return Ok(());
     };
     match hook.check_service_key_use(
@@ -179,14 +189,23 @@ pub(crate) fn check_configured_key(
         &encryption_context(function_arn),
     ) {
         Ok(_) => Ok(()),
-        Err(KmsKeyUnusable::NotFound) => Err(invalid_parameter(format!(
-            "Lambda was unable to configure your durable function because the specified KMS key {key} was not found. Please check your KMS key settings. KMS Exception: NotFoundException KMS Message: Key '{key}' does not exist"
-        ))),
-        Err(KmsKeyUnusable::AccessDenied) => Err(AwsServiceError::aws_error(
+        Err(KmsKeyUnusable::NotFound) => {
+            // Recorded: KMS names a missing alias differently from a key.
+            let kms_message = if key.split(':').nth(5).is_some_and(|r| r.starts_with("alias/")) {
+                format!("Alias {key} is not found.")
+            } else {
+                format!("Key '{key}' does not exist")
+            };
+            Err(invalid_parameter(format!(
+                "Lambda was unable to configure your durable function because the specified KMS key {key} was not found. Please check your KMS key settings. KMS Exception: NotFoundException KMS Message: {kms_message}"
+            )))
+        }
+        // Recorded: names the key an alias resolved to, not the alias.
+        Err(KmsKeyUnusable::AccessDenied(resolved)) => Err(AwsServiceError::aws_error(
             StatusCode::FORBIDDEN,
             "AccessDeniedException",
             format!(
-                "Lambda was unable to configure your durable function because KMS access was denied for key {key}. Please ensure your KMS key policy allows access to Lambda."
+                "Lambda was unable to configure your durable function because KMS access was denied for key {resolved}. Please ensure your KMS key policy allows access to Lambda."
             ),
         )),
         Err(KmsKeyUnusable::Disabled) => Err(invalid_parameter(format!(
@@ -226,7 +245,7 @@ pub(crate) fn unusable_key_error(key: &str, reason: &KmsKeyUnusable) -> AwsServi
             "NotFoundException",
             format!("Key '{key}' does not exist"),
         ),
-        KmsKeyUnusable::AccessDenied => (
+        KmsKeyUnusable::AccessDenied(_) => (
             "KMSAccessDeniedException",
             "access to the KMS key was denied",
             "AccessDeniedException",
