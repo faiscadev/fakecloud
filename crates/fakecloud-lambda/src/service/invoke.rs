@@ -208,7 +208,9 @@ impl LambdaService {
                                 function_name: function_name.to_string(),
                                 alias: qualifier
                                     .filter(|q| {
-                                        *q != "$LATEST" && !q.chars().all(|c| c.is_ascii_digit())
+                                        *q != "$LATEST"
+                                            && *q != crate::state::LATEST_PUBLISHED
+                                            && !q.chars().all(|c| c.is_ascii_digit())
                                     })
                                     .map(str::to_string),
                                 executed_version: executed_version.clone(),

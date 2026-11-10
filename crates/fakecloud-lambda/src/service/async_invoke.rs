@@ -295,9 +295,7 @@ fn resolve_invoked(state: &LambdaState, target: &InvokedVersion) -> Option<Lambd
         return Some(live.clone());
     }
     state
-        .function_version_snapshots
-        .get(name)
-        .and_then(|versions| versions.get(&target.executed_version))
+        .version_snapshot(name, &target.executed_version)
         .cloned()
 }
 
@@ -893,6 +891,16 @@ mod tests {
                 .unwrap()
                 .description,
             "latest"
+        );
+        // A Lambda Managed Instances function's $LATEST.PUBLISHED.
+        let mut published = test_func();
+        published.description = "published".into();
+        state.latest_published.insert("f".into(), published);
+        assert_eq!(
+            resolve_invoked(&state, &target(None, crate::state::LATEST_PUBLISHED))
+                .unwrap()
+                .description,
+            "published"
         );
         // The alias the call named is gone.
         assert!(resolve_invoked(&state, &target(Some("live"), "1")).is_none());
