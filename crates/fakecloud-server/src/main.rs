@@ -108,6 +108,57 @@ async fn cloudfront_viewer_middleware(
     dp.serve(req, next).await
 }
 
+async fn opensearch_dataplane_middleware(
+    axum::extract::State(dp): axum::extract::State<
+        Option<std::sync::Arc<fakecloud_opensearch::dataplane::OpenSearchDataPlane>>,
+    >,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use fakecloud_opensearch::dataplane::Route;
+    let Some(dp) = dp else {
+        return next.run(req).await;
+    };
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().host().map(str::to_string));
+    let route = host.as_deref().map(|h| dp.route(h));
+    let base = match route {
+        None | Some(Route::NotADomain) => return next.run(req).await,
+        Some(Route::Unavailable) => {
+            return http_bytes_response(fakecloud_opensearch::dataplane::unavailable(
+                "The domain's search cluster is not running.",
+            ))
+        }
+        Some(Route::Cluster(base)) => base,
+    };
+    let (parts, body) = req.into_parts();
+    let max_body = fakecloud_core::dispatch::max_request_body_bytes();
+    let Ok(body) = axum::body::to_bytes(body, max_body).await else {
+        return axum::http::Response::builder()
+            .status(axum::http::StatusCode::PAYLOAD_TOO_LARGE)
+            .body(axum::body::Body::empty())
+            .expect("static response");
+    };
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    let resp = dp
+        .forward(&base, parts.method, &path_and_query, &parts.headers, body)
+        .await;
+    http_bytes_response(resp)
+}
+
+fn http_bytes_response(resp: axum::http::Response<bytes::Bytes>) -> axum::response::Response {
+    let (parts, body) = resp.into_parts();
+    axum::response::Response::from_parts(parts, axum::body::Body::from(body))
+}
+
 /// Record types the `--dns` resolver (and this introspection endpoint) answer:
 /// the types `fakecloud_route53::dnssec::encode_rdata` has an explicit encoding
 /// arm for (it has a raw-bytes catch-all, but only these produce meaningful
@@ -1130,6 +1181,19 @@ async fn main() {
     } else {
         degraded_runtimes.push("MQ (control-plane-only brokers, no connectable broker data plane)");
     }
+    // OpenSearch / Elasticsearch domain backing-cluster runtime
+    // (Docker/Podman). Constructed here so the degraded-runtimes banner
+    // reports it; attached to the OpenSearchService further down.
+    let opensearch_runtime = fakecloud_opensearch::OpenSearchRuntime::new().map(Arc::new);
+    if let Some(ref rt) = opensearch_runtime {
+        tracing::info!(
+            cli = rt.cli_name(),
+            "OpenSearch domain clusters enabled via container runtime"
+        );
+    } else {
+        degraded_runtimes
+            .push("OpenSearch (control-plane-only domains, no search cluster data plane)");
+    }
     // Amazon MSK (Kafka) backing-broker runtime (Docker/Podman). Constructed
     // here so the degraded-runtimes banner reports it; attached to the
     // KafkaService further down where the service is built.
@@ -1745,6 +1809,7 @@ async fn main() {
             elasticache_runtime: elasticache_runtime.clone(),
             mq_runtime: mq_runtime.clone(),
             kafka_runtime: kafka_runtime.clone(),
+            opensearch_runtime: opensearch_runtime.clone(),
         },
     );
     if let Some(store) = cloudformation_snapshot_store {
@@ -6784,6 +6849,13 @@ async fn main() {
     if let Some(store) = opensearch_snapshot_store {
         opensearch_service = opensearch_service.with_snapshot_store(store);
     }
+    // Domains are backed by REAL single-node OpenSearch / Elasticsearch
+    // containers when a container runtime is available; persisted domains
+    // re-attach (or respawn on their data volume) in the background.
+    if let Some(ref rt) = opensearch_runtime {
+        opensearch_service = opensearch_service.with_runtime(rt.clone());
+    }
+    opensearch_service.recover_persisted_containers().await;
     if let Some(h) = opensearch_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("es", h);
     }
@@ -7419,6 +7491,7 @@ async fn main() {
                 mwaa: mwaa_state.clone(),
                 neptune: neptune_state.clone(),
                 opensearch: opensearch_state.clone(),
+                opensearch_runtime: opensearch_runtime.clone(),
                 pinpoint: pinpoint_state.clone(),
                 pipes: pipes_state.clone(),
                 ram: ram_state.clone(),
@@ -12832,6 +12905,13 @@ async fn main() {
             cloudfront_dataplane,
             cloudfront_viewer_middleware,
         ))
+        // Search domain endpoints: a request whose `Host` is a domain's
+        // AWS-format endpoint is proxied to its backing cluster; everything
+        // else falls through.
+        .layer(axum::middleware::from_fn_with_state(
+            fakecloud_opensearch::dataplane::OpenSearchDataPlane::new(opensearch_state.clone()),
+            opensearch_dataplane_middleware,
+        ))
         // Outermost: ECS task containers reach the agent's link-local
         // credentials address (`169.254.170.2:80`), which their network
         // namespace NATs to this listener; those requests
@@ -12903,6 +12983,9 @@ async fn main() {
         rt.stop_all().await;
     }
     if let Some(rt) = kafka_runtime {
+        rt.stop_all().await;
+    }
+    if let Some(rt) = opensearch_runtime {
         rt.stop_all().await;
     }
     if let Some(rt) = ec2_runtime {

@@ -3242,6 +3242,7 @@ pub(crate) mod tests {
             elasticache_runtime: None,
             mq_runtime: None,
             kafka_runtime: None,
+            opensearch_runtime: None,
         }
     }
 

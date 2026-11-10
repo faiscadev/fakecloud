@@ -1044,6 +1044,7 @@ pub struct ResourceProvisioner {
     pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
     pub mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
     pub kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
+    pub opensearch_runtime: Option<Arc<fakecloud_opensearch::OpenSearchRuntime>>,
     /// Intents queued by container-backed provisioners during the synchronous
     /// provisioning pass. After provisioning, `CreateStack` drains these and
     /// backs each freshly-inserted record with a real container in the
@@ -1147,6 +1148,11 @@ pub enum ContainerSpawnIntent {
     /// Apache Kafka container via the Kafka runtime, matching the direct
     /// `CreateCluster` path.
     MskCluster { cluster_arn: String },
+    /// `AWS::OpenSearchService::Domain` / `AWS::Elasticsearch::Domain` --
+    /// bring the inserted (or updated) domain's backing search cluster in
+    /// line with its configuration, matching the direct `CreateDomain` /
+    /// `UpdateDomainConfig` path.
+    OpenSearchDomain { domain_name: String },
 }
 
 /// A container-backed resource the synchronous delete pass removed from memory
@@ -1193,6 +1199,14 @@ pub enum ContainerTeardownIntent {
     MqBroker { broker_id: String },
     /// `AWS::MSK::Cluster` -- stop + remove the backing Apache Kafka container.
     MskCluster { cluster_arn: String },
+    /// `AWS::OpenSearchService::Domain` / `AWS::Elasticsearch::Domain` --
+    /// remove the backing search cluster container (already untracked when
+    /// the row was removed, so a same-named recreate never reuses it) and its
+    /// data volume.
+    OpenSearchDomain {
+        container_id: Option<String>,
+        volume: Option<String>,
+    },
 }
 
 /// A queued custom-resource (`Custom::*`) Lambda invocation. Built by
@@ -4521,6 +4535,7 @@ mod tests {
             elasticache_runtime: None,
             mq_runtime: None,
             kafka_runtime: None,
+            opensearch_runtime: None,
             pending_container_spawns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_container_teardowns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_custom_invokes: Arc::new(parking_lot::Mutex::new(Vec::new())),

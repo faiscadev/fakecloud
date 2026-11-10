@@ -88,7 +88,7 @@ impl ResourceProvisioner {
             }
         }
 
-        let domain = Domain {
+        let mut domain = Domain {
             name: name.clone(),
             domain_id: domain_id.clone(),
             arn: arn.clone(),
@@ -108,7 +108,18 @@ impl ResourceProvisioner {
             last_change: None,
             last_dry_run: None,
             dry_runs: Vec::new(),
+            data_plane: None,
+            processing: None,
+            data_plane_error: None,
         };
+        // With a container runtime the domain is backed by a real search
+        // cluster, brought up in the background after provisioning (the same
+        // convergence the direct `CreateDomain` runs).
+        let back_with_container = fakecloud_opensearch::backing::begin(
+            self.opensearch_runtime.is_some(),
+            &mut domain,
+            fakecloud_opensearch::backing::CREATING,
+        );
 
         let mut guard = self.opensearch_state.write();
         let st = guard.get_or_create(account);
@@ -116,6 +127,14 @@ impl ResourceProvisioner {
             return Err(format!("Domain {name} already exists"));
         }
         st.domains.insert(name.clone(), domain);
+        drop(guard);
+        if back_with_container {
+            self.pending_container_spawns.lock().push(
+                super::ContainerSpawnIntent::OpenSearchDomain {
+                    domain_name: name.clone(),
+                },
+            );
+        }
 
         Ok(ProvisionResult::new(name)
             .with("Arn", arn.clone())
@@ -206,10 +225,25 @@ impl ResourceProvisioner {
         domain.engine_version = engine_version;
         domain.config = config;
         domain.tags = tags;
+        // A changed engine version or node settings replace the backing
+        // cluster on the same data volume, as `UpdateDomainConfig` does.
+        let restart = fakecloud_opensearch::backing::begin_change(
+            self.opensearch_runtime.as_deref(),
+            domain,
+            fakecloud_opensearch::backing::MODIFYING,
+        );
 
         let arn = domain.arn.clone();
         let domain_id = domain.domain_id.clone();
         let endpoint = domain.endpoint.clone();
+        drop(guard);
+        if restart {
+            self.pending_container_spawns.lock().push(
+                super::ContainerSpawnIntent::OpenSearchDomain {
+                    domain_name: name.clone(),
+                },
+            );
+        }
 
         Ok(ProvisionResult::new(name)
             .with("Arn", arn.clone())
@@ -222,7 +256,18 @@ impl ResourceProvisioner {
     pub(super) fn delete_opensearch_domain(&self, physical_id: &str) -> Result<(), String> {
         let mut guard = self.opensearch_state.write();
         let st = guard.get_or_create(&self.account_id);
-        st.domains.remove(physical_id);
+        let removed = st.domains.remove(physical_id);
+        drop(guard);
+        // Reap the backing cluster off the request path. Untracked now so a
+        // same-named recreate in this stack op never reuses the container.
+        if let (Some(rt), Some(d)) = (&self.opensearch_runtime, removed) {
+            self.pending_container_teardowns.lock().push(
+                super::ContainerTeardownIntent::OpenSearchDomain {
+                    container_id: rt.untrack(&d.arn),
+                    volume: fakecloud_opensearch::backing::domain_spec(&d).map(|s| s.volume),
+                },
+            );
+        }
         Ok(())
     }
 

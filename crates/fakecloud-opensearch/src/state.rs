@@ -80,6 +80,32 @@ pub struct Domain {
     /// `DescribeDryRunProgress` can report a specific `DryRunId`.
     #[serde(default)]
     pub dry_runs: Vec<DryRunRecord>,
+    /// The live backing cluster, set once it answers `_cluster/health`. `None`
+    /// without a container runtime (control-plane-only domains) and while the
+    /// cluster is being created or replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_plane: Option<DomainDataPlane>,
+    /// The `DomainProcessingStatus` (`Creating`, `Modifying`,
+    /// `UpgradingEngineVersion`) while the backing cluster is being brought
+    /// up or replaced; `None` once settled. Only set when a container runtime
+    /// backs the domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processing: Option<String>,
+    /// Why the last bring-up of the backing cluster failed. The domain then
+    /// stays control-plane only until its next configuration change or
+    /// restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_plane_error: Option<String>,
+}
+
+/// Where a domain's backing search cluster listens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainDataPlane {
+    pub container_id: String,
+    /// The address fakecloud reaches the published port at (`127.0.0.1`, or
+    /// the sibling host alias when fakecloud is containerized).
+    pub host: String,
+    pub port: u16,
 }
 
 /// How many dry runs a domain remembers for `DescribeDryRunProgress`.
@@ -266,10 +292,41 @@ pub fn direct_query_data_source_arn(region: &str, account_id: &str, name: &str) 
 }
 
 impl Domain {
-    /// Where a client can reach this domain's cluster. Domains are control-plane
-    /// only today, so none has one; `endpoint` is a formatted name nothing serves.
+    /// Where a client can reach this domain's cluster: the backing container's
+    /// published HTTP port once it answers health. `None` for a
+    /// control-plane-only domain (no container runtime, an engine version
+    /// with no image, a failed bring-up) and while the cluster is being
+    /// created or replaced; `endpoint` is the AWS-format name, which only
+    /// fakecloud's own `Host`-routed proxy serves.
     pub fn reachable_url(&self) -> Option<String> {
-        None
+        if self.deleted {
+            return None;
+        }
+        self.data_plane
+            .as_ref()
+            .map(|dp| format!("http://{}:{}", dp.host, dp.port))
+    }
+
+    /// The account the domain belongs to, from its ARN.
+    pub fn account_id(&self) -> &str {
+        fakecloud_aws::arn::account_of(&self.arn).unwrap_or_default()
+    }
+
+    /// Stable id of this incarnation of the domain: a delete and a recreate
+    /// under the same name get different ids, so their data volumes never
+    /// collide.
+    pub fn incarnation(&self) -> String {
+        fakecloud_core::data_volume::incarnation_id(&[&self.arn, &self.created_at.to_rfc3339()])
+    }
+
+    /// The named volume holding the backing cluster's data directory, in the
+    /// volume scope `scope_tag` (`fakecloud_core::data_volume`).
+    pub fn data_volume_name(&self, scope_tag: &str) -> String {
+        fakecloud_core::data_volume::scoped_volume_name(
+            "opensearch",
+            scope_tag,
+            &[self.account_id(), &self.name, &self.incarnation()],
+        )
     }
 }
 

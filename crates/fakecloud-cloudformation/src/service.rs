@@ -667,6 +667,7 @@ pub struct CloudFormationDeps {
     pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
     pub mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
     pub kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
+    pub opensearch_runtime: Option<Arc<fakecloud_opensearch::OpenSearchRuntime>>,
 }
 
 #[derive(Clone)]
@@ -830,6 +831,8 @@ pub(crate) struct ContainerBackingHandles {
     mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
     kafka_state: fakecloud_kafka::SharedKafkaState,
     kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
+    opensearch_state: fakecloud_opensearch::SharedOpenSearchState,
+    opensearch_runtime: Option<Arc<fakecloud_opensearch::OpenSearchRuntime>>,
     /// Snapshot hooks for the services whose DETACHED container-backing task
     /// mutates snapshot-backed state AFTER the stack op has already serialized
     /// it. `persist_touched_services` fires right after the op returns, which
@@ -870,6 +873,8 @@ impl ContainerBackingHandles {
             mq_runtime: p.mq_runtime.clone(),
             kafka_state: p.kafka_state.clone(),
             kafka_runtime: p.kafka_runtime.clone(),
+            opensearch_state: p.opensearch_state.clone(),
+            opensearch_runtime: p.opensearch_runtime.clone(),
             autoscaling_snapshot_hook: None,
             ec2_snapshot_hook: None,
             snapshot_hooks: BTreeMap::new(),
@@ -1053,6 +1058,18 @@ impl ContainerBackingHandles {
                         });
                     }
                 }
+                ContainerSpawnIntent::OpenSearchDomain { domain_name } => {
+                    if let Some(runtime) = self.opensearch_runtime.clone() {
+                        tokio::spawn(fakecloud_opensearch::backing::converge_domain(
+                            self.opensearch_state.clone(),
+                            runtime,
+                            self.account_id.clone(),
+                            domain_name,
+                            None,
+                            self.persist_hook("es"),
+                        ));
+                    }
+                }
                 ContainerSpawnIntent::MskCluster { cluster_arn } => {
                     if let Some(runtime) = self.kafka_runtime.clone() {
                         let kafka_state = self.kafka_state.clone();
@@ -1185,6 +1202,21 @@ impl ContainerBackingHandles {
                                 runtime, broker_id,
                             )
                             .await;
+                        });
+                    }
+                }
+                ContainerTeardownIntent::OpenSearchDomain {
+                    container_id,
+                    volume,
+                } => {
+                    if let Some(runtime) = self.opensearch_runtime.clone() {
+                        tokio::spawn(async move {
+                            if let Some(cid) = container_id {
+                                runtime.remove_container(&cid).await;
+                            }
+                            if let Some(v) = volume {
+                                runtime.remove_volume(&v).await;
+                            }
                         });
                     }
                 }
@@ -1409,6 +1441,7 @@ impl CloudFormationService {
             elasticache_runtime: self.deps.elasticache_runtime.clone(),
             mq_runtime: self.deps.mq_runtime.clone(),
             kafka_runtime: self.deps.kafka_runtime.clone(),
+            opensearch_runtime: self.deps.opensearch_runtime.clone(),
             pending_container_spawns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_container_teardowns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_custom_invokes: Arc::new(parking_lot::Mutex::new(Vec::new())),
@@ -4795,6 +4828,7 @@ mod tests {
             elasticache_runtime: None,
             mq_runtime: None,
             kafka_runtime: None,
+            opensearch_runtime: None,
         };
         CloudFormationService::new(cf_state, deps)
     }

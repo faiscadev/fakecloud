@@ -138,6 +138,7 @@ impl ResourceProvisioner {
             elasticache_runtime: self.elasticache_runtime.clone(),
             mq_runtime: self.mq_runtime.clone(),
             kafka_runtime: self.kafka_runtime.clone(),
+            opensearch_runtime: self.opensearch_runtime.clone(),
             // Share the parent's queues so nested-stack container resources are
             // drained and backed/reaped by the same parent op, and any deferred
             // custom-resource invokes are drained alongside the parent's.
