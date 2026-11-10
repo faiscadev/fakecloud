@@ -177,6 +177,14 @@ pub const SERVICES: &[Service] = &[
             //  round-trips (bucket/sort/skewed columns), and
             //  GetPartitionIndexes raises EntityNotFound on a deleted table,
             //  so the partition + partition-index tests run.)
+            //
+            // The pinned provider's job test asserts `timeout = 2880` for a
+            // job created without `glue_version`. AWS now defaults such a job
+            // to Glue 6.0 with a 480-minute timeout (recorded with CreateJob +
+            // GetJob in us-east-1: MaxCapacity 10, no GlueVersion -> Timeout
+            // 480, GlueVersion "6.0"), and fakecloud returns that. Upstream
+            // has since dropped the timeout assertion from this test.
+            "TestAccGlueJob_basic",
         ],
     },
     Service {
