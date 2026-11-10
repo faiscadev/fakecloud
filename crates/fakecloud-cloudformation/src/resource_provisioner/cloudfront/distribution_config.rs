@@ -28,23 +28,25 @@
 //! the API would reject fails the resource with the API's error.
 
 use fakecloud_cloudfront::model::{
-    AliasItems, Aliases, AllowedMethods, AwsAccountNumberList, CacheBehavior, CacheBehaviorItems,
-    CacheBehaviors, CacheTagConfig, CachedMethods, ConnectionFunctionAssociation, CookieNameList,
-    CookieNames, CookiePreference, CustomErrorResponse, CustomErrorResponseItems,
-    CustomErrorResponses, CustomHeaderItems, CustomHeaders, CustomOriginConfig,
-    DefaultCacheBehavior, DistributionConfig, ForwardedValues, FunctionAssociation,
-    FunctionAssociationItems, FunctionAssociations, GeoRestriction, GrpcConfig, HeaderList,
-    Headers, LambdaFunctionAssociation, LambdaFunctionAssociationItems, LambdaFunctionAssociations,
-    LocationList, LoggingConfig, MethodList, Origin, OriginCustomHeader, OriginGroup,
-    OriginGroupFailoverCriteria, OriginGroupItems, OriginGroupMember, OriginGroupMemberItems,
-    OriginGroupMembers, OriginGroups, OriginItems, OriginMtlsConfig, OriginShield,
-    OriginSslProtocols, Origins, ParameterDefinition, ParameterDefinitionSchema,
-    ParameterDefinitions, QueryStringCacheKeyList, QueryStringCacheKeys, Restrictions,
-    S3OriginConfig, SslProtocolItems, StatusCodeItems, StatusCodes, StringSchemaConfig,
-    TenantConfig, TrustStoreConfig, TrustedKeyGroupIdList, TrustedKeyGroups, TrustedSigners,
-    ViewerCertificate, ViewerMtlsConfig, VpcOriginConfig,
+    has_cache_policy, AliasItems, Aliases, AllowedMethods, AwsAccountNumberList, CacheBehavior,
+    CacheBehaviorItems, CacheBehaviors, CacheTagConfig, CachedMethods,
+    ConnectionFunctionAssociation, CookieNameList, CookieNames, CookiePreference,
+    CustomErrorResponse, CustomErrorResponseItems, CustomErrorResponses, CustomHeaderItems,
+    CustomHeaders, CustomOriginConfig, DefaultCacheBehavior, DistributionConfig, ForwardedValues,
+    FunctionAssociation, FunctionAssociationItems, FunctionAssociations, GeoRestriction,
+    GrpcConfig, HeaderList, Headers, LambdaFunctionAssociation, LambdaFunctionAssociationItems,
+    LambdaFunctionAssociations, LocationList, LoggingConfig, MethodList, Origin,
+    OriginCustomHeader, OriginGroup, OriginGroupFailoverCriteria, OriginGroupItems,
+    OriginGroupMember, OriginGroupMemberItems, OriginGroupMembers, OriginGroups, OriginItems,
+    OriginMtlsConfig, OriginShield, OriginSslProtocols, Origins, ParameterDefinition,
+    ParameterDefinitionSchema, ParameterDefinitions, QueryStringCacheKeyList, QueryStringCacheKeys,
+    Restrictions, S3OriginConfig, SslProtocolItems, StatusCodeItems, StatusCodes,
+    StringSchemaConfig, TenantConfig, TrustStoreConfig, TrustedKeyGroupIdList, TrustedKeyGroups,
+    TrustedSigners, ViewerCertificate, ViewerMtlsConfig, VpcOriginConfig,
 };
-use fakecloud_cloudfront::validate_distribution_config;
+use fakecloud_cloudfront::{
+    canonicalize_distribution_config, canonicalize_distribution_update, ConfigRequest,
+};
 use serde_json::Value;
 
 type CfnResult<T> = Result<T, String>;
@@ -56,6 +58,7 @@ type CfnResult<T> = Result<T, String>;
 pub(super) fn cfn_distribution_config(
     cfg: &Value,
     caller_reference: String,
+    stored: Option<&DistributionConfig>,
 ) -> CfnResult<DistributionConfig> {
     let at = |path: &'static str| move |e: String| format!("DistributionConfig.{path}: {e}");
 
@@ -178,9 +181,65 @@ pub(super) fn cfn_distribution_config(
             .map_err(at("CacheTagConfig"))?,
     };
 
-    config.ensure_aws_defaults();
-    validate_distribution_config(&config).map_err(|e| format!("{}: {}", e.code(), e.message()))?;
+    apply_schema_ttl_defaults(&mut config);
+    // Before the API's own defaults fill it in.
+    let omits_protocol_version = config
+        .viewer_certificate
+        .as_ref()
+        .is_none_or(|vc| vc.minimum_protocol_version.is_none());
+    // Inferred: a stack update goes through `UpdateDistribution`, so it meets the same
+    // rules as an API update, with the schema defaults having filled all three TTLs.
+    match stored {
+        Some(stored) => canonicalize_distribution_update(stored, &mut config),
+        None => canonicalize_distribution_config(&mut config, ConfigRequest::Create),
+    }
+    .map_err(|e| cfn_invalid_request(e.message().as_str()))?;
+    // Recorded from real CloudFormation on 2026-11-09 for a multi-tenant template
+    // with no `ViewerCertificate` at all. Taking one that names a certificate but
+    // no protocol version to fail alike, and an explicit version to pass, is
+    // inferred.
+    if config.is_multi_tenant() && omits_protocol_version {
+        return Err(cfn_invalid_request(
+            "The parameter ViewerCertificate The specified distribution is configured for SNI \
+             and the minimum SSL protocol version is specified as SSLv3. You cannot specify both.",
+        ));
+    }
     Ok(config)
+}
+
+/// The handler's wording for a refusal from the API it calls.
+pub(super) fn cfn_invalid_request(message: &str) -> String {
+    format!("Invalid request provided: AWS::CloudFront::Distribution: {message}")
+}
+
+/// Recorded from real CloudFormation on 2026-11-09: `MinTTL` 0, `DefaultTTL` 86400
+/// and `MaxTTL` 31536000 are each filled in independently of the others and sent to
+/// the API, so unlike an API request's derivation `MaxTTL` 600 alone fails as out of
+/// order. A behavior on a cache policy, or any behavior of a multi-tenant
+/// distribution, must not carry them at all.
+fn apply_schema_ttl_defaults(config: &mut DistributionConfig) {
+    if config.is_multi_tenant() {
+        return;
+    }
+    let fill = |min: &mut Option<i64>, default: &mut Option<i64>, max: &mut Option<i64>| {
+        min.get_or_insert(0);
+        default.get_or_insert(86_400);
+        max.get_or_insert(31_536_000);
+    };
+    let dcb = &mut config.default_cache_behavior;
+    if !has_cache_policy(dcb.cache_policy_id.as_deref()) {
+        fill(&mut dcb.min_ttl, &mut dcb.default_ttl, &mut dcb.max_ttl);
+    }
+    for b in config
+        .cache_behaviors
+        .iter_mut()
+        .filter_map(|b| b.items.as_mut())
+        .flat_map(|i| &mut i.cache_behavior)
+    {
+        if !has_cache_policy(b.cache_policy_id.as_deref()) {
+            fill(&mut b.min_ttl, &mut b.default_ttl, &mut b.max_ttl);
+        }
+    }
 }
 
 /// The distribution's origins: `Origins`, or the single origin the legacy
@@ -320,9 +379,10 @@ fn cfn_custom_origin_config(c: &Value) -> CfnResult<CustomOriginConfig> {
         https_port: opt_i32(c, "HTTPSPort")?.unwrap_or(443),
         origin_protocol_policy: req_str(c, "OriginProtocolPolicy")?,
         origin_ssl_protocols: {
-            // The resource schema's default; the API documents none.
+            // Recorded from real CloudFormation on 2026-11-09, unlike the API's
+            // own default.
             let ssl_protocol = str_list(c, "OriginSSLProtocols")?
-                .unwrap_or_else(|| vec!["TLSv1".to_string(), "SSLv3".to_string()]);
+                .unwrap_or_else(|| vec!["SSLv3".to_string(), "TLSv1".to_string()]);
             Some(OriginSslProtocols {
                 quantity: len(&ssl_protocol),
                 items: SslProtocolItems { ssl_protocol },
@@ -839,20 +899,28 @@ mod tests {
             "Enabled": true,
             "Origins": [{"Id": "o1", "DomainName": "origin.example.com",
                          "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}}],
-            "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all"}
+            "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
+                                     "ForwardedValues": {"QueryString": false}}
         })
     }
 
+    /// The base with members replaced. A default behavior given here gets
+    /// `ForwardedValues` unless it names a cache policy, since CloudFront requires
+    /// one or the other and most tests are about something else.
     fn with(extra: Value) -> Value {
         let mut cfg = base();
         for (k, v) in extra.as_object().unwrap() {
             cfg[k] = v.clone();
         }
+        let dcb = cfg["DefaultCacheBehavior"].as_object_mut().unwrap();
+        if !dcb.contains_key("CachePolicyId") && !dcb.contains_key("ForwardedValues") {
+            dcb.insert("ForwardedValues".into(), json!({"QueryString": false}));
+        }
         cfg
     }
 
     fn translate(cfg: &Value) -> DistributionConfig {
-        cfn_distribution_config(cfg, "ref".to_string()).expect("translates")
+        cfn_distribution_config(cfg, "ref".to_string(), None).expect("translates")
     }
 
     /// The `CustomErrorResponses` block CDK synthesizes for a SPA
@@ -896,7 +964,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(ssl.quantity, 2);
-        assert_eq!(ssl.items.ssl_protocol, ["TLSv1", "SSLv3"]);
+        assert_eq!(ssl.items.ssl_protocol, ["SSLv3", "TLSv1"]);
     }
 
     #[test]
@@ -952,6 +1020,7 @@ mod tests {
         let err = cfn_distribution_config(
             &with(json!({"CustomErrorResponses": [{"ResponsePagePath": "/index.html"}]})),
             "ref".to_string(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("CustomErrorResponses[0]"), "{err}");
@@ -1014,6 +1083,7 @@ mod tests {
         let err = cfn_distribution_config(
             &with(json!({"CacheBehaviors": [{"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all"}]})),
             "ref".to_string(),
+        None,
         )
         .unwrap_err();
         assert!(
@@ -1135,7 +1205,7 @@ mod tests {
     }
 
     fn translate_err(cfg: &Value) -> String {
-        cfn_distribution_config(cfg, "ref".to_string()).unwrap_err()
+        cfn_distribution_config(cfg, "ref".to_string(), None).unwrap_err()
     }
 
     #[test]
@@ -1195,12 +1265,12 @@ mod tests {
             "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
                                      "FunctionAssociations": [{"EventType": "viewer-request"}]}
         })));
-        assert!(err.starts_with("InvalidFunctionAssociation"), "{err}");
+        assert!(err.contains("A function association needs"), "{err}");
         let err = translate_err(&with(json!({
             "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
                                      "LambdaFunctionAssociations": [{"LambdaFunctionARN": "arn:l"}]}
         })));
-        assert!(err.starts_with("InvalidLambdaFunctionAssociation"), "{err}");
+        assert!(err.contains("A Lambda function association needs"), "{err}");
     }
 
     #[test]
@@ -1223,11 +1293,11 @@ mod tests {
     fn ttls_accept_integral_doubles_only() {
         let config = translate(&with(json!({
             "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
-                                     "DefaultTTL": 86400.0, "MaxTTL": "600.0"},
+                                     "DefaultTTL": 86400.0, "MaxTTL": "90000.0"},
             "CustomErrorResponses": [{"ErrorCode": 404, "ErrorCachingMinTTL": 10.0}]
         })));
         assert_eq!(config.default_cache_behavior.default_ttl, Some(86400));
-        assert_eq!(config.default_cache_behavior.max_ttl, Some(600));
+        assert_eq!(config.default_cache_behavior.max_ttl, Some(90000));
         let err = translate_err(&with(json!({
             "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
                                      "MinTTL": 1.5}
@@ -1241,6 +1311,196 @@ mod tests {
                                      "MaxTTL": 1e30}
         })));
         assert!(err.contains("MaxTTL is out of range"), "{err}");
+    }
+
+    /// Recorded from real CloudFormation on 2026-11-09: omitted TTLs take their
+    /// schema defaults independently, unlike an API request's derivation.
+    #[test]
+    fn omitted_ttls_take_independent_schema_defaults() {
+        let config = translate(&with(json!({
+            "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
+                                     "ForwardedValues": {"QueryString": false}, "DefaultTTL": 600},
+            // Inferred from the default behavior.
+            "CacheBehaviors": [{"PathPattern": "/x", "TargetOriginId": "o1",
+                                "ViewerProtocolPolicy": "allow-all",
+                                "ForwardedValues": {"QueryString": false}, "DefaultTTL": 600}]
+        })));
+        let dcb = &config.default_cache_behavior;
+        assert_eq!(
+            (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl),
+            (Some(0), Some(600), Some(31_536_000))
+        );
+        let behaviors = config.cache_behaviors.unwrap().items.unwrap();
+        let b = &behaviors.cache_behavior[0];
+        assert_eq!(
+            (b.min_ttl, b.default_ttl, b.max_ttl),
+            (Some(0), Some(600), Some(31_536_000))
+        );
+
+        let order = "Invalid request provided: AWS::CloudFront::Distribution: MinTTL, MaxTTL and \
+                     DefaultTTL should follow order MinTTL less than or equal to DefaultTTL less \
+                     than or equal to MaxTTL";
+        for ttl in [json!({"MaxTTL": 600}), json!({"MinTTL": 100_000})] {
+            let mut cfg = base();
+            for (k, v) in ttl.as_object().unwrap() {
+                cfg["DefaultCacheBehavior"][k] = v.clone();
+            }
+            assert_eq!(translate_err(&cfg), order);
+        }
+        let mut negative = base();
+        negative["DefaultCacheBehavior"]["MinTTL"] = json!(-5);
+        assert_eq!(
+            translate_err(&negative),
+            "Invalid request provided: AWS::CloudFront::Distribution: The parameter MinTTL is \
+             not within allowed range."
+        );
+    }
+
+    #[test]
+    fn a_template_on_a_cache_policy_gets_no_ttls() {
+        let config = translate(&with(json!({
+            "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
+                                     "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6"}
+        })));
+        let dcb = &config.default_cache_behavior;
+        assert_eq!(
+            (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl),
+            (None, None, None)
+        );
+    }
+
+    /// Recorded from real CloudFormation on 2026-11-09: a template omitting
+    /// `IPV6Enabled`, `HttpVersion`, `MinTTL`, `Cookies` and `OriginSSLProtocols`.
+    #[test]
+    fn omitted_members_take_the_values_cloudformation_recorded() {
+        let config = translate(&base());
+        assert_eq!(config.is_ipv6_enabled, Some(true));
+        assert_eq!(config.staging, Some(false));
+        assert_eq!(config.http_version.as_deref(), Some("http1.1"));
+        let dcb = &config.default_cache_behavior;
+        assert_eq!(
+            (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl),
+            (Some(0), Some(86_400), Some(31_536_000))
+        );
+        assert_eq!(
+            dcb.forwarded_values.as_ref().unwrap().cookies.forward,
+            "none"
+        );
+        let origins = config.origins.items.unwrap();
+        let custom = origins.origin[0].custom_origin_config.as_ref().unwrap();
+        assert_eq!(
+            custom
+                .origin_ssl_protocols
+                .as_ref()
+                .unwrap()
+                .items
+                .ssl_protocol,
+            ["SSLv3", "TLSv1"]
+        );
+    }
+
+    /// The translated template meets the same refusals as an API create, under
+    /// the handler's prefix. Recorded from real CloudFormation on 2026-11-09 for
+    /// the rows named below; the others are inferred from those.
+    #[test]
+    fn a_template_the_api_would_refuse_fails_with_the_apis_error() {
+        const PREFIX: &str = "Invalid request provided: AWS::CloudFront::Distribution: ";
+        let behavior = |extra: Value| {
+            let mut b = json!({"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all"});
+            for (k, v) in extra.as_object().unwrap() {
+                b[k] = v.clone();
+            }
+            with(json!({"DefaultCacheBehavior": b}))
+        };
+        let err = translate_err(&behavior(json!({"DefaultTTL": 900, "MaxTTL": 800})));
+        assert!(
+            err.starts_with(&format!("{PREFIX}MinTTL, MaxTTL and DefaultTTL")),
+            "{err}"
+        );
+        let err = translate_err(&behavior(json!({"CachePolicyId": "cp", "MinTTL": 0})));
+        assert!(err.contains("The parameter MinTTL cannot be used"), "{err}");
+
+        // Recorded: nothing at all.
+        let mut neither = base();
+        neither["DefaultCacheBehavior"]
+            .as_object_mut()
+            .unwrap()
+            .remove("ForwardedValues");
+        assert_eq!(
+            translate_err(&neither),
+            format!("{PREFIX}The parameter ForwardedValues is required.")
+        );
+
+        let tls = json!({"CloudFrontDefaultCertificate": true, "MinimumProtocolVersion": "TLSv1"});
+        // Recorded: a multi-tenant template with no certificate is refused over the
+        // protocol default CloudFormation applies.
+        let mut tenant = behavior(json!({"CachePolicyId": "cp"}));
+        tenant["ConnectionMode"] = json!("tenant-only");
+        assert_eq!(
+            translate_err(&tenant),
+            format!(
+                "{PREFIX}The parameter ViewerCertificate The specified distribution is configured \
+                 for SNI and the minimum SSL protocol version is specified as SSLv3. You cannot \
+                 specify both."
+            )
+        );
+        // Inferred: naming a version gets past that, with no schema TTLs added.
+        tenant["ViewerCertificate"] = tls.clone();
+        let config = translate(&tenant);
+        assert_eq!(config.default_cache_behavior.min_ttl, None);
+        tenant["IPV6Enabled"] = json!(true);
+        assert!(
+            translate_err(&tenant).contains("IsIPV6Enabled field for a multi-tenant"),
+            "IPV6Enabled"
+        );
+        neither["ConnectionMode"] = json!("tenant-only");
+        neither["ViewerCertificate"] = tls;
+        assert_eq!(
+            translate_err(&neither),
+            format!("{PREFIX}The CachePolicyId field is required for a multi-tenant distribution.")
+        );
+    }
+
+    /// Inferred: a stack update follows `UpdateDistribution`'s rules.
+    #[test]
+    fn a_stack_update_follows_the_update_rules() {
+        let stored = translate(&base());
+        let update = |cfg: &Value| {
+            cfn_distribution_config(cfg, stored.caller_reference.clone(), Some(&stored))
+        };
+
+        // Out of order is stored as given on an update, unlike on a create.
+        let mut inverted = base();
+        inverted["DefaultCacheBehavior"]["MinTTL"] = json!(100_000);
+        let config = update(&inverted).expect("accepted");
+        let dcb = &config.default_cache_behavior;
+        assert_eq!(
+            (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl),
+            (Some(100_000), Some(86_400), Some(31_536_000))
+        );
+
+        // The mode can't flip.
+        let mut flipped = with(json!({"DefaultCacheBehavior": {
+            "TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all", "CachePolicyId": "cp"}}));
+        flipped["ConnectionMode"] = json!("tenant-only");
+        flipped["ViewerCertificate"] =
+            json!({"CloudFrontDefaultCertificate": true, "MinimumProtocolVersion": "TLSv1"});
+        assert!(
+            update(&flipped).unwrap_err().contains("ConnectionMode"),
+            "standard to multi-tenant"
+        );
+        let tenant = translate(&flipped);
+        let err = cfn_distribution_config(&base(), tenant.caller_reference.clone(), Some(&tenant))
+            .unwrap_err();
+        assert!(err.contains("Price class is missing"), "{err}");
+
+        // Nor can staging.
+        let mut staging = base();
+        staging["Staging"] = json!(true);
+        assert!(
+            update(&staging).unwrap_err().contains("isStaging"),
+            "staging"
+        );
     }
 
     #[test]
@@ -1312,13 +1572,13 @@ mod tests {
         let err = translate_err(&with(json!({
             "DefaultCacheBehavior": {"TargetOriginId": "nowhere", "ViewerProtocolPolicy": "allow-all"}
         })));
-        assert!(err.starts_with("NoSuchOrigin"), "{err}");
+        assert!(err.contains("One or more of your origins"), "{err}");
         let err = translate_err(&with(json!({
             "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
                                      "AllowedMethods": ["GET", "HEAD"],
                                      "CachedMethods": ["GET", "HEAD", "OPTIONS"]}
         })));
-        assert!(err.starts_with("InvalidArgument"), "{err}");
+        assert!(err.contains("CachedMethods must be"), "{err}");
     }
 
     #[test]

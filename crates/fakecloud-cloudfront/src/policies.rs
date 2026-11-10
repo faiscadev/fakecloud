@@ -516,6 +516,20 @@ pub fn seed_managed(account: &mut AccountState) {
     }
 }
 
+/// Whether `id` names an AWS-managed policy, which every account can use whether
+/// or not its own state has been seeded with them yet.
+pub(crate) fn is_managed_cache_policy(id: &str) -> bool {
+    MANAGED_CACHE_POLICIES.iter().any(|p| p.0 == id)
+}
+
+pub(crate) fn is_managed_origin_request_policy(id: &str) -> bool {
+    MANAGED_ORIGIN_REQUEST_POLICIES.iter().any(|p| p.0 == id)
+}
+
+pub(crate) fn is_managed_response_headers_policy(id: &str) -> bool {
+    MANAGED_RESPONSE_HEADERS_POLICIES.iter().any(|p| p.0 == id)
+}
+
 const MANAGED_CACHE_POLICIES: &[(&str, &str, i64, i64, bool, bool)] = &[
     (
         "658327ea-f89d-4fab-a63d-7e88639e58f6",
@@ -744,13 +758,17 @@ pub(crate) fn require_if_match(req: &AwsRequest) -> Result<String, AwsServiceErr
         .get(IF_MATCH)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-        .ok_or_else(|| {
-            aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidIfMatchVersion",
-                "Missing If-Match header",
-            )
-        })
+        .ok_or_else(invalid_if_match)
+}
+
+/// Text recorded from real AWS on `UpdateDistribution` on 2026-11-09, shared by
+/// every resource's `If-Match`.
+pub(crate) fn invalid_if_match() -> AwsServiceError {
+    aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidIfMatchVersion",
+        "The If-Match version is missing or not valid for the resource.",
+    )
 }
 
 /// Map a logical resource "kind" to the Smithy-declared error shape name used
@@ -794,12 +812,71 @@ pub(crate) fn not_found(kind: &str, id: &str) -> AwsServiceError {
     )
 }
 
+/// Text recorded from real AWS on `UpdateDistribution` and `DeleteDistribution` on
+/// 2026-11-09, shared by every resource's `If-Match`.
 pub(crate) fn precondition_failed() -> AwsServiceError {
     aws_error(
         StatusCode::PRECONDITION_FAILED,
         "PreconditionFailed",
-        "If-Match header does not match the current ETag",
+        "The request failed because it didn't meet the preconditions in one or more request-header fields.",
     )
+}
+
+/// The refusal to delete something a distribution still names. Codes and text
+/// from the model's error shapes.
+pub(crate) fn in_use(code: &str) -> AwsServiceError {
+    let (status, message) = match code {
+        "CachePolicyInUse" => (
+            StatusCode::CONFLICT,
+            "Cannot delete the cache policy because it is attached to one or more cache behaviors.",
+        ),
+        "OriginRequestPolicyInUse" => (
+            StatusCode::CONFLICT,
+            "Cannot delete the origin request policy because it is attached to one or more cache behaviors.",
+        ),
+        "ResponseHeadersPolicyInUse" => (
+            StatusCode::CONFLICT,
+            "Cannot delete the response headers policy because it is attached to one or more cache behaviors in a CloudFront distribution.",
+        ),
+        "OriginAccessControlInUse" => (
+            StatusCode::CONFLICT,
+            "Cannot delete the origin access control because it's in use by one or more distributions.",
+        ),
+        "FunctionInUse" => (
+            StatusCode::CONFLICT,
+            "Cannot delete the function because it's attached to one or more cache behaviors.",
+        ),
+        "CloudFrontOriginAccessIdentityInUse" => (
+            StatusCode::CONFLICT,
+            "The Origin Access Identity specified is already in use.",
+        ),
+        "FieldLevelEncryptionConfigInUse" => (
+            StatusCode::CONFLICT,
+            "The specified configuration for field-level encryption is in use.",
+        ),
+        "FieldLevelEncryptionProfileInUse" => (
+            StatusCode::CONFLICT,
+            "The specified profile for field-level encryption is in use.",
+        ),
+        "PublicKeyInUse" => (StatusCode::CONFLICT, "The specified public key is in use."),
+        "RealtimeLogConfigInUse" => (
+            StatusCode::BAD_REQUEST,
+            "Cannot delete the real-time log configuration because it is attached to one or more cache behaviors.",
+        ),
+        "ContinuousDeploymentPolicyInUse" => (
+            StatusCode::CONFLICT,
+            "You cannot delete a continuous deployment policy that is associated with a primary distribution.",
+        ),
+        "ResourceInUse" => (
+            StatusCode::CONFLICT,
+            "Cannot delete this resource because it is in use.",
+        ),
+        _ => (
+            StatusCode::CONFLICT,
+            "The entity cannot be deleted while it is in use.",
+        ),
+    };
+    aws_error(status, code, message)
 }
 
 pub(crate) fn rfc3339(t: &DateTime<Utc>) -> String {

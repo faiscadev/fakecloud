@@ -259,7 +259,9 @@ impl ResourceProvisioner {
         let req = self.ec2_request(action, params);
         let resp = svc
             .provision_sync(&req)
-            .map_err(|e| format!("EC2 {action} failed: {}", e.message()))?;
+            // The code goes in too, so a delete can tell `*.NotFound` from a real
+            // failure (`is_not_found_error`).
+            .map_err(|e| format!("EC2 {action} failed ({}): {}", e.code(), e.message()))?;
         Ok(String::from_utf8_lossy(resp.body.expect_bytes()).to_string())
     }
 

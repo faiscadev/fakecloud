@@ -155,6 +155,11 @@ impl CloudFrontService {
         if f.etag != if_match {
             return Err(precondition_failed());
         }
+        // Model-declared; checked after the If-Match (inferred).
+        crate::validate::refuse_in_use(
+            account,
+            crate::validate::Reference::FieldLevelEncryption(&id),
+        )?;
         account.field_level_encryptions.remove(&id);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))
@@ -352,6 +357,11 @@ impl CloudFrontService {
         if p.etag != if_match {
             return Err(precondition_failed());
         }
+        // Model-declared; checked after the If-Match (inferred).
+        crate::validate::refuse_in_use(
+            account,
+            crate::validate::Reference::FieldLevelEncryptionProfile(&id),
+        )?;
         account.field_level_encryption_profiles.remove(&id);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))
@@ -520,6 +530,11 @@ impl CloudFrontService {
             .accounts
             .get_mut(&req.account_id)
             .ok_or_else(|| not_found("RealtimeLogConfig", &key))?;
+        // Model-declared; checked after the If-Match (inferred).
+        crate::validate::refuse_in_use(
+            account,
+            crate::validate::Reference::RealtimeLogConfig(&key),
+        )?;
         if account.realtime_log_configs.remove(&key).is_none() {
             return Err(not_found("RealtimeLogConfig", &key));
         }

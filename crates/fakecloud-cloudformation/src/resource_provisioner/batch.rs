@@ -439,14 +439,7 @@ impl ResourceProvisioner {
         }
         let mut body = Map::new();
         body.insert(kind.id_key.to_string(), id);
-        self.batch_dispatch(kind.delete, body)
-            .map(|_| ())
-            .or_else(|e| {
-                if e.contains("does not exist") {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })
+        // Already gone is handled centrally by `delete_resource`.
+        self.batch_dispatch(kind.delete, body).map(|_| ())
     }
 }

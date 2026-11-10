@@ -85,18 +85,39 @@ macro_rules! fill_behavior_defaults {
             if let Some(names) = forwarded.cookies.whitelisted_names.as_mut() {
                 drop_empty(&mut names.items, |i| i.name.is_empty());
             }
-            // The legacy cache settings, standard-only: a behavior on a cache
-            // policy has no TTLs.
-            // A day and a year, unless the bounds supplied exceed them: AWS
-            // documents that the default `DefaultTTL` then follows `MinTTL`,
-            // and the default `MaxTTL` follows `DefaultTTL`.
-            if !$multi_tenant {
-                let min = *b.min_ttl.get_or_insert(0);
-                let default = *b.default_ttl.get_or_insert(min.max(86_400));
-                b.max_ttl.get_or_insert(default.max(31_536_000));
-            }
+        }
+        // Recorded from real AWS on 2026-11-09: an empty id reads back as absent.
+        drop_empty(&mut b.cache_policy_id, String::is_empty);
+        // The legacy cache settings, standard-only: a behavior on a cache policy
+        // has no TTLs.
+        if !$multi_tenant && b.cache_policy_id.is_none() {
+            let (min, default, max) = derive_ttls(b.min_ttl, b.default_ttl, b.max_ttl);
+            b.min_ttl = Some(min);
+            b.default_ttl = Some(default);
+            b.max_ttl = Some(max);
         }
     }};
+}
+
+/// Whether a behavior names a cache policy. Clients that model the member as a
+/// plain string (the Terraform provider) send it empty to mean none, which real
+/// AWS accepts as none (recorded 2026-11-09).
+pub fn has_cache_policy(cache_policy_id: Option<&str>) -> bool {
+    cache_policy_id.is_some_and(|id| !id.is_empty())
+}
+
+/// CloudFront's fill-in for the TTLs a legacy behavior left out, as recorded
+/// from real AWS on 2026-11-09: `DefaultTTL` is a day held inside the bounds
+/// supplied, `MaxTTL` is a year or `DefaultTTL` if that is higher. Written with
+/// `max`/`min` rather than `clamp`, which panics on the inverted bounds an
+/// `UpdateDistribution` may store.
+fn derive_ttls(min: Option<i64>, default: Option<i64>, max: Option<i64>) -> (i64, i64, i64) {
+    const DAY: i64 = 86_400;
+    const YEAR: i64 = 31_536_000;
+    let min = min.unwrap_or(0);
+    let default = default.unwrap_or_else(|| DAY.max(min).min(max.unwrap_or(i64::MAX)));
+    let max = max.unwrap_or_else(|| default.max(YEAR));
+    (min, default, max)
 }
 
 // ─── DistributionConfig ───────────────────────────────────────────────
@@ -160,6 +181,18 @@ pub struct DistributionConfig {
 }
 
 impl DistributionConfig {
+    pub fn is_multi_tenant(&self) -> bool {
+        self.connection_mode.as_deref() == Some("tenant-only")
+    }
+
+    /// The path-scoped behaviors, excluding the default one.
+    pub fn cache_behavior_items(&self) -> impl Iterator<Item = &CacheBehavior> {
+        self.cache_behaviors
+            .iter()
+            .filter_map(|b| b.items.as_ref())
+            .flat_map(|i| i.cache_behavior.iter())
+    }
+
     /// Make the config canonical: fill in what CloudFront fills in for members
     /// a request left out, so `GetDistribution` / `GetDistributionConfig` carry
     /// the same envelopes AWS returns. What a request supplied is kept, except
@@ -170,10 +203,16 @@ impl DistributionConfig {
     /// Applied wherever a config enters state (the API, CloudFormation, snapshot
     /// load); the read paths rely on it.
     ///
-    /// Members AWS documents as standard-distribution only stay absent on a
-    /// multi-tenant (`tenant-only`) distribution.
+    /// Members real AWS leaves out of a multi-tenant (`tenant-only`)
+    /// distribution's config stay absent on one. `ConnectionMode` itself stays
+    /// absent on a standard distribution; only the summary reports `direct`.
     pub fn ensure_aws_defaults(&mut self) {
-        let multi_tenant = self.connection_mode.as_deref() == Some("tenant-only");
+        // Recorded from real AWS on 2026-11-09: an explicit `direct` is accepted
+        // and not echoed.
+        if self.connection_mode.as_deref() == Some("direct") {
+            self.connection_mode = None;
+        }
+        let multi_tenant = self.is_multi_tenant();
 
         self.default_root_object.get_or_insert_with(String::new);
         drop_empty(
@@ -216,8 +255,8 @@ impl DistributionConfig {
                 .get_or_insert_with(|| "PriceClass_All".to_string());
             self.is_ipv6_enabled.get_or_insert(true);
             self.staging.get_or_insert(false);
-            // No documented default to report: empty means no policy.
-            drop_empty(&mut self.continuous_deployment_policy_id, String::is_empty);
+            self.continuous_deployment_policy_id
+                .get_or_insert_with(String::new);
         }
         self.logging.get_or_insert_with(Default::default);
         self.viewer_certificate
@@ -349,6 +388,14 @@ impl Origin {
         self.origin_access_control_id
             .get_or_insert_with(String::new);
         if let Some(custom) = self.custom_origin_config.as_mut() {
+            custom
+                .origin_ssl_protocols
+                .get_or_insert_with(|| OriginSslProtocols {
+                    quantity: 3,
+                    items: SslProtocolItems {
+                        ssl_protocol: ["TLSv1", "TLSv1.1", "TLSv1.2"].map(String::from).to_vec(),
+                    },
+                });
             custom.origin_read_timeout.get_or_insert(30);
             custom.origin_keepalive_timeout.get_or_insert(5);
         }
@@ -970,9 +1017,26 @@ impl ViewerCertificate {
             self.cloud_front_default_certificate = Some(true);
             self.certificate = None;
             self.certificate_source = Some("cloudfront".to_string());
-            // "CloudFront automatically sets the security policy to TLSv1
-            // regardless of the value that you set here."
-            self.minimum_protocol_version = Some("TLSv1".to_string());
+            // Recorded from real AWS on 2026-11-09. A standard distribution overwrites
+            // whatever method it was given, and takes the documented policy:
+            // "CloudFront automatically sets the security policy to TLSv1 regardless
+            // of the value that you set here." A multi-tenant one refuses `vip` before
+            // this point. Given `sni-only` and no policy it reports TLSv1.2_2021, and
+            // given neither, TLSv1. Keeping a policy it was given is inferred; it also
+            // makes this idempotent.
+            if multi_tenant {
+                let policy = if self.ssl_support_method.is_some() {
+                    "TLSv1.2_2021"
+                } else {
+                    "TLSv1"
+                };
+                self.minimum_protocol_version
+                    .get_or_insert_with(|| policy.to_string());
+                self.ssl_support_method = Some("sni-only".to_string());
+            } else {
+                self.ssl_support_method = Some("vip".to_string());
+                self.minimum_protocol_version = Some("TLSv1".to_string());
+            }
         }
     }
 }
@@ -1378,6 +1442,30 @@ mod tests {
         assert!(!parse(&xml).logging.unwrap().enabled);
     }
 
+    /// A read-modify-write away from a custom certificate carries its method along.
+    #[test]
+    fn the_default_certificate_replaces_a_custom_certificates_ssl_method() {
+        // Recorded from real AWS on 2026-11-09.
+        for (multi_tenant, supplied, method, policy) in [
+            (false, Some("sni-only"), "vip", "TLSv1"),
+            (false, Some("vip"), "vip", "TLSv1"),
+            (true, Some("sni-only"), "sni-only", "TLSv1.2_2021"),
+            (true, None, "sni-only", "TLSv1"),
+        ] {
+            let mut vc = ViewerCertificate {
+                cloud_front_default_certificate: Some(true),
+                ssl_support_method: supplied.map(Into::into),
+                ..Default::default()
+            };
+            vc.ensure_aws_defaults(multi_tenant);
+            assert_eq!(vc.ssl_support_method.as_deref(), Some(method));
+            assert_eq!(vc.minimum_protocol_version.as_deref(), Some(policy));
+            // Read back and sent again, neither moves.
+            vc.ensure_aws_defaults(multi_tenant);
+            assert_eq!(vc.minimum_protocol_version.as_deref(), Some(policy));
+        }
+    }
+
     #[test]
     fn the_default_certificate_always_gets_the_tlsv1_policy() {
         for given in [None, Some("TLSv1.2_2021")] {
@@ -1608,22 +1696,23 @@ mod tests {
 
     #[test]
     fn omitted_ttls_follow_the_bounds_the_request_supplied() {
+        // Every accepted row was recorded from real AWS on 2026-11-09.
         const DAY: i64 = 86_400;
         const YEAR: i64 = 31_536_000;
         const LONG: i64 = 40_000_000;
         for (supplied, expected) in [
-            ((None, None, None), (0, DAY, YEAR)),
-            // A MinTTL above a day raises the default DefaultTTL to it.
-            ((Some(172_800), None, None), (172_800, 172_800, YEAR)),
-            // A MinTTL or DefaultTTL above a year raises the default MaxTTL.
-            ((None, Some(LONG), None), (0, LONG, LONG)),
+            ((Some(0), None, None), (0, DAY, YEAR)),
+            // MaxTTL below a day pulls DefaultTTL down to it.
+            ((Some(0), None, Some(600)), (0, 600, 600)),
+            ((Some(0), Some(600), None), (0, 600, YEAR)),
+            ((Some(0), Some(90_000), None), (0, 90_000, YEAR)),
+            // A DefaultTTL above a year raises MaxTTL.
+            ((Some(0), Some(LONG), None), (0, LONG, LONG)),
+            // A MinTTL above a day raises DefaultTTL, and above a year MaxTTL too.
+            ((Some(100_000), None, None), (100_000, 100_000, YEAR)),
             ((Some(LONG), None, None), (LONG, LONG, LONG)),
-            // Below those thresholds the fixed defaults stand.
-            ((Some(10), None, None), (10, DAY, YEAR)),
-            ((None, Some(10), None), (0, 10, YEAR)),
-            // What a request supplied is kept.
+            // Not a recorded row: what a request supplied is kept.
             ((Some(1), Some(2), Some(3)), (1, 2, 3)),
-            ((None, None, Some(600)), (0, DAY, 600)),
         ] {
             let mut config = parse(&sparse_config_xml());
             let dcb = &mut config.default_cache_behavior;
@@ -1662,6 +1751,98 @@ mod tests {
             again.ensure_aws_defaults();
             assert_eq!(render(&again), render(&config));
         }
+    }
+
+    #[test]
+    fn inverted_ttl_bounds_do_not_panic() {
+        assert_eq!(derive_ttls(Some(700), None, Some(600)), (700, 600, 600));
+    }
+
+    /// The defaults a sparse standard config came back with from real AWS on
+    /// 2026-11-09.
+    #[test]
+    fn a_standard_config_takes_the_recorded_defaults() {
+        let mut config = parse(&sparse_config_xml());
+        config.default_cache_behavior.min_ttl = Some(0);
+        config.ensure_aws_defaults();
+        assert_eq!(config.is_ipv6_enabled, Some(true));
+        assert_eq!(config.staging, Some(false));
+        assert_eq!(config.http_version.as_deref(), Some("http2"));
+        assert_eq!(config.price_class.as_deref(), Some("PriceClass_All"));
+        assert_eq!(config.continuous_deployment_policy_id.as_deref(), Some(""));
+        assert_eq!(config.connection_mode, None);
+
+        let dcb = &config.default_cache_behavior;
+        for (enabled, quantity) in [
+            {
+                let t = dcb.trusted_signers.as_ref().unwrap();
+                (t.enabled, t.quantity)
+            },
+            {
+                let t = dcb.trusted_key_groups.as_ref().unwrap();
+                (t.enabled, t.quantity)
+            },
+        ] {
+            assert_eq!((enabled, quantity), (false, 0));
+        }
+        let allowed = dcb.allowed_methods.as_ref().unwrap();
+        assert_eq!(allowed.items.method, ["HEAD", "GET"]);
+        assert_eq!(
+            allowed.cached_methods.as_ref().unwrap().items.method,
+            ["HEAD", "GET"]
+        );
+        assert_eq!(dcb.smooth_streaming, Some(false));
+        assert_eq!(dcb.compress, Some(false));
+        assert_eq!(
+            dcb.lambda_function_associations.as_ref().unwrap().quantity,
+            0
+        );
+        assert_eq!(dcb.function_associations.as_ref().unwrap().quantity, 0);
+        assert_eq!(dcb.field_level_encryption_id.as_deref(), Some(""));
+
+        let vc = config.viewer_certificate.as_ref().unwrap();
+        assert_eq!(vc.cloud_front_default_certificate, Some(true));
+        assert_eq!(vc.ssl_support_method.as_deref(), Some("vip"));
+        assert_eq!(vc.minimum_protocol_version.as_deref(), Some("TLSv1"));
+        assert_eq!(vc.certificate_source.as_deref(), Some("cloudfront"));
+
+        let origins = config.origins.items.as_ref().unwrap();
+        let custom = origins.origin[0].custom_origin_config.as_ref().unwrap();
+        let ssl = custom.origin_ssl_protocols.as_ref().unwrap();
+        assert_eq!(ssl.quantity, 3);
+        assert_eq!(ssl.items.ssl_protocol, ["TLSv1", "TLSv1.1", "TLSv1.2"]);
+    }
+
+    /// What a `tenant-only` config came back with from real AWS on 2026-11-09.
+    #[test]
+    fn a_multi_tenant_config_leaves_the_recorded_members_absent() {
+        let mut config = parse(&sparse_config_xml());
+        config.connection_mode = Some("tenant-only".into());
+        let dcb = &mut config.default_cache_behavior;
+        dcb.forwarded_values = None;
+        dcb.cache_policy_id = Some("cp".into());
+        config.ensure_aws_defaults();
+        let vc = config.viewer_certificate.as_ref().unwrap();
+        assert_eq!(vc.cloud_front_default_certificate, Some(true));
+        assert_eq!(vc.ssl_support_method.as_deref(), Some("sni-only"));
+        assert_eq!(vc.minimum_protocol_version.as_deref(), Some("TLSv1"));
+        assert_eq!(vc.certificate_source.as_deref(), Some("cloudfront"));
+        assert!(config.aliases.is_none());
+        assert_eq!(config.default_root_object.as_deref(), Some(""));
+        assert_eq!(config.web_acl_id.as_deref(), Some(""));
+        assert_eq!(config.http_version.as_deref(), Some("http2"));
+        assert_eq!(config.connection_mode.as_deref(), Some("tenant-only"));
+        assert_eq!(config.price_class, None);
+        assert_eq!(config.is_ipv6_enabled, None);
+        assert_eq!(config.staging, None);
+        assert_eq!(config.continuous_deployment_policy_id, None);
+        let dcb = &config.default_cache_behavior;
+        assert!(dcb.smooth_streaming.is_none());
+        assert!(dcb.trusted_signers.is_none());
+        assert_eq!(
+            (dcb.min_ttl, dcb.default_ttl, dcb.max_ttl),
+            (None, None, None)
+        );
     }
 
     #[test]
