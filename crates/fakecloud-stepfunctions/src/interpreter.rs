@@ -2881,37 +2881,13 @@ async fn invoke_lambda_direct(
     };
 
     match result {
-        Some(Ok(bytes)) => {
-            let response_str = String::from_utf8_lossy(&bytes);
+        Some(Ok(output)) => {
+            if output.is_function_error() {
+                return Err(lambda_function_error(&output));
+            }
+            let response_str = String::from_utf8_lossy(&output.payload);
             let value: Value =
                 serde_json::from_str(&response_str).unwrap_or(json!(response_str.to_string()));
-
-            // The Lambda runtime returns HTTP 200 even for unhandled function
-            // errors, encoding the failure in the payload as
-            // `{"errorMessage", "errorType", "stackTrace"}`. The delivery trait
-            // only conveys bytes, so the payload is the only available signal —
-            // the same heuristic the Lambda service uses for async destination
-            // routing. Mirror real AWS: a function error fails the task with the
-            // function's `errorType` as the Error and the serialized payload as
-            // the Cause, which is exactly what makes Retry/Catch on custom
-            // exception names work.
-            //
-            // Require BOTH `errorType` and `errorMessage` (not either) to avoid
-            // misreading a legitimate success payload that merely happens to
-            // contain one of those field names as a function error.
-            if let Some(obj) = value.as_object() {
-                if obj.contains_key("errorType") && obj.contains_key("errorMessage") {
-                    let error_type = obj
-                        .get("errorType")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Exception")
-                        .to_string();
-                    let cause = serde_json::to_string(&value)
-                        .expect("serde_json::Value serialization is infallible");
-                    return Err((error_type, cause));
-                }
-            }
-
             Ok(value)
         }
         Some(Err(e)) => {
@@ -2934,6 +2910,27 @@ async fn invoke_lambda_direct(
             // No runtime available — return empty result
             Ok(json!({}))
         }
+    }
+}
+
+/// The Task failure for a Lambda invocation that returned a function error
+/// (`X-Amz-Function-Error`). The Error is the error object's `errorType`
+/// (what makes Retry/Catch on custom exception names work), or
+/// `Lambda.Unknown` when the function failed without reporting a type (an
+/// older-runtime timeout or crash). The Cause is the error payload; for an
+/// untyped failure Step Functions explains the missing type and quotes it.
+fn lambda_function_error(
+    output: &fakecloud_core::delivery::LambdaInvocationOutput,
+) -> (String, String) {
+    let payload = String::from_utf8_lossy(&output.payload).into_owned();
+    match output.error_type() {
+        Some(error_type) => (error_type, payload),
+        None => (
+            "Lambda.Unknown".to_string(),
+            format!(
+                "The cause could not be determined because Lambda did not return an error type. Returned payload: {payload}"
+            ),
+        ),
     }
 }
 

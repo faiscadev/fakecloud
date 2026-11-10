@@ -1661,7 +1661,9 @@ async fn secretsmanager_rotation_invokes_lambda() {
     let sm = server.secretsmanager_client().await;
     let lambda = server.lambda_client().await;
 
-    // Create a Lambda function (no real code needed -- invocation is recorded regardless)
+    // A handler that completes every step: Secrets Manager runs a step only
+    // when the previous one succeeded, so a failing (or unrunnable) function
+    // would stop the rotation at createSecret.
     lambda
         .create_function()
         .function_name("rotation-handler")
@@ -1670,7 +1672,10 @@ async fn secretsmanager_rotation_invokes_lambda() {
         .handler("index.handler")
         .code(
             aws_sdk_lambda::types::FunctionCode::builder()
-                .zip_file(aws_sdk_lambda::primitives::Blob::new(b"fake-code"))
+                .zip_file(aws_sdk_lambda::primitives::Blob::new(make_zip(&[(
+                    "index.py",
+                    b"def handler(event, context):\n    return None\n",
+                )])))
                 .build(),
         )
         .send()

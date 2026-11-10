@@ -282,7 +282,7 @@ pub async fn invoke_lambda(
             )
         })?;
 
-    let response_bytes = response_result.map_err(|e| {
+    let output = response_result.map_err(|e| {
         AwsServiceError::aws_error(
             StatusCode::BAD_GATEWAY,
             "BadGatewayException",
@@ -290,9 +290,16 @@ pub async fn invoke_lambda(
         )
     })?;
 
+    // A Lambda function error (`X-Amz-Function-Error`) is never a proxy
+    // response, whatever its payload looks like, and must not reach the
+    // payload-2.0 simple-response branch (which would echo it as a 200).
+    if output.is_function_error() {
+        return Ok(malformed_proxy_response());
+    }
+
     // Parse Lambda response
     let response_json: serde_json::Value =
-        serde_json::from_slice(&response_bytes).map_err(|e| {
+        serde_json::from_slice(&output.payload).map_err(|e| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_GATEWAY,
                 "BadGatewayException",
@@ -301,27 +308,6 @@ pub async fn invoke_lambda(
         })?;
 
     parse_lambda_response(response_json, payload_v2)
-}
-
-/// True when a proxied Lambda response is actually a **function-error**
-/// envelope rather than a proxy response. A handler that throws makes the
-/// Lambda runtime reply HTTP 200 with a body shaped like
-/// `{"errorMessage": "...", "errorType": "...", "stackTrace": [...]}` and
-/// no `statusCode`.
-///
-/// The guard requires BOTH `errorType` AND `errorMessage` as strings AND
-/// the absence of `statusCode` — exactly the check the Lambda `Invoke`
-/// handler and StepFunctions interpreter use. That avoids over-rejecting a
-/// SUCCESSFUL Lambda whose 200 body legitimately carries an `errorMessage`
-/// field: such a response either sets `statusCode` (proxy response) or is a
-/// plain simple-response object, so it will not trip all three conditions.
-fn is_function_error_envelope(response: &serde_json::Value) -> bool {
-    let Some(obj) = response.as_object() else {
-        return false;
-    };
-    obj.get("errorType").and_then(|v| v.as_str()).is_some()
-        && obj.get("errorMessage").and_then(|v| v.as_str()).is_some()
-        && !obj.contains_key("statusCode")
 }
 
 /// AWS's response for a malformed proxy response or a Lambda function
@@ -345,19 +331,12 @@ fn malformed_proxy_response() -> AwsResponse {
 /// - `false` (payload format 1.0, REST-shaped): `statusCode` is required;
 ///   its absence is a malformed proxy response and maps to HTTP 502.
 ///
-/// A function-error envelope (see [`is_function_error_envelope`]) always
-/// maps to HTTP 502 regardless of `payload_v2`.
+/// Function errors never get here: [`invoke_lambda`] maps them to HTTP 502
+/// from the invocation's function-error flag.
 fn parse_lambda_response(
     response: serde_json::Value,
     payload_v2: bool,
 ) -> Result<AwsResponse, AwsServiceError> {
-    // A thrown handler surfaces as a 200 error envelope with no statusCode.
-    // Detect it BEFORE the simple-response branch so a function error never
-    // gets echoed back to the client as a successful 200.
-    if is_function_error_envelope(&response) {
-        return Ok(malformed_proxy_response());
-    }
-
     if response.get("statusCode").is_none() {
         if payload_v2 {
             // Payload format 2.0 simple response: no statusCode -> 200 with
@@ -666,24 +645,15 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_lambda_response_function_error_is_502() {
-        // A thrown handler: 200 body with errorType+errorMessage and no
-        // statusCode. Maps to 502 regardless of payload format, and MUST
-        // take priority over the 2.0 simple-response branch.
-        let envelope = json!({
-            "errorMessage": "boom",
-            "errorType": "RuntimeError",
-            "stackTrace": ["line 1"],
-        });
-        for payload_v2 in [true, false] {
-            let r = parse_lambda_response(envelope.clone(), payload_v2).unwrap();
-            assert_eq!(r.status, StatusCode::BAD_GATEWAY, "payload_v2={payload_v2}");
-            assert_eq!(r.content_type, "application/json");
-            assert_eq!(
-                r.body.expect_bytes(),
-                br#"{"message":"Internal server error"}"#.as_slice()
-            );
-        }
+    fn test_parse_lambda_response_v2_error_shaped_success_is_simple_response() {
+        // A function that RETURNS an object with errorType/errorMessage (no
+        // function error) is a 2.0 simple response, not a failure; only the
+        // invocation's function-error flag maps to 502.
+        let value = json!({"errorType": "Validation", "errorMessage": "bad input"});
+        let r = parse_lambda_response(value.clone(), true).unwrap();
+        assert_eq!(r.status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(r.body.expect_bytes()).unwrap();
+        assert_eq!(body, value);
     }
 
     #[test]

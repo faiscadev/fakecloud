@@ -574,7 +574,6 @@ pub(crate) fn deliver_notification_batch(
                     delivery.publish_to_sns(&target.arn, &message, Some("Amazon S3 Notification"));
                 }
                 NotificationTargetType::Lambda => {
-                    let delivery = delivery.clone();
                     let function_arn = target.arn.clone();
                     let payload = message;
                     // Objects other services deliver can be written from a
@@ -587,33 +586,30 @@ pub(crate) fn deliver_notification_batch(
                         );
                         continue;
                     };
-                    runtime.spawn(async move {
-                        tracing::info!(
-                            function_arn = %function_arn,
-                            "S3 invoking Lambda function for notification"
-                        );
-                        match delivery.invoke_lambda(&function_arn, &payload).await {
-                            Some(Ok(_)) => {
-                                tracing::info!(
-                                    function_arn = %function_arn,
-                                    "S3->Lambda invocation succeeded"
-                                );
-                            }
-                            Some(Err(e)) => {
-                                tracing::error!(
-                                    function_arn = %function_arn,
-                                    error = %e,
-                                    "S3->Lambda invocation failed"
-                                );
-                            }
-                            None => {
-                                tracing::warn!(
-                                    function_arn = %function_arn,
-                                    "No Lambda delivery configured"
-                                );
-                            }
+                    // S3 invokes the function asynchronously; a function
+                    // error is Lambda's to retry and route, not S3's.
+                    let _entered = runtime.enter();
+                    match delivery.invoke_lambda_async(&function_arn, &payload) {
+                        Some(Ok(())) => {
+                            tracing::info!(
+                                function_arn = %function_arn,
+                                "S3->Lambda notification queued"
+                            );
                         }
-                    });
+                        Some(Err(e)) => {
+                            tracing::error!(
+                                function_arn = %function_arn,
+                                error = %e,
+                                "S3->Lambda invocation failed"
+                            );
+                        }
+                        None => {
+                            tracing::warn!(
+                                function_arn = %function_arn,
+                                "No Lambda delivery configured"
+                            );
+                        }
+                    }
                 }
             }
         }

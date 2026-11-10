@@ -1471,19 +1471,21 @@ fn fail_state_with_explicit_error_and_cause() {
 
 // ── Task: lambda:invoke integration — function errors, transport, envelope ──
 
-use fakecloud_core::delivery::{DeliveryBus, LambdaDelivery};
+use fakecloud_core::delivery::{DeliveryBus, LambdaDelivery, LambdaInvocationOutput};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Stub `LambdaDelivery` that returns canned results, one per call. Once the
 /// canned list is exhausted it repeats the last entry — so "fail once, then
 /// succeed forever" needs only two entries.
 struct StubLambda {
-    responses: Vec<Result<Vec<u8>, String>>,
+    responses: Vec<Result<LambdaInvocationOutput, String>>,
     calls: Arc<AtomicUsize>,
 }
 
 impl StubLambda {
-    fn bus(responses: Vec<Result<Vec<u8>, String>>) -> (Arc<DeliveryBus>, Arc<AtomicUsize>) {
+    fn bus(
+        responses: Vec<Result<LambdaInvocationOutput, String>>,
+    ) -> (Arc<DeliveryBus>, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let stub = Arc::new(StubLambda {
             responses,
@@ -1498,14 +1500,16 @@ impl LambdaDelivery for StubLambda {
         &self,
         _function_arn: &str,
         _payload: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<LambdaInvocationOutput, String>> + Send>,
+    > {
         let idx = self.calls.fetch_add(1, Ordering::SeqCst);
         let resp = self
             .responses
             .get(idx)
             .or_else(|| self.responses.last())
             .cloned()
-            .unwrap_or_else(|| Ok(b"{}".to_vec()));
+            .unwrap_or_else(|| Ok(LambdaInvocationOutput::success(b"{}".to_vec())));
         Box::pin(async move { resp })
     }
 }
@@ -1556,9 +1560,9 @@ fn lambda_invoke_def(extra: Value) -> Value {
 fn lambda_function_error_fails_task_with_error_type() {
     let state = make_state();
     let arn = arn_for("lambda-fn-error");
-    let (bus, calls) = StubLambda::bus(vec![Ok(
+    let (bus, calls) = StubLambda::bus(vec![Ok(LambdaInvocationOutput::unhandled(
         br#"{"errorMessage":"boom","errorType":"MyCustomError","stackTrace":[]}"#.to_vec(),
-    )]);
+    ))]);
     drive_with_delivery(&state, &arn, lambda_invoke_def(json!({})), Some("{}"), bus);
 
     read_exec(&state, &arn, |exec| {
@@ -1575,8 +1579,10 @@ fn lambda_retry_on_custom_error_type_succeeds() {
     let state = make_state();
     let arn = arn_for("lambda-retry");
     let (bus, calls) = StubLambda::bus(vec![
-        Ok(br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec()),
-        Ok(br#"{"ok":true}"#.to_vec()),
+        Ok(LambdaInvocationOutput::unhandled(
+            br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec(),
+        )),
+        Ok(LambdaInvocationOutput::success(br#"{"ok":true}"#.to_vec())),
     ]);
     let def = lambda_invoke_def(json!({
         "Retry": [{ "ErrorEquals": ["MyCustomError"], "MaxAttempts": 2, "IntervalSeconds": 0 }]
@@ -1594,9 +1600,9 @@ fn lambda_retry_on_custom_error_type_succeeds() {
 fn lambda_catch_on_custom_error_type_routes() {
     let state = make_state();
     let arn = arn_for("lambda-catch");
-    let (bus, _calls) = StubLambda::bus(vec![Ok(
+    let (bus, _calls) = StubLambda::bus(vec![Ok(LambdaInvocationOutput::unhandled(
         br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec(),
-    )]);
+    ))]);
     let def = lambda_invoke_def(json!({
         "Catch": [{ "ErrorEquals": ["MyCustomError"], "Next": "Handler", "ResultPath": "$.err" }]
     }));
@@ -1622,7 +1628,7 @@ fn lambda_transport_error_is_lambda_unknown_and_retryable() {
     let arn = arn_for("lambda-transport-retry");
     let (bus, calls) = StubLambda::bus(vec![
         Err("invocation failed: error sending request for url".to_string()),
-        Ok(br#"{"ok":true}"#.to_vec()),
+        Ok(LambdaInvocationOutput::success(br#"{"ok":true}"#.to_vec())),
     ]);
     let def = lambda_invoke_def(json!({
         "Retry": [{ "ErrorEquals": ["Lambda.Unknown"], "MaxAttempts": 2, "IntervalSeconds": 0 }]
@@ -1656,9 +1662,9 @@ fn lambda_transport_error_fails_as_lambda_unknown() {
 fn lambda_catch_on_states_task_failed_wildcard_routes() {
     let state = make_state();
     let arn = arn_for("lambda-taskfailed-wildcard");
-    let (bus, _calls) = StubLambda::bus(vec![Ok(
+    let (bus, _calls) = StubLambda::bus(vec![Ok(LambdaInvocationOutput::unhandled(
         br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec(),
-    )]);
+    ))]);
     let def = lambda_invoke_def(json!({
         "Catch": [{
             "ErrorEquals": ["States.TaskFailed"],
@@ -1685,8 +1691,10 @@ fn lambda_retry_on_states_task_failed_wildcard() {
     let state = make_state();
     let arn = arn_for("lambda-taskfailed-retry");
     let (bus, calls) = StubLambda::bus(vec![
-        Ok(br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec()),
-        Ok(br#"{"ok":true}"#.to_vec()),
+        Ok(LambdaInvocationOutput::unhandled(
+            br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec(),
+        )),
+        Ok(LambdaInvocationOutput::success(br#"{"ok":true}"#.to_vec())),
     ]);
     let def = lambda_invoke_def(json!({
         "Retry": [{ "ErrorEquals": ["States.TaskFailed"], "MaxAttempts": 2, "IntervalSeconds": 0 }]
@@ -1737,7 +1745,9 @@ fn long_loop_exceeds_old_ceiling_completes() {
 fn lambda_invoke_wraps_result_in_envelope() {
     let state = make_state();
     let arn = arn_for("lambda-envelope");
-    let (bus, _calls) = StubLambda::bus(vec![Ok(br#"{"answer":42}"#.to_vec())]);
+    let (bus, _calls) = StubLambda::bus(vec![Ok(LambdaInvocationOutput::success(
+        br#"{"answer":42}"#.to_vec(),
+    ))]);
     let def = lambda_invoke_def(json!({
         "ResultSelector": { "value.$": "$.Payload", "status.$": "$.StatusCode" }
     }));
@@ -1757,7 +1767,9 @@ fn lambda_invoke_wraps_result_in_envelope() {
 fn lambda_direct_arn_is_not_wrapped() {
     let state = make_state();
     let arn = arn_for("lambda-direct");
-    let (bus, _calls) = StubLambda::bus(vec![Ok(br#"{"answer":42}"#.to_vec())]);
+    let (bus, _calls) = StubLambda::bus(vec![Ok(LambdaInvocationOutput::success(
+        br#"{"answer":42}"#.to_vec(),
+    ))]);
     let def = json!({
         "StartAt": "T",
         "States": {
@@ -1784,7 +1796,9 @@ fn lambda_plain_payloads_pass_through() {
     // Object containing only one of the error field names is NOT an error.
     let state = make_state();
     let arn = arn_for("lambda-one-key");
-    let (bus, _c) = StubLambda::bus(vec![Ok(br#"{"errorType":"NotReallyAnError"}"#.to_vec())]);
+    let (bus, _c) = StubLambda::bus(vec![Ok(LambdaInvocationOutput::success(
+        br#"{"errorType":"NotReallyAnError"}"#.to_vec(),
+    ))]);
     drive_with_delivery(&state, &arn, lambda_invoke_def(json!({})), Some("{}"), bus);
     read_exec(&state, &arn, |exec| {
         assert_eq!(exec.status, ExecutionStatus::Succeeded);
@@ -1795,12 +1809,77 @@ fn lambda_plain_payloads_pass_through() {
     // A bare string payload passes through inside the envelope.
     let state = make_state();
     let arn = arn_for("lambda-string");
-    let (bus, _c) = StubLambda::bus(vec![Ok(b"\"hello\"".to_vec())]);
+    let (bus, _c) = StubLambda::bus(vec![Ok(LambdaInvocationOutput::success(
+        b"\"hello\"".to_vec(),
+    ))]);
     drive_with_delivery(&state, &arn, lambda_invoke_def(json!({})), Some("{}"), bus);
     read_exec(&state, &arn, |exec| {
         assert_eq!(exec.status, ExecutionStatus::Succeeded);
         let output: Value = serde_json::from_str(exec.output.as_ref().unwrap()).unwrap();
         assert_eq!(output["Payload"], json!("hello"));
+    });
+}
+
+// The function-error flag, not the payload shape, decides failure: a
+// function that legitimately returns an object carrying both error field
+// names succeeds.
+#[test]
+fn lambda_error_shaped_success_payload_succeeds() {
+    let state = make_state();
+    let arn = arn_for("lambda-error-shaped-ok");
+    let (bus, _c) = StubLambda::bus(vec![Ok(LambdaInvocationOutput::success(
+        br#"{"errorType":"Validation","errorMessage":"field x is required"}"#.to_vec(),
+    ))]);
+    drive_with_delivery(&state, &arn, lambda_invoke_def(json!({})), Some("{}"), bus);
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        let output: Value = serde_json::from_str(exec.output.as_ref().unwrap()).unwrap();
+        assert_eq!(output["Payload"]["errorType"], json!("Validation"));
+    });
+}
+
+// A function error whose payload names no `errorType` (an older runtime's
+// timeout/crash, `{"errorMessage": ...}`) fails as `Lambda.Unknown`, with
+// Step Functions' explanation of the missing type quoting the payload.
+#[test]
+fn lambda_untyped_function_error_is_lambda_unknown() {
+    let state = make_state();
+    let arn = arn_for("lambda-untyped-error");
+    let (bus, _c) = StubLambda::bus(vec![Ok(LambdaInvocationOutput::unhandled(
+        br#"{"errorMessage":"2026-11-10T00:00:00.000Z abc Task timed out after 3.00 seconds"}"#
+            .to_vec(),
+    ))]);
+    drive_with_delivery(&state, &arn, lambda_invoke_def(json!({})), Some("{}"), bus);
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Failed);
+        assert_eq!(exec.error.as_deref(), Some("Lambda.Unknown"));
+        let cause = exec.cause.as_deref().unwrap();
+        assert!(
+            cause.starts_with(
+                "The cause could not be determined because Lambda did not return an error type. Returned payload: "
+            ),
+            "{cause}"
+        );
+        assert!(
+            cause.contains("Task timed out after 3.00 seconds"),
+            "{cause}"
+        );
+    });
+}
+
+// A timeout reported by a current runtime carries `Sandbox.Timedout`.
+#[test]
+fn lambda_sandbox_timeout_surfaces_its_error_type() {
+    let state = make_state();
+    let arn = arn_for("lambda-sandbox-timeout");
+    let (bus, _c) = StubLambda::bus(vec![Ok(LambdaInvocationOutput::unhandled(
+        br#"{"errorType":"Sandbox.Timedout","errorMessage":"RequestId: r Error: Task timed out after 3.00 seconds"}"#
+            .to_vec(),
+    ))]);
+    drive_with_delivery(&state, &arn, lambda_invoke_def(json!({})), Some("{}"), bus);
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Failed);
+        assert_eq!(exec.error.as_deref(), Some("Sandbox.Timedout"));
     });
 }
 
@@ -2200,9 +2279,13 @@ fn task_parameters_reevaluated_per_retry_attempt() {
     let state = make_state();
     let arn = arn_for("task-retry-count");
     let (bus, _calls) = StubLambda::bus(vec![
-        Ok(br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec()),
-        Ok(br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec()),
-        Ok(br#"{"ok":true}"#.to_vec()),
+        Ok(LambdaInvocationOutput::unhandled(
+            br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec(),
+        )),
+        Ok(LambdaInvocationOutput::unhandled(
+            br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec(),
+        )),
+        Ok(LambdaInvocationOutput::success(br#"{"ok":true}"#.to_vec())),
     ]);
     let def = lambda_invoke_def(json!({
         "Parameters": {"FunctionName": "fn", "Payload": {"retry.$": "$$.State.RetryCount"}},

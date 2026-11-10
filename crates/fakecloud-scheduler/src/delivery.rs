@@ -46,16 +46,13 @@ pub fn deliver_target(bus: &Arc<DeliveryBus>, schedule: &Schedule) -> Result<(),
     }
 
     if arn.contains(":lambda:") {
-        // Fire-and-forget async invocation. A proper implementation
-        // would await the future, but DeliveryBus::invoke_lambda is
-        // async and we're called from the synchronous tick loop.
-        let bus = bus.clone();
-        let arn = arn.clone();
-        let body = body.to_string();
-        tokio::spawn(async move {
-            let _ = bus.invoke_lambda(&arn, &body).await;
-        });
-        return Ok(());
+        // Scheduler invokes the function asynchronously: the target
+        // succeeded once Lambda queued the event; a function error is then
+        // retried and routed by Lambda's async error handling.
+        return match bus.invoke_lambda_async(arn, body) {
+            Some(Ok(())) | None => Ok(()),
+            Some(Err(e)) => Err(SqsDeliveryError::TargetUnavailable(e)),
+        };
     }
 
     if arn.contains(":states:") {

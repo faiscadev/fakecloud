@@ -795,8 +795,8 @@ impl CognitoService {
                         auth_context: claims.auth_context.clone(),
                     },
                 );
-                state.refresh_tokens.remove(refresh_token);
-                Some(new_token)
+                let replaced = state.refresh_tokens.remove(refresh_token);
+                Some((new_token, replaced))
             } else {
                 None
             };
@@ -830,13 +830,27 @@ impl CognitoService {
                     &region,
                     &account_id,
                 );
-                crate::triggers::invoke_trigger(ctx, &function_arn, &event).await
+                let outcome = crate::triggers::invoke_trigger(ctx, &function_arn, &event).await;
+                if outcome.is_err() {
+                    // The call fails, so the rotation must not take effect:
+                    // the caller keeps its refresh token.
+                    if let Some((new_token, Some(old))) = rotated_refresh.as_ref() {
+                        let mut accounts = self.state.write();
+                        let state = accounts.get_or_create(&req.account_id);
+                        state.refresh_tokens.remove(new_token);
+                        state
+                            .refresh_tokens
+                            .insert(refresh_token.to_string(), old.clone());
+                    }
+                }
+                outcome?
             } else {
                 None
             }
         } else {
             None
         };
+        let rotated_refresh = rotated_refresh.map(|(new_token, _)| new_token);
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);

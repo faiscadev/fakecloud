@@ -19,7 +19,7 @@ impl CognitoService {
                 )
             })?;
 
-        let (pool_id, sub, user, region, account_id) = {
+        let (pool_id, sub, user, region, account_id, sign_up_event_id) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
 
@@ -95,8 +95,9 @@ impl CognitoService {
             let region = state.region.clone();
             let account_id = state.account_id.clone();
 
+            let sign_up_event_id = Uuid::new_v4().to_string();
             state.auth_events.push(AuthEvent {
-                event_id: Uuid::new_v4().to_string(),
+                event_id: sign_up_event_id.clone(),
                 event_type: "SIGN_UP".to_string(),
                 username: username.to_string(),
                 user_pool_id: pool_id.clone(),
@@ -106,7 +107,7 @@ impl CognitoService {
                 feedback_value: None,
             });
 
-            (pool_id, sub, user, region, account_id)
+            (pool_id, sub, user, region, account_id, sign_up_event_id)
         };
 
         // PreSignUp_SignUp trigger (synchronous — response can auto-confirm)
@@ -124,7 +125,18 @@ impl CognitoService {
                     &region,
                     &account_id,
                 );
-                if let Some(response) = triggers::invoke_trigger(ctx, &function_arn, &event).await {
+                let outcome = triggers::invoke_trigger(ctx, &function_arn, &event).await;
+                if outcome.is_err() {
+                    // A failing PreSignUp trigger means no user is created
+                    // and the sign-up did not succeed.
+                    let mut accounts = self.state.write();
+                    let state = accounts.get_or_create(&req.account_id);
+                    if let Some(users) = state.users.get_mut(&pool_id) {
+                        users.remove(username);
+                    }
+                    state.auth_events.retain(|e| e.event_id != sign_up_event_id);
+                }
+                if let Some(response) = outcome? {
                     if response["response"]["autoConfirmUser"].as_bool() == Some(true) {
                         auto_confirm = true;
                     }

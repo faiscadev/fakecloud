@@ -226,15 +226,101 @@ pub trait EventBridgeDelivery: Send + Sync {
     fn put_event(&self, event: &CrossServiceEvent<'_>) -> Result<String, EventBridgeDeliveryError>;
 }
 
+/// The `X-Amz-Function-Error` value Lambda reports for a function error:
+/// the handler threw, the runtime crashed or exited, init failed, or the
+/// invocation timed out. (`Handled` is only used by the retired Node.js
+/// 0.10 callback-error convention.)
+pub const FUNCTION_ERROR_UNHANDLED: &str = "Unhandled";
+
+/// What a synchronous Lambda invocation produced: the response payload and,
+/// when the function failed, the `X-Amz-Function-Error` value. This is the
+/// signal real Lambda gives (`Invoke` still returns 200); integrations must
+/// branch on `function_error`, never on the payload's shape, because a
+/// function may legitimately return an object carrying `errorType` /
+/// `errorMessage`, and some failures (a timeout reported without an
+/// `errorType` by older runtimes) carry only one of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LambdaInvocationOutput {
+    /// The response payload. For a function error this is the error object
+    /// (`{"errorType", "errorMessage", ...}`) the runtime reported.
+    pub payload: Vec<u8>,
+    /// `Some("Unhandled")` when the invocation produced a function error.
+    pub function_error: Option<String>,
+}
+
+impl LambdaInvocationOutput {
+    /// A successful invocation that returned `payload`.
+    pub fn success(payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            payload: payload.into(),
+            function_error: None,
+        }
+    }
+
+    /// An invocation that failed with a function error reported as `payload`.
+    pub fn unhandled(payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            payload: payload.into(),
+            function_error: Some(FUNCTION_ERROR_UNHANDLED.to_string()),
+        }
+    }
+
+    /// True when the function failed (`X-Amz-Function-Error` was set).
+    pub fn is_function_error(&self) -> bool {
+        self.function_error.is_some()
+    }
+
+    /// The error object's `errorType`, for a function error whose payload
+    /// names one. `None` for a success or an error payload without a type.
+    pub fn error_type(&self) -> Option<String> {
+        self.error_field("errorType")
+    }
+
+    /// The error object's `errorMessage`, for a function error whose payload
+    /// carries one.
+    pub fn error_message(&self) -> Option<String> {
+        self.error_field("errorMessage")
+    }
+
+    fn error_field(&self, key: &str) -> Option<String> {
+        if !self.is_function_error() {
+            return None;
+        }
+        serde_json::from_slice::<serde_json::Value>(&self.payload)
+            .ok()?
+            .get(key)?
+            .as_str()
+            .map(str::to_string)
+    }
+}
+
 /// Trait for invoking Lambda functions from cross-service integrations.
 pub trait LambdaDelivery: Send + Sync {
-    /// Invoke a Lambda function with the given payload.
-    /// The function is identified by ARN. Returns the response bytes on success.
+    /// Invoke a Lambda function with the given payload, synchronously
+    /// (`RequestResponse`). The function is identified by ARN. `Ok` means
+    /// Lambda ran the invocation; a function error is reported in the
+    /// output's `function_error`, not as `Err`. `Err` is a failure to invoke
+    /// at all (function not found, no deployment package, runtime
+    /// unavailable).
     fn invoke_lambda(
         &self,
         function_arn: &str,
         payload: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>;
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<LambdaInvocationOutput, String>> + Send>,
+    >;
+
+    /// Queue an asynchronous (`Event`) invocation, as S3, SNS, EventBridge
+    /// and Scheduler invoke functions. `Ok` once Lambda accepted the event;
+    /// a function error is then handled by Lambda itself (retries,
+    /// `MaximumEventAge`, `OnSuccess`/`OnFailure` destinations, dead-letter
+    /// queue) and never reaches the caller. `Err` when the event could not
+    /// be queued (function not found, no deployment package), which the
+    /// caller treats as a failed delivery.
+    fn invoke_lambda_async(&self, function_arn: &str, payload: &str) -> Result<(), String> {
+        let _ = (function_arn, payload);
+        Err("this Lambda invoker does not support asynchronous invocation".to_string())
+    }
 }
 
 /// Trait for putting records to Kinesis Data Streams.
@@ -1042,12 +1128,25 @@ impl DeliveryBus {
         &self,
         function_arn: &str,
         payload: &str,
-    ) -> Option<Result<Vec<u8>, String>> {
+    ) -> Option<Result<LambdaInvocationOutput, String>> {
         if let Some(ref invoker) = self.lambda_invoker {
             Some(invoker.invoke_lambda(function_arn, payload).await)
         } else {
             None
         }
+    }
+
+    /// Queue an asynchronous (`Event`) invocation of the function
+    /// `function_arn` names (see [`LambdaDelivery::invoke_lambda_async`]).
+    /// `None` when no Lambda invoker is wired.
+    pub fn invoke_lambda_async(
+        &self,
+        function_arn: &str,
+        payload: &str,
+    ) -> Option<Result<(), String>> {
+        self.lambda_invoker
+            .as_ref()
+            .map(|invoker| invoker.invoke_lambda_async(function_arn, payload))
     }
 
     /// Put a record to a Kinesis stream identified by ARN.
@@ -1277,6 +1376,31 @@ mod tests {
         assert_eq!(eb.call_count.load(Ordering::SeqCst), 1);
         assert_eq!(kin.call_count.load(Ordering::SeqCst), 1);
         assert_eq!(sfn.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn invoke_lambda_async_returns_none_without_invoker() {
+        let bus = DeliveryBus::new();
+        assert!(bus.invoke_lambda_async("arn:lambda", "{}").is_none());
+    }
+
+    #[test]
+    fn invocation_output_reads_error_fields_only_for_function_errors() {
+        let shaped = br#"{"errorType":"X","errorMessage":"m"}"#;
+        let ok = LambdaInvocationOutput::success(shaped.to_vec());
+        assert!(!ok.is_function_error());
+        assert_eq!(ok.error_type(), None);
+        assert_eq!(ok.error_message(), None);
+
+        let failed = LambdaInvocationOutput::unhandled(shaped.to_vec());
+        assert_eq!(failed.function_error.as_deref(), Some("Unhandled"));
+        assert_eq!(failed.error_type().as_deref(), Some("X"));
+        assert_eq!(failed.error_message().as_deref(), Some("m"));
+
+        let untyped =
+            LambdaInvocationOutput::unhandled(br#"{"errorMessage":"timed out"}"#.to_vec());
+        assert_eq!(untyped.error_type(), None);
+        assert_eq!(untyped.error_message().as_deref(), Some("timed out"));
     }
 
     #[tokio::test]

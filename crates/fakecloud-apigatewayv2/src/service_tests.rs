@@ -1419,8 +1419,10 @@ async fn execute_api_jwt_authorizer_no_delivery_returns_500() {
 
 // ─── Lambda authorizer tests ───────────────────────────────────────
 
+use fakecloud_core::delivery::LambdaInvocationOutput;
+
 struct MockLambdaInvoker {
-    response: Result<Vec<u8>, String>,
+    response: Result<LambdaInvocationOutput, String>,
 }
 
 impl fakecloud_core::delivery::LambdaDelivery for MockLambdaInvoker {
@@ -1428,13 +1430,22 @@ impl fakecloud_core::delivery::LambdaDelivery for MockLambdaInvoker {
         &self,
         _function_arn: &str,
         _payload: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<LambdaInvocationOutput, String>> + Send>,
+    > {
         let res = self.response.clone();
         Box::pin(async move { res })
     }
 }
 
+/// A service whose Lambda returns `response` as a successful invocation.
 fn make_svc_with_lambda(response: Result<Vec<u8>, String>) -> ApiGatewayV2Service {
+    make_svc_with_lambda_output(response.map(LambdaInvocationOutput::success))
+}
+
+fn make_svc_with_lambda_output(
+    response: Result<LambdaInvocationOutput, String>,
+) -> ApiGatewayV2Service {
     let state = make_state();
     let delivery = Arc::new(
         fakecloud_core::delivery::DeliveryBus::new()
@@ -3789,4 +3800,149 @@ async fn get_apis_pages_by_next_token() {
 
     let err = expect_err(svc.handle(list(&[("nextToken", "bogus")])).await);
     assert_eq!(err.code(), "BadRequestException");
+}
+
+// ── Lambda function errors (X-Amz-Function-Error) ──
+
+/// `POST` a control-plane resource and return its `id_field`.
+async fn post_id(
+    svc: &ApiGatewayV2Service,
+    path: &str,
+    body: serde_json::Value,
+    id_field: &str,
+) -> String {
+    let resp = svc
+        .handle(make_request(Method::POST, path, &body.to_string()))
+        .await
+        .unwrap();
+    body_json(&resp)[id_field]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// An HTTP API with `GET /pets` on stage `prod` routed to a Lambda proxy
+/// integration, optionally behind a REQUEST Lambda authorizer (then the
+/// route's integration is MOCK).
+async fn function_error_api(svc: &ApiGatewayV2Service, with_authorizer: bool) {
+    let api_id = create_api(svc);
+    let integration = if with_authorizer {
+        serde_json::json!({"integrationType": "MOCK"})
+    } else {
+        serde_json::json!({
+            "integrationType": "AWS_PROXY",
+            "integrationUri": "arn:aws:lambda:us-east-1:123456789012:function:backend",
+            "payloadFormatVersion": "2.0",
+        })
+    };
+    let integration_id = post_id(
+        svc,
+        &format!("/v2/apis/{api_id}/integrations"),
+        integration,
+        "integrationId",
+    )
+    .await;
+    let mut route = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+    });
+    if with_authorizer {
+        let auth_id = post_id(
+            svc,
+            &format!("/v2/apis/{api_id}/authorizers"),
+            serde_json::json!({
+                "name": "lambda-auth",
+                "authorizerType": "REQUEST",
+                "identitySource": ["$request.header.Authorization"],
+                "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:authorizer/invocations"
+            }),
+            "authorizerId",
+        )
+        .await;
+        route["authorizerId"] = serde_json::json!(auth_id);
+    }
+    post_id(svc, &format!("/v2/apis/{api_id}/routes"), route, "routeId").await;
+    post_id(
+        svc,
+        &format!("/v2/apis/{api_id}/stages"),
+        serde_json::json!({"stageName": "prod"}),
+        "stageName",
+    )
+    .await;
+}
+
+fn pets_request() -> AwsRequest {
+    let mut req = make_request(Method::GET, "/prod/pets", "");
+    req.headers
+        .insert("Authorization", "Bearer tok".parse().unwrap());
+    req
+}
+
+#[tokio::test]
+async fn execute_api_backend_function_error_is_502() {
+    let svc = make_svc_with_lambda_output(Ok(LambdaInvocationOutput::unhandled(
+        serde_json::json!({"errorType": "Error", "errorMessage": "boom"})
+            .to_string()
+            .into_bytes(),
+    )));
+    function_error_api(&svc, false).await;
+    let resp = svc.handle(pets_request()).await.unwrap();
+    assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn execute_api_backend_error_shaped_success_is_a_simple_response() {
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({
+        "errorType": "Validation",
+        "errorMessage": "bad input"
+    })
+    .to_string()
+    .into_bytes()));
+    function_error_api(&svc, false).await;
+    let resp = svc.handle(pets_request()).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(body_json(&resp)["errorType"], "Validation");
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_throwing_unauthorized_returns_401() {
+    let svc = make_svc_with_lambda_output(Ok(LambdaInvocationOutput::unhandled(
+        serde_json::json!({"errorType": "Error", "errorMessage": "Unauthorized"})
+            .to_string()
+            .into_bytes(),
+    )));
+    function_error_api(&svc, true).await;
+    let err = expect_err(svc.handle(pets_request()).await);
+    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_returning_unauthorized_returns_401() {
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({"errorMessage": "Unauthorized"})
+        .to_string()
+        .into_bytes()));
+    function_error_api(&svc, true).await;
+    let err = expect_err(svc.handle(pets_request()).await);
+    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_function_error_returns_500() {
+    let svc = make_svc_with_lambda_output(Ok(LambdaInvocationOutput::unhandled(
+        serde_json::json!({"errorType": "TypeError", "errorMessage": "x is undefined"})
+            .to_string()
+            .into_bytes(),
+    )));
+    function_error_api(&svc, true).await;
+    let err = expect_err(svc.handle(pets_request()).await);
+    assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(err.message(), "Internal Server Error");
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_invoke_failure_returns_500() {
+    let svc = make_svc_with_lambda(Err("Function not found: authorizer".to_string()));
+    function_error_api(&svc, true).await;
+    let err = expect_err(svc.handle(pets_request()).await);
+    assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }

@@ -131,12 +131,15 @@ pub(super) async fn run_lambda_authorizer(
     let delivery = service
         .delivery()
         .ok_or_else(|| bad_gateway("Lambda delivery not configured"))?;
-    let response_bytes = delivery
+    let output = delivery
         .invoke_lambda(&function_arn, &event.to_string())
         .await
         .ok_or_else(|| bad_gateway("Lambda delivery not configured"))?
-        .map_err(|e| forbidden(format!("Authorizer Lambda failed: {e}")))?;
-    let response: serde_json::Value = serde_json::from_slice(&response_bytes)
+        .map_err(|e| authorizer_configuration_error(format!("Authorizer Lambda failed: {e}")))?;
+    if output.is_function_error() {
+        return Err(authorizer_function_error(&output));
+    }
+    let response: serde_json::Value = serde_json::from_slice(&output.payload)
         .map_err(|e| forbidden(format!("Authorizer returned invalid JSON: {e}")))?;
 
     let principal_id = response
@@ -324,12 +327,29 @@ pub(crate) async fn test_invoke_authorizer_eval(
             let delivery = service
                 .delivery()
                 .ok_or_else(|| bad_gateway("Lambda delivery not configured"))?;
-            let response_bytes = delivery
+            let output = delivery
                 .invoke_lambda(&function_arn, &event.to_string())
                 .await
                 .ok_or_else(|| bad_gateway("Lambda delivery not configured"))?
                 .map_err(|e| bad_gateway(format!("Authorizer Lambda failed: {e}")))?;
-            let response: serde_json::Value = serde_json::from_slice(&response_bytes)
+            if output.is_function_error() {
+                // The authorizer threw: `Unauthorized` is a 401, anything
+                // else an authorizer configuration error (500).
+                let unauthorized = is_unauthorized_error(&output);
+                return Ok(json!({
+                    "clientStatus": if unauthorized { 401 } else { 500 },
+                    "log": if unauthorized {
+                        "TestInvokeAuthorizer: Unauthorized"
+                    } else {
+                        "Execution failed due to configuration error: Authorizer error"
+                    },
+                    "latency": 0,
+                    "principalId": "",
+                    "authorization": {},
+                    "claims": {},
+                }));
+            }
+            let response: serde_json::Value = serde_json::from_slice(&output.payload)
                 .map_err(|e| bad_gateway(format!("Authorizer returned invalid JSON: {e}")))?;
 
             let principal_id = response
@@ -367,6 +387,38 @@ pub(crate) async fn test_invoke_authorizer_eval(
                 "claims": {},
             }))
         }
+    }
+}
+
+/// The error code API Gateway reports when a Lambda authorizer could not be
+/// run or failed (`AUTHORIZER_CONFIGURATION_ERROR`, HTTP 500).
+pub(super) const AUTHORIZER_CONFIGURATION_ERROR: &str = "AuthorizerConfigurationException";
+
+pub(super) fn authorizer_configuration_error(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        AUTHORIZER_CONFIGURATION_ERROR,
+        msg.into(),
+    )
+}
+
+/// A TOKEN/REQUEST authorizer that throws `Unauthorized` (Node
+/// `callback("Unauthorized")`, `throw new Error("Unauthorized")`, Python
+/// `raise Exception("Unauthorized")`) denies with 401.
+fn is_unauthorized_error(output: &fakecloud_core::delivery::LambdaInvocationOutput) -> bool {
+    output.error_message().as_deref() == Some("Unauthorized")
+}
+
+/// How API Gateway answers when a Lambda authorizer returned a function
+/// error: 401 `Unauthorized` for the conventional `Unauthorized` error, else
+/// a 500 authorizer configuration error.
+pub(super) fn authorizer_function_error(
+    output: &fakecloud_core::delivery::LambdaInvocationOutput,
+) -> AwsServiceError {
+    if is_unauthorized_error(output) {
+        unauthorized("Unauthorized")
+    } else {
+        authorizer_configuration_error("Authorizer error")
     }
 }
 

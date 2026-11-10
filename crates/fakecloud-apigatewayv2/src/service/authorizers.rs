@@ -581,7 +581,10 @@ impl ApiGatewayV2Service {
                 "Lambda delivery not configured",
             )
         })?;
-        let response_bytes = delivery
+        // HTTP API: an authorizer API Gateway can't invoke, or one that
+        // fails or answers in an invalid format, is a 500 Internal Server
+        // Error; an `Unauthorized` error is a 401.
+        let output = delivery
             .invoke_lambda(&function_arn, &event.to_string())
             .await
             .ok_or_else(|| {
@@ -592,19 +595,26 @@ impl ApiGatewayV2Service {
                 )
             })?
             .map_err(|e| {
-                AwsServiceError::aws_error(
-                    StatusCode::FORBIDDEN,
-                    "ForbiddenException",
-                    format!("Authorizer Lambda failed: {e}"),
-                )
+                tracing::warn!(%function_arn, error = %e, "HTTP API Lambda authorizer could not be invoked");
+                authorizer_internal_error()
             })?;
-        let response: serde_json::Value = serde_json::from_slice(&response_bytes).map_err(|e| {
-            AwsServiceError::aws_error(
-                StatusCode::FORBIDDEN,
-                "ForbiddenException",
-                format!("Authorizer returned invalid JSON: {e}"),
-            )
-        })?;
+        let response: serde_json::Value = match serde_json::from_slice(&output.payload) {
+            Ok(v) => v,
+            Err(_) if !output.is_function_error() => return Err(authorizer_internal_error()),
+            Err(_) => serde_json::Value::Null,
+        };
+        // "You can also directly return {"errorMessage" : "Unauthorized"}
+        // from your Lambda function to return a 401" (thrown or returned).
+        if response.get("errorMessage").and_then(|v| v.as_str()) == Some("Unauthorized") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::UNAUTHORIZED,
+                "UnauthorizedException",
+                "Unauthorized",
+            ));
+        }
+        if output.is_function_error() {
+            return Err(authorizer_internal_error());
+        }
 
         // v2 simple response: { "isAuthorized": true/false, "context": {...} }
         if let Some(is_authorized) = response.get("isAuthorized").and_then(|v| v.as_bool()) {
@@ -664,4 +674,14 @@ impl ApiGatewayV2Service {
             )),
         }
     }
+}
+
+/// The 500 an HTTP API answers when its Lambda authorizer can't be invoked,
+/// fails, or returns an invalid response.
+fn authorizer_internal_error() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "InternalServerErrorException",
+        "Internal Server Error",
+    )
 }

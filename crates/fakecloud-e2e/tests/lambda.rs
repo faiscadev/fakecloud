@@ -1569,13 +1569,14 @@ async fn lambda_account_settings_unreserved_concurrency_decrements() {
     );
 }
 
-// bug-audit 2026-06-27, T1.13: a handler that raises an exception (the runtime
-// catches it and returns the {errorMessage,errorType} envelope) must set
-// X-Amz-Function-Error: Handled, not Unhandled. (Lives in the `lambda` binary,
+// A handler that raises an exception is a function error: Invoke still
+// answers 200 and sets X-Amz-Function-Error: Unhandled, the value Lambda
+// reports for every current runtime ("Handled" belonged to the retired
+// Node.js 0.10 callback-error convention). (Lives in the `lambda` binary,
 // which the lambda-api partition covers in full, rather than the
 // runtime-name-partitioned `lambda_invoke` binary.)
 #[tokio::test]
-async fn lambda_handler_exception_is_handled_function_error() {
+async fn lambda_handler_exception_is_unhandled_function_error() {
     let server = TestServer::start().await;
     let client = server.lambda_client().await;
 
@@ -1612,16 +1613,171 @@ async fn lambda_handler_exception_is_handled_function_error() {
         .await
         .unwrap();
 
+    assert_eq!(resp.status_code(), 200);
     assert_eq!(
         resp.function_error(),
-        Some("Handled"),
-        "a raised handler exception is a Handled function error"
+        Some("Unhandled"),
+        "a raised handler exception is an Unhandled function error"
     );
     let body = String::from_utf8(resp.payload().unwrap().as_ref().to_vec()).unwrap();
     assert!(
         body.contains("errorMessage") || body.contains("errorType"),
         "error envelope in payload, got: {body}"
     );
+}
+
+/// Create a Python 3.12 function `name` whose `index.py` is `code`.
+async fn create_python_fn(
+    client: &aws_sdk_lambda::Client,
+    name: &str,
+    code: &str,
+    timeout: Option<i32>,
+) {
+    let zip = {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("index.py", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(code.as_bytes()).unwrap();
+        writer.finish().unwrap().into_inner()
+    };
+    let mut req = client
+        .create_function()
+        .function_name(name)
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(zip))
+                .build(),
+        );
+    if let Some(t) = timeout {
+        req = req.timeout(t);
+    }
+    req.send().await.unwrap();
+}
+
+// A timed-out invocation is a function error too: 200 + Unhandled with the
+// `Sandbox.Timedout` error object current runtimes report.
+#[tokio::test]
+async fn lambda_timeout_is_unhandled_sandbox_timedout() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    create_python_fn(
+        &client,
+        "sleeper",
+        "import time\ndef handler(event, context):\n    time.sleep(5)\n",
+        Some(1),
+    )
+    .await;
+    let resp = client
+        .invoke()
+        .function_name("sleeper")
+        .payload(Blob::new(b"{}".to_vec()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code(), 200);
+    assert_eq!(resp.function_error(), Some("Unhandled"));
+    let body: serde_json::Value = serde_json::from_slice(resp.payload().unwrap().as_ref()).unwrap();
+    assert_eq!(body["errorType"], "Sandbox.Timedout", "{body}");
+    let message = body["errorMessage"].as_str().unwrap();
+    assert!(message.starts_with("RequestId: "), "{message}");
+    assert!(
+        message.ends_with("Error: Task timed out after 1.00 seconds"),
+        "{message}"
+    );
+}
+
+// A runtime that exits mid-invocation is a function error reported as
+// `Runtime.ExitError`, not a 5xx from the Invoke API.
+#[tokio::test]
+async fn lambda_runtime_exit_is_unhandled_runtime_exit_error() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    create_python_fn(
+        &client,
+        "exiter",
+        "import os\ndef handler(event, context):\n    os._exit(3)\n",
+        None,
+    )
+    .await;
+    let resp = client
+        .invoke()
+        .function_name("exiter")
+        .payload(Blob::new(b"{}".to_vec()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code(), 200);
+    assert_eq!(resp.function_error(), Some("Unhandled"));
+    let body: serde_json::Value = serde_json::from_slice(resp.payload().unwrap().as_ref()).unwrap();
+    assert_eq!(body["errorType"], "Runtime.ExitError", "{body}");
+}
+
+// Step Functions fails a Lambda task whose function raised with the
+// function's errorType as the Error and the error payload as the Cause.
+#[tokio::test]
+async fn sfn_lambda_task_function_error_surfaces_error_type() {
+    let server = TestServer::start().await;
+    let lambda = server.lambda_client().await;
+    let sfn = server.sfn_client().await;
+    create_python_fn(
+        &lambda,
+        "sfn-raiser",
+        "def handler(event, context):\n    raise ValueError('bad input')\n",
+        None,
+    )
+    .await;
+    let def = serde_json::json!({
+        "StartAt": "Call",
+        "States": {
+            "Call": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "Parameters": {
+                    "FunctionName": "arn:aws:lambda:us-east-1:123456789012:function:sfn-raiser",
+                    "Payload": {}
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+    let sm = sfn
+        .create_state_machine()
+        .name("fn-error-sm")
+        .definition(def)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+    let exec = sfn
+        .start_execution()
+        .state_machine_arn(sm.state_machine_arn())
+        .send()
+        .await
+        .unwrap();
+    let mut desc = None;
+    for _ in 0..120 {
+        let d = sfn
+            .describe_execution()
+            .execution_arn(exec.execution_arn())
+            .send()
+            .await
+            .unwrap();
+        if d.status().as_str() != "RUNNING" {
+            desc = Some(d);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let desc = desc.expect("execution finished");
+    assert_eq!(desc.status().as_str(), "FAILED");
+    assert_eq!(desc.error(), Some("ValueError"));
+    let cause: serde_json::Value = serde_json::from_str(desc.cause().unwrap()).unwrap();
+    assert_eq!(cause["errorMessage"], "bad input");
 }
 
 #[tokio::test]

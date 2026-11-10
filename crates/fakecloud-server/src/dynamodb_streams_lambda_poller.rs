@@ -266,6 +266,16 @@ impl DynamoDbStreamsLambdaPoller {
 
             let invoke_succeeded = match &self.lambda_delivery {
                 Some(delivery) => match delivery.invoke_lambda(&function_arn, &payload).await {
+                    // A function error fails the batch: the checkpoint holds
+                    // and the records are retried.
+                    Ok(output) if output.is_function_error() => {
+                        tracing::warn!(
+                            function_arn = %function_arn,
+                            error = %String::from_utf8_lossy(&output.payload),
+                            "DynamoDB Streams->Lambda: function returned an error; batch will be retried"
+                        );
+                        false
+                    }
                     Ok(_) => {
                         tracing::info!(
                             function_arn = %function_arn,
@@ -545,6 +555,64 @@ mod tests {
             invocation_count(&lambda_state, OTHER),
             1,
             "cross-account mapping must fire"
+        );
+    }
+
+    /// A function that answers every invocation with a function error.
+    struct FailingLambda(parking_lot::Mutex<usize>);
+
+    impl LambdaDelivery for FailingLambda {
+        fn invoke_lambda(
+            &self,
+            _function_arn: &str,
+            _payload: &str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                    > + Send,
+            >,
+        > {
+            *self.0.lock() += 1;
+            Box::pin(async {
+                Ok(fakecloud_core::delivery::LambdaInvocationOutput::unhandled(
+                    br#"{"errorType":"Error","errorMessage":"boom"}"#.to_vec(),
+                ))
+            })
+        }
+    }
+
+    /// A function error holds the checkpoint: the batch is redelivered on
+    /// the next poll instead of being consumed as a success.
+    #[tokio::test]
+    async fn function_error_retries_the_batch() {
+        let dynamodb_state: SharedDynamoDbState = Arc::new(RwLock::new(MultiAccountState::new(
+            DEFAULT_ACCOUNT,
+            REGION,
+            ENDPOINT,
+        )));
+        let svc = DynamoDbService::new(dynamodb_state.clone());
+        create_streamed_table(&svc, DEFAULT_ACCOUNT, "tbl").await;
+        put_item(&svc, DEFAULT_ACCOUNT, "tbl", "a").await;
+
+        let arn = stream_arn(&dynamodb_state, DEFAULT_ACCOUNT, "tbl");
+        let lambda_state = lambda_state_with(DEFAULT_ACCOUNT, esm("esm-1", DEFAULT_ACCOUNT, &arn));
+        let delivery = Arc::new(FailingLambda(parking_lot::Mutex::new(0)));
+        let poller = DynamoDbStreamsLambdaPoller::new(dynamodb_state.clone(), lambda_state)
+            .with_lambda_delivery(delivery.clone());
+        poller.poll().await;
+        poller.poll().await;
+        assert_eq!(*delivery.0.lock(), 2, "the failed batch is redelivered");
+        // TRIM_HORIZON seeds an empty checkpoint; a failed batch leaves it.
+        assert_eq!(
+            dynamodb_state
+                .read()
+                .regional(DEFAULT_ACCOUNT, REGION)
+                .unwrap()
+                .lambda_stream_checkpoint("esm-1")
+                .as_deref(),
+            Some(""),
+            "the checkpoint does not move past a failed batch"
         );
     }
 }

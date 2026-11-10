@@ -228,7 +228,7 @@ impl CognitoService {
                     region,
                     &account_id,
                 );
-                triggers::invoke_trigger(ctx, &function_arn, &event).await
+                triggers::invoke_trigger(ctx, &function_arn, &event).await?
             } else {
                 None
             }

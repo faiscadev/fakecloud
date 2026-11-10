@@ -24,7 +24,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use fakecloud_core::delivery::LambdaDelivery;
+use fakecloud_core::delivery::{LambdaDelivery, LambdaInvocationOutput};
 use fakecloud_firehose::{
     FirehoseEngine, SharedFirehoseState, SourceLimit, SourceRead, SourceRecord, StreamKey,
 };
@@ -525,7 +525,7 @@ impl KinesisLambdaFirehosePoller {
             let record_seqs: Vec<String> =
                 records.iter().map(|r| r.sequence_number.clone()).collect();
 
-            let invoke_result: Option<Result<Vec<u8>, String>> =
+            let invoke_result: Option<Result<LambdaInvocationOutput, String>> =
                 if let Some(ref delivery) = self.lambda_delivery {
                     Some(
                         delivery
@@ -537,8 +537,21 @@ impl KinesisLambdaFirehosePoller {
                 };
 
             let advance_to: Option<usize> = match &invoke_result {
-                Some(Ok(body)) if mapping.report_batch_item_failures => {
-                    match first_failed_index(body, &record_seqs) {
+                // A function error fails the whole batch: the checkpoint
+                // holds and the batch is retried (ReportBatchItemFailures
+                // or not).
+                Some(Ok(output)) if output.is_function_error() => {
+                    tracing::warn!(
+                        function_arn = %mapping.function_arn,
+                        stream_arn = %mapping.stream_arn,
+                        shard_id = %shard_id,
+                        error = %String::from_utf8_lossy(&output.payload),
+                        "Kinesis->Lambda: function returned an error; batch will be retried"
+                    );
+                    None
+                }
+                Some(Ok(output)) if mapping.report_batch_item_failures => {
+                    match first_failed_index(&output.payload, &record_seqs) {
                         Some(idx) => Some(start.saturating_add(idx)),
                         None => Some(end),
                     }
@@ -888,29 +901,38 @@ fn kinesis_event_record(
     event
 }
 
-/// Parse the Lambda response body as `{"batchItemFailures":[{"itemIdentifier":"<seqno>"}]}`
-/// and return the index in `batch_seqs` of the first failed sequence
-/// number. Returns `None` when the body doesn't decode, the failures
-/// list is empty, or no failure references a sequence number actually
-/// in the batch (AWS ignores stale identifiers). Kinesis-specific:
-/// callers advance the shard checkpoint to this index, so the failed
-/// record and everything after it gets retried on the next poll.
+/// Apply a `ReportBatchItemFailures` response
+/// (`{"batchItemFailures":[{"itemIdentifier":"<seqno>"}]}`) to the batch:
+/// the index in `batch_seqs` of the first failed record, or `None` when the
+/// whole batch succeeded. Callers checkpoint at this index, so the failed
+/// record and everything after it is retried on the next poll.
+///
+/// As on AWS, an empty or null `batchItemFailures` list or an empty or null
+/// response is a complete success, while an invalid JSON response or an
+/// entry whose `itemIdentifier` is empty, null, missing (a bad key name) or
+/// names a sequence number not in the batch is a complete failure (index 0:
+/// the whole batch is retried).
 fn first_failed_index(body: &[u8], batch_seqs: &[String]) -> Option<usize> {
-    let parsed: Value = serde_json::from_slice(body).ok()?;
-    let failures = parsed.get("batchItemFailures")?.as_array()?;
-    let failed_seqs: Vec<&str> = failures
-        .iter()
-        .filter_map(|f| f.get("itemIdentifier").and_then(|v| v.as_str()))
-        .collect();
-    if failed_seqs.is_empty() {
+    if body.iter().all(u8::is_ascii_whitespace) {
         return None;
     }
-    batch_seqs
-        .iter()
-        .enumerate()
-        .filter(|(_, seq)| failed_seqs.contains(&seq.as_str()))
-        .map(|(idx, _)| idx)
-        .min()
+    let Ok(parsed) = serde_json::from_slice::<Value>(body) else {
+        return Some(0);
+    };
+    let failures = parsed.get("batchItemFailures")?.as_array()?;
+    let mut first: Option<usize> = None;
+    for failure in failures {
+        let idx = failure
+            .get("itemIdentifier")
+            .and_then(|v| v.as_str())
+            .filter(|id| !id.is_empty())
+            .and_then(|id| batch_seqs.iter().position(|seq| seq == id));
+        match idx {
+            Some(idx) => first = Some(first.map_or(idx, |f| f.min(idx))),
+            None => return Some(0),
+        }
+    }
+    first
 }
 
 #[cfg(test)]
@@ -929,13 +951,27 @@ mod tests {
     }
 
     #[test]
-    fn first_failed_index_ignores_stale_identifiers() {
-        let body = br#"{"batchItemFailures":[{"itemIdentifier":"99"}]}"#;
+    fn first_failed_index_unknown_identifier_fails_the_whole_batch() {
         let seqs = ["0", "1", "2"]
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
-        assert!(first_failed_index(body, &seqs).is_none());
+        for body in [
+            &br#"{"batchItemFailures":[{"itemIdentifier":"99"}]}"#[..],
+            br#"{"batchItemFailures":[{"itemIdentifier":""}]}"#,
+            br#"{"batchItemFailures":[{"itemIdentifier":null}]}"#,
+            br#"{"batchItemFailures":[{"seq":"1"}]}"#,
+        ] {
+            assert_eq!(first_failed_index(body, &seqs), Some(0));
+        }
+    }
+
+    #[test]
+    fn first_failed_index_empty_or_null_response_is_success() {
+        let seqs = ["a"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for body in [&b""[..], b"null", br#"{"batchItemFailures":null}"#, b"{}"] {
+            assert!(first_failed_index(body, &seqs).is_none());
+        }
     }
 
     #[test]
@@ -1092,11 +1128,113 @@ mod tests {
             &self,
             _function_arn: &str,
             payload: &str,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>
-        {
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<LambdaInvocationOutput, String>> + Send>,
+        > {
             self.0.lock().push(payload.to_string());
-            Box::pin(async { Ok(b"{}".to_vec()) })
+            Box::pin(async { Ok(LambdaInvocationOutput::success(b"{}".to_vec())) })
         }
+    }
+
+    /// A function that fails every invocation with a function error.
+    struct FailingDelivery(parking_lot::Mutex<usize>);
+
+    impl LambdaDelivery for FailingDelivery {
+        fn invoke_lambda(
+            &self,
+            _function_arn: &str,
+            _payload: &str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<LambdaInvocationOutput, String>> + Send>,
+        > {
+            *self.0.lock() += 1;
+            Box::pin(async {
+                Ok(LambdaInvocationOutput::unhandled(
+                    br#"{"errorType":"Error","errorMessage":"boom"}"#.to_vec(),
+                ))
+            })
+        }
+    }
+
+    /// A stream in `us-east-1` with one record and a mapping onto it.
+    fn one_record_stream(account: &str) -> (fakecloud_kinesis::SharedKinesisState, Mapping) {
+        use fakecloud_core::delivery::KinesisDelivery;
+        use fakecloud_core::multi_account::MultiAccountState;
+        use parking_lot::RwLock;
+
+        let region = "us-east-1";
+        let kinesis: fakecloud_kinesis::SharedKinesisState = Arc::new(RwLock::new(
+            MultiAccountState::new(account, region, "http://localhost:4566"),
+        ));
+        {
+            let mut mas = kinesis.write();
+            let st = mas.regional_mut(account, region);
+            let arn = st.stream_arn(region, "orders");
+            st.streams.insert(
+                "orders".to_string(),
+                fakecloud_kinesis::KinesisStream {
+                    stream_name: "orders".to_string(),
+                    stream_arn: arn,
+                    stream_status: "ACTIVE".to_string(),
+                    stream_creation_timestamp: Utc::now(),
+                    retention_period_hours: 24,
+                    stream_mode: "PROVISIONED".to_string(),
+                    encryption_type: "NONE".to_string(),
+                    key_id: None,
+                    shard_count: 1,
+                    open_shard_count: 1,
+                    tags: Default::default(),
+                    shards: fakecloud_kinesis::build_stream_shards(1),
+                    next_shard_index: 1,
+                    enhanced_metrics: Vec::new(),
+                    warm_throughput_mibps: None,
+                    max_record_size_kib: None,
+                    record_distribution_strategy:
+                        fakecloud_kinesis::default_record_distribution_strategy(),
+                    auto_distribution_cursor: 0,
+                },
+            );
+        }
+        let arn = format!("arn:aws:kinesis:{region}:{account}:stream/orders");
+        fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis.clone())
+            .put_record(&arn, "aGVsbG8=", "pk");
+        let mapping = Mapping {
+            uuid: "esm-1".to_string(),
+            function_arn: format!("arn:aws:lambda:{region}:{account}:function:f"),
+            stream_arn: arn,
+            batch_size: 10,
+            filter: FilterSet::from_strings(std::iter::empty::<&String>()),
+            starting_position: Some("TRIM_HORIZON".to_string()),
+            starting_position_timestamp: None,
+            report_batch_item_failures: false,
+            invoke_identity_arn: None,
+        };
+        (kinesis, mapping)
+    }
+
+    /// A function error holds the shard checkpoint so the batch is retried,
+    /// instead of being consumed as a success.
+    #[tokio::test]
+    async fn function_error_retries_the_batch() {
+        use fakecloud_core::multi_account::MultiAccountState;
+        let account = "123456789012";
+        let (kinesis, mapping) = one_record_stream(account);
+        let delivery = Arc::new(FailingDelivery(parking_lot::Mutex::new(0)));
+        let poller = KinesisLambdaFirehosePoller::new(
+            kinesis.clone(),
+            Arc::new(parking_lot::RwLock::new(MultiAccountState::new(
+                account,
+                "us-east-1",
+                "http://localhost:4566",
+            ))),
+        )
+        .with_lambda_delivery(delivery.clone());
+        poller.process_mapping(&mapping).await;
+        poller.process_mapping(&mapping).await;
+        assert_eq!(*delivery.0.lock(), 2, "the failed batch is redelivered");
+        let mas = kinesis.read();
+        let st = mas.regional(account, "us-east-1").unwrap();
+        assert_eq!(st.lambda_checkpoint("esm-1", "shardId-000000000000"), 0);
     }
 
     /// The poller reads the stream in the region its ARN names, not a
@@ -1821,8 +1959,11 @@ mod tests {
                 &self,
                 _function_arn: &str,
                 _payload: &str,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>
-            {
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<LambdaInvocationOutput, String>> + Send,
+                >,
+            > {
                 self.0.notify_one();
                 Box::pin(std::future::pending())
             }
@@ -2008,9 +2149,9 @@ mod tests {
     }
 
     #[test]
-    fn first_failed_index_invalid_json_returns_none() {
+    fn first_failed_index_invalid_json_fails_the_whole_batch() {
         let body = b"not json";
         let seqs = ["a"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(first_failed_index(body, &seqs).is_none());
+        assert_eq!(first_failed_index(body, &seqs), Some(0));
     }
 }

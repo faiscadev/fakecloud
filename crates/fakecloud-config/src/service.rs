@@ -2054,9 +2054,16 @@ impl ConfigService {
         };
         let payload = event.to_string().into_bytes();
         match runtime.invoke(&func, &payload, &layer_zips).await {
-            Ok(resp) => {
+            Ok(output) if output.is_function_error() => {
+                tracing::warn!(
+                    function = %func_name,
+                    error = %String::from_utf8_lossy(&output.payload),
+                    "Config custom rule Lambda returned an error"
+                )
+            }
+            Ok(output) => {
                 // If the function returned evaluations directly, record them.
-                if let Ok(v) = serde_json::from_slice::<Value>(&resp) {
+                if let Ok(v) = serde_json::from_slice::<Value>(&output.payload) {
                     if let Some(arr) = v
                         .as_array()
                         .or_else(|| v.get("evaluations").and_then(Value::as_array))

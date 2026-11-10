@@ -165,7 +165,12 @@ impl CognitoService {
                 event["request"]["codeParameter"] = serde_json::json!("{####}");
                 event["request"]["usernameParameter"] = serde_json::json!(username_owned);
                 if let Some(resp) =
-                    crate::triggers::invoke_trigger(&ctx, &function_arn, &event).await
+                    // Dispatched in the background, so a failing trigger can
+                    // only fall back to the pool's own template here.
+                    crate::triggers::invoke_trigger(&ctx, &function_arn, &event)
+                        .await
+                        .ok()
+                        .flatten()
                 {
                     if let Some(s) = resp["response"]["emailSubject"].as_str() {
                         subject_tpl = Some(s.to_string());
@@ -2690,7 +2695,12 @@ async fn oauth_pre_token_overrides(
     );
     let started = std::time::Instant::now();
     let invoked_at = Utc::now();
-    let raw_response = crate::triggers::invoke_trigger(ctx, &function_arn, &event).await;
+    // The hosted-UI token endpoint has no Cognito API error to fail with; a
+    // failing trigger leaves token issuance unchanged.
+    let raw_response = crate::triggers::invoke_trigger(ctx, &function_arn, &event)
+        .await
+        .ok()
+        .flatten();
     let duration_ms = started.elapsed().as_millis() as u64;
     auth::record_pre_token_gen_invocation(
         state,

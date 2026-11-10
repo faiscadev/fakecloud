@@ -2184,17 +2184,23 @@ async fn main() {
     if let Some(ref rt) = container_runtime {
         lambda_service = lambda_service.with_runtime(rt.clone());
     }
-    // Async-invoke destinations (OnSuccess/OnFailure) route to SQS / SNS /
-    // EventBridge / Lambda by ARN scheme.
+    // Async-invoke destinations (OnSuccess/OnFailure) and dead-letter queues
+    // route to SQS / SNS / EventBridge / Lambda / S3 by ARN scheme.
     let mut lambda_destinations_inner = DeliveryBus::new()
         .with_sqs(sqs_delivery.clone())
         .with_sns(sns_delivery.clone())
+        .with_s3(s3_delivery_for_logs.clone())
         .with_cloudwatch_metrics(cloudwatch_delivery_for_logs.clone());
     if let Some(ref ld) = lambda_delivery {
         lambda_destinations_inner = lambda_destinations_inner.with_lambda(ld.clone());
     }
     let lambda_destinations_bus =
         Arc::new(lambda_destinations_inner.with_eventbridge(eb_delivery.clone()));
+    // Event invocations queued by other services (S3, SNS, EventBridge,
+    // Scheduler, Logs, SES) record their outcome through the same bus.
+    if let Some(ref rt) = container_runtime {
+        rt.set_async_destinations(&lambda_destinations_bus);
+    }
     lambda_service = lambda_service.with_delivery_bus(lambda_destinations_bus);
     let lambda_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -8467,6 +8473,13 @@ async fn main() {
                                         .invoke_lambda(&function_arn, &payload)
                                         .await
                                     {
+                                        Some(Ok(output)) if output.is_function_error() => {
+                                            tracing::error!(
+                                                function_arn = %function_arn,
+                                                error = %String::from_utf8_lossy(&output.payload),
+                                                "SES inbound: Lambda RequestResponse returned an error"
+                                            );
+                                        }
                                         Some(Ok(_)) => {
                                             tracing::info!(
                                                 function_arn = %function_arn,
@@ -8487,30 +8500,31 @@ async fn main() {
                                         }
                                     }
                                 } else {
-                                    // Fire-and-forget (Event / DryRun).
-                                    let delivery = delivery_for_inbound.clone();
-                                    tokio::spawn(async move {
-                                        match delivery.invoke_lambda(&function_arn, &payload).await {
-                                            Some(Ok(_)) => {
-                                                tracing::info!(
-                                                    function_arn = %function_arn,
-                                                    "SES inbound: Lambda invocation succeeded"
-                                                );
-                                            }
-                                            Some(Err(e)) => {
-                                                tracing::error!(
-                                                    function_arn = %function_arn,
-                                                    error = %e,
-                                                    "SES inbound: Lambda invocation failed"
-                                                );
-                                            }
-                                            None => {
-                                                tracing::warn!(
-                                                    "SES inbound: no container runtime available for Lambda invocation"
-                                                );
-                                            }
+                                    // Event: Lambda queues the invocation and
+                                    // handles a function error itself (retries,
+                                    // destinations, DLQ).
+                                    match delivery_for_inbound
+                                        .invoke_lambda_async(&function_arn, &payload)
+                                    {
+                                        Some(Ok(())) => {
+                                            tracing::info!(
+                                                function_arn = %function_arn,
+                                                "SES inbound: Lambda invocation queued"
+                                            );
                                         }
-                                    });
+                                        Some(Err(e)) => {
+                                            tracing::error!(
+                                                function_arn = %function_arn,
+                                                error = %e,
+                                                "SES inbound: Lambda invocation failed"
+                                            );
+                                        }
+                                        None => {
+                                            tracing::warn!(
+                                                "SES inbound: no container runtime available for Lambda invocation"
+                                            );
+                                        }
+                                    }
                                 }
                             }
                             fakecloud_ses::ReceiptAction::Bounce {
@@ -10431,6 +10445,7 @@ async fn main() {
                       axum::Json(body): axum::Json<types::RdsLambdaInvokeRequest>| {
                     let bridge_lambda = bridge_lambda.clone();
                     async move {
+                        use axum::response::IntoResponse;
                         let Some(ld) = bridge_lambda else {
                             return (
                                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -10440,7 +10455,8 @@ async fn main() {
                                     "executed_version": null,
                                     "log_result": null,
                                 })),
-                            );
+                            )
+                                .into_response();
                         };
                         let account_id = headers
                             .get("x-fakecloud-account-id")
@@ -10473,32 +10489,43 @@ async fn main() {
                             .unwrap_or("RequestResponse")
                             .to_string();
                         if invocation_type == "Event" {
-                            let arn = function_arn.clone();
-                            let payload = payload_str.clone();
-                            tokio::spawn(async move {
-                                let _ = ld.invoke_lambda(&arn, &payload).await;
-                            });
-                            return (
-                                axum::http::StatusCode::OK,
-                                axum::Json(serde_json::json!({
-                                    "status_code": 202,
-                                    "payload": null,
-                                    "executed_version": "$LATEST",
-                                    "log_result": null,
-                                })),
-                            );
+                            // Lambda queues the event (retries, destinations
+                            // and DLQ are its own); a queueing failure (no
+                            // such function) is an invoke failure.
+                            return match ld.invoke_lambda_async(&function_arn, &payload_str) {
+                                Ok(()) => (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!({
+                                        "status_code": 202,
+                                        "payload": null,
+                                        "executed_version": "$LATEST",
+                                        "log_result": null,
+                                    })),
+                                )
+                                    .into_response(),
+                                Err(msg) => (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!({
+                                        "status_code": 502,
+                                        "payload": { "errorMessage": msg },
+                                        "executed_version": null,
+                                        "log_result": null,
+                                    })),
+                                )
+                                    .into_response(),
+                            };
                         }
                         match ld.invoke_lambda(&function_arn, &payload_str).await {
-                            Ok(bytes) => {
+                            Ok(output) => {
                                 let payload_value = serde_json::from_slice::<serde_json::Value>(
-                                    &bytes,
+                                    &output.payload,
                                 )
                                 .unwrap_or_else(|_| {
                                     serde_json::Value::String(
-                                        String::from_utf8_lossy(&bytes).to_string(),
+                                        String::from_utf8_lossy(&output.payload).to_string(),
                                     )
                                 });
-                                (
+                                let mut response = (
                                     axum::http::StatusCode::OK,
                                     axum::Json(serde_json::json!({
                                         "status_code": 200,
@@ -10507,6 +10534,23 @@ async fn main() {
                                         "log_result": null,
                                     })),
                                 )
+                                    .into_response();
+                                // Like Lambda's Invoke, a function error is
+                                // flagged by `X-Amz-Function-Error`; the
+                                // extension turns it into the RDS "lambda
+                                // invocation failed" error for the resolved
+                                // function ARN.
+                                if let Some(fe) = output.function_error.as_deref() {
+                                    let headers = response.headers_mut();
+                                    if let Ok(v) = axum::http::HeaderValue::from_str(fe) {
+                                        headers.insert("x-amz-function-error", v);
+                                    }
+                                    if let Ok(v) = axum::http::HeaderValue::from_str(&function_arn)
+                                    {
+                                        headers.insert("x-fakecloud-function-arn", v);
+                                    }
+                                }
+                                response
                             }
                             Err(msg) => (
                                 axum::http::StatusCode::OK,
@@ -10516,7 +10560,8 @@ async fn main() {
                                     "executed_version": null,
                                     "log_result": null,
                                 })),
-                            ),
+                            )
+                                .into_response(),
                         }
                     }
                 }

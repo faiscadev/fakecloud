@@ -231,6 +231,14 @@ pub async fn dispatch_websocket_event(
     };
 
     match lambda_delivery.invoke_lambda(&function_arn, &payload).await {
+        Ok(output) if output.is_function_error() => {
+            tracing::warn!(
+                route_key,
+                integration_id,
+                error = %String::from_utf8_lossy(&output.payload),
+                "websocket lambda returned a function error"
+            );
+        }
         Ok(_) => {
             tracing::debug!(route_key, integration_id, "websocket lambda invoked");
         }

@@ -53,8 +53,11 @@ fn remove_rotation_test_pending(state: &SharedSecretsManagerState, cleanup: &Pen
     }
 }
 
-/// Invoke the rotation Lambda once per step, in order. Stops early if delivery
-/// is not configured for the target function.
+/// Invoke the rotation Lambda once per step, in order. As on AWS, a step runs
+/// only when the previous one succeeded: a step whose invocation fails or
+/// returns a function error ends the rotation, leaving the secret's staging
+/// labels wherever the steps that did succeed put them. Also stops early if
+/// delivery is not configured for the target function.
 async fn run_rotation_steps(bus: &DeliveryBus, inv: &RotationInvocation) {
     for step in &inv.steps {
         let payload = serde_json::json!({
@@ -66,9 +69,18 @@ async fn run_rotation_steps(bus: &DeliveryBus, inv: &RotationInvocation) {
             .invoke_lambda(&inv.lambda_arn, &payload.to_string())
             .await
         {
+            Some(Ok(output)) if output.is_function_error() => {
+                tracing::warn!(
+                    step = step,
+                    error = %String::from_utf8_lossy(&output.payload),
+                    "rotation Lambda step failed; rotation stopped"
+                );
+                break;
+            }
             Some(Ok(_)) => {}
             Some(Err(e)) => {
-                tracing::warn!(step = step, error = %e, "rotation Lambda invocation failed");
+                tracing::warn!(step = step, error = %e, "rotation Lambda invocation failed; rotation stopped");
+                break;
             }
             None => {
                 tracing::warn!(

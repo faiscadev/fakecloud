@@ -9,6 +9,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use fakecloud_core::delivery::{DeliveryBus, EmailDispatcher, SmsDispatcher};
+use fakecloud_core::service::AwsServiceError;
 
 use crate::state::{ChallengeResult, SharedCognitoState, User, UserAttribute};
 
@@ -221,41 +222,76 @@ pub fn build_trigger_event(
 }
 
 /// Invoke a Lambda trigger synchronously (waits for response).
-/// Used for PreSignUp and PreAuthentication triggers where the response
-/// can modify the operation outcome.
 ///
-/// Returns `Ok(Some(response))` if the trigger was invoked successfully,
-/// `Ok(None)` if no trigger is configured or the delivery bus has no Lambda,
-/// or silently returns `Ok(None)` on invocation errors (triggers should not
-/// fail the Cognito operation).
+/// Returns `Ok(Some(response))` when the trigger ran and returned a JSON
+/// response, and `Ok(None)` when no Lambda is wired, the invocation could
+/// not run, or the response was not JSON (triggers that cannot run do not
+/// fail the Cognito operation). A trigger that ran and returned a function
+/// error fails the operation the way Cognito does:
+/// `UserLambdaValidationException` "`<Trigger>` failed with error
+/// `<errorMessage>`."
 pub async fn invoke_trigger(
     ctx: &CognitoDeliveryContext,
     function_arn: &str,
     event: &Value,
-) -> Option<Value> {
+) -> Result<Option<Value>, AwsServiceError> {
     let payload = event.to_string();
     match ctx.delivery_bus.invoke_lambda(function_arn, &payload).await {
-        Some(Ok(bytes)) => match serde_json::from_slice::<Value>(&bytes) {
-            Ok(response) => Some(response),
-            Err(e) => {
-                tracing::warn!(
-                    function_arn = %function_arn,
-                    error = %e,
-                    "Failed to parse Lambda trigger response as JSON"
-                );
-                None
+        Some(Ok(output)) => {
+            if output.is_function_error() {
+                return Err(trigger_function_error(event, &output));
             }
-        },
+            match serde_json::from_slice::<Value>(&output.payload) {
+                Ok(response) => Ok(Some(response)),
+                Err(e) => {
+                    tracing::warn!(
+                        function_arn = %function_arn,
+                        error = %e,
+                        "Failed to parse Lambda trigger response as JSON"
+                    );
+                    Ok(None)
+                }
+            }
+        }
         Some(Err(e)) => {
             tracing::warn!(
                 function_arn = %function_arn,
                 error = %e,
                 "Lambda trigger invocation failed, skipping"
             );
-            None
+            Ok(None)
         }
-        None => None,
+        None => Ok(None),
     }
+}
+
+/// The trigger name Cognito reports in a trigger failure: the Lambda config
+/// key the event's `triggerSource` belongs to (`PreSignUp_SignUp` ->
+/// `PreSignUp`, `TokenGeneration_*` -> `PreTokenGeneration`).
+fn trigger_name(event: &Value) -> String {
+    let source = event["triggerSource"].as_str().unwrap_or("");
+    let prefix = source.split('_').next().unwrap_or(source);
+    match prefix {
+        "TokenGeneration" => "PreTokenGeneration".to_string(),
+        "" => "Lambda trigger".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// `UserLambdaValidationException` for a trigger that returned a function
+/// error.
+pub(crate) fn trigger_function_error(
+    event: &Value,
+    output: &fakecloud_core::delivery::LambdaInvocationOutput,
+) -> AwsServiceError {
+    let message = output
+        .error_message()
+        .unwrap_or_else(|| String::from_utf8_lossy(&output.payload).into_owned());
+    AwsServiceError::aws_error(
+        http::StatusCode::BAD_REQUEST,
+        "UserLambdaValidationException",
+        format!("{} failed with error {message}.", trigger_name(event)),
+    )
 }
 
 /// Invoke a Lambda trigger in fire-and-forget mode.

@@ -166,7 +166,7 @@ impl CognitoService {
                     region,
                     &account_id,
                 );
-                triggers::invoke_trigger(ctx, &function_arn, &event).await
+                triggers::invoke_trigger(ctx, &function_arn, &event).await?
             } else {
                 None
             }
@@ -1060,7 +1060,7 @@ impl CognitoService {
                     &region,
                     &account_id,
                 );
-                triggers::invoke_trigger(ctx, &function_arn, &event).await
+                triggers::invoke_trigger(ctx, &function_arn, &event).await?
             } else {
                 None
             }
@@ -1242,7 +1242,7 @@ impl CognitoService {
         );
 
         let verify_response = triggers::invoke_trigger(ctx, &verify_arn, &verify_event)
-            .await
+            .await?
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -1285,7 +1285,7 @@ impl CognitoService {
         );
 
         let define_response = triggers::invoke_trigger(ctx, &define_arn, &define_event)
-            .await
+            .await?
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -1362,7 +1362,7 @@ impl CognitoService {
                 &challenge_results,
             );
             if let Some(create_response) =
-                triggers::invoke_trigger(ctx, &create_arn, &create_event).await
+                triggers::invoke_trigger(ctx, &create_arn, &create_event).await?
             {
                 if let Some(params) =
                     create_response["response"]["publicChallengeParameters"].as_object()
@@ -1468,7 +1468,7 @@ impl CognitoService {
                     region,
                     &account_id,
                 );
-                triggers::invoke_trigger(ctx, &function_arn, &event).await
+                triggers::invoke_trigger(ctx, &function_arn, &event).await?
             } else {
                 None
             }

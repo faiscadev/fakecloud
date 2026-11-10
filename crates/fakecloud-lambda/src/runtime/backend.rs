@@ -61,6 +61,12 @@ pub struct StreamingInvocation {
 }
 
 impl StreamingInvocation {
+    /// The HTTP status the runtime answered with (non-200 for a runtime
+    /// that exited or failed init).
+    pub fn status(&self) -> u16 {
+        self.resp.status().as_u16()
+    }
+
     /// Read the next chunk of the function's response body. Returns
     /// `Ok(None)` once the RIE has finished streaming. Buffered
     /// handlers tend to deliver a single chunk; streaming handlers

@@ -734,29 +734,28 @@ impl LogsService {
                 }
             });
             let lambda_payload = serde_json::to_string(&lambda_event).unwrap();
-            tokio::spawn({
-                let bus = self.delivery_bus.clone();
-                let arn = destination_arn.to_string();
-                async move {
-                    if let Some(result) = bus.invoke_lambda(&arn, &lambda_payload).await {
-                        match result {
-                            Ok(_) => {
-                                tracing::debug!(
-                                    function_arn = %arn,
-                                    "CloudWatch Logs -> Lambda subscription delivered"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    function_arn = %arn,
-                                    error = %e,
-                                    "CloudWatch Logs -> Lambda subscription failed"
-                                );
-                            }
-                        }
-                    }
+            // CloudWatch Logs invokes a subscription function asynchronously:
+            // once Lambda queues the event, a function error is retried and
+            // routed by Lambda's async error handling, not by Logs.
+            match self
+                .delivery_bus
+                .invoke_lambda_async(destination_arn, &lambda_payload)
+            {
+                Some(Ok(())) => {
+                    tracing::debug!(
+                        function_arn = %destination_arn,
+                        "CloudWatch Logs -> Lambda subscription delivered"
+                    );
                 }
-            });
+                Some(Err(e)) => {
+                    tracing::error!(
+                        function_arn = %destination_arn,
+                        error = %e,
+                        "CloudWatch Logs -> Lambda subscription failed"
+                    );
+                }
+                None => {}
+            }
         } else if destination_arn.contains(":kinesis:") {
             // The record's Data is the GZIP bytes; base64 appears only in
             // GetRecords' JSON wire encoding, which SDKs decode. The
@@ -3247,14 +3246,23 @@ mod tests {
     impl fakecloud_core::delivery::LambdaDelivery for SubscriptionRecorder {
         fn invoke_lambda(
             &self,
-            function_arn: &str,
-            payload: &str,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>
-        {
+            _function_arn: &str,
+            _payload: &str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                    > + Send,
+            >,
+        > {
+            Box::pin(async { Err("subscriptions invoke asynchronously".to_string()) })
+        }
+
+        fn invoke_lambda_async(&self, function_arn: &str, payload: &str) -> Result<(), String> {
             self.lambda
                 .lock()
                 .push((function_arn.to_string(), payload.to_string()));
-            Box::pin(async { Ok(Vec::new()) })
+            Ok(())
         }
     }
 

@@ -802,7 +802,17 @@ impl PipesRunner {
             let payload =
                 serde_json::to_string(&Value::Array(input)).unwrap_or_else(|_| "[]".into());
             match self.delivery.invoke_lambda(enr_arn, &payload).await {
-                Some(Ok(bytes)) => Some(enrichment_output(&bytes)),
+                // A function error fails the enrichment step, like an
+                // invocation failure: the events are retried.
+                Some(Ok(output)) if output.is_function_error() => {
+                    tracing::warn!(
+                        %enr_arn,
+                        error = %String::from_utf8_lossy(&output.payload),
+                        "pipes: enrichment Lambda returned an error; events will be retried"
+                    );
+                    None
+                }
+                Some(Ok(output)) => Some(enrichment_output(&output.payload)),
                 Some(Err(err)) => {
                     tracing::warn!(%enr_arn, %err, "pipes: enrichment Lambda failed; events will be retried");
                     None
@@ -835,6 +845,14 @@ impl PipesRunner {
             let payload = serde_json::to_string(&Value::Array(batch.to_vec()))
                 .unwrap_or_else(|_| "[]".to_string());
             match self.delivery.invoke_lambda(target_arn, &payload).await {
+                Some(Ok(output)) if output.is_function_error() => {
+                    tracing::warn!(
+                        %target_arn,
+                        error = %String::from_utf8_lossy(&output.payload),
+                        "pipes: Lambda target returned an error; events will be retried"
+                    );
+                    false
+                }
                 Some(Ok(_)) => true,
                 Some(Err(err)) => {
                     tracing::warn!(%target_arn, %err, "pipes: Lambda target invocation failed; events will be retried");

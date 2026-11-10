@@ -12972,15 +12972,24 @@ mod tests {
             &self,
             _function_arn: &str,
             payload: &str,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>
-        {
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                    > + Send,
+            >,
+        > {
             let request: serde_json::Value = serde_json::from_str(payload).unwrap();
             self.responses.accept(
                 request["RequestId"].as_str().unwrap(),
                 self.answer.to_string().as_bytes(),
             );
             self.requests.lock().push(request);
-            Box::pin(async { Ok(Vec::new()) })
+            Box::pin(async {
+                Ok(fakecloud_core::delivery::LambdaInvocationOutput::success(
+                    Vec::new(),
+                ))
+            })
         }
     }
 

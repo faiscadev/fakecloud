@@ -690,6 +690,7 @@ pub(crate) fn missing(name: &str) -> AwsServiceError {
 ///
 /// Handles both unqualified (`arn:aws:lambda:region:account:function:NAME`)
 /// and qualified (`arn:aws:lambda:region:account:function:NAME:alias`) ARNs.
+#[cfg(test)]
 pub(crate) fn function_name_from_arn(arn: &str) -> &str {
     let parts: Vec<&str> = arn.split(':').collect();
     if parts.len() >= 7 && parts[5] == "function" {
@@ -751,8 +752,7 @@ pub(crate) fn record_lambda_invocation(
         });
 }
 
-/// Spawn a background task to invoke a Lambda function via ContainerRuntime.
-/// This is fire-and-forget: EventBridge delivery is asynchronous.
+/// Queue an asynchronous Lambda invocation for a rule target.
 pub(crate) fn invoke_lambda_async(
     container_runtime: &Option<Arc<ContainerRuntime>>,
     lambda_state: &Option<SharedLambdaState>,
@@ -781,46 +781,23 @@ pub(crate) fn invoke_lambda_async(
             return;
         }
     };
-    let func_name = function_name_from_arn(function_arn).to_string();
-    let function_arn = function_arn.to_string();
-    let payload = payload.as_bytes().to_vec();
-
-    tokio::spawn(async move {
-        // Resolve the function in the account and region its ARN names (an
-        // event from another account's bus targets that account's function);
-        // only a bare name falls back to the default account and region.
-        let resolved = {
-            let accounts = lambda_state.read();
-            fakecloud_lambda::resolve_invocable(
-                &accounts,
-                &function_arn,
-                accounts.default_account_id(),
-                accounts.region(),
-            )
-        };
-        let (func, layer_zips) = match resolved {
-            Some(pair) => pair,
-            None => {
-                tracing::warn!(
-                    function = %func_name,
-                    "EventBridge Lambda target not found, skipping invocation"
-                );
-                return;
-            }
-        };
-        match runtime.invoke(&func, &payload, &layer_zips).await {
-            Ok(_) => {
-                tracing::info!(function = %func_name, "EventBridge Lambda invocation succeeded");
-            }
-            Err(e) => {
-                tracing::warn!(
-                    function = %func_name,
-                    error = %e,
-                    "EventBridge Lambda invocation failed"
-                );
-            }
-        }
-    });
+    // EventBridge invokes the function asynchronously: Lambda queues the
+    // event and applies its own async error handling (retries, event age,
+    // destinations, dead-letter queue) to a function error. Resolved in the
+    // account and region the ARN names (an event from another account's bus
+    // targets that account's function).
+    if let Err(e) = fakecloud_lambda::queue_async_invocation(
+        &lambda_state,
+        runtime,
+        function_arn,
+        payload.as_bytes(),
+    ) {
+        tracing::warn!(
+            function_arn = %function_arn,
+            error = %e,
+            "EventBridge Lambda target could not be invoked"
+        );
+    }
 }
 
 /// Deliver an EventBridge event to CloudWatch Logs by writing a log event

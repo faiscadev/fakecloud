@@ -74,7 +74,7 @@ impl CognitoService {
                     &lookup.account_id,
                 );
                 if triggers::invoke_trigger(ctx, &function_arn, &event)
-                    .await
+                    .await?
                     .is_none()
                 {
                     return Err(AwsServiceError::aws_error(
@@ -873,7 +873,7 @@ impl CognitoService {
                     &account_id,
                 );
                 if triggers::invoke_trigger(ctx, &function_arn, &event)
-                    .await
+                    .await?
                     .is_none()
                 {
                     return Err(AwsServiceError::aws_error(
@@ -988,7 +988,7 @@ impl CognitoService {
                 );
                 let started = std::time::Instant::now();
                 let invoked_at = chrono::Utc::now();
-                let raw_response = triggers::invoke_trigger(ctx, &function_arn, &event).await;
+                let raw_response = triggers::invoke_trigger(ctx, &function_arn, &event).await?;
                 let duration_ms = started.elapsed().as_millis() as u64;
                 record_pre_token_gen_invocation(
                     &self.state,
@@ -1217,7 +1217,7 @@ impl CognitoService {
         );
 
         let define_response = triggers::invoke_trigger(ctx, &define_arn, &define_event)
-            .await
+            .await?
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -1288,7 +1288,7 @@ impl CognitoService {
                 &challenge_results,
             );
             if let Some(create_response) =
-                triggers::invoke_trigger(ctx, &create_arn, &create_event).await
+                triggers::invoke_trigger(ctx, &create_arn, &create_event).await?
             {
                 if let Some(params) =
                     create_response["response"]["publicChallengeParameters"].as_object()
@@ -1479,7 +1479,7 @@ impl CognitoService {
                 );
                 let started = std::time::Instant::now();
                 let invoked_at = chrono::Utc::now();
-                let raw_response = triggers::invoke_trigger(ctx, &function_arn, &event).await;
+                let raw_response = triggers::invoke_trigger(ctx, &function_arn, &event).await?;
                 let duration_ms = started.elapsed().as_millis() as u64;
                 record_pre_token_gen_invocation(
                     &self.state,

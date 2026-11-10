@@ -9140,7 +9140,13 @@ impl fakecloud_core::delivery::LambdaDelivery for SwitchingTriggerLambda {
         &self,
         _function_arn: &str,
         payload: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                > + Send,
+        >,
+    > {
         let event: Value = serde_json::from_str(payload).unwrap_or_else(|_| json!({}));
         let src = event["triggerSource"].as_str().unwrap_or("").to_string();
         let resp = if src.contains("VerifyAuthChallenge") {
@@ -9161,7 +9167,11 @@ impl fakecloud_core::delivery::LambdaDelivery for SwitchingTriggerLambda {
             json!({"response": {}})
         };
         let bytes = serde_json::to_vec(&resp).unwrap();
-        Box::pin(async move { Ok(bytes) })
+        Box::pin(async move {
+            Ok(fakecloud_core::delivery::LambdaInvocationOutput::success(
+                bytes,
+            ))
+        })
     }
 }
 
@@ -12575,4 +12585,202 @@ fn confidential_client_challenge_without_responses_fails_closed() {
             );
         }
     }
+}
+
+/// A trigger Lambda that answers every invocation with `output`.
+struct FixedTriggerLambda(fakecloud_core::delivery::LambdaInvocationOutput);
+
+impl fakecloud_core::delivery::LambdaDelivery for FixedTriggerLambda {
+    fn invoke_lambda(
+        &self,
+        _function_arn: &str,
+        _payload: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                > + Send,
+        >,
+    > {
+        let output = self.0.clone();
+        Box::pin(async move { Ok(output) })
+    }
+}
+
+fn svc_with_trigger_output(
+    output: fakecloud_core::delivery::LambdaInvocationOutput,
+) -> (CognitoService, crate::state::SharedCognitoState) {
+    let state = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4569",
+        ),
+    ));
+    let bus = std::sync::Arc::new(
+        fakecloud_core::delivery::DeliveryBus::new()
+            .with_lambda(std::sync::Arc::new(FixedTriggerLambda(output))),
+    );
+    let ctx = triggers::CognitoDeliveryContext::new(bus);
+    let svc = CognitoService::new(state.clone()).with_delivery(ctx);
+    (svc, state)
+}
+
+fn sign_up_with_pre_sign_up(
+    output: fakecloud_core::delivery::LambdaInvocationOutput,
+) -> Result<AwsResponse, AwsServiceError> {
+    sign_up_with_pre_sign_up_state(output).0
+}
+
+/// Sign up `carol` behind a PreSignUp trigger answering `output`; also
+/// report whether `carol` exists afterwards and how many SIGN_UP events
+/// were recorded.
+fn sign_up_with_pre_sign_up_state(
+    output: fakecloud_core::delivery::LambdaInvocationOutput,
+) -> (Result<AwsResponse, AwsServiceError>, bool, usize) {
+    let (svc, state) = svc_with_trigger_output(output);
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreSignUp": "arn:aws:lambda:us-east-1:123456789012:function:presignup"}),
+    );
+    let body = json!({
+        "ClientId": client_id,
+        "Username": "carol",
+        "Password": "P@ssw0rd!",
+    });
+    let result = block_on(svc.sign_up(&make_req("SignUp", &body.to_string())));
+    let r = state.read();
+    let st = r.default_ref();
+    let exists = st
+        .users
+        .get(&pool_id)
+        .is_some_and(|users| users.contains_key("carol"));
+    let sign_ups = st
+        .auth_events
+        .iter()
+        .filter(|e| e.event_type == "SIGN_UP")
+        .count();
+    (result, exists, sign_ups)
+}
+
+#[test]
+fn pre_sign_up_function_error_fails_sign_up_with_user_lambda_validation() {
+    let (result, exists, sign_ups) = sign_up_with_pre_sign_up_state(
+        fakecloud_core::delivery::LambdaInvocationOutput::unhandled(
+            br#"{"errorType":"Error","errorMessage":"Email domain not allowed"}"#.to_vec(),
+        ),
+    );
+    assert!(!exists, "a failed PreSignUp creates no user");
+    assert_eq!(sign_ups, 0, "and records no successful sign-up");
+    let err = match result {
+        Ok(_) => panic!("a failing PreSignUp trigger must fail SignUp"),
+        Err(e) => e,
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "PreSignUp failed with error Email domain not allowed."
+    );
+}
+
+#[test]
+fn pre_sign_up_error_shaped_response_is_a_normal_response() {
+    // Only the function-error flag fails the trigger.
+    let resp = sign_up_with_pre_sign_up(fakecloud_core::delivery::LambdaInvocationOutput::success(
+        br#"{"errorType":"X","errorMessage":"y","response":{}}"#.to_vec(),
+    ));
+    assert!(resp.is_ok(), "{:?}", resp.err());
+}
+
+#[test]
+fn pre_authentication_function_error_fails_auth() {
+    let (svc, state) =
+        svc_with_trigger_output(fakecloud_core::delivery::LambdaInvocationOutput::unhandled(
+            br#"{"errorType":"Error","errorMessage":"Account locked"}"#.to_vec(),
+        ));
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "dave");
+    set_user_password(&svc, &pool_id, "dave", "P@ssw0rd!");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreAuthentication": "arn:aws:lambda:us-east-1:123456789012:function:preauth"}),
+    );
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientId": client_id,
+        "AuthFlow": "ADMIN_NO_SRP_AUTH",
+        "AuthParameters": {"USERNAME": "dave", "PASSWORD": "P@ssw0rd!"},
+    });
+    let err = match block_on(
+        svc.admin_initiate_auth(&make_req("AdminInitiateAuth", &body.to_string())),
+    ) {
+        Ok(_) => panic!("a failing PreAuthentication trigger must fail auth"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "PreAuthentication failed with error Account locked."
+    );
+}
+
+/// A failing PreTokenGeneration trigger fails GetTokensFromRefreshToken, and
+/// with rotation enabled the caller keeps its refresh token: the swap does
+/// not take effect for a call that returned no tokens.
+#[test]
+fn failed_pre_token_generation_keeps_the_rotated_refresh_token() {
+    let (svc, state) =
+        svc_with_trigger_output(fakecloud_core::delivery::LambdaInvocationOutput::unhandled(
+            br#"{"errorType":"Error","errorMessage":"no tokens today"}"#.to_vec(),
+        ));
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "rita");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreTokenGeneration": "arn:aws:lambda:us-east-1:123456789012:function:pretoken"}),
+    );
+    {
+        let mut st = state.write();
+        let acct = st.get_or_create("123456789012");
+        acct.user_pool_clients
+            .get_mut(&client_id)
+            .unwrap()
+            .refresh_token_rotation = Some(crate::state::RefreshTokenRotationConfig {
+            feature: "ENABLED".to_string(),
+            retry_grace_period_seconds: None,
+        });
+        acct.refresh_tokens.insert(
+            "rt-keep".to_string(),
+            crate::state::RefreshTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "rita".to_string(),
+                client_id: client_id.clone(),
+                issued_at: chrono::Utc::now(),
+                auth_context: None,
+            },
+        );
+    }
+    let body = json!({"RefreshToken": "rt-keep", "ClientId": client_id});
+    let req = make_req("GetTokensFromRefreshToken", &body.to_string());
+    let err = match block_on(svc.get_tokens_from_refresh_token(&req)) {
+        Ok(_) => panic!("a failing PreTokenGeneration trigger must fail the call"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "PreTokenGeneration failed with error no tokens today."
+    );
+    let st = state.read();
+    let tokens = &st.default_ref().refresh_tokens;
+    assert!(tokens.contains_key("rt-keep"), "the old token still works");
+    assert_eq!(tokens.len(), 1, "no orphaned replacement token");
 }

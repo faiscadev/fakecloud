@@ -38,6 +38,8 @@ k8s-openapi = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }
+# Paused clock for the async-invoke retry timing tests.
+tokio = { workspace = true, features = ["test-util"] }
 # The opt-in k8s-integration test drives a real cluster directly.
 kube = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

@@ -200,7 +200,16 @@ impl CognitoService {
                     &region,
                     &account_id,
                 );
-                if let Some(response) = triggers::invoke_trigger(ctx, &function_arn, &event).await {
+                let outcome = triggers::invoke_trigger(ctx, &function_arn, &event).await;
+                if outcome.is_err() {
+                    // A failing PreSignUp trigger means no user is created.
+                    let mut accounts = self.state.write();
+                    let state = accounts.get_or_create(&req.account_id);
+                    if let Some(users) = state.users.get_mut(&pool_id_owned) {
+                        users.remove(&username_owned);
+                    }
+                }
+                if let Some(response) = outcome? {
                     if response["response"]["autoConfirmUser"].as_bool() == Some(true) {
                         let mut accounts = self.state.write();
                         let state = accounts.get_or_create(&req.account_id);
