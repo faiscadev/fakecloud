@@ -1850,6 +1850,7 @@ impl ResourceProvisioner {
             physical_id: res.physical_id,
             resource_type: resource.resource_type.clone(),
             status: "CREATE_COMPLETE".to_string(),
+            custom_properties: service_token.is_some().then(|| resource.properties.clone()),
             service_token,
             attributes: res.attributes,
             deletion_policy: resource.deletion_policy.clone(),
@@ -2315,6 +2316,7 @@ impl ResourceProvisioner {
             // Carry the new template's policies onto the updated record.
             deletion_policy: new_def.deletion_policy.clone(),
             update_replace_policy: new_def.update_replace_policy.clone(),
+            custom_properties: existing.custom_properties.clone(),
         }))
     }
 
@@ -3744,6 +3746,7 @@ impl ResourceProvisioner {
             attributes: existing.attributes.clone(),
             deletion_policy: resource.deletion_policy.clone(),
             update_replace_policy: resource.update_replace_policy.clone(),
+            custom_properties: Some(props.clone()),
         };
         if let Some(response) = response {
             if response.status.eq_ignore_ascii_case("FAILED") {
@@ -3777,21 +3780,19 @@ impl ResourceProvisioner {
             "ResourceType": resource.resource_type,
             "LogicalResourceId": resource.logical_id,
             "PhysicalResourceId": resource.physical_id,
+            "ResourceProperties": resource.custom_properties.clone().unwrap_or_else(|| {
+                serde_json::json!({ "ServiceToken": service_token })
+            }),
         });
 
-        match self.send_custom_request(&service_token, &request_id, event) {
-            Ok(Some(response)) if response.status.eq_ignore_ascii_case("FAILED") => {
+        // A handler that cannot be invoked, or never answers, fails the
+        // delete (DELETE_FAILED with the same reason as a create), as
+        // recorded.
+        match self.send_custom_request(&service_token, &request_id, event)? {
+            Some(response) if response.status.eq_ignore_ascii_case("FAILED") => {
                 Err(Self::custom_failure_reason(&response, &request_id))
             }
-            Ok(_) => Ok(()),
-            Err(e) => {
-                // Best-effort: don't fail stack deletion if Lambda invocation fails
-                tracing::warn!(
-                    "Custom resource delete Lambda invocation failed for {}: {e}",
-                    resource.logical_id
-                );
-                Ok(())
-            }
+            _ => Ok(()),
         }
     }
 
@@ -6014,6 +6015,7 @@ mod tests {
             attributes: Default::default(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         prov.delete_resource(&table)
             .expect("a table whose database is gone is already deleted");
@@ -10273,6 +10275,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&stack_resource, "Arn"), None);
     }
@@ -10296,6 +10299,7 @@ mod tests {
             },
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(
             prov.get_att(&stack_resource, "TopicArn"),
@@ -10504,6 +10508,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "Arn"), None);
     }
@@ -10536,6 +10541,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "Arn"), None);
     }
@@ -10567,6 +10573,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "Arn"), None);
     }
@@ -10600,6 +10607,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "Arn"), None);
     }
@@ -10731,6 +10739,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "Name"), None);
     }
@@ -10760,6 +10769,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "IdentityName"), None);
     }
@@ -10796,6 +10806,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "TemplateName"), None);
     }
@@ -10829,6 +10840,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "ContactListName"), None);
     }
@@ -10855,6 +10867,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "PoolName"), None);
     }
@@ -10881,6 +10894,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "RuleSetName"), None);
     }
@@ -10982,6 +10996,7 @@ mod tests {
                     attributes: BTreeMap::new(),
                     deletion_policy: None,
                     update_replace_policy: None,
+                    custom_properties: None,
                 },
                 "Name",
             ),

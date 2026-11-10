@@ -29,6 +29,11 @@ pub struct StackResource {
     /// this resource. `None` = default (`Delete`).
     #[serde(default)]
     pub update_replace_policy: Option<String>,
+    /// For custom resources, the resolved `ResourceProperties` last sent to
+    /// the handler: CloudFormation sends them again with the `Delete`
+    /// request (and as `OldResourceProperties` with an `Update`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_properties: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -339,6 +339,7 @@ mod tests {
             attributes: Default::default(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         for response in [
             list_stack_resources_response(std::slice::from_ref(&failed), "r"),
@@ -389,6 +390,7 @@ mod tests {
             attributes: std::collections::BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         }
     }
 

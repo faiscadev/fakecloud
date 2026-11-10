@@ -1429,6 +1429,7 @@ impl<'a> UpdateEngine<'a> {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         });
         ForwardFailure {
             reason: format!("The following resource(s) failed to create: [{logical_id}]. "),
@@ -1572,6 +1573,7 @@ impl<'a> UpdateEngine<'a> {
                     attributes: BTreeMap::new(),
                     deletion_policy: def.deletion_policy.clone(),
                     update_replace_policy: def.update_replace_policy.clone(),
+                    custom_properties: None,
                 };
                 self.upsert_resource(&failed);
                 journal
@@ -4239,6 +4241,7 @@ mod tests {
                 attributes: BTreeMap::new(),
                 deletion_policy: None,
                 update_replace_policy: None,
+                custom_properties: None,
             };
             for status in ["UPDATE_FAILED", "UPDATE_ROLLBACK_FAILED"] {
                 assert!(

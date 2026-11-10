@@ -488,6 +488,7 @@ pub(crate) fn provision_stack_resources(
                 attributes: BTreeMap::new(),
                 deletion_policy: def.deletion_policy.clone(),
                 update_replace_policy: def.update_replace_policy.clone(),
+                custom_properties: Some(def.properties.clone()),
             }),
         }
     };
@@ -607,6 +608,7 @@ fn reconstruct_stack_resource(
         // Cloud Control has no CloudFormation DeletionPolicy concept.
         deletion_policy: None,
         update_replace_policy: None,
+        custom_properties: None,
     }
 }
 
@@ -705,6 +707,17 @@ pub struct CloudFormationDeps {
     pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
     pub mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
     pub kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
+}
+
+/// What the resource-deleting half of DeleteStack needs.
+struct StackDeleteJob {
+    account_id: String,
+    region: String,
+    stack_id: String,
+    stack_name: String,
+    notification_arns: Vec<String>,
+    resources: Vec<StackResource>,
+    orphans: Vec<StackResource>,
 }
 
 #[derive(Clone)]
@@ -2997,6 +3010,15 @@ impl CloudFormationService {
                     ));
                 }
 
+                // A delete already under way (waiting on custom resources)
+                // carries on; asking again changes nothing.
+                if stack.status == "DELETE_IN_PROGRESS" {
+                    return Ok(AwsResponse::xml(
+                        StatusCode::OK,
+                        xml_responses::delete_stack_response(&req.request_id),
+                    ));
+                }
+
                 // An update is walking this stack's resources with the state
                 // lock released; deleting them underneath it would leave its
                 // undo log pointing at nothing.
@@ -3063,103 +3085,47 @@ impl CloudFormationService {
                     ));
                 }
 
-                // Build the provisioner while we still have the stack_id
-                // Drop the write lock temporarily so the provisioner can read state
-                drop(accounts);
-                // `provisioner_deferred`: queue any custom-resource Delete Lambda
-                // invokes so a cold image pull never blocks the client past its
-                // read timeout (drained off the request path below).
-                let provisioner =
-                    self.provisioner_deferred(&stack_id, &req.account_id, &req.region);
-
-                // Delete resources in reverse order, honoring each resource's
-                // DeletionPolicy (Retain/Snapshot leaves the physical resource
-                // in place instead of destroying it).
-                // A resource whose delete fails stays, and fails the stack's delete
-                // (`DELETE_FAILED`), as on AWS; the rest are still deleted.
-                let mut failed: Vec<(String, String)> = Vec::new();
-                for resource in resources.iter().rev() {
-                    if let Err(reason) = provisioner.delete_resource_respecting_policy(resource) {
-                        failed.push((resource.logical_id.clone(), reason));
-                    }
-                }
-                for orphan in &orphans {
-                    let _ = provisioner.delete_resource(orphan);
-                }
-
-                // Reap the REAL backing containers for the deleted container
-                // resources (RDS / ElastiCache / ECS / ASG-EC2) off the request
-                // path, so a stack delete does not leak running containers (the
-                // create-side #2031-#2034 hardening reaching the delete path).
-                // Each delete_resource above only removed the in-memory record.
-                // The snapshot hooks let the detached teardown persist the EC2
-                // records it terminates, which this stack op has already
-                // serialized as still running.
-                ContainerBackingHandles::from_provisioner(&provisioner)
-                    .with_snapshot_hooks(&self.snapshot_hooks)
-                    .spawn_teardown_intents(std::mem::take(
-                        &mut *provisioner.pending_container_teardowns.lock(),
-                    ));
-                spawn_custom_invokes(&provisioner);
-
-                // Re-acquire the write lock to update stack status
-                let mut accounts = self.state.write();
-                let outcome = if failed.is_empty() {
-                    "DELETE_COMPLETE"
-                } else {
-                    "DELETE_FAILED"
+                // A custom resource's Delete waits for its handler's answer
+                // (up to its ServiceTimeout), so such a stack deletes in the
+                // background, DELETE_IN_PROGRESS meanwhile, as on AWS; a stack
+                // without one deletes within the call.
+                let waits_for_handlers = resources.iter().any(|r| {
+                    is_custom_resource_type(&r.resource_type)
+                        && r.service_token.is_some()
+                        && !crate::resource_provisioner::policy_retains_physical(
+                            r.deletion_policy.as_deref(),
+                        )
+                });
+                let job = StackDeleteJob {
+                    account_id: req.account_id.clone(),
+                    region: req.region.clone(),
+                    stack_id: stack_id.clone(),
+                    stack_name: stack_name_for_notif.clone(),
+                    notification_arns: notification_arns.clone(),
+                    resources: resources.clone(),
+                    orphans: orphans.clone(),
                 };
-                if !failed.is_empty() {
-                    if let Some(state) = accounts.regional_get_mut(&req.account_id, &req.region) {
-                        record_delete_failure(state, &stack_id, &failed);
-                    }
-                } else if let Some(state) = accounts.regional_get_mut(&req.account_id, &req.region)
-                {
+                if waits_for_handlers {
                     if let Some(stack) = state.stacks.values_mut().find(|s| s.stack_id == stack_id)
                     {
-                        stack.status = "DELETE_COMPLETE".to_string();
-                        // The reason belonged to the previous status (a failed
-                        // create/update); carrying it into DELETE_COMPLETE would
-                        // report a stale failure on a cleanly deleted stack.
+                        stack.status = "DELETE_IN_PROGRESS".to_string();
                         stack.status_reason = None;
-                        stack.resources.clear();
-                        stack.outputs.clear();
-                        // A deleted stack's policy goes with it; a later stack
-                        // of the same name starts without one. Only when this
-                        // call deleted the stack: a concurrent delete may have
-                        // finished first and the name been reused since.
-                        state.stack_policies.remove(&stack_name_for_notif);
                     }
-                    // Drop this stack's exports + import-consumer entries.
-                    let stale_exports: Vec<String> = state
-                        .exports
-                        .iter()
-                        .filter(|(_, e)| e.exporting_stack_name == stack_name_for_notif)
-                        .map(|(k, _)| k.clone())
-                        .collect();
-                    for k in stale_exports {
-                        state.exports.remove(&k);
-                    }
-                    for entries in state.imports.values_mut() {
-                        entries.retain(|s| s != &stack_name_for_notif);
-                    }
-                    state.imports.retain(|_, v| !v.is_empty());
-                    // A stack's change sets go with it. Left behind, they would
-                    // still answer DescribeChangeSet, and a re-created stack of
-                    // the same name would find them by name.
-                    if let Some(change_sets) = state.extras.get_mut("change_sets") {
-                        change_sets.retain(|_, v| v["StackId"].as_str() != Some(stack_id.as_str()));
-                    }
+                    drop(accounts);
+                    let service = self.clone();
+                    let deleted = std::mem::take(&mut deleted_types);
+                    tokio::spawn(async move {
+                        let worker = service.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            worker.run_stack_delete(job, false)
+                        })
+                        .await;
+                        persist_touched_services(&service.snapshot_hooks, deleted).await;
+                    });
+                } else {
+                    drop(accounts);
+                    self.run_stack_delete(job, true);
                 }
-                drop(accounts);
-
-                Self::send_stack_notification(
-                    &self.deps.delivery,
-                    &notification_arns,
-                    &stack_name_for_notif,
-                    &stack_id,
-                    outcome,
-                );
             }
         }
 
@@ -3172,6 +3138,108 @@ impl CloudFormationService {
             StatusCode::OK,
             xml_responses::delete_stack_response(&req.request_id),
         ))
+    }
+
+    /// The resource-deleting half of DeleteStack, run within the call or, for
+    /// a stack whose custom resources must answer, in the background
+    /// (`deferred` false: custom-resource Deletes wait for their handlers).
+    fn run_stack_delete(&self, job: StackDeleteJob, deferred: bool) {
+        let stack_id = job.stack_id.clone();
+
+        // Within the call (`deferred`) nothing waits on a handler; in the
+        // background each custom resource's Delete waits for its answer.
+        let provisioner = if deferred {
+            self.provisioner_deferred(&stack_id, &job.account_id, &job.region)
+        } else {
+            self.provisioner(&stack_id, &job.account_id, &job.region)
+        };
+
+        // Delete resources in reverse order, honoring each resource's
+        // DeletionPolicy (Retain/Snapshot leaves the physical resource
+        // in place instead of destroying it).
+        // A resource whose delete fails stays, and fails the stack's delete
+        // (`DELETE_FAILED`), as on AWS; the rest are still deleted.
+        let mut failed: Vec<(String, String)> = Vec::new();
+        for resource in job.resources.iter().rev() {
+            if let Err(reason) = provisioner.delete_resource_respecting_policy(resource) {
+                failed.push((resource.logical_id.clone(), reason));
+            }
+        }
+        for orphan in &job.orphans {
+            let _ = provisioner.delete_resource(orphan);
+        }
+
+        // Reap the REAL backing containers for the deleted container
+        // resources (RDS / ElastiCache / ECS / ASG-EC2) off the request
+        // path, so a stack delete does not leak running containers (the
+        // create-side #2031-#2034 hardening reaching the delete path).
+        // Each delete_resource above only removed the in-memory record.
+        // The snapshot hooks let the detached teardown persist the EC2
+        // records it terminates, which this stack op has already
+        // serialized as still running.
+        ContainerBackingHandles::from_provisioner(&provisioner)
+            .with_snapshot_hooks(&self.snapshot_hooks)
+            .spawn_teardown_intents(std::mem::take(
+                &mut *provisioner.pending_container_teardowns.lock(),
+            ));
+        spawn_custom_invokes(&provisioner);
+
+        // Re-acquire the write lock to update stack status
+        let mut accounts = self.state.write();
+        let outcome = if failed.is_empty() {
+            "DELETE_COMPLETE"
+        } else {
+            "DELETE_FAILED"
+        };
+        if !failed.is_empty() {
+            if let Some(state) = accounts.regional_get_mut(&job.account_id, &job.region) {
+                record_delete_failure(state, &stack_id, &failed);
+            }
+        } else if let Some(state) = accounts.regional_get_mut(&job.account_id, &job.region) {
+            if let Some(stack) = state.stacks.values_mut().find(|s| s.stack_id == stack_id) {
+                stack.status = "DELETE_COMPLETE".to_string();
+                // The reason belonged to the previous status (a failed
+                // create/update); carrying it into DELETE_COMPLETE would
+                // report a stale failure on a cleanly deleted stack.
+                stack.status_reason = None;
+                stack.resources.clear();
+                stack.outputs.clear();
+                // A deleted stack's policy goes with it; a later stack
+                // of the same name starts without one. Only when this
+                // call deleted the stack: a concurrent delete may have
+                // finished first and the name been reused since.
+                state.stack_policies.remove(&job.stack_name);
+            }
+            // Drop this stack's exports + import-consumer entries.
+            let stale_exports: Vec<String> = state
+                .exports
+                .iter()
+                .filter(|(_, e)| e.exporting_stack_name == job.stack_name)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in stale_exports {
+                state.exports.remove(&k);
+            }
+            for entries in state.imports.values_mut() {
+                entries.retain(|s| s != &job.stack_name);
+            }
+            state.imports.retain(|_, v| !v.is_empty());
+            // A stack's change sets go with it. Left behind, they would
+            // still answer DescribeChangeSet, and a re-created stack of
+            // the same name would find them by name.
+            if let Some(change_sets) = state.extras.get_mut("change_sets") {
+                change_sets.retain(|_, v| v["StackId"].as_str() != Some(stack_id.as_str()));
+            }
+        }
+        drop(accounts);
+
+        Self::send_stack_notification(
+            &self.deps.delivery,
+            &job.notification_arns,
+            &job.stack_name,
+            &stack_id,
+            outcome,
+        );
     }
 
     fn describe_stacks(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
