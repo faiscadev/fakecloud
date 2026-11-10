@@ -4,7 +4,7 @@ description = "Install fakecloud via install script, Homebrew, Cargo, Docker, Do
 weight = 1
 +++
 
-fakecloud ships as a single ~120 MB binary. Pick whichever install path fits your workflow.
+fakecloud ships as a single ~130 MB binary. Pick whichever install path fits your workflow.
 
 ## Install script (recommended)
 

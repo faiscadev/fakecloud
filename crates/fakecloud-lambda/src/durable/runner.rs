@@ -109,15 +109,17 @@ pub(crate) fn pinned_function(
     version: &str,
 ) -> Option<LambdaFunction> {
     if version != "$LATEST" {
-        if let Some(f) = st
-            .function_version_snapshots
-            .get(function_name)
-            .and_then(|m| m.get(version))
-        {
+        if let Some(f) = st.version_snapshot(function_name, version) {
             return Some(f.clone());
         }
     }
     st.functions.get(function_name).cloned()
+}
+
+/// Whether qualifier `q` names a version rather than an alias: `$LATEST`,
+/// `$LATEST.PUBLISHED` or a version number.
+pub(crate) fn is_version_qualifier(q: &str) -> bool {
+    q == "$LATEST" || q == crate::state::LATEST_PUBLISHED || q.chars().all(|c| c.is_ascii_digit())
 }
 
 /// What starting an execution produced.
@@ -644,6 +646,8 @@ pub(crate) fn no_runtime_error() -> Value {
 /// Whether `version` of `function_name` exists (`$LATEST` always does).
 pub(crate) fn version_exists(st: &LambdaState, function_name: &str, version: &str) -> bool {
     version == "$LATEST"
+        || (version == crate::state::LATEST_PUBLISHED
+            && st.latest_published.contains_key(function_name))
         || st
             .function_versions
             .get(function_name)
@@ -767,9 +771,8 @@ fn dispatch_chained(
             return None;
         };
         if let Some(q) = qualifier.as_deref() {
-            let alias_known = q == "$LATEST"
-                || q.chars().all(|c| c.is_ascii_digit())
-                || st.aliases.contains_key(&format!("{name}:{q}"));
+            let alias_known =
+                is_version_qualifier(q) || st.aliases.contains_key(&format!("{name}:{q}"));
             if !alias_known {
                 fail(accounts, not_found());
                 return None;
@@ -929,6 +932,29 @@ mod tests {
             }
         }
         DurableHub::new(state)
+    }
+
+    #[test]
+    fn latest_published_is_a_version_qualifier_that_pins_its_snapshot() {
+        let hub = hub_with(&[("f", true)]);
+        let mut accounts = hub.state().write();
+        let st = accounts.regional_mut(ACCOUNT, "us-east-1");
+        let latest_published = crate::state::LATEST_PUBLISHED;
+        assert!(is_version_qualifier(latest_published));
+        assert!(!is_version_qualifier("live"));
+        // Unpublished: the qualifier names no version yet.
+        assert!(!version_exists(st, "f", latest_published));
+        let mut published = st.functions["f"].clone();
+        published.version = latest_published.into();
+        published.description = "published".into();
+        st.latest_published.insert("f".into(), published);
+        assert!(version_exists(st, "f", latest_published));
+        assert_eq!(
+            pinned_function(st, "f", latest_published)
+                .unwrap()
+                .description,
+            "published"
+        );
     }
 
     fn start(hub: &DurableHub) -> String {

@@ -198,7 +198,7 @@ fn is_bare_layer_name(s: &str) -> bool {
 /// `(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\d{1}`: the region part of
 /// a layer ARN (`us-east-1`, `us-gov-west-1`, `us-isob-east-1`,
 /// `eusc-de-east-1`).
-fn is_layer_arn_region(region: &str) -> bool {
+pub(crate) fn is_layer_arn_region(region: &str) -> bool {
     let rest = region.strip_prefix("eusc-").unwrap_or(region);
     let mut parts: Vec<&str> = rest.split('-').collect();
     // Trailing `\d{1}`.
@@ -429,9 +429,7 @@ impl LambdaService {
                 None => (live, "$LATEST".to_string()),
                 Some(v) => {
                     let snap = state
-                        .function_version_snapshots
-                        .get(function_name)
-                        .and_then(|m| m.get(&v))
+                        .version_snapshot(function_name, &v)
                         .ok_or_else(|| not_found("Function", function_name))?;
                     (snap, v)
                 }
@@ -524,6 +522,7 @@ impl LambdaService {
         } else {
             None
         };
+        let requested_cpc = crate::capacity::parse_config(&body)?;
         let caller = self.layer_caller(req);
         let mut accounts = self.state.write();
         // Pre-resolve layer attachments before re-borrowing accounts mutably
@@ -539,11 +538,61 @@ impl LambdaService {
                 crate::layer_access::resolve_layer_attachments(&accounts, arns, &caller)
             })
             .transpose()?;
+        // A Lambda Managed Instances function can move its capacity settings
+        // (or to another capacity provider); a Lambda (default) function
+        // cannot take a capacity provider after creation.
+        let new_cpc = match requested_cpc {
+            Some(cpc) => {
+                let current = accounts
+                    .regional(&req.account_id, &req.region)
+                    .and_then(|s| s.functions.get(function_name))
+                    .ok_or_else(|| not_found("Function", function_name))?
+                    .capacity_provider_config
+                    .clone();
+                crate::capacity::locate_provider(
+                    &cpc.capacity_provider_arn,
+                    &req.account_id,
+                    &req.region,
+                    self.iam_mode,
+                )?;
+                let Some(current) = current else {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValueException",
+                        "CapacityProviderConfig isn't supported for Lambda Default functions.",
+                    ));
+                };
+                let cpc = crate::capacity::resolve(
+                    &accounts,
+                    &cpc,
+                    &req.account_id,
+                    &req.region,
+                    self.iam_mode,
+                )?;
+                if cpc.capacity_provider_arn != current.capacity_provider_arn {
+                    crate::capacity::check_version_quota(
+                        crate::capacity::versions_using(&accounts, &cpc.capacity_provider_arn)
+                            .len(),
+                        1,
+                        &cpc.capacity_provider_arn,
+                    )?;
+                }
+                Some(cpc)
+            }
+            None => None,
+        };
         let state = accounts.regional_mut(&req.account_id, &req.region);
-        let func = state
+        let live = state
             .functions
             .get_mut(function_name)
             .ok_or_else(|| not_found("Function", function_name))?;
+        // The update is applied to a copy and checked as a whole before it
+        // replaces `$LATEST`, so a refused update changes nothing.
+        let mut updated = live.clone();
+        let func = &mut updated;
+        if let Some(cpc) = new_cpc {
+            func.capacity_provider_config = Some(cpc);
+        }
         if let Some(handler) = body["Handler"].as_str() {
             func.handler = handler.to_string();
         }
@@ -606,12 +655,27 @@ impl LambdaService {
         if let Some(attachments) = layer_attachments {
             func.layers = attachments;
         }
+        if let Some(cpc) = &func.capacity_provider_config {
+            crate::capacity::validate_settings(
+                cpc,
+                &crate::capacity::FunctionSettings {
+                    runtime: &func.runtime,
+                    package_type: &func.package_type,
+                    memory_size: func.memory_size,
+                    snap_start: func.snap_start.as_ref(),
+                    vpc_config: func.vpc_config.as_ref(),
+                },
+            )?;
+            crate::capacity::validate_concurrency(cpc, func.memory_size)?;
+        }
         // RevisionId rotates only on real config changes — clients
         // round-trip it through optimistic-concurrency calls, so we
         // mint a fresh one here to signal "config changed".
         func.revision_id = uuid::Uuid::new_v4().to_string();
         func.last_modified = Utc::now();
-        ok(self.function_config_json(func))
+        let response = self.function_config_json(func);
+        *live = updated;
+        ok(response)
     }
 
     fn update_function_code(
@@ -859,24 +923,65 @@ impl LambdaService {
         // version (unless publishing would return the latest version
         // unchanged), so both copies must fit before `$LATEST` changes.
         // Measured once: the publish step below does not check again.
-        let publish_copy = storage_limit.is_some()
-            && publish
-            && crate::service::publish_creates_version(
-                state,
+        // `PublishTo=LATEST_PUBLISHED` on a Lambda Managed Instances function
+        // also (re)publishes `$LATEST.PUBLISHED` from the new code; a Lambda
+        // (default) function has no such version and the member is ignored.
+        let publish_latest_published = body["PublishTo"].as_str() == Some("LATEST_PUBLISHED")
+            && func.capacity_provider_config.is_some();
+        if publish_latest_published {
+            // The version quota and both stored copies are checked before
+            // `$LATEST` changes, so a refused publish leaves the old code live.
+            crate::service::check_latest_published(
+                &accounts,
+                &req.account_id,
+                &req.region,
                 function_name,
                 &func,
-                body["Description"].as_str(),
-            );
-        crate::quota::check_replaced_code(state, storage_limit, old_size, &func, publish_copy)?;
+                storage_limit,
+                Some(old_size),
+            )?;
+        } else {
+            let state = accounts.regional_mut(&req.account_id, &req.region);
+            let publish_copy = storage_limit.is_some()
+                && publish
+                && crate::service::publish_creates_version(
+                    state,
+                    function_name,
+                    &func,
+                    body["Description"].as_str(),
+                );
+            crate::quota::check_replaced_code(state, storage_limit, old_size, &func, publish_copy)?;
+        }
         let response = self.function_config_json(&func);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.functions.insert(function_name.to_string(), func);
 
         // Publish=true mints a new immutable version snapshot off the
         // freshly updated $LATEST and returns that version's config, under
         // the same lock. The request's RevisionId was checked against the
         // `$LATEST` it replaced, so it is not re-checked against the new one.
+        // `PublishTo=LATEST_PUBLISHED` republishes `$LATEST.PUBLISHED` of a
+        // Lambda Managed Instances function; a Lambda (default) function has
+        // no such version and the member is ignored.
+        if publish_latest_published {
+            return self.publish_latest_published_locked(
+                &mut accounts,
+                &req.account_id,
+                &req.region,
+                function_name,
+                body["Description"].as_str(),
+                storage_limit,
+            );
+        }
         if publish {
-            return self.publish_locked(state, function_name, body["Description"].as_str(), None);
+            return self.publish_locked(
+                &mut accounts,
+                &req.account_id,
+                &req.region,
+                function_name,
+                body["Description"].as_str(),
+                None,
+            );
         }
 
         ok(response)

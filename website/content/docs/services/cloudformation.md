@@ -125,7 +125,7 @@ For **container-backed** services, a CloudFormation-provisioned resource is back
 - **Kinesis Analytics v2 (Managed Service for Apache Flink)** — `Application`, `ApplicationOutput`, `ApplicationReferenceDataSource`, `ApplicationCloudWatchLoggingOption`
 - **KMS** — `Key`, `Alias`, `ReplicaKey`
 - **MSK (Managed Streaming for Apache Kafka)** — `Cluster`, `ServerlessCluster`, `Configuration`, `ClusterPolicy`, `BatchScramSecret`, `VpcConnection`, `Replicator`
-- **Lambda** — `Function` (including `ImageConfig` and `ReservedConcurrentExecutions`), `Version`, `Alias`, `LayerVersion`, `Permission`, `EventSourceMapping`, `EventInvokeConfig`, `Url`
+- **Lambda** — `Function` (including `ImageConfig`, `ReservedConcurrentExecutions`, `CapacityProviderConfig` and `PublishToLatestPublished`), `CapacityProvider` (scaling and tags update in place, other changes replace it; deleting it while a function version uses it fails), `Version`, `Alias`, `LayerVersion`, `Permission`, `EventSourceMapping`, `EventInvokeConfig`, `Url`
 - **CloudWatch Logs** — `LogGroup`, `LogStream`, `MetricFilter`, `SubscriptionFilter`, `Destination`, `ResourcePolicy`, `QueryDefinition`, `Delivery`, `DeliverySource`, `DeliveryDestination`
 - **Organizations** — `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy`
 - **RDS** — `DBInstance` (a `DBClusterIdentifier` member joins the cluster's `DBClusterMembers` and takes its engine, credentials and port; `Endpoint.Address` / `Endpoint.Port` resolve live), `DBCluster` (port defaults per engine), `DBParameterGroup`, `DBClusterParameterGroup`, `DBSubnetGroup`, `DBSecurityGroup`, `OptionGroup`, `DBProxy`, `EventSubscription`

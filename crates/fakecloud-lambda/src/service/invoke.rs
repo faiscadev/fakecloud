@@ -23,12 +23,27 @@ impl LambdaService {
         // alias qualifier that doesn't exist here (bug-audit 2026-06-20, 1.9).
         // Numeric versions keep the existing lenient fallback (a missing version
         // snapshot is legacy state, handled below).
+        // An unqualified invoke of a Lambda Managed Instances function runs
+        // its `$LATEST.PUBLISHED` version rather than the unpublished
+        // `$LATEST`.
+        let default_qualifier = {
+            let accounts = self.state.read();
+            accounts
+                .regional(account_id, region)
+                .and_then(|s| crate::service::default_invoke_qualifier(s, function_name))
+        };
+        let qualifier = qualifier.or(default_qualifier);
         if let Some(q) = qualifier {
             if q != "$LATEST" && !q.chars().all(|c| c.is_ascii_digit()) {
                 let accounts = self.state.read();
                 let empty = LambdaState::new(account_id, "");
                 let state = accounts.regional(account_id, region).unwrap_or(&empty);
-                if !state.aliases.contains_key(&format!("{function_name}:{q}")) {
+                let exists = if q == crate::state::LATEST_PUBLISHED {
+                    state.latest_published.contains_key(function_name)
+                } else {
+                    state.aliases.contains_key(&format!("{function_name}:{q}"))
+                };
+                if !exists {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::NOT_FOUND,
                         "ResourceNotFoundException",
@@ -73,11 +88,7 @@ impl LambdaService {
             // routable invoke.
             let func = match resolved_version.as_deref() {
                 Some(v) => {
-                    let snap = state
-                        .function_version_snapshots
-                        .get(function_name)
-                        .and_then(|m| m.get(v))
-                        .cloned();
+                    let snap = state.version_snapshot(function_name, v).cloned();
                     if snap.is_none() {
                         // Snapshot missing: code is whatever is in
                         // `functions` ($LATEST). Reflect that in the

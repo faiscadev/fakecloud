@@ -430,6 +430,7 @@ mod tests {
             state_reason_code: None,
             last_update_status_reason: None,
             last_update_status_reason_code: None,
+            capacity_provider_config: None,
         };
         f.environment
             .insert("FAKECLOUD_URL".into(), "http://localhost:4566".into());

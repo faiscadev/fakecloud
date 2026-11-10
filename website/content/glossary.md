@@ -40,7 +40,7 @@ An AWS Organizations policy that sets the *ceiling* of permissions for accounts 
 AWS's interface definition language for its services. Every official AWS SDK is generated from Smithy models, and fakecloud validates its responses against the same models on every commit. See [conformance-baseline.json](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json) for the exact baseline.
 
 ### Startup time
-The wall time from launching `fakecloud` to the server accepting requests on port 4566. Currently **~300ms** on Apple M1, with **~30 MiB** idle memory and a **~120 MB** binary. The fast startup is what makes fakecloud usable in per-test setup/teardown rather than as a long-running shared environment.
+The wall time from launching `fakecloud` to the server accepting requests on port 4566. Currently **~300ms** on Apple M1, with **~30 MiB** idle memory and a **~130 MB** binary. The fast startup is what makes fakecloud usable in per-test setup/teardown rather than as a long-running shared environment.
 
 ### Wire protocol
 The on-the-wire format an AWS service uses: REST-XML (S3), REST-JSON (Lambda, API Gateway), JSON 1.1 (most others), Query/JSON 1.1 hybrid (older services). fakecloud implements each service's actual wire protocol so the official AWS SDKs work without modification — pointing them at `http://localhost:4566` is the only change needed.

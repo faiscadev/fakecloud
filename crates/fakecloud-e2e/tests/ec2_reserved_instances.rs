@@ -212,3 +212,156 @@ async fn a_queued_purchase_waits_and_can_be_deleted() {
         Some("InvalidParameterValue")
     );
 }
+
+/// A one-year Convertible offering of `instance_type`, Region-scoped.
+async fn convertible_offering(c: &aws_sdk_ec2::Client, instance_type: InstanceType) -> String {
+    c.describe_reserved_instances_offerings()
+        .instance_type(instance_type)
+        .offering_class(OfferingClassType::Convertible)
+        .max_duration(31_536_000)
+        .send()
+        .await
+        .unwrap()
+        .reserved_instances_offerings()[0]
+        .reserved_instances_offering_id()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_convertible_reservation_is_quoted_and_exchanged() {
+    use aws_sdk_ec2::types::TargetConfigurationRequest;
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let source = c
+        .purchase_reserved_instances_offering()
+        .reserved_instances_offering_id(convertible_offering(&c, InstanceType::M5Large).await)
+        .instance_count(2)
+        .send()
+        .await
+        .unwrap()
+        .reserved_instances_id()
+        .unwrap()
+        .to_string();
+    let target = convertible_offering(&c, InstanceType::M5Xlarge).await;
+    let to = || {
+        TargetConfigurationRequest::builder()
+            .offering_id(&target)
+            .build()
+    };
+
+    // Not active while its payment settles.
+    let quote = c
+        .get_reserved_instances_exchange_quote()
+        .reserved_instance_ids(&source)
+        .target_configurations(to())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(quote.is_valid_exchange(), Some(false));
+    assert!(quote.validation_failure_reason().is_some());
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+
+    let quote = c
+        .get_reserved_instances_exchange_quote()
+        .reserved_instance_ids(&source)
+        .target_configurations(to())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(quote.is_valid_exchange(), Some(true), "{quote:?}");
+    assert_eq!(quote.currency_code(), Some("USD"));
+    assert_eq!(quote.payment_due(), Some("0.000000"));
+    assert_eq!(
+        quote.reserved_instance_value_set()[0].reserved_instance_id(),
+        Some(source.as_str())
+    );
+    let target_value = &quote.target_configuration_value_set()[0];
+    let configuration = target_value.target_configuration().unwrap();
+    assert_eq!(configuration.offering_id(), Some(target.as_str()));
+    assert_eq!(configuration.instance_count(), Some(2));
+    assert_eq!(
+        quote
+            .reserved_instance_value_rollup()
+            .unwrap()
+            .hourly_price(),
+        Some("0.040000")
+    );
+    let source_end = c
+        .describe_reserved_instances()
+        .reserved_instances_ids(&source)
+        .send()
+        .await
+        .unwrap()
+        .reserved_instances()[0]
+        .end()
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        quote
+            .output_reserved_instances_will_expire_at()
+            .unwrap()
+            .secs(),
+        source_end.secs()
+    );
+
+    let exchange = c
+        .accept_reserved_instances_exchange_quote()
+        .reserved_instance_ids(&source)
+        .target_configurations(to())
+        .send()
+        .await
+        .unwrap();
+    assert!(exchange.exchange_id().unwrap().starts_with("riex-"));
+    let all = c.describe_reserved_instances().send().await.unwrap();
+    let all = all.reserved_instances();
+    assert_eq!(all.len(), 2, "{all:?}");
+    let old = all
+        .iter()
+        .find(|r| r.reserved_instances_id() == Some(source.as_str()))
+        .unwrap();
+    assert_eq!(old.state(), Some(&ReservedInstanceState::Retired));
+    let new = all
+        .iter()
+        .find(|r| r.reserved_instances_id() != Some(source.as_str()))
+        .unwrap();
+    assert_eq!(new.instance_type(), Some(&InstanceType::M5Xlarge));
+    assert_eq!(new.instance_count(), Some(2));
+    assert_eq!(new.offering_class(), Some(&OfferingClassType::Convertible));
+    assert_eq!(new.end().unwrap().secs(), source_end.secs());
+
+    // Retired, it cannot be exchanged again.
+    let err = c
+        .accept_reserved_instances_exchange_quote()
+        .reserved_instance_ids(&source)
+        .target_configurations(to())
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(err.meta().code(), Some("InvalidParameterValue"));
+    // Unknown and malformed ids are refused as on EC2.
+    let err = c
+        .get_reserved_instances_exchange_quote()
+        .reserved_instance_ids("e5a2ff3b-7d14-494f-90af-0b5d00000000")
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(err.meta().code(), Some("InvalidReservedInstanceId"));
+    assert_eq!(
+        err.meta().message(),
+        Some(" [e5a2ff3b-7d14-494f-90af-0b5d00000000]")
+    );
+    let err = c
+        .accept_reserved_instances_exchange_quote()
+        .reserved_instance_ids("ri-1")
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(
+        err.meta().code(),
+        Some("InvalidReservedInstancesID.NotFound")
+    );
+}

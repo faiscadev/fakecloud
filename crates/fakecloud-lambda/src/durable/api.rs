@@ -509,7 +509,7 @@ pub(crate) fn list_durable_executions_by_function(
     // A qualifier filters by the version the executions are pinned to; an
     // alias stands for the version it points at.
     let version_filter = qualifier.as_deref().map(|q| {
-        if q == "$LATEST" || q.chars().all(|c| c.is_ascii_digit()) {
+        if runner::is_version_qualifier(q) {
             q.to_string()
         } else {
             st.aliases
@@ -590,7 +590,7 @@ impl LambdaService {
                     "You cannot invoke a durable function using an unqualified ARN.",
                 )));
             };
-            if q != "$LATEST" && !q.chars().all(|c| c.is_ascii_digit()) {
+            if !runner::is_version_qualifier(q) {
                 // An unknown alias falls through to the regular 404.
                 st.aliases.get(&format!("{function_name}:{q}"))?;
             }

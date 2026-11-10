@@ -32,7 +32,7 @@ These are philosophies, not rankings. Breadth-first and depth-first are differen
 | Feature | fakecloud |
 |---|---|
 | Language | Rust |
-| Distribution | Single static binary (~120 MB) + Docker image |
+| Distribution | Single static binary (~130 MB) + Docker image |
 | Startup | ~300ms |
 | Idle memory | ~30 MiB |
 | Services covered today | 107 (7,657 ops) at true 100% conformance (258,545/258,545 variants), incl. ECR + ECS + ELBv2 |

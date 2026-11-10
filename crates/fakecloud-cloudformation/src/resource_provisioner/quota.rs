@@ -331,6 +331,44 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_publish_to_latest_published_rolls_the_function_back() {
+        // 10 bytes: the 8-byte $LATEST fits, its $LATEST.PUBLISHED copy does not.
+        let prov = enforcing(fakecloud_core::quota::FixedQuotas::default().with(
+            "lambda",
+            "L-2ACBD22F",
+            10.5 / (1024.0 * 1024.0 * 1024.0),
+        ));
+        prov.create_resource(&make_resource(
+            "AWS::Lambda::CapacityProvider",
+            "Cp",
+            serde_json::json!({
+                "CapacityProviderName": "cp",
+                "VpcConfig": {"SubnetIds": ["subnet-1"], "SecurityGroupIds": ["sg-1"]},
+                "PermissionsConfig": {
+                    "CapacityProviderOperatorRoleArn": "arn:aws:iam::123456789012:role/op"
+                }
+            }),
+        ))
+        .unwrap();
+        let mut props = function("eight888");
+        props["Runtime"] = serde_json::json!("python3.13");
+        props["CapacityProviderConfig"] = serde_json::json!({
+            "LambdaManagedInstancesCapacityProviderConfig": {
+                "CapacityProviderArn": "arn:aws:lambda:us-east-1:123456789012:capacity-provider:cp"
+            }
+        });
+        props["PublishToLatestPublished"] = serde_json::json!(true);
+        let err = prov
+            .create_resource(&make_resource("AWS::Lambda::Function", "F", props))
+            .expect_err("the $LATEST.PUBLISHED copy does not fit");
+        assert!(err.contains("CodeStorageExceededException"), "{err}");
+        let accounts = prov.lambda_state.read();
+        let state = accounts.regional(&prov.account_id, &prov.region).unwrap();
+        assert!(!state.functions.contains_key("sized"), "rolled back");
+        assert!(!state.latest_published.contains_key("sized"));
+    }
+
+    #[test]
     fn a_refused_function_code_update_leaves_the_function_unchanged() {
         // 10 bytes of code storage, in the quota's gigabytes.
         let prov = enforcing(fakecloud_core::quota::FixedQuotas::default().with(
