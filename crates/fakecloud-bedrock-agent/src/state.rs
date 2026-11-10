@@ -313,6 +313,10 @@ pub struct Flow {
     /// version's number is never handed out again.
     #[serde(default)]
     pub latest_version: u64,
+    /// The findings of the last PrepareFlow, cleared when the draft changes.
+    /// `None` until the flow is prepared, so GetFlow omits `validations`.
+    #[serde(default)]
+    pub validations: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

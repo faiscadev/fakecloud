@@ -276,6 +276,24 @@ pub struct JobRun {
     pub error_message: Option<String>,
     pub execution_time: i64,
     pub attempt: i64,
+    /// What the run ran with, fixed when it started: the job's settings and the
+    /// run's own overrides. Changing or deleting the job later changes no run.
+    #[serde(default)]
+    pub settings: JobRunSettings,
+}
+
+/// A job run's capacity and runtime settings, as `GetJobRun` reports them.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct JobRunSettings {
+    pub timeout: Option<i64>,
+    pub max_capacity: Option<f64>,
+    pub allocated_capacity: Option<i64>,
+    pub glue_version: Option<String>,
+    pub worker_type: Option<String>,
+    pub number_of_workers: Option<i64>,
+    pub execution_class: Option<String>,
+    pub job_mode: Option<String>,
+    pub log_group_name: Option<String>,
 }
 
 impl GlueState {

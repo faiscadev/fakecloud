@@ -1150,6 +1150,40 @@ pub struct ReservedInstances {
     pub duration: i64,
     pub fixed_price: String,
     pub usage_price: String,
+    /// `Availability Zone` or `Region` (then `availability_zone` is empty).
+    #[serde(default = "ri_default_scope")]
+    pub scope: String,
+    #[serde(default = "ri_default_offering_class")]
+    pub offering_class: String,
+    #[serde(default = "ri_default_offering_type")]
+    pub offering_type: String,
+    #[serde(default = "ri_default_tenancy")]
+    pub instance_tenancy: String,
+    /// When the reservation started and ends, `start` plus `duration`.
+    #[serde(default = "ri_default_start")]
+    pub start: String,
+    #[serde(default = "ri_default_end")]
+    pub end: String,
+}
+
+// What a reservation persisted before these were recorded reported.
+fn ri_default_scope() -> String {
+    "Availability Zone".to_string()
+}
+fn ri_default_offering_class() -> String {
+    "standard".to_string()
+}
+fn ri_default_offering_type() -> String {
+    "No Upfront".to_string()
+}
+fn ri_default_tenancy() -> String {
+    "default".to_string()
+}
+fn ri_default_start() -> String {
+    "2024-01-01T00:00:00.000Z".to_string()
+}
+fn ri_default_end() -> String {
+    "2025-01-01T00:00:00.000Z".to_string()
 }
 
 /// A Reserved Instances listing in the Reserved Instance Marketplace.
@@ -2049,6 +2083,11 @@ pub struct TgwMcastGroup {
 pub struct Ec2State {
     pub account_id: String,
     pub region: String,
+    /// Whether this state has been given a default subnet in every zone (set at
+    /// bootstrap; `false` in a snapshot from a build that seeded fewer, which
+    /// restore backfills once and then sets).
+    #[serde(default)]
+    pub default_subnets_backfilled: bool,
     /// resource-id -> tags. Shared by every Describe* `tag:` filter.
     #[serde(default)]
     pub tags: BTreeMap<String, Vec<Tag>>,
@@ -2490,6 +2529,13 @@ impl Ec2State {
     /// have deterministic ids, so re-seeding an already-seeded account is a no-op.
     pub fn ensure_public_images_seeded(&mut self) {
         crate::defaults::seed_public_images(self);
+    }
+
+    /// On snapshot restore, give the default VPC of a state persisted by a
+    /// build that seeded fewer zones the default subnets it lacks, once (see
+    /// `defaults::backfill_default_subnets`).
+    pub fn ensure_default_subnets_backfilled(&mut self) {
+        crate::defaults::backfill_default_subnets(self);
     }
 
     /// Replace the tag set for `resource_id` with `tags` merged over any

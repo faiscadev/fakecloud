@@ -38,7 +38,7 @@ For a complete testing guide with code examples, see [Testing Bedrock](/docs/gui
 - **InvokeModel** — with canned or configurable responses
 - **InvokeModelWithResponseStream** — streaming, same config surface
 - **Converse** — with message history, tool use
-- **ConverseStream** — streaming variant
+- **ConverseStream**: streaming variant: `messageStart`, text deltas, `contentBlockStop`, `toolUse` blocks (`contentBlockStart` + delta + stop), `messageStop`, `metadata`
 - **ApplyGuardrail** — content evaluation against configured guardrails
 - **InvokeGuardrailChecks** — inline guardrail-tier checks (no pre-created guardrail): evaluates messages for `contentFilter` / `promptAttack` categories and `sensitiveInformation` entities, returning per-detection scores, PII match offsets, and per-check text-unit usage
 - **CountTokens** — token counting for Anthropic model bodies

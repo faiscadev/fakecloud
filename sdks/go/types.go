@@ -1053,6 +1053,7 @@ type BedrockAgentRuntimeInvocation struct {
 	OutputChunks uint32  `json:"outputChunks"`
 	Trace        any     `json:"trace"`
 	Citations    []any   `json:"citations"`
+	FlowOutputs  []any   `json:"flowOutputs"`
 	InvokedAt    string  `json:"invokedAt"`
 	DurationMs   uint64  `json:"durationMs"`
 }

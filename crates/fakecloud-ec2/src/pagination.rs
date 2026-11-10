@@ -20,6 +20,17 @@ use crate::service_helpers::{
     decode_page_token, encode_page_token, invalid_parameter_value, parse_page_size,
 };
 
+/// How an operation refuses a `MaxResults` outside its range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MaxResultsRefusal {
+    /// `InvalidParameterValue`.
+    Generic,
+    /// `InvalidMaxResults`, with the message recorded from real EC2 (2026-11-09) above
+    /// the maximum. The CLI refuses a value below the minimum before sending it, so
+    /// the same refusal below it is inferred.
+    InvalidMaxResults,
+}
+
 /// How a result with several list members is paged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SetLayout {
@@ -39,6 +50,7 @@ pub(crate) struct PagedOp {
     pub sets: &'static [&'static str],
     pub layout: SetLayout,
     pub max_results: Option<(i64, i64)>,
+    pub refusal: MaxResultsRefusal,
 }
 
 /// Operations whose handlers apply `MaxResults` / `NextToken` themselves.
@@ -110,6 +122,16 @@ pub(crate) fn validate_request(
         None => (1, i64::MAX),
     };
     let size = match parse_page_size(&req.query_params)? {
+        Some(n) if (n < min || n > max) && op.refusal == MaxResultsRefusal::InvalidMaxResults => {
+            return Err(AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "InvalidMaxResults",
+                format!(
+                    "Value ( {n} ) for parameter maxResults is invalid. \
+                     Expecting a value from ( {min} ) to  ( {max} )."
+                ),
+            ));
+        }
         Some(n) if n < min || n > max => {
             return Err(invalid_parameter_value(match (min, max) {
                 (_, i64::MAX) => format!("MaxResults must be at least {min}"),
@@ -347,6 +369,7 @@ mod tests {
             sets,
             layout,
             max_results: None,
+            refusal: MaxResultsRefusal::Generic,
         }
     }
 
@@ -714,6 +737,53 @@ mod dispatch_tests {
         }
     }
 
+    /// The refusal of a `MaxResults` outside its range.
+    fn out_of_range(op: &PagedOp, value: &str) -> &'static str {
+        if op.refusal == MaxResultsRefusal::InvalidMaxResults && value.parse::<i64>().is_ok() {
+            "InvalidMaxResults"
+        } else {
+            "InvalidParameterValue"
+        }
+    }
+
+    /// As recorded from real EC2, two spaces and all.
+    #[tokio::test]
+    async fn the_instance_type_listings_refuse_max_results_as_ec2_does() {
+        let svc = Ec2Service::new();
+        for (action, value, range) in [
+            ("DescribeInstanceTypes", "101", "( 5 ) to  ( 100 )"),
+            (
+                "DescribeInstanceTypeOfferings",
+                "1001",
+                "( 5 ) to  ( 1000 )",
+            ),
+            // Inferred: the CLI refuses these before sending them.
+            ("DescribeInstanceTypes", "4", "( 5 ) to  ( 100 )"),
+            ("DescribeInstanceTypeOfferings", "4", "( 5 ) to  ( 1000 )"),
+        ] {
+            let err = call(&svc, action, &[("MaxResults", value)])
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{action} accepted {value}"));
+            assert_eq!(err.code(), "InvalidMaxResults", "{action} {value}");
+            assert_eq!(
+                err.message(),
+                format!(
+                    "Value ( {value} ) for parameter maxResults is invalid. \
+                     Expecting a value from {range}."
+                ),
+            );
+        }
+        for (action, value) in [
+            ("DescribeInstanceTypes", "5"),
+            ("DescribeInstanceTypes", "100"),
+            ("DescribeInstanceTypeOfferings", "5"),
+            ("DescribeInstanceTypeOfferings", "1000"),
+        ] {
+            ok(&svc, action, &[("MaxResults", value)]).await;
+        }
+    }
+
     /// `MaxResults` must be a positive integer inside the model's `@range`.
     #[tokio::test]
     async fn every_paginated_op_bounds_max_results() {
@@ -730,7 +800,7 @@ mod dispatch_tests {
                     .await
                     .err()
                     .unwrap_or_else(|| panic!("{} accepted MaxResults={bad}", op.action));
-                assert_eq!(err.code(), "InvalidParameterValue", "{} {bad}", op.action);
+                assert_eq!(err.code(), out_of_range(op, bad), "{} {bad}", op.action);
             }
             if let Some((min, max)) = op.max_results {
                 for bad in [min.checked_sub(1), max.checked_add(1)]
@@ -745,7 +815,7 @@ mod dispatch_tests {
                         .await
                         .err()
                         .unwrap_or_else(|| panic!("{} accepted MaxResults={bad}", op.action));
-                    assert_eq!(err.code(), "InvalidParameterValue", "{} {bad}", op.action);
+                    assert_eq!(err.code(), out_of_range(op, &bad), "{} {bad}", op.action);
                 }
             }
         }
@@ -783,6 +853,7 @@ mod dispatch_tests {
             sets: &["thingSet"],
             layout: SetLayout::Concat,
             max_results: Some((0, 100)),
+            refusal: MaxResultsRefusal::Generic,
         };
         let xml = fakecloud_aws::ec2query::ec2_response(
             "DescribeThings",
@@ -836,13 +907,14 @@ mod dispatch_tests {
             ("InstanceRequirements.VCpuCount.Min", "1"),
             ("InstanceRequirements.MemoryMiB.Min", "1"),
         ];
-        for (action, params, size) in [
-            ("DescribeInstanceTypes", &[][..], "5"),
-            ("DescribeInstanceTypeOfferings", &[][..], "5"),
+        for (action, params, size, default_page) in [
+            ("DescribeInstanceTypes", &[][..], "5", Some(100)),
+            ("DescribeInstanceTypeOfferings", &[][..], "5", Some(1000)),
             (
                 "GetInstanceTypesFromInstanceRequirements",
                 &requirements[..],
                 "1",
+                None,
             ),
         ] {
             let names = |xml: &str| -> Vec<String> {
@@ -851,9 +923,27 @@ mod dispatch_tests {
                     .map(|s| s.split('<').next().unwrap().to_string())
                     .collect()
             };
-            let full_xml = ok(&svc, action, params).await;
-            assert!(next_token(&full_xml).is_none(), "{action}");
-            let full = names(&full_xml);
+            // As real EC2 answers a request with no MaxResults.
+            let mut full = Vec::new();
+            let mut token: Option<String> = None;
+            loop {
+                let mut request = params.to_vec();
+                if let Some(t) = &token {
+                    request.push(("NextToken", t));
+                }
+                let xml = ok(&svc, action, &request).await;
+                let page = names(&xml);
+                token = next_token(&xml);
+                match (default_page, &token) {
+                    (Some(default_page), Some(_)) => assert_eq!(page.len(), default_page),
+                    (None, Some(_)) => panic!("{action}: paged with no MaxResults"),
+                    _ => {}
+                }
+                full.extend(page);
+                if token.is_none() {
+                    break;
+                }
+            }
             assert!(full.len() > 100, "{action}: {}", full.len());
             let mut walked = Vec::new();
             let mut token: Option<String> = None;

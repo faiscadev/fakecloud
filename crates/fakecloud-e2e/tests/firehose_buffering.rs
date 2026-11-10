@@ -378,6 +378,12 @@ async fn firehose_detached_batch_keeps_captured_config_until_late_bucket_exists(
     let server = TestServer::start().await;
     let fh = server.firehose_client().await;
     let s3 = server.s3_client().await;
+    // Creating the stream requires its bucket; it goes away before any delivery.
+    s3.create_bucket()
+        .bucket("fh-missing-old")
+        .send()
+        .await
+        .unwrap();
     create(
         &fh,
         "captured",
@@ -389,6 +395,11 @@ async fn firehose_detached_batch_keeps_captured_config_until_late_bucket_exists(
             .unwrap(),
     )
     .await;
+    s3.delete_bucket()
+        .bucket("fh-missing-old")
+        .send()
+        .await
+        .unwrap();
     // Zero interval detaches at admission even though the bucket is missing.
     put(&fh, "captured", b"captured-old".to_vec()).await;
     s3.create_bucket()
@@ -498,7 +509,8 @@ async fn firehose_unsupported_preflight_invalid_argument_before_ack_and_control_
             .build()
             .unwrap(),
         destination_builder(bucket, 0)
-            .prefix("!{timestamp:yyyy}/")
+            .prefix("!{partitionKeyFromQuery:id}/")
+            .error_output_prefix("errors/")
             .build()
             .unwrap(),
         destination_builder(bucket, 0)
@@ -925,6 +937,14 @@ async fn firehose_sdk_enforces_buffering_hint_and_destination_string_limits() {
     let server = TestServer::start().await;
     let fh = server.firehose_client().await;
     let bucket = "fh-limits";
+    server
+        .s3_client()
+        .await
+        .create_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .unwrap();
     // Model ranges: SizeInMBs 1-128 and IntervalInSeconds 0-900, set together.
     for (stream, hints) in [
         ("size-zero", hints(0, 60)),

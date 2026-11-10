@@ -204,6 +204,12 @@ impl CloudFrontService {
         if f.etag != if_match {
             return Err(precondition_failed());
         }
+        // Model-declared; checked after the If-Match (inferred).
+        // A distribution names it by ID.
+        crate::validate::refuse_in_use(
+            account,
+            crate::validate::Reference::ConnectionFunction(&f.id),
+        )?;
         account.connection_functions.remove(&name);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))

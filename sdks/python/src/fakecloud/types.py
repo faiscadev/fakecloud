@@ -2400,6 +2400,7 @@ class BedrockAgentRuntimeInvocation:
     output_chunks: int
     trace: Any
     citations: List[Any]
+    flow_outputs: List[Any]
     invoked_at: str
     duration_ms: int
 
@@ -2416,6 +2417,7 @@ class BedrockAgentRuntimeInvocation:
             output_chunks=int(data.get("outputChunks", 0)),
             trace=data.get("trace"),
             citations=list(data.get("citations", [])),
+            flow_outputs=list(data.get("flowOutputs", [])),
             invoked_at=data.get("invokedAt", ""),
             duration_ms=int(data.get("durationMs", 0)),
         )

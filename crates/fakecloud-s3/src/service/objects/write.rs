@@ -43,6 +43,13 @@ impl S3Service {
         // Resolved here, before `take_body_stream` spools the payload to disk:
         // returning after the spool leaks the file, since nothing unlinks it on
         // the error paths.
+        self.reject_blocked_sse_c(
+            account_id,
+            req,
+            bucket,
+            key,
+            crate::service::sse_c_algorithm_header(&req.headers),
+        )?;
         let write_acl = self.resolve_write_acl_headers(account_id, bucket, &req.headers)?;
 
         // Parse tags from header
@@ -517,6 +524,15 @@ impl S3Service {
         // caller believed it had published the copy.
         // Resolved before the write lock, since the check reads bucket state of
         // its own, and before the copy does any work.
+        // SSE-C on the destination (not the copy-source key headers, which
+        // only decrypt the source) is refused on a bucket that blocks it.
+        self.reject_blocked_sse_c(
+            account_id,
+            req,
+            dest_bucket,
+            dest_key,
+            crate::service::sse_c_algorithm_header(&req.headers),
+        )?;
         let copy_acl = self.resolve_write_acl_headers(account_id, dest_bucket, &req.headers)?;
 
         // Phase 1 (read guard): resolve the source, evaluate preconditions and

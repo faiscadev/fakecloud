@@ -234,6 +234,8 @@ jobs:
             case "$1" in
               public.ecr.aws/docker/library/*)
                 echo "mirror.gcr.io/library/${1#public.ecr.aws/docker/library/}" ;;
+              public.ecr.aws/opensearchproject/opensearch:*)
+                echo "mirror.gcr.io/opensearchproject/opensearch:${1##*:} docker.io/opensearchproject/opensearch:${1##*:}" ;;
               public.ecr.aws/aws-cli/aws-cli:*)
                 tag="${1##*:}"
                 echo "mirror.gcr.io/amazon/aws-cli:$tag docker.io/amazon/aws-cli:$tag" ;;

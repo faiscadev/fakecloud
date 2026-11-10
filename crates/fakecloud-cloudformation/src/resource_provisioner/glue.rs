@@ -213,7 +213,7 @@ impl ResourceProvisioner {
         let dbs = state.dbs_in_mut(&self.region);
         let db = dbs
             .get_mut(parts[0])
-            .ok_or_else(|| format!("Database {} not found", parts[0]))?;
+            .ok_or_else(|| format!("EntityNotFoundException: Database {} not found", parts[0]))?;
         db.tables.remove(parts[1]);
         Ok(())
     }
@@ -372,11 +372,11 @@ impl ResourceProvisioner {
         let dbs = state.dbs_in_mut(&self.region);
         let db = dbs
             .get_mut(parts[0])
-            .ok_or_else(|| format!("Database {} not found", parts[0]))?;
+            .ok_or_else(|| format!("EntityNotFoundException: Database {} not found", parts[0]))?;
         let table = db
             .tables
             .get_mut(parts[1])
-            .ok_or_else(|| format!("Table {} not found", parts[1]))?;
+            .ok_or_else(|| format!("EntityNotFoundException: Table {} not found", parts[1]))?;
         table.partitions.remove(parts[2]);
         Ok(())
     }

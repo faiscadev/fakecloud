@@ -52,6 +52,8 @@ fn minimal_config(caller_ref: &str) -> DistributionConfig {
                         .unwrap(),
                 )
                 .min_ttl(0)
+                .default_ttl(86_400)
+                .max_ttl(31_536_000)
                 .build()
                 .unwrap(),
         )
@@ -276,6 +278,8 @@ async fn etag_only_bumps_on_real_changes() {
                         .unwrap(),
                 )
                 .min_ttl(0)
+                .default_ttl(86_400)
+                .max_ttl(31_536_000)
                 .build()
                 .unwrap(),
         )

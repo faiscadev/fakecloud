@@ -173,10 +173,21 @@ struct ToolSpec {
 
 /// A tool invocation the model chose to make, translated back to the
 /// Bedrock `toolUse` vocabulary.
-struct ToolCall {
-    id: String,
-    name: String,
-    input: Value,
+pub(crate) struct ToolCall {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) input: Value,
+}
+
+/// The input of a tool call from its raw JSON arguments, on the non-streaming and
+/// streaming paths alike. Blank arguments are a call with no input, unless the
+/// reply hit the token limit, when they are a call that never finished; so are
+/// arguments that never became JSON. `None` is a call cut off.
+fn tool_input(arguments: &str, hit_token_limit: bool) -> Option<Value> {
+    if arguments.trim().is_empty() {
+        return (!hit_token_limit).then(|| json!({}));
+    }
+    serde_json::from_str(arguments).ok()
 }
 
 struct Chat {
@@ -373,6 +384,17 @@ fn extract_tools(input: &Value) -> Vec<ToolSpec> {
     tools
 }
 
+/// The chat for an `InvokeModel` body. Only Anthropic's native reply shape here
+/// has a place for a tool call, so other families don't offer the model tools it
+/// could call only to have the answer lost. Converse carries them for every family.
+fn invoke_chat(model_id: &str, input: &Value) -> Chat {
+    let mut chat = bedrock_request_to_chat(input);
+    if !strip_region_prefix(model_id).starts_with("anthropic.") {
+        chat.tools.clear();
+    }
+    chat
+}
+
 fn norm_anthropic_role(role: &str) -> &str {
     if role == "assistant" {
         "assistant"
@@ -448,14 +470,28 @@ pub(crate) enum StopKind {
     ContentFiltered,
 }
 
-/// Map an upstream finish/stop reason onto [`StopKind`]. A model that
-/// emitted a tool call is always `ToolUse` regardless of the raw string.
+/// Whether a provider's stop reason means the reply ran out of tokens.
+fn is_token_limit(upstream: Option<&str>) -> bool {
+    upstream.is_some_and(|reason| {
+        matches!(
+            reason.to_ascii_lowercase().as_str(),
+            "length" | "max_tokens" | "model_length"
+        )
+    })
+}
+
+/// Map an upstream finish/stop reason onto [`StopKind`]. A model that emitted a
+/// tool call is `ToolUse` regardless of the raw string, unless the token limit
+/// cut the reply off.
 pub(crate) fn normalize_stop(upstream: Option<&str>, has_tool_calls: bool) -> StopKind {
+    if is_token_limit(upstream) {
+        return StopKind::MaxTokens;
+    }
+    let reason = upstream.map(|s| s.to_ascii_lowercase());
     if has_tool_calls {
         return StopKind::ToolUse;
     }
-    match upstream.map(|s| s.to_ascii_lowercase()).as_deref() {
-        Some("length") | Some("max_tokens") | Some("model_length") => StopKind::MaxTokens,
+    match reason.as_deref() {
         Some("tool_calls") | Some("tool_use") | Some("function_call") => StopKind::ToolUse,
         Some("content_filter") | Some("content_filtered") => StopKind::ContentFiltered,
         Some("stop_sequence") => StopKind::StopSequence,
@@ -531,20 +567,9 @@ fn build_provider_response(model_id: &str, completion: &Completion) -> String {
     )
 }
 
-/// The provider-native InvokeModel body equivalent to a streamed upstream
-/// reply of `text`. InvokeModelWithResponseStream records it for
-/// introspection so a streamed call reads back in the same shape as the
-/// equivalent upstream InvokeModel.
-pub(crate) fn provider_response_for_text(
-    model_id: &str,
-    text: &str,
-    stop: StopKind,
-    input_tokens: u64,
-    output_tokens: u64,
-) -> String {
-    render_provider_response(model_id, text, &[], stop, input_tokens, output_tokens)
-}
-
+/// The provider-native InvokeModel body for a completion. A streamed upstream
+/// reply records the same body for introspection, so it reads back in the same
+/// shape as the equivalent upstream InvokeModel.
 fn render_provider_response(
     model_id: &str,
     text: &str,
@@ -855,37 +880,51 @@ async fn call_chat(
                 .and_then(|t| t.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let tool_calls = v
+            let finish_reason = v
+                .pointer("/choices/0/finish_reason")
+                .and_then(|s| s.as_str())
+                .map(str::to_string);
+            let hit_limit = is_token_limit(finish_reason.as_deref());
+            let mut cut_off = false;
+            let mut tool_calls = Vec::new();
+            for tc in v
                 .pointer("/choices/0/message/tool_calls")
                 .and_then(|c| c.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|tc| {
-                            let name = tc.pointer("/function/name").and_then(|x| x.as_str())?;
-                            let args = tc
-                                .pointer("/function/arguments")
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("{}");
-                            Some(ToolCall {
-                                id: tc
-                                    .get("id")
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("tooluse_fakecloud_01")
-                                    .to_string(),
-                                name: name.to_string(),
-                                input: serde_json::from_str::<Value>(args)
-                                    .unwrap_or_else(|_| json!({})),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+                .into_iter()
+                .flatten()
+            {
+                let Some(name) = tc.pointer("/function/name").and_then(|x| x.as_str()) else {
+                    continue;
+                };
+                let arguments = tc
+                    .pointer("/function/arguments")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default();
+                let Some(input) = tool_input(arguments, hit_limit) else {
+                    cut_off = true;
+                    continue;
+                };
+                tool_calls.push(ToolCall {
+                    id: tc
+                        .get("id")
+                        .and_then(|x| x.as_str())
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("tooluse_fakecloud_{:02}", tool_calls.len())),
+                    name: name.to_string(),
+                    input,
+                });
+            }
             (
                 text,
                 tool_calls,
-                v.pointer("/choices/0/finish_reason")
-                    .and_then(|s| s.as_str())
-                    .map(str::to_string),
+                // A reply cut off mid-call ran out of tokens, however the
+                // upstream labelled it, as on the streaming path.
+                if cut_off {
+                    Some("length".to_string())
+                } else {
+                    finish_reason
+                },
                 v.pointer("/usage/prompt_tokens").and_then(|x| x.as_u64()),
                 v.pointer("/usage/completion_tokens")
                     .and_then(|x| x.as_u64()),
@@ -946,9 +985,102 @@ async fn call_chat(
 /// Accumulator for a streaming upstream response.
 struct StreamAcc {
     deltas: Vec<String>,
+    tools: Vec<StreamedTool>,
+    /// Whether an argument fragment that names no call continues the last tool:
+    /// not when the block in progress is text, or one the cap turned away.
+    tool_open: bool,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     stop_reason: Option<String>,
+}
+
+/// A tool call assembled from stream fragments: providers send the name once and
+/// the JSON arguments in pieces.
+#[derive(Default)]
+struct StreamedTool {
+    /// The provider's position for the call, when it sends one.
+    index: Option<u64>,
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// How many parallel tool calls one reply can assemble: a position in a fragment
+/// is the upstream's word, not a size to allocate.
+const MAX_STREAMED_TOOLS: usize = 128;
+
+impl StreamedTool {
+    /// The finished call, or `None` when it was cut off.
+    fn into_call(self, ordinal: usize, hit_token_limit: bool) -> Option<ToolCall> {
+        let input = tool_input(&self.arguments, hit_token_limit)?;
+        Some(ToolCall {
+            id: if self.id.is_empty() {
+                format!("tooluse_fakecloud_{ordinal:02}")
+            } else {
+                self.id
+            },
+            name: self.name,
+            input,
+        })
+    }
+}
+
+/// The tool an OpenAI fragment continues: by its `index`, else by its `id`, else
+/// the one in progress. A fragment naming neither starts nothing. An `id` other
+/// than the one at that `index` is a new call, since Gemini's OpenAI endpoint
+/// sends every parallel call at index 0.
+fn openai_tool_for<'a>(acc: &'a mut StreamAcc, call: &Value) -> Option<&'a mut StreamedTool> {
+    let index = call["index"].as_u64();
+    let id = call["id"].as_str().filter(|id| !id.is_empty());
+    let tools = &mut acc.tools;
+    let existing = match (index, id) {
+        (Some(index), _) => tools
+            .iter()
+            .rposition(|tool| tool.index == Some(index))
+            .filter(|at| id.is_none_or(|id| tools[*at].id.is_empty() || tools[*at].id == id)),
+        (None, Some(id)) => tools.iter().position(|tool| tool.id == id),
+        (None, None) => {
+            return if acc.tool_open {
+                tools.last_mut()
+            } else {
+                None
+            };
+        }
+    };
+    let at = match existing {
+        Some(at) => at,
+        None if tools.len() >= MAX_STREAMED_TOOLS => {
+            acc.tool_open = false;
+            return None;
+        }
+        None => {
+            tools.push(StreamedTool {
+                index,
+                ..StreamedTool::default()
+            });
+            tools.len() - 1
+        }
+    };
+    acc.tool_open = true;
+    tools.get_mut(at)
+}
+
+/// What a stream's fragments add up to: the finished calls, and whether any was
+/// cut off. A call that never got a name is not a call.
+fn finished_tool_calls(
+    tools: Vec<StreamedTool>,
+    stop_reason: Option<&str>,
+) -> (Vec<ToolCall>, bool) {
+    let hit_limit = is_token_limit(stop_reason);
+    let mut calls = Vec::new();
+    let mut truncated = false;
+    for tool in tools.into_iter().filter(|tool| !tool.name.is_empty()) {
+        match tool.into_call(calls.len(), hit_limit) {
+            Some(call) => calls.push(call),
+            None => truncated = true,
+        }
+    }
+    (calls, truncated)
 }
 
 /// Byte-oriented line buffer for the streaming path. Raw chunk bytes are
@@ -976,6 +1108,14 @@ impl LineBuffer {
             self.buf.clear();
         }
     }
+}
+
+fn str_at(value: &Value, pointer: &str) -> String {
+    value
+        .pointer(pointer)
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Parse a single completed line from the upstream stream, appending any
@@ -1015,11 +1155,30 @@ fn process_stream_line(protocol: Protocol, line: &str, acc: &mut StreamAcc) {
                     acc.input_tokens = Some(n);
                 }
             }
+            Some("content_block_start") => {
+                acc.tool_open = v.pointer("/content_block/type").and_then(|x| x.as_str())
+                    == Some("tool_use")
+                    && acc.tools.len() < MAX_STREAMED_TOOLS;
+                if acc.tool_open {
+                    acc.tools.push(StreamedTool {
+                        id: str_at(&v, "/content_block/id"),
+                        name: str_at(&v, "/content_block/name"),
+                        ..StreamedTool::default()
+                    });
+                }
+            }
             Some("content_block_delta") => {
                 if let Some(t) = v.pointer("/delta/text").and_then(|x| x.as_str()) {
                     if !t.is_empty() {
                         acc.deltas.push(t.to_string());
                     }
+                }
+                if let (Some(part), true, Some(tool)) = (
+                    v.pointer("/delta/partial_json").and_then(|x| x.as_str()),
+                    acc.tool_open,
+                    acc.tools.last_mut(),
+                ) {
+                    tool.arguments.push_str(part);
                 }
             }
             Some("message_delta") => {
@@ -1039,6 +1198,27 @@ fn process_stream_line(protocol: Protocol, line: &str, acc: &mut StreamAcc) {
             {
                 if !t.is_empty() {
                     acc.deltas.push(t.to_string());
+                }
+            }
+            for call in v
+                .pointer("/choices/0/delta/tool_calls")
+                .and_then(|x| x.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let Some(tool) = openai_tool_for(acc, call) else {
+                    continue;
+                };
+                if let Some(id) = call["id"].as_str().filter(|id| !id.is_empty()) {
+                    tool.id = id.to_string();
+                }
+                if tool.name.is_empty() {
+                    if let Some(name) = call.pointer("/function/name").and_then(|x| x.as_str()) {
+                        tool.name = name.to_string();
+                    }
+                }
+                if let Some(part) = call.pointer("/function/arguments").and_then(|x| x.as_str()) {
+                    tool.arguments.push_str(part);
                 }
             }
             if let Some(s) = v
@@ -1063,6 +1243,26 @@ fn process_stream_line(protocol: Protocol, line: &str, acc: &mut StreamAcc) {
                     acc.deltas.push(t.to_string());
                 }
             }
+            for call in v
+                .pointer("/message/tool_calls")
+                .and_then(|x| x.as_array())
+                .into_iter()
+                .flatten()
+            {
+                // Ollama sends a whole call at once, its arguments already JSON.
+                if acc.tools.len() >= MAX_STREAMED_TOOLS {
+                    break;
+                }
+                acc.tools.push(StreamedTool {
+                    id: str_at(call, "/id"),
+                    name: str_at(call, "/function/name"),
+                    arguments: call
+                        .pointer("/function/arguments")
+                        .map(Value::to_string)
+                        .unwrap_or_default(),
+                    ..StreamedTool::default()
+                });
+            }
             if let Some(s) = v.get("done_reason").and_then(|x| x.as_str()) {
                 acc.stop_reason = Some(s.to_string());
             }
@@ -1081,6 +1281,7 @@ fn process_stream_line(protocol: Protocol, line: &str, acc: &mut StreamAcc) {
 /// event stream.
 struct StreamResult {
     deltas: Vec<String>,
+    tool_calls: Vec<ToolCall>,
     stop: StopKind,
     input_tokens: u64,
     output_tokens: u64,
@@ -1110,6 +1311,8 @@ async fn call_chat_stream(
 
     let mut acc = StreamAcc {
         deltas: Vec::new(),
+        tools: Vec::new(),
+        tool_open: false,
         input_tokens: None,
         output_tokens: None,
         stop_reason: None,
@@ -1132,9 +1335,17 @@ async fn call_chat_stream(
     let output_tokens = acc
         .output_tokens
         .unwrap_or_else(|| crate::prompt::count_tokens(&output_text));
+    let (tool_calls, truncated) = finished_tool_calls(acc.tools, acc.stop_reason.as_deref());
+    // A reply cut off mid-call ran out of tokens, however many calls it finished.
+    let stop = if truncated {
+        StopKind::MaxTokens
+    } else {
+        normalize_stop(acc.stop_reason.as_deref(), !tool_calls.is_empty())
+    };
     Ok(StreamResult {
         deltas: acc.deltas,
-        stop: normalize_stop(acc.stop_reason.as_deref(), false),
+        stop,
+        tool_calls,
         input_tokens,
         output_tokens,
     })
@@ -1309,7 +1520,7 @@ pub(crate) async fn invoke_model_upstream(
     let result = if is_embedding_model(model_id) {
         invoke_embedding_upstream(cfg, model_id, &input).await
     } else {
-        let chat = bedrock_request_to_chat(&input);
+        let chat = invoke_chat(model_id, &input);
         let upstream_model = cfg.resolve_model(model_id);
         call_chat(cfg, &upstream_model, &chat).await.map(|c| {
             let in_t = c.input_tokens;
@@ -1344,6 +1555,52 @@ pub(crate) async fn invoke_model_upstream(
             request_metadata,
         )),
     }
+}
+
+/// Converse content blocks: the assistant text, then a `toolUse` block for every
+/// tool the model chose to call, mirroring the offline `converse()` shape.
+fn converse_content(text: &str, tool_calls: &[ToolCall]) -> Vec<Value> {
+    let mut content: Vec<Value> = Vec::new();
+    if !text.is_empty() || tool_calls.is_empty() {
+        content.push(json!({ "text": text }));
+    }
+    for tc in tool_calls {
+        content.push(json!({
+            "toolUse": {
+                "toolUseId": tc.id,
+                "name": tc.name,
+                "input": tc.input
+            }
+        }));
+    }
+    content
+}
+
+/// The Converse response for an upstream reply, as `Converse` returns it and
+/// `ConverseStream` records it.
+fn converse_response(
+    text: &str,
+    tool_calls: &[ToolCall],
+    stop: StopKind,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> String {
+    let response = json!({
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": converse_content(text, tool_calls)
+            }
+        },
+        "stopReason": stop_converse(stop),
+        "usage": {
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "totalTokens": input_tokens + output_tokens
+        },
+        "metrics": { "latencyMs": 100 }
+    });
+    serde_json::to_string(&response).expect("serde_json::Value serialization is infallible")
 }
 
 /// Real-inference `Converse`. Produces the unified Converse response shape.
@@ -1391,45 +1648,17 @@ pub(crate) async fn converse_upstream(
         }
     };
 
-    // Build Converse content blocks: the assistant text, then a `toolUse`
-    // block for every tool the model chose to call, mirroring the offline
-    // `converse()` shape.
-    let mut content: Vec<Value> = Vec::new();
-    if !completion.text.is_empty() || completion.tool_calls.is_empty() {
-        content.push(json!({ "text": completion.text }));
-    }
-    for tc in &completion.tool_calls {
-        content.push(json!({
-            "toolUse": {
-                "toolUseId": tc.id,
-                "name": tc.name,
-                "input": tc.input
-            }
-        }));
-    }
-
     let stop = normalize_stop(
         completion.stop_reason.as_deref(),
         !completion.tool_calls.is_empty(),
     );
-
-    let response = json!({
-        "output": {
-            "message": {
-                "role": "assistant",
-                "content": content
-            }
-        },
-        "stopReason": stop_converse(stop),
-        "usage": {
-            "inputTokens": completion.input_tokens,
-            "outputTokens": completion.output_tokens,
-            "totalTokens": completion.input_tokens + completion.output_tokens
-        },
-        "metrics": { "latencyMs": 100 }
-    });
-    let response_str =
-        serde_json::to_string(&response).expect("serde_json::Value serialization is infallible");
+    let response_str = converse_response(
+        &completion.text,
+        &completion.tool_calls,
+        stop,
+        completion.input_tokens,
+        completion.output_tokens,
+    );
 
     crate::invoke::record_invocation(
         state,
@@ -1456,20 +1685,11 @@ pub(crate) async fn invoke_stream_upstream(
     // A configured simulation override wins over the live upstream, same as
     // the non-streaming path: stream the override text deterministically.
     if let Some(custom) = crate::prompt::resolve_override(state, req, model_id, body) {
-        // Recorded verbatim, as InvokeModel records the same override.
-        let output = custom.clone();
-        let text = crate::streaming::override_text(model_id, custom);
         let input = serde_json::from_slice(body).unwrap_or(Value::Null);
         let in_t = crate::prompt::count_tokens(&crate::invoke::extract_input_text(&input));
-        let out_t = crate::prompt::count_tokens(&text);
-        let deltas = vec![text];
-        let event_body = crate::streaming::build_invoke_stream_from_deltas(
-            model_id,
-            &deltas,
-            StopKind::EndTurn,
-            in_t,
-            out_t,
-        );
+        let event_body = crate::streaming::build_override_stream(model_id, &custom, in_t);
+        // Recorded verbatim, as InvokeModel records the same override.
+        let output = custom;
         crate::invoke::record_invocation(
             state,
             req,
@@ -1483,7 +1703,7 @@ pub(crate) async fn invoke_stream_upstream(
     }
 
     let input = parse_body(body)?;
-    let chat = bedrock_request_to_chat(&input);
+    let chat = invoke_chat(model_id, &input);
     let upstream_model = cfg.resolve_model(model_id);
 
     let result = match call_chat_stream(cfg, &upstream_model, &chat).await {
@@ -1503,13 +1723,15 @@ pub(crate) async fn invoke_stream_upstream(
     let event_body = crate::streaming::build_invoke_stream_from_deltas(
         model_id,
         &result.deltas,
+        &result.tool_calls,
         result.stop,
         result.input_tokens,
         result.output_tokens,
     );
-    let output = provider_response_for_text(
+    let output = render_provider_response(
         model_id,
         &result.deltas.concat(),
+        &result.tool_calls,
         result.stop,
         result.input_tokens,
         result.output_tokens,
@@ -1569,14 +1791,16 @@ pub(crate) async fn converse_stream_upstream(
 
     let event_body = crate::streaming::build_converse_stream_from_deltas(
         &result.deltas,
+        &result.tool_calls,
         result.stop,
         result.input_tokens,
         result.output_tokens,
     );
-    let output = crate::converse::response_json(
+    // Recorded as the Converse response this stream amounts to.
+    let output = converse_response(
         &result.deltas.concat(),
-        None,
-        stop_converse(result.stop),
+        &result.tool_calls,
+        result.stop,
         result.input_tokens,
         result.output_tokens,
     );
@@ -1866,18 +2090,462 @@ mod tests {
         let mut meta_in = None;
         let mut meta_out = None;
         for f in &frames {
+            // A payload is the event's own members, so its fields identify it.
             let inner = converse_frame_inner(f);
-            if let Some(d) = inner.get("contentBlockDelta") {
-                delta_texts.push(d["delta"]["text"].as_str().unwrap().to_string());
+            if let Some(text) = inner["delta"]["text"].as_str() {
+                delta_texts.push(text.to_string());
             }
-            if let Some(m) = inner.get("metadata") {
-                meta_in = m["usage"]["inputTokens"].as_u64();
-                meta_out = m["usage"]["outputTokens"].as_u64();
+            if let Some(usage) = inner.get("usage") {
+                meta_in = usage["inputTokens"].as_u64();
+                meta_out = usage["outputTokens"].as_u64();
             }
         }
         assert_eq!(delta_texts, vec!["foo".to_string(), "bar".to_string()]);
         assert_eq!(meta_in, Some(5));
         assert_eq!(meta_out, Some(2));
+    }
+
+    fn stream_tools(protocol: Protocol, lines: &[Value]) -> (Vec<ToolCall>, bool) {
+        let mut acc = StreamAcc {
+            deltas: Vec::new(),
+            tools: Vec::new(),
+            tool_open: false,
+            input_tokens: None,
+            output_tokens: None,
+            stop_reason: None,
+        };
+        for line in lines {
+            let text = match protocol {
+                Protocol::Ollama => line.to_string(),
+                _ => format!("data: {line}"),
+            };
+            process_stream_line(protocol, &text, &mut acc);
+        }
+        let stop_reason = acc.stop_reason.clone();
+        finished_tool_calls(acc.tools, stop_reason.as_deref())
+    }
+
+    fn stream_lines(protocol: Protocol, lines: &[Value]) -> Vec<ToolCall> {
+        stream_tools(protocol, lines).0
+    }
+
+    fn openai_tool_line(call: Value) -> Value {
+        json!({"choices":[{"delta":{"tool_calls":[call]}}]})
+    }
+
+    #[test]
+    fn openai_calls_without_an_index_stay_apart_by_id() {
+        let calls = stream_lines(
+            Protocol::OpenAi,
+            &[
+                openai_tool_line(json!({"id":"a","function":{"name":"one","arguments":"{}"}})),
+                openai_tool_line(json!({"id":"b","function":{"name":"two","arguments":"{}"}})),
+            ],
+        );
+        let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["one", "two"]);
+    }
+
+    #[test]
+    fn openai_name_is_set_once_and_nameless_slots_drop() {
+        let calls = stream_lines(
+            Protocol::OpenAi,
+            &[
+                openai_tool_line(
+                    json!({"index":0,"id":"a","function":{"name":"calc","arguments":""}}),
+                ),
+                openai_tool_line(json!({"index":0,"function":{"name":"calc","arguments":"{}"}})),
+                openai_tool_line(json!({"index":7,"function":{"arguments":"{}"}})),
+            ],
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "calc");
+    }
+
+    #[test]
+    fn a_huge_openai_index_allocates_nothing() {
+        let mut lines = Vec::new();
+        for index in 0..=MAX_STREAMED_TOOLS as u64 + 5 {
+            lines.push(openai_tool_line(
+                json!({"index": u64::MAX - index, "function": {"name": "t", "arguments": "{}"}}),
+            ));
+        }
+        assert_eq!(
+            stream_lines(Protocol::OpenAi, &lines).len(),
+            MAX_STREAMED_TOOLS
+        );
+    }
+
+    #[test]
+    fn gemini_parallel_calls_all_at_index_zero_stay_apart() {
+        let calls = stream_lines(
+            Protocol::OpenAi,
+            &[
+                openai_tool_line(
+                    json!({"index":0,"id":"a","function":{"name":"one","arguments":"{\"x\":1}"}}),
+                ),
+                openai_tool_line(
+                    json!({"index":0,"id":"b","function":{"name":"two","arguments":"{\"y\":"}}),
+                ),
+                // No id: it continues the latest call at that index.
+                openai_tool_line(json!({"index":0,"function":{"arguments":"2}"}})),
+            ],
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].input, json!({"x":1}));
+        assert_eq!(calls[1].name, "two");
+        assert_eq!(calls[1].input, json!({"y":2}));
+    }
+
+    #[test]
+    fn a_tool_call_with_no_arguments_survives_a_normal_finish() {
+        for line in [
+            json!({"index":0,"id":"a","function":{"name":"ping","arguments":""}}),
+            json!({"index":0,"id":"a","function":{"name":"ping"}}),
+        ] {
+            let (calls, truncated) = stream_tools(
+                Protocol::OpenAi,
+                &[
+                    openai_tool_line(line),
+                    json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+                ],
+            );
+            assert!(!truncated);
+            assert_eq!(calls[0].input, json!({}));
+        }
+    }
+
+    #[test]
+    fn a_blank_call_at_the_token_limit_is_cut_off() {
+        let (calls, truncated) = stream_tools(
+            Protocol::OpenAi,
+            &[
+                openai_tool_line(json!({"index":0,"id":"a","function":{"name":"calc"}})),
+                json!({"choices":[{"delta":{},"finish_reason":"length"}]}),
+            ],
+        );
+        assert!(calls.is_empty());
+        assert!(truncated);
+    }
+
+    #[test]
+    fn fragments_of_a_block_the_cap_refused_touch_nothing() {
+        let mut lines = Vec::new();
+        for at in 0..MAX_STREAMED_TOOLS {
+            lines.push(json!({"type":"content_block_start","index":at,
+                "content_block":{"type":"tool_use","id":format!("t{at}"),"name":"calc"}}));
+            lines.push(json!({"type":"content_block_delta","index":at,
+                "delta":{"partial_json":"{}"}}));
+        }
+        lines.push(
+            json!({"type":"content_block_start","index":MAX_STREAMED_TOOLS,
+            "content_block":{"type":"tool_use","id":"over","name":"calc"}}),
+        );
+        lines.push(
+            json!({"type":"content_block_delta","index":MAX_STREAMED_TOOLS,
+            "delta":{"partial_json":"garbage"}}),
+        );
+        let (calls, truncated) = stream_tools(Protocol::Anthropic, &lines);
+        assert_eq!(calls.len(), MAX_STREAMED_TOOLS);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn a_text_block_after_a_tool_does_not_take_argument_fragments() {
+        let (calls, _) = stream_tools(
+            Protocol::Anthropic,
+            &[
+                json!({"type":"content_block_start","index":0,
+                    "content_block":{"type":"tool_use","id":"t","name":"calc"}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"partial_json":"{}"}}),
+                json!({"type":"content_block_start","index":1,
+                    "content_block":{"type":"text","text":""}}),
+                json!({"type":"content_block_delta","index":1,"delta":{"partial_json":"x"}}),
+            ],
+        );
+        assert_eq!(calls[0].input, json!({}));
+    }
+
+    #[test]
+    fn invoke_offers_tools_only_to_families_that_can_answer_with_them() {
+        let input = json!({"messages":[],"tools":[{"name":"calc"}]});
+        assert_eq!(invoke_chat("anthropic.claude-3", &input).tools.len(), 1);
+        assert_eq!(invoke_chat("us.anthropic.claude-3", &input).tools.len(), 1);
+        assert!(invoke_chat("cohere.command-r", &input).tools.is_empty());
+        assert!(invoke_chat("meta.llama3", &input).tools.is_empty());
+    }
+
+    async fn openai_reply(reply: Value) -> Completion {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let reply = reply.clone();
+                async move { axum::Json(reply) }
+            }),
+        );
+        let url = spawn(app).await;
+        let c = cfg(url, Protocol::OpenAi);
+        let chat = bedrock_request_to_chat(&json!({"messages":[]}));
+        call_chat(&c, "m", &chat).await.unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_non_streaming_call_with_no_arguments_survives_as_on_the_stream() {
+        for arguments in [json!(""), Value::Null] {
+            let completion = openai_reply(json!({"choices":[{
+                "message":{"content":null,"tool_calls":[
+                    {"id":"a","function":{"name":"ping","arguments":arguments}}
+                ]},
+                "finish_reason":"tool_calls"
+            }]}))
+            .await;
+            assert_eq!(completion.tool_calls.len(), 1);
+            assert_eq!(completion.tool_calls[0].input, json!({}));
+            assert_eq!(
+                normalize_stop(completion.stop_reason.as_deref(), true),
+                StopKind::ToolUse
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_non_streaming_malformed_call_is_cut_off_as_on_the_stream() {
+        let completion = openai_reply(json!({"choices":[{
+            "message":{"content":"","tool_calls":[
+                {"id":"a","function":{"name":"ok","arguments":"{}"}},
+                {"id":"b","function":{"name":"bad","arguments":"{\"a\":"}}
+            ]},
+            "finish_reason":"tool_calls"
+        }]}))
+        .await;
+        assert_eq!(completion.tool_calls.len(), 1);
+        assert_eq!(completion.tool_calls[0].name, "ok");
+        assert_eq!(
+            normalize_stop(completion.stop_reason.as_deref(), true),
+            StopKind::MaxTokens
+        );
+    }
+
+    #[test]
+    fn cut_off_arguments_are_reported_not_invented() {
+        let (calls, truncated) = stream_tools(
+            Protocol::OpenAi,
+            &[
+                openai_tool_line(
+                    json!({"index":0,"id":"a","function":{"name":"calc","arguments":"{\"a\":"}}),
+                ),
+                json!({"choices":[{"delta":{},"finish_reason":"length"}]}),
+            ],
+        );
+        assert!(calls.is_empty());
+        assert!(truncated);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn converse_stream_upstream_reports_a_cut_off_call_as_max_tokens() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\",\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"function\":{\"name\":\"calc\",\"arguments\":\"{\\\"a\"}}]}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n\
+                   data: [DONE]\n\n";
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let sse = sse.to_string();
+                async move { ([(http::header::CONTENT_TYPE, "text/event-stream")], sse) }
+            }),
+        );
+        let url = spawn(app).await;
+        let c = cfg(url, Protocol::OpenAi);
+        let s = shared();
+        let body = br#"{"messages":[{"role":"user","content":[{"text":"hi"}]}]}"#;
+
+        let resp = converse_stream_upstream(&s, &req(), "anthropic.claude-3", body, &c, None)
+            .await
+            .unwrap();
+
+        let inners: Vec<Value> = split_frames(&body_bytes(&resp))
+            .iter()
+            .map(|f| converse_frame_inner(f))
+            .collect();
+        assert!(
+            inners.iter().all(|inner| inner.get("start").is_none()),
+            "{inners:?}"
+        );
+        assert!(
+            inners
+                .iter()
+                .any(|inner| inner["stopReason"] == "max_tokens"),
+            "{inners:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invoke_stream_upstream_streams_tool_calls_for_anthropic() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"sure\"}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"calc\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+                   data: [DONE]\n\n";
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let sse = sse.to_string();
+                async move { ([(http::header::CONTENT_TYPE, "text/event-stream")], sse) }
+            }),
+        );
+        let url = spawn(app).await;
+        let c = cfg(url, Protocol::OpenAi);
+        let s = shared();
+        let body = br#"{"messages":[{"role":"user","content":"hi"}]}"#;
+
+        let resp = invoke_stream_upstream(&s, &req(), "anthropic.claude-3", body, &c, None)
+            .await
+            .unwrap();
+
+        let chunks: Vec<Value> = split_frames(&body_bytes(&resp))
+            .iter()
+            .map(|f| invoke_frame_inner(f))
+            .collect();
+        let tool_start = chunks
+            .iter()
+            .find(|c| c["content_block"]["type"] == "tool_use")
+            .expect("tool block start");
+        assert_eq!(tool_start["index"], 1);
+        assert_eq!(tool_start["content_block"]["name"], "calc");
+        assert_eq!(tool_start["content_block"]["id"], "call_1");
+        let args = chunks
+            .iter()
+            .find(|c| c["delta"]["type"] == "input_json_delta")
+            .expect("tool arguments");
+        assert_eq!(args["delta"]["partial_json"], "{\"a\":1}");
+        let stop = chunks
+            .iter()
+            .find(|c| c["type"] == "message_delta")
+            .unwrap();
+        assert_eq!(stop["delta"]["stop_reason"], "tool_use");
+
+        let st = s.read();
+        let recorded: Value =
+            serde_json::from_str(&st.default_ref().invocations[0].output).unwrap();
+        assert_eq!(recorded["content"][1]["input"], json!({"a": 1}));
+    }
+
+    #[test]
+    fn openai_stream_assembles_tool_calls_from_fragments() {
+        let calls = stream_lines(
+            Protocol::OpenAi,
+            &[
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"calc","arguments":"{\"a\""}}]}}]}),
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":1}"}}]}}]}),
+            ],
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "calc");
+        assert_eq!(calls[0].input, json!({"a": 1}));
+    }
+
+    #[test]
+    fn anthropic_stream_assembles_tool_calls_from_fragments() {
+        let calls = stream_lines(
+            Protocol::Anthropic,
+            &[
+                json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"calc","input":{}}}),
+                json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}}),
+                json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"1}"}}),
+            ],
+        );
+        assert_eq!(calls[0].id, "toolu_1");
+        assert_eq!(calls[0].input, json!({"a": 1}));
+    }
+
+    #[test]
+    fn ollama_stream_reads_whole_tool_calls() {
+        let calls = stream_lines(
+            Protocol::Ollama,
+            &[json!({"message":{"tool_calls":[{"function":{"name":"calc","arguments":{"a":1}}}]}})],
+        );
+        assert_eq!(calls[0].name, "calc");
+        assert_eq!(calls[0].id, "tooluse_fakecloud_00");
+        assert_eq!(calls[0].input, json!({"a": 1}));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn converse_stream_upstream_streams_tool_calls_as_blocks() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"calc\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+                   data: [DONE]\n\n";
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let sse = sse.to_string();
+                async move { ([(http::header::CONTENT_TYPE, "text/event-stream")], sse) }
+            }),
+        );
+        let url = spawn(app).await;
+        let c = cfg(url, Protocol::OpenAi);
+        let s = shared();
+        let body = br#"{"messages":[{"role":"user","content":[{"text":"hi"}]}]}"#;
+
+        let resp = converse_stream_upstream(&s, &req(), "anthropic.claude-3", body, &c, None)
+            .await
+            .unwrap();
+
+        let inners: Vec<Value> = split_frames(&body_bytes(&resp))
+            .iter()
+            .map(|f| converse_frame_inner(f))
+            .collect();
+        // messageStart, the tool block at index 0, messageStop, metadata: an
+        // all-tool reply has no text block.
+        assert_eq!(inners.len(), 6, "{inners:?}");
+        assert_eq!(inners[1]["contentBlockIndex"], 0);
+        assert_eq!(inners[1]["start"]["toolUse"]["name"], "calc");
+        assert_eq!(inners[1]["start"]["toolUse"]["toolUseId"], "call_1");
+        assert_eq!(inners[2]["delta"]["toolUse"]["input"], "{\"a\":1}");
+        assert_eq!(inners[4]["stopReason"], "tool_use");
+
+        let st = s.read();
+        let recorded: Value =
+            serde_json::from_str(&st.default_ref().invocations[0].output).unwrap();
+        assert_eq!(
+            recorded["output"]["message"]["content"][0]["toolUse"]["input"],
+            json!({"a": 1})
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn converse_upstream_reports_a_cut_off_call_as_max_tokens() {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                axum::Json(json!({
+                    "choices": [{
+                        "message": {
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "call_abc",
+                                "type": "function",
+                                "function": {"name": "calc", "arguments": "{\"a\":"}
+                            }]
+                        },
+                        "finish_reason": "length"
+                    }],
+                    "usage": { "prompt_tokens": 9, "completion_tokens": 5 }
+                }))
+            }),
+        );
+        let url = spawn(app).await;
+        let c = cfg(url, Protocol::OpenAi);
+        let s = shared();
+        let body = br#"{"messages":[{"role":"user","content":[{"text":"hi"}]}]}"#;
+        let resp = converse_upstream(&s, &req(), "anthropic.claude-3", body, &c, None)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body_bytes(&resp)).unwrap();
+        assert_eq!(parsed["stopReason"], "max_tokens");
+        assert!(parsed["output"]["message"]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|block| block.get("toolUse").is_none()));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2100,6 +2768,8 @@ mod tests {
 
         let mut acc = StreamAcc {
             deltas: Vec::new(),
+            tools: Vec::new(),
+            tool_open: false,
             input_tokens: None,
             output_tokens: None,
             stop_reason: None,

@@ -51,6 +51,15 @@ jobs:
             exit 1
           fi
 
+  sfn-sdk-models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # `aws-sdk:*` Tasks run on a table generated from aws-models/.
+      - name: Step Functions SDK table is up to date
+        run: python3 scripts/gen-sfn-sdk-models.py --check
+
   release-tooling:
     runs-on: ubuntu-latest
     timeout-minutes: 75

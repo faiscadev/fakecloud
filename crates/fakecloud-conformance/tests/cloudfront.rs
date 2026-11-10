@@ -35,6 +35,7 @@ fn minimal_config(caller_ref: &str) -> DistributionConfig {
             DefaultCacheBehavior::builder()
                 .target_origin_id("primary")
                 .viewer_protocol_policy(ViewerProtocolPolicy::AllowAll)
+                .cache_policy_id("658327ea-f89d-4fab-a63d-7e88639e58f6")
                 .build()
                 .unwrap(),
         )
@@ -440,6 +441,7 @@ async fn cloudfront_copy_distribution() {
         .primary_distribution_id(&id)
         .if_match(&etag)
         .caller_reference("conf-copy-1")
+        .staging(true)
         .send()
         .await
         .unwrap();

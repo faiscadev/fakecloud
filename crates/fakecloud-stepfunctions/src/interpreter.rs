@@ -9,9 +9,14 @@ use fakecloud_aws::arn::arn_resource;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_dynamodb::SharedDynamoDbState;
 
-use crate::choice::evaluate_choice;
-use crate::error_handling::{find_catcher, should_retry};
+use crate::error_handling::should_retry;
 use crate::io_processing::{apply_input_path, apply_output_path, apply_result_path};
+use crate::optimized_results::{
+    dynamodb_metadata, ecs_run_task_result, ecs_sync_result, glue_start_job_run_result,
+    glue_sync_result, lambda_invoke_metadata, sns_metadata, sqs_metadata, start_execution_result,
+    sync_execution_result, sync_failure_cause, SyncForm,
+};
+use crate::sdk_protocol::{Caller, DateStyle};
 use crate::service::SharedServiceRegistry;
 use crate::state::{ExecutionStatus, HistoryEvent, MapRun, SharedStepFunctionsState};
 
@@ -64,24 +69,28 @@ pub async fn execute_state_machine(
     // this the panic propagates through the outer spawn in `start_execution`
     // which leaves the execution stuck in Running and leaks the panic to
     // tokio's default hook.
-    let def_owned = def;
+    let mut def_owned = def;
     let state_clone = state.clone();
     let execution_arn_clone = execution_arn.clone();
     let delivery_clone = delivery.clone();
     let dynamodb_state_clone = dynamodb_state.clone();
     let registry_clone = registry.clone();
-    let handle = tokio::spawn(async move {
-        run_states(
-            &def_owned,
-            raw_input,
-            &delivery_clone,
-            &dynamodb_state_clone,
-            &registry_clone,
-            &state_clone,
-            &execution_arn_clone,
-        )
-        .await
-    });
+    let handle = tokio::spawn(crate::variables::in_scope(
+        crate::variables::VariableScope::root(),
+        async move {
+            crate::jsonata::propagate_query_language(&mut def_owned, None);
+            run_states(
+                &def_owned,
+                raw_input,
+                &delivery_clone,
+                &dynamodb_state_clone,
+                &registry_clone,
+                &state_clone,
+                &execution_arn_clone,
+            )
+            .await
+        },
+    ));
 
     match handle.await {
         Ok(Ok(output)) => {
@@ -133,38 +142,54 @@ pub(crate) enum Advance {
     End(Value),
     /// Fail the state machine with the given error and cause.
     Fail(String, String),
+    /// A failure a catcher took; the state loop applies the catcher's fields.
+    Caught(CaughtError),
+}
+
+/// `Assign` on a JSONPath Wait state reads the effective input.
+fn assign_wait_variables(
+    name: &str,
+    state_def: &Value,
+    input: &Value,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Result<(), (String, String)> {
+    if crate::jsonata::is_jsonata(state_def) || state_def.get("Assign").is_none() {
+        return Ok(());
+    }
+    let effective = match state_def["InputPath"].as_str() {
+        Some("null") => json!({}),
+        path => apply_input_path(input, path)?,
+    };
+    let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
+    crate::variables::assign_jsonpath(state_def.get("Assign"), &effective, Some(&ctx))
 }
 
 async fn run_wait_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: Value,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let entered_event_id = add_event(
-        shared_state,
-        execution_arn,
-        "WaitStateEntered",
-        0,
-        json!({
-            "name": name,
-            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
-        }),
-    );
-
-    let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
-    if let Err((error, cause)) = execute_wait_state(state_def, &input, &ctx).await {
-        return Advance::Fail(error, cause);
+    let ctx = entry.context(shared_state, execution_arn, 0);
+    if let Err(failure) = execute_wait_state(state_def, &input, &ctx).await {
+        return fail_own(shared_state, execution_arn, entry, failure);
+    }
+    if let Err(failure) =
+        assign_wait_variables(entry.name, state_def, &input, shared_state, execution_arn)
+    {
+        return fail_own(shared_state, execution_arn, entry, failure);
     }
 
-    add_event(
+    add_state_exit_event(
+        state_def,
         shared_state,
         execution_arn,
         "WaitStateExited",
-        entered_event_id,
+        entry.entered,
         json!({
-            "name": name,
+            "name": entry.name,
             "output": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
         }),
     );
@@ -172,87 +197,111 @@ async fn run_wait_state(
     advance_from_next(state_def, input)
 }
 
+/// How a Task, Parallel or Map state failed.
+#[derive(Debug)]
+pub(crate) enum StateFailure {
+    /// Its own fields failed: paths, templates, expressions or settings. It is
+    /// reported in the state (see [`own_failure`]).
+    Own((String, String)),
+    /// What it ran failed: a task's resource, a branch or an iteration. That has
+    /// been recorded where it happened, and the failure goes on as it is.
+    Ran((String, String)),
+}
+
+impl From<(String, String)> for StateFailure {
+    fn from(failure: (String, String)) -> Self {
+        StateFailure::Own(failure)
+    }
+}
+
+/// A Task, Parallel or Map state's outcome: its output on to the next state, or
+/// its failure.
+fn task_like_outcome(
+    entry: &StateEntry<'_>,
+    state_def: &Value,
+    exited_type: &str,
+    result: Result<Value, StateFailure>,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Advance {
+    match result {
+        Ok(output) => {
+            // A JSONata state exits once its `Output` has evaluated: a Map's
+            // has by now (see `finish_map_output`), any other's hasn't.
+            let exits_here =
+                !crate::jsonata::is_jsonata(state_def) || exited_type == "MapStateExited";
+            if exits_here {
+                add_event(
+                    shared_state,
+                    execution_arn,
+                    exited_type,
+                    entry.entered,
+                    json!({
+                        "name": entry.name,
+                        "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
+                    }),
+                );
+            }
+            advance_from_next(state_def, output)
+        }
+        Err(StateFailure::Own(failure)) => fail_own(shared_state, execution_arn, entry, failure),
+        Err(StateFailure::Ran((error, cause))) => Advance::Fail(error, cause),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_task_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: Value,
+    attempt: &mut u32,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let entered_event_id = add_event(
-        shared_state,
-        execution_arn,
-        "TaskStateEntered",
-        0,
-        json!({
-            "name": name,
-            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
-        }),
-    );
-
     let result = execute_task_state(
-        name,
+        entry,
         state_def,
         &input,
+        attempt,
         delivery,
         dynamodb_state,
         registry,
         shared_state,
         execution_arn,
-        entered_event_id,
     )
     .await;
-
-    match result {
-        Ok(output) => {
-            add_event(
-                shared_state,
-                execution_arn,
-                "TaskStateExited",
-                entered_event_id,
-                json!({
-                    "name": name,
-                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
-                }),
-            );
-            advance_from_next(state_def, output)
-        }
-        // Task-originated error → the States.TaskFailed wildcard applies.
-        Err((error, cause)) => advance_from_error(state_def, &input, error, cause, true),
-    }
+    task_like_outcome(
+        entry,
+        state_def,
+        "TaskStateExited",
+        result,
+        shared_state,
+        execution_arn,
+    )
 }
 
+/// A Parallel state, on attempt `attempt` of the whole state.
 #[allow(clippy::too_many_arguments)]
 async fn run_parallel_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: Value,
+    attempt: u32,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let entered_event_id = add_event(
-        shared_state,
-        execution_arn,
-        "ParallelStateEntered",
-        0,
-        json!({
-            "name": name,
-            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
-        }),
-    );
-
-    let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
+    let ctx = entry.context(shared_state, execution_arn, attempt);
     let result = execute_parallel_state(
         state_def,
         &ctx,
         &input,
+        entry.entered,
         delivery,
         dynamodb_state,
         registry,
@@ -260,54 +309,35 @@ async fn run_parallel_state(
         execution_arn,
     )
     .await;
-
-    match result {
-        Ok(output) => {
-            add_event(
-                shared_state,
-                execution_arn,
-                "ParallelStateExited",
-                entered_event_id,
-                json!({
-                    "name": name,
-                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
-                }),
-            );
-            advance_from_next(state_def, output)
-        }
-        // A Parallel branch failure is not itself a task error; the
-        // States.TaskFailed wildcard must not swallow branch-level errors.
-        Err((error, cause)) => advance_from_error(state_def, &input, error, cause, false),
-    }
+    task_like_outcome(
+        entry,
+        state_def,
+        "ParallelStateExited",
+        result,
+        shared_state,
+        execution_arn,
+    )
 }
 
+/// A Map state, on attempt `attempt` of the whole state.
 #[allow(clippy::too_many_arguments)]
 async fn run_map_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: Value,
+    attempt: u32,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let entered_event_id = add_event(
-        shared_state,
-        execution_arn,
-        "MapStateEntered",
-        0,
-        json!({
-            "name": name,
-            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
-        }),
-    );
-
-    let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
+    let ctx = entry.context(shared_state, execution_arn, attempt);
     let result = execute_map_state(
         state_def,
         &ctx,
         &input,
+        entry.entered,
         delivery,
         dynamodb_state,
         registry,
@@ -315,25 +345,26 @@ async fn run_map_state(
         execution_arn,
     )
     .await;
+    task_like_outcome(
+        entry,
+        state_def,
+        "MapStateExited",
+        result,
+        shared_state,
+        execution_arn,
+    )
+}
 
-    match result {
-        Ok(output) => {
-            add_event(
-                shared_state,
-                execution_arn,
-                "MapStateExited",
-                entered_event_id,
-                json!({
-                    "name": name,
-                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
-                }),
-            );
-            advance_from_next(state_def, output)
-        }
-        // A Map iteration failure is not itself a task error; the
-        // States.TaskFailed wildcard must not swallow iteration-level errors.
-        Err((error, cause)) => advance_from_error(state_def, &input, error, cause, false),
+/// The longest a Wait state waits, in seconds, as recorded: one more fails it.
+const MAX_WAIT_SECONDS: u64 = 2_147_483_646;
+
+fn wait_delay(seconds: u64) -> Result<tokio::time::Duration, (String, String)> {
+    if seconds > MAX_WAIT_SECONDS {
+        return Err(crate::io_processing::runtime_error(
+            "Wait state delay is too long.".to_string(),
+        ));
     }
+    Ok(tokio::time::Duration::from_secs(seconds))
 }
 
 /// Execute a Wait state: pause execution for a specified duration or until a timestamp.
@@ -344,8 +375,15 @@ async fn execute_wait_state(
     input: &Value,
     ctx: &Value,
 ) -> Result<(), (String, String)> {
-    if let Some(seconds) = state_def["Seconds"].as_u64() {
-        tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
+    let text_of = crate::io_processing::value_text;
+
+    if let Some(seconds) = state_def.get("Seconds") {
+        let seconds = seconds.as_u64().ok_or_else(|| {
+            crate::io_processing::runtime_error(format!(
+                "The Seconds field must be a non-negative integer but was: {seconds}"
+            ))
+        })?;
+        tokio::time::sleep(wait_delay(seconds)?).await;
         return Ok(());
     }
 
@@ -353,30 +391,33 @@ async fn execute_wait_state(
         let val = crate::io_processing::resolve_reference_with_context(input, Some(ctx), path)?;
         let seconds = val.as_u64().ok_or_else(|| {
             crate::io_processing::runtime_error(format!(
-                "The SecondsPath parameter does not reference a valid integer value: '{path}'"
+                "The SecondsPath parameter cannot be parsed as a long value: {path} == {}",
+                text_of(&val)
             ))
         })?;
-        tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
+        tokio::time::sleep(wait_delay(seconds)?).await;
         return Ok(());
     }
 
-    let target = if let Some(ts_str) = state_def["Timestamp"].as_str() {
-        chrono::DateTime::parse_from_rfc3339(ts_str).ok()
+    let target = if let Some(timestamp) = state_def.get("Timestamp") {
+        let text = text_of(timestamp);
+        Some(chrono::DateTime::parse_from_rfc3339(&text).map_err(|_| {
+            crate::io_processing::runtime_error(format!(
+                "The Timestamp field cannot be parsed as an ISO-8601 extended offset date-time \
+                 format string: {text}"
+            ))
+        })?)
     } else if let Some(path) = state_def["TimestampPath"].as_str() {
         let val = crate::io_processing::resolve_reference_with_context(input, Some(ctx), path)?;
-        let parsed = val
-            .as_str()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
-        if parsed.is_none() {
-            return Err(crate::io_processing::runtime_error(format!(
-                "The TimestampPath parameter does not reference a valid ISO-8601 extended offset date-time format string: '{path}'"
-            )));
-        }
-        parsed
+        let text = text_of(&val);
+        Some(chrono::DateTime::parse_from_rfc3339(&text).map_err(|_| {
+            crate::io_processing::runtime_error(format!(
+                "The TimestampPath parameter does not reference a valid ISO-8601 extended offset \
+                 date-time format string: {path} == {text}"
+            ))
+        })?)
     } else {
-        warn!(
-            "Wait state has no valid Seconds, SecondsPath, Timestamp, or TimestampPath — skipping wait"
-        );
+        warn!("Wait state has no Seconds, SecondsPath, Timestamp, or TimestampPath: skipping wait");
         return Ok(());
     };
 
@@ -391,27 +432,81 @@ async fn execute_wait_state(
     Ok(())
 }
 
+/// Turn a Task's raw result into its output.
+#[allow(clippy::too_many_arguments)]
+fn finish_task_result(
+    state_def: &Value,
+    name: &str,
+    input: &Value,
+    result: Value,
+    entered: chrono::DateTime<Utc>,
+    attempt: u32,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Result<Value, (String, String)> {
+    let result_path = state_def["ResultPath"].as_str();
+    let output_path = state_def["OutputPath"].as_str();
+    let ctx = context_object(shared_state, execution_arn, name, entered, attempt);
+    let selected = match state_def.get("ResultSelector") {
+        Some(selector) => apply_parameters(selector, &result, Some(&ctx))?,
+        None => result.clone(),
+    };
+    let after_result = apply_result_path(input, &selected, result_path)?;
+    let output = if output_path == Some("null") {
+        json!({})
+    } else {
+        apply_output_path(&after_result, output_path)?
+    };
+    // `$` is the raw result. Staged last: a state failing above assigns nothing.
+    if !crate::jsonata::is_jsonata(state_def) {
+        crate::variables::assign_jsonpath(state_def.get("Assign"), &result, Some(&ctx))?;
+    }
+    Ok(output)
+}
+
+/// The most a task's result can hold, per the ASL service quota.
+const MAX_TASK_RESULT_BYTES: usize = 256 * 1024;
+
+/// A result over the quota fails the state with an error no wildcard catches.
+fn within_result_limit(resource: &str, result: Value) -> Result<Value, (String, String)> {
+    if serde_json::to_vec(&result).map_or(0, |bytes| bytes.len()) <= MAX_TASK_RESULT_BYTES {
+        return Ok(result);
+    }
+    // As recorded, an SDK integration goes by its service: `aws-sdk:s3`.
+    let task = resource
+        .split_once(":::aws-sdk:")
+        .map(|(_, tail)| format!("aws-sdk:{}", tail.split(':').next().unwrap_or_default()))
+        .unwrap_or_else(|| resource.to_string());
+    Err((
+        "States.DataLimitExceeded".to_string(),
+        format!(
+            "The state/task '{task}' returned a result with a size exceeding the maximum number \
+             of bytes service limit."
+        ),
+    ))
+}
+
 /// Execute a Task state: invoke the resource (Lambda, SQS, SNS, EventBridge, DynamoDB),
 /// apply I/O processing, handle Retry.
 #[allow(clippy::too_many_arguments)]
 async fn execute_task_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: &Value,
+    attempt: &mut u32,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
-    entered_event_id: i64,
-) -> Result<Value, (String, String)> {
+) -> Result<Value, StateFailure> {
+    let name = entry.name;
+    let entered = entry.entered_at;
+    let entered_event_id = entry.entered;
     let resource = state_def["Resource"].as_str().unwrap_or("").to_string();
-    let entered = Utc::now();
     let base_ctx = context_object(shared_state, execution_arn, name, entered, 0);
 
     let input_path = state_def["InputPath"].as_str();
-    let result_path = state_def["ResultPath"].as_str();
-    let output_path = state_def["OutputPath"].as_str();
 
     let effective_input = if input_path == Some("null") {
         json!({})
@@ -419,10 +514,12 @@ async fn execute_task_state(
         apply_input_path(input, input_path)?
     };
 
-    let retriers = state_def["Retry"].as_array().cloned().unwrap_or_default();
+    let retriers: &[Value] = state_def["Retry"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let timeout_seconds = state_def["TimeoutSeconds"].as_u64();
     let heartbeat_seconds = state_def["HeartbeatSeconds"].as_u64();
-    let mut attempt = 0u32;
 
     let is_wait_for_task_token = resource.contains(".waitForTaskToken");
     let task_token = if is_wait_for_task_token {
@@ -464,11 +561,27 @@ async fn execute_task_state(
         // Parameters are re-evaluated for every attempt, so
         // `$$.State.RetryCount` reflects the current retry as on AWS.
         let task_input = if let Some(params) = state_def.get("Parameters") {
-            let mut ctx = context_object(shared_state, execution_arn, name, entered, attempt);
+            let mut ctx = context_object(shared_state, execution_arn, name, entered, *attempt);
             if let Some((_, token_ctx)) = &task_token {
                 ctx["Task"] = token_ctx["Task"].clone();
             }
             apply_parameters(params, &effective_input, Some(&ctx))?
+        } else if let Some(arguments) = state_def.get("Arguments") {
+            let mut ctx = context_object(shared_state, execution_arn, name, entered, *attempt);
+            if let Some((_, token_ctx)) = &task_token {
+                ctx["Task"] = token_ctx["Task"].clone();
+            }
+            // On failure nothing was scheduled; the state loop decides on `Retry`.
+            crate::jsonata::eval_template(
+                "Arguments",
+                arguments,
+                &crate::jsonata::Scope {
+                    input: &effective_input,
+                    context: &ctx,
+                    result: None,
+                    error_output: None,
+                },
+            )?
         } else {
             effective_input.clone()
         };
@@ -503,7 +616,8 @@ async fn execute_task_state(
             heartbeat_seconds,
             shared_state,
         )
-        .await;
+        .await
+        .and_then(|result| within_result_limit(&resource, result));
 
         match invoke_result {
             Ok(result) => {
@@ -519,6 +633,7 @@ async fn execute_task_state(
                         heartbeat_seconds,
                     )
                     .await
+                    .and_then(|output| within_result_limit(&resource, output))
                     {
                         Ok(output) => {
                             add_event(
@@ -532,32 +647,16 @@ async fn execute_task_state(
                                 }),
                             );
 
-                            let selected = if let Some(selector) = state_def.get("ResultSelector") {
-                                let ctx = context_object(
-                                    shared_state,
-                                    execution_arn,
-                                    name,
-                                    entered,
-                                    attempt,
-                                );
-                                apply_parameters(selector, &output, Some(&ctx))?
-                            } else {
-                                output
-                            };
-
-                            let after_result = if result_path == Some("null") {
-                                input.clone()
-                            } else {
-                                apply_result_path(input, &selected, result_path)
-                            };
-
-                            let output = if output_path == Some("null") {
-                                json!({})
-                            } else {
-                                apply_output_path(&after_result, output_path)?
-                            };
-
-                            return Ok(output);
+                            return Ok(finish_task_result(
+                                state_def,
+                                name,
+                                input,
+                                output,
+                                entered,
+                                *attempt,
+                                shared_state,
+                                execution_arn,
+                            )?);
                         }
                         Err((error, cause)) => {
                             add_event(
@@ -568,8 +667,8 @@ async fn execute_task_state(
                                 json!({ "error": error, "cause": cause }),
                             );
 
-                            if let Some(delay_ms) = should_retry(&retriers, &error, attempt, true) {
-                                attempt += 1;
+                            if let Some(delay_ms) = should_retry(retriers, &error, *attempt, true) {
+                                *attempt += 1;
                                 // Honour the ASL-computed backoff (already bounded
                                 // by MaxDelaySeconds inside `should_retry`).
                                 tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms))
@@ -577,7 +676,7 @@ async fn execute_task_state(
                                 continue;
                             }
 
-                            return Err((error, cause));
+                            return Err(StateFailure::Ran((error, cause)));
                         }
                     }
                 }
@@ -593,26 +692,16 @@ async fn execute_task_state(
                     }),
                 );
 
-                let selected = if let Some(selector) = state_def.get("ResultSelector") {
-                    let ctx = context_object(shared_state, execution_arn, name, entered, attempt);
-                    apply_parameters(selector, &result, Some(&ctx))?
-                } else {
-                    result
-                };
-
-                let after_result = if result_path == Some("null") {
-                    input.clone()
-                } else {
-                    apply_result_path(input, &selected, result_path)
-                };
-
-                let output = if output_path == Some("null") {
-                    json!({})
-                } else {
-                    apply_output_path(&after_result, output_path)?
-                };
-
-                return Ok(output);
+                return Ok(finish_task_result(
+                    state_def,
+                    name,
+                    input,
+                    result,
+                    entered,
+                    *attempt,
+                    shared_state,
+                    execution_arn,
+                )?);
             }
             Err((error, cause)) => {
                 add_event(
@@ -623,15 +712,15 @@ async fn execute_task_state(
                     json!({ "error": error, "cause": cause }),
                 );
 
-                if let Some(delay_ms) = should_retry(&retriers, &error, attempt, true) {
-                    attempt += 1;
+                if let Some(delay_ms) = should_retry(retriers, &error, *attempt, true) {
+                    *attempt += 1;
                     // Honour the ASL-computed backoff (already bounded by
                     // MaxDelaySeconds inside `should_retry`).
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
                     continue;
                 }
 
-                return Err((error, cause));
+                return Err(StateFailure::Ran((error, cause)));
             }
         }
     }
@@ -643,12 +732,13 @@ async fn execute_parallel_state(
     state_def: &Value,
     ctx: &Value,
     input: &Value,
+    entered_event_id: i64,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
-) -> Result<Value, (String, String)> {
+) -> Result<Value, StateFailure> {
     let input_path = state_def["InputPath"].as_str();
     let result_path = state_def["ResultPath"].as_str();
     let output_path = state_def["OutputPath"].as_str();
@@ -658,6 +748,15 @@ async fn execute_parallel_state(
     } else {
         apply_input_path(input, input_path)?
     };
+    // A JSONPath state's `Parameters` give each branch its input, evaluated per
+    // attempt (`$$.State.RetryCount`), as recorded. A JSONata state's
+    // `Arguments` were evaluated into `input` when it was prepared.
+    let effective_input = match state_def.get("Parameters") {
+        Some(template) if !crate::jsonata::is_jsonata(state_def) => {
+            apply_parameters(template, &effective_input, Some(ctx))?
+        }
+        _ => effective_input,
+    };
 
     let branches = state_def["Branches"]
         .as_array()
@@ -665,11 +764,19 @@ async fn execute_parallel_state(
         .unwrap_or_default();
 
     if branches.is_empty() {
-        return Err((
+        return Err(StateFailure::Own((
             "States.Runtime".to_string(),
             "Parallel state has no Branches".to_string(),
-        ));
+        )));
     }
+
+    add_event(
+        shared_state,
+        execution_arn,
+        "ParallelStateStarted",
+        entered_event_id,
+        json!({}),
+    );
 
     // Spawn all branches concurrently
     let mut handles = Vec::new();
@@ -682,9 +789,10 @@ async fn execute_parallel_state(
         let state = shared_state.clone();
         let arn = execution_arn.to_string();
 
-        handles.push(tokio::spawn(async move {
+        let scope = crate::variables::child_scope(true);
+        handles.push(tokio::spawn(crate::variables::in_scope(scope, async move {
             run_states(&branch, branch_input, &delivery, &ddb, &reg, &state, &arn).await
-        }));
+        })));
     }
 
     // Collect results in order
@@ -695,9 +803,19 @@ async fn execute_parallel_state(
                 "States.Runtime".to_string(),
                 format!("Branch execution panicked: {e}"),
             )
-        })??;
-        results.push(result);
+        })?;
+        results.push(result.map_err(StateFailure::Ran)?);
     }
+
+    // The branches have succeeded, whatever becomes of their results, as
+    // recorded: a failing `ResultSelector` follows this event.
+    add_event(
+        shared_state,
+        execution_arn,
+        "ParallelStateSucceeded",
+        entered_event_id,
+        json!({}),
+    );
 
     let branch_output = Value::Array(results);
 
@@ -705,15 +823,11 @@ async fn execute_parallel_state(
     let selected = if let Some(selector) = state_def.get("ResultSelector") {
         apply_parameters(selector, &branch_output, Some(ctx))?
     } else {
-        branch_output
+        branch_output.clone()
     };
 
     // Apply ResultPath
-    let after_result = if result_path == Some("null") {
-        input.clone()
-    } else {
-        apply_result_path(input, &selected, result_path)
-    };
+    let after_result = apply_result_path(input, &selected, result_path)?;
 
     // Apply OutputPath
     let output = if output_path == Some("null") {
@@ -721,6 +835,9 @@ async fn execute_parallel_state(
     } else {
         apply_output_path(&after_result, output_path)?
     };
+    if !crate::jsonata::is_jsonata(state_def) {
+        crate::variables::assign_jsonpath(state_def.get("Assign"), &branch_output, Some(ctx))?;
+    }
 
     Ok(output)
 }
@@ -733,15 +850,317 @@ async fn execute_map_state(
     state_def: &Value,
     ctx: &Value,
     input: &Value,
+    entered_event_id: i64,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
+) -> Result<Value, StateFailure> {
+    // A distributed Map (`ItemProcessor.ProcessorConfig.Mode == "DISTRIBUTED"`)
+    // materialises a MapRun record that `ListMapRuns` / `DescribeMapRun`
+    // surface, from before it reads its items. Inline Map states do not create
+    // one, matching AWS.
+    let is_distributed = state_def
+        .get("ItemProcessor")
+        .or_else(|| state_def.get("Iterator"))
+        .and_then(|processor| processor["ProcessorConfig"]["Mode"].as_str())
+        == Some("DISTRIBUTED");
+    let map_run_arn = if is_distributed {
+        map_run_arn_for(execution_arn)
+    } else {
+        None
+    };
+    if let Some(arn) = &map_run_arn {
+        start_map_run(shared_state, arn, execution_arn, state_def);
+    }
+
+    let result = run_map_iterations(
+        state_def,
+        ctx,
+        input,
+        delivery,
+        dynamodb_state,
+        registry,
+        shared_state,
+        execution_arn,
+        map_run_arn.as_deref(),
+    )
+    .await;
+    let fail_run = |failure: &StateFailure, failed_event: bool| {
+        let Some(arn) = &map_run_arn else {
+            return;
+        };
+        finish_map_run(shared_state, arn, execution_arn, None, "FAILED");
+        if failed_event {
+            let (StateFailure::Own((error, cause)) | StateFailure::Ran((error, cause))) = failure;
+            add_event(
+                shared_state,
+                execution_arn,
+                "MapRunFailed",
+                0,
+                json!({ "error": error, "cause": cause }),
+            );
+        }
+    };
+
+    let results = match result {
+        Ok(results) => results,
+        Err(MapRunError {
+            failure,
+            failed_event,
+        }) => {
+            fail_run(&failure, failed_event);
+            return Err(failure);
+        }
+    };
+    // The iterations have succeeded, whatever becomes of their results, as
+    // recorded: a failing `ResultSelector` follows this event.
+    add_event(
+        shared_state,
+        execution_arn,
+        "MapStateSucceeded",
+        entered_event_id,
+        json!({}),
+    );
+
+    // A map run ends with its state's own processing: one failing here fails it.
+    match finish_map_output(state_def, ctx, input, &results.output) {
+        Ok(output) => {
+            if let Some(arn) = &map_run_arn {
+                finish_map_run(
+                    shared_state,
+                    arn,
+                    execution_arn,
+                    Some(results.tallies),
+                    "SUCCEEDED",
+                );
+            }
+            Ok(output)
+        }
+        Err(failure) => {
+            let failure = StateFailure::Own(failure);
+            fail_run(&failure, true);
+            Err(failure)
+        }
+    }
+}
+
+/// A Map state's own processing of its iterations' results: a JSONPath state's
+/// `ResultSelector`, `ResultPath`, `OutputPath` and `Assign`, a JSONata state's
+/// `Assign` and `Output`. A map run ends with it.
+fn finish_map_output(
+    state_def: &Value,
+    ctx: &Value,
+    input: &Value,
+    map_output: &Value,
 ) -> Result<Value, (String, String)> {
+    if crate::jsonata::is_jsonata(state_def) {
+        return crate::jsonata::finish_state(state_def, "", input, ctx, map_output.clone(), false);
+    }
+    let selected = match state_def.get("ResultSelector") {
+        Some(selector) => apply_parameters(selector, map_output, Some(ctx))?,
+        None => map_output.clone(),
+    };
+    let after_result = apply_result_path(input, &selected, state_def["ResultPath"].as_str())?;
+    let output = match state_def["OutputPath"].as_str() {
+        Some("null") => json!({}),
+        output_path => apply_output_path(&after_result, output_path)?,
+    };
+    crate::variables::assign_jsonpath(state_def.get("Assign"), map_output, Some(ctx))?;
+    Ok(output)
+}
+
+/// A Map's iterations, done: their results and the map run's tallies
+/// (succeeded, failed).
+struct MapResults {
+    output: Value,
+    tallies: (i64, i64),
+}
+
+/// How a Map's iterations failed, and whether its map run records it with a
+/// `MapRunFailed` event: as recorded, a tolerance that isn't one does not.
+struct MapRunError {
+    failure: StateFailure,
+    failed_event: bool,
+}
+
+impl From<StateFailure> for MapRunError {
+    fn from(failure: StateFailure) -> Self {
+        MapRunError {
+            failure,
+            failed_event: true,
+        }
+    }
+}
+
+impl From<(String, String)> for MapRunError {
+    fn from(failure: (String, String)) -> Self {
+        StateFailure::Own(failure).into()
+    }
+}
+
+/// How many failed iterations a map run tolerates. With neither limit set, none;
+/// when both are set, passing either fails the run.
+#[derive(Clone, Copy, Debug)]
+struct FailureTolerance {
+    count: Option<u64>,
+    percentage: Option<f64>,
+}
+
+impl FailureTolerance {
+    fn resolve(
+        state_def: &Value,
+        jsonata: bool,
+        input: &Value,
+        ctx: &Value,
+    ) -> Result<Self, (String, String)> {
+        let resolved = |path: &str, field: &str| -> Result<Option<Value>, (String, String)> {
+            match state_def[path].as_str() {
+                Some(reference) => crate::io_processing::resolve_reference_with_context(
+                    input,
+                    Some(ctx),
+                    reference,
+                )
+                .map(Some),
+                None => Ok(state_def.get(field).cloned()),
+            }
+        };
+        let invalid = |field: &str, value: &Value, wanted: &str| {
+            crate::io_processing::runtime_error(format!(
+                "The {field} must be {wanted}, got {value}"
+            ))
+        };
+        let count = match resolved("ToleratedFailureCountPath", "ToleratedFailureCount")? {
+            None => None,
+            // As recorded: a JSONata expression's whole number counts, `2.0`
+            // too; a path's value must be an integer as it stands.
+            Some(value) if jsonata => {
+                let query = |cause: String| ("States.QueryEvaluationError".to_string(), cause);
+                let whole = crate::jsonata::whole_number(&value).ok_or_else(|| {
+                    query(format!(
+                        "The ToleratedFailureCount field cannot be parsed as an integer: {value}"
+                    ))
+                })?;
+                // Worded as a negative Wait `Seconds` is, as recorded there.
+                Some(u64::try_from(whole).map_err(|_| {
+                    query(format!(
+                        "ToleratedFailureCount cannot be negative but was: {value}"
+                    ))
+                })?)
+            }
+            Some(value) => Some(value.as_u64().ok_or_else(|| {
+                match state_def["ToleratedFailureCountPath"].as_str() {
+                    Some(path) => {
+                        let text = crate::io_processing::value_text(&value);
+                        crate::io_processing::runtime_error(format!(
+                            "The ToleratedFailureCountPath field refers to value \"{text}\" which \
+                         is not a valid integer: {path}"
+                        ))
+                    }
+                    None => invalid("ToleratedFailureCount", &value, "a non-negative integer"),
+                }
+            })?),
+        };
+        let percentage = match resolved(
+            "ToleratedFailurePercentagePath",
+            "ToleratedFailurePercentage",
+        )? {
+            None => None,
+            Some(value) => Some(
+                value
+                    .as_f64()
+                    .filter(|p| (0.0..=100.0).contains(p))
+                    .ok_or_else(|| {
+                        invalid(
+                            "ToleratedFailurePercentage",
+                            &value,
+                            "a number from 0 to 100",
+                        )
+                    })?,
+            ),
+        };
+        Ok(Self { count, percentage })
+    }
+
+    fn exceeded(&self, failed: usize, total: usize) -> bool {
+        let over_count = self.count.map(|limit| failed as u64 > limit);
+        let over_percentage = self
+            .percentage
+            .map(|limit| failed as f64 / total.max(1) as f64 * 100.0 > limit);
+        match (over_count, over_percentage) {
+            (None, None) => failed > 0,
+            (count, percentage) => count == Some(true) || percentage == Some(true),
+        }
+    }
+}
+
+/// Stops a failing Map starting new iterations. For a map run, as recorded (40
+/// items, concurrency 2, no tolerance: 3 ran, 37 stayed pending), the dispatcher
+/// has one `MaxConcurrency` window committed beyond the iterations already
+/// finished when the threshold is crossed. An inline Map has no such window.
+struct MapProgress {
+    window: usize,
+    started: std::sync::atomic::AtomicUsize,
+    finished: std::sync::atomic::AtomicUsize,
+    failed: std::sync::atomic::AtomicUsize,
+    /// How many iterations may start in all, once the run is failing.
+    start_limit: std::sync::atomic::AtomicUsize,
+}
+
+impl MapProgress {
+    fn new(window: usize) -> Self {
+        Self {
+            window,
+            started: Default::default(),
+            finished: Default::default(),
+            failed: Default::default(),
+            start_limit: std::sync::atomic::AtomicUsize::new(usize::MAX),
+        }
+    }
+
+    fn may_start(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.started.load(SeqCst) >= self.start_limit.load(SeqCst) {
+            return false;
+        }
+        self.started.fetch_add(1, SeqCst);
+        true
+    }
+
+    fn record_finish(&self, is_failure: bool, tolerance: FailureTolerance, total: usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let finished = self.finished.fetch_add(1, SeqCst) + 1;
+        if !is_failure {
+            return;
+        }
+        let failed = self.failed.fetch_add(1, SeqCst) + 1;
+        if tolerance.exceeded(failed, total) {
+            let limit = finished + self.window;
+            let _ = self
+                .start_limit
+                .compare_exchange(usize::MAX, limit, SeqCst, SeqCst);
+        }
+    }
+}
+
+const THRESHOLD_ERROR: &str = "States.ExceedToleratedFailureThreshold";
+const THRESHOLD_CAUSE: &str = "The specified tolerated failure threshold was exceeded";
+
+#[allow(clippy::too_many_arguments)]
+async fn run_map_iterations(
+    state_def: &Value,
+    ctx: &Value,
+    input: &Value,
+    delivery: &Option<Arc<DeliveryBus>>,
+    dynamodb_state: &Option<SharedDynamoDbState>,
+    registry: &Option<SharedServiceRegistry>,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+    map_run_arn: Option<&str>,
+) -> Result<MapResults, MapRunError> {
+    let jsonata = crate::jsonata::is_jsonata(state_def);
     let input_path = state_def["InputPath"].as_str();
-    let result_path = state_def["ResultPath"].as_str();
-    let output_path = state_def["OutputPath"].as_str();
 
     let effective_input = if input_path == Some("null") {
         json!({})
@@ -763,23 +1182,41 @@ async fn execute_map_state(
         max_concurrency as usize
     };
 
+    // A ResultWriter that cannot be honored must fail before any iteration runs.
+    let result_writer = state_def.get("ResultWriter");
+    let writer_config = result_writer
+        .map(crate::map_s3::WriterConfig::parse)
+        .transpose()?;
+
     // Read items from ItemReader (S3) or ItemsPath
     let items = if let Some(item_reader) = state_def.get("ItemReader") {
-        read_items_from_s3(item_reader, registry, execution_arn).await?
-    } else {
-        let items_path = state_def["ItemsPath"].as_str().unwrap_or("$");
-        let items_value = crate::io_processing::resolve_reference_with_context(
+        read_items_from_s3(
+            item_reader,
+            jsonata,
             &effective_input,
-            Some(ctx),
-            items_path,
-        )?;
+            ctx,
+            registry,
+            execution_arn,
+        )
+        .await?
+    } else {
+        // A JSONata state's `Items`, already evaluated, or a JSONPath `ItemsPath`.
+        let items_value = match state_def.get("Items") {
+            Some(items) => items.clone(),
+            None => crate::io_processing::resolve_reference_with_context(
+                &effective_input,
+                Some(ctx),
+                state_def["ItemsPath"].as_str().unwrap_or("$"),
+            )?,
+        };
         match items_value {
             Value::Array(items) => items,
             other => {
                 return Err(crate::io_processing::runtime_error(format!(
                     "Map state input must be an array but was: {}",
                     json_type_name(&other)
-                )))
+                ))
+                .into())
             }
         }
     };
@@ -787,7 +1224,7 @@ async fn execute_map_state(
     // Apply ItemBatcher if present
     let batch_config = state_def.get("ItemBatcher").cloned();
     let batched_items = if let Some(ref batcher) = batch_config {
-        apply_item_batcher(&items, batcher, &effective_input)
+        apply_item_batcher(&items, batcher, jsonata, &effective_input, ctx)?
     } else {
         items
     };
@@ -804,60 +1241,62 @@ async fn execute_map_state(
             )
         })?;
 
-    let tolerated_failure_percentage = state_def["ToleratedFailurePercentage"]
-        .as_f64()
-        .unwrap_or(0.0);
-    let tolerated_failure_count = state_def["ToleratedFailureCount"].as_i64().unwrap_or(0);
-    let total_items = batched_items.len() as f64;
-    let mut failure_count = 0usize;
-
-    // A distributed Map (`ItemProcessor.ProcessorConfig.Mode == "DISTRIBUTED"`)
-    // materialises a MapRun record that `ListMapRuns` / `DescribeMapRun`
-    // surface. Inline Map states do not create one, matching AWS.
-    let is_distributed = iterator_def
-        .get("ProcessorConfig")
-        .and_then(|c| c.get("Mode"))
-        .and_then(Value::as_str)
-        == Some("DISTRIBUTED");
-    let map_run_arn = if is_distributed {
-        map_run_arn_for(execution_arn).inspect(|arn| {
-            start_map_run(
-                shared_state,
-                arn,
-                execution_arn,
-                // The configured MaxConcurrency (0 == unlimited), as AWS reports
-                // it, not the internal `effective_concurrency` (which defaults
-                // an unset value to 40).
-                max_concurrency as usize,
-                tolerated_failure_percentage,
-                tolerated_failure_count,
-                batched_items.len(),
-            );
-        })
-    } else {
-        None
-    };
+    let total_items = batched_items.len();
+    add_event(
+        shared_state,
+        execution_arn,
+        "MapStateStarted",
+        0,
+        json!({ "length": total_items }),
+    );
+    // As recorded, a tolerance that isn't one fails the state once it has started.
+    let tolerance = FailureTolerance::resolve(state_def, jsonata, &effective_input, ctx).map_err(
+        |failure| MapRunError {
+            failure: StateFailure::Own(failure),
+            failed_event: false,
+        },
+    )?;
+    if let Some(arn) = map_run_arn {
+        set_map_run_total(
+            shared_state,
+            arn,
+            execution_arn,
+            total_items,
+            max_concurrency,
+            tolerance,
+        );
+    }
 
     // Apply ItemSelector to every item before any iteration starts, so a
     // failing selector fails the state without leaving earlier iterations
     // running in the background. `$` paths read the Map state's effective
     // input; the current item is exposed through the context object as
     // `$$.Map.Item.Value` / `$$.Map.Item.Index`, as on AWS.
-    let item_inputs: Vec<Value> = match state_def.get("ItemSelector") {
+    // `Parameters` is a JSONPath Map's older name for `ItemSelector`.
+    let item_selector = state_def
+        .get("ItemSelector")
+        .or_else(|| (!jsonata).then(|| state_def.get("Parameters")).flatten());
+    let item_inputs: Vec<Value> = match item_selector {
         Some(selector) => {
             let mut out = Vec::with_capacity(batched_items.len());
             for (index, batch_item) in batched_items.into_iter().enumerate() {
                 let mut item_ctx = ctx.clone();
                 item_ctx["Map"] = json!({"Item": {"Value": batch_item, "Index": index}});
-                match apply_parameters(selector, &effective_input, Some(&item_ctx)) {
-                    Ok(v) => out.push(v),
-                    Err(err) => {
-                        if let Some(arn) = &map_run_arn {
-                            finish_map_run(shared_state, arn, execution_arn, 0, 0, "FAILED");
-                        }
-                        return Err(err);
-                    }
-                }
+                let selected = if jsonata {
+                    crate::jsonata::eval_template(
+                        "ItemSelector",
+                        selector,
+                        &crate::jsonata::Scope {
+                            input: &effective_input,
+                            context: &item_ctx,
+                            result: None,
+                            error_output: None,
+                        },
+                    )?
+                } else {
+                    apply_parameters(selector, &effective_input, Some(&item_ctx))?
+                };
+                out.push(selected);
             }
             out
         }
@@ -865,6 +1304,12 @@ async fn execute_map_state(
     };
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_concurrency));
+    let is_distributed = map_run_arn.is_some();
+    let progress = Arc::new(MapProgress::new(if is_distributed {
+        effective_concurrency
+    } else {
+        0
+    }));
 
     // Process all items
     let mut handles = Vec::new();
@@ -875,39 +1320,77 @@ async fn execute_map_state(
         let reg = registry.clone();
         let state = shared_state.clone();
         let arn = execution_arn.to_string();
-        let sem = semaphore.clone();
+        // Iterations start in item order, so what a failing run leaves pending is
+        // the items at the end. A permit is held until the iteration has finished.
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ("States.Runtime".to_string(), "Semaphore closed".to_string()))?;
+        let may_start = progress.may_start();
+        let recorded_input = result_writer.map(|_| item_input.clone());
+        let progress = progress.clone();
 
-        add_event(
-            shared_state,
-            execution_arn,
-            "MapIterationStarted",
-            0,
-            json!({ "index": index }),
-        );
+        if may_start {
+            add_event(
+                shared_state,
+                execution_arn,
+                "MapIterationStarted",
+                0,
+                json!({ "index": index }),
+            );
+        }
 
-        handles.push(tokio::spawn(async move {
-            let _permit = sem
-                .acquire()
-                .await
-                .map_err(|_| ("States.Runtime".to_string(), "Semaphore closed".to_string()))?;
-            let result =
-                run_states(&iter_def, item_input, &delivery, &ddb, &reg, &state, &arn).await;
-            Ok::<(usize, Result<Value, (String, String)>), (String, String)>((index, result))
-        }));
+        // A distributed Map's iterations cannot read outer variables.
+        let scope = crate::variables::child_scope(!is_distributed);
+        handles.push(tokio::spawn(crate::variables::in_scope(
+            scope,
+            async move {
+                let _permit = permit;
+                let started = Utc::now();
+                if !may_start {
+                    let record = recorded_input.map(|input| crate::map_s3::IterationRecord {
+                        input,
+                        started,
+                        stopped: started,
+                        outcome: crate::map_s3::IterationOutcome::Pending,
+                    });
+                    return Ok::<_, (String, String)>((index, None, record));
+                }
+                let result =
+                    run_states(&iter_def, item_input, &delivery, &ddb, &reg, &state, &arn).await;
+                progress.record_finish(result.is_err(), tolerance, total_items);
+                let record = recorded_input.map(|input| crate::map_s3::IterationRecord {
+                    input,
+                    started,
+                    stopped: Utc::now(),
+                    outcome: match &result {
+                        Ok(output) => crate::map_s3::IterationOutcome::Succeeded(output.clone()),
+                        Err((error, cause)) => {
+                            crate::map_s3::IterationOutcome::Failed(error.clone(), cause.clone())
+                        }
+                    },
+                });
+                Ok((index, Some(result), record))
+            },
+        )));
     }
 
     // Collect results in order
     let mut results: Vec<(usize, Value)> = Vec::with_capacity(handles.len());
+    let mut iteration_records = Vec::new();
+    let mut failure_count = 0usize;
     for handle in handles {
-        let (index, result) = handle.await.map_err(|e| {
+        let (index, result, record) = handle.await.map_err(|e| {
             (
                 "States.Runtime".to_string(),
                 format!("Map iteration panicked: {e}"),
             )
         })??;
+        iteration_records.extend(record);
 
         match result {
-            Ok(output) => {
+            Some(Ok(output)) => {
                 add_event(
                     shared_state,
                     execution_arn,
@@ -917,7 +1400,15 @@ async fn execute_map_state(
                 );
                 results.push((index, output));
             }
-            Err((error, cause)) => {
+            // As recorded, an inline iteration failing so that the execution
+            // ends records no MapIterationFailed: the execution fails at once. A
+            // map run's iterations are child executions, which fail on their own.
+            Some(Err((error, cause)))
+                if !is_distributed && crate::error_handling::ends_execution(&error) =>
+            {
+                return Err(StateFailure::Ran((error, cause)).into());
+            }
+            Some(Err((error, cause))) => {
                 add_event(
                     shared_state,
                     execution_arn,
@@ -926,68 +1417,69 @@ async fn execute_map_state(
                     json!({ "index": index, "error": error }),
                 );
                 failure_count += 1;
-                let failure_percentage = (failure_count as f64 / total_items) * 100.0;
-                if failure_percentage > tolerated_failure_percentage {
-                    if let Some(arn) = &map_run_arn {
-                        finish_map_run(
-                            shared_state,
-                            arn,
-                            execution_arn,
-                            results.len() as i64,
-                            failure_count as i64,
-                            "FAILED",
-                        );
-                    }
-                    return Err((error, cause));
+                // An inline Map fails with the iteration's own error, at once.
+                // A map run finishes its window and reports the threshold.
+                if !is_distributed && tolerance.exceeded(failure_count, total_items) {
+                    return Err(StateFailure::Ran((error, cause)).into());
                 }
             }
+            None => {}
         }
-    }
-
-    // Every iteration is accounted for and the tolerated-failure threshold was
-    // not exceeded: the map run succeeded.
-    if let Some(arn) = &map_run_arn {
-        finish_map_run(
-            shared_state,
-            arn,
-            execution_arn,
-            results.len() as i64,
-            failure_count as i64,
-            "SUCCEEDED",
-        );
     }
 
     // Sort by index to maintain order
     results.sort_by_key(|(i, _)| *i);
-    let map_output = Value::Array(results.into_iter().map(|(_, v)| v).collect());
+    let succeeded_count = results.len() as i64;
+    let threshold_exceeded = is_distributed && tolerance.exceeded(failure_count, total_items);
 
-    // Write results to S3 if ResultWriter is configured
-    if let Some(result_writer) = state_def.get("ResultWriter") {
-        write_map_results_to_s3(result_writer, registry, execution_arn, &map_output).await?;
+    // With a ResultWriter the results take its form, and go to S3 when it names
+    // a destination, whether or not the run went on to fail.
+    let map_output = match (result_writer, writer_config) {
+        (Some(writer), Some(config)) => {
+            write_map_results(
+                writer,
+                jsonata,
+                config,
+                &effective_input,
+                ctx,
+                registry,
+                execution_arn,
+                map_run_arn,
+                &iteration_records,
+            )
+            .await
+        }
+        _ => Ok(Value::Array(results.into_iter().map(|(_, v)| v).collect())),
+    };
+
+    if threshold_exceeded {
+        if let Some(arn) = map_run_arn {
+            finish_map_run(
+                shared_state,
+                arn,
+                execution_arn,
+                Some((succeeded_count, failure_count as i64)),
+                "FAILED",
+            );
+        }
+        return Err(
+            StateFailure::Ran((THRESHOLD_ERROR.to_string(), THRESHOLD_CAUSE.to_string())).into(),
+        );
     }
 
-    // Apply ResultSelector if present
-    let selected = if let Some(selector) = state_def.get("ResultSelector") {
-        apply_parameters(selector, &map_output, Some(ctx))?
-    } else {
-        map_output
-    };
-
-    // Apply ResultPath
-    let after_result = if result_path == Some("null") {
-        input.clone()
-    } else {
-        apply_result_path(input, &selected, result_path)
-    };
-
-    // Apply OutputPath
-    let output = if output_path == Some("null") {
-        json!({})
-    } else {
-        apply_output_path(&after_result, output_path)?
-    };
-
-    Ok(output)
+    // Every iteration is accounted for and the tolerated-failure threshold was
+    // not exceeded. Results that weren't delivered fail the map run; otherwise
+    // it ends with the state's own processing of them.
+    let tallies = (succeeded_count, failure_count as i64);
+    match map_output {
+        Ok(output) => Ok(MapResults { output, tallies }),
+        Err(failure) => {
+            if let Some(arn) = map_run_arn {
+                finish_map_run(shared_state, arn, execution_arn, Some(tallies), "FAILED");
+            }
+            Err(failure.into())
+        }
+    }
 }
 
 /// Build a MapRun ARN for a distributed Map running inside `execution_arn`.
@@ -997,19 +1489,17 @@ fn map_run_arn_for(execution_arn: &str) -> Option<String> {
     // `tail` is `StateMachineName:ExecutionName`; the MapRun ARN joins them with
     // a slash and appends a unique label.
     let sm_exec = tail.replacen(':', "/", 1);
-    let label = uuid::Uuid::new_v4().simple().to_string();
+    let label = uuid::Uuid::new_v4();
     Some(format!("{prefix}:mapRun:{sm_exec}:{label}"))
 }
 
-/// Persist a fresh RUNNING MapRun record for a distributed Map.
+/// Persist a fresh RUNNING MapRun record for a distributed Map, from before it
+/// knows how many items it has.
 fn start_map_run(
     shared_state: &SharedStepFunctionsState,
     map_run_arn: &str,
     execution_arn: &str,
-    max_concurrency: usize,
-    tolerated_failure_percentage: f64,
-    tolerated_failure_count: i64,
-    total: usize,
+    state_def: &Value,
 ) {
     let account = account_id_from_arn(execution_arn).to_string();
     let mut accounts = shared_state.write();
@@ -1020,27 +1510,53 @@ fn start_map_run(
         MapRun {
             map_run_arn: map_run_arn.to_string(),
             execution_arn: execution_arn.to_string(),
-            max_concurrency: max_concurrency as i32,
-            tolerated_failure_percentage,
-            tolerated_failure_count,
+            max_concurrency: state_def["MaxConcurrency"].as_i64().unwrap_or(0) as i32,
+            tolerated_failure_percentage: state_def["ToleratedFailurePercentage"]
+                .as_f64()
+                .unwrap_or(0.0),
+            tolerated_failure_count: state_def["ToleratedFailureCount"].as_i64().unwrap_or(0),
             status: "RUNNING".to_string(),
             start_date: Utc::now(),
             stop_date: None,
-            total_count: total as i64,
+            total_count: 0,
             succeeded_count: 0,
             failed_count: 0,
         },
     );
 }
 
+/// Record what a MapRun learned once it read its items and resolved its paths.
+fn set_map_run_total(
+    shared_state: &SharedStepFunctionsState,
+    map_run_arn: &str,
+    execution_arn: &str,
+    total: usize,
+    max_concurrency: u64,
+    tolerance: FailureTolerance,
+) {
+    let account = account_id_from_arn(execution_arn).to_string();
+    let mut accounts = shared_state.write();
+    let region = arn_region(execution_arn, accounts.region());
+    let s = accounts.regional_mut(&account, &region);
+    if let Some(mr) = s.map_runs.get_mut(map_run_arn) {
+        mr.total_count = total as i64;
+        // The configured MaxConcurrency (0 == unlimited), as AWS reports it, not
+        // the internal effective concurrency.
+        mr.max_concurrency = max_concurrency as i32;
+        // What the run actually enforces, `*Path` forms resolved.
+        mr.tolerated_failure_count = tolerance.count.unwrap_or(0) as i64;
+        mr.tolerated_failure_percentage = tolerance.percentage.unwrap_or(0.0);
+    }
+}
+
 /// Transition a MapRun to a terminal status, recording the final iteration
-/// tallies. No-op if the record was reaped (e.g. a state reset mid-run).
+/// tallies when known. The first terminal status stands, and a record reaped
+/// mid-run (a state reset) is left alone.
 fn finish_map_run(
     shared_state: &SharedStepFunctionsState,
     map_run_arn: &str,
     execution_arn: &str,
-    succeeded: i64,
-    failed: i64,
+    tallies: Option<(i64, i64)>,
     status: &str,
 ) {
     let account = account_id_from_arn(execution_arn).to_string();
@@ -1048,86 +1564,115 @@ fn finish_map_run(
     let region = arn_region(execution_arn, accounts.region());
     let s = accounts.regional_mut(&account, &region);
     if let Some(mr) = s.map_runs.get_mut(map_run_arn) {
+        if mr.status != "RUNNING" {
+            return;
+        }
         mr.status = status.to_string();
-        mr.succeeded_count = succeeded;
-        mr.failed_count = failed;
+        if let Some((succeeded, failed)) = tallies {
+            mr.succeeded_count = succeeded;
+            mr.failed_count = failed;
+        }
         mr.stop_date = Some(Utc::now());
     }
+}
+
+/// The S3 service as the execution that is calling it.
+fn s3_caller<'a>(
+    registry: &'a Arc<fakecloud_core::registry::ServiceRegistry>,
+    account_id: &'a str,
+    region: &'a str,
+) -> Result<crate::s3_integration::S3Caller<'a>, (String, String)> {
+    crate::s3_integration::S3Caller::new(Caller {
+        registry,
+        account_id,
+        region,
+        principal: None,
+    })
+    .ok_or_else(|| {
+        (
+            "States.Runtime".to_string(),
+            "S3 is not available".to_string(),
+        )
+    })
 }
 
 /// Read items from S3 for distributed Map mode ItemReader.
 async fn read_items_from_s3(
     item_reader: &Value,
+    jsonata: bool,
+    effective_input: &Value,
+    ctx: &Value,
     registry: &Option<SharedServiceRegistry>,
     execution_arn: &str,
 ) -> Result<Vec<Value>, (String, String)> {
     let resource = item_reader["Resource"]
         .as_str()
         .unwrap_or("arn:aws:states:::s3:getObject");
-    if !resource.contains("s3:getObject") {
-        return Err((
-            "States.Runtime".to_string(),
-            format!("ItemReader unsupported resource: {resource}"),
-        ));
-    }
+    let action = arn_resource(resource, "states")
+        .and_then(|r| r.strip_prefix("::"))
+        .filter(|action| crate::map_s3::ItemReader::supports(action))
+        .ok_or_else(|| {
+            (
+                "States.Runtime".to_string(),
+                format!("ItemReader unsupported resource: {resource}"),
+            )
+        })?;
 
-    let params = item_reader
-        .get("Parameters")
+    let params = match item_reader.get("Parameters") {
+        Some(template) => resolve_template(template, jsonata, effective_input, ctx)?,
+        None => json!({}),
+    };
+    let config = item_reader
+        .get("ReaderConfig")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let bucket = params["Bucket"].as_str().ok_or_else(|| {
-        (
-            "States.Runtime".to_string(),
-            "ItemReader missing Bucket".to_string(),
-        )
-    })?;
-    let key = params["Key"].as_str().ok_or_else(|| {
-        (
-            "States.Runtime".to_string(),
-            "ItemReader missing Key".to_string(),
-        )
-    })?;
+    let max_items = match config["MaxItemsPath"].as_str() {
+        Some(path) => {
+            crate::io_processing::resolve_reference_with_context(effective_input, Some(ctx), path)?
+                .as_u64()
+        }
+        None => config["MaxItems"].as_u64(),
+    };
 
     let registry_arc = resolve_registry(registry)?;
     let account_id = account_from_execution_arn(execution_arn);
-    let region = &region_from_execution_arn(execution_arn);
-
-    let body = call_sdk_action_raw_bytes(
-        &registry_arc,
-        "s3",
-        "GetObject",
-        &json!({ "Bucket": bucket, "Key": key }),
-        &account_id,
-        region,
-    )
-    .await?;
-
-    // Parse JSON array from the S3 object body
-    let parsed: Value = serde_json::from_slice(&body).map_err(|e| {
-        (
-            "States.Runtime".to_string(),
-            format!("ItemReader failed to parse S3 object as JSON: {e}"),
-        )
-    })?;
-
-    parsed.as_array().cloned().ok_or_else(|| {
-        (
-            "States.Runtime".to_string(),
-            "ItemReader S3 object is not a JSON array".to_string(),
-        )
-    })
+    let region = region_from_execution_arn(execution_arn);
+    crate::map_s3::ItemReader {
+        action: action.to_string(),
+        params,
+        config,
+        max_items: max_items.filter(|max| *max > 0).map(|max| max as usize),
+    }
+    .read(&s3_caller(&registry_arc, &account_id, &region)?)
+    .await
 }
 
-/// Write Map results to S3 for distributed Map mode ResultWriter.
-async fn write_map_results_to_s3(
+/// Deliver a map run's results as its ResultWriter says, returning the Map
+/// state's result.
+#[allow(clippy::too_many_arguments)]
+async fn write_map_results(
     result_writer: &Value,
+    jsonata: bool,
+    config: crate::map_s3::WriterConfig<'_>,
+    effective_input: &Value,
+    ctx: &Value,
     registry: &Option<SharedServiceRegistry>,
     execution_arn: &str,
-    results: &Value,
-) -> Result<(), (String, String)> {
-    let resource = result_writer["Resource"]
-        .as_str()
-        .unwrap_or("arn:aws:states:::s3:putObject");
+    map_run_arn: Option<&str>,
+    records: &[crate::map_s3::IterationRecord],
+) -> Result<Value, (String, String)> {
+    let map_run_arn = map_run_arn.ok_or_else(|| {
+        (
+            "States.Runtime".to_string(),
+            "ResultWriter requires a distributed Map".to_string(),
+        )
+    })?;
+    let run = crate::map_s3::MapRunIdentity { map_run_arn };
+
+    // No S3 destination: the configuration only shapes the state's output.
+    let Some(resource) = result_writer["Resource"].as_str() else {
+        return crate::map_s3::format_state_output(config, &run, records);
+    };
     if !resource.contains("s3:putObject") {
         return Err((
             "States.Runtime".to_string(),
@@ -1135,72 +1680,83 @@ async fn write_map_results_to_s3(
         ));
     }
 
-    let params = result_writer
-        .get("Parameters")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let params = match result_writer.get("Parameters") {
+        Some(template) => resolve_template(template, jsonata, effective_input, ctx)?,
+        None => json!({}),
+    };
     let bucket = params["Bucket"].as_str().ok_or_else(|| {
         (
-            "States.Runtime".to_string(),
+            "States.ResultWriterFailed".to_string(),
             "ResultWriter missing Bucket".to_string(),
         )
     })?;
-    let prefix = params["Prefix"].as_str().unwrap_or("map-results/");
 
     let registry_arc = resolve_registry(registry)?;
     let account_id = account_from_execution_arn(execution_arn);
+    let region = region_from_execution_arn(execution_arn);
+    crate::map_s3::write_results(
+        &s3_caller(&registry_arc, &account_id, &region)?,
+        bucket,
+        params["Prefix"].as_str().unwrap_or(""),
+        config,
+        &run,
+        records,
+    )
+    .await
+}
 
-    use bytes::Bytes;
-    let body = Bytes::from(
-        serde_json::to_vec(results).expect("serde_json::Value serialization is infallible"),
-    );
-
-    // Build a raw S3 PutObject request with the JSON body
-    use fakecloud_core::service::AwsRequest;
-    use http::{HeaderMap, Method};
-    let service = registry_arc.get("s3").ok_or_else(|| {
-        (
-            "States.TaskFailed".to_string(),
-            "S3 service not available for ResultWriter".to_string(),
-        )
-    })?;
-
-    let req = AwsRequest {
-        service: "s3".to_string(),
-        action: "PutObject".to_string(),
-        region: region_from_execution_arn(execution_arn),
-        account_id: account_id.to_string(),
-        request_id: uuid::Uuid::new_v4().to_string(),
-        headers: HeaderMap::new(),
-        query_params: std::collections::HashMap::new(),
-        body,
-        body_stream: parking_lot::Mutex::new(None),
-        path_segments: vec![bucket.to_string(), format!("{prefix}result.json")],
-        raw_path: format!("/{bucket}/{prefix}result.json"),
-        raw_query: String::new(),
-        method: Method::PUT,
-        is_query_protocol: false,
-        access_key_id: None,
-        principal: None,
-    };
-
-    service.handle(req).await.map_err(|err| {
-        let code = err.code().to_string();
-        let msg = err.message();
-        (
-            format!("S3.{code}"),
-            format!("ResultWriter PutObject failed: {msg}"),
-        )
-    })?;
-
-    Ok(())
+/// A JSONPath payload template resolved against the state's input. A JSONata
+/// state's was evaluated when the state was prepared, and is taken as it is: a
+/// key its expressions produced that ends in `.$` is not a path.
+fn resolve_template(
+    template: &Value,
+    jsonata: bool,
+    effective_input: &Value,
+    ctx: &Value,
+) -> Result<Value, (String, String)> {
+    if jsonata {
+        Ok(template.clone())
+    } else {
+        apply_parameters(template, effective_input, Some(ctx))
+    }
 }
 
 /// Apply ItemBatcher configuration to group items into batches.
-fn apply_item_batcher(items: &[Value], batcher: &Value, _effective_input: &Value) -> Vec<Value> {
-    let max_per_batch = batcher["MaxItemsPerBatch"].as_u64().unwrap_or(u64::MAX) as usize;
-    let max_bytes = batcher["MaxInputBytesPerBatch"].as_u64().unwrap_or(0) as usize;
-    let batch_input = batcher.get("BatchInput").cloned();
+fn apply_item_batcher(
+    items: &[Value],
+    batcher: &Value,
+    jsonata: bool,
+    effective_input: &Value,
+    ctx: &Value,
+) -> Result<Vec<Value>, (String, String)> {
+    // A limit is a literal (a JSONata expression has been evaluated by now) or a
+    // reference path, and must come out a positive integer.
+    let limit = |field: &str| -> Result<Option<u64>, (String, String)> {
+        let path_field = format!("{field}Path");
+        let value = match batcher[path_field.as_str()].as_str() {
+            Some(path) => Some(crate::io_processing::resolve_reference_with_context(
+                effective_input,
+                Some(ctx),
+                path,
+            )?),
+            None => batcher.get(field).cloned(),
+        };
+        match value {
+            None => Ok(None),
+            Some(value) => match value.as_u64().filter(|n| *n > 0) {
+                Some(n) => Ok(Some(n)),
+                None => Err(crate::io_processing::runtime_error(format!(
+                    "The ItemBatcher field '{field}' must be a positive integer, got {value}"
+                ))),
+            },
+        }
+    };
+    let max_per_batch = limit("MaxItemsPerBatch")?.unwrap_or(u64::MAX) as usize;
+    let max_bytes = limit("MaxInputBytesPerBatch")?.unwrap_or(0) as usize;
+    let batch_input = batcher
+        .get("BatchInput")
+        .map(|template| resolve_template(template, jsonata, effective_input, ctx))
+        .transpose()?;
 
     let mut batches: Vec<Vec<Value>> = Vec::new();
     let mut current_batch: Vec<Value> = Vec::new();
@@ -1223,21 +1779,17 @@ fn apply_item_batcher(items: &[Value], batcher: &Value, _effective_input: &Value
         batches.push(current_batch);
     }
 
-    batches
+    Ok(batches
         .into_iter()
-        .enumerate()
-        .map(|(index, batch)| {
+        .map(|batch| {
             let mut map = serde_json::Map::new();
-            map.insert("index".to_string(), json!(index));
-            map.insert("items".to_string(), Value::Array(batch));
-            if let Some(Value::Object(ref obj)) = batch_input {
-                for (k, v) in obj {
-                    map.insert(k.clone(), v.clone());
-                }
+            if let Some(batch_input) = &batch_input {
+                map.insert("BatchInput".to_string(), batch_input.clone());
             }
+            map.insert("Items".to_string(), Value::Array(batch));
             Value::Object(map)
         })
-        .collect()
+        .collect())
 }
 
 /// The full function ARN a `lambda:invoke` task's `FunctionName` refers to.
@@ -1322,21 +1874,29 @@ async fn invoke_resource(
         return invoke_lambda_direct(&function_arn, &payload, delivery, timeout_seconds)
             .await
             .map(|payload| {
-                json!({
+                let mut envelope = json!({
                     "ExecutedVersion": "$LATEST",
                     "Payload": payload,
                     "StatusCode": 200,
-                })
+                });
+                lambda_invoke_metadata(&mut envelope);
+                envelope
             });
     }
 
     if is_integration("sqs:sendMessage") {
         let region = fakecloud_aws::arn::region_of(execution_arn).unwrap_or("us-east-1");
-        return invoke_sqs_send_message(input, delivery, region);
+        return invoke_sqs_send_message(input, delivery, region).map(|mut result| {
+            sqs_metadata(&mut result);
+            result
+        });
     }
 
     if is_integration("sns:publish") {
-        return invoke_sns_publish(input, delivery);
+        return invoke_sns_publish(input, delivery).map(|mut result| {
+            sns_metadata(&mut result);
+            result
+        });
     }
 
     if is_integration("events:putEvents") {
@@ -1370,14 +1930,22 @@ async fn invoke_resource(
             let region = fakecloud_aws::arn::region_of(execution_arn).unwrap_or("us-east-1");
             return call_sdk_action(&registry_arc, "dynamodb", action, input, &account, region)
                 .await
-                .map_err(optimized_dynamodb_error);
+                .map_err(optimized_dynamodb_error)
+                .map(|mut result| {
+                    dynamodb_metadata(&mut result);
+                    result
+                });
         }
         return match action {
             "GetItem" => invoke_dynamodb_get_item(input, dynamodb_state, execution_arn),
             "PutItem" => invoke_dynamodb_put_item(input, dynamodb_state, execution_arn),
             "DeleteItem" => invoke_dynamodb_delete_item(input, dynamodb_state, execution_arn),
             _ => invoke_dynamodb_update_item(input, dynamodb_state, execution_arn),
-        };
+        }
+        .map(|mut result| {
+            dynamodb_metadata(&mut result);
+            result
+        });
     }
 
     // Nested Step Functions execution:
@@ -1398,6 +1966,11 @@ async fn invoke_resource(
                 &account_id,
                 region,
                 timeout_seconds,
+                true,
+                crate::sdk_protocol::execution_principal(
+                    &execution_role_arn(shared_state, execution_arn),
+                    execution_arn,
+                ),
             )
             .await;
             // Patch the inner execution's parent_execution_arn so the
@@ -1438,15 +2011,23 @@ async fn invoke_resource(
             &account_id,
             region,
             timeout_seconds,
+            false,
+            crate::sdk_protocol::execution_principal(
+                &execution_role_arn(shared_state, execution_arn),
+                execution_arn,
+            ),
         )
         .await;
     }
 
-    // Optimized service integrations expose `.sync` variants for ECS,
-    // Athena, and Glue. Route them through the same waiter machinery as
-    // `aws-sdk:` so callers can write the AWS-blessed ARN forms.
+    // Optimized ECS, Athena and Glue integrations, in their request-response,
+    // `.sync` and `.waitForTaskToken` forms, route through the same machinery
+    // as `aws-sdk:` so callers can write the AWS-blessed ARN forms.
     if let Some(tail) = integration {
-        if tail.contains(".sync") {
+        let is_optimized = ["ecs:", "athena:", "glue:"]
+            .iter()
+            .any(|service| tail.starts_with(service));
+        if is_optimized || tail.contains(".sync") || tail.contains(".waitForTaskToken") {
             let account_id = account_from_execution_arn(execution_arn);
             let region = &region_from_execution_arn(execution_arn);
             return invoke_aws_sdk_integration(
@@ -1456,6 +2037,11 @@ async fn invoke_resource(
                 &account_id,
                 region,
                 timeout_seconds,
+                true,
+                crate::sdk_protocol::execution_principal(
+                    &execution_role_arn(shared_state, execution_arn),
+                    execution_arn,
+                ),
             )
             .await;
         }
@@ -1476,19 +2062,6 @@ fn camel_to_pascal(action: &str) -> String {
     match chars.next() {
         None => String::new(),
         Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
-    }
-}
-
-/// Map a Step Functions SDK integration service id to the corresponding
-/// fakecloud `service_name()`. Most match 1:1, but a handful of AWS SDK
-/// service ids differ from the SigV4 service identifier we register
-/// services under (e.g. `sfn` -> `states`, `cloudwatchlogs` -> `logs`).
-fn map_sdk_service_id(service_id: &str) -> &str {
-    match service_id {
-        "sfn" => "states",
-        "cloudwatchlogs" => "logs",
-        // Default: pass through unchanged.
-        other => other,
     }
 }
 
@@ -1536,6 +2109,7 @@ fn account_from_execution_arn(execution_arn: &str) -> String {
 /// registered service via the central [`fakecloud_core::registry::ServiceRegistry`].
 /// `tail` is the trailing portion of the resource ARN after the
 /// `aws-sdk:` prefix (e.g. `dynamodb:getItem` or `sqs:sendMessage.waitForTaskToken`).
+#[allow(clippy::too_many_arguments)]
 async fn invoke_aws_sdk_integration(
     tail: &str,
     input: &Value,
@@ -1543,6 +2117,8 @@ async fn invoke_aws_sdk_integration(
     account_id: &str,
     region: &str,
     timeout_seconds: Option<u64>,
+    optimized: bool,
+    principal: Option<fakecloud_core::auth::Principal>,
 ) -> Result<Value, (String, String)> {
     let registry_arc = resolve_registry(registry)?;
 
@@ -1575,85 +2151,117 @@ async fn invoke_aws_sdk_integration(
             )
         })?;
     let modifiers: Vec<&str> = action_with_mod.split('.').skip(1).collect();
-    let is_sync = modifiers.iter().any(|m| *m == "sync" || *m == "sync:2");
+    let sync_form = modifiers.iter().find_map(|m| match *m {
+        "sync" => Some(SyncForm::Escaped),
+        "sync:2" => Some(SyncForm::Json),
+        _ => None,
+    });
 
     let action_pascal = camel_to_pascal(action_camel);
-    let service_name = map_sdk_service_id(service_id).to_string();
+    let unknown_service = || {
+        (
+            "States.TaskFailed".to_string(),
+            format!("Unknown aws-sdk service '{service_id}'"),
+        )
+    };
+    let service = crate::sdk_protocol::service(service_id).ok_or_else(unknown_service)?;
+    let (_, service_name) = service
+        .registered_in(&registry_arc)
+        .ok_or_else(unknown_service)?;
+    let operation = service.operation(&action_pascal).ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            format!("{service_id} has no action '{action_camel}'"),
+        )
+    })?;
 
-    // ECS's wire format is camelCase, but Step Functions's optimized
-    // integration takes PascalCase parameter names in the state machine
-    // definition. Translate top-level keys for the ECS service so AWS
-    // Step Functions definitions Just Work against the fake.
-    let translated_input = match service_name.as_str() {
-        "ecs" => translate_ecs_keys_to_camel(input),
-        _ => input.clone(),
+    // A `.sync` Task nothing can wait for fails before it starts anything, rather
+    // than reporting a job it never watched.
+    if sync_form.is_some() && !has_sync_waiter(&service_name, &operation) {
+        return Err((
+            "States.TaskFailed".to_string(),
+            format!(
+                "`.sync` is not supported for {service_name}:{operation} yet; supported: \
+                 ecs:RunTask, athena:StartQueryExecution, glue:StartJobRun, \
+                 states:StartExecution, batch:SubmitJob, codebuild:StartBuild"
+            ),
+        ));
+    }
+
+    let caller = Caller {
+        registry: &registry_arc,
+        account_id,
+        region,
+        principal,
     };
 
+    // AWS Batch is REST, so its waiter speaks the service's own protocol.
+    if sync_form.is_some() && service.protocol() != "json" {
+        return sync_wait_batch_job(&service, &caller, &operation, input, timeout_seconds).await;
+    }
+
+    // An `aws-sdk:*` Task, and any integration over a protocol other than JSON,
+    // takes the service's own protocol end to end.
+    if (!optimized && sync_form.is_none()) || service.protocol() != "json" {
+        return service
+            .invoke(&caller, &operation, input, DateStyle::Iso)
+            .await
+            .map_err(|failure| crate::sdk_protocol::task_error(&service, &failure));
+    }
+
+    // Optimized integrations: the waiters below read the camelCase wire shapes
+    // of ECS and Step Functions, and results present dates in epoch millis.
+    let mut wire_input = service.request_json(&operation, input);
+    // As recorded, a task a `.sync` integration waits on says who started it.
+    if sync_form.is_some() && service_name == "ecs" && wire_input.get("startedBy").is_none() {
+        wire_input["startedBy"] = json!("AWS Step Functions");
+    }
     let initial = call_sdk_action(
         &registry_arc,
         &service_name,
-        &action_pascal,
-        &translated_input,
+        &operation,
+        &wire_input,
         account_id,
         region,
     )
     .await?;
 
-    if !is_sync {
-        return Ok(initial);
-    }
+    let Some(form) = sync_form else {
+        return Ok(match (service_name.as_str(), operation.as_str()) {
+            ("states", "StartExecution") => start_execution_result(&service, &initial),
+            ("ecs", "RunTask") => ecs_run_task_result(&service, &initial),
+            ("glue", "StartJobRun") => {
+                glue_start_job_run_result(&service, &initial, &wire_input["JobName"])
+            }
+            _ => service.result_json(&operation, &initial, DateStyle::EpochMillis),
+        });
+    };
 
-    // `.sync` pattern: dispatch to the per-service waiter that polls until
-    // the downstream operation reaches a terminal state. Returns the full
+    // `.sync` pattern: dispatch to the per-service waiter that polls until the
+    // downstream operation reaches a terminal state. Returns the full
     // describe-shape result, or surfaces a terminal failure as
     // `States.TaskFailed`.
-    sync_wait(
+    let described = sync_wait(
         &registry_arc,
         &service_name,
-        &action_pascal,
+        &operation,
         &initial,
-        &translated_input,
+        &wire_input,
         account_id,
         region,
         timeout_seconds,
     )
-    .await
-}
-
-/// Translate the top-level PascalCase keys that AWS Step Functions
-/// state machines use for `ecs:runTask` Parameters into the camelCase
-/// shape that the AWS ECS API (and our handler) expects. Unknown keys
-/// pass through unchanged so callers can still send raw camelCase. The
-/// translation is shallow on purpose — nested overrides keep their
-/// existing camelCase shape on real AWS too.
-fn translate_ecs_keys_to_camel(input: &Value) -> Value {
-    let Some(obj) = input.as_object() else {
-        return input.clone();
-    };
-    let mut out = serde_json::Map::with_capacity(obj.len());
-    for (k, v) in obj.iter() {
-        let camel = match k.as_str() {
-            "Cluster" => "cluster",
-            "TaskDefinition" => "taskDefinition",
-            "LaunchType" => "launchType",
-            "Group" => "group",
-            "Overrides" => "overrides",
-            "PlatformVersion" => "platformVersion",
-            "NetworkConfiguration" => "networkConfiguration",
-            "Tags" => "tags",
-            "EnableExecuteCommand" => "enableExecuteCommand",
-            "PropagateTags" => "propagateTags",
-            "ReferenceId" => "referenceId",
-            "StartedBy" => "startedBy",
-            "Count" => "count",
-            "CapacityProviderStrategy" => "capacityProviderStrategy",
-            "PlacementConstraints" => "placementConstraints",
-            "PlacementStrategy" => "placementStrategy",
-            other => other,
-        };
-        out.insert(camel.to_string(), v.clone());
-    }
-    Value::Object(out)
+    .await?;
+    Ok(match (service_name.as_str(), operation.as_str()) {
+        ("states", _) => sync_execution_result(&service, &described, form),
+        ("ecs", _) => ecs_sync_result(&service, &described),
+        ("athena", _) => {
+            service.result_json("GetQueryExecution", &described, DateStyle::EpochMillis)
+        }
+        ("glue", _) => glue_sync_result(&service, &described),
+        ("codebuild", _) => service.result_json("StartBuild", &described, DateStyle::EpochMillis),
+        _ => described,
+    })
 }
 
 fn resolve_registry(
@@ -1728,17 +2336,27 @@ async fn call_sdk_action(
         principal: None,
     };
 
+    // `<Service>.<Code>`, with the message and details the SDK behind an optimized
+    // integration reports, as recorded for Glue and ECS.
     let response = service.handle(req).await.map_err(|err| {
         let code = err.code().to_string();
         let msg = err.message();
-        let prefix_service = match service_name {
-            "dynamodb" => "DynamoDb".to_string(),
-            "states" => "Sfn".to_string(),
-            other => camel_to_pascal(other),
+        let (prefix_service, sdk_service) = match service_name {
+            "dynamodb" => ("DynamoDb".to_string(), "AmazonDynamoDBv2".to_string()),
+            "states" => ("Sfn".to_string(), "AWSStepFunctions".to_string()),
+            "ecs" => ("ECS".to_string(), "AmazonECS".to_string()),
+            "glue" => ("Glue".to_string(), "AWSGlue".to_string()),
+            "athena" => ("Athena".to_string(), "AmazonAthena".to_string()),
+            other => (camel_to_pascal(other), camel_to_pascal(other)),
         };
+        let status = err.status().as_u16();
+        let request_id = uuid::Uuid::new_v4();
         (
             format!("{prefix_service}.{code}"),
-            format!("{action_pascal} failed: {msg}"),
+            format!(
+                "{msg} (Service: {sdk_service}; Status Code: {status}; Error Code: {code}; \
+                 Request ID: {request_id}; Proxy: null)"
+            ),
         )
     })?;
 
@@ -1763,73 +2381,6 @@ async fn call_sdk_action(
     })
 }
 
-/// Call an SDK action and return raw bytes without JSON parsing.
-/// Used by distributed Map mode to read/write S3 objects.
-async fn call_sdk_action_raw_bytes(
-    registry: &Arc<fakecloud_core::registry::ServiceRegistry>,
-    service_name: &str,
-    action_pascal: &str,
-    input: &Value,
-    account_id: &str,
-    region: &str,
-) -> Result<bytes::Bytes, (String, String)> {
-    use bytes::Bytes;
-    use fakecloud_core::service::AwsRequest;
-    use http::{HeaderMap, Method};
-
-    let service = registry.get(service_name).ok_or_else(|| {
-        (
-            "States.TaskFailed".to_string(),
-            format!("Unknown aws-sdk service '{service_name}'"),
-        )
-    })?;
-
-    let body_bytes = Bytes::from(
-        serde_json::to_vec(input).expect("serde_json::Value serialization is infallible"),
-    );
-
-    let req = AwsRequest {
-        service: service_name.to_string(),
-        action: action_pascal.to_string(),
-        region: region.to_string(),
-        account_id: account_id.to_string(),
-        request_id: uuid::Uuid::new_v4().to_string(),
-        headers: HeaderMap::new(),
-        query_params: std::collections::HashMap::new(),
-        body: body_bytes,
-        body_stream: parking_lot::Mutex::new(None),
-        path_segments: vec![],
-        raw_path: "/".to_string(),
-        raw_query: String::new(),
-        method: Method::POST,
-        is_query_protocol: false,
-        access_key_id: None,
-        principal: None,
-    };
-
-    let response = service.handle(req).await.map_err(|err| {
-        let code = err.code().to_string();
-        let msg = err.message();
-        let prefix_service = match service_name {
-            "dynamodb" => "DynamoDb".to_string(),
-            "states" => "Sfn".to_string(),
-            other => camel_to_pascal(other),
-        };
-        (
-            format!("{prefix_service}.{code}"),
-            format!("{action_pascal} failed: {msg}"),
-        )
-    })?;
-
-    match response.body {
-        fakecloud_core::service::ResponseBody::Bytes(b) => Ok(b),
-        fakecloud_core::service::ResponseBody::File { .. } => Err((
-            "States.TaskFailed".to_string(),
-            "aws-sdk integration: file-backed response not supported".to_string(),
-        )),
-    }
-}
-
 /// Cap on `.sync` polling so a stuck downstream task can't hang an
 /// execution forever. Mirrors the `TimeoutSeconds` knob on the Task state
 /// when one is set; otherwise defaults to 5 minutes which is enough for
@@ -1837,6 +2388,116 @@ async fn call_sdk_action_raw_bytes(
 /// milliseconds, ECS tasks within seconds even when docker-less).
 const SYNC_DEFAULT_TIMEOUT_SECS: u64 = 300;
 const SYNC_POLL_INTERVAL_MS: u64 = 200;
+
+fn has_sync_waiter(service_name: &str, operation: &str) -> bool {
+    matches!(
+        (service_name, operation),
+        ("ecs", "RunTask")
+            | ("athena", "StartQueryExecution")
+            | ("states", "StartExecution")
+            | ("glue", "StartJobRun")
+            | ("batch", "SubmitJob")
+            | ("codebuild", "StartBuild")
+    )
+}
+
+/// `batch:submitJob.sync`: submit, then poll `DescribeJobs` until the job ends.
+async fn sync_wait_batch_job(
+    service: &crate::sdk_protocol::SdkService,
+    caller: &Caller<'_>,
+    operation: &str,
+    input: &Value,
+    timeout_seconds: Option<u64>,
+) -> Result<Value, (String, String)> {
+    let failed = |failure: crate::sdk_protocol::SdkFailure| {
+        crate::sdk_protocol::task_error(service, &failure)
+    };
+    let submitted = service
+        .invoke(caller, operation, input, DateStyle::EpochMillis)
+        .await
+        .map_err(failed)?;
+    let job_id = submitted["JobId"].as_str().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "batch:submitJob.sync: response missing JobId".to_string(),
+        )
+    })?;
+    let deadline = sync_deadline(timeout_seconds);
+    loop {
+        let described = service
+            .invoke(
+                caller,
+                "DescribeJobs",
+                &json!({ "Jobs": [job_id] }),
+                DateStyle::EpochMillis,
+            )
+            .await
+            .map_err(failed)?;
+        let job = &described["Jobs"][0];
+        match job["Status"].as_str() {
+            Some("SUCCEEDED") => return Ok(job.clone()),
+            Some("FAILED") => return Err(("States.TaskFailed".to_string(), job.to_string())),
+            _ => {}
+        }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err((
+                "States.Timeout".to_string(),
+                format!(
+                    "batch:submitJob.sync timed out after {}s for job {job_id}",
+                    sync_timeout_secs(timeout_seconds)
+                ),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(SYNC_POLL_INTERVAL_MS)).await;
+    }
+}
+
+/// `codebuild:startBuild.sync`: poll `BatchGetBuilds` until the build ends. The
+/// result is `{ build }`, the shape `StartBuild` returns.
+async fn sync_wait_codebuild_build(
+    registry: &Arc<fakecloud_core::registry::ServiceRegistry>,
+    initial: &Value,
+    account_id: &str,
+    region: &str,
+    timeout_seconds: Option<u64>,
+) -> Result<Value, (String, String)> {
+    let build_id = initial["build"]["id"].as_str().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "codebuild:startBuild.sync: response missing build.id".to_string(),
+        )
+    })?;
+    let deadline = sync_deadline(timeout_seconds);
+    loop {
+        let described = call_sdk_action(
+            registry,
+            "codebuild",
+            "BatchGetBuilds",
+            &json!({ "ids": [build_id] }),
+            account_id,
+            region,
+        )
+        .await?;
+        let build = &described["builds"][0];
+        match build["buildStatus"].as_str() {
+            Some("SUCCEEDED") => return Ok(json!({ "build": build })),
+            Some("FAILED" | "FAULT" | "STOPPED" | "TIMED_OUT") => {
+                return Err(("States.TaskFailed".to_string(), build.to_string()))
+            }
+            _ => {}
+        }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err((
+                "States.Timeout".to_string(),
+                format!(
+                    "codebuild:startBuild.sync timed out after {}s for build {build_id}",
+                    sync_timeout_secs(timeout_seconds)
+                ),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(SYNC_POLL_INTERVAL_MS)).await;
+    }
+}
 
 /// Dispatch `.sync` waiters by service+action. Each waiter polls the
 /// matching describe-style API until the downstream operation reaches a
@@ -1861,6 +2522,9 @@ async fn sync_wait(
         }
         ("states", "StartExecution") => {
             sync_wait_states_start_execution(registry, initial, account_id, region, timeout_seconds).await
+        }
+        ("codebuild", "StartBuild") => {
+            sync_wait_codebuild_build(registry, initial, account_id, region, timeout_seconds).await
         }
         ("glue", "StartJobRun") => {
             // Poll the real Glue `GetJobRun` (the job run was created by the
@@ -2143,12 +2807,9 @@ async fn sync_wait_states_start_execution(
         match status {
             "SUCCEEDED" => return Ok(described),
             "FAILED" | "TIMED_OUT" | "ABORTED" => {
-                let cause = described
-                    .get("cause")
-                    .or_else(|| described.get("Cause"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("Nested execution reached terminal failure state")
-                    .to_string();
+                let cause = crate::sdk_protocol::service("states")
+                    .map(|service| sync_failure_cause(&service, &described))
+                    .unwrap_or_else(|| described.to_string());
                 return Err(("States.TaskFailed".to_string(), cause));
             }
             _ => {}

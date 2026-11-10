@@ -2817,3 +2817,416 @@ async fn bedrock_request_metadata_recorded_and_bounded() {
         Some("acme")
     );
 }
+
+// Streaming decoded by the official SDK: an event-stream payload holds the
+// event's own members, with the event type in the `:event-type` header. A
+// payload wrapped in the event name decodes to an event with every member
+// missing, so these assert what the decoder actually sees rather than frames.
+
+const STREAM_MODEL: &str = "anthropic.claude-3-haiku-20240307-v1:0";
+
+fn user_message(text: &str) -> aws_sdk_bedrockruntime::types::Message {
+    aws_sdk_bedrockruntime::types::Message::builder()
+        .role(aws_sdk_bedrockruntime::types::ConversationRole::User)
+        .content(aws_sdk_bedrockruntime::types::ContentBlock::Text(
+            text.to_string(),
+        ))
+        .build()
+        .unwrap()
+}
+
+async fn collect_converse_stream(
+    resp: aws_sdk_bedrockruntime::operation::converse_stream::ConverseStreamOutput,
+) -> Vec<aws_sdk_bedrockruntime::types::ConverseStreamOutput> {
+    let mut stream = resp.stream;
+    let mut events = Vec::new();
+    while let Some(event) = stream.recv().await.expect("stream event must decode") {
+        events.push(event);
+    }
+    events
+}
+
+fn delta_text(events: &[aws_sdk_bedrockruntime::types::ConverseStreamOutput]) -> String {
+    use aws_sdk_bedrockruntime::types::{ContentBlockDelta, ConverseStreamOutput};
+    events
+        .iter()
+        .filter_map(|e| match e {
+            ConverseStreamOutput::ContentBlockDelta(d) => match d.delta() {
+                Some(ContentBlockDelta::Text(t)) => Some(t.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn bedrock_converse_stream_sdk_decodes_configured_text_and_metadata() {
+    use aws_sdk_bedrockruntime::types::{ConversationRole, ConverseStreamOutput, StopReason};
+
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+    let fc = fakecloud_sdk::FakeCloud::new(server.endpoint());
+    fc.bedrock()
+        .set_response_rules(
+            STREAM_MODEL,
+            &[fakecloud_sdk::types::BedrockResponseRule {
+                prompt_contains: Some("ping".into()),
+                response: "pong from the rule".into(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let resp = client
+        .converse_stream()
+        .model_id(STREAM_MODEL)
+        .messages(user_message("ping"))
+        .send()
+        .await
+        .unwrap();
+    let events = collect_converse_stream(resp).await;
+
+    assert_eq!(delta_text(&events), "pong from the rule");
+
+    let role = events.iter().find_map(|e| match e {
+        ConverseStreamOutput::MessageStart(m) => Some(m.role().clone()),
+        _ => None,
+    });
+    assert_eq!(role, Some(ConversationRole::Assistant));
+
+    let stop = events.iter().find_map(|e| match e {
+        ConverseStreamOutput::MessageStop(m) => Some(m.stop_reason().clone()),
+        _ => None,
+    });
+    assert_eq!(stop, Some(StopReason::EndTurn));
+
+    let block_stops = events
+        .iter()
+        .filter(|e| matches!(e, ConverseStreamOutput::ContentBlockStop(_)))
+        .count();
+    assert_eq!(block_stops, 1);
+
+    let metadata = events
+        .iter()
+        .find_map(|e| match e {
+            ConverseStreamOutput::Metadata(m) => Some(m),
+            _ => None,
+        })
+        .expect("metadata event");
+    let usage = metadata.usage().expect("metadata.usage");
+    assert!(usage.input_tokens() > 0, "{usage:?}");
+    assert!(usage.output_tokens() > 0, "{usage:?}");
+    assert_eq!(
+        usage.total_tokens(),
+        usage.input_tokens() + usage.output_tokens()
+    );
+    assert!(metadata.metrics().is_some(), "metadata.metrics");
+}
+
+#[tokio::test]
+async fn bedrock_converse_stream_text_matches_converse() {
+    use aws_sdk_bedrockruntime::types::{ContentBlock, ConverseOutput};
+
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+
+    let converse = client
+        .converse()
+        .model_id(STREAM_MODEL)
+        .messages(user_message("same prompt"))
+        .send()
+        .await
+        .unwrap();
+    let Some(ConverseOutput::Message(message)) = converse.output() else {
+        panic!("expected message output");
+    };
+    let ContentBlock::Text(text) = &message.content()[0] else {
+        panic!("expected text content");
+    };
+
+    let stream = client
+        .converse_stream()
+        .model_id(STREAM_MODEL)
+        .messages(user_message("same prompt"))
+        .send()
+        .await
+        .unwrap();
+    let events = collect_converse_stream(stream).await;
+
+    assert_eq!(&delta_text(&events), text);
+}
+
+/// A configured override that calls a tool streams that call and its stop reason,
+/// on both stream operations, rather than its JSON as text.
+#[tokio::test]
+async fn bedrock_streams_honor_an_overrides_tool_use_and_stop_reason() {
+    use aws_sdk_bedrockruntime::types::{
+        ContentBlockDelta, ContentBlockStart, ConverseStreamOutput, ResponseStream, StopReason,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+    let fc = fakecloud_sdk::FakeCloud::new(server.endpoint());
+    fc.bedrock()
+        .set_response_rules(
+            STREAM_MODEL,
+            &[fakecloud_sdk::types::BedrockResponseRule {
+                prompt_contains: None,
+                response: serde_json::json!({
+                    "content": [
+                        {"type": "text", "text": "checking"},
+                        {"type": "tool_use", "id": "t1", "name": "calc", "input": {"a": 1}}
+                    ],
+                    "stop_reason": "tool_use"
+                })
+                .to_string(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let converse = client
+        .converse_stream()
+        .model_id(STREAM_MODEL)
+        .messages(user_message("hello"))
+        .send()
+        .await
+        .unwrap();
+    let events = collect_converse_stream(converse).await;
+    assert_eq!(delta_text(&events), "checking");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ConverseStreamOutput::ContentBlockStart(start)
+            if matches!(start.start(), Some(ContentBlockStart::ToolUse(tool))
+                if tool.tool_use_id() == "t1" && tool.name() == "calc")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ConverseStreamOutput::ContentBlockDelta(delta)
+            if matches!(delta.delta(), Some(ContentBlockDelta::ToolUse(tool))
+                if tool.input() == "{\"a\":1}")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ConverseStreamOutput::MessageStop(stop) if stop.stop_reason() == &StopReason::ToolUse
+    )));
+
+    let body = serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+    let invoke = client
+        .invoke_model_with_response_stream()
+        .model_id(STREAM_MODEL)
+        .content_type("application/json")
+        .body(Blob::new(serde_json::to_vec(&body).unwrap()))
+        .send()
+        .await
+        .unwrap();
+    let mut stream = invoke.body;
+    let mut chunks: Vec<serde_json::Value> = Vec::new();
+    while let Some(event) = stream.recv().await.expect("chunk must decode") {
+        let ResponseStream::Chunk(part) = event else {
+            panic!("unexpected stream event {event:?}");
+        };
+        chunks.push(serde_json::from_slice(part.bytes().unwrap().as_ref()).unwrap());
+    }
+    assert!(chunks
+        .iter()
+        .any(|chunk| chunk["content_block"]["id"] == "t1"));
+    assert!(chunks
+        .iter()
+        .any(|chunk| chunk["delta"]["stop_reason"] == "tool_use"));
+    assert!(!chunks.iter().any(|chunk| chunk["delta"]["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("tool_use"))));
+}
+
+#[tokio::test]
+async fn bedrock_converse_stream_sdk_decodes_forced_tool_use() {
+    use aws_sdk_bedrockruntime::types::{
+        AnyToolChoice, ContentBlockDelta, ContentBlockStart, ConverseStreamOutput, StopReason,
+        Tool, ToolChoice, ToolConfiguration, ToolInputSchema, ToolSpecification,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+
+    let tool = ToolSpecification::builder()
+        .name("calculator")
+        .input_schema(ToolInputSchema::Json(aws_smithy_types::Document::Object(
+            std::collections::HashMap::new(),
+        )))
+        .build()
+        .unwrap();
+    let config = ToolConfiguration::builder()
+        .tools(Tool::ToolSpec(tool))
+        .tool_choice(ToolChoice::Any(AnyToolChoice::builder().build()))
+        .build()
+        .unwrap();
+
+    let resp = client
+        .converse_stream()
+        .model_id(STREAM_MODEL)
+        .messages(user_message("add these"))
+        .tool_config(config)
+        .send()
+        .await
+        .unwrap();
+    let events = collect_converse_stream(resp).await;
+
+    let start = events
+        .iter()
+        .find_map(|e| match e {
+            ConverseStreamOutput::ContentBlockStart(s) => Some(s),
+            _ => None,
+        })
+        .expect("toolUse contentBlockStart");
+    let Some(ContentBlockStart::ToolUse(tool_use)) = start.start() else {
+        panic!("expected a toolUse block start, got {start:?}");
+    };
+    assert_eq!(tool_use.name(), "calculator");
+    assert!(!tool_use.tool_use_id().is_empty());
+    let tool_index = start.content_block_index();
+
+    let input = events.iter().find_map(|e| match e {
+        ConverseStreamOutput::ContentBlockDelta(d) if d.content_block_index() == tool_index => {
+            match d.delta() {
+                Some(ContentBlockDelta::ToolUse(t)) => Some(t.input().to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
+    });
+    assert_eq!(input.as_deref(), Some("{}"));
+
+    let stop = events.iter().find_map(|e| match e {
+        ConverseStreamOutput::MessageStop(m) => Some(m.stop_reason().clone()),
+        _ => None,
+    });
+    assert_eq!(stop, Some(StopReason::ToolUse));
+}
+
+/// Concatenate what a provider's streaming consumer would read from each
+/// `chunk` of InvokeModelWithResponseStream.
+async fn invoke_stream_chunks(
+    client: &aws_sdk_bedrockruntime::Client,
+    model_id: &str,
+    body: serde_json::Value,
+) -> Vec<serde_json::Value> {
+    use aws_sdk_bedrockruntime::types::ResponseStream;
+
+    let resp = client
+        .invoke_model_with_response_stream()
+        .model_id(model_id)
+        .content_type("application/json")
+        .body(Blob::new(serde_json::to_vec(&body).unwrap()))
+        .send()
+        .await
+        .unwrap();
+    let mut stream = resp.body;
+    let mut chunks = Vec::new();
+    while let Some(event) = stream.recv().await.expect("chunk must decode") {
+        let ResponseStream::Chunk(part) = event else {
+            panic!("unexpected stream event {event:?}");
+        };
+        let bytes = part.bytes().expect("chunk.bytes");
+        chunks.push(serde_json::from_slice(bytes.as_ref()).unwrap());
+    }
+    chunks
+}
+
+type ChunkText = fn(&serde_json::Value) -> Option<&str>;
+
+#[tokio::test]
+async fn bedrock_invoke_stream_sdk_decodes_each_provider_family() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+    let fc = fakecloud_sdk::FakeCloud::new(server.endpoint());
+
+    let anthropic_body = serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    let prompt_body = serde_json::json!({ "prompt": "hi" });
+    let cases: Vec<(&str, serde_json::Value, ChunkText)> = vec![
+        (
+            "anthropic.claude-3-haiku-20240307-v1:0",
+            anthropic_body.clone(),
+            |c| c["delta"]["text"].as_str(),
+        ),
+        // A cross-region inference profile streams like its base model.
+        (
+            "us.anthropic.claude-3-haiku-20240307-v1:0",
+            anthropic_body,
+            |c| c["delta"]["text"].as_str(),
+        ),
+        (
+            "amazon.titan-text-express-v1",
+            serde_json::json!({ "inputText": "hi" }),
+            |c| c["outputText"].as_str(),
+        ),
+        ("meta.llama3-8b-instruct-v1:0", prompt_body.clone(), |c| {
+            c["generation"].as_str()
+        }),
+        (
+            "cohere.command-r-v1:0",
+            serde_json::json!({ "message": "hi" }),
+            |c| c["text"].as_str(),
+        ),
+        ("mistral.mistral-large-2402-v1:0", prompt_body, |c| {
+            c["outputs"][0]["text"].as_str()
+        }),
+    ];
+
+    for (model, body, text_of) in cases {
+        fc.bedrock()
+            .set_response_rules(
+                model,
+                &[fakecloud_sdk::types::BedrockResponseRule {
+                    prompt_contains: None,
+                    response: "streamed reply".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let chunks = invoke_stream_chunks(&client, model, body).await;
+        let text: String = chunks.iter().filter_map(text_of).collect();
+        assert_eq!(text, "streamed reply", "{model}: {chunks:?}");
+    }
+}
+
+#[tokio::test]
+async fn bedrock_invoke_stream_anthropic_is_a_complete_message_sequence() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+
+    let chunks = invoke_stream_chunks(
+        &client,
+        STREAM_MODEL,
+        serde_json::json!({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 50,
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+    )
+    .await;
+    let types: Vec<&str> = chunks.iter().filter_map(|c| c["type"].as_str()).collect();
+    assert_eq!(
+        types,
+        [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop"
+        ]
+    );
+    assert!(chunks[0]["message"]["usage"]["input_tokens"].as_u64() > Some(0));
+    assert_eq!(chunks[4]["delta"]["stop_reason"], "end_turn");
+    assert!(chunks[4]["usage"]["output_tokens"].as_u64() > Some(0));
+}

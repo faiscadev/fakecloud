@@ -327,6 +327,8 @@ pub(crate) fn seed_public_images(state: &mut Ec2State) {
 }
 
 pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
+    // Every zone gets its default subnet below: nothing to backfill on restore.
+    state.default_subnets_backfilled = true;
     let account = state.account_id.clone();
     let region = fixture_region(&state.region).to_string();
 
@@ -366,43 +368,14 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
     );
 
     // --- default subnets, one per AZ ---
-    // Placed in the region's first (up to) three listed zones, so every
-    // default subnet sits in a zone DescribeAvailabilityZones reports. AWS
-    // creates one per AZ; three covers the cardinality realistic tests
-    // exercise and keeps the deterministic CIDR layout simple.
+    // One in every zone DescribeAvailabilityZones reports, as AWS creates them,
+    // each a /20 of 172.31.0.0/16 in zone order: 172.31.0.0/20, 172.31.16.0/20,
+    // 172.31.32.0/20 and on.
     let mut subnet_ids = Vec::new();
-    for (idx, (az, zone_id)) in region_zones(&region).into_iter().take(3).enumerate() {
-        let suffix = az.chars().last().unwrap_or('a');
-        let subnet_id = deterministic_id(
-            "subnet",
-            &account,
-            &region,
-            &format!("default-subnet-{suffix}"),
-        );
-        state.subnets.insert(
-            subnet_id.clone(),
-            Subnet {
-                subnet_id: subnet_id.clone(),
-                vpc_id: vpc_id.clone(),
-                // /20 blocks carved from 172.31.0.0/16: .0, .16, .32 …
-                cidr_block: format!("172.31.{}.0/20", idx * 16),
-                availability_zone: az,
-                availability_zone_id: zone_id,
-                state: "available".to_string(),
-                available_ip_address_count: 4091,
-                default_for_az: true,
-                // Default subnets auto-assign public IPs, matching AWS.
-                map_public_ip_on_launch: true,
-                assign_ipv6_address_on_creation: false,
-                map_customer_owned_ip_on_launch: false,
-                enable_dns64: false,
-                enable_resource_name_dns_a_record_on_launch: false,
-                enable_resource_name_dns_aaaa_record_on_launch: false,
-                private_dns_hostname_type: "ip-name".to_string(),
-                ipv6_cidr_block: None,
-            },
-        );
-        subnet_ids.push(subnet_id);
+    for (idx, (az, zone_id)) in region_zones(&region).into_iter().enumerate() {
+        let subnet = default_subnet(&account, &region, &vpc_id, idx, az, zone_id);
+        subnet_ids.push(subnet.subnet_id.clone());
+        state.subnets.insert(subnet.subnet_id.clone(), subnet);
     }
 
     // --- main route table: local + default route at the IGW (public) ---
@@ -414,18 +387,7 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
         main: true,
     }];
     for sid in &subnet_ids {
-        associations.push(RouteTableAssociation {
-            association_id: deterministic_id(
-                "rtbassoc",
-                &account,
-                &region,
-                &format!("default-rtb-{sid}"),
-            ),
-            route_table_id: rtb_id.clone(),
-            subnet_id: Some(sid.clone()),
-            gateway_id: None,
-            main: false,
-        });
+        associations.push(default_rtb_association(&account, &region, &rtb_id, sid));
     }
     state.route_tables.insert(
         rtb_id.clone(),
@@ -494,15 +456,7 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
     // --- default network ACL: allow-all, associated with every default subnet ---
     let nacl_associations = subnet_ids
         .iter()
-        .map(|sid| NetworkAclAssoc {
-            association_id: deterministic_id(
-                "aclassoc",
-                &account,
-                &region,
-                &format!("default-acl-{sid}"),
-            ),
-            subnet_id: sid.clone(),
-        })
+        .map(|sid| default_acl_association(&account, &region, sid))
         .collect();
     state.network_acls.insert(
         acl_id.clone(),
@@ -519,6 +473,153 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
             associations: nacl_associations,
         },
     );
+}
+
+/// The default subnet of the `idx`-th zone of `region` (in
+/// DescribeAvailabilityZones order): the `idx`-th /20 of 172.31.0.0/16.
+fn default_subnet(
+    account: &str,
+    region: &str,
+    vpc_id: &str,
+    idx: usize,
+    az: String,
+    zone_id: String,
+) -> Subnet {
+    let suffix = az.chars().last().unwrap_or('a');
+    Subnet {
+        subnet_id: deterministic_id(
+            "subnet",
+            account,
+            region,
+            &format!("default-subnet-{suffix}"),
+        ),
+        vpc_id: vpc_id.to_string(),
+        // /20 blocks carved from 172.31.0.0/16: .0, .16, .32 …
+        cidr_block: format!("172.31.{}.0/20", idx * 16),
+        availability_zone: az,
+        availability_zone_id: zone_id,
+        state: "available".to_string(),
+        available_ip_address_count: 4091,
+        default_for_az: true,
+        // Default subnets auto-assign public IPs, matching AWS.
+        map_public_ip_on_launch: true,
+        assign_ipv6_address_on_creation: false,
+        map_customer_owned_ip_on_launch: false,
+        enable_dns64: false,
+        enable_resource_name_dns_a_record_on_launch: false,
+        enable_resource_name_dns_aaaa_record_on_launch: false,
+        private_dns_hostname_type: "ip-name".to_string(),
+        ipv6_cidr_block: None,
+    }
+}
+
+fn default_rtb_association(
+    account: &str,
+    region: &str,
+    rtb_id: &str,
+    subnet_id: &str,
+) -> RouteTableAssociation {
+    RouteTableAssociation {
+        association_id: deterministic_id(
+            "rtbassoc",
+            account,
+            region,
+            &format!("default-rtb-{subnet_id}"),
+        ),
+        route_table_id: rtb_id.to_string(),
+        subnet_id: Some(subnet_id.to_string()),
+        gateway_id: None,
+        main: false,
+    }
+}
+
+fn default_acl_association(account: &str, region: &str, subnet_id: &str) -> NetworkAclAssoc {
+    NetworkAclAssoc {
+        association_id: deterministic_id(
+            "aclassoc",
+            account,
+            region,
+            &format!("default-acl-{subnet_id}"),
+        ),
+        subnet_id: subnet_id.to_string(),
+    }
+}
+
+/// Give a state persisted by an older build the default subnets it lacks,
+/// once: `default_subnets_backfilled` records that it ran (bootstrap sets it),
+/// so a subnet deleted afterwards is never recreated.
+///
+/// Only a state whose default subnets all sit in the Region's first three
+/// zones, as the build that seeded three left it, is filled in, and only past
+/// them: a missing subnet in one of the first three was deleted on purpose.
+/// Each subnet takes the CIDR the seeding gives its zone, and is
+/// skipped when another subnet of the default VPC already overlaps it; it is
+/// associated with the VPC's main route table and default network ACL.
+pub(crate) fn backfill_default_subnets(state: &mut Ec2State) {
+    if state.default_subnets_backfilled {
+        return;
+    }
+    let account = state.account_id.clone();
+    let region = fixture_region(&state.region).to_string();
+    let Some(vpc_id) = state
+        .vpcs
+        .values()
+        .find(|v| v.is_default)
+        .map(|v| v.vpc_id.clone())
+    else {
+        // Nothing to fill now; a default VPC created later comes with its own.
+        state.default_subnets_backfilled = true;
+        return;
+    };
+    // Only the shape an older build left, default subnets in none but the
+    // first three zones, is filled in. None at all is ambiguous (a build from
+    // before seeding, or every one deleted on purpose), so nothing is
+    // recreated; CreateDefaultSubnet restores one, as on AWS.
+    let all_zones = region_zones(&region);
+    let first_three: Vec<&str> = all_zones.iter().take(3).map(|(z, _)| z.as_str()).collect();
+    let defaults: Vec<&str> = state
+        .subnets
+        .values()
+        .filter(|s| s.vpc_id == vpc_id && s.default_for_az)
+        .map(|s| s.availability_zone.as_str())
+        .collect();
+    if defaults.is_empty() || defaults.iter().any(|z| !first_three.contains(z)) {
+        state.default_subnets_backfilled = true;
+        return;
+    }
+    let zones: Vec<(usize, (String, String))> = all_zones.into_iter().enumerate().skip(3).collect();
+    for (idx, (az, zone_id)) in zones {
+        let subnet = default_subnet(&account, &region, &vpc_id, idx, az, zone_id);
+        let taken = state.subnets.contains_key(&subnet.subnet_id)
+            || state.subnets.values().any(|s| {
+                s.vpc_id == vpc_id
+                    && (s.default_for_az && s.availability_zone == subnet.availability_zone
+                        || crate::vpc_lookup::ipv4_cidrs_overlap(&s.cidr_block, &subnet.cidr_block))
+            });
+        if taken {
+            continue;
+        }
+        let sid = subnet.subnet_id.clone();
+        state.subnets.insert(sid.clone(), subnet);
+        if let Some(rtb) = state
+            .route_tables
+            .values_mut()
+            .find(|t| t.vpc_id == vpc_id && t.associations.iter().any(|a| a.main))
+        {
+            let rtb_id = rtb.route_table_id.clone();
+            rtb.associations
+                .push(default_rtb_association(&account, &region, &rtb_id, &sid));
+        }
+        if let Some(acl) = state
+            .network_acls
+            .values_mut()
+            .find(|a| a.vpc_id == vpc_id && a.is_default)
+        {
+            acl.associations
+                .push(default_acl_association(&account, &region, &sid));
+        }
+    }
+    state.default_subnets_backfilled = true;
 }
 
 /// Create the implicit resources AWS provisions for every newly-created VPC: a
@@ -846,8 +947,25 @@ mod tests {
         let vpc = state.vpcs.values().next().unwrap();
         assert!(vpc.is_default);
         assert_eq!(vpc.cidr_block, "172.31.0.0/16");
-        // one subnet per AZ suffix, all default_for_az + public
-        assert_eq!(state.subnets.len(), 3);
+        // one subnet per zone, all default_for_az + public, /20s in zone order
+        assert_eq!(state.subnets.len(), 6);
+        let mut by_zone: Vec<(&str, &str)> = state
+            .subnets
+            .values()
+            .map(|s| (s.availability_zone.as_str(), s.cidr_block.as_str()))
+            .collect();
+        by_zone.sort();
+        assert_eq!(
+            by_zone,
+            [
+                ("us-east-1a", "172.31.0.0/20"),
+                ("us-east-1b", "172.31.16.0/20"),
+                ("us-east-1c", "172.31.32.0/20"),
+                ("us-east-1d", "172.31.48.0/20"),
+                ("us-east-1e", "172.31.64.0/20"),
+                ("us-east-1f", "172.31.80.0/20"),
+            ]
+        );
         assert!(state.subnets.values().all(|s| s.default_for_az));
         assert!(state.subnets.values().all(|s| s.map_public_ip_on_launch));
         // IGW attached to the default VPC
@@ -858,6 +976,204 @@ mod tests {
         let sg = state.security_groups.values().next().unwrap();
         assert_eq!(sg.group_name, "default");
         assert!(state.network_acls.values().next().unwrap().is_default);
+    }
+
+    /// A state as an older build persisted it: default subnets in only the
+    /// first three zones, here with 1b deleted and a user subnet sitting on
+    /// 1e's CIDR.
+    /// Delete the default subnets of the zones `drop` keeps, with their
+    /// associations.
+    fn delete_default_subnets(state: &mut Ec2State, drop: impl Fn(&str) -> bool) {
+        let gone: Vec<String> = state
+            .subnets
+            .values()
+            .filter(|s| s.default_for_az && drop(&s.availability_zone))
+            .map(|s| s.subnet_id.clone())
+            .collect();
+        for sid in gone {
+            state.subnets.remove(&sid);
+            for rtb in state.route_tables.values_mut() {
+                rtb.associations
+                    .retain(|a| a.subnet_id.as_deref() != Some(&sid));
+            }
+            for acl in state.network_acls.values_mut() {
+                acl.associations.retain(|a| a.subnet_id != sid);
+            }
+        }
+    }
+
+    fn old_build_state() -> Ec2State {
+        let mut state = Ec2State::new("123456789012", "us-east-1");
+        // As an older build persisted it: no marker.
+        state.default_subnets_backfilled = false;
+        delete_default_subnets(&mut state, |z| {
+            !["us-east-1a", "us-east-1b", "us-east-1c"].contains(&z)
+        });
+        let b = state
+            .subnets
+            .values()
+            .find(|s| s.availability_zone == "us-east-1b")
+            .unwrap()
+            .subnet_id
+            .clone();
+        state.subnets.remove(&b);
+        let vpc_id = state.vpcs.values().next().unwrap().vpc_id.clone();
+        let mut user = default_subnet(
+            "123456789012",
+            "us-east-1",
+            &vpc_id,
+            4,
+            "us-east-1a".to_string(),
+            "use1-az1".to_string(),
+        );
+        user.subnet_id = "subnet-user".to_string();
+        user.cidr_block = "172.31.64.0/24".to_string();
+        user.default_for_az = false;
+        state.subnets.insert(user.subnet_id.clone(), user);
+        state
+    }
+
+    fn default_zones(state: &Ec2State) -> Vec<(String, String)> {
+        let mut zones: Vec<(String, String)> = state
+            .subnets
+            .values()
+            .filter(|s| s.default_for_az)
+            .map(|s| (s.availability_zone.clone(), s.cidr_block.clone()))
+            .collect();
+        zones.sort();
+        zones
+    }
+
+    #[test]
+    fn backfill_adds_only_the_zones_past_the_first_three() {
+        let mut state = old_build_state();
+        backfill_default_subnets(&mut state);
+        let zone = |z: &str, c: &str| (z.to_string(), c.to_string());
+        // 1b stays deleted, 1e's CIDR is taken, 1d and 1f get theirs.
+        assert_eq!(
+            default_zones(&state),
+            [
+                zone("us-east-1a", "172.31.0.0/20"),
+                zone("us-east-1c", "172.31.32.0/20"),
+                zone("us-east-1d", "172.31.48.0/20"),
+                zone("us-east-1f", "172.31.80.0/20"),
+            ]
+        );
+        // The new subnets are wired like the seeded ones.
+        let d = state
+            .subnets
+            .values()
+            .find(|s| s.availability_zone == "us-east-1d")
+            .unwrap()
+            .subnet_id
+            .clone();
+        assert!(subnet_is_public(&state, &d));
+        assert!(state.route_tables.values().any(|t| t
+            .associations
+            .iter()
+            .any(|a| a.subnet_id.as_deref() == Some(&d))));
+        assert!(state
+            .network_acls
+            .values()
+            .any(|a| a.is_default && a.associations.iter().any(|x| x.subnet_id == d)));
+
+        // Run again (every restart): nothing changes.
+        let before = default_zones(&state);
+        backfill_default_subnets(&mut state);
+        assert_eq!(default_zones(&state), before);
+    }
+
+    #[test]
+    fn backfill_runs_once_and_never_undoes_a_deletion() {
+        // Backfilled once (above), then 1d deleted: not recreated on the next
+        // restore.
+        let mut state = old_build_state();
+        backfill_default_subnets(&mut state);
+        assert!(state.default_subnets_backfilled);
+        delete_default_subnets(&mut state, |z| z == "us-east-1d");
+        let before = default_zones(&state);
+        backfill_default_subnets(&mut state);
+        assert_eq!(default_zones(&state), before);
+
+        // Seeded by this build, 1d/1e/1f deleted since: not recreated.
+        let mut state = Ec2State::new("123456789012", "us-east-1");
+        assert!(state.default_subnets_backfilled);
+        delete_default_subnets(&mut state, |z| {
+            ["us-east-1d", "us-east-1e", "us-east-1f"].contains(&z)
+        });
+        let before = default_zones(&state);
+        assert_eq!(before.len(), 3);
+        backfill_default_subnets(&mut state);
+        assert_eq!(default_zones(&state), before);
+    }
+
+    #[test]
+    fn backfill_leaves_a_state_without_default_subnets_alone() {
+        // Ambiguous: from before seeding, or every one deleted. Nothing is
+        // recreated; the marker is set.
+        let mut state = Ec2State::new("123456789012", "us-east-1");
+        state.default_subnets_backfilled = false;
+        delete_default_subnets(&mut state, |_| true);
+        backfill_default_subnets(&mut state);
+        assert!(default_zones(&state).is_empty());
+        assert!(state.default_subnets_backfilled);
+    }
+
+    #[test]
+    fn backfill_skips_a_state_with_a_later_zone_already() {
+        // Has a default subnet past the first three: not the old shape.
+        let mut state = Ec2State::new("123456789012", "us-east-1");
+        state.default_subnets_backfilled = false;
+        delete_default_subnets(&mut state, |z| z == "us-east-1e" || z == "us-east-1f");
+        let before = default_zones(&state);
+        backfill_default_subnets(&mut state);
+        assert_eq!(default_zones(&state), before);
+        assert!(state.default_subnets_backfilled);
+    }
+
+    #[test]
+    fn backfill_without_a_default_vpc_only_sets_the_marker() {
+        let mut state = old_build_state();
+        state.vpcs.values_mut().for_each(|v| v.is_default = false);
+        let before = default_zones(&state);
+        backfill_default_subnets(&mut state);
+        assert_eq!(default_zones(&state), before);
+        assert!(state.default_subnets_backfilled);
+    }
+
+    #[test]
+    fn backfill_associates_with_the_vpcs_main_route_table() {
+        // The main table is found by VPC, not by the id bootstrap derives.
+        let mut state = old_build_state();
+        let main = state
+            .route_tables
+            .values()
+            .find(|t| t.associations.iter().any(|a| a.main))
+            .unwrap()
+            .route_table_id
+            .clone();
+        let mut table = state.route_tables.remove(&main).unwrap();
+        table.route_table_id = "rtb-0legacy00000000".into();
+        for a in &mut table.associations {
+            a.route_table_id = table.route_table_id.clone();
+        }
+        state
+            .route_tables
+            .insert(table.route_table_id.clone(), table);
+        backfill_default_subnets(&mut state);
+        let d = state
+            .subnets
+            .values()
+            .find(|s| s.availability_zone == "us-east-1d")
+            .unwrap()
+            .subnet_id
+            .clone();
+        let assoc = state.route_tables["rtb-0legacy00000000"]
+            .associations
+            .iter()
+            .find(|a| a.subnet_id.as_deref() == Some(&d))
+            .expect("associated with the main table");
+        assert_eq!(assoc.route_table_id, "rtb-0legacy00000000");
     }
 
     #[test]

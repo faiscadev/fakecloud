@@ -166,9 +166,23 @@ pub(crate) fn object_key(
     uuid: Uuid,
 ) -> String {
     format!(
-        "{}{}/{stream}-{version}-{}-{uuid}{}",
+        "{}{}/{}",
         config.prefix,
         oldest_arrival.format("%Y/%m/%d/%H"),
+        object_name(stream, version, config, delivery_time, uuid),
+    )
+}
+
+/// The file name under whatever directory a batch's prefix evaluates to.
+pub(crate) fn object_name(
+    stream: &str,
+    version: &str,
+    config: &OutputConfig,
+    delivery_time: DateTime<Utc>,
+    uuid: Uuid,
+) -> String {
+    format!(
+        "{stream}-{version}-{}-{uuid}{}",
         delivery_time.format("%Y-%m-%d-%H-%M-%S"),
         config
             .file_extension

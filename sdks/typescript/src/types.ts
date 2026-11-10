@@ -924,6 +924,7 @@ export interface BedrockAgentRuntimeInvocation {
   outputChunks: number;
   trace: unknown;
   citations: unknown[];
+  flowOutputs: unknown[];
   invokedAt: string;
   durationMs: number;
 }

@@ -160,7 +160,13 @@ async fn cfn_provisions_sns_topic_policy() {
 const BUCKET_POLICY_TEMPLATE: &str = r#"{
   "AWSTemplateFormatVersion": "2010-09-09",
   "Resources": {
-    "B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "cfn-bp-bucket"}},
+    "B": {"Type": "AWS::S3::Bucket", "Properties": {
+      "BucketName": "cfn-bp-bucket",
+      "PublicAccessBlockConfiguration": {
+        "BlockPublicPolicy": false,
+        "RestrictPublicBuckets": false
+      }
+    }},
     "BP": {
       "Type": "AWS::S3::BucketPolicy",
       "Properties": {

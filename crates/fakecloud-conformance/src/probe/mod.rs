@@ -962,6 +962,21 @@ mod tests {
     }
 
     #[test]
+    fn classify_firehose_model_pattern_refusal_passes() {
+        let body = r#"{"__type":"ValidationException","message":"m"}"#;
+        let result = classify_response(
+            "v1",
+            400,
+            body,
+            &Expectation::Success,
+            0,
+            Some(&["InvalidArgumentException".to_string()]),
+            "firehose",
+        );
+        assert_eq!(result.status, ProbeStatus::Pass);
+    }
+
+    #[test]
     fn classify_ssm_shared_errors_pass_on_under_declared_ops() {
         // SSM's paginated `Describe*` ops declare only InternalServerError even
         // though AWS documents InvalidNextToken for them, and ValidationException

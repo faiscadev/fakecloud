@@ -6,8 +6,10 @@
 mod helpers;
 
 use aws_sdk_bedrockagent::types::{
-    FlowAliasRoutingConfigurationListItem, FlowDefinition, FlowNode, FlowNodeConfiguration,
-    FlowNodeType, InputFlowNodeConfiguration,
+    FlowAliasRoutingConfigurationListItem, FlowConnection, FlowConnectionConfiguration,
+    FlowConnectionType, FlowDataConnectionConfiguration, FlowDefinition, FlowNode,
+    FlowNodeConfiguration, FlowNodeInput, FlowNodeIoDataType, FlowNodeOutput, FlowNodeType,
+    InputFlowNodeConfiguration, OutputFlowNodeConfiguration,
 };
 use aws_sdk_bedrockagentruntime::error::ProvideErrorMetadata;
 use aws_sdk_bedrockagentruntime::types::FlowExecutionStatus;
@@ -15,6 +17,8 @@ use helpers::TestServer;
 
 const ROLE: &str = "arn:aws:iam::123456789012:role/service-role/flow-exec-role";
 
+/// A flow that prepares cleanly: Input node `node` passes its document
+/// straight to an Output node.
 fn definition(node: &str) -> FlowDefinition {
     FlowDefinition::builder()
         .nodes(
@@ -24,8 +28,49 @@ fn definition(node: &str) -> FlowDefinition {
                 .configuration(FlowNodeConfiguration::Input(
                     InputFlowNodeConfiguration::builder().build(),
                 ))
+                .outputs(
+                    FlowNodeOutput::builder()
+                        .name("document")
+                        .r#type(FlowNodeIoDataType::String)
+                        .build()
+                        .expect("node output"),
+                )
                 .build()
                 .expect("flow node"),
+        )
+        .nodes(
+            FlowNode::builder()
+                .name("FlowOutputNode")
+                .r#type(FlowNodeType::Output)
+                .configuration(FlowNodeConfiguration::Output(
+                    OutputFlowNodeConfiguration::builder().build(),
+                ))
+                .inputs(
+                    FlowNodeInput::builder()
+                        .name("document")
+                        .r#type(FlowNodeIoDataType::String)
+                        .expression("$.data")
+                        .build()
+                        .expect("node input"),
+                )
+                .build()
+                .expect("flow node"),
+        )
+        .connections(
+            FlowConnection::builder()
+                .name("ToOutput")
+                .r#type(FlowConnectionType::Data)
+                .source(node)
+                .target("FlowOutputNode")
+                .configuration(FlowConnectionConfiguration::Data(
+                    FlowDataConnectionConfiguration::builder()
+                        .source_output("document")
+                        .target_input("document")
+                        .build()
+                        .expect("data connection"),
+                ))
+                .build()
+                .expect("flow connection"),
         )
         .build()
 }
@@ -322,4 +367,644 @@ async fn unknown_flows_and_executions_are_not_found() {
         .await
         .expect_err("unknown execution stop");
     assert!(is_not_found(&err), "{err:?}");
+}
+
+/// `InvokeFlow` streams the flow's output, then its completion, through the SDK.
+#[tokio::test]
+async fn invoke_flow_streams_output_then_completion() {
+    use aws_sdk_bedrockagentruntime::types::{
+        FlowCompletionReason, FlowInput, FlowInputContent, FlowOutputContent, FlowResponseStream,
+    };
+
+    let server = TestServer::start().await;
+    let agent = server.bedrock_agent_client().await;
+    let runtime = server.bedrock_agent_runtime_client().await;
+
+    let flow_id = agent
+        .create_flow()
+        .name("stream-flow")
+        .execution_role_arn(ROLE)
+        .definition(definition("Input"))
+        .send()
+        .await
+        .expect("create flow")
+        .id;
+    agent
+        .prepare_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("prepare flow");
+    agent
+        .create_flow_version()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("create flow version");
+    let alias_id = agent
+        .create_flow_alias()
+        .flow_identifier(&flow_id)
+        .name("live")
+        .routing_configuration(
+            FlowAliasRoutingConfigurationListItem::builder()
+                .flow_version("1")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create flow alias")
+        .id;
+
+    let mut stream = runtime
+        .invoke_flow()
+        .flow_identifier(&flow_id)
+        .flow_alias_identifier(&alias_id)
+        .inputs(
+            FlowInput::builder()
+                .node_name("Input")
+                .node_output_name("document")
+                .content(FlowInputContent::Document(
+                    aws_smithy_types::Document::String("hi".to_string()),
+                ))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("invoke flow")
+        .response_stream;
+
+    let mut events = Vec::new();
+    while let Some(event) = stream.recv().await.expect("decode stream event") {
+        events.push(event);
+    }
+    assert_eq!(events.len(), 2, "{events:?}");
+    let FlowResponseStream::FlowOutputEvent(output) = &events[0] else {
+        panic!("expected flowOutputEvent first: {events:?}");
+    };
+    assert!(!output.node_name().is_empty());
+    assert!(matches!(
+        output.content(),
+        Some(FlowOutputContent::Document(_))
+    ));
+    let FlowResponseStream::FlowCompletionEvent(completion) = &events[1] else {
+        panic!("expected flowCompletionEvent last: {events:?}");
+    };
+    assert_eq!(
+        completion.completion_reason(),
+        &FlowCompletionReason::Success
+    );
+}
+
+/// The recorded `enableTrace` stream of a Start -> End flow: the input node's
+/// output trace, the output node's input trace, the output, then completion.
+#[tokio::test]
+async fn invoke_flow_trace_matches_the_recording() {
+    let server = TestServer::start().await;
+    let agent = server.bedrock_agent_client().await;
+    let endpoint = server.endpoint().to_string();
+
+    let definition = serde_json::from_value::<serde_json::Value>(serde_json::json!({
+        "nodes": [
+            {
+                "name": "Start",
+                "type": "Input",
+                "configuration": {"input": {}},
+                "outputs": [{"name": "document", "type": "String"}]
+            },
+            {
+                "name": "End",
+                "type": "Output",
+                "configuration": {"output": {}},
+                "inputs": [{"name": "document", "type": "String", "expression": "$.data"}]
+            }
+        ],
+        "connections": [{
+            "name": "c",
+            "source": "Start",
+            "target": "End",
+            "type": "Data",
+            "configuration": {"data": {"sourceOutput": "document", "targetInput": "document"}}
+        }]
+    }))
+    .unwrap();
+
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+    let http = reqwest::Client::new();
+    let created: serde_json::Value = http
+        .post(format!("{endpoint}/flows/"))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(
+            serde_json::json!({
+                "name": "recorded-flow",
+                "executionRoleArn": ROLE,
+                "definition": definition
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let flow_id = created["id"].as_str().expect("flow id").to_string();
+    agent
+        .prepare_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("prepare flow");
+
+    let frames = http
+        .post(format!("{endpoint}/flows/{flow_id}/aliases/TSTALIASID"))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(
+            serde_json::json!({
+                "enableTrace": true,
+                "inputs": [{
+                    "nodeName": "Start",
+                    "nodeOutputName": "document",
+                    "content": {"document": "hello"}
+                }]
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+
+    let events = decode_events(&frames);
+    let types: Vec<&str> = events.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(
+        types,
+        [
+            "flowTraceEvent",
+            "flowTraceEvent",
+            "flowOutputEvent",
+            "flowCompletionEvent"
+        ]
+    );
+
+    let mut output_trace = events[0].1["trace"]["nodeOutputTrace"].clone();
+    assert!(output_trace["timestamp"].is_string());
+    output_trace.as_object_mut().unwrap().remove("timestamp");
+    assert_eq!(
+        output_trace,
+        serde_json::json!({
+            "fields": [{
+                "content": {"document": "hello"},
+                "next": [{"inputFieldName": "document", "nodeName": "End"}],
+                "nodeOutputName": "document",
+                "type": "STRING"
+            }],
+            "nodeName": "Start"
+        })
+    );
+    let mut input_trace = events[1].1["trace"]["nodeInputTrace"].clone();
+    input_trace.as_object_mut().unwrap().remove("timestamp");
+    assert_eq!(
+        input_trace,
+        serde_json::json!({
+            "fields": [{
+                "content": {"document": "hello"},
+                "nodeInputName": "document",
+                "source": {"expression": "$.data", "nodeName": "Start", "outputFieldName": "document"},
+                "type": "STRING"
+            }],
+            "nodeName": "End"
+        })
+    );
+    assert_eq!(
+        events[2].1,
+        serde_json::json!({"content": {"document": "hello"}, "nodeName": "End"})
+    );
+    assert_eq!(
+        events[3].1,
+        serde_json::json!({"completionReason": "SUCCESS"})
+    );
+}
+
+/// Bad inputs are refused rather than answered with empty trace fields.
+#[tokio::test]
+async fn invoke_flow_validates_its_input() {
+    let server = TestServer::start().await;
+    let agent = server.bedrock_agent_client().await;
+    let endpoint = server.endpoint().to_string();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    let flow_id = agent
+        .create_flow()
+        .name("validated-flow")
+        .execution_role_arn(ROLE)
+        .definition(definition("Input"))
+        .send()
+        .await
+        .expect("create flow")
+        .id;
+    agent
+        .prepare_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("prepare flow");
+
+    let http = reqwest::Client::new();
+    for inputs in [
+        serde_json::json!([]),
+        serde_json::json!([{"nodeName": "Input"}]),
+        serde_json::json!([{"nodeName": "Input", "nodeOutputName": "document"}]),
+        serde_json::json!([{"nodeName": "Input", "nodeOutputName": 1, "content": {"document": "x"}}]),
+        serde_json::json!([{"nodeName": "Nope", "nodeOutputName": "document", "content": {"document": "x"}}]),
+    ] {
+        let response = http
+            .post(format!("{endpoint}/flows/{flow_id}/aliases/TSTALIASID"))
+            .header("content-type", "application/json")
+            .header("authorization", auth)
+            .body(serde_json::json!({ "inputs": inputs }).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400, "{inputs}");
+    }
+}
+
+/// A flow of `Input -> Iterator -> Output`, with the node inputs' expressions.
+fn iterating_flow(array_expression: &str) -> serde_json::Value {
+    let data = |source: &str, output: &str, target: &str, input: &str| {
+        serde_json::json!({
+            "name": format!("{source}To{target}"),
+            "type": "Data",
+            "source": source,
+            "target": target,
+            "configuration": {"data": {"sourceOutput": output, "targetInput": input}}
+        })
+    };
+    serde_json::json!({
+        "nodes": [
+            {"name": "Input", "type": "Input", "configuration": {"input": {}},
+             "outputs": [{"name": "document", "type": "Object"}]},
+            {"name": "Each", "type": "Iterator", "configuration": {"iterator": {}},
+             "inputs": [{"name": "array", "type": "Array", "expression": array_expression}],
+             "outputs": [{"name": "arrayItem", "type": "String"}, {"name": "arraySize", "type": "Number"}]},
+            {"name": "End", "type": "Output", "configuration": {"output": {}},
+             "inputs": [{"name": "document", "type": "String", "expression": "$.data"}]}
+        ],
+        "connections": [
+            data("Input", "document", "Each", "array"),
+            data("Each", "arrayItem", "End", "document")
+        ]
+    })
+}
+
+#[tokio::test]
+async fn invoke_flow_iterates_and_introspection_lists_every_output() {
+    let server = TestServer::start().await;
+    let endpoint = server.endpoint().to_string();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+    let http = reqwest::Client::new();
+    let agent = server.bedrock_agent_client().await;
+    let prepare = |flow_id: String| {
+        let agent = agent.clone();
+        async move {
+            agent
+                .prepare_flow()
+                .flow_identifier(flow_id)
+                .send()
+                .await
+                .expect("prepare flow");
+        }
+    };
+
+    let create = |name: &str, expression: &str| {
+        http.post(format!("{endpoint}/flows/"))
+            .header("content-type", "application/json")
+            .header("authorization", auth)
+            .body(
+                serde_json::json!({
+                    "name": name,
+                    "executionRoleArn": ROLE,
+                    "definition": iterating_flow(expression),
+                })
+                .to_string(),
+            )
+            .send()
+    };
+    let created: serde_json::Value = create("iterating", "$.data.items[1:]")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let flow_id = created["id"].as_str().unwrap();
+    prepare(flow_id.to_string()).await;
+
+    // nodeOutputName is optional on FlowInput.
+    let response = http
+        .post(format!("{endpoint}/flows/{flow_id}/aliases/TSTALIASID"))
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(
+            serde_json::json!({"inputs": [{
+                "nodeName": "Input",
+                "content": {"document": {"items": ["skip", "a", "b"]}}
+            }]})
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let events = decode_events(&response.bytes().await.unwrap());
+    let outputs: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|(kind, _)| kind == "flowOutputEvent")
+        .map(|(_, payload)| &payload["content"]["document"])
+        .collect();
+    assert_eq!(outputs, ["a", "b"]);
+
+    let rows: serde_json::Value = http
+        .get(format!(
+            "{endpoint}/_fakecloud/bedrock-agent-runtime/invocations"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = &rows["invocations"][0];
+    assert_eq!(row["outputChunks"], 2);
+    assert_eq!(
+        row["flowOutputs"],
+        serde_json::json!([
+            {"nodeName": "End", "document": "a"},
+            {"nodeName": "End", "document": "b"}
+        ])
+    );
+
+    // A malformed expression fails the node rather than running on null. The
+    // request itself was fine, so the stream starts and ends on the error.
+    let created: serde_json::Value = create("malformed", "$.database")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let malformed_id = created["id"].as_str().unwrap().to_string();
+    prepare(malformed_id.clone()).await;
+    let runtime = server.bedrock_agent_runtime_client().await;
+    let mut stream = runtime
+        .invoke_flow()
+        .flow_identifier(&malformed_id)
+        .flow_alias_identifier("TSTALIASID")
+        .execution_id("malformed-run")
+        .inputs(
+            aws_sdk_bedrockagentruntime::types::FlowInput::builder()
+                .node_name("Input")
+                .content(
+                    aws_sdk_bedrockagentruntime::types::FlowInputContent::Document(
+                        aws_smithy_types::Document::Object(
+                            [(
+                                "items".to_string(),
+                                aws_smithy_types::Document::Array(Vec::new()),
+                            )]
+                            .into(),
+                        ),
+                    ),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("a node failure doesn't fail the request")
+        .response_stream;
+    let error = loop {
+        match stream.recv().await {
+            Ok(Some(event)) => assert!(
+                !event.is_flow_completion_event(),
+                "a failed run doesn't complete: {event:?}"
+            ),
+            Ok(None) => panic!("the stream ended without reporting the failure"),
+            Err(error) => break error,
+        }
+    };
+    let error = error.into_service_error();
+    assert!(error.is_validation_exception(), "{error:?}");
+    assert!(
+        error.message().is_some_and(|m| m.contains("not valid")),
+        "{error:?}"
+    );
+    let execution = runtime
+        .get_flow_execution()
+        .flow_identifier(&malformed_id)
+        .flow_alias_identifier("TSTALIASID")
+        .execution_identifier("malformed-run")
+        .send()
+        .await
+        .expect("the failed run is an execution");
+    assert_eq!(execution.status(), &FlowExecutionStatus::Failed);
+}
+
+/// Each event-stream frame's `:event-type` and JSON payload.
+fn decode_events(mut buf: &[u8]) -> Vec<(String, serde_json::Value)> {
+    let mut out = Vec::new();
+    while !buf.is_empty() {
+        let total = u32::from_be_bytes(buf[0..4].try_into().unwrap()) as usize;
+        let headers_len = u32::from_be_bytes(buf[4..8].try_into().unwrap()) as usize;
+        let mut headers = &buf[12..12 + headers_len];
+        let mut event_type = String::new();
+        while !headers.is_empty() {
+            let name_len = headers[0] as usize;
+            let name = &headers[1..1 + name_len];
+            let value_at = 2 + name_len;
+            let value_len = u16::from_be_bytes([headers[value_at], headers[value_at + 1]]) as usize;
+            let value = &headers[value_at + 2..value_at + 2 + value_len];
+            if name == b":event-type" {
+                event_type = String::from_utf8(value.to_vec()).unwrap();
+            }
+            headers = &headers[value_at + 2 + value_len..];
+        }
+        out.push((
+            event_type,
+            serde_json::from_slice(&buf[12 + headers_len..total - 4]).unwrap(),
+        ));
+        buf = &buf[total..];
+    }
+    out
+}
+
+/// PrepareFlow validates the definition: one with errors ends `Failed`, and
+/// GetFlow reports the same findings ValidateFlowDefinition does. A failed
+/// draft can't be versioned until it is fixed and prepared again.
+#[tokio::test]
+async fn prepare_flow_fails_an_invalid_definition_with_its_validations() {
+    use aws_sdk_bedrockagent::error::ProvideErrorMetadata as _;
+    use aws_sdk_bedrockagent::types::{
+        FlowStatus, FlowValidationDetails, FlowValidationSeverity, FlowValidationType,
+    };
+
+    let server = TestServer::start().await;
+    let agent = server.bedrock_agent_client().await;
+
+    // An Input node without its `document` output, and a connection to a
+    // node that doesn't exist.
+    let broken = FlowDefinition::builder()
+        .nodes(
+            FlowNode::builder()
+                .name("FlowInputNode")
+                .r#type(FlowNodeType::Input)
+                .configuration(FlowNodeConfiguration::Input(
+                    InputFlowNodeConfiguration::builder().build(),
+                ))
+                .build()
+                .expect("flow node"),
+        )
+        .connections(
+            FlowConnection::builder()
+                .name("ToGhost")
+                .r#type(FlowConnectionType::Data)
+                .source("FlowInputNode")
+                .target("Ghost")
+                .configuration(FlowConnectionConfiguration::Data(
+                    FlowDataConnectionConfiguration::builder()
+                        .source_output("document")
+                        .target_input("document")
+                        .build()
+                        .expect("data connection"),
+                ))
+                .build()
+                .expect("flow connection"),
+        )
+        .build();
+
+    let validated = agent
+        .validate_flow_definition()
+        .definition(broken.clone())
+        .send()
+        .await
+        .expect("validate flow definition");
+    let summary = |v: &aws_sdk_bedrockagent::types::FlowValidation| {
+        (
+            v.r#type().cloned(),
+            v.severity().clone(),
+            v.message().to_string(),
+        )
+    };
+    let expected = vec![
+        (
+            Some(FlowValidationType::MissingEndingNodes),
+            FlowValidationSeverity::Warning,
+            "The flow is missing a required Flow Output node. Add an Output node to define what the flow returns when it completes.".to_string(),
+        ),
+        (
+            Some(FlowValidationType::MissingNodeOutput),
+            FlowValidationSeverity::Error,
+            "The node 'FlowInputNode' is missing the required output 'document'. Add this output to the node definition.".to_string(),
+        ),
+        (
+            Some(FlowValidationType::UnknownConnectionTarget),
+            FlowValidationSeverity::Error,
+            "The connection between the nodes 'FlowInputNode' and 'Ghost' references an unknown target node 'Ghost'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.".to_string(),
+        ),
+    ];
+    assert_eq!(
+        validated
+            .validations()
+            .iter()
+            .map(summary)
+            .collect::<Vec<_>>(),
+        expected
+    );
+
+    let flow_id = agent
+        .create_flow()
+        .name("broken-flow")
+        .execution_role_arn(ROLE)
+        .definition(broken)
+        .send()
+        .await
+        .expect("create flow")
+        .id;
+    let unprepared = agent
+        .get_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("get flow");
+    assert_eq!(unprepared.status(), &FlowStatus::NotPrepared);
+    assert!(unprepared.validations.is_none());
+
+    let prepared = agent
+        .prepare_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("prepare flow");
+    assert_eq!(prepared.status(), &FlowStatus::Preparing);
+    let failed = agent
+        .get_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("get flow");
+    assert_eq!(failed.status(), &FlowStatus::Failed);
+    assert_eq!(
+        failed.validations().iter().map(summary).collect::<Vec<_>>(),
+        expected
+    );
+    let FlowValidationDetails::UnknownConnectionTarget(target) =
+        failed.validations()[2].details().expect("details")
+    else {
+        panic!("{:?}", failed.validations()[2]);
+    };
+    assert_eq!(target.connection(), "ToGhost");
+
+    let err = agent
+        .create_flow_version()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect_err("a failed draft can't be versioned");
+    assert_eq!(err.code(), Some("ConflictException"), "{err:?}");
+
+    // Fixed and prepared again, it versions.
+    let fixed = agent
+        .update_flow()
+        .flow_identifier(&flow_id)
+        .name("broken-flow")
+        .execution_role_arn(ROLE)
+        .definition(definition("FlowInputNode"))
+        .send()
+        .await
+        .expect("update flow");
+    assert_eq!(fixed.status(), &FlowStatus::NotPrepared);
+    agent
+        .prepare_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("prepare fixed flow");
+    let ready = agent
+        .get_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("get flow");
+    assert_eq!(ready.status(), &FlowStatus::Prepared);
+    assert!(ready.validations().is_empty());
+    let version = agent
+        .create_flow_version()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("create flow version")
+        .version;
+    assert_eq!(version, "1");
 }

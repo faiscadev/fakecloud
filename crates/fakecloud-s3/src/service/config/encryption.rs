@@ -12,46 +12,7 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
-        // Validate the SSE config fields *before* persisting. The stored
-        // body is later round-tripped, field-by-field, into the object
-        // default-encryption headers on PutObject and ultimately into the
-        // `x-amz-server-side-encryption` / `-aws-kms-key-id` *response*
-        // headers on a later GET/HEAD. A control byte here (all bytes
-        // 0x00-0x1F are legal XML body bytes but illegal HTTP header bytes)
-        // would otherwise be persisted verbatim and crash the read path —
-        // a reachable, unauthenticated-input DoS (bug-audit 2026-06-13 2.1/2.2).
-        if let Some(algo) = extract_xml_value(&body_str, "SSEAlgorithm") {
-            // SSEAlgorithm is a closed enum; AWS returns MalformedXML for
-            // anything outside it. The full set is the Smithy
-            // `ServerSideEncryption` enum in `aws-models/s3.json` — which
-            // includes the managed-service algorithms `aws:fsx` and
-            // `aws:backup` alongside the three customer-facing ones.
-            if !matches!(
-                algo.as_str(),
-                "AES256" | "aws:kms" | "aws:kms:dsse" | "aws:fsx" | "aws:backup"
-            ) {
-                return Err(malformed_encryption("SSEAlgorithm", &algo));
-            }
-        }
-        if let Some(kid) = extract_xml_value(&body_str, "KMSMasterKeyID") {
-            // A real KMS key id / ARN / alias never contains control
-            // characters. Reject any value that isn't a legal HTTP header
-            // value rather than persisting a string that would later panic
-            // the GET/HEAD response path. AWS rejects a malformed key id with
-            // KMS.KMSInvalidStateException / InvalidArgument; InvalidArgument
-            // is the closest stable shape here.
-            if kid.parse::<http::header::HeaderValue>().is_err() {
-                return Err(AwsServiceError::aws_error_with_fields(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidArgument",
-                    "The KMSMasterKeyID is not a valid KMS key id, ARN, or alias",
-                    vec![
-                        ("ArgumentName".to_string(), "KMSMasterKeyID".to_string()),
-                        ("ArgumentValue".to_string(), kid.clone()),
-                    ],
-                ));
-            }
-        }
+        validate_bucket_encryption_xml(&body_str)?;
         // An aws:kms / aws:kms:dsse default without a KMSMasterKeyID is
         // valid, as on AWS: objects written under it use the account's
         // AWS-managed `aws/s3` key. The configuration is stored (and
@@ -133,12 +94,79 @@ impl S3Service {
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        b.encryption_config = None;
+        // S3 never leaves a general purpose bucket without default encryption:
+        // DeleteBucketEncryption "resets the default encryption for the bucket
+        // as server-side encryption with Amazon S3 managed keys (SSE-S3)". The
+        // reset is to the bucket's own default: SSE-C blocked for a bucket
+        // created with the new-bucket defaults, plain SSE-S3 for one from
+        // before them (AWS documents no SSE-C block for those). Persisted
+        // before memory changes, as the other config writes are.
+        let reset = b.default_encryption_xml();
         self.store
-            .delete_bucket_subresource(bucket, BucketSubresource::Encryption)
+            .put_bucket_subresource(bucket, BucketSubresource::Encryption, reset)
             .map_err(crate::service::persistence_error)?;
+        b.encryption_config = Some(reset.to_string());
         Ok(empty_response(StatusCode::NO_CONTENT))
     }
+}
+
+/// Validate a `ServerSideEncryptionConfiguration` document the way
+/// PutBucketEncryption does, before anything stores it. Shared with the
+/// CloudFormation `BucketEncryption` property so both refuse the same input.
+pub(crate) fn validate_bucket_encryption_xml(body_str: &str) -> Result<(), AwsServiceError> {
+    // Validate the SSE config fields *before* persisting. The stored
+    // body is later round-tripped, field-by-field, into the object
+    // default-encryption headers on PutObject and ultimately into the
+    // `x-amz-server-side-encryption` / `-aws-kms-key-id` *response*
+    // headers on a later GET/HEAD. A control byte here (all bytes
+    // 0x00-0x1F are legal XML body bytes but illegal HTTP header bytes)
+    // would otherwise be persisted verbatim and crash the read path —
+    // a reachable, unauthenticated-input DoS (bug-audit 2026-06-13 2.1/2.2).
+    if let Some(algo) = extract_xml_value(body_str, "SSEAlgorithm") {
+        // SSEAlgorithm is a closed enum; AWS returns MalformedXML for
+        // anything outside it. The full set is the Smithy
+        // `ServerSideEncryption` enum in `aws-models/s3.json` — which
+        // includes the managed-service algorithms `aws:fsx` and
+        // `aws:backup` alongside the three customer-facing ones.
+        if !matches!(
+            algo.as_str(),
+            "AES256" | "aws:kms" | "aws:kms:dsse" | "aws:fsx" | "aws:backup"
+        ) {
+            return Err(malformed_encryption("SSEAlgorithm", &algo));
+        }
+    }
+    // `EncryptionType` is a closed enum (SSE-C, NONE). Anything else would
+    // be stored and then neither block nor allow anything.
+    let blocked =
+        crate::service::notifications::extract_all_xml_values(body_str, "BlockedEncryptionTypes");
+    for value in blocked.iter().flat_map(|block| {
+        crate::service::notifications::extract_all_xml_values(block, "EncryptionType")
+    }) {
+        let value = value.trim();
+        if !matches!(value, "SSE-C" | "NONE") {
+            return Err(malformed_encryption("EncryptionType", value));
+        }
+    }
+    if let Some(kid) = extract_xml_value(body_str, "KMSMasterKeyID") {
+        // A real KMS key id / ARN / alias never contains control
+        // characters. Reject any value that isn't a legal HTTP header
+        // value rather than persisting a string that would later panic
+        // the GET/HEAD response path. AWS rejects a malformed key id with
+        // KMS.KMSInvalidStateException / InvalidArgument; InvalidArgument
+        // is the closest stable shape here.
+        if kid.parse::<http::header::HeaderValue>().is_err() {
+            return Err(AwsServiceError::aws_error_with_fields(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "The KMSMasterKeyID is not a valid KMS key id, ARN, or alias",
+                vec![
+                    ("ArgumentName".to_string(), "KMSMasterKeyID".to_string()),
+                    ("ArgumentValue".to_string(), kid.clone()),
+                ],
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Build a `MalformedXML` error for a bucket-encryption field whose value

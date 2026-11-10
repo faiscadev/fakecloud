@@ -166,6 +166,11 @@ impl CloudFrontService {
                 return Err(precondition_failed());
             }
         }
+        // Model-declared; checked after the If-Match (inferred).
+        crate::validate::refuse_in_use(
+            account,
+            crate::validate::Reference::OriginAccessControl(&id),
+        )?;
         account.origin_access_controls.remove(&id);
         Ok(empty(StatusCode::NO_CONTENT))
     }
@@ -355,6 +360,8 @@ impl CloudFrontService {
                 return Err(precondition_failed());
             }
         }
+        // Model-declared; checked after the If-Match (inferred).
+        crate::validate::refuse_in_use(account, crate::validate::Reference::CachePolicy(&id))?;
         account.cache_policies.remove(&id);
         Ok(empty(StatusCode::NO_CONTENT))
     }
@@ -549,6 +556,11 @@ impl CloudFrontService {
                 return Err(precondition_failed());
             }
         }
+        // Model-declared; checked after the If-Match (inferred).
+        crate::validate::refuse_in_use(
+            account,
+            crate::validate::Reference::OriginRequestPolicy(&id),
+        )?;
         account.origin_request_policies.remove(&id);
         Ok(empty(StatusCode::NO_CONTENT))
     }
@@ -746,6 +758,11 @@ impl CloudFrontService {
                 return Err(precondition_failed());
             }
         }
+        // Model-declared; checked after the If-Match (inferred).
+        crate::validate::refuse_in_use(
+            account,
+            crate::validate::Reference::ResponseHeadersPolicy(&id),
+        )?;
         account.response_headers_policies.remove(&id);
         Ok(empty(StatusCode::NO_CONTENT))
     }
@@ -920,6 +937,11 @@ impl CloudFrontService {
                 return Err(precondition_failed());
             }
         }
+        // Model-declared; checked after the If-Match (inferred).
+        crate::validate::refuse_in_use(
+            account,
+            crate::validate::Reference::ContinuousDeploymentPolicy(&id),
+        )?;
         account.continuous_deployment_policies.remove(&id);
         Ok(empty(StatusCode::NO_CONTENT))
     }

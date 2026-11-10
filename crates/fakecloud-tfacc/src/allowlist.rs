@@ -86,6 +86,14 @@ pub const SERVICES: &[Service] = &[
             //  is opt-in via `FAKECLOUD_S3_EAGER_DELIVERY`.)
             // --- gap: replication configuration is cross-region. ---
             "TestAccS3BucketReplicationConfiguration_basic",
+            // --- upstream asserts pre-April-2023 S3: the deprecated
+            //     `aws_s3_bucket_object` still defaults `acl = "private"` and
+            //     sends it on PutObject into a plain `aws_s3_bucket`, which now
+            //     has ACLs disabled (BucketOwnerEnforced). AWS answers 400
+            //     AccessControlListNotSupported, as reported in
+            //     hashicorp/terraform-provider-aws#27197, which dropped that
+            //     default from `aws_s3_object` for exactly this reason. ---
+            "TestAccS3BucketObject_basic",
             // --- unsupportable: S3 Express One Zone directory buckets are a
             //     separate API surface (ListDirectoryBuckets, etc.) not
             //     implemented. ---
@@ -177,6 +185,14 @@ pub const SERVICES: &[Service] = &[
             //  round-trips (bucket/sort/skewed columns), and
             //  GetPartitionIndexes raises EntityNotFound on a deleted table,
             //  so the partition + partition-index tests run.)
+            //
+            // The pinned provider's job test asserts `timeout = 2880` for a
+            // job created without `glue_version`. AWS now defaults such a job
+            // to Glue 6.0 with a 480-minute timeout (recorded with CreateJob +
+            // GetJob in us-east-1: MaxCapacity 10, no GlueVersion -> Timeout
+            // 480, GlueVersion "6.0"), and fakecloud returns that. Upstream
+            // has since dropped the timeout assertion from this test.
+            "TestAccGlueJob_basic",
         ],
     },
     Service {
@@ -1606,6 +1622,23 @@ pub const SHARDS: &[Shard] = &[
             ")_basic$",
         ),
         extra_deny: &[],
+    },
+    // The instance type data sources, against the catalog vendored from EC2's own
+    // DescribeInstanceTypes: each reads a real type's values back, including GPU,
+    // FPGA, Neuron and media accelerators. Control plane only.
+    Shard {
+        name: "ec2-instance-types",
+        service: "ec2",
+        run_regex: "^TestAccEC2InstanceTypes?(Offerings?)?DataSource_",
+        extra_deny: &[
+            // unsupportable: asserts m5.large is current generation. Real EC2 now
+            // answers false (dumped 2026-11-09), and the other 64 checks passed with
+            // that one corrected.
+            "TestAccEC2InstanceTypeDataSource_basic",
+            // unsupportable: reads f1.2xlarge in us-east-1, where real EC2 no longer
+            // sells it and answers InvalidInstanceType.
+            "TestAccEC2InstanceTypeDataSource_fpga",
+        ],
     },
     Shard {
         name: "rds",

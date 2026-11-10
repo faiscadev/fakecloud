@@ -58,7 +58,7 @@ impl StepFunctionsService {
             if same_input {
                 return Ok(AwsResponse::ok_json(json!({
                     "executionArn": existing.execution_arn,
-                    "startDate": existing.start_date.timestamp() as f64,
+                    "startDate": existing.start_date.timestamp_millis() as f64 / 1000.0,
                 })));
             }
             return Err(AwsServiceError::aws_error(
@@ -128,7 +128,7 @@ impl StepFunctionsService {
 
         Ok(AwsResponse::ok_json(json!({
             "executionArn": exec_arn,
-            "startDate": now.timestamp() as f64,
+            "startDate": now.timestamp_millis() as f64 / 1000.0,
         })))
     }
 
@@ -164,7 +164,7 @@ impl StepFunctionsService {
         exec.cause = cause;
 
         Ok(AwsResponse::ok_json(json!({
-            "stopDate": now.timestamp() as f64,
+            "stopDate": now.timestamp_millis() as f64 / 1000.0,
         })))
     }
 
@@ -237,10 +237,10 @@ impl StepFunctionsService {
                     "stateMachineArn": e.state_machine_arn,
                     "name": e.name,
                     "status": e.status.as_str(),
-                    "startDate": e.start_date.timestamp() as f64,
+                    "startDate": e.start_date.timestamp_millis() as f64 / 1000.0,
                 });
                 if let Some(stop) = e.stop_date {
-                    item["stopDate"] = json!(stop.timestamp() as f64);
+                    item["stopDate"] = json!(stop.timestamp_millis() as f64 / 1000.0);
                 }
                 item
             })
@@ -294,7 +294,7 @@ impl StepFunctionsService {
                 json!({
                     "id": e.id,
                     "type": e.event_type,
-                    "timestamp": e.timestamp.timestamp() as f64,
+                    "timestamp": e.timestamp.timestamp_millis() as f64 / 1000.0,
                     "previousEventId": e.previous_event_id,
                     format!("{}EventDetails", camel_to_details_key(&e.event_type)): e.details,
                 })
@@ -522,8 +522,8 @@ impl StepFunctionsService {
             "executionArn": exec.execution_arn,
             "stateMachineArn": exec.state_machine_arn,
             "name": exec.name,
-            "startDate": exec.start_date.timestamp(),
-            "stopDate": exec.stop_date.map(|d| d.timestamp()),
+            "startDate": exec.start_date.timestamp_millis() as f64 / 1000.0,
+            "stopDate": exec.stop_date.map(|d| d.timestamp_millis() as f64 / 1000.0),
             "status": exec.status.as_str(),
             "input": exec.input.as_deref().unwrap_or("{}"),
         });

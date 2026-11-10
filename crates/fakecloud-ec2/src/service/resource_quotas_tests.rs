@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use fakecloud_core::quota::{FixedQuotas, QuotaUsageSource};
-use fakecloud_core::service::{AwsResponse, AwsServiceError};
+use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use super::*;
 use crate::service::quota::Ec2QuotaUsage;
@@ -164,22 +164,13 @@ fn subnets_per_vpc_are_scoped_to_the_vpc() {
 #[test]
 fn a_new_default_subnet_counts_toward_the_default_vpc() {
     let svc = seeded(enforcing(&[(SUBNETS_PER_VPC, 0.0)]));
-    // The default VPC has default subnets in its first zones only.
-    let unseeded = {
-        let accounts = svc.state.read();
-        let state = accounts.regional(ACCT, "us-east-1").unwrap();
-        let zones: Vec<String> = state
-            .subnets
-            .values()
-            .filter(|s| s.default_for_az)
-            .map(|s| s.availability_zone.clone())
-            .collect();
-        crate::defaults::region_zones("us-east-1")
-            .into_iter()
-            .map(|(name, _)| name)
-            .find(|z| !zones.contains(z))
-            .expect("a zone without a default subnet")
-    };
+    // Every zone starts with a default subnet: delete one to recreate it.
+    let unseeded = "us-east-1f".to_string();
+    svc.state
+        .write()
+        .regional_mut(ACCT, "us-east-1")
+        .subnets
+        .retain(|_, s| !(s.default_for_az && s.availability_zone == unseeded));
     // The zone's existing default subnet is returned, not created.
     body(subnet::create_default_subnet(
         &svc,
@@ -701,11 +692,45 @@ fn items_of(out: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every page of `describe`, one after the other.
+fn all_pages(
+    describe: fn(&Ec2Service, &AwsRequest) -> Result<AwsResponse, AwsServiceError>,
+    action: &str,
+    params: &[(&str, &str)],
+    region: Option<&str>,
+) -> String {
+    let svc = Ec2Service::new();
+    let mut out = String::new();
+    let mut token: Option<String> = None;
+    loop {
+        let mut request = params.to_vec();
+        if let Some(t) = &token {
+            request.push(("NextToken", t));
+        }
+        let mut r = req(action, &request);
+        if let Some(region) = region {
+            r.region = region.to_string();
+        }
+        let page = body(describe(&svc, &r));
+        token = page
+            .split("<nextToken>")
+            .nth(1)
+            .and_then(|s| s.split('<').next())
+            .map(str::to_string);
+        out.push_str(&page);
+        if token.is_none() {
+            return out;
+        }
+    }
+}
+
 fn describe_types(params: &[(&str, &str)]) -> String {
-    body(instance::describe_instance_types(
-        &Ec2Service::new(),
-        &req("DescribeInstanceTypes", params),
-    ))
+    all_pages(
+        instance::describe_instance_types,
+        "DescribeInstanceTypes",
+        params,
+        None,
+    )
 }
 
 fn types_from_requirements(params: &[(&str, &str)]) -> Vec<String> {
@@ -765,34 +790,40 @@ fn describe_instance_types_reports_real_per_type_values() {
 }
 
 #[test]
-fn an_unknown_value_is_left_out_but_the_required_blocks_exist() {
-    let sparse = describe_types(&[("InstanceType.1", "p3.8xlarge")]);
-    for present in ["<ebsInfo>", "<networkInfo>", "<placementGroupInfo>"] {
-        assert!(sparse.contains(present), "{present}: {sparse}");
-    }
-    for absent in [
-        "<hypervisor>",
-        "<defaultCores>",
-        "<instanceStorageSupported>",
-        "<ebsOptimizedSupport>",
-        "<maximumNetworkInterfaces>",
-        "<ipv6AddressesPerInterface>",
+fn responses_carry_every_block_the_api_has() {
+    let m5 = describe_types(&[("InstanceType.1", "m5.large")]);
+    for present in [
+        "<ebsInfo>",
+        "<networkInfo>",
+        "<placementGroupInfo>",
+        "<networkCards><item>",
+        "<maximumEbsAttachments>27</maximumEbsAttachments>",
+        "<rebootMigrationSupport>supported</rebootMigrationSupport>",
+        "<supportedBootModes><item>legacy-bios</item><item>uefi</item></supportedBootModes>",
+        "<validThreadsPerCore><item>1</item><item>2</item></validThreadsPerCore>",
+        "<nitroTpmInfo><supportedVersions><item>2.0</item></supportedVersions></nitroTpmInfo>",
+        "<efaSupported>false</efaSupported>",
+        "<encryptionSupport>supported</encryptionSupport>",
+        "<sustainedClockSpeedInGhz>3.1</sustainedClockSpeedInGhz>",
+        "<supportedInRegion>true</supportedInRegion>",
     ] {
-        assert!(!sparse.contains(absent), "{absent}: {sparse}");
+        assert!(m5.contains(present), "{present}: {m5}");
     }
+    // Only what the type has: no instance store on an EBS-only type.
+    assert!(!m5.contains("<instanceStorageInfo>"), "{m5}");
+    assert!(!m5.contains("<gpuInfo>"), "{m5}");
+    // A type no enabled Region sells is known, and flagged, only on request.
+    let dl1 = describe_types(&[
+        ("InstanceType.1", "dl1.24xlarge"),
+        ("IncludeUnsupportedInRegion", "true"),
+    ]);
+    assert!(dl1.contains("<supportedInRegion>false<"), "{dl1}");
+    assert!(dl1.contains("<manufacturer>Habana</manufacturer>"), "{dl1}");
+    assert!(dl1.contains("<name>Gaudi HL-205</name>"), "{dl1}");
     assert!(
-        sparse.contains("<placementGroupInfo></placementGroupInfo>"),
-        "{sparse}"
+        dl1.contains("<totalGpuMemoryInMiB>262144</totalGpuMemoryInMiB>"),
+        "{dl1}"
     );
-    assert!(!sparse.contains("<ipv6Supported>"), "{sparse}");
-    let all = describe_types(&[]);
-    for never in [
-        "<efaSupported>",
-        "<encryptionSupport>",
-        "<maximumNetworkCards>",
-    ] {
-        assert!(!all.contains(never), "{never}");
-    }
 }
 
 #[test]
@@ -841,27 +872,949 @@ fn every_evaluated_filter_narrows_the_catalog() {
     assert!(!hdd.contains(&"i3.large".to_string()));
 }
 
+/// Every filter the catalog could not answer before, against the number of
+/// us-east-1 types the raw `DescribeInstanceTypes` dump has that value on (computed
+/// from the dump, not the catalog).
 #[test]
-fn a_filter_with_no_data_behind_it_is_refused() {
+fn filters_match_the_answers_computed_from_the_dump() {
+    for (filter, value, expected) in [
+        ("network-info.efa-supported", "true", 289),
+        ("hibernation-supported", "true", 582),
+        ("free-tier-eligible", "true", 8),
+        ("reboot-migration-support", "supported", 753),
+        ("ebs-info.attachment-limit-type", "dedicated", 714),
+        ("ebs-info.maximum-ebs-attachments", "28", 6),
+        ("instance-storage-info.encryption-support", "required", 527),
+        ("network-info.flexible-ena-queues-support", "supported", 552),
+        ("network-info.bandwidth-weightings", "vpc-1", 299),
+        ("nitro-tpm-support", "supported", 1109),
+        ("nitro-tpm-info.supported-versions", "2.0", 1109),
+        ("processor-info.supported-features", "amd-sev-snp", 16),
+        ("processor-info.sustained-clock-speed-in-ghz", "3.1", 99),
+        ("supported-boot-mode", "legacy-bios", 957),
+        ("supported-root-device-type", "instance-store", 33),
+        ("vcpu-info.valid-cores", "3", 544),
+        ("vcpu-info.valid-threads-per-core", "1", 1156),
+        ("network-info.encryption-in-transit-supported", "true", 1096),
+        ("auto-recovery-supported", "true", 825),
+        ("network-info.maximum-network-cards", "2", 52),
+        ("network-info.efa-info.maximum-efa-interfaces", "1", 231),
+        ("ebs-info.encryption-support", "supported", 1369),
+        ("nitro-enclaves-support", "supported", 940),
+    ] {
+        let found = items_of(&describe_types(&[
+            ("Filter.1.Name", filter),
+            ("Filter.1.Value.1", value),
+        ]));
+        assert_eq!(found.len(), expected, "{filter}={value}");
+    }
+    // Regions differ on this one, and us-east-1 answers with its own value.
+    let hosts = items_of(&describe_types(&[
+        ("Filter.1.Name", "dedicated-hosts-supported"),
+        ("Filter.1.Value.1", "true"),
+    ]));
+    assert_eq!(hosts.len(), 1152);
+}
+
+#[test]
+fn only_an_unknown_filter_is_refused() {
+    for (filter, _) in crate::instance_types::INSTANCE_TYPE_FILTERS {
+        let r = instance::describe_instance_types(
+            &Ec2Service::new(),
+            &req(
+                "DescribeInstanceTypes",
+                &[("Filter.1.Name", filter), ("Filter.1.Value.1", "x")],
+            ),
+        );
+        assert!(r.is_ok(), "{filter}");
+    }
+    let bogus = [("Filter.1.Name", "bogus"), ("Filter.1.Value.1", "x")];
     let r = instance::describe_instance_types(
         &Ec2Service::new(),
-        &req(
-            "DescribeInstanceTypes",
+        &req("DescribeInstanceTypes", &bogus),
+    );
+    assert_eq!(
+        aws_error(r),
+        (
+            "InvalidParameterValue".to_string(),
+            "The filter 'bogus' is invalid".to_string()
+        )
+    );
+    let r = crate::service::rest::describe_instance_type_offerings(
+        &Ec2Service::new(),
+        &req("DescribeInstanceTypeOfferings", &bogus),
+    );
+    assert_eq!(
+        aws_error(r),
+        (
+            "InvalidParameterValue".to_string(),
+            "The filter 'bogus' is invalid".to_string()
+        )
+    );
+}
+
+/// Code and message of a refused request.
+fn aws_error(r: Result<AwsResponse, AwsServiceError>) -> (String, String) {
+    let e = crate::test_support::err_of(r);
+    (e.code().to_string(), e.message())
+}
+
+#[test]
+fn location_type_refusal_and_counts_are_ec2s() {
+    let run = |location_type: &str| {
+        crate::service::rest::describe_instance_type_offerings(
+            &Ec2Service::new(),
+            &req(
+                "DescribeInstanceTypeOfferings",
+                &[
+                    ("LocationType", location_type),
+                    ("Filter.1.Name", "instance-type"),
+                    ("Filter.1.Value.1", "m5.large"),
+                ],
+            ),
+        )
+    };
+    assert_eq!(
+        aws_error(run("bogus")),
+        (
+            "InvalidParameterValue".to_string(),
+            "Invalid value for location type: bogus. \
+             Must be one of [availability-zone, availability-zone-id, outpost, region]"
+                .to_string(),
+        )
+    );
+    // m5.large in us-east-1, as real EC2 answers it.
+    for (location_type, count) in [
+        ("region", 1),
+        ("availability-zone", 5),
+        ("availability-zone-id", 5),
+        ("outpost", 0),
+    ] {
+        let out = body(run(location_type));
+        assert_eq!(items_of(&out).len(), count, "{location_type}: {out}");
+    }
+    // The zone real EC2 does not sell it in, under both of its names.
+    let az = body(run("availability-zone"));
+    assert!(!az.contains("us-east-1e<"), "{az}");
+    let id = body(run("availability-zone-id"));
+    assert!(!id.contains(">use1-az5<"), "{id}");
+    assert!(id.contains(">use1-az6<"), "{id}");
+}
+
+/// x86_64 + hvm, the request every recorded accelerator answer shares.
+fn x86_types_from_requirements(region: &str, extra: &[(&str, &str)]) -> Vec<String> {
+    let mut all = vec![
+        ("ArchitectureType.1", "x86_64"),
+        ("VirtualizationType.1", "hvm"),
+        ("InstanceRequirements.VCpuCount.Min", "1"),
+        ("InstanceRequirements.MemoryMiB.Min", "1"),
+    ];
+    all.extend_from_slice(extra);
+    let mut r = req("GetInstanceTypesFromInstanceRequirements", &all);
+    r.region = region.to_string();
+    items_of(&body(instance::get_instance_types_from_requirements(
+        &Ec2Service::new(),
+        &r,
+    )))
+}
+
+/// As recorded from real us-east-1 (`req_acc_*`).
+#[test]
+fn accelerator_requirements_match_ec2s_recorded_answers() {
+    let by_name = |name: &str| {
+        x86_types_from_requirements(
+            "us-east-1",
             &[
-                ("Filter.1.Name", "network-info.efa-supported"),
-                ("Filter.1.Value.1", "true"),
+                ("InstanceRequirements.AcceleratorCount.Min", "1"),
+                ("InstanceRequirements.AcceleratorName.1", name),
+            ],
+        )
+    };
+    assert_eq!(by_name("a100"), ["p4d.24xlarge", "p4de.24xlarge"]);
+    assert_eq!(by_name("h100"), ["p5.48xlarge"]);
+    assert_eq!(
+        by_name("inferentia2"),
+        [
+            "inf2.24xlarge",
+            "inf2.48xlarge",
+            "inf2.8xlarge",
+            "inf2.xlarge"
+        ]
+    );
+    assert_eq!(
+        by_name("trainium"),
+        ["trn1.2xlarge", "trn1.32xlarge", "trn1n.32xlarge"]
+    );
+    // Not sold in us-east-1, or not x86_64 (t4g).
+    for empty in ["vu9p", "gaudi-hl-205", "trainium2", "t4g"] {
+        assert!(by_name(empty).is_empty(), "{empty}");
+    }
+    let inf = [
+        "inf1.24xlarge",
+        "inf1.2xlarge",
+        "inf1.6xlarge",
+        "inf1.xlarge",
+        "inf2.24xlarge",
+        "inf2.48xlarge",
+        "inf2.8xlarge",
+        "inf2.xlarge",
+    ];
+    assert_eq!(
+        x86_types_from_requirements(
+            "us-east-1",
+            &[("InstanceRequirements.AcceleratorType.1", "inference")]
+        ),
+        inf
+    );
+    let mut amazon = inf.to_vec();
+    amazon.extend(["trn1.2xlarge", "trn1.32xlarge", "trn1n.32xlarge"]);
+    assert_eq!(
+        x86_types_from_requirements(
+            "us-east-1",
+            &[(
+                "InstanceRequirements.AcceleratorManufacturer.1",
+                "amazon-web-services"
+            )]
+        ),
+        amazon
+    );
+    let e = crate::test_support::err_of(instance::get_instance_types_from_requirements(
+        &Ec2Service::new(),
+        &req(
+            "GetInstanceTypesFromInstanceRequirements",
+            &[
+                ("ArchitectureType.1", "x86_64"),
+                ("VirtualizationType.1", "hvm"),
+                ("InstanceRequirements.VCpuCount.Min", "1"),
+                ("InstanceRequirements.MemoryMiB.Min", "1"),
+                ("InstanceRequirements.AcceleratorName.1", "inferentia1"),
             ],
         ),
+    ));
+    assert_eq!(e.code(), "InvalidParameterValue");
+    assert_eq!(
+        e.message(),
+        "The value 'inferentia1' for AcceleratorNames is not valid. Valid values: [a10g, a100, \
+         h100, inferentia, k520, k80, m60, radeon-pro-v520, t4, t4g, vu9p, v100, l40s, l4, \
+         gaudi-hl-205, inferentia2, trainium, trainium2, u30]"
     );
-    assert_eq!(code(r), "UnsupportedOperation");
-    let r = instance::describe_instance_types(
+    // The names that came back empty above do select their types where they are sold.
+    let select = |region: &str, name: &str| {
+        x86_types_from_requirements(region, &[("InstanceRequirements.AcceleratorName.1", name)])
+    };
+    assert!(select("us-gov-west-1", "vu9p").contains(&"f1.2xlarge".to_string()));
+    assert!(select("cn-north-1", "gaudi-hl-205").contains(&"dl1.24xlarge".to_string()));
+    assert!(select("us-east-2", "trainium2").contains(&"trn2.48xlarge".to_string()));
+}
+
+/// Recorded for x86_64 and arm64, hvm and paravirtual, vCPUs and memory from 1.
+fn recorded_types(extra: &[(&str, &str)]) -> Vec<String> {
+    let mut all = vec![
+        ("ArchitectureType.1", "x86_64"),
+        ("ArchitectureType.2", "arm64"),
+        ("VirtualizationType.1", "hvm"),
+        ("VirtualizationType.2", "paravirtual"),
+        ("InstanceRequirements.VCpuCount.Min", "1"),
+        ("InstanceRequirements.MemoryMiB.Min", "1"),
+    ];
+    all.extend_from_slice(extra);
+    items_of(&body(instance::get_instance_types_from_requirements(
         &Ec2Service::new(),
-        &req(
-            "DescribeInstanceTypes",
-            &[("Filter.1.Name", "nope"), ("Filter.1.Value.1", "x")],
-        ),
+        &req("GetInstanceTypesFromInstanceRequirements", &all),
+    )))
+}
+
+#[derive(serde::Deserialize)]
+struct RecordedRequirements {
+    base: Vec<String>,
+    accelerator_count_min_1: Vec<String>,
+}
+
+fn recorded_requirements() -> RecordedRequirements {
+    serde_json::from_str(include_str!("../testdata/instance_requirements_all.json")).unwrap()
+}
+
+/// Real EC2 lists neither of these under any requirements, wherever they are sold.
+#[test]
+fn the_base_listing_is_ec2s_recorded_one() {
+    let base = recorded_types(&[]);
+    assert_eq!(base.len(), 1184);
+    assert_eq!(base, recorded_requirements().base);
+    assert!(!base.contains(&"p5.4xlarge".to_string()));
+    let everything = recorded_types(&[
+        ("InstanceRequirements.BareMetal", "included"),
+        ("InstanceRequirements.BurstablePerformance", "included"),
+    ]);
+    assert_eq!(everything.len(), 1358);
+    assert!(!everything.contains(&"p5.4xlarge".to_string()));
+    assert!(!everything.contains(&"t1.micro".to_string()));
+    // Though both are described.
+    let described = describe_types(&[
+        ("InstanceType.1", "p5.4xlarge"),
+        ("InstanceType.2", "t1.micro"),
+    ]);
+    assert_eq!(items_of(&described).len(), 2);
+}
+
+#[test]
+fn accelerator_counts_match_ec2s_recorded_answers() {
+    let fractional = [
+        "g6f.2xlarge",
+        "g6f.4xlarge",
+        "g6f.large",
+        "g6f.xlarge",
+        "gr6f.4xlarge",
+    ];
+    let count = |key, value| recorded_types(&[(key, value)]);
+    let min = "InstanceRequirements.AcceleratorCount.Min";
+    let max = "InstanceRequirements.AcceleratorCount.Max";
+    let min_1 = count(min, "1");
+    assert_eq!(min_1, recorded_requirements().accelerator_count_min_1);
+    let max_0 = count(max, "0");
+    assert_eq!(max_0.len(), 1106);
+    let max_1 = count(max, "1");
+    assert_eq!(max_1.len(), 1150);
+    assert_eq!(count(min, "0").len(), 1184);
+    // A fractional GPU is above 0 and below 1.
+    for name in fractional {
+        let name = name.to_string();
+        assert!(!min_1.contains(&name), "{name}");
+        assert!(!max_0.contains(&name), "{name}");
+        assert!(max_1.contains(&name), "{name}");
+    }
+    // x86_64 + hvm only, as recorded first.
+    assert_eq!(
+        x86_types_from_requirements("us-east-1", &[(max, "0")]).len(),
+        757
     );
-    assert_eq!(code(r), "InvalidParameterValue");
+    let kind = |value| recorded_types(&[("InstanceRequirements.AcceleratorType.1", value)]);
+    let gpu = kind("gpu");
+    assert_eq!(gpu.len(), 61);
+    assert!(gpu.contains(&"g6f.large".to_string()));
+    assert!(gpu.contains(&"p5.48xlarge".to_string()));
+    assert!(!gpu.iter().any(|t| t.starts_with("trn")));
+    assert_eq!(kind("fpga"), ["f2.12xlarge", "f2.48xlarge", "f2.6xlarge"]);
+    assert_eq!(kind("inference").len(), 8);
+    assert_eq!(
+        kind("media"),
+        ["vt1.24xlarge", "vt1.3xlarge", "vt1.6xlarge"]
+    );
+    let maker =
+        |value| recorded_types(&[("InstanceRequirements.AcceleratorManufacturer.1", value)]);
+    assert_eq!(maker("amazon-web-services").len(), 11);
+    assert_eq!(maker("nvidia").len(), 61);
+    // Every device block counts for memory, Trainium's and a fractional GPU's too.
+    let memory = |key, value| recorded_types(&[(key, value)]).len();
+    assert_eq!(
+        memory("InstanceRequirements.AcceleratorTotalMemoryMiB.Min", "1"),
+        78
+    );
+    assert_eq!(
+        memory("InstanceRequirements.AcceleratorTotalMemoryMiB.Max", "0"),
+        1106
+    );
+}
+
+const CPU_REFERENCE: &str =
+    "InstanceRequirements.BaselinePerformanceFactors.Cpu.Reference.1.InstanceFamily";
+
+/// As real EC2 answered each reference.
+#[test]
+fn baseline_performance_references_match_ec2s_recorded_answers() {
+    let refer = |family| recorded_types(&[(CPU_REFERENCE, family)]);
+    let m5 = refer("m5");
+    assert_eq!(m5.len(), 1043);
+    assert_eq!(refer("c6g").len(), 923);
+    // A family it holds no answer for is no answer: real EC2 lists nothing there too.
+    for empty in ["t3", "a1", "bogus", "-", "u7i-12tb"] {
+        assert!(refer(empty).is_empty(), "{empty}");
+    }
+    // Case does not matter, and the family's own members are in.
+    assert_eq!(refer("M5"), m5);
+    assert!(m5.contains(&"m5.large".to_string()));
+    for excluded in [
+        "m5a.large",
+        "r5a.large",
+        "i8g.large",
+        "m1.large",
+        "c1.medium",
+    ] {
+        assert!(!m5.contains(&excluded.to_string()), "{excluded}");
+    }
+    assert_eq!(refer(&"a".repeat(30)).len(), 0);
+    // Recorded: the burstable policy rules a reference out or in, bare metal only narrows.
+    let with =
+        |family, member, policy| recorded_types(&[(CPU_REFERENCE, family), (member, policy)]).len();
+    let burstable = "InstanceRequirements.BurstablePerformance";
+    let metal = "InstanceRequirements.BareMetal";
+    assert_eq!(with("t3", burstable, "included"), 1084);
+    assert_eq!(with("t3", burstable, "required"), 21);
+    assert_eq!(with("t3", metal, "included"), 0);
+    assert_eq!(with("m5", burstable, "required"), 0);
+    assert_eq!(with("m5", burstable, "included"), 1064);
+    assert_eq!(with("m5", metal, "included"), 1179);
+    assert_eq!(with("m5", metal, "required"), 136);
+    // Recorded: a Region not selling the reference family lists nothing for it.
+    let reference = [(CPU_REFERENCE, "x2gd")];
+    assert!(!x86_types_from_requirements("us-east-1", &reference).is_empty());
+    assert!(x86_types_from_requirements("ca-central-1", &reference).is_empty());
+}
+
+#[test]
+fn baseline_performance_references_are_refused_as_recorded() {
+    let run = |extra: &[(&str, &str)]| {
+        let mut all = vec![
+            ("ArchitectureType.1", "x86_64"),
+            ("VirtualizationType.1", "hvm"),
+            ("InstanceRequirements.VCpuCount.Min", "1"),
+            ("InstanceRequirements.MemoryMiB.Min", "1"),
+        ];
+        all.extend_from_slice(extra);
+        instance::get_instance_types_from_requirements(
+            &Ec2Service::new(),
+            &req("GetInstanceTypesFromInstanceRequirements", &all),
+        )
+    };
+    let invalid = "CPU.References contain invalid value for the referred Instance Family. \
+                   Correct it, and try again.";
+    let thirty_one = "a".repeat(31);
+    for family in ["m5.large", "a_b", "a b", "", thirty_one.as_str()] {
+        let e = crate::test_support::err_of(run(&[(CPU_REFERENCE, family)]));
+        assert_eq!(
+            (e.code(), e.message().as_str()),
+            ("InvalidParameterValue", invalid),
+            "{family}"
+        );
+    }
+    let second = "InstanceRequirements.BaselinePerformanceFactors.Cpu.Reference.2.InstanceFamily";
+    for other in ["c6g", "m5"] {
+        let e = crate::test_support::err_of(run(&[(CPU_REFERENCE, "m5"), (second, other)]));
+        assert_eq!(
+            e.message(),
+            "CPU.References contain more than the maximum allowed number of items (1). \
+             Remove additional references, and try again."
+        );
+    }
+}
+
+/// Recorded: the same 135 types with no price protection and with each of the three
+/// at 1%.
+#[test]
+fn price_protection_does_not_narrow_as_recorded() {
+    let expected: Vec<String> =
+        serde_json::from_str(include_str!("../testdata/instance_requirements_base.json")).unwrap();
+    assert_eq!(expected.len(), 135);
+    let range = [
+        ("InstanceRequirements.VCpuCount.Max", "4"),
+        ("InstanceRequirements.MemoryMiB.Max", "16384"),
+    ];
+    let run = |extra: Option<(&'static str, &'static str)>| {
+        let mut all = vec![
+            ("ArchitectureType.1", "x86_64"),
+            ("VirtualizationType.1", "hvm"),
+            ("InstanceRequirements.VCpuCount.Min", "2"),
+            ("InstanceRequirements.MemoryMiB.Min", "4096"),
+        ];
+        all.extend_from_slice(&range);
+        all.extend(extra);
+        items_of(&body(instance::get_instance_types_from_requirements(
+            &Ec2Service::new(),
+            &req("GetInstanceTypesFromInstanceRequirements", &all),
+        )))
+    };
+    assert_eq!(run(None), expected);
+    for member in [
+        "InstanceRequirements.OnDemandMaxPricePercentageOverLowestPrice",
+        "InstanceRequirements.SpotMaxPricePercentageOverLowestPrice",
+        "InstanceRequirements.MaxSpotPriceAsPercentageOfOptimalOnDemandPrice",
+    ] {
+        assert_eq!(run(Some((member, "1"))), expected, "{member}");
+    }
+}
+
+/// A type kept with basic specs says nothing about what it does not list, so it
+/// matches neither side of a requirement on it.
+#[test]
+fn an_unknown_attribute_does_not_match() {
+    let i3p = "i3p.16xlarge".to_string();
+    let has =
+        |extra: &[(&str, &str)]| x86_types_from_requirements("us-gov-west-1", extra).contains(&i3p);
+    assert!(has(&[]));
+    assert!(!has(&[("InstanceRequirements.LocalStorage", "excluded")]));
+    assert!(!has(&[("InstanceRequirements.LocalStorage", "required")]));
+    assert!(!has(&[(
+        "InstanceRequirements.TotalLocalStorageGB.Max",
+        "0"
+    )]));
+    assert!(!has(&[("InstanceRequirements.AcceleratorCount.Max", "0")]));
+    assert!(!has(&[(
+        "InstanceRequirements.AcceleratorTotalMemoryMiB.Max",
+        "0"
+    )]));
+}
+
+/// As recorded from real us-east-1.
+#[tokio::test]
+async fn run_instances_refuses_a_zone_that_does_not_sell_the_type() {
+    let svc = seeded(Ec2Service::new());
+    let wrong_zone = [
+        ("InstanceType", "m5.large"),
+        ("MinCount", "1"),
+        ("MaxCount", "1"),
+        ("Placement.AvailabilityZone", "us-east-1e"),
+    ];
+    let recorded = "Your requested instance type (m5.large) is not supported in your requested \
+                    Availability Zone (us-east-1e). Please retry your request by not specifying \
+                    an Availability Zone or choosing us-east-1a, us-east-1b, us-east-1c, \
+                    us-east-1d, us-east-1f.";
+    let e = crate::test_support::err_of(run(&svc, &wrong_zone).await);
+    assert_eq!((e.code(), e.message().as_str()), ("Unsupported", recorded));
+
+    // The subnet path gives the same answer.
+    let vpc = make_vpc(&svc);
+    let subnet = xml(
+        &body(subnet::create_subnet(
+            &svc,
+            &req(
+                "CreateSubnet",
+                &[
+                    ("VpcId", &vpc),
+                    ("CidrBlock", "10.0.200.0/24"),
+                    ("AvailabilityZone", "us-east-1e"),
+                ],
+            ),
+        )),
+        "subnetId",
+    );
+    let in_subnet = [
+        ("InstanceType", "m5.large"),
+        ("MinCount", "1"),
+        ("MaxCount", "1"),
+        ("SubnetId", &subnet),
+    ];
+    let e = crate::test_support::err_of(run(&svc, &in_subnet).await);
+    assert_eq!((e.code(), e.message().as_str()), ("Unsupported", recorded));
+    // A type that zone does sell launches there.
+    body(
+        run(
+            &svc,
+            &[
+                ("InstanceType", "m5.large"),
+                ("MinCount", "1"),
+                ("MaxCount", "1"),
+                ("Placement.AvailabilityZone", "us-east-1f"),
+            ],
+        )
+        .await,
+    );
+
+    // Recorded: a dry run does not check the zone, but does check the type.
+    let mut dry = wrong_zone.to_vec();
+    dry.push(("DryRun", "true"));
+    assert_eq!(
+        crate::test_support::err_of(run(&svc, &dry).await).code(),
+        "DryRunOperation"
+    );
+    let e = crate::test_support::err_of(
+        run(
+            &svc,
+            &[
+                ("InstanceType", "m5.bogus"),
+                ("MinCount", "1"),
+                ("MaxCount", "1"),
+                ("DryRun", "true"),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(e.code(), "InvalidParameterValue");
+    assert_eq!(e.message(), "Invalid value 'm5.bogus' for InstanceType.");
+}
+
+#[tokio::test]
+async fn a_launch_naming_no_zone_lands_where_the_type_is_sold() {
+    let svc = seeded(Ec2Service::new());
+    // us-east-1a does not sell it.
+    let out = body(
+        run(
+            &svc,
+            &[
+                ("InstanceType", "inf2.xlarge"),
+                ("MinCount", "1"),
+                ("MaxCount", "1"),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(xml(&out, "availabilityZone"), "us-east-1b", "{out}");
+    // Inferred: a Region selling it nowhere refuses with the same code, naming no zone
+    // when none was asked for.
+    let e = crate::test_support::err_of(
+        run(
+            &svc,
+            &[
+                ("InstanceType", "dl1.24xlarge"),
+                ("MinCount", "1"),
+                ("MaxCount", "1"),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(e.code(), "Unsupported");
+    assert_eq!(
+        e.message(),
+        "Your requested instance type (dl1.24xlarge) is not supported in us-east-1."
+    );
+    let e = crate::test_support::err_of(
+        run(
+            &svc,
+            &[
+                ("InstanceType", "dl1.24xlarge"),
+                ("MinCount", "1"),
+                ("MaxCount", "1"),
+                ("Placement.AvailabilityZone", "us-east-1b"),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(
+        e.message(),
+        "Your requested instance type (dl1.24xlarge) is not supported in your requested \
+         Availability Zone (us-east-1b)."
+    );
+}
+
+/// A dry run refuses what the real launch would, quotas included: here one
+/// m5.large (2 vCPUs) fits the 3-vCPU quota on its own, but not on top of the
+/// one already running, which only the check under the EC2 lock sees.
+#[tokio::test]
+async fn a_dry_run_is_refused_over_quota_like_the_launch() {
+    let svc = seeded(enforcing(&[(ON_DEMAND_STANDARD, 3.0)]));
+    let launch = [
+        ("InstanceType", "m5.large"),
+        ("MinCount", "1"),
+        ("MaxCount", "1"),
+    ];
+    let mut dry = launch.to_vec();
+    dry.push(("DryRun", "true"));
+    // Alone, the dry run passes.
+    assert_eq!(code(run(&svc, &dry).await), "DryRunOperation");
+    body(run(&svc, &launch).await);
+    let real = crate::test_support::err_of(run(&svc, &launch).await);
+    let dry = crate::test_support::err_of(run(&svc, &dry).await);
+    assert_eq!(
+        (dry.code(), dry.message()),
+        (real.code(), real.message()),
+        "{}",
+        real.code()
+    );
+    assert_ne!(real.code(), "DryRunOperation");
+}
+
+/// The instance and its subnet are in the same zone, whatever default subnets exist.
+#[tokio::test]
+async fn a_zone_without_a_default_subnet_does_not_borrow_another_zones() {
+    let svc = seeded(Ec2Service::new());
+    let in_zone = |out: &str| xml(out, "availabilityZone");
+    let params = |zone: &'static str| {
+        [
+            ("InstanceType", "m5.large"),
+            ("MinCount", "1"),
+            ("MaxCount", "1"),
+            ("Placement.AvailabilityZone", zone),
+        ]
+    };
+    // Every zone has its default subnet, us-east-1f too.
+    let out = body(run(&svc, &params("us-east-1f")).await);
+    assert_eq!(in_zone(&out), "us-east-1f");
+    assert!(out.contains("<subnetId>"), "{out}");
+    // A deleted one is refused, not replaced by another zone's.
+    let default_b = {
+        let accounts = svc.state.read();
+        accounts
+            .regional(ACCT, "us-east-1")
+            .unwrap()
+            .subnets
+            .values()
+            .find(|s| s.default_for_az && s.availability_zone == "us-east-1b")
+            .unwrap()
+            .subnet_id
+            .clone()
+    };
+    svc.state
+        .write()
+        .regional_mut(ACCT, "us-east-1")
+        .subnets
+        .remove(&default_b);
+    let e = crate::test_support::err_of(run(&svc, &params("us-east-1b")).await);
+    assert_eq!(
+        (e.code(), e.message().as_str()),
+        (
+            "MissingInput",
+            "No default subnet for availability zone: 'us-east-1b'."
+        )
+    );
+    // With one, it uses it.
+    let out = body(run(&svc, &params("us-east-1a")).await);
+    assert_eq!(in_zone(&out), "us-east-1a");
+    assert!(out.contains("<subnetId>"), "{out}");
+    // And a launch naming no zone prefers one with a default subnet.
+    let out = body(
+        run(
+            &svc,
+            &[
+                ("InstanceType", "inf2.xlarge"),
+                ("MinCount", "1"),
+                ("MaxCount", "1"),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(in_zone(&out), "us-east-1c", "{out}");
+}
+
+/// As recorded from real us-east-1.
+#[test]
+fn reserved_instance_offerings_follow_the_catalog() {
+    let offerings = |params: &[(&str, &str)]| {
+        crate::service::reserved::describe_reserved_instances_offerings(
+            &Ec2Service::new(),
+            &req("DescribeReservedInstancesOfferings", params),
+        )
+    };
+    for bogus in ["m5.bogus", "nodot"] {
+        let e = crate::test_support::err_of(offerings(&[("InstanceType", bogus)]));
+        assert_eq!(
+            (e.code(), e.message()),
+            (
+                "InvalidParameterValue",
+                format!("The following supplied instance types do not exist: [{bogus}]")
+            )
+        );
+    }
+    let elems = |out: &str, name: &str| -> Vec<String> {
+        out.split(&format!("<{name}>"))
+            .skip(1)
+            .map(|s| s.split('<').next().unwrap().to_string())
+            .collect()
+    };
+    // The Region and every zone selling it, each for a 1-year and a 3-year term.
+    let out = body(offerings(&[("InstanceType", "m5.large")]));
+    assert_eq!(
+        elems(&out, "availabilityZone"),
+        ["a", "a", "b", "b", "c", "c", "d", "d", "f", "f"].map(|z| format!("us-east-1{z}"))
+    );
+    assert_eq!(out.matches("<scope>Region</scope>").count(), 2);
+    assert_eq!(elems(&out, "duration"), ["31536000", "94608000"].repeat(6));
+    let ids = elems(&out, "reservedInstancesOfferingId");
+    assert_eq!(
+        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        ids.len()
+    );
+    // The duration bounds keep one term.
+    let out = body(offerings(&[
+        ("InstanceType", "m5.large"),
+        ("MinDuration", "94608000"),
+    ]));
+    assert_eq!(elems(&out, "duration"), ["94608000"].repeat(6));
+    let out = body(offerings(&[
+        ("InstanceType", "m5.large"),
+        ("MaxDuration", "31536000"),
+    ]));
+    assert_eq!(elems(&out, "duration"), ["31536000"].repeat(6));
+    // Convertible reservations are Region-scoped only.
+    let out = body(offerings(&[
+        ("InstanceType", "m5.large"),
+        ("OfferingClass", "convertible"),
+    ]));
+    assert!(!out.contains("<availabilityZone>"), "{out}");
+    assert_eq!(out.matches("<scope>Region</scope>").count(), 2);
+    let none = body(offerings(&[
+        ("InstanceType", "m5.large"),
+        ("AvailabilityZone", "us-east-1e"),
+    ]));
+    assert!(!none.contains("<item>"), "{none}");
+}
+
+/// A launch naming no zone of a type the Region sells nowhere: refused, but a
+/// dry run skips that check, as it does for a named zone.
+#[tokio::test]
+async fn a_dry_run_naming_no_zone_skips_the_selling_check() {
+    let svc = seeded(Ec2Service::new());
+    let launch = [
+        ("InstanceType", "dl1.24xlarge"),
+        ("MinCount", "1"),
+        ("MaxCount", "1"),
+    ];
+    assert_eq!(code(run(&svc, &launch).await), "Unsupported");
+    let mut dry = launch.to_vec();
+    dry.push(("DryRun", "true"));
+    assert_eq!(code(run(&svc, &dry).await), "DryRunOperation");
+}
+
+/// A dry run validates everything but the zone, and changes nothing.
+#[tokio::test]
+async fn a_dry_run_validates_the_rest_of_the_launch() {
+    let svc = seeded(Ec2Service::new());
+    let dry = |extra: &'static [(&'static str, &'static str)]| {
+        let mut all = vec![
+            ("InstanceType", "m5.large"),
+            ("MinCount", "1"),
+            ("MaxCount", "1"),
+            ("DryRun", "true"),
+        ];
+        all.extend_from_slice(extra);
+        all
+    };
+    let e = crate::test_support::err_of(run(&svc, &dry(&[])).await);
+    assert_eq!(e.code(), "DryRunOperation");
+    let e = crate::test_support::err_of(
+        run(
+            &svc,
+            &dry(&[("InstanceInitiatedShutdownBehavior", "explode")]),
+        )
+        .await,
+    );
+    assert_eq!(e.code(), "InvalidParameterValue");
+    // No ImageId: `run` adds one, so the request goes in by hand.
+    let e = crate::test_support::err_of(
+        instance::run_instances(&svc, &req("RunInstances", &dry(&[]))).await,
+    );
+    assert_eq!(e.code(), "MissingParameter");
+    // Nothing was launched by any of them.
+    assert!(svc
+        .state
+        .read()
+        .regional(ACCT, "us-east-1")
+        .unwrap()
+        .instances
+        .is_empty());
+}
+
+/// The Regions and zones without data of their own keep working.
+#[tokio::test]
+async fn carried_over_and_unknown_zones_keep_launching() {
+    let in_region = |region: &'static str, itype: &'static str, zone: Option<&'static str>| async move {
+        let mut all = vec![
+            ("ImageId", "ami-12345678"),
+            ("InstanceType", itype),
+            ("MinCount", "1"),
+            ("MaxCount", "1"),
+        ];
+        if let Some(z) = zone {
+            all.push(("Placement.AvailabilityZone", z));
+        }
+        let mut r = req("RunInstances", &all);
+        r.region = region.to_string();
+        instance::run_instances(&Ec2Service::new(), &r).await
+    };
+    // No per-zone data for an opt-in Region.
+    body(in_region("af-south-1", "m5.large", Some("af-south-1c")).await);
+    body(in_region("af-south-1", "m5.large", None).await);
+    // A letter the dumping account does not have.
+    body(in_region("us-west-1", "m5.large", Some("us-west-1b")).await);
+    // A Region the catalog does not know at all.
+    body(in_region("cn-north-1", "dl1.24xlarge", None).await);
+    // Sold only in a carried-over Region.
+    assert_eq!(
+        code(in_region("us-east-1", "i3p.16xlarge", None).await),
+        "Unsupported"
+    );
+    body(in_region("us-gov-west-1", "i3p.16xlarge", None).await);
+}
+
+/// The recorded answers of real EC2 for the same request.
+#[test]
+fn requirements_match_ec2s_recorded_answer() {
+    let run = |extra: &[(&str, &str)]| {
+        let mut all = vec![
+            ("ArchitectureType.1", "x86_64"),
+            ("VirtualizationType.1", "hvm"),
+            ("InstanceRequirements.VCpuCount.Min", "2"),
+            ("InstanceRequirements.VCpuCount.Max", "2"),
+            ("InstanceRequirements.MemoryMiB.Min", "4096"),
+            ("InstanceRequirements.MemoryMiB.Max", "4096"),
+        ];
+        all.extend_from_slice(extra);
+        items_of(&body(instance::get_instance_types_from_requirements(
+            &Ec2Service::new(),
+            &req("GetInstanceTypesFromInstanceRequirements", &all),
+        )))
+    };
+    assert_eq!(
+        run(&[]),
+        [
+            "c5.large",
+            "c5a.large",
+            "c5ad.large",
+            "c5d.large",
+            "c6a.large",
+            "c6i.large",
+            "c6id.large",
+            "c6in.large",
+            "c7a.large",
+            "c7i-flex.large",
+            "c7i.large",
+            "c8a.large",
+            "c8i-flex.large",
+            "c8i.large",
+            "c8ib.large",
+            "c8id.large",
+            "c8in.large",
+            "c8ine.large",
+        ]
+    );
+    assert_eq!(
+        run(&[("InstanceRequirements.LocalStorageType.1", "ssd")]),
+        ["c5ad.large", "c5d.large", "c6id.large", "c8id.large"]
+    );
+}
+
+#[test]
+fn requirements_evaluate_what_the_api_reports() {
+    let has =
+        |params: &[(&str, &str)], t: &str| types_from_requirements(params).contains(&t.to_string());
+    let hibernate = ("InstanceRequirements.RequireHibernateSupport", "true");
+    assert!(has(&[hibernate], "m5.large"));
+    assert!(!has(&[hibernate], "g6.xlarge"));
+    let not_asked = ("InstanceRequirements.RequireHibernateSupport", "false");
+    assert!(has(&[not_asked], "g6.xlarge"));
+    let in_transit = ("InstanceRequirements.RequireEncryptionInTransit", "true");
+    assert!(has(&[in_transit], "m5n.large"));
+    assert!(!has(&[in_transit], "m5.large"));
+    // Baseline network bandwidth, summed over a type's cards.
+    let net = ("InstanceRequirements.NetworkBandwidthGbps.Min", "1");
+    assert!(!has(&[net], "m5.large"), "0.75 Gbps baseline");
+    assert!(has(
+        &[("InstanceRequirements.NetworkBandwidthGbps.Max", "1")],
+        "m5.large"
+    ));
+    assert!(has(
+        &[("InstanceRequirements.NetworkBandwidthGbps.Min", "3200")],
+        "p5.48xlarge"
+    ));
+    // Recorded not to narrow.
+    let everything = types_from_requirements(&[]);
+    for unnarrowed in [
+        (
+            "InstanceRequirements.SpotMaxPricePercentageOverLowestPrice",
+            "1",
+        ),
+        (
+            "InstanceRequirements.OnDemandMaxPricePercentageOverLowestPrice",
+            "1",
+        ),
+        (
+            "InstanceRequirements.MaxSpotPriceAsPercentageOfOptimalOnDemandPrice",
+            "1",
+        ),
+    ] {
+        assert_eq!(
+            types_from_requirements(&[unnarrowed]),
+            everything,
+            "{unnarrowed:?}"
+        );
+    }
 }
 
 #[test]
@@ -935,7 +1888,7 @@ fn requirements_honor_the_other_catalog_backed_fields() {
     ));
     assert!(!has(
         &[("InstanceRequirements.LocalStorage", "excluded")],
-        "p3.8xlarge"
+        "i3.large"
     ));
     assert!(!has(
         &[("InstanceRequirements.LocalStorageType.1", "ssd")],
@@ -1003,27 +1956,48 @@ fn requirements_honor_the_accelerator_fields() {
     let count_max_0 = ("InstanceRequirements.AcceleratorCount.Max", "0");
     assert!(has(&[count_max_0], "m5.large"));
     assert!(!has(&[count_max_0], "g4dn.xlarge"));
-    // An inference chip count is unknown, so it does not pass for 0.
+    // Inference chips have a real count now, so 0 excludes them.
     assert!(!has(&[count_max_0], "inf1.xlarge"));
+    // As does a fractional GPU's logical count, and a Trainium.
+    assert!(!has(&[count_max_0], "g6f.large"));
+    assert!(!has(&[count_max_0], "gr6f.4xlarge"));
+    assert!(!has(&[count_max_0], "trn1.2xlarge"));
+    assert!(!has(&[count_max_0], "vt1.3xlarge"));
     let gpu = ("InstanceRequirements.AcceleratorType.1", "gpu");
     assert!(has(&[gpu], "g4dn.xlarge"));
     assert!(!has(&[gpu], "f2.12xlarge"));
     assert!(!has(&[gpu], "m5.large"));
     let inference = ("InstanceRequirements.AcceleratorType.1", "inference");
     assert!(has(&[inference], "inf1.xlarge"));
+    // Recorded: only Inferentia is `inference`, Trainium is not.
+    assert!(!has(&[inference], "trn1.2xlarge"));
+    let media = ("InstanceRequirements.AcceleratorType.1", "media");
+    assert!(has(&[media], "vt1.3xlarge"));
     let nvidia = ("InstanceRequirements.AcceleratorManufacturer.1", "nvidia");
     assert!(has(&[nvidia], "g4dn.xlarge"));
-    assert!(!has(&[nvidia], "g4ad.xlarge"));
+    assert!(!has(&[nvidia], "inf1.xlarge"));
+    let amazon = (
+        "InstanceRequirements.AcceleratorManufacturer.1",
+        "amazon-web-services",
+    );
+    assert!(has(&[amazon], "inf1.xlarge"));
+    assert!(has(&[amazon], "trn1.2xlarge"));
     let t4 = ("InstanceRequirements.AcceleratorName.1", "t4");
     assert!(has(&[t4], "g4dn.xlarge"));
     assert!(!has(&[t4], "g5g.xlarge"));
+    let inferentia = ("InstanceRequirements.AcceleratorName.1", "inferentia");
+    assert!(has(&[inferentia], "inf1.xlarge"));
     let memory = (
         "InstanceRequirements.AcceleratorTotalMemoryMiB.Min",
         "16384",
     );
     assert!(has(&[memory], "g4dn.xlarge"));
     assert!(!has(&[memory], "m5.large"));
-    assert!(!has(&[memory], "f2.12xlarge"));
+    // An FPGA's memory is real too.
+    assert!(has(&[memory], "f2.12xlarge"));
+    let count_min_2 = ("InstanceRequirements.AcceleratorCount.Min", "2");
+    assert!(has(&[count_min_2], "f2.12xlarge"));
+    assert!(!has(&[count_min_2], "g4dn.xlarge"));
 }
 
 #[test]
@@ -1032,10 +2006,6 @@ fn a_known_diskless_type_has_zero_local_storage() {
     let found = types_from_requirements(&[none]);
     assert!(found.contains(&"m5.large".to_string()));
     assert!(!found.contains(&"i3.large".to_string()));
-    assert!(
-        !found.contains(&"p3.8xlarge".to_string()),
-        "unknown storage"
-    );
 }
 
 #[test]
@@ -1177,31 +2147,48 @@ fn requirements_max_results_must_make_progress() {
     assert_eq!(items_of(&body(run("1"))).len(), 1);
 }
 
+/// Settled by EC2's own record of dl1.24xlarge: `GpuInfo`, Habana, Gaudi HL-205. No
+/// Region the catalog knows sells it, so it is asked of one the catalog does not.
 #[test]
 fn dl1_counts_as_a_habana_gpu_not_an_inference_chip() {
-    let has =
-        |params: &[(&str, &str)], t: &str| types_from_requirements(params).contains(&t.to_string());
-    let dl1 = "dl1.24xlarge";
-    assert!(has(
-        &[("InstanceRequirements.AcceleratorType.1", "gpu")],
-        dl1
-    ));
-    assert!(!has(
-        &[("InstanceRequirements.AcceleratorType.1", "inference")],
-        dl1
-    ));
-    assert!(has(
-        &[("InstanceRequirements.AcceleratorManufacturer.1", "habana")],
-        dl1
-    ));
-    assert!(has(
-        &[("InstanceRequirements.AcceleratorName.1", "gaudi-hl-205")],
-        dl1
-    ));
+    let has = |requirement: (&str, &str)| {
+        let mut r = req(
+            "GetInstanceTypesFromInstanceRequirements",
+            &[
+                ("ArchitectureType.1", "x86_64"),
+                ("VirtualizationType.1", "hvm"),
+                ("InstanceRequirements.VCpuCount.Min", "96"),
+                ("InstanceRequirements.VCpuCount.Max", "96"),
+                ("InstanceRequirements.MemoryMiB.Min", "1"),
+                requirement,
+            ],
+        );
+        r.region = "cn-north-1".to_string();
+        items_of(&body(instance::get_instance_types_from_requirements(
+            &Ec2Service::new(),
+            &r,
+        )))
+        .contains(&"dl1.24xlarge".to_string())
+    };
+    assert!(has(("InstanceRequirements.AcceleratorType.1", "gpu")));
+    assert!(!has((
+        "InstanceRequirements.AcceleratorType.1",
+        "inference"
+    )));
+    assert!(has((
+        "InstanceRequirements.AcceleratorManufacturer.1",
+        "habana"
+    )));
+    assert!(has((
+        "InstanceRequirements.AcceleratorName.1",
+        "gaudi-hl-205"
+    )));
+    assert!(has(("InstanceRequirements.AcceleratorCount.Min", "8")));
+    assert!(!has(("InstanceRequirements.AcceleratorCount.Min", "9")));
 }
 
 #[test]
-fn ipv6_addresses_per_interface_filters_on_the_reported_zero() {
+fn ipv6_addresses_per_interface_filters_on_the_reported_value() {
     let names = |value: &str| {
         items_of(&describe_types(&[
             ("Filter.1.Name", "network-info.ipv6-addresses-per-interface"),
@@ -1211,7 +2198,6 @@ fn ipv6_addresses_per_interface_filters_on_the_reported_zero() {
     let zero = names("0");
     assert!(zero.contains(&"c1.medium".to_string()), "{zero:?}");
     assert!(!zero.contains(&"m7g.large".to_string()), "{zero:?}");
-    assert!(!zero.contains(&"p3.8xlarge".to_string()), "{zero:?}");
     // What the response says, the filter finds.
     for name in &zero {
         let one = describe_types(&[("InstanceType.1", name)]);
@@ -1220,31 +2206,7 @@ fn ipv6_addresses_per_interface_filters_on_the_reported_zero() {
             "{name}: {one}"
         );
     }
-    // Any other limit is not in the data, so it matches nothing.
-    assert!(names("15").is_empty());
-}
-
-#[test]
-fn requirements_with_no_data_are_accepted_without_narrowing() {
-    let base = types_from_requirements(&[]);
-    for param in [
-        ("InstanceRequirements.RequireHibernateSupport", "true"),
-        ("InstanceRequirements.RequireEncryptionInTransit", "true"),
-        (
-            "InstanceRequirements.SpotMaxPricePercentageOverLowestPrice",
-            "50",
-        ),
-        (
-            "InstanceRequirements.OnDemandMaxPricePercentageOverLowestPrice",
-            "50",
-        ),
-        (
-            "InstanceRequirements.MaxSpotPriceAsPercentageOfOptimalOnDemandPrice",
-            "50",
-        ),
-    ] {
-        assert_eq!(types_from_requirements(&[param]), base, "{}", param.0);
-    }
+    assert!(names("10").contains(&"m5.large".to_string()));
 }
 
 #[test]
@@ -1284,15 +2246,17 @@ fn the_three_catalog_operations_agree_on_the_region() {
         ("InstanceRequirements.MemoryMiB.Min", "1"),
     ];
     let names = |region: &str| {
-        let types = items_of(&body(instance::describe_instance_types(
-            &svc,
-            &in_region("DescribeInstanceTypes", region, &[]),
-        )));
-        let offerings = items_of(&body(
-            crate::service::rest::describe_instance_type_offerings(
-                &svc,
-                &in_region("DescribeInstanceTypeOfferings", region, &[]),
-            ),
+        let types = items_of(&all_pages(
+            instance::describe_instance_types,
+            "DescribeInstanceTypes",
+            &[],
+            Some(region),
+        ));
+        let offerings = items_of(&all_pages(
+            crate::service::rest::describe_instance_type_offerings,
+            "DescribeInstanceTypeOfferings",
+            &[],
+            Some(region),
         ));
         let from_requirements = items_of(&body(instance::get_instance_types_from_requirements(
             &svc,
@@ -1304,7 +2268,7 @@ fn the_three_catalog_operations_agree_on_the_region() {
         )));
         (types, offerings, from_requirements)
     };
-    for region in ["us-east-1", "eu-west-1", "cn-north-1"] {
+    for region in ["us-east-1", "us-west-2", "cn-north-1"] {
         let (types, offerings, from_requirements) = names(region);
         assert_eq!(types, offerings, "{region}");
         assert!(
@@ -1324,10 +2288,12 @@ fn the_three_catalog_operations_agree_on_the_region() {
 #[test]
 fn instance_type_offerings_follow_the_catalog() {
     let offerings = |params: &[(&str, &str)]| {
-        body(crate::service::rest::describe_instance_type_offerings(
-            &Ec2Service::new(),
-            &req("DescribeInstanceTypeOfferings", params),
-        ))
+        all_pages(
+            crate::service::rest::describe_instance_type_offerings,
+            "DescribeInstanceTypeOfferings",
+            params,
+            None,
+        )
     };
     let in_region = offerings(&[]);
     assert!(in_region.contains("<instanceType>m7g.large</instanceType>"));
@@ -1533,30 +2499,22 @@ fn quota_arithmetic_saturates() {
 }
 
 #[tokio::test]
-async fn an_unknown_instance_type_is_refused_only_while_its_vcpu_quota_is_enforced() {
+async fn an_unknown_instance_type_is_refused() {
     let one = [
         ("InstanceType", "m5.huge"),
         ("MinCount", "1"),
         ("MaxCount", "1"),
     ];
-    body(run(&seeded(Ec2Service::new()), &one).await);
-    let svc = seeded(enforcing(&[(ON_DEMAND_STANDARD, 100.0)]));
-    let e = crate::test_support::err_of(run(&svc, &one).await);
-    assert_eq!(e.code(), "InvalidParameterValue");
-    assert_eq!(e.message(), "Invalid value 'm5.huge' for InstanceType.");
-    // A family whose quota is not enforced is not refused.
-    body(
-        run(
-            &svc,
-            &[
-                ("InstanceType", "g5.huge"),
-                ("MinCount", "1"),
-                ("MaxCount", "1"),
-            ],
-        )
-        .await,
-    );
-    // Spot requests too.
+    // Whether or not a quota is enforced.
+    for svc in [
+        seeded(Ec2Service::new()),
+        seeded(enforcing(&[(ON_DEMAND_STANDARD, 100.0)])),
+    ] {
+        let e = crate::test_support::err_of(run(&svc, &one).await);
+        assert_eq!(e.code(), "InvalidParameterValue");
+        assert_eq!(e.message(), "Invalid value 'm5.huge' for InstanceType.");
+    }
+    // Spot requests only while their quota is.
     let svc = seeded(enforcing(&[(SPOT_STANDARD, 100.0)]));
     let r = fleet::request_spot_instances(
         &svc,
@@ -1705,14 +2663,14 @@ async fn starting_adds_vcpus_only_for_stopped_instances_off_dedicated_hosts() {
 
 #[tokio::test]
 async fn starting_an_unknown_type_counts_no_vcpus() {
-    // Launched while the quota was not enforced.
+    // A launch refuses such a type, but an attribute change does not check it.
     let svc = seeded(Ec2Service::new());
     let id = xml(
         &body(
             run(
                 &svc,
                 &[
-                    ("InstanceType", "m5.huge"),
+                    ("InstanceType", "t3.micro"),
                     ("MinCount", "1"),
                     ("MaxCount", "1"),
                 ],
@@ -1722,6 +2680,13 @@ async fn starting_an_unknown_type_counts_no_vcpus() {
         "instanceId",
     );
     body(instance::stop_instances(&svc, &req("StopInstances", &[("InstanceId.1", &id)])).await);
+    body(instance::modify_instance_attribute(
+        &svc,
+        &req(
+            "ModifyInstanceAttribute",
+            &[("InstanceId", &id), ("InstanceType.Value", "m5.huge")],
+        ),
+    ));
     let svc = Ec2Service::with_state(svc.state.clone()).with_quota_provider(Some(Arc::new(
         FixedQuotas::default().with(ON_DEMAND_STANDARD.service, ON_DEMAND_STANDARD.code, 0.0),
     )));

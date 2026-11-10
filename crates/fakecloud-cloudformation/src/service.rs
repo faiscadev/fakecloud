@@ -2568,8 +2568,13 @@ impl CloudFormationService {
                 // Delete resources in reverse order, honoring each resource's
                 // DeletionPolicy (Retain/Snapshot leaves the physical resource
                 // in place instead of destroying it).
+                // A resource whose delete fails stays, and fails the stack's delete
+                // (`DELETE_FAILED`), as on AWS; the rest are still deleted.
+                let mut failed: Vec<(String, String)> = Vec::new();
                 for resource in resources.iter().rev() {
-                    let _ = provisioner.delete_resource_respecting_policy(resource);
+                    if let Err(reason) = provisioner.delete_resource_respecting_policy(resource) {
+                        failed.push((resource.logical_id.clone(), reason));
+                    }
                 }
 
                 // Reap the REAL backing containers for the deleted container
@@ -2589,7 +2594,17 @@ impl CloudFormationService {
 
                 // Re-acquire the write lock to update stack status
                 let mut accounts = self.state.write();
-                if let Some(state) = accounts.regional_get_mut(&req.account_id, &req.region) {
+                let outcome = if failed.is_empty() {
+                    "DELETE_COMPLETE"
+                } else {
+                    "DELETE_FAILED"
+                };
+                if !failed.is_empty() {
+                    if let Some(state) = accounts.regional_get_mut(&req.account_id, &req.region) {
+                        record_delete_failure(state, &stack_id, &failed);
+                    }
+                } else if let Some(state) = accounts.regional_get_mut(&req.account_id, &req.region)
+                {
                     if let Some(stack) = state.stacks.values_mut().find(|s| s.stack_id == stack_id)
                     {
                         stack.status = "DELETE_COMPLETE".to_string();
@@ -2633,7 +2648,7 @@ impl CloudFormationService {
                     &notification_arns,
                     &stack_name_for_notif,
                     &stack_id,
-                    "DELETE_COMPLETE",
+                    outcome,
                 );
             }
         }
@@ -4101,6 +4116,64 @@ pub(crate) fn record_event_with_reason(
         event["ResourceStatusReason"] = json!(reason);
     }
     log.push(event);
+}
+
+/// A stack delete that left `failed` (logical id, reason) behind: those resources
+/// stay on the stack as `DELETE_FAILED` with the service's reason, everything else
+/// is gone, and the stack is `DELETE_FAILED` naming them, as on AWS, so the
+/// delete can be retried once the cause is fixed. Its exports, policy and change
+/// sets stay with it.
+fn record_delete_failure(
+    state: &mut crate::state::CloudFormationState,
+    stack_id: &str,
+    failed: &[(String, String)],
+) {
+    let Some(stack) = state.stacks.values_mut().find(|s| s.stack_id == stack_id) else {
+        return;
+    };
+    let names: Vec<&str> = failed.iter().map(|(id, _)| id.as_str()).collect();
+    let reason = format!(
+        "The following resource(s) failed to delete: [{}]. ",
+        names.join(", ")
+    );
+    stack.status = "DELETE_FAILED".to_string();
+    stack.status_reason = Some(reason.clone());
+    stack
+        .resources
+        .retain(|r| failed.iter().any(|(id, _)| *id == r.logical_id));
+    let mut rows = Vec::new();
+    for r in &mut stack.resources {
+        r.status = "DELETE_FAILED".to_string();
+        if let Some((_, why)) = failed.iter().find(|(id, _)| *id == r.logical_id) {
+            rows.push((
+                r.logical_id.clone(),
+                r.physical_id.clone(),
+                r.resource_type.clone(),
+                why.clone(),
+            ));
+        }
+    }
+    let stack_name = stack.name.clone();
+    for (logical_id, physical_id, resource_type, why) in rows {
+        record_event_with_reason(
+            state,
+            stack_id,
+            &stack_name,
+            &logical_id,
+            &physical_id,
+            &resource_type,
+            "DELETE_FAILED",
+            Some(&why),
+        );
+    }
+    record_stack_status_event_with_reason(
+        state,
+        stack_id,
+        &stack_name,
+        "AWS::CloudFormation::Stack",
+        "DELETE_FAILED",
+        Some(&reason),
+    );
 }
 
 /// Emits IN_PROGRESS + COMPLETE event pairs for every resource change
@@ -6878,7 +6951,7 @@ mod tests {
             "TemplateBody".to_string(),
             r#"{"Resources":{
                 "B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"pol-bucket"}},
-                "BP":{"Type":"AWS::S3::BucketPolicy","Properties":{"Bucket":"pol-bucket","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","Principal":"*"}]}}}
+                "BP":{"Type":"AWS::S3::BucketPolicy","Properties":{"Bucket":"pol-bucket","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","Principal":{"AWS":"arn:aws:iam::123456789012:root"}}]}}}
             }}"#
             .to_string(),
         );
@@ -6900,7 +6973,7 @@ mod tests {
             "TemplateBody".to_string(),
             r#"{"Resources":{
                 "B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"pol-bucket"}},
-                "BP":{"Type":"AWS::S3::BucketPolicy","Properties":{"Bucket":"pol-bucket","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*","Principal":"*"}]}}}
+                "BP":{"Type":"AWS::S3::BucketPolicy","Properties":{"Bucket":"pol-bucket","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*","Principal":{"AWS":"arn:aws:iam::123456789012:root"}}]}}}
             }}"#
             .to_string(),
         );

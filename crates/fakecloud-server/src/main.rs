@@ -20,6 +20,7 @@ mod dns;
 mod dynamodb_streams_lambda_poller;
 mod ec2_imds;
 mod ecs_creds;
+mod firehose_topology;
 mod imds;
 mod introspection;
 mod kinesis_lambda_firehose_poller;
@@ -2564,6 +2565,7 @@ async fn main() {
                                 let mut guard = ec2_state.write();
                                 for (_, _, st) in guard.iter_regional_mut() {
                                     st.ensure_public_images_seeded();
+                                    st.ensure_default_subnets_backfilled();
                                 }
                             }
                             tracing::info!(
@@ -5568,7 +5570,20 @@ async fn main() {
     };
     let mut bedrock_agent_runtime_service =
         BedrockAgentRuntimeService::new(bedrock_agent_runtime_state.clone())
-            .with_agent_state(bedrock_agent_state.clone());
+            .with_agent_state(bedrock_agent_state.clone())
+            .with_guardrail_check({
+                let bedrock_state = bedrock_state.clone();
+                Arc::new(move |check| {
+                    fakecloud_bedrock::guardrails::check_text(
+                        &bedrock_state,
+                        check.account_id,
+                        check.guardrail_id,
+                        check.guardrail_version,
+                        check.source,
+                        check.text,
+                    )
+                })
+            });
     if let Some(store) = bedrock_agent_runtime_snapshot_store {
         bedrock_agent_runtime_service = bedrock_agent_runtime_service.with_snapshot_store(store);
     }
@@ -7547,6 +7562,10 @@ async fn main() {
     if let Some(h) = kinesis_poller_snapshot_hook {
         kinesis_lambda_firehose_poller = kinesis_lambda_firehose_poller.with_snapshot_hook(h);
     }
+    firehose_engine.set_topology(Arc::new(firehose_topology::ServerFirehoseTopology::new(
+        kinesis_state.clone(),
+        opensearch_state.clone(),
+    )));
     let kinesis_lambda_firehose_poller = Arc::new(kinesis_lambda_firehose_poller);
     tokio::spawn(kinesis_lambda_firehose_poller.clone().run());
     let mut dynamodb_streams_poller =
@@ -12303,6 +12322,7 @@ async fn main() {
                                 "outputChunks": inv.output_chunks,
                                 "trace": inv.trace,
                                 "citations": inv.citations,
+                                "flowOutputs": inv.flow_outputs,
                                 "invokedAt": inv.timestamp.to_rfc3339(),
                                 "durationMs": inv.duration_ms,
                             }));

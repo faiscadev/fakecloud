@@ -33,6 +33,10 @@ MULTI = {
 }
 
 
+# Operations whose MaxResults refusal was recorded from real EC2.
+INVALID_MAX_RESULTS = {"DescribeInstanceTypeOfferings", "DescribeInstanceTypes"}
+
+
 def xml_name(member_name, member):
     return member.get("traits", {}).get("smithy.api#xmlName") or (
         member_name[0].lower() + member_name[1:]
@@ -84,7 +88,7 @@ def main():
         "// aws-models/ec2.json. Do not edit by hand; rerun the script after a model",
         "// refresh.",
         "",
-        "use crate::pagination::{PagedOp, SetLayout};",
+        "use crate::pagination::{MaxResultsRefusal, PagedOp, SetLayout};",
         "",
         "/// Every EC2 operation whose input models `NextToken`, sorted by name.",
         "pub(crate) const PAGED_OPS: &[PagedOp] = &[",
@@ -97,8 +101,9 @@ def main():
             rng_s = f"Some(({lo}, {hi}))"
         else:
             rng_s = "None"
+        refusal = "InvalidMaxResults" if op in INVALID_MAX_RESULTS else "Generic"
         lines.append(
-            f'    PagedOp {{ action: "{op}", sets: &[{sets_s}], layout: SetLayout::{mode}, max_results: {rng_s} }},'
+            f'    PagedOp {{ action: "{op}", sets: &[{sets_s}], layout: SetLayout::{mode}, max_results: {rng_s}, refusal: MaxResultsRefusal::{refusal} }},'
         )
     lines.append("];")
     lines.append("")

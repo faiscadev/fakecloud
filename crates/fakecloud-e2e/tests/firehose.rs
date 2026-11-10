@@ -1242,3 +1242,91 @@ async fn firehose_append_delimiter_to_record_processor() {
         assert_eq!(body.as_ref(), expected, "version {version}");
     }
 }
+
+/// A prefix with expressions is the object's whole directory, as recorded:
+/// `s3expr/2026/QXksZOYpSoo/<stream>-1-<time>-<uuid>`, with no date hierarchy.
+#[tokio::test]
+async fn prefix_expressions_are_evaluated_for_s3_objects() {
+    let server = TestServer::start().await;
+    let firehose = server.firehose_client().await;
+    let s3 = server.s3_client().await;
+    s3.create_bucket()
+        .bucket("expr-bucket")
+        .send()
+        .await
+        .unwrap();
+    let destination = |prefix: &str, error_prefix: &str| {
+        aws_sdk_firehose::types::ExtendedS3DestinationConfiguration::builder()
+            .role_arn("arn:aws:iam::123456789012:role/firehose")
+            .bucket_arn("arn:aws:s3:::expr-bucket")
+            .prefix(prefix)
+            .error_output_prefix(error_prefix)
+            .buffering_hints(
+                aws_sdk_firehose::types::BufferingHints::builder()
+                    .size_in_mbs(1)
+                    .interval_in_seconds(0)
+                    .build(),
+            )
+            .build()
+            .unwrap()
+    };
+    let error = firehose
+        .create_delivery_stream()
+        .delivery_stream_name("bad")
+        .extended_s3_destination_configuration(destination("!{bogus:x}/", "e/"))
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.as_service_error().unwrap().meta().message(),
+        Some(
+            "The supplied prefix(es) do not satisfy the following constraint: Namespace to the \
+             left of colon (bogus) is an invalid keyword!"
+        )
+    );
+    firehose
+        .create_delivery_stream()
+        .delivery_stream_name("expr")
+        .extended_s3_destination_configuration(destination(
+            "s3expr/!{timestamp:yyyy}/!{firehose:random-string}/",
+            "s3err/!{firehose:error-output-type}/",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let year = chrono::Utc::now().format("%Y").to_string();
+    firehose
+        .put_record()
+        .delivery_stream_name("expr")
+        .record(
+            aws_sdk_firehose::types::Record::builder()
+                .data(aws_sdk_firehose::primitives::Blob::new("expr"))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let key = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let listed = s3
+                .list_objects_v2()
+                .bucket("expr-bucket")
+                .send()
+                .await
+                .unwrap();
+            if let Some(key) = listed.contents().first().and_then(|object| object.key()) {
+                return key.to_owned();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("delivered");
+    let parts: Vec<&str> = key.split('/').collect();
+    assert_eq!(parts.len(), 4, "{key}");
+    assert_eq!(parts[0], "s3expr");
+    assert_eq!(parts[1], year);
+    assert_eq!(parts[2].len(), 11, "{key}");
+    assert!(parts[3].starts_with("expr-1-"), "{key}");
+}

@@ -73,9 +73,25 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListTagsForResource",
 ];
 
+/// What a guardrail is asked to check.
+pub struct GuardrailRequest<'a> {
+    pub account_id: &'a str,
+    pub guardrail_id: &'a str,
+    pub guardrail_version: &'a str,
+    /// `INPUT` or `OUTPUT`.
+    pub source: &'a str,
+    pub text: &'a str,
+}
+
+/// Bedrock's guardrail evaluation: `Some(message)` when the guardrail intervened
+/// and the text to reply with instead. A missing guardrail is a 404 error.
+pub type GuardrailCheck =
+    Arc<dyn Fn(&GuardrailRequest<'_>) -> Result<Option<String>, AwsServiceError> + Send + Sync>;
+
 pub struct BedrockAgentRuntimeService {
     state: SharedBedrockAgentRuntimeState,
     agent_state: Option<fakecloud_bedrock_agent::SharedBedrockAgentState>,
+    guardrail_check: Option<GuardrailCheck>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
 }
@@ -85,9 +101,16 @@ impl BedrockAgentRuntimeService {
         Self {
             state,
             agent_state: None,
+            guardrail_check: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
+    }
+
+    /// Wire Bedrock's guardrails in, for `guardrailConfiguration` on requests.
+    pub fn with_guardrail_check(mut self, check: GuardrailCheck) -> Self {
+        self.guardrail_check = Some(check);
+        self
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
@@ -748,6 +771,7 @@ async fn handle_invoke_agent(
             output_chunks: 1,
             trace: None,
             citations: Vec::new(),
+            flow_outputs: Vec::new(),
             timestamp: Utc::now(),
             duration_ms: start.elapsed().as_millis() as u64,
         });
@@ -770,15 +794,35 @@ async fn handle_invoke_agent(
     })
 }
 
+/// `InvokeFlow` takes exactly one input, naming a node and output and carrying a
+/// document.
+fn validated_flow_input(body: &Value) -> Result<&Value, AwsServiceError> {
+    let inputs = body
+        .get("inputs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| validation("inputs is required"))?;
+    let [input] = inputs.as_slice() else {
+        return Err(validation("inputs must contain exactly one input"));
+    };
+    if !input["nodeName"].is_string() {
+        return Err(validation("inputs.nodeName is required"));
+    }
+    if !input["nodeOutputName"].is_null() && !input["nodeOutputName"].is_string() {
+        return Err(validation("inputs.nodeOutputName must be a string"));
+    }
+    if input["content"]["document"].is_null() {
+        return Err(validation("inputs.content.document is required"));
+    }
+    Ok(input)
+}
+
 async fn handle_invoke_flow(
     svc: &BedrockAgentRuntimeService,
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
     let (flow_identifier, alias_identifier) = validate_flow_labels(body)?;
-    if body.get("inputs").is_none() {
-        return Err(validation("inputs is required"));
-    }
+    let first_input = validated_flow_input(body)?;
     // executionId optional, length 2..100, pattern session-id-like
     let execution_id_opt = req_str(body, "executionId");
     if let Some(ref s) = execution_id_opt {
@@ -802,10 +846,44 @@ async fn handle_invoke_flow(
     // A caller-supplied executionId continues that execution (a multi-turn
     // conversation); otherwise the service mints one.
     let execution_id = execution_id_opt.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let input = req_str(body, "input").unwrap_or_default();
+    let input_document = &first_input["content"]["document"];
+    let input = match input_document {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    let start_node = first_input["nodeName"].as_str().unwrap_or_default();
+    let start_output = first_input["nodeOutputName"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            crate::flow_run::default_input_output(flow.definition.as_ref(), start_node)
+        });
+    let start_output = start_output.as_str();
+    crate::flow_run::validate_input(flow.definition.as_ref(), start_node, start_output)
+        .map_err(|message| validation(&message))?;
 
     let start = std::time::Instant::now();
-    let document = format!("Flow output for input: {}", input);
+    // A node failing is a failure of the run, not of the request: the stream has
+    // started, so it carries what ran and then the error.
+    let flow_result = crate::flow_run::run(
+        flow.definition.as_ref(),
+        start_node,
+        start_output,
+        input_document,
+    );
+    let status = if flow_result.failure.is_some() {
+        "Failed"
+    } else {
+        "Succeeded"
+    };
+    let document = flow_result
+        .outputs
+        .first()
+        .map(|(_, value)| match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        })
+        .unwrap_or_default();
 
     {
         let mut accts = svc.state.write();
@@ -824,10 +902,8 @@ async fn handle_invoke_flow(
                 existing.status
             )));
         }
-        s.flow_executions.insert(
-            key,
-            new_execution(req, flow, execution_id.clone(), "Succeeded"),
-        );
+        s.flow_executions
+            .insert(key, new_execution(req, flow, execution_id.clone(), status));
         s.invocations.push(InvocationRecord {
             invocation_id: execution_id.clone(),
             op: "invoke_flow".to_string(),
@@ -836,15 +912,40 @@ async fn handle_invoke_flow(
             session_id: None,
             input: input.clone(),
             output: document.clone(),
-            output_chunks: 1,
+            output_chunks: flow_result.outputs.len() as u32,
             trace: None,
             citations: Vec::new(),
+            flow_outputs: flow_result
+                .outputs
+                .iter()
+                .map(|(node, value)| json!({ "nodeName": node, "document": value }))
+                .collect(),
             timestamp: Utc::now(),
             duration_ms: start.elapsed().as_millis() as u64,
         });
     }
 
-    let frame = crate::eventstream::flow_output_frame("StartNode", &document);
+    // Trace events, then outputs, then completion, as recorded from AWS.
+    let mut frame = Vec::new();
+    if body["enableTrace"].as_bool() == Some(true) {
+        for trace in flow_result.traces {
+            frame.extend(crate::eventstream::flow_trace_frame(trace));
+        }
+    }
+    for (node, value) in &flow_result.outputs {
+        frame.extend(crate::eventstream::flow_output_frame(node, value));
+    }
+    // `FlowCompletionReason` is only `SUCCESS` or `INPUT_REQUIRED`, so a failed
+    // run ends on the stream's `validationException` member instead of a
+    // completion event. Every failure here is the definition or the data it was
+    // given not fitting a node.
+    match &flow_result.failure {
+        Some(message) => frame.extend(crate::eventstream::exception_frame(
+            "validationException",
+            message,
+        )),
+        None => frame.extend(crate::eventstream::flow_completion_frame()),
+    }
     let mut headers = http::HeaderMap::new();
     if let Ok(value) = http::HeaderValue::from_str(&execution_id) {
         headers.insert("x-amz-bedrock-flow-execution-id", value);
@@ -910,6 +1011,7 @@ async fn handle_invoke_inline_agent(
             output_chunks: 1,
             trace: None,
             citations: Vec::new(),
+            flow_outputs: Vec::new(),
             timestamp: Utc::now(),
             duration_ms: start.elapsed().as_millis() as u64,
         });
@@ -1033,6 +1135,7 @@ async fn handle_retrieve(
             output_chunks: 1,
             trace: Some(json!({ "knowledgeBaseId": kb_id })),
             citations: Vec::new(),
+            flow_outputs: Vec::new(),
             timestamp: Utc::now(),
             duration_ms: start.elapsed().as_millis() as u64,
         });
@@ -1081,24 +1184,9 @@ async fn handle_retrieve_and_generate(
         .unwrap_or_default()
         .to_string();
     let start = std::time::Instant::now();
-    let output_text = format!("Generated response for: {}", input);
-    let citation = json!({
-        "generatedResponsePart": {
-            "textResponsePart": {
-                "text": output_text,
-                "span": { "start": 0, "end": 30 }
-            }
-        },
-        "retrievedReferences": [
-            {
-                "content": { "text": "Reference text from knowledge base" },
-                "location": {
-                    "type": "CONFLUENCE",
-                    "confluenceLocation": { "url": "https://example.com/doc" }
-                }
-            }
-        ]
-    });
+    let answer = rag_answer(svc, req, body, &input)?;
+    let output_text = answer.text.clone();
+    let citations = answer.citations();
     {
         let mut accts = svc.state.write();
         let s = accts.get_or_create(&req.account_id);
@@ -1112,17 +1200,126 @@ async fn handle_retrieve_and_generate(
             output: output_text.clone(),
             output_chunks: 1,
             trace: None,
-            citations: vec![citation.clone()],
+            citations: citations.clone(),
+            flow_outputs: Vec::new(),
             timestamp: Utc::now(),
             duration_ms: start.elapsed().as_millis() as u64,
         });
     }
 
-    Ok(AwsResponse::ok_json(json!({
+    let mut response = json!({
         "sessionId": session_id,
         "output": { "text": output_text },
-        "citations": [citation]
-    })))
+        "citations": citations,
+    });
+    if let Some(action) = answer.guardrail_action {
+        response["guardrailAction"] = json!(action);
+    }
+    Ok(AwsResponse::ok_json(response))
+}
+
+/// The citation a knowledge-base answer carries: the answer's text span and the
+/// reference it came from.
+fn rag_citation(output_text: &str) -> Value {
+    json!({
+        "generatedResponsePart": {
+            "textResponsePart": {
+                "text": output_text,
+                "span": { "start": 0, "end": output_text.chars().count().saturating_sub(1) }
+            }
+        },
+        "retrievedReferences": [
+            {
+                "content": { "text": "Reference text from knowledge base" },
+                "location": {
+                    "type": "CONFLUENCE",
+                    "confluenceLocation": { "url": "https://example.com/doc" }
+                }
+            }
+        ]
+    })
+}
+
+/// A knowledge-base answer after any guardrail configured on the request.
+struct RagAnswer {
+    text: String,
+    intervened: bool,
+    guardrail_action: Option<&'static str>,
+}
+
+impl RagAnswer {
+    fn citations(&self) -> Vec<Value> {
+        if self.intervened {
+            Vec::new()
+        } else {
+            vec![rag_citation(&self.text)]
+        }
+    }
+}
+
+/// The `guardrailConfiguration` of a RetrieveAndGenerate request, from whichever
+/// source type it uses.
+fn rag_guardrail_configuration(body: &Value) -> Option<&Value> {
+    let config = body.get("retrieveAndGenerateConfiguration")?;
+    ["knowledgeBaseConfiguration", "externalSourcesConfiguration"]
+        .iter()
+        .find_map(|source| config[*source]["generationConfiguration"].get("guardrailConfiguration"))
+}
+
+/// Generate the answer and put the query and the answer through the configured
+/// guardrail, as the service does around the model call.
+fn rag_answer(
+    svc: &BedrockAgentRuntimeService,
+    req: &AwsRequest,
+    body: &Value,
+    query: &str,
+) -> Result<RagAnswer, AwsServiceError> {
+    let text = format!("Generated response for: {}", query);
+    let Some(config) = rag_guardrail_configuration(body) else {
+        return Ok(RagAnswer {
+            text,
+            intervened: false,
+            guardrail_action: None,
+        });
+    };
+    let id = config["guardrailId"]
+        .as_str()
+        .ok_or_else(|| validation("guardrailConfiguration.guardrailId is required"))?;
+    let version = config["guardrailVersion"]
+        .as_str()
+        .ok_or_else(|| validation("guardrailConfiguration.guardrailVersion is required"))?;
+    let missing = || {
+        validation("The guardrail identifier or version provided in the request does not exist.")
+    };
+    let check = svc.guardrail_check.as_ref().ok_or_else(missing)?;
+    for (source, content) in [("INPUT", query), ("OUTPUT", text.as_str())] {
+        let verdict = check(&GuardrailRequest {
+            account_id: &req.account_id,
+            guardrail_id: id,
+            guardrail_version: version,
+            source,
+            text: content,
+        })
+        .map_err(|err| {
+            if err.status() == StatusCode::NOT_FOUND {
+                missing()
+            } else {
+                err
+            }
+        })?;
+        if let Some(blocked) = verdict {
+            return Ok(RagAnswer {
+                text: blocked,
+                intervened: true,
+                guardrail_action: Some("INTERVENED"),
+            });
+        }
+    }
+    Ok(RagAnswer {
+        text,
+        intervened: false,
+        guardrail_action: Some("NONE"),
+    })
 }
 
 async fn handle_retrieve_and_generate_stream(
@@ -1151,7 +1348,9 @@ async fn handle_retrieve_and_generate_stream(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let output_text = format!("Generated response for: {}", input);
+    let answer = rag_answer(svc, req, body, &input)?;
+    let output_text = answer.text.clone();
+    let citations = answer.citations();
     {
         let mut accts = svc.state.write();
         let s = accts.get_or_create(&req.account_id);
@@ -1165,22 +1364,36 @@ async fn handle_retrieve_and_generate_stream(
             output: output_text.clone(),
             output_chunks: 1,
             trace: None,
-            citations: Vec::new(),
+            citations: citations.clone(),
+            flow_outputs: Vec::new(),
             timestamp: Utc::now(),
             duration_ms: 0,
         });
     }
 
     // Emit a single output event frame (eventstream payload).
-    let event_body = serde_json::to_vec(&json!({ "output": { "text": output_text } })).unwrap();
-    let frame = crate::eventstream::encode_frame(
-        &[
-            (":event-type", "output"),
-            (":content-type", "application/json"),
-            (":message-type", "event"),
-        ],
-        &event_body,
-    );
+    // The payload is the event's own members; `:event-type` names the event.
+    let event_body = serde_json::to_vec(&json!({ "text": output_text })).unwrap();
+    let event = |event_type: &str, payload: &[u8]| {
+        crate::eventstream::encode_frame(
+            &[
+                (":event-type", event_type),
+                (":content-type", "application/json"),
+                (":message-type", "event"),
+            ],
+            payload,
+        )
+    };
+    let mut frame = event("output", &event_body);
+    for citation in &citations {
+        frame.extend(event("citation", &serde_json::to_vec(citation).unwrap()));
+    }
+    if let Some(action) = answer.guardrail_action {
+        frame.extend(event(
+            "guardrail",
+            &serde_json::to_vec(&json!({ "action": action })).unwrap(),
+        ));
+    }
 
     let mut headers = http::HeaderMap::new();
     if let Ok(value) = http::HeaderValue::from_str(&session_id) {
@@ -2548,6 +2761,7 @@ mod tests {
             arn: format!("arn:aws-cn:bedrock:cn-north-1:{ACCT}:flow/{id}"),
             customer_encryption_key_arn: None,
             latest_version: 1,
+            validations: None,
         }
     }
 
@@ -2566,11 +2780,11 @@ mod tests {
     }
 
     fn draft_definition() -> Value {
-        json!({"nodes": [{"name": "Draft", "type": "Input"}], "connections": []})
+        json!({"nodes": [{"name": "Draft", "type": "Input"}, {"name": "Input", "type": "Input"}], "connections": []})
     }
 
     fn v1_definition() -> Value {
-        json!({"nodes": [{"name": "V1", "type": "Input"}], "connections": []})
+        json!({"nodes": [{"name": "V1", "type": "Input"}, {"name": "Input", "type": "Input"}], "connections": []})
     }
 
     /// A runtime wired to Bedrock Agents state holding FLOW (draft + version 1,
@@ -2618,7 +2832,7 @@ mod tests {
             handle_start_flow_execution(
                 svc,
                 &cn_request(),
-                &json!({"flowIdentifier": flow, "flowAliasIdentifier": alias, "inputs": []}),
+                &json!({"flowIdentifier": flow, "flowAliasIdentifier": alias, "inputs": [{"nodeName": "Input", "nodeOutputName": "document", "content": {"document": "hi"}}]}),
             )
             .await
             .unwrap(),
@@ -2893,7 +3107,7 @@ mod tests {
                 "arn:aws-cn:bedrock:cn-north-1:999999999999:flow/ABCDEFGHIJ/alias/ALIASV1AAA",
             ),
         ] {
-            let b = json!({"flowIdentifier": flow, "flowAliasIdentifier": alias, "inputs": []});
+            let b = json!({"flowIdentifier": flow, "flowAliasIdentifier": alias, "inputs": [{"nodeName": "Input", "nodeOutputName": "document", "content": {"document": "hi"}}]});
             let err = handle_start_flow_execution(&svc, &req, &b)
                 .await
                 .err()
@@ -2909,7 +3123,7 @@ mod tests {
         let bare = BedrockAgentRuntimeService::new(Arc::new(RwLock::new(
             BedrockAgentRuntimeAccounts::new(),
         )));
-        let b = json!({"flowIdentifier": FLOW, "flowAliasIdentifier": "TSTALIASID", "inputs": []});
+        let b = json!({"flowIdentifier": FLOW, "flowAliasIdentifier": "TSTALIASID", "inputs": [{"nodeName": "Input", "nodeOutputName": "document", "content": {"document": "hi"}}]});
         let err = handle_start_flow_execution(&bare, &req, &b)
             .await
             .err()
@@ -3102,7 +3316,7 @@ mod tests {
             &json!({
                 "flowIdentifier": FLOW,
                 "flowAliasIdentifier": ALIAS_V1,
-                "inputs": [],
+                "inputs": [{"nodeName": "Input", "nodeOutputName": "document", "content": {"document": "hi"}}],
                 "executionId": "my-execution-1",
             }),
         )
@@ -3123,6 +3337,71 @@ mod tests {
             format!("arn:aws-cn:bedrock:cn-north-1:{ACCT}:flow/{FLOW}/alias/{ALIAS_V1}/execution/my-execution-1")
         );
         assert_eq!(exec.execution_role_arn.as_deref(), Some(V1_ROLE));
+    }
+
+    #[tokio::test]
+    async fn a_node_failing_ends_the_stream_with_an_exception_not_a_400() {
+        let (svc, agent_state) = flow_svc();
+        let failing = json!({
+            "nodes": [
+                {"name": "Input", "type": "Input", "outputs": [{"name": "document", "type": "String"}]},
+                {"name": "First", "type": "Output",
+                 "inputs": [{"name": "document", "type": "String", "expression": "$.data"}]},
+                {"name": "Each", "type": "Iterator",
+                 "inputs": [{"name": "array", "type": "Array", "expression": "$.data"}],
+                 "outputs": [{"name": "arrayItem", "type": "String"}, {"name": "arraySize", "type": "Number"}]},
+                {"name": "End", "type": "Output",
+                 "inputs": [{"name": "document", "type": "String", "expression": "$.data"}]}
+            ],
+            "connections": [
+                {"name": "a", "type": "Data", "source": "Input", "target": "First",
+                 "configuration": {"data": {"sourceOutput": "document", "targetInput": "document"}}},
+                {"name": "b", "type": "Data", "source": "Input", "target": "Each",
+                 "configuration": {"data": {"sourceOutput": "document", "targetInput": "array"}}},
+                {"name": "c", "type": "Data", "source": "Each", "target": "End",
+                 "configuration": {"data": {"sourceOutput": "arrayItem", "targetInput": "document"}}}
+            ]
+        });
+        agent_state
+            .write()
+            .get_or_create(ACCT, "cn-north-1")
+            .flows
+            .insert(FLOW.into(), flow(FLOW, failing, DRAFT_ROLE));
+        let resp = handle_invoke_flow(
+            &svc,
+            &cn_request(),
+            &json!({
+                "flowIdentifier": FLOW,
+                "flowAliasIdentifier": "TSTALIASID",
+                "inputs": [{"nodeName": "Input", "content": {"document": "not an array"}}],
+                "executionId": "failing-run",
+            }),
+        )
+        .await
+        .expect("a node failure is reported in the stream");
+        assert_eq!(resp.status, StatusCode::OK);
+        let stream = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        // What ran before the failure is streamed, then the exception, and no
+        // completion event.
+        assert!(stream.contains("flowOutputEvent"), "{stream}");
+        assert!(stream.contains(":exception-type"), "{stream}");
+        assert!(stream.contains("validationException"), "{stream}");
+        assert!(stream.contains("needs an array input"), "{stream}");
+        assert!(!stream.contains("flowCompletionEvent"), "{stream}");
+
+        let accts = svc.state.read();
+        let account = &accts.accounts[ACCT];
+        let exec = &account.flow_executions
+            [&crate::flows::execution_map_key(FLOW, "TSTALIASID", "failing-run")];
+        assert_eq!(exec.status, "Failed");
+        assert!(exec.ended_at.is_some());
+        let row = account
+            .invocations
+            .iter()
+            .find(|row| row.invocation_id == "failing-run")
+            .expect("the failed run is recorded");
+        assert_eq!(row.output, "not an array");
+        assert_eq!(row.output_chunks, 1);
     }
 
     #[tokio::test]
@@ -3187,7 +3466,7 @@ mod tests {
             json!({
                 "flowIdentifier": FLOW,
                 "flowAliasIdentifier": alias,
-                "inputs": [],
+                "inputs": [{"nodeName": "Input", "nodeOutputName": "document", "content": {"document": "hi"}}],
                 "flowExecutionName": "nightly-run"
             })
         };
@@ -3226,7 +3505,7 @@ mod tests {
             json!({
                 "flowIdentifier": flow,
                 "flowAliasIdentifier": alias,
-                "inputs": [],
+                "inputs": [{"nodeName": "Input", "nodeOutputName": "document", "content": {"document": "hi"}}],
                 "executionId": id,
             })
         };
@@ -3257,7 +3536,7 @@ mod tests {
             json!({
                 "flowIdentifier": FLOW,
                 "flowAliasIdentifier": ALIAS_V1,
-                "inputs": [],
+                "inputs": [{"nodeName": "Input", "nodeOutputName": "document", "content": {"document": "hi"}}],
                 "executionId": id,
             })
         };
@@ -3270,7 +3549,7 @@ mod tests {
             json!({
                 "flowIdentifier": FLOW,
                 "flowAliasIdentifier": ALIAS_V1,
-                "inputs": [],
+                "inputs": [{"nodeName": "Input", "nodeOutputName": "document", "content": {"document": "hi"}}],
                 "flowExecutionName": name,
             })
         };
@@ -3326,7 +3605,7 @@ mod tests {
             .unwrap()
             .status = "NotPrepared".to_string();
         let req = cn_request();
-        let b = json!({"flowIdentifier": FLOW, "flowAliasIdentifier": "TSTALIASID", "inputs": []});
+        let b = json!({"flowIdentifier": FLOW, "flowAliasIdentifier": "TSTALIASID", "inputs": [{"nodeName": "Input", "nodeOutputName": "document", "content": {"document": "hi"}}]});
         for result in [
             handle_start_flow_execution(&svc, &req, &b).await,
             handle_invoke_flow(&svc, &req, &b).await,
