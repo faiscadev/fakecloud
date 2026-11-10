@@ -1135,6 +1135,12 @@ pub struct ResourceProvisioner {
     /// Physical ids a handler named while reporting `FAILED`, by logical id: a
     /// create that failed that way still has something to delete.
     pub custom_failures: Arc<parking_lot::Mutex<BTreeMap<String, String>>>,
+    /// The stack (the root one, for a nested provisioner) this provisioner
+    /// works for. Every create, update and delete first checks it still
+    /// exists: an operation outliving a reset, or its stack, would otherwise
+    /// act on resources that now belong to something else. `None` for Cloud
+    /// Control, which has no stack.
+    pub guard_stack_id: Option<String>,
 }
 
 /// What a custom-resource handler sent to its `ResponseURL`.
@@ -1162,9 +1168,10 @@ impl CustomResponses {
         self.unrunnable.lock().remove(request_id);
     }
 
-    /// Lambda could not run the handler for `request_id` (an emulator-side
-    /// failure such as a missing container runtime): the wait ends with
-    /// that error rather than running out the ServiceTimeout.
+    /// Lambda discarded the handler's event for `request_id` without running
+    /// it (it can never run, or it never started before the event aged out):
+    /// the wait ends with that error rather than running out the
+    /// ServiceTimeout.
     pub(crate) fn could_not_run(&self, request_id: &str, error: String) {
         if self.waiting.lock().contains_key(request_id) {
             self.unrunnable.lock().insert(request_id.to_string(), error);
@@ -1445,7 +1452,31 @@ impl ResourceProvisioner {
     }
 
     /// Create a resource and return the StackResource with physical ID.
+    /// `Err` when the stack this provisioner works for is gone (deleted, or
+    /// wiped by a reset since the operation started).
+    fn ensure_stack_alive(&self) -> Result<(), String> {
+        let Some(stack_id) = &self.guard_stack_id else {
+            return Ok(());
+        };
+        use crate::state::RegionalAccounts;
+        let accounts = self.cloudformation_state.read();
+        let alive = accounts
+            .regional(&self.account_id, &self.region)
+            .is_some_and(|state| {
+                state
+                    .stacks
+                    .values()
+                    .any(|s| &s.stack_id == stack_id && s.status != "DELETE_COMPLETE")
+            });
+        if alive {
+            Ok(())
+        } else {
+            Err(format!("Stack [{stack_id}] does not exist"))
+        }
+    }
+
     pub fn create_resource(&self, resource: &ResourceDefinition) -> Result<StackResource, String> {
+        self.ensure_stack_alive()?;
         let result = match resource.resource_type.as_str() {
             "AWS::SQS::Queue" => self.create_sqs_queue(resource),
             "AWS::SQS::QueuePolicy" => self.create_sqs_queue_policy(resource),
@@ -1886,6 +1917,7 @@ impl ResourceProvisioner {
         existing: &StackResource,
         new_def: &ResourceDefinition,
     ) -> Result<Option<StackResource>, String> {
+        self.ensure_stack_alive()?;
         let result = match new_def.resource_type.as_str() {
             "AWS::Lambda::Function" => Some(self.update_lambda_function(existing, new_def)?),
             "AWS::Lambda::Permission" => Some(self.update_lambda_permission(existing, new_def)?),
@@ -2691,6 +2723,7 @@ impl ResourceProvisioner {
     /// deleted, as on AWS: a resource removed out of band never fails a stack's
     /// delete.
     pub fn delete_resource(&self, resource: &StackResource) -> Result<(), String> {
+        self.ensure_stack_alive()?;
         self.keeping_teardowns_on_failure(|| {
             self.delete_resource_unchecked(resource).or_else(|e| {
                 if is_not_found_error(&e, &resource.physical_id) {
@@ -4755,6 +4788,7 @@ mod tests {
             reprovision_losses: Default::default(),
             custom_responses: Default::default(),
             custom_failures: Default::default(),
+            guard_stack_id: None,
         };
         // Wire KMS like the server does, over the provisioner's own KMS state.
         prov.kms_hook = Some(Arc::new(fakecloud_kms::hook::KmsServiceHook::new(
@@ -13069,7 +13103,8 @@ mod tests {
         }
     }
 
-    /// Lambda accepts the event, then cannot run the handler.
+    /// Lambda accepts the event, then discards it without running the
+    /// handler.
     struct Unrunnable;
 
     impl fakecloud_core::delivery::LambdaDelivery for Unrunnable {
@@ -13095,7 +13130,7 @@ mod tests {
         ) -> Result<(), String> {
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                on_unrunnable("container failed to start: no container runtime".to_string());
+                on_unrunnable("unsupported runtime: python0.1".to_string());
             });
             Ok(())
         }
@@ -13114,7 +13149,7 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
         assert_eq!(
             reason,
-            "Lambda invocation failed: container failed to start: no container runtime"
+            "Lambda invocation failed: unsupported runtime: python0.1"
         );
     }
 
