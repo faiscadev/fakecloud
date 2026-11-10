@@ -197,4 +197,62 @@ async fn aws_lambda_extension_invoke_round_trip() {
         "{detail}"
     );
     assert!(detail.contains("db said no"), "{detail}");
+
+    // 9. A database still on extension 1.0 (as one restored from a volume
+    //    created before 1.1 would be) is brought up to 1.1 when the instance
+    //    comes back, so it gets the function-error behaviour too.
+    client
+        .simple_query("CREATE DATABASE olddb")
+        .await
+        .expect("create olddb");
+    let old = connect_with_retry(&host, port, "admin", "secret123", "olddb").await;
+    old.simple_query("CREATE EXTENSION aws_lambda VERSION '1.0' CASCADE")
+        .await
+        .expect("install aws_lambda 1.0");
+    let version: String = old
+        .query_one(
+            "SELECT extversion FROM pg_extension WHERE extname = 'aws_lambda'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(version, "1.0");
+    drop(old);
+    drop(client);
+    rds.reboot_db_instance()
+        .db_instance_identifier("aws-lambda-ext-db")
+        .send()
+        .await
+        .expect("reboot");
+    let instance = helpers::wait_for_db_available(&rds, "aws-lambda-ext-db", 240).await;
+    let endpoint = instance.endpoint().expect("endpoint");
+    let old = connect_with_retry(
+        endpoint.address().unwrap(),
+        endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "olddb",
+    )
+    .await;
+    let version: String = old
+        .query_one(
+            "SELECT extversion FROM pg_extension WHERE extname = 'aws_lambda'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(version, "1.1", "the extension is updated in place");
+    let err = old
+        .query_one(
+            "SELECT status_code FROM aws_lambda.invoke('echo', '{\"fail\":true}'::json)",
+            &[],
+        )
+        .await
+        .expect_err("the updated extension raises the function error");
+    assert_eq!(
+        err.as_db_error().unwrap().message(),
+        "lambda invocation failed"
+    );
 }

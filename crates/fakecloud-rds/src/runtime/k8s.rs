@@ -227,6 +227,10 @@ impl K8sDb {
                             let _ = connection.await;
                         });
                         if client.simple_query("SELECT 1").await.is_ok() {
+                            super::update_bundled_extensions(
+                                &client, pod_ip, cfg.port, username, password,
+                            )
+                            .await;
                             return Ok(());
                         }
                     }

@@ -1,5 +1,5 @@
 comment = 'AWS Lambda invocation from PostgreSQL (fakecloud)'
-default_version = '1.0'
+default_version = '1.1'
 relocatable = false
 schema = 'aws_lambda'
 requires = 'plpython3u, aws_commons'
