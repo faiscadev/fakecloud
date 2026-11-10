@@ -574,12 +574,12 @@ fn parse_count(raw: &str) -> Option<i64> {
     raw.parse::<i32>().ok().filter(|n| *n > 0).map(i64::from)
 }
 
-/// The sum of instance counts, `None` past what an instance count holds.
+/// The sum of instance counts, `None` on overflow. Each count is a 32-bit
+/// model integer; their total is not, so it is only checked for overflow.
 fn checked_total(counts: impl IntoIterator<Item = i64>) -> Option<i64> {
     counts
         .into_iter()
         .try_fold(0i64, |acc, n| acc.checked_add(n))
-        .filter(|t| *t <= i64::from(i32::MAX))
 }
 
 type Now = chrono::DateTime<chrono::Utc>;
@@ -1314,13 +1314,57 @@ fn size_factor(instance_type: &str) -> Option<f64> {
 }
 
 /// A stored price times `scale`, written as prices are stored.
-fn scaled_price(raw: &str, scale: f64) -> String {
-    if (scale - 1.0).abs() < f64::EPSILON {
-        return raw.to_string();
+/// A price as the API prints it: plain decimal (never exponent form),
+/// rounded to the micro-dollar, always with a fractional part.
+fn format_price(value: f64) -> String {
+    let s = format!("{}", (value * 1e6).round() / 1e6);
+    if s.contains('.') {
+        s
+    } else {
+        format!("{s}.0")
     }
-    let scaled = price(raw) * scale;
-    // Rounded to the micro-dollar, so 0.02 * 0.5 reads 0.01.
-    format!("{:?}", (scaled * 1e6).round() / 1e6)
+}
+
+/// Per-instance prices for reservations produced by a modification. The
+/// sources' total price is pooled per unit of instance-size footprint and
+/// handed back by footprint, so a modification neither creates nor destroys
+/// value and the result does not depend on the order the sources were named.
+/// A type without a known footprint weighs one unit (types only change
+/// between sizes whose footprints are known).
+struct PooledPrice {
+    fixed_per_unit: f64,
+    usage_per_unit: f64,
+}
+
+impl PooledPrice {
+    fn of(sources: &[ReservedInstances]) -> Self {
+        let weight = |t: &str| size_factor(t).unwrap_or(1.0);
+        let (mut units, mut fixed, mut usage) = (0.0, 0.0, 0.0);
+        for r in sources {
+            let n = r.instance_count as f64;
+            units += n * weight(&r.instance_type);
+            fixed += n * price(&r.fixed_price);
+            usage += n * price(&r.usage_price);
+        }
+        if units <= 0.0 {
+            return Self {
+                fixed_per_unit: 0.0,
+                usage_per_unit: 0.0,
+            };
+        }
+        Self {
+            fixed_per_unit: fixed / units,
+            usage_per_unit: usage / units,
+        }
+    }
+
+    fn for_instance(&self, instance_type: &str) -> (String, String) {
+        let w = size_factor(instance_type).unwrap_or(1.0);
+        (
+            format_price(self.fixed_per_unit * w),
+            format_price(self.usage_per_unit * w),
+        )
+    }
 }
 
 fn family_of(instance_type: &str) -> &str {
@@ -1663,16 +1707,9 @@ pub(crate) fn modify_reserved_instances(
     let start = timestamp(effective);
     // The reservations keep their term; only when they run changes.
     let duration = first.duration;
+    let pooled = PooledPrice::of(&sources);
     for result in &results {
-        // A per-instance price follows the instance's size: half a source
-        // instance costs half as much.
-        let scale = match (
-            size_factor(&result.instance_type),
-            size_factor(&first.instance_type),
-        ) {
-            (Some(to), Some(from)) if from > 0.0 => to / from,
-            _ => 1.0,
-        };
+        let (fixed_price, usage_price) = pooled.for_instance(&result.instance_type);
         state.reserved_instances.insert(
             result.reserved_instances_id.clone(),
             ReservedInstances {
@@ -1687,8 +1724,8 @@ pub(crate) fn modify_reserved_instances(
                 product_description: first.product_description.clone(),
                 state: "active".to_string(),
                 duration,
-                fixed_price: scaled_price(&first.fixed_price, scale),
-                usage_price: scaled_price(&first.usage_price, scale),
+                fixed_price,
+                usage_price,
                 scope: result.scope.clone(),
                 offering_class: first.offering_class.clone(),
                 offering_type: first.offering_type.clone(),
@@ -4329,5 +4366,61 @@ mod tests {
         // total value.
         assert_eq!(elems(&out, "usagePrice"), ["0.01"], "{out}");
         assert_eq!(elems(&out, "instanceCount"), ["2"]);
+    }
+
+    #[test]
+    fn a_merge_pools_its_price_whatever_the_source_order() {
+        let price_after_merge = |large_first: bool| {
+            let svc = Ec2Service::new();
+            let buy = |t: &str| {
+                active_ri(
+                    &svc,
+                    &[
+                        ("InstanceType", t),
+                        ("AvailabilityZone", "us-east-1a"),
+                        ("MaxDuration", "31536000"),
+                    ],
+                    "1",
+                )
+            };
+            let (large, xlarge) = (buy("m5.large"), buy("m5.xlarge"));
+            let (a, b) = if large_first {
+                (large, xlarge)
+            } else {
+                (xlarge, large)
+            };
+            let id = elems(
+                &body(modify(
+                    &svc,
+                    &[
+                        ("ReservedInstancesId.1", &a),
+                        ("ReservedInstancesId.2", &b),
+                        (
+                            "ReservedInstancesConfigurationSetItemType.1.InstanceCount",
+                            "3",
+                        ),
+                        (
+                            "ReservedInstancesConfigurationSetItemType.1.InstanceType",
+                            "m5.large",
+                        ),
+                        (
+                            "ReservedInstancesConfigurationSetItemType.1.AvailabilityZone",
+                            "us-east-1b",
+                        ),
+                    ],
+                )),
+                "reservedInstancesModificationId",
+            )
+            .remove(0);
+            fulfil(&svc, &id);
+            with_state(&svc, |s| {
+                let made =
+                    &s.reserved_instances_modifications[&id].results[0].reserved_instances_id;
+                s.reserved_instances[made].usage_price.clone()
+            })
+        };
+        // 0.02/h + 0.02/h over 1 + 2 footprint units, three units out.
+        assert_eq!(price_after_merge(true), "0.013333");
+        assert_eq!(price_after_merge(false), "0.013333");
     }
 }
