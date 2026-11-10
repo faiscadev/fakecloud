@@ -1343,8 +1343,8 @@ async fn execute_api_jwt_authorizer_no_token_returns_401() {
 
     // Execute without token -> 401
     let req = make_request(Method::GET, "/prod/pets", "");
-    let err = expect_err(svc.handle(req).await);
-    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    let resp = expect_gateway_response(svc.handle(req).await);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1782,8 +1782,8 @@ async fn execute_api_lambda_authorizer_no_identity_source_returns_401() {
 
     // No Authorization header -> 401
     let req = make_request(Method::GET, "/prod/pets", "");
-    let err = expect_err(svc.handle(req).await);
-    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    let resp = expect_gateway_response(svc.handle(req).await);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1912,8 +1912,8 @@ async fn execute_api_lambda_authorizer_partial_identity_source_returns_401() {
     let mut req = make_request(Method::GET, "/prod/pets", "");
     req.headers
         .insert("Authorization", "Bearer tok".parse().unwrap());
-    let err = expect_err(svc.handle(req).await);
-    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    let resp = expect_gateway_response(svc.handle(req).await);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1976,8 +1976,8 @@ async fn execute_api_lambda_authorizer_empty_identity_source_returns_401() {
     // Authorization header present but empty -> 401.
     let mut req = make_request(Method::GET, "/prod/pets", "");
     req.headers.insert("Authorization", "".parse().unwrap());
-    let err = expect_err(svc.handle(req).await);
-    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    let resp = expect_gateway_response(svc.handle(req).await);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -3878,8 +3878,10 @@ fn pets_request() -> AwsRequest {
     req
 }
 
+/// Recorded: `apigateway_http.throw` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json.
 #[tokio::test]
-async fn execute_api_backend_function_error_is_502() {
+async fn execute_api_backend_function_error_is_500() {
     let svc = make_svc_with_lambda_output(Ok(LambdaInvocationOutput::unhandled(
         serde_json::json!({"errorType": "Error", "errorMessage": "boom"})
             .to_string()
@@ -3887,21 +3889,39 @@ async fn execute_api_backend_function_error_is_502() {
     )));
     function_error_api(&svc, false).await;
     let resp = svc.handle(pets_request()).await.unwrap();
-    assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        resp.body.expect_bytes(),
+        br#"{"message":"Internal Server Error"}"#.as_slice()
+    );
 }
 
+/// An HTTP API fails a returned object carrying `errorMessage`
+/// (`apigateway_http.shaped`, `.msgonly`, `.msgstatus`) but passes one with
+/// only `errorType` (`.typeonly`).
 #[tokio::test]
-async fn execute_api_backend_error_shaped_success_is_a_simple_response() {
-    let svc = make_svc_with_lambda(Ok(serde_json::json!({
-        "errorType": "Validation",
-        "errorMessage": "bad input"
-    })
-    .to_string()
-    .into_bytes()));
-    function_error_api(&svc, false).await;
-    let resp = svc.handle(pets_request()).await.unwrap();
-    assert_eq!(resp.status, StatusCode::OK);
-    assert_eq!(body_json(&resp)["errorType"], "Validation");
+async fn execute_api_backend_error_message_field_is_500_error_type_alone_passes() {
+    for (answer, status) in [
+        (
+            serde_json::json!({"errorType": "X", "errorMessage": "y"}),
+            500,
+        ),
+        (serde_json::json!({"errorMessage": "only message"}), 500),
+        (
+            serde_json::json!({"statusCode": 200, "errorMessage": "with status", "body": "b"}),
+            500,
+        ),
+        (serde_json::json!({"errorType": "OnlyType"}), 200),
+        (
+            serde_json::json!({"statusCode": 201, "errorType": "X", "body": "typed-ok"}),
+            201,
+        ),
+    ] {
+        let svc = make_svc_with_lambda(Ok(answer.to_string().into_bytes()));
+        function_error_api(&svc, false).await;
+        let resp = svc.handle(pets_request()).await.unwrap();
+        assert_eq!(resp.status.as_u16(), status, "{answer}");
+    }
 }
 
 #[tokio::test]
@@ -3912,8 +3932,8 @@ async fn execute_api_lambda_authorizer_throwing_unauthorized_returns_401() {
             .into_bytes(),
     )));
     function_error_api(&svc, true).await;
-    let err = expect_err(svc.handle(pets_request()).await);
-    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    let resp = expect_gateway_response(svc.handle(pets_request()).await);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -3922,8 +3942,8 @@ async fn execute_api_lambda_authorizer_returning_unauthorized_returns_401() {
         .to_string()
         .into_bytes()));
     function_error_api(&svc, true).await;
-    let err = expect_err(svc.handle(pets_request()).await);
-    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    let resp = expect_gateway_response(svc.handle(pets_request()).await);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -3934,15 +3954,38 @@ async fn execute_api_lambda_authorizer_function_error_returns_500() {
             .into_bytes(),
     )));
     function_error_api(&svc, true).await;
-    let err = expect_err(svc.handle(pets_request()).await);
-    assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(err.message(), "Internal Server Error");
+    let resp = expect_gateway_response(svc.handle(pets_request()).await);
+    assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        resp.body.expect_bytes(),
+        br#"{"message":"Internal Server Error"}"#.as_slice()
+    );
 }
 
 #[tokio::test]
 async fn execute_api_lambda_authorizer_invoke_failure_returns_500() {
     let svc = make_svc_with_lambda(Err("Function not found: authorizer".to_string()));
     function_error_api(&svc, true).await;
-    let err = expect_err(svc.handle(pets_request()).await);
-    assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let resp = expect_gateway_response(svc.handle(pets_request()).await);
+    assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+/// An HTTP API authorizer rejection is answered with AWS's bare gateway
+/// response (`{"message":"Unauthorized"}` / `{"message":"Internal Server
+/// Error"}`), not raised as a service error.
+fn expect_gateway_response(result: Result<AwsResponse, AwsServiceError>) -> AwsResponse {
+    match result {
+        Ok(resp) => {
+            assert_eq!(resp.content_type, "application/json");
+            let body: serde_json::Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            let expected = match resp.status.as_u16() {
+                401 => "Unauthorized",
+                500 => "Internal Server Error",
+                other => panic!("unexpected gateway response status {other}"),
+            };
+            assert_eq!(body, serde_json::json!({ "message": expected }));
+            resp
+        }
+        Err(e) => panic!("expected a gateway response, got {e:?}"),
+    }
 }

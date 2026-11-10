@@ -357,20 +357,38 @@ pub async fn handle(
                 }
             })
             .or_else(|| {
-                // AWS's built-in AUTHORIZER_CONFIGURATION_ERROR response:
-                // 500 with a null message.
-                configuration_error.then(|| {
-                    let mut headers = http::HeaderMap::new();
-                    headers.insert(
-                        "x-amzn-errortype",
-                        http::HeaderValue::from_static(authorizers::AUTHORIZER_CONFIGURATION_ERROR),
-                    );
-                    AwsResponse {
-                        status: StatusCode::INTERNAL_SERVER_ERROR,
-                        content_type: "application/json".to_string(),
-                        body: bytes::Bytes::from_static(br#"{"message":null}"#).into(),
-                        headers,
-                    }
+                // AWS's built-in gateway responses, as recorded
+                // (`apigateway_rest.t-authother` / `.t-authunauth` in
+                // fakecloud-lambda/tests/fixtures/function-errors/
+                // aws-recordings.json): AUTHORIZER_CONFIGURATION_ERROR is
+                // 500 `{"message":null}`, UNAUTHORIZED is 401
+                // `{"message":"Unauthorized"}`, each naming its error type.
+                let (status, error_type, body): (_, &'static str, &'static [u8]) =
+                    if configuration_error {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            authorizers::AUTHORIZER_CONFIGURATION_ERROR,
+                            br#"{"message":null}"#,
+                        )
+                    } else if err.status() == StatusCode::UNAUTHORIZED {
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            "UnauthorizedException",
+                            br#"{"message":"Unauthorized"}"#,
+                        )
+                    } else {
+                        return None;
+                    };
+                let mut headers = http::HeaderMap::new();
+                headers.insert(
+                    "x-amzn-errortype",
+                    http::HeaderValue::from_static(error_type),
+                );
+                Some(AwsResponse {
+                    status,
+                    content_type: "application/json".to_string(),
+                    body: bytes::Bytes::from_static(body).into(),
+                    headers,
                 })
             });
             let recorded_status = overridden
@@ -1337,21 +1355,49 @@ mod tests {
         assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
         assert_eq!(
             resp.body.expect_bytes(),
-            br#"{"message":"Internal server error"}"#.as_slice()
+            br#"{"message": "Internal server error"}"#.as_slice()
         );
     }
 
+    /// Recorded on AWS (`apigateway_rest.msgstatus` / `.typestatus` in
+    /// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json):
+    /// a successful invocation whose proxy response carries a field outside
+    /// the proxy response format, here `errorType` / `errorMessage`, is a
+    /// malformed proxy response even with a valid `statusCode`.
     #[tokio::test]
-    async fn backend_error_shaped_success_passes_through() {
+    async fn backend_response_with_extra_fields_is_malformed() {
+        for extra in [
+            serde_json::json!({"statusCode": 201, "errorType": "X", "body": "typed-ok"}),
+            serde_json::json!({"statusCode": 200, "errorMessage": "with status", "body": "b"}),
+            serde_json::json!({"statusCode": 200, "body": "extra-ok", "extra": "x"}),
+        ] {
+            let state = build_state("NONE", None);
+            let lambda = Arc::new(StubLambda::new());
+            lambda.set(BACKEND_ARN, extra.clone());
+            let service = build_service(state, lambda.clone(), None);
+            let resp = handle(&service, &make_request(HeaderMap::new()))
+                .await
+                .expect("answered");
+            assert_eq!(resp.status, StatusCode::BAD_GATEWAY, "{extra}");
+            assert_eq!(
+                resp.headers.get("x-amzn-errortype").unwrap(),
+                "InternalServerErrorException"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_response_with_every_proxy_field_passes_through() {
         let state = build_state("NONE", None);
         let lambda = Arc::new(StubLambda::new());
         lambda.set(
             BACKEND_ARN,
             serde_json::json!({
                 "statusCode": 422,
-                "errorType": "Validation",
-                "errorMessage": "name is required",
+                "headers": {"x-a": "1"},
+                "multiValueHeaders": {"x-b": ["2"]},
                 "body": "invalid",
+                "isBase64Encoded": false,
             }),
         );
         let service = build_service(state, lambda.clone(), None);
@@ -1373,13 +1419,73 @@ mod tests {
         let service = build_service(state, lambda.clone(), None);
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "tok".parse().unwrap());
-        let err = match handle(&service, &make_request(headers)).await {
-            Ok(_) => panic!("Unauthorized must surface as an error"),
-            Err(e) => e,
-        };
-        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(err.message(), "Unauthorized");
+        assert_unauthorized_gateway_response(handle(&service, &make_request(headers)).await);
         assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    /// AWS's built-in UNAUTHORIZED gateway response, as recorded
+    /// (`apigateway_rest.t-authunauth` in
+    /// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json).
+    fn assert_unauthorized_gateway_response(result: Result<AwsResponse, AwsServiceError>) {
+        let resp = match result {
+            Ok(resp) => resp,
+            Err(e) => panic!("expected the UNAUTHORIZED gateway response, got {e:?}"),
+        };
+        assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.content_type, "application/json");
+        assert_eq!(
+            resp.headers.get("x-amzn-errortype").unwrap(),
+            "UnauthorizedException"
+        );
+        assert_eq!(
+            resp.body.expect_bytes(),
+            br#"{"message":"Unauthorized"}"#.as_slice()
+        );
+    }
+
+    /// A Lambda authorizer response without a policy document, including a
+    /// returned (not thrown) `{"errorMessage":"Unauthorized"}`, is an
+    /// AUTHORIZER_CONFIGURATION_ERROR (`apigateway_rest.t-authinvalid` /
+    /// `.t-authreturnunauth`).
+    #[tokio::test]
+    async fn token_authorizer_without_policy_is_configuration_error() {
+        for answer in [
+            serde_json::json!({"foo": "bar"}),
+            serde_json::json!({"errorMessage": "Unauthorized"}),
+        ] {
+            let state = build_state("CUSTOM", Some(token_authorizer()));
+            let lambda = Arc::new(StubLambda::new());
+            lambda.set(FN_ARN, answer.clone());
+            let service = build_service(state, lambda.clone(), None);
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", "tok".parse().unwrap());
+            let resp = handle(&service, &make_request(headers))
+                .await
+                .expect("answered with the gateway response");
+            assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR, "{answer}");
+            assert_eq!(resp.body.expect_bytes(), br#"{"message":null}"#.as_slice());
+            assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+        }
+    }
+
+    /// A policy without a principalId is accepted (`apigateway_rest.t-authnoprincipal`).
+    #[tokio::test]
+    async fn token_authorizer_policy_without_principal_is_allowed() {
+        let state = build_state("CUSTOM", Some(token_authorizer()));
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            FN_ARN,
+            serde_json::json!({"policyDocument": {"Version": "2012-10-17", "Statement": [
+                {"Effect": "Allow", "Action": "execute-api:Invoke", "Resource": "*"}
+            ]}}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "tok".parse().unwrap());
+        let resp = handle(&service, &make_request(headers))
+            .await
+            .expect("allowed");
+        assert_eq!(resp.status, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1475,11 +1581,7 @@ mod tests {
         let lambda = Arc::new(StubLambda::new());
         let service = build_service(state, lambda.clone(), None);
         let result = handle(&service, &make_request(HeaderMap::new())).await;
-        let err = match result {
-            Ok(_) => panic!("missing identity source must 401"),
-            Err(e) => e,
-        };
-        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        assert_unauthorized_gateway_response(result);
         assert_eq!(lambda.invocation_count(FN_ARN), 0);
         assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
     }
@@ -1550,11 +1652,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer tampered".parse().unwrap());
         let result = handle(&service, &make_request(headers)).await;
-        let err = match result {
-            Ok(_) => panic!("tampered JWT must 401"),
-            Err(e) => e,
-        };
-        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        assert_unauthorized_gateway_response(result);
         assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
     }
 

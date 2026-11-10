@@ -1883,6 +1883,127 @@ fn lambda_sandbox_timeout_surfaces_its_error_type() {
     });
 }
 
+/// The error payload exactly as the Python runtime reported it on AWS
+/// (`invoke.typed` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json).
+const RECORDED_PYTHON_ERROR: &str = r#"{"errorMessage": "typed boom", "errorType": "ValueError", "requestId": "de6c54de-c4d6-4e32-a60c-affbf5041b09", "stackTrace": ["  File \"/var/task/typed.py\", line 2, in handler\n    raise ValueError('typed boom')\n"]}"#;
+
+fn recorded_failure_bus() -> Arc<DeliveryBus> {
+    StubLambda::bus(vec![Ok(LambdaInvocationOutput::unhandled(
+        RECORDED_PYTHON_ERROR.as_bytes().to_vec(),
+    ))])
+    .0
+}
+
+/// A function ARN `Resource` records LambdaFunction* events and keeps the
+/// error payload as the function sent it (`stepfunctions.direct-typed`).
+#[test]
+fn lambda_function_resource_failure_matches_aws_recording() {
+    let state = make_state();
+    let arn = arn_for("lambda-direct-recorded");
+    let def = json!({
+        "StartAt": "T",
+        "States": {"T": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:123456789012:function:typed",
+            "End": true
+        }}
+    });
+    drive_with_delivery(&state, &arn, def, Some("{}"), recorded_failure_bus());
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Failed);
+        assert_eq!(exec.error.as_deref(), Some("ValueError"));
+        assert_eq!(exec.cause.as_deref(), Some(RECORDED_PYTHON_ERROR));
+        let types: Vec<&str> = exec
+            .history_events
+            .iter()
+            .map(|e| e.event_type.as_str())
+            .filter(|t| {
+                t.starts_with("Lambda") || t.starts_with("Task") && !t.starts_with("TaskState")
+            })
+            .collect();
+        assert_eq!(
+            types,
+            [
+                "LambdaFunctionScheduled",
+                "LambdaFunctionStarted",
+                "LambdaFunctionFailed"
+            ]
+        );
+        let scheduled = exec
+            .history_events
+            .iter()
+            .find(|e| e.event_type == "LambdaFunctionScheduled")
+            .unwrap();
+        assert_eq!(
+            scheduled.details["resource"],
+            "arn:aws:lambda:us-east-1:123456789012:function:typed"
+        );
+        assert_eq!(scheduled.details["input"], "{}");
+    });
+}
+
+/// The optimized integration records Task* events naming `lambda` +
+/// `invoke` and re-serializes the payload compactly, keeping key order
+/// (`stepfunctions.opt-typed`).
+#[test]
+fn lambda_invoke_integration_failure_matches_aws_recording() {
+    let state = make_state();
+    let arn = arn_for("lambda-opt-recorded");
+    drive_with_delivery(
+        &state,
+        &arn,
+        lambda_invoke_def(json!({})),
+        Some("{}"),
+        recorded_failure_bus(),
+    );
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Failed);
+        assert_eq!(exec.error.as_deref(), Some("ValueError"));
+        assert_eq!(
+            exec.cause.as_deref(),
+            Some(
+                r#"{"errorMessage":"typed boom","errorType":"ValueError","requestId":"de6c54de-c4d6-4e32-a60c-affbf5041b09","stackTrace":["  File \"/var/task/typed.py\", line 2, in handler\n    raise ValueError('typed boom')\n"]}"#
+            )
+        );
+        let failed = exec
+            .history_events
+            .iter()
+            .find(|e| e.event_type == "TaskFailed")
+            .expect("TaskFailed");
+        assert_eq!(failed.details["resourceType"], "lambda");
+        assert_eq!(failed.details["resource"], "invoke");
+        assert_eq!(failed.details["error"], "ValueError");
+    });
+}
+
+/// A Node.js string throw is typed `string` (`stepfunctions.opt-untyped`).
+#[test]
+fn lambda_string_throw_uses_the_string_error_type() {
+    let state = make_state();
+    let arn = arn_for("lambda-string-throw");
+    let (bus, _c) = StubLambda::bus(vec![Ok(LambdaInvocationOutput::unhandled(
+        br#"{"errorType":"string","errorMessage":"plain string error","trace":[]}"#.to_vec(),
+    ))]);
+    drive_with_delivery(&state, &arn, lambda_invoke_def(json!({})), Some("{}"), bus);
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.error.as_deref(), Some("string"));
+        assert_eq!(
+            exec.cause.as_deref(),
+            Some(r#"{"errorType":"string","errorMessage":"plain string error","trace":[]}"#)
+        );
+    });
+}
+
+#[test]
+fn compact_json_keeps_strings_and_order() {
+    assert_eq!(
+        super::compact_json(r#"{"b": 1, "a": "x y", "c": ["q\" r", {"d" :  2}]}"#),
+        r#"{"b":1,"a":"x y","c":["q\" r",{"d":2}]}"#
+    );
+    assert_eq!(super::compact_json("not json at all"), "not json at all");
+}
+
 // ── Regression: malformed JSONPath must not panic the interpreter ─────
 //
 // A state machine with a malformed InputPath/OutputPath (e.g. an unterminated

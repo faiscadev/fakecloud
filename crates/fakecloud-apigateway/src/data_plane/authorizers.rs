@@ -139,8 +139,19 @@ pub(super) async fn run_lambda_authorizer(
     if output.is_function_error() {
         return Err(authorizer_function_error(&output));
     }
-    let response: serde_json::Value = serde_json::from_slice(&output.payload)
-        .map_err(|e| forbidden(format!("Authorizer returned invalid JSON: {e}")))?;
+    // An authorizer response without a policy document (including a
+    // returned `{"errorMessage":"Unauthorized"}`, which only a thrown error
+    // turns into a 401) is invalid: AUTHORIZER_CONFIGURATION_ERROR.
+    // Recorded: `apigateway_rest.t-authinvalid` / `.t-authreturnunauth` in
+    // fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json.
+    // A missing principalId is accepted (`.t-authnoprincipal`).
+    let response: serde_json::Value = serde_json::from_slice::<serde_json::Value>(&output.payload)
+        .ok()
+        .filter(|v: &serde_json::Value| {
+            v.get("policyDocument")
+                .is_some_and(serde_json::Value::is_object)
+        })
+        .ok_or_else(|| authorizer_configuration_error("Invalid authorizer response"))?;
 
     let principal_id = response
         .get("principalId")
@@ -410,8 +421,11 @@ fn is_unauthorized_error(output: &fakecloud_core::delivery::LambdaInvocationOutp
 }
 
 /// How API Gateway answers when a Lambda authorizer returned a function
-/// error: 401 `Unauthorized` for the conventional `Unauthorized` error, else
-/// a 500 authorizer configuration error.
+/// error: 401 `Unauthorized` for the conventional `Unauthorized` error
+/// (thrown, or `callback("Unauthorized")`), else a 500 authorizer
+/// configuration error. Recorded: `apigateway_rest.t-authunauth`,
+/// `.t-authcbunauth`, `.t-authother` (and the `r-*` REQUEST twins) in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json.
 pub(super) fn authorizer_function_error(
     output: &fakecloud_core::delivery::LambdaInvocationOutput,
 ) -> AwsServiceError {
