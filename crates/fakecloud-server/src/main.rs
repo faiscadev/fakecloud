@@ -11444,15 +11444,13 @@ async fn main() {
                     let ss = ss.clone();
                     async move {
                         let accounts = ss.read();
-                        // The execution lives in the region its ARN names
-                        // (default account, as before); so do its children.
+                        // The execution lives in the account and region its
+                        // ARN names; so do its children.
                         let empty = fakecloud_stepfunctions::StepFunctionsState::new(
                             accounts.default_account_id(),
                             accounts.region(),
                         );
-                        let state = fakecloud_aws::arn::region_of(&arn)
-                            .and_then(|r| accounts.default_ref().region(r))
-                            .unwrap_or(&empty);
+                        let state = accounts.by_arn(&arn).unwrap_or(&empty);
                         // Index children by parent arn for O(N) tree build.
                         let mut children_by_parent: std::collections::HashMap<
                             String,

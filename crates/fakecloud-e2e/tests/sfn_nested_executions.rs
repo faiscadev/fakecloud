@@ -390,6 +390,186 @@ async fn execution_tree_links_a_sync2_child_to_its_parent() {
     assert_eq!(children[0]["stateMachineArn"], child);
 }
 
+async fn execution_tree(server: &TestServer, arn: &str) -> Value {
+    let url = format!(
+        "{}/_fakecloud/stepfunctions/execution-tree/{arn}",
+        server.endpoint()
+    );
+    reqwest::get(url).await.unwrap().json().await.unwrap()
+}
+
+/// The single child under the tree's root, failing with the tree when there
+/// is not exactly one.
+fn only_child(tree: &Value) -> &Value {
+    let children = tree["tree"]["children"].as_array().expect("children");
+    assert_eq!(children.len(), 1, "{tree}");
+    &children[0]
+}
+
+#[tokio::test]
+async fn execution_tree_links_a_failed_sync_child_to_its_parent() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let child = create_machine(
+        &client,
+        "failing-child",
+        json!({"StartAt":"F","States":{"F":{"Type":"Fail","Error":"Boom","Cause":"no"}}}),
+    )
+    .await;
+    let parent = create_machine(
+        &client,
+        "parent",
+        nested_task(
+            "states:startExecution.sync",
+            json!({"StateMachineArn": child}),
+        ),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(parent)
+        .send()
+        .await
+        .unwrap();
+    let desc = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(desc.status().as_str(), "FAILED");
+
+    let tree = execution_tree(&server, started.execution_arn()).await;
+    let node = only_child(&tree);
+    assert_eq!(node["stateMachineArn"], child);
+    assert_eq!(node["status"], "FAILED");
+}
+
+#[tokio::test]
+async fn execution_tree_shows_a_sync_child_while_the_parent_waits() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let child = create_machine(
+        &client,
+        "slow-child",
+        json!({"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":3,"End":true}}}),
+    )
+    .await;
+    let parent = create_machine(
+        &client,
+        "parent",
+        nested_task(
+            "states:startExecution.sync:2",
+            json!({"StateMachineArn": child}),
+        ),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(parent)
+        .send()
+        .await
+        .unwrap();
+
+    let mut tree = Value::Null;
+    for _ in 0..40 {
+        tree = execution_tree(&server, started.execution_arn()).await;
+        if !tree["tree"]["children"].as_array().unwrap().is_empty() {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(tree["tree"]["status"], "RUNNING", "{tree}");
+    let node = only_child(&tree);
+    assert_eq!(node["stateMachineArn"], child);
+    assert_eq!(node["status"], "RUNNING");
+}
+
+#[tokio::test]
+async fn execution_tree_links_a_child_started_through_aws_sdk_sfn() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let child = create_echo_child(&client).await;
+    let parent = create_machine(
+        &client,
+        "parent",
+        nested_task(
+            "aws-sdk:sfn:startExecution",
+            json!({"StateMachineArn": child}),
+        ),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(parent)
+        .send()
+        .await
+        .unwrap();
+    let desc = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(desc.status().as_str(), "SUCCEEDED", "{:?}", desc.cause());
+
+    let tree = execution_tree(&server, started.execution_arn()).await;
+    assert_eq!(only_child(&tree)["stateMachineArn"], child);
+}
+
+#[tokio::test]
+async fn execution_tree_finds_executions_in_a_non_default_account() {
+    const ACCOUNT_B: &str = "222222222222";
+    let server = TestServer::start().await;
+    let (akid, secret) = server.create_admin(ACCOUNT_B, "admin-b").await;
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(aws_credential_types::Credentials::new(
+            akid,
+            secret,
+            None,
+            None,
+            "account-b",
+        ))
+        .load()
+        .await;
+    let client = aws_sdk_sfn::Client::new(&config);
+    let role = format!("arn:aws:iam::{ACCOUNT_B}:role/sfn-role");
+    let create = |name: &'static str, definition: Value| {
+        let client = client.clone();
+        let role = role.clone();
+        async move {
+            client
+                .create_state_machine()
+                .name(name)
+                .definition(definition.to_string())
+                .role_arn(role)
+                .send()
+                .await
+                .unwrap()
+                .state_machine_arn()
+                .to_string()
+        }
+    };
+    let child = create(
+        "child",
+        json!({"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}}),
+    )
+    .await;
+    let parent = create(
+        "parent",
+        nested_task(
+            "states:startExecution.sync:2",
+            json!({"StateMachineArn": child}),
+        ),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(parent)
+        .send()
+        .await
+        .unwrap();
+    assert!(started.execution_arn().contains(ACCOUNT_B));
+    let desc = wait_terminal(&client, started.execution_arn()).await;
+    assert_eq!(desc.status().as_str(), "SUCCEEDED", "{:?}", desc.cause());
+
+    let tree = execution_tree(&server, started.execution_arn()).await;
+    assert_eq!(tree["rootArn"], started.execution_arn(), "{tree}");
+    assert_eq!(only_child(&tree)["stateMachineArn"], child);
+}
+
 #[tokio::test]
 async fn aws_sdk_sfn_send_task_success_delivers_an_object_output() {
     let server = TestServer::start().await;
