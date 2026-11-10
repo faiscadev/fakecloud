@@ -1711,7 +1711,7 @@ impl AwsService for S3Service {
                     if req.query_params.contains_key("annotation") {
                         self.delete_object_annotation(account_id, &req, b, k)
                     } else if req.query_params.contains_key("tagging") {
-                        self.delete_object_tagging(account_id, b, k)
+                        self.delete_object_tagging(account_id, &req, b, k)
                     } else {
                         self.delete_object(account_id, &req, b, k)
                     }

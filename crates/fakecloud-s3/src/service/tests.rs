@@ -1506,7 +1506,14 @@ fn delete_object_tagging_clears_tags() {
         obj.tags.insert("env".to_string(), "prod".to_string());
     }
 
-    let resp = svc.delete_object_tagging("123456789012", "b", "k").unwrap();
+    let resp = svc
+        .delete_object_tagging(
+            "123456789012",
+            &make_request(Method::DELETE, "/b/k", &[("tagging", "")], b""),
+            "b",
+            "k",
+        )
+        .unwrap();
     assert_eq!(resp.status, StatusCode::NO_CONTENT);
     let __mas = svc.state.read();
     let state = __mas.default_ref();
@@ -1526,7 +1533,12 @@ fn delete_object_tagging_missing_key_errors() {
     let svc = make_service();
     seed_bucket(&svc, "b");
     assert_aws_err(
-        svc.delete_object_tagging("123456789012", "b", "gone"),
+        svc.delete_object_tagging(
+            "123456789012",
+            &make_request(Method::DELETE, "/b/gone", &[("tagging", "")], b""),
+            "b",
+            "gone",
+        ),
         "NoSuchKey",
     );
 }
@@ -6878,15 +6890,25 @@ async fn put_object_tagging_lifecycle() {
     let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
     assert!(body.contains("<Key>env</Key>"));
 
-    svc.delete_object_tagging("123456789012", "pota", "k")
-        .unwrap();
+    svc.delete_object_tagging(
+        "123456789012",
+        &make_request(Method::DELETE, "/pota/k", &[("tagging", "")], b""),
+        "pota",
+        "k",
+    )
+    .unwrap();
 }
 
 #[test]
 fn delete_object_tagging_bucket_not_found() {
     let svc = make_service();
     assert!(svc
-        .delete_object_tagging("123456789012", "ghost", "k")
+        .delete_object_tagging(
+            "123456789012",
+            &make_request(Method::DELETE, "/ghost/k", &[("tagging", "")], b""),
+            "ghost",
+            "k",
+        )
         .is_err());
 }
 
@@ -7889,12 +7911,16 @@ fn copy_object_follows_the_annotation_directive() {
     let calls = store.calls();
     for key in ["default", "copied"] {
         assert!(
-            calls.iter().any(|c| *c == format!("put_annotation:b/{key}/note")),
+            calls
+                .iter()
+                .any(|c| *c == format!("put_annotation:b/{key}/note")),
             "{calls:?}"
         );
     }
     assert!(
-        !calls.iter().any(|c| c.starts_with("put_annotation:b/excluded/")),
+        !calls
+            .iter()
+            .any(|c| c.starts_with("put_annotation:b/excluded/")),
         "{calls:?}"
     );
 
@@ -13086,4 +13112,188 @@ async fn recorded_unknown_parts_are_invalid_part_before_order() {
         .await,
         "InvalidPart",
     );
+}
+
+/// The tag keys GetObjectTagging returns for `key`, at `version` when given.
+async fn object_tag_keys(svc: &S3Service, key: &str, version: Option<&str>) -> Vec<String> {
+    let mut query = vec![("tagging", "")];
+    if let Some(v) = version {
+        query.push(("versionId", v));
+    }
+    let resp = svc
+        .handle(make_request(Method::GET, &format!("/b/{key}"), &query, b""))
+        .await
+        .expect("GetObjectTagging");
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    parse_tagging_xml(&body)
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect()
+}
+
+async fn put_object_tag(svc: &S3Service, key: &str, version: Option<&str>, tag: &str) {
+    let mut query = vec![("tagging", "")];
+    if let Some(v) = version {
+        query.push(("versionId", v));
+    }
+    let body =
+        format!("<Tagging><TagSet><Tag><Key>{tag}</Key><Value>v</Value></Tag></TagSet></Tagging>");
+    svc.handle(make_request(
+        Method::PUT,
+        &format!("/b/{key}"),
+        &query,
+        body.as_bytes(),
+    ))
+    .await
+    .expect("PutObjectTagging");
+}
+
+async fn put_versioned(svc: &S3Service, key: &str, body: &[u8]) -> String {
+    let resp = svc
+        .handle(make_request(Method::PUT, &format!("/b/{key}"), &[], body))
+        .await
+        .unwrap();
+    resp.headers
+        .get("x-amz-version-id")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+#[tokio::test]
+async fn tagging_the_current_version_by_id_is_what_the_current_object_reads() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    enable_versioning(&svc, "b");
+    let v1 = put_versioned(&svc, "k", b"one").await;
+    let v2 = put_versioned(&svc, "k", b"two").await;
+
+    // Naming the current version by id retags the current object as well.
+    put_object_tag(&svc, "k", Some(&v2), "current").await;
+    assert_eq!(object_tag_keys(&svc, "k", None).await, vec!["current"]);
+    assert_eq!(object_tag_keys(&svc, "k", Some(&v2)).await, vec!["current"]);
+    // A non-current version keeps its own tags, and reads back by id.
+    put_object_tag(&svc, "k", Some(&v1), "old").await;
+    assert_eq!(object_tag_keys(&svc, "k", Some(&v1)).await, vec!["old"]);
+    assert_eq!(object_tag_keys(&svc, "k", None).await, vec!["current"]);
+    // Tagging the current object without an id reaches its version too.
+    put_object_tag(&svc, "k", None, "latest").await;
+    assert_eq!(object_tag_keys(&svc, "k", Some(&v2)).await, vec!["latest"]);
+    assert_eq!(object_tag_keys(&svc, "k", Some(&v1)).await, vec!["old"]);
+
+    // DeleteObjectTagging honours the version id the same way.
+    let resp = svc
+        .handle(make_request(
+            Method::DELETE,
+            "/b/k",
+            &[("tagging", ""), ("versionId", v1.as_str())],
+            b"",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status, StatusCode::NO_CONTENT);
+    assert_eq!(resp.headers.get("x-amz-version-id").unwrap(), v1.as_str());
+    assert!(object_tag_keys(&svc, "k", Some(&v1)).await.is_empty());
+    assert_eq!(object_tag_keys(&svc, "k", None).await, vec!["latest"]);
+    svc.handle(make_request(
+        Method::DELETE,
+        "/b/k",
+        &[("tagging", ""), ("versionId", v2.as_str())],
+        b"",
+    ))
+    .await
+    .unwrap();
+    assert!(object_tag_keys(&svc, "k", None).await.is_empty());
+
+    // Reads report the version they read; unknown ids are NoSuchVersion.
+    let resp = svc
+        .handle(make_request(
+            Method::GET,
+            "/b/k",
+            &[("tagging", ""), ("versionId", v1.as_str())],
+            b"",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.headers.get("x-amz-version-id").unwrap(), v1.as_str());
+    for method in [Method::GET, Method::DELETE] {
+        assert_aws_err(
+            svc.handle(make_request(
+                method,
+                "/b/k",
+                &[("tagging", ""), ("versionId", "nope")],
+                b"",
+            ))
+            .await,
+            "NoSuchVersion",
+        );
+    }
+
+    // A delete marker's version is 405; the key itself is then NoSuchKey.
+    let marker = svc
+        .handle(make_request(Method::DELETE, "/b/k", &[], b""))
+        .await
+        .unwrap();
+    let marker_id = marker
+        .headers
+        .get("x-amz-version-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    for method in [Method::GET, Method::PUT, Method::DELETE] {
+        let err = assert_aws_err(
+            svc.handle(make_request(
+                method.clone(),
+                "/b/k",
+                &[("tagging", ""), ("versionId", marker_id.as_str())],
+                b"<Tagging><TagSet></TagSet></Tagging>",
+            ))
+            .await,
+            "MethodNotAllowed",
+        );
+        assert_eq!(err.status(), StatusCode::METHOD_NOT_ALLOWED, "{method}");
+        assert_aws_err(
+            svc.handle(make_request(
+                method,
+                "/b/k",
+                &[("tagging", "")],
+                b"<Tagging><TagSet></TagSet></Tagging>",
+            ))
+            .await,
+            "NoSuchKey",
+        );
+    }
+}
+
+#[tokio::test]
+async fn tagging_the_null_version_on_a_suspended_bucket_reaches_the_current_object() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    enable_versioning(&svc, "b");
+    let v1 = put_versioned(&svc, "k", b"one").await;
+    let req = make_request(
+        Method::PUT,
+        "/b",
+        &[("versioning", "")],
+        b"<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>",
+    );
+    svc.put_bucket_versioning("123456789012", &req, "b")
+        .unwrap();
+    // Written while Suspended: the null version, and the current object.
+    put_versioned(&svc, "k", b"null body").await;
+
+    put_object_tag(&svc, "k", Some("null"), "n").await;
+    assert_eq!(object_tag_keys(&svc, "k", None).await, vec!["n"]);
+    assert_eq!(object_tag_keys(&svc, "k", Some("null")).await, vec!["n"]);
+    assert!(object_tag_keys(&svc, "k", Some(&v1)).await.is_empty());
+    {
+        let mas = svc.state.read();
+        let b = mas.default_ref().buckets.get("b").unwrap();
+        let null = b.object_versions["k"]
+            .iter()
+            .find(|o| o.version_id.is_none() || o.version_id.as_deref() == Some("null"))
+            .unwrap();
+        assert!(null.tags.contains_key("n"));
+        assert!(b.objects["k"].tags.contains_key("n"));
+    }
 }

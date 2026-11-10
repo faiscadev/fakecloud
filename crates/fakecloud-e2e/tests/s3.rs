@@ -7182,3 +7182,117 @@ async fn s3_create_bucket_in_new_regions_and_legacy_eu() {
         .iter()
         .any(|b| b.name() == Some("loc-eu-legacy")));
 }
+
+#[tokio::test]
+async fn s3_object_tagging_by_version_id() {
+    use aws_sdk_s3::error::ProvideErrorMetadata;
+    use aws_sdk_s3::types::{BucketVersioningStatus, Tag, Tagging, VersioningConfiguration};
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    let bucket = "tag-versions";
+    client.create_bucket().bucket(bucket).send().await.unwrap();
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let mut versions = Vec::new();
+    for body in ["one", "two"] {
+        let put = client
+            .put_object()
+            .bucket(bucket)
+            .key("k")
+            .body(ByteStream::from_static(body.as_bytes()))
+            .send()
+            .await
+            .unwrap();
+        versions.push(put.version_id().unwrap().to_string());
+    }
+    let (v1, v2) = (&versions[0], &versions[1]);
+    let tagging = |key: &str| {
+        Tagging::builder()
+            .tag_set(Tag::builder().key(key).value("v").build().unwrap())
+            .build()
+            .unwrap()
+    };
+    let tag_keys = |version: Option<String>| {
+        let client = client.clone();
+        async move {
+            let resp = client
+                .get_object_tagging()
+                .bucket(bucket)
+                .key("k")
+                .set_version_id(version)
+                .send()
+                .await
+                .unwrap();
+            resp.tag_set()
+                .iter()
+                .map(|t| t.key().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+
+    // Tagging the current version by id is what the current object reads.
+    client
+        .put_object_tagging()
+        .bucket(bucket)
+        .key("k")
+        .version_id(v2)
+        .tagging(tagging("current"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tag_keys(None).await, vec!["current"]);
+
+    // An older version keeps its own tags and reads back by id.
+    client
+        .put_object_tagging()
+        .bucket(bucket)
+        .key("k")
+        .version_id(v1)
+        .tagging(tagging("old"))
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .get_object_tagging()
+        .bucket(bucket)
+        .key("k")
+        .version_id(v1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.version_id(), Some(v1.as_str()));
+    assert_eq!(resp.tag_set()[0].key(), "old");
+    assert_eq!(tag_keys(None).await, vec!["current"]);
+    assert_eq!(tag_keys(Some(v2.clone())).await, vec!["current"]);
+
+    // DeleteObjectTagging clears only the version it names.
+    client
+        .delete_object_tagging()
+        .bucket(bucket)
+        .key("k")
+        .version_id(v1)
+        .send()
+        .await
+        .unwrap();
+    assert!(tag_keys(Some(v1.clone())).await.is_empty());
+    assert_eq!(tag_keys(None).await, vec!["current"]);
+
+    let err = client
+        .get_object_tagging()
+        .bucket(bucket)
+        .key("k")
+        .version_id("no-such-version")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("NoSuchVersion"), "{err:?}");
+}

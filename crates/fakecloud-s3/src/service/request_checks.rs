@@ -173,10 +173,7 @@ pub(super) fn check_request(
         // a value outside them with the 400 InvalidArgument it gives an
         // unknown metadata directive, naming the directive.
         if header(req, "x-amz-tagging-directive").is_some_and(|v| v != "COPY" && v != "REPLACE") {
-            return Err(bad_request(
-                "InvalidArgument",
-                "Unknown tagging directive.",
-            ));
+            return Err(bad_request("InvalidArgument", "Unknown tagging directive."));
         }
         if header(req, "x-amz-object-annotation-directive")
             .is_some_and(|v| v != "COPY" && v != "EXCLUDE")
@@ -437,7 +434,10 @@ mod tests {
         // Not a copy: the directive is not read.
         let plain = req(Method::PUT, &[], &[("x-amz-metadata-directive", "x")]);
         assert!(check(&plain, Some("k")).is_ok());
-        for directive in ["x-amz-tagging-directive", "x-amz-object-annotation-directive"] {
+        for directive in [
+            "x-amz-tagging-directive",
+            "x-amz-object-annotation-directive",
+        ] {
             let bad = req(
                 Method::PUT,
                 &[],
