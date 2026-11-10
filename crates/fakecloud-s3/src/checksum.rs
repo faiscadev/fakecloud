@@ -735,9 +735,12 @@ pub(crate) struct VerifiedSpool {
 /// computing every digest the request needs in that same single pass, then
 /// verify `Content-MD5`, the `x-amz-checksum-*` value or trailing checksum,
 /// and a hex `x-amz-content-sha256`. `store` is the algorithm whose checksum
-/// the caller will keep; it is folded into the same pass. MD5 and SHA-256 are
-/// already produced by the spool and are not hashed twice. On any
-/// verification failure the spool file is removed before returning the error.
+/// the caller will keep; it is folded into the same pass. MD5 (the ETag) is
+/// produced by the spool and not hashed twice. SHA-256 is computed only when
+/// a hex `x-amz-content-sha256` or a SHA-256 checksum needs it: it is the most
+/// expensive digest on the PutObject path, and `UNSIGNED-PAYLOAD` / streaming
+/// uploads with a CRC checksum never read it. On any verification failure the
+/// spool file is removed before returning the error.
 pub(crate) async fn spool_verified(
     headers: &HeaderMap,
     stream: fakecloud_core::service::RequestBodyStream,
@@ -746,12 +749,13 @@ pub(crate) async fn spool_verified(
     store: Option<ChecksumAlgorithm>,
 ) -> Result<VerifiedSpool, AwsServiceError> {
     let aws_chunked = fakecloud_core::service::is_aws_chunked(headers);
-    let mut hasher = MultiHasher::new(
-        checks
-            .algorithms_to_compute(store)
-            .into_iter()
-            .filter(|a| !matches!(a, ChecksumAlgorithm::Md5 | ChecksumAlgorithm::Sha256)),
-    );
+    let asserted_sha256 = asserted_content_sha256(headers, aws_chunked);
+    let mut algorithms = checks.algorithms_to_compute(store);
+    if asserted_sha256.is_some() && !algorithms.contains(&ChecksumAlgorithm::Sha256) {
+        algorithms.push(ChecksumAlgorithm::Sha256);
+    }
+    algorithms.retain(|a| *a != ChecksumAlgorithm::Md5);
+    let mut hasher = MultiHasher::new(algorithms);
     let spooled = fakecloud_core::service::spool_request_stream_observed(
         stream,
         dir,
@@ -761,8 +765,7 @@ pub(crate) async fn spool_verified(
     .await?;
     let mut digests = hasher.finish();
     digests.insert(ChecksumAlgorithm::Md5, spooled.md5.to_vec());
-    digests.insert(ChecksumAlgorithm::Sha256, spooled.sha256.to_vec());
-    let verdict = verify_content_sha256(headers, aws_chunked, &spooled.sha256)
+    let verdict = check_content_sha256(asserted_sha256.as_ref(), &digests)
         .and_then(|()| checks.verify(&digests, &spooled.trailers));
     if let Err(e) = verdict {
         let _ = tokio::fs::remove_file(&spooled.path).await;
@@ -771,39 +774,40 @@ pub(crate) async fn spool_verified(
     Ok(VerifiedSpool { spooled, digests })
 }
 
-/// The `x-amz-content-sha256` payload-integrity check. A SigV4-signed,
-/// non-chunked upload carries the payload's real SHA-256 (lowercase hex) in
-/// this header, and S3 rejects a divergence with `XAmzContentSHA256Mismatch`.
-/// The markers that are not a body hash (`UNSIGNED-PAYLOAD`, `STREAMING-…`)
-/// are skipped, as are aws-chunked uploads, where the header covers the chunk
-/// framing rather than the decoded payload this compares against.
-pub(crate) fn verify_content_sha256(
-    headers: &HeaderMap,
-    aws_chunked: bool,
-    sha256: &[u8],
-) -> Result<(), AwsServiceError> {
+/// The payload SHA-256 a request's `x-amz-content-sha256` header asserts. A
+/// SigV4-signed, non-chunked upload carries the payload's real SHA-256
+/// (lowercase hex) there, and S3 rejects a divergence with
+/// `XAmzContentSHA256Mismatch`. The markers that are not a body hash
+/// (`UNSIGNED-PAYLOAD`, `STREAMING-…`) assert nothing, nor does the header on
+/// an aws-chunked upload, where it covers the chunk framing rather than the
+/// decoded payload.
+pub(crate) fn asserted_content_sha256(headers: &HeaderMap, aws_chunked: bool) -> Option<[u8; 32]> {
     if aws_chunked {
-        return Ok(());
+        return None;
     }
-    let Some(supplied) = headers
-        .get("x-amz-content-sha256")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-    else {
-        return Ok(());
-    };
+    let supplied = headers.get("x-amz-content-sha256")?.to_str().ok()?.trim();
     // Only a 64-character hex value is an assertion about the payload.
-    let Some(asserted) = (supplied.len() == 64)
-        .then(|| {
-            (0..32)
-                .map(|i| u8::from_str_radix(&supplied[2 * i..2 * i + 2], 16).ok())
-                .collect::<Option<Vec<u8>>>()
-        })
-        .flatten()
-    else {
+    if supplied.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(supplied.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Compare an asserted payload SHA-256 (see [`asserted_content_sha256`])
+/// against the computed digest, which the caller computes whenever there is
+/// an assertion.
+fn check_content_sha256(
+    asserted: Option<&[u8; 32]>,
+    digests: &Digests,
+) -> Result<(), AwsServiceError> {
+    let Some(asserted) = asserted else {
         return Ok(());
     };
-    if asserted != sha256 {
+    if digests.get(ChecksumAlgorithm::Sha256) != Some(asserted.as_slice()) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "XAmzContentSHA256Mismatch",
@@ -843,16 +847,15 @@ pub(crate) fn verify_buffered(
     } else {
         (body.to_vec(), Vec::new())
     };
+    let asserted_sha256 = asserted_content_sha256(headers, aws_chunked);
     let mut algorithms = checks.algorithms_to_compute(store);
-    if !aws_chunked && headers.contains_key("x-amz-content-sha256") {
+    if asserted_sha256.is_some() && !algorithms.contains(&ChecksumAlgorithm::Sha256) {
         algorithms.push(ChecksumAlgorithm::Sha256);
     }
     let mut hasher = MultiHasher::new(algorithms);
     hasher.update(&payload);
     let digests = hasher.finish();
-    if let Some(sha256) = digests.get(ChecksumAlgorithm::Sha256) {
-        verify_content_sha256(headers, aws_chunked, sha256)?;
-    }
+    check_content_sha256(asserted_sha256.as_ref(), &digests)?;
     checks.verify(&digests, &trailers)?;
     Ok(VerifiedPayload { payload, digests })
 }
@@ -1231,7 +1234,7 @@ mod tests {
             v.digests.encoded(ChecksumAlgorithm::Crc64Nvme),
             Some(checksum(ChecksumAlgorithm::Crc64Nvme, &body))
         );
-        // MD5 / SHA-256 come from the spool itself.
+        // MD5 comes from the spool itself.
         assert_eq!(
             v.digests.encoded(ChecksumAlgorithm::Md5),
             Some(checksum(ChecksumAlgorithm::Md5, &body))
@@ -1259,6 +1262,102 @@ mod tests {
             std::fs::read_dir(dir.path()).unwrap().count(),
             0,
             "a rejected upload must not leave its spool file behind"
+        );
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    async fn spool(
+        h: &HeaderMap,
+        body: &[u8],
+        store: Option<ChecksumAlgorithm>,
+    ) -> Result<VerifiedSpool, AwsServiceError> {
+        let checks = ChecksumHeaders::parse(h).unwrap();
+        let v = spool_verified(
+            h,
+            axum::body::Body::from(body.to_vec()),
+            None,
+            &checks,
+            store,
+        )
+        .await;
+        if let Ok(v) = &v {
+            let _ = std::fs::remove_file(&v.spooled.path);
+        }
+        v
+    }
+
+    #[tokio::test]
+    async fn spool_verified_hashes_sha256_only_when_something_reads_it() {
+        let body = b"streamed object body";
+        // Nothing asserts or stores a SHA-256: it is never computed.
+        for h in [
+            headers(&[]),
+            headers(&[("x-amz-content-sha256", "UNSIGNED-PAYLOAD")]),
+            headers(&[(
+                "x-amz-content-sha256",
+                "not-hex-but-64-chars-long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            )]),
+        ] {
+            let v = spool(&h, body, Some(ChecksumAlgorithm::Crc64Nvme))
+                .await
+                .unwrap();
+            assert_eq!(v.digests.get(ChecksumAlgorithm::Sha256), None);
+        }
+        // A hex payload hash is verified against the received bytes.
+        let h = headers(&[("x-amz-content-sha256", &sha256_hex(body))]);
+        let v = spool(&h, body, None).await.unwrap();
+        assert_eq!(
+            v.digests.encoded(ChecksumAlgorithm::Sha256),
+            Some(checksum(ChecksumAlgorithm::Sha256, body))
+        );
+        let h = headers(&[("x-amz-content-sha256", &sha256_hex(b"other"))]);
+        let err = spool(&h, body, None).await.err().unwrap();
+        assert_eq!(code(err), "XAmzContentSHA256Mismatch");
+        // Uppercase hex is still a hash assertion.
+        let h = headers(&[("x-amz-content-sha256", &sha256_hex(body).to_uppercase())]);
+        spool(&h, body, None).await.unwrap();
+        // A stored SHA-256 checksum is computed without any header assertion.
+        let v = spool(&headers(&[]), body, Some(ChecksumAlgorithm::Sha256))
+            .await
+            .unwrap();
+        assert_eq!(
+            v.digests.encoded(ChecksumAlgorithm::Sha256),
+            Some(checksum(ChecksumAlgorithm::Sha256, body))
+        );
+    }
+
+    #[test]
+    fn content_sha256_assertion_parsing() {
+        let hex = sha256_hex(b"x");
+        assert!(
+            asserted_content_sha256(&headers(&[("x-amz-content-sha256", &hex)]), false).is_some()
+        );
+        // On aws-chunked uploads the header covers the framing, not the payload.
+        assert!(
+            asserted_content_sha256(&headers(&[("x-amz-content-sha256", &hex)]), true).is_none()
+        );
+        for marker in [
+            "UNSIGNED-PAYLOAD",
+            "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
+            "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+        ] {
+            assert!(
+                asserted_content_sha256(&headers(&[("x-amz-content-sha256", marker)]), false)
+                    .is_none()
+            );
+        }
+        // 64 bytes that are not all hex, including multi-byte UTF-8, assert nothing.
+        let odd = format!("{}é", "a".repeat(62));
+        assert_eq!(odd.len(), 64);
+        assert!(
+            asserted_content_sha256(&headers(&[("x-amz-content-sha256", &odd)]), false).is_none()
         );
     }
 
