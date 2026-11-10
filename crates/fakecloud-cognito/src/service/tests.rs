@@ -13217,3 +13217,192 @@ fn resend_and_attribute_verification_name_their_custom_message_sources() {
         "CustomMessage_VerifyUserAttribute"
     );
 }
+
+fn admin_create(
+    svc: &CognitoService,
+    body: serde_json::Value,
+) -> Result<AwsResponse, AwsServiceError> {
+    block_on(svc.admin_create_user(&make_req("AdminCreateUser", &body.to_string())))
+}
+
+fn expect_error(result: Result<AwsResponse, AwsServiceError>, code: &str, message: &str) {
+    match result {
+        Ok(_) => panic!("expected {code}"),
+        Err(e) => {
+            assert_eq!(e.code(), code);
+            assert_eq!(e.message(), message);
+        }
+    }
+}
+
+/// Recorded on AWS (pool without SmsConfiguration): a user with a phone
+/// number invited by SMS fails the call but is created.
+#[test]
+fn sms_invitation_without_sms_configuration_fails_but_creates_the_user() {
+    let (svc, state, _events, _email) = svc_recording_triggers(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    expect_error(
+        admin_create(
+            &svc,
+            json!({
+                "UserPoolId": pool_id,
+                "Username": "p1",
+                "UserAttributes": [{"Name": "phone_number", "Value": "+15555550100"}],
+            }),
+        ),
+        "InvalidParameterException",
+        "User pool does not have SMS configuration to send messages.",
+    );
+    assert_eq!(
+        user_status_of(&state, &pool_id, "p1").as_deref(),
+        Some("FORCE_CHANGE_PASSWORD")
+    );
+    // A user with no phone number is just not sent an SMS.
+    admin_create(
+        &svc,
+        json!({
+            "UserPoolId": pool_id,
+            "Username": "e1",
+            "UserAttributes": [{"Name": "email", "Value": "e1@example.com"}],
+        }),
+    )
+    .unwrap();
+}
+
+/// Recorded on AWS: an EMAIL invitation for a user without an email fails
+/// the call but creates the user.
+#[test]
+fn email_invitation_without_an_email_fails_but_creates_the_user() {
+    let (svc, state, _events, _email) = svc_recording_triggers(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    expect_error(
+        admin_create(
+            &svc,
+            json!({
+                "UserPoolId": pool_id,
+                "Username": "p2",
+                "DesiredDeliveryMediums": ["EMAIL"],
+                "UserAttributes": [{"Name": "phone_number", "Value": "+15555550102"}],
+            }),
+        ),
+        "InvalidParameterException",
+        "No email provided but desired delivery medium was Email",
+    );
+    assert_eq!(
+        user_status_of(&state, &pool_id, "p2").as_deref(),
+        Some("FORCE_CHANGE_PASSWORD")
+    );
+}
+
+/// Recorded on AWS: RESEND needs an existing FORCE_CHANGE_PASSWORD user,
+/// sends a new temporary password and applies the attributes given.
+#[test]
+fn resend_invitation() {
+    let (svc, state, _events, email) =
+        svc_recording_triggers(custom_message_answer("unused", "unused"));
+    let pool_id = create_pool(&svc);
+    expect_error(
+        admin_create(
+            &svc,
+            json!({"UserPoolId": pool_id, "Username": "ghost", "MessageAction": "RESEND"}),
+        ),
+        "UserNotFoundException",
+        "User does not exist.",
+    );
+
+    admin_create(
+        &svc,
+        json!({
+            "UserPoolId": pool_id,
+            "Username": "inv",
+            "MessageAction": "SUPPRESS",
+            "TemporaryPassword": "First-Passw0rd!",
+            "UserAttributes": [{"Name": "email", "Value": "inv@example.com"}],
+        }),
+    )
+    .unwrap();
+    let resp = admin_create(
+        &svc,
+        json!({
+            "UserPoolId": pool_id,
+            "Username": "inv",
+            "MessageAction": "RESEND",
+            "DesiredDeliveryMediums": ["EMAIL"],
+            "UserAttributes": [{"Name": "given_name", "Value": "Ann"}],
+        }),
+    )
+    .unwrap();
+    let user = &resp_json(&resp)["User"];
+    assert_eq!(user["UserStatus"], "FORCE_CHANGE_PASSWORD");
+    assert!(user["Attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["Name"] == "given_name" && a["Value"] == "Ann"));
+    let sent = email.0.lock().clone();
+    assert_eq!(sent.len(), 1);
+    // The pool's default invitation.
+    assert_eq!(sent[0].1, "Your temporary password");
+    let password = sent[0]
+        .2
+        .strip_prefix("Your username is inv and temporary password is ")
+        .and_then(|rest| rest.strip_suffix('.'))
+        .unwrap()
+        .to_string();
+    assert_ne!(password, "First-Passw0rd!", "a new temporary password");
+    let stored = state.read().default_ref().users[&pool_id]["inv"]
+        .temporary_password
+        .clone();
+    assert_eq!(stored.as_deref(), Some(password.as_str()));
+
+    set_user_password(&svc, &pool_id, "inv", "P@ssw0rd!");
+    expect_error(
+        admin_create(
+            &svc,
+            json!({"UserPoolId": pool_id, "Username": "inv", "MessageAction": "RESEND"}),
+        ),
+        "UnsupportedUserStateException",
+        "Resend not possible. inv status is not FORCE_CHANGE_PASSWORD",
+    );
+}
+
+/// A pool in another account runs its triggers and sends its invitation
+/// with its own settings.
+#[test]
+fn invitation_uses_the_pools_own_account() {
+    let (svc, state, events, email) =
+        svc_recording_triggers(custom_message_answer("hi {username}", "pw {####}"));
+    let mut req = make_req("CreateUserPool", r#"{"PoolName":"other"}"#);
+    req.account_id = "222222222222".to_string();
+    let pool_id = resp_json(&block_on(svc.create_user_pool(&req)).unwrap())["UserPool"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    {
+        let mut accounts = state.write();
+        let pool = accounts
+            .get_or_create("222222222222")
+            .user_pools
+            .get_mut(&pool_id)
+            .unwrap();
+        pool.lambda_config =
+            Some(json!({"CustomMessage": "arn:aws:lambda:us-east-1:222222222222:function:msg"}));
+    }
+    let mut req = make_req(
+        "AdminCreateUser",
+        &json!({
+            "UserPoolId": pool_id,
+            "Username": "x",
+            "DesiredDeliveryMediums": ["EMAIL"],
+            "UserAttributes": [{"Name": "email", "Value": "x@example.com"}],
+        })
+        .to_string(),
+    );
+    req.account_id = "222222222222".to_string();
+    block_on(svc.admin_create_user(&req)).unwrap();
+    assert_eq!(
+        events.lock()[0]["triggerSource"],
+        "CustomMessage_AdminCreateUser"
+    );
+    assert_eq!(email.0.lock()[0].1, "hi x");
+}

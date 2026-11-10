@@ -48,6 +48,10 @@ impl CognitoService {
                 )
             })?;
 
+        if body["MessageAction"].as_str() == Some("RESEND") {
+            return self.resend_invitation(req, &body, pool_id, username).await;
+        }
+
         let (response, user_clone, region, account_id, pool_id_owned, username_owned) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
@@ -241,17 +245,9 @@ impl CognitoService {
             }
         }
 
-        // The invitation, unless suppressed; DesiredDeliveryMediums defaults
-        // to SMS.
+        // The invitation, unless suppressed.
         if body["MessageAction"].as_str() != Some("SUPPRESS") {
-            let mediums: Vec<String> = body["DesiredDeliveryMediums"]
-                .as_array()
-                .map(|m| {
-                    m.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_else(|| vec!["SMS".to_string()]);
+            let mediums = desired_delivery_mediums(&body);
             self.dispatch_invitation(
                 &pool_id_owned,
                 &username_owned,
@@ -264,6 +260,83 @@ impl CognitoService {
             .await?;
         }
 
+        Ok(AwsResponse::ok_json(json!({ "User": response })))
+    }
+
+    /// AdminCreateUser with `MessageAction: RESEND`: send an existing
+    /// FORCE_CHANGE_PASSWORD user's invitation again, with a new temporary
+    /// password (the one given, else a generated one) and any attributes
+    /// supplied applied, as recorded on AWS.
+    async fn resend_invitation(
+        &self,
+        req: &AwsRequest,
+        body: &serde_json::Value,
+        pool_id: &str,
+        username: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let new_attrs = parse_user_attributes(&body["UserAttributes"]);
+        let (response, user, region, account_id) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            ensure_user_pool_exists(state, pool_id)?;
+            let policy = state
+                .user_pools
+                .get(pool_id)
+                .map(|p| p.policies.password_policy.clone())
+                .unwrap_or_default();
+            if let Some(temp_pw) = body["TemporaryPassword"].as_str() {
+                validate_password(temp_pw, &policy)?;
+            }
+            let stored = super::resolve_alias_username(state, pool_id, username);
+            let region = state.region.clone();
+            let account_id = state.account_id.clone();
+            let user = state
+                .users
+                .get_mut(pool_id)
+                .and_then(|users| users.get_mut(&stored))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "UserNotFoundException",
+                        "User does not exist.",
+                    )
+                })?;
+            if user.user_status != user_status::FORCE_CHANGE_PASSWORD {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UnsupportedUserStateException",
+                    format!(
+                        "Resend not possible. {} status is not FORCE_CHANGE_PASSWORD",
+                        user.username
+                    ),
+                ));
+            }
+            for attr in new_attrs.into_iter().filter(|a| a.name != "sub") {
+                match user.attributes.iter_mut().find(|a| a.name == attr.name) {
+                    Some(existing) => existing.value = attr.value,
+                    None => user.attributes.push(attr),
+                }
+            }
+            user.temporary_password = Some(
+                body["TemporaryPassword"]
+                    .as_str()
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| super::generate_temporary_password(&policy)),
+            );
+            user.user_last_modified_date = Utc::now();
+            (user_to_json(user), user.clone(), region, account_id)
+        };
+        self.dispatch_invitation(
+            pool_id,
+            &user.username,
+            &user.attributes,
+            user.temporary_password.as_deref().unwrap_or_default(),
+            &desired_delivery_mediums(body),
+            &region,
+            &account_id,
+        )
+        .await?;
         Ok(AwsResponse::ok_json(json!({ "User": response })))
     }
 
@@ -1415,6 +1488,18 @@ impl CognitoService {
             }
         })))
     }
+}
+
+/// AdminCreateUser's `DesiredDeliveryMediums`, SMS when not given.
+fn desired_delivery_mediums(body: &serde_json::Value) -> Vec<String> {
+    body["DesiredDeliveryMediums"]
+        .as_array()
+        .map(|m| {
+            m.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["SMS".to_string()])
 }
 
 /// Choose which alias attribute a supplied `UsernameAttributes` value maps

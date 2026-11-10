@@ -119,9 +119,8 @@ impl CognitoService {
         let pool_settings = {
             let accounts = self.state.read();
             accounts
-                .default_ref()
-                .user_pools
-                .get(pool_id)
+                .get(account_id)
+                .and_then(|state| state.user_pools.get(pool_id))
                 .map(|p| {
                     let from = p
                         .email_configuration
@@ -210,8 +209,42 @@ impl CognitoService {
                 .find(|a| a.name == name)
                 .map(|a| a.value.clone())
         };
-        let email = attr("email").filter(|_| mediums.iter().any(|m| m == "EMAIL"));
-        let phone = attr("phone_number").filter(|_| mediums.iter().any(|m| m == "SMS"));
+        let wants = |medium: &str| mediums.iter().any(|m| m == medium);
+        let (from_addr, template, has_sms_configuration) = {
+            let accounts = self.state.read();
+            accounts
+                .get(account_id)
+                .and_then(|state| state.user_pools.get(pool_id))
+                .map(|p| {
+                    (
+                        p.email_configuration
+                            .as_ref()
+                            .and_then(|c| c.from_email_address.clone()),
+                        p.admin_create_user_config
+                            .as_ref()
+                            .and_then(|c| c.invite_message_template.clone()),
+                        p.sms_configuration.is_some(),
+                    )
+                })
+                .unwrap_or((None, None, false))
+        };
+        // Recorded on AWS: these fail the call, the user staying created.
+        if wants("EMAIL") && attr("email").is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "No email provided but desired delivery medium was Email",
+            ));
+        }
+        if wants("SMS") && attr("phone_number").is_some() && !has_sms_configuration {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "User pool does not have SMS configuration to send messages.",
+            ));
+        }
+        let email = attr("email").filter(|_| wants("EMAIL"));
+        let phone = attr("phone_number").filter(|_| wants("SMS"));
         if email.is_none() && phone.is_none() {
             return Ok(());
         }
@@ -226,24 +259,6 @@ impl CognitoService {
             TriggerSource::CustomSmsSenderAdminCreateUser,
         );
 
-        let (from_addr, template) = {
-            let accounts = self.state.read();
-            accounts
-                .default_ref()
-                .user_pools
-                .get(pool_id)
-                .map(|p| {
-                    (
-                        p.email_configuration
-                            .as_ref()
-                            .and_then(|c| c.from_email_address.clone()),
-                        p.admin_create_user_config
-                            .as_ref()
-                            .and_then(|c| c.invite_message_template.clone()),
-                    )
-                })
-                .unwrap_or((None, None))
-        };
         let mut subject = template.as_ref().and_then(|t| t.email_subject.clone());
         let mut message = template.as_ref().and_then(|t| t.email_message.clone());
         let mut sms_message = template.as_ref().and_then(|t| t.sms_message.clone());
@@ -382,9 +397,8 @@ impl CognitoService {
         let sms_template = {
             let accounts = self.state.read();
             accounts
-                .default_ref()
-                .user_pools
-                .get(pool_id)
+                .get(account_id)
+                .and_then(|state| state.user_pools.get(pool_id))
                 .and_then(|p| {
                     p.verification_message_template
                         .as_ref()

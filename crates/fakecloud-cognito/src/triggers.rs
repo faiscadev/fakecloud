@@ -175,8 +175,10 @@ pub fn get_trigger_arn(
     trigger_source: TriggerSource,
 ) -> Option<String> {
     let accounts = cognito_state.read();
-    let state = accounts.default_ref();
-    let pool = state.user_pools.get(pool_id)?;
+    // Pool ids are unique: the pool lives in whichever account created it.
+    let pool = accounts
+        .iter()
+        .find_map(|(_, state)| state.user_pools.get(pool_id))?;
     let lambda_config = pool.lambda_config.as_ref()?;
     let key = trigger_source.lambda_config_key();
     let raw = lambda_config.get(key)?;
