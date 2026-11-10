@@ -2251,6 +2251,12 @@ async fn main() {
         fakecloud_iam::pass_role::IamRoleTrustValidator::shared(iam_state.clone()),
     );
     lambda_service = lambda_service.with_iam_mode(cli.iam_mode());
+    lambda_service =
+        lambda_service.with_event_source_lookup(Arc::new(hooks::EventSourceLookupImpl {
+            sqs: sqs_state.clone(),
+            kinesis: kinesis_state.clone(),
+            dynamodb: dynamodb_state.clone(),
+        }));
     // Layer version grants scoped to an organization (`aws:PrincipalOrgID`)
     // resolve the caller's organization from the Organizations state.
     lambda_service = lambda_service.with_org_resolver(

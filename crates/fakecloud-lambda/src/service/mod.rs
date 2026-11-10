@@ -1312,6 +1312,9 @@ pub struct LambdaService {
     /// Durable executions: starts, re-invokes and times out executions of
     /// functions with a `DurableConfig`.
     pub(crate) durable: crate::durable::DurableHub,
+    /// Whether an event source (SQS queue, Kinesis / DynamoDB stream) a
+    /// mapping names exists; `None` skips the check.
+    pub(crate) event_source_lookup: Option<Arc<dyn crate::event_source::EventSourceLookup>>,
 }
 
 pub(crate) mod async_invoke;
@@ -1337,11 +1340,22 @@ impl LambdaService {
             ec2_state: None,
             quota_provider: None,
             org_resolver: None,
+            event_source_lookup: None,
         }
     }
 
     /// Attach the Organizations membership graph (see the `org_resolver`
     /// field).
+    /// Look event sources up in their services' state, so
+    /// CreateEventSourceMapping refuses one that does not exist.
+    pub fn with_event_source_lookup(
+        mut self,
+        lookup: Arc<dyn crate::event_source::EventSourceLookup>,
+    ) -> Self {
+        self.event_source_lookup = Some(lookup);
+        self
+    }
+
     pub fn with_org_resolver(mut self, orgs: Arc<dyn fakecloud_core::auth::ScpResolver>) -> Self {
         self.org_resolver = Some(orgs);
         self

@@ -653,3 +653,40 @@ mod task_eni_tests {
             .contains_key(&eni.eni_id));
     }
 }
+
+/// Lambda event source mappings' sources, looked up in the SQS, Kinesis and
+/// DynamoDB state of the account and region each ARN names.
+pub(crate) struct EventSourceLookupImpl {
+    pub(crate) sqs: fakecloud_sqs::SharedSqsState,
+    pub(crate) kinesis: fakecloud_kinesis::SharedKinesisState,
+    pub(crate) dynamodb: fakecloud_dynamodb::SharedDynamoDbState,
+}
+
+impl fakecloud_lambda::event_source::EventSourceLookup for EventSourceLookupImpl {
+    fn exists(&self, arn: &str) -> Option<bool> {
+        match arn.split(':').nth(2)? {
+            "sqs" => Some(
+                self.sqs
+                    .read()
+                    .by_arn(arn)
+                    .is_some_and(|s| s.queues.values().any(|q| q.arn == arn)),
+            ),
+            "kinesis" => {
+                // A stream consumer's ARN reads from its stream.
+                let stream = arn.split("/consumer/").next().unwrap_or(arn);
+                Some(
+                    self.kinesis
+                        .read()
+                        .by_arn(arn)
+                        .is_some_and(|s| s.streams.values().any(|st| st.stream_arn == stream)),
+                )
+            }
+            "dynamodb" => Some(self.dynamodb.read().by_arn(arn).is_some_and(|s| {
+                s.tables
+                    .values()
+                    .any(|t| t.stream_arn.as_deref() == Some(arn))
+            })),
+            _ => None,
+        }
+    }
+}

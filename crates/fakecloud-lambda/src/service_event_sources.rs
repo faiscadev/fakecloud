@@ -18,15 +18,14 @@ impl LambdaService {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         let event_source_arn = body["EventSourceArn"]
             .as_str()
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterValueException",
-                    "EventSourceArn is required",
-                )
-            })?
+            .ok_or_else(crate::event_source::unrecognized)?
             .to_string();
         crate::extras::check_len("EventSourceArn", &event_source_arn, 0, 10000)?;
+        crate::event_source::validate(
+            &event_source_arn,
+            &req.region,
+            self.event_source_lookup.as_deref(),
+        )?;
 
         let function_name = body["FunctionName"]
             .as_str()

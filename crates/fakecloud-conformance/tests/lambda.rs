@@ -5,6 +5,30 @@ use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
 use std::io::Write;
 
+/// Create SQS queue `name` and return its ARN: a mapping's source must
+/// exist.
+async fn create_queue(server: &TestServer, name: &str) -> String {
+    let sqs = server.sqs_client().await;
+    let url = sqs
+        .create_queue()
+        .queue_name(name)
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    sqs.get_queue_attributes()
+        .queue_url(url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap()
+        .attributes()
+        .unwrap()[&aws_sdk_sqs::types::QueueAttributeName::QueueArn]
+        .clone()
+}
+
 fn make_python_zip() -> Vec<u8> {
     let buf = Vec::new();
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(buf));
@@ -210,7 +234,7 @@ async fn lambda_create_get_delete_event_source_mapping() {
     let create_resp = client
         .create_event_source_mapping()
         .function_name("esm-func")
-        .event_source_arn("arn:aws:sqs:us-east-1:123456789012:my-queue")
+        .event_source_arn(create_queue(&server, "my-queue").await)
         .send()
         .await
         .unwrap();
@@ -258,7 +282,7 @@ async fn lambda_list_event_source_mappings() {
     client
         .create_event_source_mapping()
         .function_name("esm-list-func")
-        .event_source_arn("arn:aws:sqs:us-east-1:123456789012:queue-1")
+        .event_source_arn(create_queue(&server, "queue-1").await)
         .send()
         .await
         .unwrap();
@@ -1116,7 +1140,7 @@ async fn lambda_update_event_source_mapping() {
     let esm = client
         .create_event_source_mapping()
         .function_name("esm-fn")
-        .event_source_arn("arn:aws:sqs:us-east-1:000000000000:queue1")
+        .event_source_arn(create_queue(&server, "queue1").await)
         .send()
         .await
         .unwrap();
