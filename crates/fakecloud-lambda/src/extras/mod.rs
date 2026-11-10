@@ -562,7 +562,9 @@ impl LambdaService {
             func.image_config = Some(body["ImageConfig"].clone());
         }
         if body["DurableConfig"].is_object() {
-            func.durable_config = Some(body["DurableConfig"].clone());
+            func.durable_config = Some(crate::durable::model::normalize_durable_config(
+                &body["DurableConfig"],
+            ));
         }
         if let Some(attachments) = layer_attachments {
             func.layers = attachments;

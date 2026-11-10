@@ -394,7 +394,14 @@ impl LambdaService {
             tokio::spawn(async move { rt.terminate_instances(pool).await });
         }
 
-        Ok(AwsResponse::json(StatusCode::NO_CONTENT, ""))
+        // A durable function is deleted asynchronously (it reports
+        // `Deleting` while its executions wind down): 202, not 204.
+        let status = if removed.durable_config.is_some() {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::NO_CONTENT
+        };
+        Ok(AwsResponse::json(status, ""))
     }
 
     pub(crate) fn list_functions(

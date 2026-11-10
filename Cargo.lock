@@ -6085,6 +6085,7 @@ dependencies = [
  "kube",
  "parking_lot",
  "percent-encoding",
+ "regex",
  "reqwest",
  "rustls 0.23.46",
  "serde",

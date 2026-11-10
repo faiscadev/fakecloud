@@ -1,3 +1,4 @@
+pub(crate) mod durable;
 pub mod eventstream;
 pub mod extras;
 pub mod filter;
@@ -10,6 +11,8 @@ pub(crate) mod state;
 pub mod vpc;
 pub(crate) mod workflows;
 
+pub use durable::api::invoke_for_delivery as invoke_durable_for_delivery;
+pub use durable::DurableHub;
 pub use service::{validate_execution_role, LambdaService};
 pub use state::{
     attached_layer_zips, find_function, function_location, parse_lambda_snapshot, resolve_invocable,

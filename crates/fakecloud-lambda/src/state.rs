@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+pub use crate::durable::DurableExecution;
+
 use fakecloud_core::multi_account::{
     parse_regional_snapshot, AccountState, MultiRegionState, RegionalSnapshot, RegionalState,
     SplitByRegion,
@@ -111,9 +113,9 @@ pub struct LambdaFunction {
     /// (`Idle`, `Creating`, `Restoring`, `EniLimitExceeded`, …).
     #[serde(default)]
     pub state_reason_code: Option<String>,
-    /// `DurableConfig` for AWS's durable-function feature
-    /// (`RetentionPeriodInDays`, `ExecutionTimeout`). Round-tripped
-    /// only — there's no execution-history backend in fakecloud.
+    /// `DurableConfig` (`ExecutionTimeout`, `RetentionPeriodInDays`,
+    /// `KMSKeyArn`): set on a durable function, whose invocations start
+    /// durable executions (see `crate::durable`).
     #[serde(default)]
     pub durable_config: Option<serde_json::Value>,
     /// Free-form `LastUpdateStatusReason` set on the most recent failed
@@ -290,13 +292,10 @@ pub struct LambdaState {
     /// Capacity providers (Lambda Workflows, 2025-11-30 API) keyed by name.
     #[serde(default)]
     pub capacity_providers: BTreeMap<String, CapacityProvider>,
-    /// Durable executions (Lambda Workflows, 2025-12-01 API) keyed by ARN.
+    /// Durable executions (2025-12-01 API) keyed by ARN. Callbacks live on
+    /// their execution: a callback id encodes the execution ARN.
     #[serde(default)]
     pub durable_executions: BTreeMap<String, DurableExecution>,
-    /// Durable execution callbacks keyed by callback id. Each callback
-    /// belongs to one execution and records its outcome on Send*Callback*.
-    #[serde(default)]
-    pub durable_execution_callbacks: BTreeMap<String, DurableExecutionCallback>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,28 +317,6 @@ pub struct CapacityProvider {
     /// can read whatever is staged here.
     #[serde(default)]
     pub function_versions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DurableExecution {
-    pub arn: String,
-    pub function_name: String,
-    pub function_arn: String,
-    pub status: String,
-    pub input: serde_json::Value,
-    pub started_at: DateTime<Utc>,
-    pub stopped_at: Option<DateTime<Utc>>,
-    pub last_modified: DateTime<Utc>,
-    pub history: Vec<serde_json::Value>,
-    pub state: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DurableExecutionCallback {
-    pub callback_id: String,
-    pub execution_arn: String,
-    pub outcome: String,
-    pub recorded_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -547,7 +524,6 @@ impl LambdaState {
             account_settings: None,
             capacity_providers: BTreeMap::new(),
             durable_executions: BTreeMap::new(),
-            durable_execution_callbacks: BTreeMap::new(),
         }
     }
 
@@ -571,7 +547,6 @@ impl LambdaState {
         self.account_settings = None;
         self.capacity_providers.clear();
         self.durable_executions.clear();
-        self.durable_execution_callbacks.clear();
     }
 }
 
@@ -690,7 +665,7 @@ impl SplitByRegion for LambdaState {
     /// runtime / scaling / recursion / code signing settings) follow their
     /// function. Event source mappings follow their function ARN, layers,
     /// code signing configs, capacity providers and durable executions their
-    /// own ARN, callbacks their execution. Anything naming no region (and the
+    /// own ARN. Anything naming no region (and the
     /// account settings) lands in the server's default region.
     fn split_by_region(self, into: &mut RegionalState<Self>) {
         let default_region = into.default_region().to_string();
@@ -743,26 +718,14 @@ impl SplitByRegion for LambdaState {
         by_own_arn!(code_signing_configs, csc_arn);
         by_own_arn!(capacity_providers, arn);
 
-        let mut execution_regions: BTreeMap<String, String> = BTreeMap::new();
         for (arn, exec) in self.durable_executions {
             let region = lambda_arn_region(&exec.arn)
                 .or_else(|| lambda_arn_region(&exec.function_arn))
                 .map(str::to_string)
                 .unwrap_or_else(|| default_region.clone());
-            execution_regions.insert(arn.clone(), region.clone());
             into.region_mut(&region)
                 .durable_executions
                 .insert(arn, exec);
-        }
-        for (id, callback) in self.durable_execution_callbacks {
-            let region = execution_regions
-                .get(&callback.execution_arn)
-                .cloned()
-                .or_else(|| lambda_arn_region(&callback.execution_arn).map(str::to_string))
-                .unwrap_or_else(|| default_region.clone());
-            into.region_mut(&region)
-                .durable_execution_callbacks
-                .insert(id, callback);
         }
         if let Some(settings) = self.account_settings {
             into.region_mut(&default_region).account_settings = Some(settings);
