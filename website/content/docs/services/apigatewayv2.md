@@ -34,6 +34,7 @@ REST for management, path-based routing for the executed API. A deployed stage i
 
 - **API Gateway v2 -> Lambda** — HTTP API routes invoke Lambda functions with proxy integration v2.0 event format
 - **API Gateway v2 -> Lambda (authorizers)** — REQUEST (Lambda) authorizers invoke real functions; policy + context returned drive the request decision
+- **Lambda errors, as recorded on AWS** — a function error, or a returned object carrying `errorMessage`, answers 500 `{"message":"Internal Server Error"}`; a Lambda authorizer that fails with `Unauthorized` (thrown or returned) answers 401, and any other error or a response with neither `isAuthorized` nor a policy answers 500; a WebSocket `$connect` route that fails, or answers without `statusCode`, refuses the connection with 502, and one answering a `statusCode` outside 2xx refuses it with that status and body
 - **API Gateway v2 -> JWT issuers** — JWT authorizers fetch the configured issuer's JWKS and verify caller tokens (RS256 signature, expiry, audience, scope)
 - **API Gateway v2 -> CloudWatch Logs** — stage access logs delivered to the configured log group with the formatted access log line
 - **API Gateway v2 -> AWS services** — AWS service integrations dispatch to in-process service handlers
