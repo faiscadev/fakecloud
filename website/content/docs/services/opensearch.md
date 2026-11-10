@@ -81,14 +81,15 @@ chosen from the engine version.
   `DomainARN` deliveries retry) for the length of the replacement.
 - **Durability.** The data directory is a named volume. A persistent-mode
   restart (`--storage-mode persistent`) brings each domain back in a fresh
-  container on its persisted volume (a graceful shutdown removes the
-  containers, and the startup reaper removes a crashed process's), reporting
-  `Processing=true` until it is healthy again. A reset removes every domain's
-  container and volume.
-- **Liveness.** Every 30 seconds fakecloud probes each running cluster. One
-  whose container died or stopped (or whose node stops answering three
-  probes in a row) loses its endpoint, goes back to `Processing=true`
-  (`Modifying`) and is brought back up on its volume.
+  container on its persisted volume, reporting `Processing=true` until it
+  answers health again (a node on existing data counts as up even if its
+  indices are red). Before a node starts, any container still mounting the
+  domain's volume is removed, whichever fakecloud process started it. A
+  reset removes every domain's container and volume.
+- **Crashes.** A cluster that crashes is not restarted automatically: its
+  endpoint stays bound to the dead port. An `UpdateDomainConfig` call (when
+  the daemon reports the container gone or exited) or a fakecloud restart
+  brings it back.
 - **CloudFormation.** `AWS::OpenSearchService::Domain` and
   `AWS::Elasticsearch::Domain` start the same cluster; a stack update that
   changes node settings or the engine version replaces it, and a stack delete

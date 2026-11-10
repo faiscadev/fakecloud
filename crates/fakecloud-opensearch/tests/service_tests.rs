@@ -2477,13 +2477,32 @@ async fn status_operations_agree_with_processing() {
             json!({}),
         )
     };
+    let set_pending = |pending: bool| {
+        state
+            .write()
+            .get_or_create("000000000000")
+            .domains
+            .get_mut("agree")
+            .unwrap()
+            .change_pending = pending;
+    };
+    // A restart's recovery (no change of the caller's started it) leaves the
+    // last change complete.
     set(Some(MODIFYING));
+    set_pending(false);
+    let p = json_of(&call(&svc, progress()).await)["ChangeProgressStatus"].clone();
+    assert_eq!(p["Status"], "COMPLETED");
+    assert_eq!(p["ConfigChangeStatus"], "Completed");
+    assert_eq!(p["PendingProperties"], json!([]));
+    // The change itself replacing the cluster is in progress.
+    set_pending(true);
     let p = json_of(&call(&svc, progress()).await)["ChangeProgressStatus"].clone();
     assert_eq!(p["Status"], "PROCESSING");
     assert_eq!(p["ConfigChangeStatus"], "ApplyingChanges");
     assert_eq!(p["PendingProperties"], json!(["AdvancedOptions"]));
     assert_eq!(p["CompletedProperties"], json!([]));
     set(None);
+    set_pending(false);
     let p = json_of(&call(&svc, progress()).await)["ChangeProgressStatus"].clone();
     assert_eq!(p["Status"], "COMPLETED");
     assert_eq!(p["ConfigChangeStatus"], "Completed");

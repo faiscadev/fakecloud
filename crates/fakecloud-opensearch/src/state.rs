@@ -96,6 +96,11 @@ pub struct Domain {
     /// restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_plane_error: Option<String>,
+    /// Whether the bring-up in progress (`processing`) was started by a
+    /// configuration change (`last_change`), as opposed to a create or a
+    /// restart's recovery: only then is that change reported in progress.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub change_pending: bool,
 }
 
 /// Where a domain's backing search cluster listens.

@@ -460,20 +460,6 @@ impl OpenSearchService {
         ));
     }
 
-    /// Start the background liveness watch that notices a cluster whose
-    /// container died or wedged and brings it back (no-op without a
-    /// runtime). Call once, after [`Self::recover_persisted_containers`].
-    pub fn start_liveness_watch(&self) {
-        let Some(runtime) = self.runtime.clone() else {
-            return;
-        };
-        tokio::spawn(crate::backing::watch_liveness(
-            self.state.clone(),
-            runtime,
-            self.snapshot_hook(),
-        ));
-    }
-
     /// Re-drive the backing clusters of persisted domains after a restart.
     ///
     /// Every persisted endpoint binding is dropped first: its port belonged
@@ -1330,6 +1316,7 @@ impl OpenSearchService {
             data_plane: None,
             processing: None,
             data_plane_error: None,
+            change_pending: false,
         };
         // With a container runtime the domain reports `Processing` until a real
         // cluster answers health (converged in the background below).
@@ -1491,6 +1478,7 @@ impl OpenSearchService {
             .ok_or_else(|| not_found_domain(&name))?;
         let mut out = json!({});
         let mut restart = false;
+        let mut check_gone = false;
         if !dry_run {
             let mut properties = Vec::new();
             if let Some(obj) = b.as_object() {
@@ -1519,6 +1507,11 @@ impl OpenSearchService {
             // the way AWS applies it with a blue/green deployment.
             if backing::begin_change(self.runtime.as_deref(), d, backing::MODIFYING) {
                 restart = true;
+                d.change_pending = true;
+            } else if self.runtime.is_some() && d.data_plane.is_some() {
+                // The spec is unchanged, but a cluster that crashed is brought
+                // back by a configuration change (and only then).
+                check_gone = true;
             }
             d.last_change = Some(crate::state::ConfigChange {
                 change_id: uuid::Uuid::new_v4().to_string(),
@@ -1547,6 +1540,16 @@ impl OpenSearchService {
         drop(accounts);
         if restart {
             self.spawn_converge(&req.account_id, &name);
+        } else if check_gone {
+            if let Some(runtime) = self.runtime.clone() {
+                tokio::spawn(backing::recover_if_gone(
+                    self.state.clone(),
+                    runtime,
+                    req.account_id.clone(),
+                    name.clone(),
+                    self.snapshot_hook(),
+                ));
+            }
         }
         Ok(ok(out))
     }
@@ -3000,7 +3003,7 @@ impl OpenSearchService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let dom = label(l.domain.as_deref())?;
         self.require_domain(&dom, &req.account_id)?;
-        let (last_change, processing) = {
+        let (last_change, processing, change_pending) = {
             let accounts = self.state.read();
             let d = accounts
                 .get(&req.account_id)
@@ -3008,6 +3011,7 @@ impl OpenSearchService {
             (
                 d.and_then(|d| d.last_change.clone()),
                 d.and_then(|d| d.processing.clone()),
+                d.is_some_and(|d| d.change_pending),
             )
         };
         let Some(change) = last_change else {
@@ -3020,15 +3024,17 @@ impl OpenSearchService {
                 "ChangeProgressStages": [],
             }})));
         };
-        // A change is in progress while its replacement cluster boots (a
-        // container-backed domain re-converging); otherwise config changes
-        // apply synchronously and the latest one is complete. No advisory
+        // A change is in progress while the replacement cluster it started
+        // boots; a bring-up the change didn't start (a create, a restart's
+        // recovery) leaves the last change complete, as otherwise config
+        // changes apply synchronously. No advisory
         // validation ever fails, so the accepted-warning list is echoed with
         // an empty failure list.
-        let applying = matches!(
-            processing.as_deref(),
-            Some(backing::MODIFYING | backing::UPGRADING)
-        );
+        let applying = change_pending
+            && matches!(
+                processing.as_deref(),
+                Some(backing::MODIFYING | backing::UPGRADING)
+            );
         let (status, config_status, pending, completed) = if applying {
             (
                 "PROCESSING",
@@ -3195,6 +3201,9 @@ impl OpenSearchService {
                 // The new engine runs in a new container on the same data
                 // volume, so the indices carry over.
                 restart = backing::begin_change(self.runtime.as_deref(), d, backing::UPGRADING);
+                if restart {
+                    d.change_pending = true;
+                }
             }
         }
         drop(accounts);

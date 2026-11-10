@@ -111,6 +111,7 @@ impl ResourceProvisioner {
             data_plane: None,
             processing: None,
             data_plane_error: None,
+            change_pending: false,
         };
         // With a container runtime the domain is backed by a real search
         // cluster, brought up in the background after provisioning (the same

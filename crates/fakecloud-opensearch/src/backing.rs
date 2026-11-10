@@ -2,19 +2,18 @@
 //!
 //! One routine, [`converge_domain`], serves every path that can change what a
 //! domain's container should be -- `CreateDomain`, `UpdateDomainConfig`,
-//! `UpgradeDomain`, CloudFormation, restart recovery, the liveness watch --
-//! so they cannot drift apart. It reads the domain's current [`DomainSpec`], asks the runtime for a
+//! `UpgradeDomain`, CloudFormation, restart recovery, and the recovery of a
+//! gone cluster on a configuration change -- so they cannot drift apart. It reads the domain's current [`DomainSpec`], asks the runtime for a
 //! container started from it, and settles the domain: `Processing` clears and
 //! the endpoint becomes reachable, or the bring-up failure is recorded and the
 //! domain degrades to control plane only. A spec that changed while the
 //! container was booting is converged again before settling.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use fakecloud_persistence::SnapshotHook;
 
-use crate::runtime::{DomainSpec, Liveness, OpenSearchRuntime};
+use crate::runtime::{DomainSpec, OpenSearchRuntime};
 use crate::state::{Domain, DomainDataPlane, SharedOpenSearchState};
 
 /// `DomainProcessingStatus` while a new domain's cluster boots.
@@ -50,6 +49,7 @@ pub fn begin(runtime_present: bool, domain: &mut Domain, status: &str) -> bool {
     domain.processing = Some(status.to_string());
     domain.data_plane = None;
     domain.data_plane_error = None;
+    domain.change_pending = false;
     true
 }
 
@@ -89,15 +89,59 @@ pub fn begin_change(
             _ => false,
         };
     }
-    // A dead cluster (found by the liveness watch) counts as changed, so a
-    // configuration change brings it back.
-    let unchanged = domain.data_plane.is_some()
-        && rt.tracked_spec(&domain.arn) == Some(spec)
-        && rt.tracked_alive(&domain.arn);
+    let unchanged = domain.data_plane.is_some() && rt.tracked_spec(&domain.arn) == Some(spec);
     if unchanged {
         return false;
     }
     begin(true, domain, status)
+}
+
+/// After a configuration change that left the spec alone: if the domain's
+/// tracked container is definitively gone (the daemon says no such container,
+/// or that it exited), drop the dead endpoint and bring the cluster back. Any
+/// other answer, a daemon outage included, leaves the domain as it is. A
+/// crashed cluster is otherwise not restarted automatically.
+pub async fn recover_if_gone(
+    state: SharedOpenSearchState,
+    runtime: Arc<OpenSearchRuntime>,
+    account: String,
+    name: String,
+    persist: Option<SnapshotHook>,
+) {
+    let target = {
+        let accounts = state.read();
+        accounts
+            .get(&account)
+            .and_then(|st| st.domains.get(&name))
+            .filter(|d| !d.deleted && d.processing.is_none())
+            .and_then(|d| Some((d.arn.clone(), d.data_plane.as_ref()?.container_id.clone())))
+    };
+    let Some((key, container_id)) = target else {
+        return;
+    };
+    if !runtime.tracked_container_gone(&key).await {
+        return;
+    }
+    {
+        let mut accounts = state.write();
+        let Some(d) = accounts
+            .get_mut(&account)
+            .and_then(|st| st.domains.get_mut(&name))
+            .filter(|d| {
+                !d.deleted
+                    && d.processing.is_none()
+                    && d.data_plane.as_ref().map(|dp| dp.container_id.as_str())
+                        == Some(container_id.as_str())
+            })
+        else {
+            return;
+        };
+        tracing::warn!(domain = %key, container_id = %container_id, "search cluster is gone; bringing it back");
+        begin(true, d, MODIFYING);
+        // Brought back because of the caller's change.
+        d.change_pending = true;
+    }
+    converge_domain(state, runtime, account, name, persist).await;
 }
 
 /// Bring `account`'s domain `name` up from its current spec and settle it.
@@ -130,6 +174,7 @@ pub async fn converge_domain(
         let Some(spec) = spec else {
             settle(&state, &account, &name, &incarnation, |d| {
                 d.processing = None;
+                d.change_pending = false;
                 d.data_plane = None;
             });
             break;
@@ -153,6 +198,7 @@ pub async fn converge_domain(
                 Some(d) if domain_spec(d).as_ref() != Some(&spec) => Outcome::Again,
                 Some(d) => {
                     d.processing = None;
+                    d.change_pending = false;
                     match &result {
                         Ok(r) => {
                             d.data_plane = Some(DomainDataPlane {
@@ -219,117 +265,13 @@ pub fn spawn_teardown(runtime: &Arc<OpenSearchRuntime>, domain: &Domain) {
     });
 }
 
-/// How often the liveness watch probes running clusters.
-pub const LIVENESS_INTERVAL: Duration = Duration::from_secs(30);
-/// Consecutive unanswered probes of a running container before its node
-/// counts as wedged. A dead container counts at once.
-pub const UNRESPONSIVE_LIMIT: u32 = 3;
-
-/// Probe every settled domain's cluster once. A dead one (container gone or
-/// stopped, never started by this process, or a node unanswered
-/// [`UNRESPONSIVE_LIMIT`] probes in a row) loses its endpoint binding, goes
-/// back to `Processing` (`Modifying`) and is returned for a
-/// [`converge_domain`]. `misses` carries the unanswered-probe counts between
-/// passes. No lock is held across an await.
-pub async fn check_liveness(
-    state: &SharedOpenSearchState,
-    runtime: &OpenSearchRuntime,
-    misses: &mut std::collections::HashMap<String, u32>,
-) -> Vec<(String, String)> {
-    struct Live {
-        account: String,
-        name: String,
-        arn: String,
-        incarnation: String,
-        container_id: String,
-    }
-    let live: Vec<Live> = {
-        let accounts = state.read();
-        accounts
-            .iter()
-            .flat_map(|(account, st)| {
-                st.domains.values().filter_map(move |d| {
-                    let dp = d.data_plane.as_ref()?;
-                    (!d.deleted && d.processing.is_none()).then(|| Live {
-                        account: account.to_string(),
-                        name: d.name.clone(),
-                        arn: d.arn.clone(),
-                        incarnation: d.incarnation(),
-                        container_id: dp.container_id.clone(),
-                    })
-                })
-            })
-            .collect()
-    };
-    misses.retain(|arn, _| live.iter().any(|l| &l.arn == arn));
-    let mut dead = Vec::new();
-    for l in live {
-        let gone = match runtime.liveness(&l.arn).await {
-            Liveness::Healthy => {
-                misses.remove(&l.arn);
-                continue;
-            }
-            Liveness::Dead | Liveness::Untracked => true,
-            Liveness::Unresponsive => {
-                let n = misses.entry(l.arn.clone()).or_default();
-                *n += 1;
-                *n >= UNRESPONSIVE_LIMIT
-            }
-        };
-        if !gone {
-            continue;
-        }
-        misses.remove(&l.arn);
-        runtime.mark_dead(&l.arn, &l.container_id);
-        let mut accounts = state.write();
-        if let Some(d) = accounts
-            .get_mut(&l.account)
-            .and_then(|st| st.domains.get_mut(&l.name))
-            .filter(|d| {
-                !d.deleted
-                    && d.incarnation() == l.incarnation
-                    && d.processing.is_none()
-                    && d.data_plane.as_ref().map(|dp| dp.container_id.as_str())
-                        == Some(l.container_id.as_str())
-            })
-        {
-            tracing::warn!(domain = %l.arn, container_id = %l.container_id, "search cluster is gone; bringing it back");
-            d.data_plane = None;
-            d.processing = Some(MODIFYING.to_string());
-            dead.push((l.account, l.name));
-        }
-    }
-    dead
-}
-
-/// Run [`check_liveness`] every [`LIVENESS_INTERVAL`], converging every dead
-/// domain it finds. Runs for the life of the process.
-pub async fn watch_liveness(
-    state: SharedOpenSearchState,
-    runtime: Arc<OpenSearchRuntime>,
-    persist: Option<SnapshotHook>,
-) {
-    let mut misses = std::collections::HashMap::new();
-    loop {
-        tokio::time::sleep(LIVENESS_INTERVAL).await;
-        for (account, name) in check_liveness(&state, &runtime, &mut misses).await {
-            tokio::spawn(converge_domain(
-                state.clone(),
-                runtime.clone(),
-                account,
-                name,
-                persist.clone(),
-            ));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runtime::fake::FakeEngine;
     use fakecloud_core::multi_account::MultiAccountState;
     use parking_lot::RwLock;
+    use std::time::Duration;
 
     const ACCOUNT: &str = "123456789012";
 
@@ -413,8 +355,8 @@ mod tests {
         assert!(calls.iter().any(|c| c == "rm -f cid1"), "{calls:#?}");
         assert!(engine.runtime.tracked_domains().is_empty());
 
-        // A leftover the runtime doesn't track (a timed-out create) is reaped
-        // by the teardown, matched on this process's owner label.
+        // A leftover still mounting the volume (a timed-out create, another
+        // process's node) is reaped by the teardown, whoever started it.
         engine.set_ps("leftover1\n");
         let removed = state
             .write()
@@ -432,19 +374,17 @@ mod tests {
                 .position(|c| c == &format!("volume rm -f {volume}"));
             if let (Some(r), Some(v)) = (reaped, vol) {
                 assert!(r < v, "leftover reaped before the volume: {calls:#?}");
-                let ps = calls.iter().find(|c| c.starts_with("ps -aq")).unwrap();
-                assert!(
-                    ps.contains(&format!("label=fakecloud-opensearch={arn}")),
-                    "{ps}"
+                let ps = calls[..r]
+                    .iter()
+                    .rev()
+                    .find(|c| c.starts_with("ps -aq"))
+                    .unwrap();
+                assert_eq!(
+                    ps,
+                    &format!(
+                        "ps -aq --filter label=fakecloud-opensearch={arn} --filter volume={volume}"
+                    )
                 );
-                assert!(
-                    ps.contains(&format!(
-                        "label=fakecloud-opensearch-owner={}",
-                        engine.owner_id()
-                    )),
-                    "{ps}"
-                );
-                assert!(!ps.contains("fakecloud-instance"), "{ps}");
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "{calls:#?}");
@@ -476,82 +416,6 @@ mod tests {
                 std::process::id()
             )),
             "the reaper's pid label is kept: {create}"
-        );
-    }
-
-    /// A cluster whose container died is noticed, loses its endpoint, goes
-    /// back to `Modifying` and is brought back up; a configuration change
-    /// also treats a dead tracked container as changed.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_dead_cluster_is_noticed_and_brought_back() {
-        let engine = FakeEngine::start().await;
-        let state = state_with("crashy", "OpenSearch_2.11");
-        settled(&state, &engine, "crashy").await;
-        let mut misses = std::collections::HashMap::new();
-        assert!(check_liveness(&state, &engine.runtime, &mut misses)
-            .await
-            .is_empty());
-
-        engine
-            .healthy
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        engine.flag("dead", true);
-        let dead = check_liveness(&state, &engine.runtime, &mut misses).await;
-        assert_eq!(dead, vec![(ACCOUNT.to_string(), "crashy".to_string())]);
-        with_domain(&state, "crashy", |d| {
-            assert!(d.data_plane.is_none());
-            assert_eq!(d.reachable_url(), None);
-            assert_eq!(d.processing.as_deref(), Some(MODIFYING));
-        });
-
-        engine
-            .healthy
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        engine.flag("dead", false);
-        converge(&state, &engine, "crashy").await;
-        with_domain(&state, "crashy", |d| {
-            assert!(d.processing.is_none());
-            assert_eq!(d.data_plane.as_ref().unwrap().container_id, "cid2");
-        });
-
-        // A dead tracked cluster makes an otherwise no-op change re-converge.
-        assert!(!with_domain(&state, "crashy", |d| begin_change(
-            Some(&engine.runtime),
-            d,
-            MODIFYING
-        )));
-        engine.runtime.mark_dead(
-            &format!("arn:aws:es:us-east-1:{ACCOUNT}:domain/crashy"),
-            "cid2",
-        );
-        assert!(with_domain(&state, "crashy", |d| begin_change(
-            Some(&engine.runtime),
-            d,
-            MODIFYING
-        )));
-    }
-
-    /// A node that runs but stops answering counts only after repeated
-    /// misses.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn an_unresponsive_node_needs_repeated_misses() {
-        let engine = FakeEngine::start().await;
-        let state = state_with("slow", "OpenSearch_2.11");
-        settled(&state, &engine, "slow").await;
-        engine
-            .healthy
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        let mut misses = std::collections::HashMap::new();
-        for _ in 1..UNRESPONSIVE_LIMIT {
-            assert!(check_liveness(&state, &engine.runtime, &mut misses)
-                .await
-                .is_empty());
-        }
-        assert_eq!(
-            check_liveness(&state, &engine.runtime, &mut misses)
-                .await
-                .len(),
-            1
         );
     }
 
@@ -657,5 +521,145 @@ mod tests {
             creates
         );
         with_domain(&state, "late", |d| assert!(d.data_plane.is_none()));
+    }
+
+    /// Before starting a node, every container still mounting the domain's
+    /// volume is removed whichever process started it (a containerized
+    /// fakecloud restarted as pid 1 again leaves one the startup reaper
+    /// skips, and its node would hold the data's node lock).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bring_up_first_removes_whatever_mounts_the_volume() {
+        let engine = FakeEngine::start().await;
+        let state = state_with("relock", "OpenSearch_2.11");
+        engine.set_ps("previous-pid1-node\n");
+        settled(&state, &engine, "relock").await;
+        let (arn, volume) = with_domain(&state, "relock", |d| {
+            (d.arn.clone(), domain_spec(d).unwrap().volume)
+        });
+        let calls = engine.calls();
+        let ps = calls
+            .iter()
+            .position(|c| {
+                c == &format!(
+                    "ps -aq --filter label=fakecloud-opensearch={arn} --filter volume={volume}"
+                )
+            })
+            .expect("volume users listed");
+        let rm = calls
+            .iter()
+            .position(|c| c == "rm -f previous-pid1-node")
+            .expect("removed");
+        let create = calls.iter().position(|c| c.starts_with("create")).unwrap();
+        assert!(ps < rm && rm < create, "{calls:#?}");
+        assert!(
+            !calls[ps].contains("owner"),
+            "not owner-scoped: {}",
+            calls[ps]
+        );
+    }
+
+    #[test]
+    fn red_health_is_ready_only_on_existing_data() {
+        use crate::runtime::health_is_ready as ready;
+        assert!(ready("green", false) && ready("yellow", false));
+        assert!(!ready("red", false));
+        assert!(ready("red", true));
+        assert!(!ready("bogus", true));
+    }
+
+    /// A node respawned onto an existing volume whose indices are red still
+    /// counts as up, so a red index can't leave the domain control-plane only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_respawn_onto_existing_data_accepts_red_health() {
+        let engine = FakeEngine::start().await;
+        let state = state_with("reddish", "OpenSearch_2.11");
+        // The fake's volume already exists (`volume inspect` succeeds).
+        engine.red.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(with_domain(&state, "reddish", |d| begin(
+            true, d, MODIFYING
+        )));
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            converge(&state, &engine, "reddish"),
+        )
+        .await
+        .expect("a red node on existing data is ready");
+        with_domain(&state, "reddish", |d| {
+            assert!(d.data_plane.is_some(), "{:?}", d.data_plane_error)
+        });
+    }
+
+    /// A running cluster is reused as long as its container isn't
+    /// definitively gone, even when its node answers red or not at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unhealthy_but_running_cluster_is_not_replaced() {
+        let engine = FakeEngine::start().await;
+        let state = state_with("keep", "OpenSearch_2.11");
+        settled(&state, &engine, "keep").await;
+        engine.red.store(true, std::sync::atomic::Ordering::SeqCst);
+        settled(&state, &engine, "keep").await;
+        engine
+            .healthy
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        settled(&state, &engine, "keep").await;
+        let creates = engine
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("create"))
+            .count();
+        assert_eq!(creates, 1);
+    }
+
+    /// After a configuration change, a cluster whose container is
+    /// definitively gone is brought back; a daemon that can't answer proves
+    /// nothing and changes nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_gone_cluster_is_recovered_by_a_change_but_an_outage_is_not() {
+        let engine = FakeEngine::start().await;
+        let state = state_with("phoenix", "OpenSearch_2.11");
+        settled(&state, &engine, "phoenix").await;
+        let recover = || {
+            recover_if_gone(
+                state.clone(),
+                engine.runtime.clone(),
+                ACCOUNT.into(),
+                "phoenix".into(),
+                None,
+            )
+        };
+        let creates = || {
+            engine
+                .calls()
+                .iter()
+                .filter(|c| c.starts_with("create"))
+                .count()
+        };
+
+        // Still running: nothing to do.
+        recover().await;
+        assert_eq!(creates(), 1);
+
+        // The daemon is down: not proof the container is gone.
+        engine.flag("daemon-down", true);
+        recover().await;
+        engine.flag("daemon-down", false);
+        assert_eq!(creates(), 1);
+        with_domain(&state, "phoenix", |d| assert!(d.data_plane.is_some()));
+
+        // Gone for good: brought back on a new container.
+        engine.flag("gone", true);
+        recover().await;
+        engine.flag("gone", false);
+        assert_eq!(creates(), 2);
+        with_domain(&state, "phoenix", |d| {
+            assert!(d.processing.is_none() && !d.change_pending);
+            assert_eq!(d.data_plane.as_ref().unwrap().container_id, "cid2");
+        });
+
+        // Exited counts as gone too.
+        engine.flag("dead", true);
+        recover().await;
+        engine.flag("dead", false);
+        assert_eq!(creates(), 3);
     }
 }
