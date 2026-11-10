@@ -32,14 +32,14 @@ fi
 # --- Performance metrics ---
 # These have no in-repo source of truth. When re-measurement establishes a new
 # number, update these constants and audit every page in FILES in the same PR.
-# Measured on an Apple M1 Max release build, 2026-11-08: a first SQS request
-# answered in a median 274 ms over 12 runs, idle RSS 30 MiB, 124 MB on disk
-# (118 MiB). The size is rounded to the nearest 10 MB. Measure startup with a
+# Measured on an Apple M1 Max release build, 2026-11-10: a first SQS request
+# answered in a median 255 ms over 12 runs, idle RSS 31.5 MiB, 128 MB on disk
+# (122 MiB). The size is rounded to the nearest 10 MB. Measure startup with a
 # polling client that does not fork per probe, since forking curl and python
 # added about 130 ms.
 STARTUP_MS=300
 IDLE_MEM_MIB=30
-BINARY_MB=120
+BINARY_MB=130
 
 # --- Lambda runtime count ---
 # Canonical source: `runtime_to_image()` in

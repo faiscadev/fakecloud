@@ -51,7 +51,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 - **True 100% conformance.** 258,545 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, and 15+ more integrations execute end-to-end.
 - **Real infrastructure for stateful services.** Lambda (31 runtimes), RDS (Postgres/MySQL/MariaDB/Oracle/SQL Server/Db2), ElastiCache (Redis/Valkey/Memcached), ECS, and EC2 run as real containers. Use Docker (default) or native Kubernetes Pods via `FAKECLOUD_CONTAINER_BACKEND=k8s`. See the [Kubernetes backend guide](https://fakecloud.dev/docs/guides/kubernetes-backend/).
-- **Single binary.** ~120 MB, ~30 MiB idle, ~300ms startup. No Docker needed to run fakecloud itself.
+- **Single binary.** ~130 MB, ~30 MiB idle, ~300ms startup. No Docker needed to run fakecloud itself.
 - **Full Bedrock surface.** 222 ops across 4 APIs with real `InvokeModel`/`Converse` streaming, guardrails, agents, and flows. Configurable responses + fault injection for deterministic tests. See [`/bedrock-emulator/`](https://fakecloud.dev/bedrock-emulator/).
 - **First-party test SDKs** for TypeScript, Python, Go, PHP, Java, Rust, and .NET. Assert on what your code called without raw HTTP.
 - **Opt-in SigV4 verification and IAM enforcement.** Off by default so tests just work; `--verify-sigv4` for real signature checking and `--iam soft|strict` for policy evaluation across IAM, STS, SQS, SNS, S3, KMS, Lambda, DynamoDB (and Streams), ELBv2 and Scheduler. See [security docs](https://fakecloud.dev/docs/reference/security/).
@@ -77,7 +77,7 @@ Since March 2026, LocalStack's Community image requires an account and token, an
 | --- | --- | --- |
 | License | AGPL-3.0, free for commercial use | Proprietary, paid plans |
 | Auth | None | Account + token required |
-| Footprint | ~120 MB binary, ~30 MiB idle, ~300ms start, no Docker | ~1 GB image, ~150 MiB idle, ~3s start, Docker required |
+| Footprint | ~130 MB binary, ~30 MiB idle, ~300ms start, no Docker | ~1 GB image, ~150 MiB idle, ~3s start, Docker required |
 | Conformance | true 100% (258,545 Smithy variants) | partial |
 | Paywalled services | None (RDS, Cognito, SES, ElastiCache, ECS/ECR, EKS, Redshift, and more are all free) | Many core services paid-only |
 | Test-assertion SDKs | TypeScript, Python, Go, PHP, Java, Rust, .NET | Python, Java |
