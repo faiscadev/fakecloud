@@ -304,25 +304,16 @@ impl S3Service {
         // matches the stored XML case-sensitively, so accepting a differently
         // cased value here would refuse an ACL at create that the very next
         // PutBucketAcl would then happily set.
-        let ownership_enforced = ownership_header == Some("BucketOwnerEnforced");
-        // Shared with the `s3:PutBucketAcl` authorization in `iam_actions_for`,
-        // which asks the same question and must not answer it differently.
-        let acl_requests_grants = grant_headers_present
-            || acl_header.is_some_and(|a| super::acl_reaches_past_owner(a, &req.account_id));
-        if ownership_enforced && acl_requests_grants {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidBucketAclWithObjectOwnership",
-                "Bucket cannot have ACLs set with ObjectOwnership's BucketOwnerEnforced setting",
-            ));
-        }
-        // `aws-exec-read` resolves to owner-only here (its READ grant to the EC2
-        // service's canonical user is not modeled), which is exactly what the
-        // loader reconstructs without a sidecar -- so it gets no `acl.toml`
-        // rather than a stored record claiming an explicit ACL it does not have.
+        //
+        // A create that names no ownership gets BucketOwnerEnforced, the default
+        // S3 has applied to every new bucket since April 2023, so an ACL on such
+        // a create is refused exactly as if the header had said so.
+        let ownership = ownership_header.unwrap_or(crate::state::DEFAULT_OBJECT_OWNERSHIP);
+        let ownership_enforced = ownership == "BucketOwnerEnforced";
+        // Only an ACL the loader would not reconstruct on its own needs an
+        // `acl.toml`; see `canned_acl_needs_sidecar`.
         let acl_header_present =
-            grant_headers_present || acl_header.is_some_and(|a| a != "aws-exec-read");
-        let acl = acl_header.unwrap_or("private");
+            grant_headers_present || acl_header.is_some_and(super::canned_acl_needs_sidecar);
         // Resolved before the S3 lock: the lookup takes Service Quotas' locks.
         let bucket_limit = crate::quota::enforced_bucket_limit(
             self.quota_provider.as_ref(),
@@ -413,6 +404,37 @@ impl S3Service {
                 vec![("BucketName".to_string(), bucket.to_string())],
             ));
         }
+        // The ACL refusals come after the name checks: a create naming a bucket
+        // that already exists answers for the name (BucketAlreadyExists /
+        // BucketAlreadyOwnedByYou / the us-east-1 re-create 200) whatever ACL it
+        // carries.
+        // Shared with the `s3:PutBucketAcl` authorization in `iam_actions_for`,
+        // which asks the same question and must not answer it differently.
+        let acl_requests_grants = grant_headers_present
+            || acl_header.is_some_and(|a| super::acl_reaches_past_owner(a, &req.account_id));
+        if ownership_enforced && acl_requests_grants {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidBucketAclWithObjectOwnership",
+                "Bucket cannot have ACLs set with ObjectOwnership's BucketOwnerEnforced setting",
+            ));
+        }
+        // A new bucket starts with every Block Public Access flag on, so a create
+        // asking for a public ACL fails even with ACLs enabled: S3's documented
+        // path is to create the bucket, delete or relax its public access block,
+        // then PutBucketAcl.
+        let requested_grants = if grant_headers_present {
+            header_grants
+        } else {
+            canned_acl_grants(acl_header.unwrap_or("private"), &req.account_id)
+        };
+        if super::config::grants_are_public(&requested_grants) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidBucketAclWithBlockPublicAccessError",
+                "Bucket cannot have public ACLs set with BlockPublicAccess enabled",
+            ));
+        }
         crate::quota::check_new_bucket(state, bucket_limit)?;
         let object_lock_enabled = req
             .headers
@@ -423,11 +445,11 @@ impl S3Service {
 
         let mut b = S3Bucket::new(bucket, &requested_region, &req.account_id);
         b.legacy_eu_location = legacy_eu_location;
-        b.acl_grants = if grant_headers_present {
-            header_grants
-        } else {
-            canned_acl_grants(acl, &req.account_id)
-        };
+        b.acl_grants = requested_grants;
+        // Ownership, Block Public Access and default encryption as S3 sets
+        // them on every new bucket; the ownership header, when given, replaces
+        // the default ownership below.
+        b.apply_new_bucket_defaults();
         if object_lock_enabled {
             b.versioning = Some("Enabled".to_string());
             b.object_lock_config = Some(
@@ -439,15 +461,7 @@ impl S3Service {
             );
         }
 
-        // Handle x-amz-object-ownership header
-        if let Some(ownership) = ownership_header {
-            b.ownership_controls = Some(format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                 <OwnershipControls xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                 <Rule><ObjectOwnership>{ownership}</ObjectOwnership></Rule>\
-                 </OwnershipControls>"
-            ));
-        }
+        b.ownership_controls = Some(crate::state::ownership_controls_xml(ownership));
 
         let tags_snapshot = if create_tags.is_empty() {
             None
@@ -559,11 +573,12 @@ impl S3Service {
             BucketSubresource::ObjectLock,
             b.object_lock_config.as_deref(),
         )?;
-        self.put_bucket_subresource_if_set(
-            bucket,
-            BucketSubresource::Ownership,
-            b.ownership_controls.as_deref(),
-        )?;
+        // Ownership, Block Public Access and default encryption, as the bucket
+        // now holds them (the new-bucket defaults with this create's ownership
+        // applied) -- the same routine the CloudFormation create persists with.
+        for (kind, payload) in b.new_bucket_settings() {
+            self.put_bucket_subresource_if_set(bucket, kind, payload)?;
+        }
         state.buckets.insert(bucket.to_string(), b);
 
         let mut headers = HeaderMap::new();

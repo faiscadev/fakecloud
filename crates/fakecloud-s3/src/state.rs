@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::checksum::{ChecksumAlgorithm, ChecksumType};
 
 /// An ACL grant entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AclGrant {
     pub grantee_type: String, // "CanonicalUser" or "Group"
     pub grantee_id: Option<String>,
@@ -226,6 +226,11 @@ pub struct S3Bucket {
     /// eu-west-1 (where AWS places the bucket) while GetBucketLocation keeps
     /// answering `EU`, as it does on AWS.
     pub legacy_eu_location: bool,
+    /// Created with the defaults S3 applies to new buckets (see
+    /// [`S3Bucket::apply_new_bucket_defaults`]). Decides which default
+    /// encryption the bucket falls back to: a bucket from before them reads
+    /// back, and resets on DeleteBucketEncryption, to plain SSE-S3.
+    pub new_bucket_defaults: bool,
 }
 
 impl S3Bucket {
@@ -273,8 +278,117 @@ impl S3Bucket {
             metadata_configuration: None,
             metadata_table_configuration: None,
             legacy_eu_location: false,
+            new_bucket_defaults: false,
         }
     }
+
+    /// Apply the settings S3 gives every general purpose bucket it creates:
+    /// Object Ownership `BucketOwnerEnforced` (ACLs disabled, April 2023), all
+    /// four Block Public Access flags on (April 2023), and SSE-S3 default
+    /// encryption with SSE-C uploads blocked (April 2026).
+    ///
+    /// Only bucket creation calls this. `S3Bucket::new` stays bare because the
+    /// snapshot loader and tests build buckets through it too, and a bucket
+    /// persisted by an older build must come back with exactly the settings it
+    /// was stored with: AWS did not apply these defaults to existing buckets.
+    pub fn apply_new_bucket_defaults(&mut self) {
+        self.new_bucket_defaults = true;
+        self.ownership_controls = Some(ownership_controls_xml(DEFAULT_OBJECT_OWNERSHIP));
+        self.public_access_block = Some(DEFAULT_PUBLIC_ACCESS_BLOCK_XML.to_string());
+        self.encryption_config = Some(self.default_encryption_xml().to_string());
+    }
+
+    /// The default encryption this bucket has when none is configured, and
+    /// what DeleteBucketEncryption resets it to: SSE-S3 with SSE-C blocked
+    /// for a bucket created with the new-bucket defaults, plain SSE-S3 for
+    /// one from before them.
+    pub fn default_encryption_xml(&self) -> &'static str {
+        if self.new_bucket_defaults {
+            DEFAULT_BUCKET_ENCRYPTION_XML
+        } else {
+            LEGACY_BUCKET_ENCRYPTION_XML
+        }
+    }
+
+    /// The three create-time settings and the subresource each persists as,
+    /// in the state the bucket holds them. Both creation paths (CreateBucket
+    /// and CloudFormation) write exactly these after applying their overrides.
+    pub fn new_bucket_settings(
+        &self,
+    ) -> [(fakecloud_persistence::BucketSubresource, Option<&str>); 3] {
+        use fakecloud_persistence::BucketSubresource;
+        [
+            (
+                BucketSubresource::Ownership,
+                self.ownership_controls.as_deref(),
+            ),
+            (
+                BucketSubresource::PublicAccessBlock,
+                self.public_access_block.as_deref(),
+            ),
+            (
+                BucketSubresource::Encryption,
+                self.encryption_config.as_deref(),
+            ),
+        ]
+    }
+}
+
+/// Object Ownership a new bucket gets when CreateBucket names none.
+pub const DEFAULT_OBJECT_OWNERSHIP: &str = "BucketOwnerEnforced";
+
+/// Block Public Access a new bucket gets: every flag on.
+pub const DEFAULT_PUBLIC_ACCESS_BLOCK_XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<PublicAccessBlockConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+<BlockPublicAcls>true</BlockPublicAcls>\
+<IgnorePublicAcls>true</IgnorePublicAcls>\
+<BlockPublicPolicy>true</BlockPublicPolicy>\
+<RestrictPublicBuckets>true</RestrictPublicBuckets>\
+</PublicAccessBlockConfiguration>";
+
+/// Default encryption a new bucket gets, and what DeleteBucketEncryption
+/// resets a bucket to: SSE-S3, no bucket key, SSE-C uploads blocked.
+/// `BlockedEncryptionTypes.EncryptionType` is `xmlFlattened` in the model,
+/// so each value is a bare `<EncryptionType>` child.
+pub const DEFAULT_BUCKET_ENCRYPTION_XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+<Rule>\
+<ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault>\
+<BucketKeyEnabled>false</BucketKeyEnabled>\
+<BlockedEncryptionTypes><EncryptionType>SSE-C</EncryptionType></BlockedEncryptionTypes>\
+</Rule>\
+</ServerSideEncryptionConfiguration>";
+
+/// Default encryption a bucket persisted by an older build (no encryption
+/// sidecar) reads back with. AWS applied SSE-S3 to every existing bucket in
+/// January 2023, so such a bucket is not unencrypted. It does not block SSE-C:
+/// whether AWS's April 2026 SSE-C default reached a given pre-existing bucket
+/// depended on the account's SSE-C usage, so it is not assumed here.
+pub const LEGACY_BUCKET_ENCRYPTION_XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+<Rule>\
+<ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault>\
+<BucketKeyEnabled>false</BucketKeyEnabled>\
+</Rule>\
+</ServerSideEncryptionConfiguration>";
+
+/// The stored `OwnershipControls` document for one `ObjectOwnership` value.
+pub fn ownership_controls_xml(ownership: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <OwnershipControls xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+         <Rule><ObjectOwnership>{ownership}</ObjectOwnership></Rule>\
+         </OwnershipControls>"
+    )
+}
+
+/// Whether a stored default-encryption document blocks SSE-C uploads.
+pub fn encryption_blocks_sse_c(xml: &str) -> bool {
+    use crate::service::notifications::extract_all_xml_values;
+    extract_all_xml_values(xml, "BlockedEncryptionTypes")
+        .iter()
+        .flat_map(|block| extract_all_xml_values(block, "EncryptionType"))
+        .any(|v| v.trim() == "SSE-C")
 }
 
 /// A recorded S3 notification event for introspection.

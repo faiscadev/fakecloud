@@ -31,6 +31,24 @@ async fn root_bypass_s3_client(server: &TestServer) -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::from_conf(s3_config)
 }
 
+/// Create the `probe` bucket the way a user publishing objects must on a
+/// bucket created since April 2023: ACLs enabled (`ObjectWriter`) and the
+/// default Block Public Access removed, so public-read ACLs and public bucket
+/// policies are accepted.
+async fn create_public_probe(s3: &aws_sdk_s3::Client) {
+    s3.create_bucket()
+        .bucket("probe")
+        .object_ownership(aws_sdk_s3::types::ObjectOwnership::ObjectWriter)
+        .send()
+        .await
+        .unwrap();
+    s3.delete_public_access_block()
+        .bucket("probe")
+        .send()
+        .await
+        .unwrap();
+}
+
 /// Default mode: an anonymous GET serves the object (fakecloud is permissive
 /// by default), both before and after a public-read bucket policy. The bug was
 /// a 404 here; this is the core regression test for #1707.
@@ -39,7 +57,7 @@ async fn anonymous_get_object_default_mode_serves_object() {
     let server = TestServer::start().await;
     let s3 = server.s3_client().await;
 
-    s3.create_bucket().bucket("probe").send().await.unwrap();
+    create_public_probe(&s3).await;
     s3.put_object()
         .bucket("probe")
         .key("a.txt")
@@ -90,7 +108,7 @@ async fn anonymous_get_object_iam_strict_bucket_policy() {
     let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
     let s3 = helpers::root_s3_client(&server).await;
 
-    s3.create_bucket().bucket("probe").send().await.unwrap();
+    create_public_probe(&s3).await;
     s3.put_object()
         .bucket("probe")
         .key("a.txt")
@@ -132,7 +150,7 @@ async fn sigv2_presigned_request_is_attributed_to_its_caller() {
     let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
     let s3 = helpers::root_s3_client(&server).await;
 
-    s3.create_bucket().bucket("probe").send().await.unwrap();
+    create_public_probe(&s3).await;
     s3.put_object()
         .bucket("probe")
         .key("a.txt")
@@ -194,7 +212,7 @@ async fn anonymous_get_object_iam_strict_public_acl() {
     let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
     let s3 = helpers::root_s3_client(&server).await;
 
-    s3.create_bucket().bucket("probe").send().await.unwrap();
+    create_public_probe(&s3).await;
     s3.put_object()
         .bucket("probe")
         .key("public.txt")
@@ -249,7 +267,7 @@ async fn anonymous_get_reaches_public_read_under_verify_sigv4() {
     // Seed S3 state with root-bypass creds (always pass verification).
     let s3 = root_bypass_s3_client(&server).await;
 
-    s3.create_bucket().bucket("probe").send().await.unwrap();
+    create_public_probe(&s3).await;
     s3.put_object()
         .bucket("probe")
         .key("public.txt")
@@ -313,7 +331,7 @@ async fn anonymous_get_explicit_deny_overrides_public_acl() {
     let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
     let s3 = helpers::root_s3_client(&server).await;
 
-    s3.create_bucket().bucket("probe").send().await.unwrap();
+    create_public_probe(&s3).await;
     s3.put_object()
         .bucket("probe")
         .key("public.txt")

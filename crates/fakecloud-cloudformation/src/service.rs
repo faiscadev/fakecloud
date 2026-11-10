@@ -6951,7 +6951,7 @@ mod tests {
             "TemplateBody".to_string(),
             r#"{"Resources":{
                 "B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"pol-bucket"}},
-                "BP":{"Type":"AWS::S3::BucketPolicy","Properties":{"Bucket":"pol-bucket","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","Principal":"*"}]}}}
+                "BP":{"Type":"AWS::S3::BucketPolicy","Properties":{"Bucket":"pol-bucket","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","Principal":{"AWS":"arn:aws:iam::123456789012:root"}}]}}}
             }}"#
             .to_string(),
         );
@@ -6973,7 +6973,7 @@ mod tests {
             "TemplateBody".to_string(),
             r#"{"Resources":{
                 "B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"pol-bucket"}},
-                "BP":{"Type":"AWS::S3::BucketPolicy","Properties":{"Bucket":"pol-bucket","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*","Principal":"*"}]}}}
+                "BP":{"Type":"AWS::S3::BucketPolicy","Properties":{"Bucket":"pol-bucket","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*","Principal":{"AWS":"arn:aws:iam::123456789012:root"}}]}}}
             }}"#
             .to_string(),
         );

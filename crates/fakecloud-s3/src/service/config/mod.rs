@@ -112,6 +112,32 @@ pub(crate) fn grants_are_public(grants: &[crate::state::AclGrant]) -> bool {
     })
 }
 
+/// Whether a bucket ACL gives nothing to anyone but the bucket owner, which
+/// is the only ACL S3 lets BucketOwnerEnforced be applied over.
+pub(crate) fn grants_are_owner_only(grants: &[crate::state::AclGrant], owner_id: &str) -> bool {
+    grants
+        .iter()
+        .all(|g| g.grantee_type == "CanonicalUser" && g.grantee_id.as_deref() == Some(owner_id))
+}
+
+/// What reading an ACL returns while ACLs are disabled: S3 "always return[s]
+/// a response that shows full control for the bucket owner", whatever grants
+/// are stored (they come back if ACLs are re-enabled).
+pub(crate) fn owner_full_control(owner_id: &str) -> Vec<crate::state::AclGrant> {
+    vec![crate::state::AclGrant {
+        grantee_type: "CanonicalUser".to_string(),
+        grantee_id: Some(owner_id.to_string()),
+        grantee_display_name: Some(owner_id.to_string()),
+        grantee_uri: None,
+        permission: "FULL_CONTROL".to_string(),
+    }]
+}
+
+/// Whether a stored `OwnershipControls` document disables ACLs.
+pub(crate) fn ownership_xml_enforced(xml: Option<&str>) -> bool {
+    xml.is_some_and(|x| x.contains("BucketOwnerEnforced"))
+}
+
 const LIFECYCLE_TDMOS_HEADER: &str = "x-amz-transition-default-minimum-object-size";
 
 /// Default value real AWS returns on `GetBucketLifecycleConfiguration` for
@@ -134,6 +160,7 @@ mod bucket_inventory;
 mod cors;
 pub(crate) use cors::validate_cors_xml;
 mod encryption;
+pub(crate) use encryption::validate_bucket_encryption_xml;
 mod intelligent_tiering;
 mod lifecycle;
 mod logging;
@@ -217,7 +244,15 @@ impl S3Service {
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
 
-        let body = build_acl_xml(&b.acl_owner_id, &b.acl_grants, &req.account_id);
+        let body = if ownership_xml_enforced(b.ownership_controls.as_deref()) {
+            build_acl_xml(
+                &b.acl_owner_id,
+                &owner_full_control(&b.acl_owner_id),
+                &req.account_id,
+            )
+        } else {
+            build_acl_xml(&b.acl_owner_id, &b.acl_grants, &req.account_id)
+        };
         Ok(s3_xml(StatusCode::OK, body))
     }
 
@@ -404,10 +439,7 @@ impl S3Service {
         let Some(b) = state.buckets.get(bucket) else {
             return false;
         };
-        b.ownership_controls
-            .as_deref()
-            .map(|xml| xml.contains("BucketOwnerEnforced"))
-            .unwrap_or(false)
+        ownership_xml_enforced(b.ownership_controls.as_deref())
     }
 
     // ---- ABAC ----

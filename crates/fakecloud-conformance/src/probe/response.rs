@@ -176,6 +176,13 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             // A multipart upload id that does not exist (or was already
             // completed/aborted).
             "NoSuchUpload",
+            // Object Ownership codes from the same list. New buckets default to
+            // BucketOwnerEnforced, so any ACL-setting request (PutBucketAcl,
+            // PutObjectAcl, an ACL on an object write) against one is
+            // AccessControlListNotSupported, and an ACL that conflicts with that
+            // setting is InvalidBucketAclWithObjectOwnership.
+            "AccessControlListNotSupported",
+            "InvalidBucketAclWithObjectOwnership",
         ],
         // EC2's Smithy model declares no per-operation `errors:` lists at all,
         // yet the EC2 Query API has a large, well-documented set of client
