@@ -2761,6 +2761,7 @@ mod tests {
             arn: format!("arn:aws-cn:bedrock:cn-north-1:{ACCT}:flow/{id}"),
             customer_encryption_key_arn: None,
             latest_version: 1,
+            validations: None,
         }
     }
 

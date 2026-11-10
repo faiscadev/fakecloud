@@ -1357,6 +1357,9 @@ fn flow_json(f: &Flow) -> Value {
     if let Some(ref def) = f.definition {
         o["definition"] = def.clone();
     }
+    if let Some(ref validations) = f.validations {
+        o["validations"] = json!(validations);
+    }
     o
 }
 
@@ -1608,6 +1611,22 @@ mod tests {
         arn.replace(':', "%3A").replace('/', "%2F")
     }
 
+    /// The smallest flow that prepares cleanly: Input -> Output.
+    fn valid_flow_definition() -> Value {
+        json!({
+            "nodes": [
+                {"name": "FlowInputNode", "type": "Input", "configuration": {"input": {}},
+                    "outputs": [{"name": "document", "type": "String"}]},
+                {"name": "FlowOutputNode", "type": "Output", "configuration": {"output": {}},
+                    "inputs": [{"name": "document", "type": "String", "expression": "$.data"}]}
+            ],
+            "connections": [
+                {"name": "Link", "type": "Data", "source": "FlowInputNode", "target": "FlowOutputNode",
+                    "configuration": {"data": {"sourceOutput": "document", "targetInput": "document"}}}
+            ]
+        })
+    }
+
     fn validation_types(v: &Value) -> Vec<&str> {
         v["validations"]
             .as_array()
@@ -1625,10 +1644,19 @@ mod tests {
             Method::POST,
             "/flows/",
             &[],
-            json!({"name": "f", "executionRoleArn": "arn:aws:iam::123456789012:role/r"}),
+            json!({"name": "f", "executionRoleArn": "arn:aws:iam::123456789012:role/r",
+                "definition": valid_flow_definition()}),
         )
         .await;
         let fid = flow["id"].as_str().unwrap().to_string();
+        call(
+            &svc,
+            Method::POST,
+            &format!("/flows/{fid}/"),
+            &[],
+            json!({}),
+        )
+        .await;
         let (_, prompt) = call(&svc, Method::POST, "/prompts/", &[], json!({"name": "p"})).await;
         let pid = prompt["id"].as_str().unwrap().to_string();
         let flow_versions = format!("/flows/{fid}/versions");
@@ -2020,47 +2048,55 @@ mod tests {
         .await;
         assert_eq!(
             validation_types(&dup),
-            vec!["DuplicateConnections", "MultipleNodeInputConnections"]
+            vec!["MultipleNodeInputConnections", "DuplicateConnections"]
         );
     }
 
     #[tokio::test]
-    async fn validate_flow_definition_reports_duplicate_and_missing_node_names() {
+    async fn validate_flow_definition_refuses_duplicate_and_reports_missing_node_names() {
         let svc = BedrockAgentService::new(Arc::new(RwLock::new(BedrockAgentAccounts::new())));
+        let input = json!({"name": "In", "type": "Input",
+            "outputs": [{"name": "document", "type": "String"}]});
+        // Two nodes sharing a name make the definition unaddressable: it is
+        // refused outright, by ValidateFlowDefinition and CreateFlow alike.
+        let shared = json!({"nodes": [input, {"name": "In", "type": "Output"}]});
+        for path in ["/flows/validate-definition", "/flows/"] {
+            let err = try_call(
+                &svc,
+                Method::POST,
+                path,
+                &[],
+                json!({"name": "f", "executionRoleArn": "arn:aws:iam::123456789012:role/r", "definition": shared}),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(err.code(), "ValidationException", "{path}");
+            assert_eq!(err.message(), "Node name In must be unique", "{path}");
+        }
+
         let (_, got) = call(
             &svc,
             Method::POST,
             "/flows/validate-definition",
             &[],
             json!({"definition": {
-                "nodes": [
-                    {"name": "In", "type": "Input", "outputs": [{"name": "document", "type": "String"}]},
-                    {"name": "In", "type": "Output", "inputs": []},
-                    {"type": "Output", "inputs": []}
-                ],
+                "nodes": [input, {"type": "Output", "inputs": []}],
                 "connections": []
             }}),
         )
         .await;
-        let validations = got["validations"].as_array().unwrap();
-        let unspecified: Vec<&str> = validations
+        let unspecified: Vec<&Value> = got["validations"]
+            .as_array()
+            .unwrap()
             .iter()
             .filter(|v| v["type"] == "Unspecified")
-            .map(|v| v["message"].as_str().unwrap())
             .collect();
-        assert_eq!(
-            unspecified,
-            vec![
-                "Node name In is used by more than one node.",
-                "Node at index 2 has no name."
-            ]
-        );
-        assert!(validations
-            .iter()
-            .filter(|v| v["type"] == "Unspecified")
-            .all(|v| v["details"] == json!({"unspecified": {}}) && v["severity"] == "Error"));
-        // The second `In` (an Output node) was not merged into the first, so
-        // the flow still has no ending node.
+        assert_eq!(unspecified.len(), 1, "{got}");
+        assert_eq!(unspecified[0]["message"], "Node at index 1 has no name.");
+        assert_eq!(unspecified[0]["severity"], "Error");
+        assert_eq!(unspecified[0]["details"], json!({"unspecified": {}}));
+        // The unnamed Output node can't count as the flow's ending node.
         assert!(validation_types(&got).contains(&"MissingEndingNodes"));
     }
 
@@ -2077,7 +2113,7 @@ mod tests {
                 "description": "d",
                 "executionRoleArn": "arn:aws:iam::123456789012:role/r",
                 "customerEncryptionKeyArn": "arn:aws:kms:us-east-1:123456789012:key/k",
-                "definition": {"nodes": [], "connections": []},
+                "definition": valid_flow_definition(),
             }),
         )
         .await;
@@ -2121,7 +2157,15 @@ mod tests {
         let (status, prepared) =
             call(&svc, Method::POST, &format!("/flows/{id}/"), &[], json!({})).await;
         assert_eq!(status, StatusCode::ACCEPTED);
-        assert_eq!(prepared, json!({"id": id, "status": "Prepared"}));
+        assert_eq!(prepared, json!({"id": id, "status": "Preparing"}));
+        // A prepared flow reports its (here empty) validation findings.
+        let (_, got) = call(&svc, Method::GET, &format!("/flows/{id}/"), &[], json!({})).await;
+        assert_eq!(got["status"], "Prepared");
+        assert_eq!(got["validations"], json!([]));
+        let mut prepared_members = flow_members.clone();
+        prepared_members.push("validations");
+        prepared_members.sort_unstable();
+        assert_eq!(keys(&got), prepared_members);
 
         let (_, updated) = call(
             &svc,
@@ -2135,6 +2179,7 @@ mod tests {
         assert_eq!(updated["name"], "f2");
         assert_eq!(updated["arn"], arn);
         assert_eq!(updated["status"], "NotPrepared");
+        call(&svc, Method::POST, &format!("/flows/{id}/"), &[], json!({})).await;
 
         let (status, version) = call(
             &svc,
@@ -2220,6 +2265,211 @@ mod tests {
         )
         .await;
         assert_eq!(deleted, json!({"id": id}));
+    }
+
+    #[tokio::test]
+    async fn prepare_flow_validates_the_definition() {
+        let svc = BedrockAgentService::new(Arc::new(RwLock::new(BedrockAgentAccounts::new())));
+        let role = "arn:aws:iam::123456789012:role/r";
+        let create = |definition: Option<Value>| {
+            let svc = &svc;
+            async move {
+                let mut body = json!({"name": "f", "executionRoleArn": role});
+                if let Some(d) = definition {
+                    body["definition"] = d;
+                }
+                let (_, flow) = call(svc, Method::POST, "/flows/", &[], body).await;
+                flow["id"].as_str().unwrap().to_string()
+            }
+        };
+        let prepare = |id: String| {
+            let svc = &svc;
+            async move {
+                let (status, out) =
+                    call(svc, Method::POST, &format!("/flows/{id}/"), &[], json!({})).await;
+                assert_eq!(status, StatusCode::ACCEPTED);
+                assert_eq!(out, json!({"id": id, "status": "Preparing"}));
+                let (_, got) =
+                    call(svc, Method::GET, &format!("/flows/{id}/"), &[], json!({})).await;
+                got
+            }
+        };
+
+        // A flow whose connection leads to a node that doesn't exist fails.
+        let mut broken = valid_flow_definition();
+        broken["connections"].as_array_mut().unwrap().push(json!({
+            "name": "ToGhost", "type": "Data", "source": "FlowInputNode", "target": "Ghost",
+            "configuration": {"data": {"sourceOutput": "document", "targetInput": "document"}}
+        }));
+        let id = create(Some(broken)).await;
+        let (_, unprepared) =
+            call(&svc, Method::GET, &format!("/flows/{id}/"), &[], json!({})).await;
+        assert!(unprepared.get("validations").is_none(), "{unprepared}");
+        let got = prepare(id.clone()).await;
+        assert_eq!(got["status"], "Failed");
+        assert_eq!(
+            got["validations"],
+            json!([{
+                "message": "The connection between the nodes 'FlowInputNode' and 'Ghost' references an unknown target node 'Ghost'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.",
+                "severity": "Error",
+                "details": {"unknownConnectionTarget": {"connection": "ToGhost"}},
+                "type": "UnknownConnectionTarget"
+            }])
+        );
+        // A failed draft can't be versioned, but is listed as the DRAFT.
+        let err = try_call(
+            &svc,
+            Method::POST,
+            &format!("/flows/{id}/versions"),
+            &[],
+            json!({}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(err.code(), "ConflictException");
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            err.message(),
+            "Couldn't perform CreateFlowVersion operation. The resource that you specified is currently in status Failed. Retry your request after the resource changes to a valid status."
+        );
+        let (_, listed) = call(
+            &svc,
+            Method::GET,
+            &format!("/flows/{id}/versions"),
+            &[],
+            json!({}),
+        )
+        .await;
+        let summaries = listed["flowVersionSummaries"].as_array().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0]["version"], "DRAFT");
+        assert_eq!(summaries[0]["status"], "Failed");
+
+        // Fixing the draft clears the findings until it is prepared again.
+        let (_, updated) = call(
+            &svc,
+            Method::PUT,
+            &format!("/flows/{id}/"),
+            &[],
+            json!({"name": "f", "executionRoleArn": role, "definition": valid_flow_definition()}),
+        )
+        .await;
+        assert_eq!(updated["status"], "NotPrepared");
+        let (_, got) = call(&svc, Method::GET, &format!("/flows/{id}/"), &[], json!({})).await;
+        assert!(got.get("validations").is_none(), "{got}");
+        let err = try_call(
+            &svc,
+            Method::POST,
+            &format!("/flows/{id}/versions"),
+            &[],
+            json!({}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(err.message().contains("currently in status NotPrepared"));
+        let got = prepare(id.clone()).await;
+        assert_eq!(got["status"], "Prepared");
+        assert_eq!(got["validations"], json!([]));
+        let (status, _) = call(
+            &svc,
+            Method::POST,
+            &format!("/flows/{id}/versions"),
+            &[],
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Warnings alone (no Output node) still prepare.
+        let mut input_only = valid_flow_definition();
+        input_only["nodes"].as_array_mut().unwrap().pop();
+        input_only["connections"] = json!([]);
+        let got = prepare(create(Some(input_only)).await).await;
+        assert_eq!(got["status"], "Prepared");
+        assert_eq!(got["validations"][0]["type"], "MissingEndingNodes");
+        assert_eq!(got["validations"][0]["severity"], "Warning");
+
+        // An empty definition fails; no definition at all can't be prepared.
+        let got = prepare(create(Some(json!({}))).await).await;
+        assert_eq!(got["status"], "Failed");
+        assert_eq!(
+            validation_types(&got),
+            vec!["MissingStartingNodes", "MissingEndingNodes"]
+        );
+        let bare = create(None).await;
+        let err = try_call(
+            &svc,
+            Method::POST,
+            &format!("/flows/{bare}/"),
+            &[],
+            json!({}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(err.code(), "ValidationException");
+        assert_eq!(
+            err.message(),
+            format!("You can\u{2019}t prepare flow {bare} because its definition is empty. Update your flow with a definition and retry your request.")
+        );
+        let (_, got) = call(
+            &svc,
+            Method::GET,
+            &format!("/flows/{bare}/"),
+            &[],
+            json!({}),
+        )
+        .await;
+        assert_eq!(got["status"], "NotPrepared");
+
+        // A stored definition holds at most one Input node.
+        let mut two_inputs = valid_flow_definition();
+        two_inputs["nodes"].as_array_mut().unwrap().push(json!({
+            "name": "Other", "type": "Input",
+            "outputs": [{"name": "document", "type": "String"}]
+        }));
+        for (method, path) in [
+            (Method::POST, "/flows/".to_string()),
+            (Method::PUT, format!("/flows/{id}/")),
+        ] {
+            let err = try_call(
+                &svc,
+                method,
+                &path,
+                &[],
+                json!({"name": "f", "executionRoleArn": role, "definition": two_inputs}),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(err.code(), "ValidationException", "{path}");
+            assert!(
+                err.message().starts_with(
+                    "The limit for max-number-flow-input-nodes is 1, but the requested value is 2"
+                ),
+                "{}",
+                err.message()
+            );
+        }
+
+        // An alias routes to a version, never to the draft.
+        let err = try_call(
+            &svc,
+            Method::POST,
+            &format!("/flows/{id}/aliases"),
+            &[],
+            json!({"name": "live", "routingConfiguration": [{"flowVersion": "DRAFT"}]}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(err.code(), "ValidationException");
+        assert_eq!(
+            err.message(),
+            "Alias routing configuration must point to a non draft version. Retry your request with a valid version."
+        );
     }
 
     #[tokio::test]
