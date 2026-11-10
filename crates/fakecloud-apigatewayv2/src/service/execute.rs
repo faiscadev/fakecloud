@@ -788,6 +788,17 @@ fn apply_request_parameters(
     (url, headers)
 }
 
+/// A bare HTTP API gateway response: `Content-Type: application/json`,
+/// `body`, no `x-amzn-ErrorType`.
+fn http_api_message_response(status: StatusCode, body: &'static [u8]) -> AwsResponse {
+    AwsResponse {
+        status,
+        content_type: "application/json".to_string(),
+        headers: http::HeaderMap::new(),
+        body: bytes::Bytes::from_static(body).into(),
+    }
+}
+
 #[cfg(test)]
 mod request_param_tests {
     use super::*;
@@ -872,16 +883,5 @@ mod request_param_tests {
         mappings.insert("overwrite:path".to_string(), "'/rewritten'".to_string());
         let (url, _) = apply_request_parameters("http://backend.local/orig", Some(&mappings), &req);
         assert_eq!(url, "http://backend.local/rewritten");
-    }
-}
-
-/// A bare HTTP API gateway response: `Content-Type: application/json`,
-/// `body`, no `x-amzn-ErrorType`.
-fn http_api_message_response(status: StatusCode, body: &'static [u8]) -> AwsResponse {
-    AwsResponse {
-        status,
-        content_type: "application/json".to_string(),
-        headers: http::HeaderMap::new(),
-        body: bytes::Bytes::from_static(body).into(),
     }
 }

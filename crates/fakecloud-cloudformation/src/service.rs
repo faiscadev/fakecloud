@@ -2640,7 +2640,10 @@ impl CloudFormationService {
             failure.logical_id
         );
         let reason = if is_custom_resource_type(&failure.resource_type)
-            && failure.reason.starts_with("Received response status")
+            && (failure.reason.starts_with("Received response status")
+                || failure
+                    .reason
+                    .starts_with(crate::stack_update::CUSTOM_NO_RESPONSE_PREFIX))
         {
             failure.reason.clone()
         } else {

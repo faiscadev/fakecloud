@@ -1325,6 +1325,17 @@ fn looks_like_fakecloud_envelope(body: &str) -> bool {
     }
 }
 
+/// Whether a Lambda target's `TargetParameters.LambdaFunctionParameters`
+/// ask for an asynchronous invocation (`InvocationType: FIRE_AND_FORGET`;
+/// the default is `REQUEST_RESPONSE`).
+fn lambda_target_is_fire_and_forget(target_params: Option<&Value>) -> bool {
+    target_params
+        .and_then(|p| p.get("LambdaFunctionParameters"))
+        .and_then(|p| p.get("InvocationType"))
+        .and_then(Value::as_str)
+        == Some("FIRE_AND_FORGET")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1640,15 +1651,4 @@ mod tests {
         )));
         assert!(!super::lambda_target_is_fire_and_forget(None));
     }
-}
-
-/// Whether a Lambda target's `TargetParameters.LambdaFunctionParameters`
-/// ask for an asynchronous invocation (`InvocationType: FIRE_AND_FORGET`;
-/// the default is `REQUEST_RESPONSE`).
-fn lambda_target_is_fire_and_forget(target_params: Option<&Value>) -> bool {
-    target_params
-        .and_then(|p| p.get("LambdaFunctionParameters"))
-        .and_then(|p| p.get("InvocationType"))
-        .and_then(Value::as_str)
-        == Some("FIRE_AND_FORGET")
 }

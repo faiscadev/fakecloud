@@ -458,6 +458,7 @@ fn guarded<T>(call: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
 /// updating, since a create's goes through the handler.
 fn provisioning_reason(message: &str, updating: bool) -> String {
     if message.starts_with("Received response status")
+        || message.starts_with(CUSTOM_NO_RESPONSE_PREFIX)
         || message.starts_with("Modifying service token")
         || (updating && message.starts_with("CloudFormation does not support"))
     {
@@ -466,6 +467,11 @@ fn provisioning_reason(message: &str, updating: bool) -> String {
         handler_reason(message)
     }
 }
+
+/// How CloudFormation's own failure for a custom resource that never
+/// answered begins; it stands unwrapped, like a handler's answer.
+pub(crate) const CUSTOM_NO_RESPONSE_PREFIX: &str =
+    "CloudFormation did not receive a response from your Custom Resource.";
 
 pub(crate) fn handler_reason(message: &str) -> String {
     // InvalidRequest is recorded for the provisioning-level refusals, and
