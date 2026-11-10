@@ -1300,8 +1300,10 @@ impl RdsRuntime {
 /// `aws_lambda`, `aws_s3`) up to the version this image ships, the way
 /// RDS upgrades its extensions: a database restored from a persisted
 /// volume keeps the version it was created with until `ALTER EXTENSION
-/// ... UPDATE`. Best effort: a database that cannot be reached or
-/// updated is logged and left as is.
+/// ... UPDATE`. An image that ships nothing newer leaves nothing to do.
+/// Best effort and bounded: the whole pass gives up after a few seconds,
+/// and a database that cannot be reached or updated is logged and left as
+/// is, never failing or holding up the instance.
 pub(super) async fn update_bundled_extensions(
     client: &tokio_postgres::Client,
     host: &str,
@@ -1309,27 +1311,59 @@ pub(super) async fn update_bundled_extensions(
     username: &str,
     password: &str,
 ) {
-    let Ok(rows) = client
+    let pass = update_bundled_extensions_inner(client, host, host_port, username, password);
+    if tokio::time::timeout(EXTENSION_UPDATE_BUDGET, pass)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            host,
+            host_port,
+            "gave up updating postgres extensions after {}s",
+            EXTENSION_UPDATE_BUDGET.as_secs()
+        );
+    }
+}
+
+/// How long the startup extension update may take in all.
+const EXTENSION_UPDATE_BUDGET: Duration = Duration::from_secs(10);
+
+async fn update_bundled_extensions_inner(
+    client: &tokio_postgres::Client,
+    host: &str,
+    host_port: u16,
+    username: &str,
+    password: &str,
+) {
+    let rows = match client
         .query(
             "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate",
             &[],
         )
         .await
-    else {
-        return;
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list databases to update postgres extensions");
+            return;
+        }
     };
     for row in rows {
         let db: String = row.get(0);
         let connection_string =
             format!("host={host} port={host_port} user={username} password={password} dbname={db}");
-        let Ok((db_client, connection)) = tokio_postgres::connect(&connection_string, NoTls).await
-        else {
-            continue;
+        let (db_client, connection) = match tokio_postgres::connect(&connection_string, NoTls).await
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(database = %db, error = %e, "could not connect to update postgres extensions");
+                continue;
+            }
         };
         tokio::spawn(async move {
             let _ = connection.await;
         });
-        let Ok(installed) = db_client
+        let installed = match db_client
             .query(
                 "SELECT e.extname FROM pg_extension e \
                  JOIN pg_available_extensions a ON a.name = e.extname \
@@ -1338,16 +1372,25 @@ pub(super) async fn update_bundled_extensions(
                 &[],
             )
             .await
-        else {
-            continue;
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(database = %db, error = %e, "could not read installed postgres extensions");
+                continue;
+            }
         };
         for ext in installed {
             let name: String = ext.get(0);
-            if let Err(e) = db_client
+            match db_client
                 .simple_query(&format!("ALTER EXTENSION {name} UPDATE"))
                 .await
             {
-                tracing::warn!(database = %db, extension = %name, error = %e, "could not update postgres extension");
+                Ok(_) => {
+                    tracing::info!(database = %db, extension = %name, "updated postgres extension")
+                }
+                Err(e) => {
+                    tracing::warn!(database = %db, extension = %name, error = %e, "could not update postgres extension")
+                }
             }
         }
     }
