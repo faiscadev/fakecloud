@@ -416,10 +416,16 @@ impl LambdaService {
                 ));
             }
             // Drop the version from the ordered list too so
-            // ListVersionsByFunction reflects the deletion.
+            // ListVersionsByFunction reflects the deletion, and the
+            // configurations attached to that version with it.
             if let Some(list) = state.function_versions.get_mut(function_name) {
                 list.retain(|v| v != q);
             }
+            let version_key = format!("{function_name}:{q}");
+            state.provisioned_concurrency.remove(&version_key);
+            state.event_invoke_configs.remove(&version_key);
+            state.runtime_management.remove(&version_key);
+            state.scaling_configs.remove(&version_key);
             let live_arn = state
                 .functions
                 .get(function_name)
@@ -451,9 +457,24 @@ impl LambdaService {
         state.function_versions.remove(function_name);
         state.function_version_snapshots.remove(function_name);
         state.latest_published.remove(function_name);
-        // Aliases on this function disappear too.
+        // Aliases on this function disappear too, and so does every
+        // configuration attached to the function or one of its qualifiers
+        // (URLs, concurrency, async-invoke, code signing, runtime
+        // management, scaling, recursion): AWS deletes them with the
+        // function, so a function re-created under the same name starts
+        // without them. Event source mappings outlive the function, as on
+        // AWS.
         let prefix = format!("{function_name}:");
         state.aliases.retain(|k, _| !k.starts_with(&prefix));
+        let owned = |k: &String| k == function_name || k.starts_with(&prefix);
+        state.function_url_configs.retain(|k, _| !owned(k));
+        state.function_concurrency.retain(|k, _| !owned(k));
+        state.provisioned_concurrency.retain(|k, _| !owned(k));
+        state.function_code_signing.retain(|k, _| !owned(k));
+        state.event_invoke_configs.retain(|k, _| !owned(k));
+        state.runtime_management.retain(|k, _| !owned(k));
+        state.scaling_configs.retain(|k, _| !owned(k));
+        state.recursion_configs.retain(|k, _| !owned(k));
 
         // Release the state lock before touching the runtime's warm-instance
         // map. Holding `state` while acquiring the facade `instances` lock

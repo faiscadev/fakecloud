@@ -1350,6 +1350,24 @@ impl LambdaService {
         }
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
+        if !state.event_source_mappings.contains_key(uuid) {
+            return Err(not_found("EventSourceMapping", uuid));
+        }
+        if let Some(name) = body["FunctionName"].as_str() {
+            // The mapping must keep invoking a function that exists, as on
+            // AWS.
+            let bare = crate::service::normalize_function_name(name);
+            if !state.functions.contains_key(&bare) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!(
+                        "Function not found: {}",
+                        function_arn(&req.region, &state.account_id, &bare)
+                    ),
+                ));
+            }
+        }
         let esm = state
             .event_source_mappings
             .get_mut(uuid)

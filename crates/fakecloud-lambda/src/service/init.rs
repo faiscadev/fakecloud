@@ -110,8 +110,10 @@ impl LambdaService {
             ));
         }
 
-        // Event invoke config — any prefix.
-        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+        // Event invoke config — any prefix. Exactly four segments:
+        // `.../event-invoke-config/list` is ListFunctionEventInvokeConfigs.
+        if segs.len() == 4
+            && segs.get(1).map(|s| s.as_str()) == Some("functions")
             && segs.get(3).map(|s| s.as_str()) == Some("event-invoke-config")
         {
             let res = segs.get(2).map(|s| s.to_string());

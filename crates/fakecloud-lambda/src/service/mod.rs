@@ -215,6 +215,36 @@ fn prevalidate_lambda(action: &str, req: &AwsRequest) -> Result<(), AwsServiceEr
             check_optional_len("S3Key", body["S3Key"].as_str(), 1, 1024)?;
             check_optional_len("S3ObjectVersion", body["S3ObjectVersion"].as_str(), 1, 1024)?;
         }
+        "CreateEventSourceMapping" | "UpdateEventSourceMapping" => {
+            // The mapping's numeric settings' `@range`s, and the function
+            // reference's `@length(1, 256)` (CreateEventSourceMapping's
+            // handler refuses a missing one; on Update it is optional).
+            check_optional_len("FunctionName", body["FunctionName"].as_str(), 1, 256)?;
+            check_optional_len("KMSKeyArn", body["KMSKeyArn"].as_str(), 0, 10000)?;
+            // Only CreateEventSourceMapping takes `StartingPosition`.
+            check_optional_enum(
+                "StartingPosition",
+                body["StartingPosition"].as_str(),
+                &["TRIM_HORIZON", "LATEST", "AT_TIMESTAMP"],
+            )?;
+            for (field, min, max) in [
+                ("BatchSize", 1, 10000),
+                ("MaximumBatchingWindowInSeconds", 0, 300),
+                ("ParallelizationFactor", 1, 10),
+                ("MaximumRecordAgeInSeconds", -1, 604800),
+                ("MaximumRetryAttempts", -1, 10000),
+                ("TumblingWindowInSeconds", 0, 900),
+            ] {
+                check_optional_int_range(field, body[field].as_i64(), min, max)?;
+            }
+        }
+        "UpdateAlias" => {
+            check_optional_len("FunctionVersion", body["FunctionVersion"].as_str(), 1, 1024)?;
+            check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
+        }
+        "UpdateCodeSigningConfig" => {
+            check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
+        }
         "Invoke" | "InvokeWithResponseStream" => validate_invoke_headers(action, req)?,
         // `InvokeArgs` is the required `@httpPayload`. Recorded against
         // Lambda (us-east-1, 2026-11-09): an empty body is refused with this
@@ -299,6 +329,7 @@ pub(crate) fn action_takes_function_name(action: &str) -> bool {
             | "DeleteAlias"
             | "PutRuntimeManagementConfig"
             | "GetRuntimeManagementConfig"
+            | "ListDurableExecutionsByFunction"
     )
 }
 
@@ -1147,8 +1178,6 @@ fn snap_start_apply_on_eq(prev: Option<&Value>, live: Option<&Value>) -> bool {
     prev_apply == live_apply
 }
 
-/// versions in the weight map. Returns `None` for `$LATEST` /
-/// unqualified invokes (caller uses the live `$LATEST` config).
 /// The qualifier an unqualified invoke of `function_name` runs: the
 /// `$LATEST.PUBLISHED` version of a Lambda Managed Instances function that
 /// has one, `None` (`$LATEST`) otherwise.
@@ -1164,6 +1193,15 @@ pub(crate) fn default_invoke_qualifier(
         .then_some(crate::state::LATEST_PUBLISHED)
 }
 
+/// The version a qualifier names: a numeric version as is, an alias's
+/// version (a weighted alias picks between the versions in its weight map),
+/// `None` for `$LATEST` / no qualifier (callers use the live `$LATEST`
+/// config).
+///
+/// An alias that does not exist resolves to the qualifier itself, which no
+/// version snapshot is keyed by (alias names cannot be all digits), so every
+/// caller's version lookup answers `ResourceNotFoundException` for it, as
+/// AWS does, instead of quietly serving `$LATEST`.
 pub(crate) fn resolve_qualifier_to_version(
     state: &LambdaState,
     function_name: &str,
@@ -1180,7 +1218,9 @@ pub(crate) fn resolve_qualifier_to_version(
         return Some(q.to_string());
     }
     let alias_key = format!("{function_name}:{q}");
-    let alias = state.aliases.get(&alias_key)?;
+    let Some(alias) = state.aliases.get(&alias_key) else {
+        return Some(q.to_string());
+    };
     let primary = alias.function_version.clone();
     let routing = alias
         .routing_config

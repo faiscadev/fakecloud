@@ -56,7 +56,15 @@ impl LambdaService {
                 Some(v) => state
                     .version_snapshot(function_name, v)
                     .cloned()
-                    .or_else(|| state.functions.get(function_name).cloned()),
+                    // A numeric version without a snapshot is legacy state
+                    // and runs `$LATEST`, as Invoke does; an alias that does
+                    // not exist is not found.
+                    .or_else(|| {
+                        v.chars()
+                            .all(|c| c.is_ascii_digit())
+                            .then(|| state.functions.get(function_name).cloned())
+                            .flatten()
+                    }),
                 None => state.functions.get(function_name).cloned(),
             }
             .ok_or_else(|| {
@@ -64,8 +72,9 @@ impl LambdaService {
                     StatusCode::NOT_FOUND,
                     "ResourceNotFoundException",
                     format!(
-                        "Function not found: {}",
-                        function_arn(&req.region, &state.account_id, function_name)
+                        "Function not found: {}{}",
+                        function_arn(&req.region, &state.account_id, function_name),
+                        qualifier.map(|q| format!(":{q}")).unwrap_or_default()
                     ),
                 )
             })?;
