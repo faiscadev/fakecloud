@@ -388,15 +388,17 @@ impl DockerBackend {
             })
     }
 
+    /// Wait until the container's Runtime Interface Emulator answers HTTP
+    /// (see `facade::endpoint_reachable`: the published port accepts TCP
+    /// before anything listens in the container).
     async fn wait_for_ready(&self, container_id: &str, port: u16) -> Result<(), RuntimeError> {
-        for _ in 0..20 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if tokio::net::TcpStream::connect(format!("{}:{port}", self.sibling_host))
-                .await
-                .is_ok()
-            {
+        let endpoint = format!("{}:{port}", self.sibling_host);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            if super::facade::endpoint_reachable(&endpoint, Duration::from_millis(500)).await {
                 return Ok(());
             }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         self.remove_container(container_id).await;
         Err(RuntimeError::ContainerStartFailed(

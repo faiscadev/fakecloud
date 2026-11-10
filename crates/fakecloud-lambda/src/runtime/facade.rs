@@ -206,16 +206,33 @@ fn deploy_id_from(code_sha256: &str, launch_config: &str, layers: &[Vec<u8>]) ->
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
-/// Quick liveness check: can a TCP connection to `endpoint` (`host:port`) be
-/// opened within `timeout`? Used before forwarding a payload to a warm instance
-/// so a dead/black-holed Pod is detected in ~1s instead of hanging the full
-/// invoke timeout. A failed connect provably never reached the handler, so the
-/// caller can safely evict and retry.
-async fn endpoint_reachable(endpoint: &str, timeout: Duration) -> bool {
-    matches!(
-        tokio::time::timeout(timeout, tokio::net::TcpStream::connect(endpoint)).await,
-        Ok(Ok(_))
-    )
+/// Quick liveness check: does the Runtime Interface Emulator at `endpoint`
+/// (`host:port`) answer HTTP within `timeout`? Used before forwarding a
+/// payload to a warm instance so a dead/black-holed instance is detected in
+/// ~1s instead of hanging the full invoke timeout, and by the Docker backend
+/// to wait for a fresh container.
+///
+/// A TCP connect is not enough: a published Docker port is a forwarder
+/// that accepts connections whether or not anything listens in the
+/// container, then closes them. A freshly started container therefore
+/// looked ready before its RIE listened, and the first invocation failed
+/// with "error sending request" (never retried, since the connection had
+/// been established). `GET /` is answered `404` by a listening RIE and runs
+/// no invocation, so any HTTP response proves the instance is serving; a
+/// failed probe provably never reached the handler, so the caller can
+/// safely evict and retry.
+pub(crate) async fn endpoint_reachable(endpoint: &str, timeout: Duration) -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout)
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    client
+        .get(format!("http://{endpoint}/"))
+        .send()
+        .await
+        .is_ok()
 }
 
 /// Decide what a Runtime Interface Emulator response means, in the terms of
@@ -1330,6 +1347,16 @@ mod tests {
                     if n == 0 {
                         return;
                     }
+                    // The readiness probe (`GET /`): the real RIE answers it
+                    // 404 at once and starts no event.
+                    if buf[..n].starts_with(b"GET ") {
+                        let _ = sock
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                        return;
+                    }
                     let now = cur.fetch_add(1, SeqCst) + 1;
                     peak.fetch_max(now, SeqCst);
                     tokio::time::sleep(delay).await;
@@ -2123,5 +2150,27 @@ mod tests {
         let out =
             super::classify_invocation_response(200, br#""Task timed out after 2.00 seconds""#);
         assert_eq!(out.function_error, None);
+    }
+
+    /// The cold-start race: a published Docker port is a forwarder that
+    /// accepts TCP with nothing listening in the container and closes the
+    /// connection. Such an endpoint must not count as ready, while a
+    /// listening RIE (any HTTP answer) must.
+    #[tokio::test]
+    async fn readiness_needs_an_http_answer_not_just_a_tcp_accept() {
+        let forwarder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fwd_addr = forwarder.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = forwarder.accept().await {
+                drop(sock);
+            }
+        });
+        assert!(
+            !super::endpoint_reachable(&fwd_addr, Duration::from_millis(500)).await,
+            "an accept-and-close forwarder is not a listening RIE"
+        );
+
+        let rie = spawn_rie(Duration::from_secs(5), Arc::new(AtomicUsize::new(0))).await;
+        assert!(super::endpoint_reachable(&rie, Duration::from_millis(500)).await);
     }
 }
