@@ -651,6 +651,9 @@ pub struct CloudFormationDeps {
         fakecloud_application_autoscaling::SharedApplicationAutoScalingState,
     pub athena: fakecloud_athena::SharedAthenaState,
     pub firehose: fakecloud_firehose::SharedFirehoseState,
+    /// The Firehose engine, for the checks `CreateDeliveryStream` makes against
+    /// other services. `None` checks nothing, like an engine with no topology.
+    pub firehose_engine: Option<Arc<fakecloud_firehose::FirehoseEngine>>,
     pub glue: fakecloud_glue::SharedGlueState,
     pub eks: fakecloud_eks::SharedEksState,
     pub servicediscovery: fakecloud_servicediscovery::SharedServiceDiscoveryState,
@@ -1476,6 +1479,7 @@ impl CloudFormationService {
             app_autoscaling_state: self.deps.application_autoscaling.clone(),
             athena_state: self.deps.athena.clone(),
             firehose_state: self.deps.firehose.clone(),
+            firehose_engine: self.deps.firehose_engine.clone(),
             glue_state: self.deps.glue.clone(),
             eks_state: self.deps.eks.clone(),
             servicediscovery_state: self.deps.servicediscovery.clone(),
@@ -4898,6 +4902,7 @@ pub(crate) mod tests {
             firehose: Arc::new(parking_lot::RwLock::new(
                 fakecloud_firehose::FirehoseAccounts::new(),
             )),
+            firehose_engine: None,
             glue: Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new())),
             eks: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(

@@ -25,7 +25,10 @@ pub use output::{Compression, OutputConfig};
 pub use search::{
     validate_search_destination, BulkAttempts, SearchDelivery, SearchFamily, SearchTarget,
 };
-pub use service::{parse_kinesis_source, validate_s3_destination_compression, FirehoseService};
+pub use service::{
+    check_request_cluster_endpoints, check_request_destinations, parse_kinesis_source,
+    validate_s3_destination_compression, FirehoseService,
+};
 pub use state::{
     DeliveryStream, FirehoseAccounts, FirehoseSnapshot, KinesisSource, S3Destination,
     SharedFirehoseState, StreamKey, FIREHOSE_SNAPSHOT_SCHEMA_VERSION,

@@ -264,6 +264,15 @@ async fn e1b_custom_named_replacement_is_refused_even_with_retain() {
 #[tokio::test]
 async fn a_handler_type_refuses_a_same_name_replacement_itself() {
     let server = TestServer::start().await;
+    // The stream's bucket has to exist, as for CreateDeliveryStream.
+    server
+        .s3_client()
+        .await
+        .create_bucket()
+        .bucket("bucket")
+        .send()
+        .await
+        .unwrap();
     let cfn = server.cloudformation_client().await;
     let sqs = server.sqs_client().await;
 

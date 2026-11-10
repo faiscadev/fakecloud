@@ -3350,6 +3350,7 @@ pub(crate) mod tests {
             firehose: Arc::new(parking_lot::RwLock::new(
                 fakecloud_firehose::FirehoseAccounts::new(),
             )),
+            firehose_engine: None,
             glue: Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new())),
             eks: shared::<fakecloud_eks::EksState>(),
             servicediscovery: shared::<fakecloud_servicediscovery::ServiceDiscoveryState>(),

@@ -117,7 +117,7 @@ For **container-backed** services, a CloudFormation-provisioned resource is back
 - **ElastiCache** — `CacheCluster` and `ReplicationGroup` (backed by a real Redis/Memcached container), `ParameterGroup`, `SubnetGroup`, `SecurityGroup`, `User`, `UserGroup`
 - **ELBv2** — `LoadBalancer`, `Listener`, `ListenerRule`, `ListenerCertificate`, `TargetGroup`, `TrustStore`
 - **EventBridge** — `EventBus`, `Rule` (`Ref` is the rule name, or `<bus>|<rule>` off the default bus), `Archive`, `Connection`, `ApiDestination`, `Endpoint`, `EventBusPolicy`
-- **Firehose** — `DeliveryStream`
+- **Firehose**: `DeliveryStream`, checked as `CreateDeliveryStream` and `UpdateDestination` check it (model patterns, the buckets, domains and source stream it names, a named `ClusterEndpoint` answering), with the API's message as the resource's failure reason
 - **Glue** — `Database`, `Table`, `Partition`
 - **IAM** — `Role`, `User`, `Group`, `Policy` (an inline policy embedded in each listed role, user and group), `RolePolicy`, `ManagedPolicy`, `AccessKey`, `InstanceProfile`, `OIDCProvider`, `SAMLProvider`, `ServiceLinkedRole`, `UserToGroupAddition`, `VirtualMFADevice`
 - **IoT** - `TopicRule` (read back by `GetTopicRule` / `ListTopicRules`)

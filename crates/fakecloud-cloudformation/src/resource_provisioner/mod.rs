@@ -1000,6 +1000,8 @@ pub struct ResourceProvisioner {
     pub app_autoscaling_state: AppasState,
     pub athena_state: SharedAthenaState,
     pub firehose_state: fakecloud_firehose::SharedFirehoseState,
+    /// See `CloudFormationDeps::firehose_engine`.
+    pub firehose_engine: Option<Arc<fakecloud_firehose::FirehoseEngine>>,
     pub glue_state: fakecloud_glue::SharedGlueState,
     pub eks_state: SharedEksState,
     pub servicediscovery_state: SharedServiceDiscoveryState,
@@ -4565,6 +4567,7 @@ mod tests {
             firehose_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_firehose::FirehoseAccounts::new(),
             )),
+            firehose_engine: None,
             glue_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_glue::GlueAccounts::new(),
             )),

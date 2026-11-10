@@ -128,6 +128,8 @@ async fn firehose_mixed_destinations_do_not_bypass_admission() {
 async fn firehose_cfn_preserves_unsupported_settings_for_admission() {
     use serde_json::json;
     let server = TestServer::start().await;
+    // CloudFormation checks the bucket exists, as CreateDeliveryStream does.
+    create_bucket(&server, "compression-bucket").await;
     let cfn = server.cloudformation_client().await;
     let firehose = server.firehose_client().await;
     for (i, setting) in [
@@ -144,11 +146,11 @@ async fn firehose_cfn_preserves_unsupported_settings_for_admission() {
     {
         let name = format!("unsupported-cfn-{i}");
         let field = setting.as_object().unwrap().keys().next().unwrap();
-        let mut dest = json!({"RoleARN": "arn:aws:iam::123456789012:role/fh", "BucketARN": "arn:aws:s3:::missing"});
+        let mut dest = json!({"RoleARN": "arn:aws:iam::123456789012:role/fh", "BucketARN": "arn:aws:s3:::compression-bucket"});
         dest.as_object_mut()
             .unwrap()
             .extend(setting.as_object().unwrap().clone());
-        let template = json!({"Resources": {"Stream": {"Type": "AWS::KinesisFirehose::DeliveryStream", "Properties": {
+        let template = serde_json::json!({"Resources": {"Stream": {"Type": "AWS::KinesisFirehose::DeliveryStream", "Properties": {
             "DeliveryStreamName": name, "ExtendedS3DestinationConfiguration": dest,
         }}}});
         cfn.create_stack()
@@ -182,11 +184,24 @@ fn destination(format: &str) -> ExtendedS3DestinationConfiguration {
         .unwrap()
 }
 
+/// A bucket for a destination to name: a stream naming a missing one is refused.
+async fn create_bucket(server: &TestServer, name: &str) {
+    server
+        .s3_client()
+        .await
+        .create_bucket()
+        .bucket(name)
+        .send()
+        .await
+        .unwrap();
+}
+
 async fn firehose_cfn_invalid_retry(change_set: bool) {
     use aws_sdk_cloudformation::types::{ChangeSetType, Parameter, Tag};
     use serde_json::json;
 
     let server = TestServer::start().await;
+    create_bucket(&server, "bucket").await;
     let cfn = server.cloudformation_client().await;
     let firehose = server.firehose_client().await;
     let template = json!({
@@ -616,4 +631,72 @@ async fn firehose_sdk_all_valid_compression_values_round_trip() {
         "rejected settings must never write fallback objects"
     );
     assert!(versions.delete_markers().is_empty());
+}
+
+/// A stack whose delivery stream names a bucket that does not exist fails that
+/// resource with the Firehose API's message, then rolls back.
+#[tokio::test]
+async fn firehose_cfn_missing_bucket_fails_the_stack() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let template = serde_json::json!({"Resources": {"Stream": {
+        "Type": "AWS::KinesisFirehose::DeliveryStream",
+        "Properties": {
+            "DeliveryStreamName": "cfn-missing-bucket",
+            "ExtendedS3DestinationConfiguration": {
+                "RoleARN": "arn:aws:iam::123456789012:role/fh",
+                "BucketARN": "arn:aws:s3:::cfn-no-such-bucket"
+            }
+        }
+    }}})
+    .to_string();
+    cfn.create_stack()
+        .stack_name("cfn-firehose-missing-bucket")
+        .template_body(template)
+        .send()
+        .await
+        .unwrap();
+    let stack = cfn
+        .describe_stacks()
+        .stack_name("cfn-firehose-missing-bucket")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        stack.stacks()[0].stack_status().unwrap().as_str(),
+        "ROLLBACK_COMPLETE"
+    );
+    let events = cfn
+        .describe_stack_events()
+        .stack_name("cfn-firehose-missing-bucket")
+        .send()
+        .await
+        .unwrap();
+    let failed = events
+        .stack_events()
+        .iter()
+        .find(|e| {
+            e.logical_resource_id() == Some("Stream")
+                && e.resource_status().map(|s| s.as_str()) == Some("CREATE_FAILED")
+        })
+        .expect("the stream failed");
+    let reason = failed.resource_status_reason().unwrap();
+    assert!(
+        reason.starts_with(
+            "Resource handler returned message: \"S3 Bucket cfn-no-such-bucket does not exist.\""
+        ),
+        "{reason}"
+    );
+    assert!(events.stack_events().iter().any(|e| {
+        e.resource_status().map(|s| s.as_str()) == Some("ROLLBACK_IN_PROGRESS")
+            && e.resource_status_reason()
+                == Some("The following resource(s) failed to create: [Stream]. Rollback requested by user.")
+    }));
+    let firehose = server.firehose_client().await;
+    assert!(firehose
+        .describe_delivery_stream()
+        .delivery_stream_name("cfn-missing-bucket")
+        .send()
+        .await
+        .is_err());
 }

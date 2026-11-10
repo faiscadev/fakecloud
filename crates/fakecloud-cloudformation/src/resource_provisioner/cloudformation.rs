@@ -60,6 +60,7 @@ impl ResourceProvisioner {
             app_autoscaling_state: self.app_autoscaling_state.clone(),
             athena_state: self.athena_state.clone(),
             firehose_state: self.firehose_state.clone(),
+            firehose_engine: self.firehose_engine.clone(),
             glue_state: self.glue_state.clone(),
             eks_state: self.eks_state.clone(),
             servicediscovery_state: self.servicediscovery_state.clone(),

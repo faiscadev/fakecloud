@@ -253,8 +253,74 @@ fn coerce_firehose_scalars_in_place(
     Ok(())
 }
 
+/// A template's properties as the `UpdateDestination` request CloudFormation makes
+/// of them: each `*DestinationConfiguration` an `*DestinationUpdate`, and a search
+/// destination's `S3Configuration` its `S3Update`.
+fn firehose_update_request(props: &serde_json::Value) -> serde_json::Value {
+    let mut request = serde_json::Map::new();
+    if let Some(members) = props.as_object() {
+        for (key, value) in members {
+            let Some(base) = key.strip_suffix("Configuration") else {
+                request.insert(key.clone(), value.clone());
+                continue;
+            };
+            let mut value = value.clone();
+            if let Some(block) = value.as_object_mut() {
+                if let Some(s3) = block.remove("S3Configuration") {
+                    block.insert("S3Update".to_string(), s3);
+                }
+            }
+            request.insert(format!("{base}Update"), value);
+        }
+    }
+    serde_json::Value::Object(request)
+}
+
 impl ResourceProvisioner {
     // --- Firehose ---
+
+    /// What the Firehose API checks of a stream's request before making it: the
+    /// model's patterns, the buckets, domains and source stream it names, and the
+    /// `ClusterEndpoint` it names answering. The last is a bounded network call,
+    /// run on a thread of its own so it never borrows the caller's runtime, and
+    /// with no state lock held.
+    fn check_firehose_request(
+        &self,
+        props: &serde_json::Value,
+        updating: bool,
+    ) -> Result<(), String> {
+        let Some(engine) = self.firehose_engine.clone() else {
+            return Ok(());
+        };
+        let request = if updating {
+            firehose_update_request(props)
+        } else {
+            props.clone()
+        };
+        fakecloud_firehose::check_request_destinations(
+            &engine,
+            &self.account_id,
+            &request,
+            updating,
+        )
+        .map_err(|err| err.message())?;
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| format!("Failed to create runtime: {e}"))?;
+                    runtime
+                        .block_on(fakecloud_firehose::check_request_cluster_endpoints(
+                            &engine, &request, updating,
+                        ))
+                        .map_err(|err| err.message())
+                })
+                .join()
+                .map_err(|_| "Cluster endpoint check panicked".to_string())?
+        })
+    }
 
     /// The stream a template describes, built without touching any state so an
     /// invalid template can be refused before anything is replaced.
@@ -319,6 +385,7 @@ impl ResourceProvisioner {
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
         let (name, arn, stream) = self.firehose_stream_from_template(resource)?;
+        self.check_firehose_request(&resource.properties, false)?;
         let mut state = self.firehose_state.write();
         let account = state.get_or_create(&self.account_id, &self.region);
         if account
@@ -357,6 +424,7 @@ impl ResourceProvisioner {
         let name = existing.physical_id.clone();
 
         let new_destination = firehose_template_destination(props)?;
+        self.check_firehose_request(props, true)?;
 
         let mut state = self.firehose_state.write();
         let account = state.get_or_create(&self.account_id, &self.region);
@@ -423,6 +491,153 @@ mod tests {
     use super::super::tests::{make_provisioner, make_resource};
     use super::*;
     use serde_json::{json, Value};
+
+    /// What the server wires: the engine sees this provisioner's buckets, and a
+    /// topology answers for source streams and search domains.
+    struct Topology;
+
+    impl fakecloud_firehose::FirehoseTopology for Topology {
+        fn kinesis_stream_exists(&self, stream_arn: &str) -> bool {
+            stream_arn.ends_with("/present")
+        }
+        fn search_domain(&self, domain_arn: &str) -> fakecloud_firehose::SearchDomain {
+            if domain_arn.ends_with("/present") {
+                fakecloud_firehose::SearchDomain::Present {
+                    reachable_url: None,
+                }
+            } else {
+                fakecloud_firehose::SearchDomain::Absent
+            }
+        }
+    }
+
+    fn wired(topology: bool) -> ResourceProvisioner {
+        let mut prov = make_provisioner();
+        let engine = Arc::new(fakecloud_firehose::FirehoseEngine::new(
+            prov.firehose_state.clone(),
+        ));
+        engine.set_s3(prov.s3_state.clone());
+        if topology {
+            engine.set_topology(Arc::new(Topology));
+        }
+        prov.firehose_engine = Some(engine);
+        prov.create_resource(&make_resource(
+            "AWS::S3::Bucket",
+            "Bucket",
+            json!({"BucketName": "present"}),
+        ))
+        .unwrap();
+        prov
+    }
+
+    fn s3_stream(bucket_arn: &str) -> ResourceDefinition {
+        make_resource(
+            "AWS::KinesisFirehose::DeliveryStream",
+            "Firehose",
+            json!({
+                "DeliveryStreamName": "events",
+                "ExtendedS3DestinationConfiguration": {
+                    "RoleARN": "arn:aws:iam::123456789012:role/fh",
+                    "BucketARN": bucket_arn
+                }
+            }),
+        )
+    }
+
+    fn no_stream(prov: &ResourceProvisioner) -> bool {
+        prov.firehose_state
+            .read()
+            .get("123456789012")
+            .is_none_or(|a| a.streams("us-east-1").is_none_or(|s| s.is_empty()))
+    }
+
+    #[test]
+    fn a_missing_bucket_fails_the_stream_as_the_api_does() {
+        let prov = wired(false);
+        let err = prov
+            .create_resource(&s3_stream("arn:aws:s3:::missing"))
+            .unwrap_err();
+        assert_eq!(err, "S3 Bucket missing does not exist.");
+        assert!(no_stream(&prov));
+        prov.create_resource(&s3_stream("arn:aws:s3:::present"))
+            .unwrap();
+    }
+
+    #[test]
+    fn the_models_patterns_are_checked_first_with_the_request_member_path() {
+        let prov = wired(false);
+        let err = prov.create_resource(&s3_stream("not-an-arn")).unwrap_err();
+        assert_eq!(
+            err,
+            "1 validation error detected: Value at 'extendedS3DestinationConfiguration.bucketARN' failed to satisfy constraint: Member must satisfy regular expression pattern: arn:.*:s3:::[\\w\\.\\-]{1,255}"
+        );
+        // An update names the UpdateDestination member CloudFormation sends.
+        let existing = prov
+            .create_resource(&s3_stream("arn:aws:s3:::present"))
+            .unwrap();
+        let err = prov
+            .update_resource(&existing, &s3_stream("not-an-arn"))
+            .unwrap_err();
+        assert!(
+            err.contains("Value at 'extendedS3DestinationUpdate.bucketARN'"),
+            "{err}"
+        );
+        let err = prov
+            .update_resource(&existing, &s3_stream("arn:aws:s3:::missing"))
+            .unwrap_err();
+        assert_eq!(err, "S3 Bucket missing does not exist.");
+        assert_eq!(
+            stored(&prov).destination.unwrap().bucket_arn,
+            "arn:aws:s3:::present",
+            "the stream is left as it was"
+        );
+    }
+
+    #[test]
+    fn source_streams_domains_and_endpoints_are_checked_with_a_topology() {
+        let mut props = search_stream_props("absent");
+        props["AmazonopensearchserviceDestinationConfiguration"]["S3Configuration"]["BucketARN"] =
+            json!("arn:aws:s3:::present");
+        let definition =
+            |props: Value| make_resource("AWS::KinesisFirehose::DeliveryStream", "Firehose", props);
+
+        // Without a topology nothing outside S3 is known, as for the API.
+        assert!(wired(false)
+            .create_resource(&definition(props.clone()))
+            .is_ok());
+
+        let prov = wired(true);
+        let err = prov
+            .create_resource(&definition(props.clone()))
+            .unwrap_err();
+        assert_eq!(err, "Stream absent under account 123456789012 not found.");
+
+        props["KinesisStreamSourceConfiguration"]["KinesisStreamARN"] =
+            json!("arn:aws:kinesis:us-east-1:123456789012:stream/present");
+        let config = &mut props["AmazonopensearchserviceDestinationConfiguration"];
+        config.as_object_mut().unwrap().remove("ClusterEndpoint");
+        config["DomainARN"] = json!("arn:aws:es:us-east-1:123456789012:domain/absent");
+        let err = prov
+            .create_resource(&definition(props.clone()))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "Verify that the IAM role has access to the ElasticSearch domain."
+        );
+
+        // A named ClusterEndpoint has to answer: nothing listens on port 9.
+        let config = &mut props["AmazonopensearchserviceDestinationConfiguration"];
+        config.as_object_mut().unwrap().remove("DomainARN");
+        config["ClusterEndpoint"] = json!("http://127.0.0.1:9");
+        let err = prov
+            .create_resource(&definition(props.clone()))
+            .unwrap_err();
+        assert!(
+            err.starts_with("Error connecting to the provided ElasticSearch cluster endpoint."),
+            "{err}"
+        );
+        assert!(no_stream(&prov));
+    }
 
     fn configuration() -> Value {
         json!({

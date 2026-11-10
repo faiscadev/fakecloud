@@ -1709,6 +1709,7 @@ async fn main() {
             application_autoscaling: app_autoscaling_state.clone(),
             athena: athena_state.clone(),
             firehose: firehose_state.clone(),
+            firehose_engine: Some(firehose_engine.clone()),
             glue: glue_state.clone(),
             eks: eks_state.clone(),
             servicediscovery: servicediscovery_state.clone(),
