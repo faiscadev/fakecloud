@@ -168,6 +168,25 @@ pub trait SnsDelivery: Send + Sync {
     ) {
         self.publish_to_topic(topic_arn, message, subject);
     }
+
+    /// Publish carrying typed message attributes (e.g. Lambda's dead-letter
+    /// `RequestID` / `ErrorCode` / `ErrorMessage`), delivered to subscribers
+    /// like `Publish` `MessageAttributes`. Implementations that cannot carry
+    /// attributes must override this; the default refuses to drop them
+    /// silently and publishes nothing.
+    fn publish_to_topic_with_attributes(
+        &self,
+        topic_arn: &str,
+        message: &str,
+        subject: Option<&str>,
+        attributes: &HashMap<String, SqsMessageAttribute>,
+    ) {
+        let _ = (message, subject, attributes);
+        tracing::warn!(
+            topic_arn,
+            "SNS delivery does not support message attributes; message not published"
+        );
+    }
 }
 
 /// An event another service puts onto an EventBridge bus (S3 bucket
@@ -1107,6 +1126,19 @@ impl DeliveryBus {
     pub fn publish_to_sns(&self, topic_arn: &str, message: &str, subject: Option<&str>) {
         if let Some(ref sender) = self.sns_sender {
             sender.publish_to_topic(topic_arn, message, subject);
+        }
+    }
+
+    /// Publish to an SNS topic with typed message attributes.
+    pub fn publish_to_sns_with_attributes(
+        &self,
+        topic_arn: &str,
+        message: &str,
+        subject: Option<&str>,
+        attributes: &HashMap<String, SqsMessageAttribute>,
+    ) {
+        if let Some(ref sender) = self.sns_sender {
+            sender.publish_to_topic_with_attributes(topic_arn, message, subject, attributes);
         }
     }
 

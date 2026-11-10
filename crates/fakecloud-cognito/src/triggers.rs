@@ -54,6 +54,8 @@ pub enum TriggerSource {
     CustomMessageSignUp,
     CustomMessageForgotPassword,
     TokenGenerationAuthentication,
+    TokenGenerationRefreshTokens,
+    TokenGenerationHostedAuth,
     UserMigrationAuthentication,
     DefineAuthChallengeAuthentication,
     CreateAuthChallengeAuthentication,
@@ -80,12 +82,17 @@ impl TriggerSource {
             Self::PreSignUpSignUp => "PreSignUp_SignUp",
             Self::PreSignUpAdminCreateUser => "PreSignUp_AdminCreateUser",
             Self::PostConfirmationConfirmSignUp => "PostConfirmation_ConfirmSignUp",
-            Self::PostConfirmationAdminConfirmSignUp => "PostConfirmation_AdminConfirmSignUp",
+            // AdminConfirmSignUp reports the same trigger source as
+            // ConfirmSignUp (Cognito developer guide, "Connecting API
+            // operations to Lambda triggers").
+            Self::PostConfirmationAdminConfirmSignUp => "PostConfirmation_ConfirmSignUp",
             Self::PreAuthenticationAuthentication => "PreAuthentication_Authentication",
             Self::PostAuthenticationAuthentication => "PostAuthentication_Authentication",
             Self::CustomMessageSignUp => "CustomMessage_SignUp",
             Self::CustomMessageForgotPassword => "CustomMessage_ForgotPassword",
             Self::TokenGenerationAuthentication => "TokenGeneration_Authentication",
+            Self::TokenGenerationRefreshTokens => "TokenGeneration_RefreshTokens",
+            Self::TokenGenerationHostedAuth => "TokenGeneration_HostedAuth",
             Self::UserMigrationAuthentication => "UserMigration_Authentication",
             Self::DefineAuthChallengeAuthentication => "DefineAuthChallenge_Authentication",
             Self::CreateAuthChallengeAuthentication => "CreateAuthChallenge_Authentication",
@@ -121,7 +128,9 @@ impl TriggerSource {
             Self::PreAuthenticationAuthentication => "PreAuthentication",
             Self::PostAuthenticationAuthentication => "PostAuthentication",
             Self::CustomMessageSignUp | Self::CustomMessageForgotPassword => "CustomMessage",
-            Self::TokenGenerationAuthentication => "PreTokenGeneration",
+            Self::TokenGenerationAuthentication
+            | Self::TokenGenerationRefreshTokens
+            | Self::TokenGenerationHostedAuth => "PreTokenGeneration",
             Self::UserMigrationAuthentication => "UserMigration",
             Self::DefineAuthChallengeAuthentication => "DefineAuthChallenge",
             Self::CreateAuthChallengeAuthentication => "CreateAuthChallenge",
@@ -294,33 +303,28 @@ pub(crate) fn trigger_function_error(
     )
 }
 
-/// Invoke a Lambda trigger in fire-and-forget mode.
-/// Used for PostConfirmation, PostAuthentication, and CustomMessage triggers.
-pub fn invoke_trigger_fire_and_forget(
-    ctx: &CognitoDeliveryContext,
-    function_arn: String,
-    event: Value,
-) {
-    let bus = ctx.delivery_bus.clone();
-    tokio::spawn(async move {
-        let payload = event.to_string();
-        match bus.invoke_lambda(&function_arn, &payload).await {
-            Some(Ok(_)) => {
-                tracing::debug!(
-                    function_arn = %function_arn,
-                    "Fire-and-forget Lambda trigger completed"
-                );
-            }
-            Some(Err(e)) => {
-                tracing::warn!(
-                    function_arn = %function_arn,
-                    error = %e,
-                    "Fire-and-forget Lambda trigger failed"
-                );
-            }
-            None => {}
+/// Invoke a custom sender trigger (CustomEmailSender / CustomSMSSender).
+/// "Except for custom sender Lambda triggers, Amazon Cognito invokes Lambda
+/// functions synchronously" (Cognito developer guide, "Things to know about
+/// Lambda triggers"): custom senders are Event invocations, so a function
+/// error is Lambda's to retry and never fails the Cognito call.
+pub fn invoke_custom_sender(ctx: &CognitoDeliveryContext, function_arn: &str, event: &Value) {
+    match ctx
+        .delivery_bus
+        .invoke_lambda_async(function_arn, &event.to_string())
+    {
+        Some(Ok(())) => {
+            tracing::debug!(function_arn = %function_arn, "Custom sender trigger queued");
         }
-    });
+        Some(Err(e)) => {
+            tracing::warn!(
+                function_arn = %function_arn,
+                error = %e,
+                "Custom sender trigger could not be invoked"
+            );
+        }
+        None => {}
+    }
 }
 
 /// Build a DefineAuthChallenge trigger event.
@@ -609,7 +613,7 @@ mod tests {
         );
         assert_eq!(
             TriggerSource::PostConfirmationAdminConfirmSignUp.as_str(),
-            "PostConfirmation_AdminConfirmSignUp"
+            "PostConfirmation_ConfirmSignUp"
         );
         assert_eq!(
             TriggerSource::PreAuthenticationAuthentication.as_str(),
@@ -734,10 +738,7 @@ mod tests {
         );
 
         assert_eq!(event["callerContext"]["clientId"], "");
-        assert_eq!(
-            event["triggerSource"],
-            "PostConfirmation_AdminConfirmSignUp"
-        );
+        assert_eq!(event["triggerSource"], "PostConfirmation_ConfirmSignUp");
     }
 
     #[test]

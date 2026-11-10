@@ -72,13 +72,16 @@ impl CognitoService {
     }
 
     /// Dispatch a Cognito verification email. Routes through the
-    /// CustomEmailSender Lambda when configured on the pool; otherwise
-    /// invokes the CustomMessage trigger (synchronously, so its response
-    /// can override subject+body) and then sends through the wired SES
-    /// dispatcher. No-op when neither is wired. Returns immediately —
-    /// all work happens in a spawned task.
+    /// CustomEmailSender Lambda when configured on the pool (an
+    /// asynchronous invocation); otherwise invokes the CustomMessage trigger
+    /// synchronously, so its response can override subject and body and
+    /// its failure fails the calling operation
+    /// (`UserLambdaValidationException` "CustomMessage failed with error
+    /// ...", recorded as `cognito."CustomMessage/SignUp"` in
+    /// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json),
+    /// then sends through the wired SES dispatcher.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn dispatch_verification_email(
+    pub(crate) async fn dispatch_verification_email(
         &self,
         pool_id: &str,
         client_id: Option<&str>,
@@ -90,9 +93,9 @@ impl CognitoService {
         custom_sender_trigger: crate::triggers::TriggerSource,
         region: &str,
         account_id: &str,
-    ) {
+    ) -> Result<(), AwsServiceError> {
         let Some(ref ctx) = self.delivery_ctx else {
-            return;
+            return Ok(());
         };
 
         // Custom sender path takes precedence per AWS behavior.
@@ -109,15 +112,10 @@ impl CognitoService {
                 region,
                 account_id,
             );
-            crate::triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
-            return;
+            crate::triggers::invoke_custom_sender(ctx, &function_arn, &event);
+            return Ok(());
         }
 
-        let Some(ref dispatcher) = ctx.email else {
-            return;
-        };
-        let custom_message_arn =
-            crate::triggers::get_trigger_arn(&self.state, pool_id, custom_message_trigger);
         let pool_settings = {
             let accounts = self.state.read();
             accounts
@@ -135,67 +133,53 @@ impl CognitoService {
                 .unwrap_or((None, None))
         };
         let (from_addr, vmt) = pool_settings;
-        let (subject_tpl_default, msg_tpl_default) = vmt
+        let (mut subject_tpl, mut msg_tpl) = vmt
             .map(|t| (t.email_subject, t.email_message))
             .unwrap_or((None, None));
 
-        let dispatcher = dispatcher.clone();
-        let ctx = ctx.clone();
-        let username_owned = username.to_string();
-        let client_id_owned = client_id.map(|s| s.to_string());
-        let pool_id_owned = pool_id.to_string();
-        let region_owned = region.to_string();
-        let account_id_owned = account_id.to_string();
-        let user_attrs_owned: Vec<crate::state::UserAttribute> = user_attributes.to_vec();
-        let to_email_owned = to_email.to_string();
-        let code_owned = code.to_string();
-        tokio::spawn(async move {
-            let mut subject_tpl = subject_tpl_default;
-            let mut msg_tpl = msg_tpl_default;
-            if let Some(function_arn) = custom_message_arn {
-                let mut event = crate::triggers::build_trigger_event(
-                    custom_message_trigger,
-                    &pool_id_owned,
-                    client_id_owned.as_deref(),
-                    &username_owned,
-                    &user_attrs_owned,
-                    &region_owned,
-                    &account_id_owned,
-                );
-                event["request"]["codeParameter"] = serde_json::json!("{####}");
-                event["request"]["usernameParameter"] = serde_json::json!(username_owned);
-                if let Some(resp) =
-                    // Dispatched in the background, so a failing trigger can
-                    // only fall back to the pool's own template here.
-                    crate::triggers::invoke_trigger(&ctx, &function_arn, &event)
-                        .await
-                        .ok()
-                        .flatten()
-                {
-                    if let Some(s) = resp["response"]["emailSubject"].as_str() {
-                        subject_tpl = Some(s.to_string());
-                    }
-                    if let Some(m) = resp["response"]["emailMessage"].as_str() {
-                        msg_tpl = Some(m.to_string());
-                    }
+        if let Some(function_arn) =
+            crate::triggers::get_trigger_arn(&self.state, pool_id, custom_message_trigger)
+        {
+            let mut event = crate::triggers::build_trigger_event(
+                custom_message_trigger,
+                pool_id,
+                client_id,
+                username,
+                user_attributes,
+                region,
+                account_id,
+            );
+            event["request"]["codeParameter"] = serde_json::json!("{####}");
+            event["request"]["usernameParameter"] = serde_json::json!(username);
+            if let Some(resp) = crate::triggers::invoke_trigger(ctx, &function_arn, &event).await? {
+                if let Some(s) = resp["response"]["emailSubject"].as_str() {
+                    subject_tpl = Some(s.to_string());
+                }
+                if let Some(m) = resp["response"]["emailMessage"].as_str() {
+                    msg_tpl = Some(m.to_string());
                 }
             }
-            let rendered = crate::triggers::render_verification_email(
-                from_addr.as_deref(),
-                subject_tpl.as_deref(),
-                msg_tpl.as_deref(),
-                &username_owned,
-                &code_owned,
-            );
-            dispatcher.send_email(
-                &account_id_owned,
-                &rendered.from,
-                &to_email_owned,
-                &rendered.subject,
-                &rendered.body_text,
-                rendered.body_html.as_deref(),
-            );
-        });
+        }
+
+        let Some(ref dispatcher) = ctx.email else {
+            return Ok(());
+        };
+        let rendered = crate::triggers::render_verification_email(
+            from_addr.as_deref(),
+            subject_tpl.as_deref(),
+            msg_tpl.as_deref(),
+            username,
+            code,
+        );
+        dispatcher.send_email(
+            account_id,
+            &rendered.from,
+            to_email,
+            &rendered.subject,
+            &rendered.body_text,
+            rendered.body_html.as_deref(),
+        );
+        Ok(())
     }
 
     /// Dispatch a Cognito verification SMS. Routes through the
@@ -231,7 +215,7 @@ impl CognitoService {
                 region,
                 account_id,
             );
-            crate::triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
+            crate::triggers::invoke_custom_sender(ctx, &function_arn, &event);
             return;
         }
 
@@ -444,9 +428,11 @@ impl AwsService for CognitoService {
             "DeleteUser" => self.delete_user(&req),
             "UpdateUserAttributes" => self.update_user_attributes(&req),
             "DeleteUserAttributes" => self.delete_user_attributes(&req),
-            "GetUserAttributeVerificationCode" => self.get_user_attribute_verification_code(&req),
+            "GetUserAttributeVerificationCode" => {
+                self.get_user_attribute_verification_code(&req).await
+            }
             "VerifyUserAttribute" => self.verify_user_attribute(&req),
-            "ResendConfirmationCode" => self.resend_confirmation_code(&req),
+            "ResendConfirmationCode" => self.resend_confirmation_code(&req).await,
             "SetUserPoolMfaConfig" => self.set_user_pool_mfa_config(&req),
             "GetUserPoolMfaConfig" => self.get_user_pool_mfa_config(&req),
             "AdminSetUserMFAPreference" => self.admin_set_user_mfa_preference(&req),
@@ -2573,6 +2559,9 @@ pub enum OAuthTokenError {
     /// The requested `scope` is not a subset of what the client is
     /// allowed (RFC 6749 §5.2).
     InvalidScope,
+    /// A Lambda trigger (PreTokenGeneration) failed; carries the user pools
+    /// API message (`PreTokenGeneration failed with error ...`).
+    TriggerFailed(String),
 }
 
 impl OAuthTokenError {
@@ -2583,14 +2572,23 @@ impl OAuthTokenError {
         }
     }
 
-    pub fn as_oauth_code(&self) -> &'static str {
+    /// The body's `error` value. A trigger failure is reported the way the
+    /// hosted-UI token endpoint does, as recorded
+    /// (`cognito."PreTokenGeneration/oauth2-token refresh_token grant"` in
+    /// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json):
+    /// the API message plus the internal service error summary.
+    pub fn as_oauth_code(&self) -> String {
         match self {
-            OAuthTokenError::InvalidRequest(_) => "invalid_request",
-            OAuthTokenError::UnsupportedGrantType => "unsupported_grant_type",
-            OAuthTokenError::InvalidClient => "invalid_client",
-            OAuthTokenError::InvalidGrant => "invalid_grant",
-            OAuthTokenError::UnauthorizedClient => "unauthorized_client",
-            OAuthTokenError::InvalidScope => "invalid_scope",
+            OAuthTokenError::InvalidRequest(_) => "invalid_request".to_string(),
+            OAuthTokenError::UnsupportedGrantType => "unsupported_grant_type".to_string(),
+            OAuthTokenError::InvalidClient => "invalid_client".to_string(),
+            OAuthTokenError::InvalidGrant => "invalid_grant".to_string(),
+            OAuthTokenError::UnauthorizedClient => "unauthorized_client".to_string(),
+            OAuthTokenError::InvalidScope => "invalid_scope".to_string(),
+            OAuthTokenError::TriggerFailed(message) => format!(
+                "{message} (Service: AWSCognitoIdentityProviderInternalService; Status Code: 400; Error Code: UserLambdaValidationException; Request ID: {}; Proxy: null)",
+                Uuid::new_v4()
+            ),
         }
     }
 
@@ -2654,8 +2652,11 @@ async fn oauth_pre_token_overrides(
     pool_id: &str,
     client_id: &str,
     username: &str,
-) -> Option<Value> {
-    let ctx = delivery_ctx?;
+    trigger_source: crate::triggers::TriggerSource,
+) -> Result<Option<Value>, AwsServiceError> {
+    let Some(ctx) = delivery_ctx else {
+        return Ok(None);
+    };
     let (account_id_key, account_id, event_region, user_attrs) = {
         let mas = state.read();
         let mut found = None;
@@ -2674,18 +2675,20 @@ async fn oauth_pre_token_overrides(
                 break;
             }
         }
-        found?
+        let Some(found) = found else {
+            return Ok(None);
+        };
+        found
     };
-    let function_arn = crate::triggers::get_trigger_arn(
-        state,
-        pool_id,
-        crate::triggers::TriggerSource::TokenGenerationAuthentication,
-    )?;
+    let Some(function_arn) = crate::triggers::get_trigger_arn(state, pool_id, trigger_source)
+    else {
+        return Ok(None);
+    };
     // The event region/account come from the resolved account (not the request
     // region), mirroring how the InitiateAuth flows build this event so the
     // `userPoolId`/ARN in the trigger payload match the pool's own identity.
     let event = crate::triggers::build_trigger_event(
-        crate::triggers::TriggerSource::TokenGenerationAuthentication,
+        trigger_source,
         pool_id,
         Some(client_id),
         username,
@@ -2695,12 +2698,7 @@ async fn oauth_pre_token_overrides(
     );
     let started = std::time::Instant::now();
     let invoked_at = Utc::now();
-    // The hosted-UI token endpoint has no Cognito API error to fail with; a
-    // failing trigger leaves token issuance unchanged.
-    let raw_response = crate::triggers::invoke_trigger(ctx, &function_arn, &event)
-        .await
-        .ok()
-        .flatten();
+    let raw_response = crate::triggers::invoke_trigger(ctx, &function_arn, &event).await?;
     let duration_ms = started.elapsed().as_millis() as u64;
     auth::record_pre_token_gen_invocation(
         state,
@@ -2715,7 +2713,7 @@ async fn oauth_pre_token_overrides(
         invoked_at,
         duration_ms,
     );
-    raw_response
+    Ok(raw_response)
 }
 
 /// Resolve the `(client_id, client_secret)` an OAuth endpoint request
@@ -2914,9 +2912,16 @@ async fn handle_authorization_code_grant(
         Some(consumed.scopes.join(" "))
     };
     let claims = collect_token_claims(state, pool_id, &consumed.username, client_id);
-    let overrides =
-        oauth_pre_token_overrides(state, delivery_ctx, pool_id, client_id, &consumed.username)
-            .await;
+    let overrides = oauth_pre_token_overrides(
+        state,
+        delivery_ctx,
+        pool_id,
+        client_id,
+        &consumed.username,
+        crate::triggers::TriggerSource::TokenGenerationHostedAuth,
+    )
+    .await
+    .map_err(|e| OAuthTokenError::TriggerFailed(e.message()))?;
     let tokens = generate_tokens_with_overrides(
         pool_id,
         client_id,
@@ -3020,8 +3025,16 @@ async fn handle_refresh_token_grant(
     // A refresh keeps the acr / amr / auth_time of the original sign-in.
     let mut claims = collect_token_claims(state, pool_id, &username, client_id);
     claims.auth_context = auth_context.clone();
-    let overrides =
-        oauth_pre_token_overrides(state, delivery_ctx, pool_id, client_id, &username).await;
+    let overrides = oauth_pre_token_overrides(
+        state,
+        delivery_ctx,
+        pool_id,
+        client_id,
+        &username,
+        crate::triggers::TriggerSource::TokenGenerationRefreshTokens,
+    )
+    .await
+    .map_err(|e| OAuthTokenError::TriggerFailed(e.message()))?;
     let tokens = generate_tokens_with_overrides(
         pool_id,
         client_id,
@@ -3937,9 +3950,19 @@ pub async fn handle_oauth2_authorize(
             let signing = ensure_pool_signing_key(state, &pool_id).await;
             let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
             let claims = collect_token_claims(state, &pool_id, username, &req.client_id);
-            let overrides =
-                oauth_pre_token_overrides(state, delivery_ctx, &pool_id, &req.client_id, username)
-                    .await;
+            // The implicit grant answers with a redirect, which carries no
+            // trigger error; a failing trigger leaves the tokens unchanged.
+            let overrides = oauth_pre_token_overrides(
+                state,
+                delivery_ctx,
+                &pool_id,
+                &req.client_id,
+                username,
+                crate::triggers::TriggerSource::TokenGenerationHostedAuth,
+            )
+            .await
+            .ok()
+            .flatten();
             let tokens = generate_tokens_with_overrides(
                 &pool_id,
                 &req.client_id,

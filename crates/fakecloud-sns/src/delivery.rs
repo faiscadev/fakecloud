@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use fakecloud_core::delivery::{DeliveryBus, SnsDelivery};
+use fakecloud_core::delivery::{DeliveryBus, SnsDelivery, SqsMessageAttribute};
 
 use crate::state::{PublishedMessage, SharedSnsState};
 
@@ -31,6 +31,7 @@ impl SnsDeliveryImpl {
         subject: Option<&str>,
         message_group_id: Option<&str>,
         message_dedup_id: Option<&str>,
+        attrs: BTreeMap<String, crate::state::MessageAttribute>,
     ) {
         // Resolve the target account from the topic ARN, record the
         // published message, and pull the per-topic subscriber list under
@@ -50,7 +51,6 @@ impl SnsDeliveryImpl {
             }
 
             let msg_id = uuid::Uuid::new_v4().to_string();
-            let attrs: BTreeMap<String, crate::state::MessageAttribute> = BTreeMap::new();
             state.published.push(PublishedMessage {
                 message_id: msg_id.clone(),
                 topic_arn: topic_arn.to_string(),
@@ -68,13 +68,10 @@ impl SnsDeliveryImpl {
             (subscribers, msg_id, endpoint)
         };
 
-        // Cross-service publishes don't carry typed message attributes
-        // (S3 events, EventBridge targets serialize the whole payload
-        // into the Message body), so the envelope attributes map is
-        // empty. The direct `Publish` op populates this from
-        // `MessageAttributes.entry.N.*` query params.
-        let empty_attrs: BTreeMap<String, crate::state::MessageAttribute> = BTreeMap::new();
-        let envelope_attrs = serde_json::Map::new();
+        // Most cross-service publishes carry no typed attributes (S3
+        // events, EventBridge targets serialize the whole payload into the
+        // Message body); Lambda's dead-letter publishes do.
+        let envelope_attrs = crate::service::build_envelope_attrs(&attrs);
 
         let ctx = crate::service::TopicFanoutContext {
             msg_id: &msg_id,
@@ -84,7 +81,7 @@ impl SnsDeliveryImpl {
             default_message: message,
             structure: None,
             envelope_attrs: &envelope_attrs,
-            message_attributes: &empty_attrs,
+            message_attributes: &attrs,
             message_group_id,
             message_dedup_id,
         };
@@ -95,7 +92,33 @@ impl SnsDeliveryImpl {
 
 impl SnsDelivery for SnsDeliveryImpl {
     fn publish_to_topic(&self, topic_arn: &str, message: &str, subject: Option<&str>) {
-        self.fan_out(topic_arn, message, subject, None, None);
+        self.fan_out(topic_arn, message, subject, None, None, BTreeMap::new());
+    }
+
+    fn publish_to_topic_with_attributes(
+        &self,
+        topic_arn: &str,
+        message: &str,
+        subject: Option<&str>,
+        attributes: &std::collections::HashMap<String, SqsMessageAttribute>,
+    ) {
+        let attrs = attributes
+            .iter()
+            .map(|(name, a)| {
+                (
+                    name.clone(),
+                    crate::state::MessageAttribute {
+                        data_type: a.data_type.clone(),
+                        string_value: a.string_value.clone(),
+                        binary_value: a.binary_value.as_deref().and_then(|b| {
+                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b)
+                                .ok()
+                        }),
+                    },
+                )
+            })
+            .collect();
+        self.fan_out(topic_arn, message, subject, None, None, attrs);
     }
 
     fn publish_to_topic_fifo(
@@ -112,6 +135,7 @@ impl SnsDelivery for SnsDeliveryImpl {
             subject,
             message_group_id,
             message_dedup_id,
+            BTreeMap::new(),
         );
     }
 }
@@ -400,6 +424,78 @@ mod tests {
         assert_eq!(envelope["Message"], "hello-sqs");
         assert_eq!(envelope["Subject"], "s");
         assert_eq!(envelope["TopicArn"], arn);
+    }
+
+    /// A cross-service publish with typed attributes (Lambda's dead-letter
+    /// `RequestID` / `ErrorCode` / `ErrorMessage`) delivers them to
+    /// subscribers in the notification's `MessageAttributes`.
+    #[tokio::test]
+    async fn publish_with_attributes_carries_them_to_subscribers() {
+        use fakecloud_core::delivery::SqsDelivery;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Recorder {
+            bodies: Mutex<Vec<String>>,
+        }
+        impl SqsDelivery for Recorder {
+            fn deliver_to_queue(&self, _: &str, body: &str, _: &HashMap<String, String>) {
+                self.bodies.lock().unwrap().push(body.to_string());
+            }
+            fn deliver_to_queue_with_attrs(
+                &self,
+                _: &str,
+                body: &str,
+                _: &HashMap<String, SqsMessageAttribute>,
+                _: Option<&str>,
+                _: Option<&str>,
+            ) {
+                self.bodies.lock().unwrap().push(body.to_string());
+            }
+        }
+
+        let recorder = Arc::new(Recorder::default());
+        let (topic, arn) = make_topic("dlq-topic");
+        let q_arn = Arn::new("sqs", REGION, ACCOUNT, "q1").to_string();
+        let sub = make_subscription(&arn, "sqs", &q_arn, true);
+        let state = make_state(vec![topic], vec![sub]);
+        let bus = Arc::new(DeliveryBus::new().with_sqs(recorder.clone()));
+        let delivery = SnsDeliveryImpl::new(state.clone(), bus);
+        let attr = |t: &str, v: &str| SqsMessageAttribute {
+            data_type: t.to_string(),
+            string_value: Some(v.to_string()),
+            binary_value: None,
+        };
+        let attrs = HashMap::from([
+            ("RequestID".to_string(), attr("String", "req-1")),
+            ("ErrorCode".to_string(), attr("Number", "200")),
+            ("ErrorMessage".to_string(), attr("String", "boom")),
+        ]);
+        delivery.publish_to_topic_with_attributes(&arn, r#"{"order":42}"#, None, &attrs);
+        let bodies = recorder.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        let envelope: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+        assert_eq!(envelope["Message"], r#"{"order":42}"#);
+        assert_eq!(
+            envelope["MessageAttributes"]["RequestID"],
+            serde_json::json!({"Type": "String", "Value": "req-1"})
+        );
+        assert_eq!(
+            envelope["MessageAttributes"]["ErrorCode"],
+            serde_json::json!({"Type": "Number", "Value": "200"})
+        );
+        assert_eq!(
+            envelope["MessageAttributes"]["ErrorMessage"]["Value"],
+            "boom"
+        );
+        let st = state.read();
+        let published = &st.default_regional().unwrap().published[0];
+        assert_eq!(
+            published.message_attributes["RequestID"]
+                .string_value
+                .as_deref(),
+            Some("req-1")
+        );
     }
 
     /// Cross-service publish to a FIFO topic must forward MessageGroupId

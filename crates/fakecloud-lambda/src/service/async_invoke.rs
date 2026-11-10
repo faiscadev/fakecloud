@@ -524,23 +524,23 @@ fn send_to_dead_letter(
         Ok(_) => "200",
         Err(_) => "500",
     };
+    let attr = |data_type: &str, value: &str| SqsMessageAttribute {
+        data_type: data_type.to_string(),
+        string_value: Some(value.to_string()),
+        binary_value: None,
+    };
+    let attributes = HashMap::from([
+        ("RequestID".to_string(), attr("String", request_id)),
+        ("ErrorCode".to_string(), attr("Number", error_code)),
+        (
+            "ErrorMessage".to_string(),
+            attr("String", truncate_utf8(&message, DLQ_ERROR_MESSAGE_LIMIT)),
+        ),
+    ]);
     if dlq.contains(":sqs:") {
-        let attr = |data_type: &str, value: &str| SqsMessageAttribute {
-            data_type: data_type.to_string(),
-            string_value: Some(value.to_string()),
-            binary_value: None,
-        };
-        let attributes = HashMap::from([
-            ("RequestID".to_string(), attr("String", request_id)),
-            ("ErrorCode".to_string(), attr("Number", error_code)),
-            (
-                "ErrorMessage".to_string(),
-                attr("String", truncate_utf8(&message, DLQ_ERROR_MESSAGE_LIMIT)),
-            ),
-        ]);
         bus.send_to_sqs_with_attrs(dlq, &body, &attributes, None, None);
     } else if dlq.contains(":sns:") {
-        bus.publish_to_sns(dlq, &body, None);
+        bus.publish_to_sns_with_attributes(dlq, &body, None, &attributes);
     }
 }
 

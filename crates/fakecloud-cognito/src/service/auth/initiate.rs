@@ -142,7 +142,9 @@ impl CognitoService {
                     &lookup.region,
                     &lookup.account_id,
                 );
-                triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
+                // Synchronous: a failing trigger fails the call (the state
+                // change above stays, as on AWS).
+                triggers::invoke_trigger(ctx, &function_arn, &event).await?;
             }
         }
 
@@ -1083,7 +1085,9 @@ impl CognitoService {
                     &region,
                     &account_id,
                 );
-                triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
+                // Synchronous: a failing trigger fails the call (the state
+                // change above stays, as on AWS).
+                triggers::invoke_trigger(ctx, &function_arn, &event).await?;
             }
         }
 
@@ -1466,10 +1470,10 @@ impl CognitoService {
             if let Some(function_arn) = triggers::get_trigger_arn(
                 &self.state,
                 &token_pool_id,
-                TriggerSource::TokenGenerationAuthentication,
+                TriggerSource::TokenGenerationRefreshTokens,
             ) {
                 let event = triggers::build_trigger_event(
-                    TriggerSource::TokenGenerationAuthentication,
+                    TriggerSource::TokenGenerationRefreshTokens,
                     &token_pool_id,
                     Some(client_id),
                     &token_username,

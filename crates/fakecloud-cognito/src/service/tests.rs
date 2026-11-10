@@ -1472,7 +1472,7 @@ fn verify_user_attribute_with_correct_code() {
         access_key_id: None,
         principal: None,
     };
-    let resp = svc.get_user_attribute_verification_code(&req).unwrap();
+    let resp = block_on(svc.get_user_attribute_verification_code(&req)).unwrap();
     let resp_json: Value =
         serde_json::from_str(core::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
     assert_eq!(resp_json["CodeDeliveryDetails"]["DeliveryMedium"], "EMAIL");
@@ -1555,7 +1555,7 @@ fn verify_user_attribute_with_correct_code() {
         access_key_id: None,
         principal: None,
     };
-    svc.get_user_attribute_verification_code(&req).unwrap();
+    block_on(svc.get_user_attribute_verification_code(&req)).unwrap();
 
     let req = AwsRequest {
         service: "cognito-idp".to_string(),
@@ -7075,7 +7075,7 @@ fn resend_confirmation_code_unknown_client_errors() {
     let (svc, _) = make_svc();
     let body = json!({"ClientId": "ghost", "Username": "u"});
     let req = make_req("ResendConfirmationCode", &body.to_string());
-    assert!(svc.resend_confirmation_code(&req).is_err());
+    assert!(block_on(svc.resend_confirmation_code(&req)).is_err());
 }
 
 #[test]
@@ -7085,7 +7085,7 @@ fn resend_confirmation_code_unknown_user_errors() {
     let client_id = create_client(&svc, &pool_id);
     let body = json!({"ClientId": client_id, "Username": "ghost"});
     let req = make_req("ResendConfirmationCode", &body.to_string());
-    assert!(svc.resend_confirmation_code(&req).is_err());
+    assert!(block_on(svc.resend_confirmation_code(&req)).is_err());
 }
 
 #[test]
@@ -7096,7 +7096,7 @@ fn resend_confirmation_code_returns_masked_email() {
     admin_create_user_helper(&svc, &pool_id, "steve");
     let body = json!({"ClientId": client_id, "Username": "steve"});
     let req = make_req("ResendConfirmationCode", &body.to_string());
-    let resp = svc.resend_confirmation_code(&req).unwrap();
+    let resp = block_on(svc.resend_confirmation_code(&req)).unwrap();
     let b = resp_json(&resp);
     let dest = b["CodeDeliveryDetails"]["Destination"].as_str().unwrap();
     assert!(dest.contains("***"));
@@ -7108,7 +7108,7 @@ fn get_user_attribute_verification_code_invalid_token() {
     let (svc, _) = make_svc();
     let body = json!({"AccessToken": "bad", "AttributeName": "email"});
     let req = make_req("GetUserAttributeVerificationCode", &body.to_string());
-    assert!(svc.get_user_attribute_verification_code(&req).is_err());
+    assert!(block_on(svc.get_user_attribute_verification_code(&req)).is_err());
 }
 
 #[test]
@@ -7120,7 +7120,7 @@ fn get_user_attribute_verification_code_email_path() {
 
     let body = json!({"AccessToken": token, "AttributeName": "email"});
     let req = make_req("GetUserAttributeVerificationCode", &body.to_string());
-    let resp = svc.get_user_attribute_verification_code(&req).unwrap();
+    let resp = block_on(svc.get_user_attribute_verification_code(&req)).unwrap();
     let b = resp_json(&resp);
     assert_eq!(b["CodeDeliveryDetails"]["DeliveryMedium"], "EMAIL");
 }
@@ -7149,7 +7149,7 @@ fn get_user_attribute_verification_code_phone_path() {
     let token = issue_at_for_users(&state, &pool_id, "lee", "c");
     let body = json!({"AccessToken": token, "AttributeName": "phone_number"});
     let req = make_req("GetUserAttributeVerificationCode", &body.to_string());
-    let resp = svc.get_user_attribute_verification_code(&req).unwrap();
+    let resp = block_on(svc.get_user_attribute_verification_code(&req)).unwrap();
     let b = resp_json(&resp);
     assert_eq!(b["CodeDeliveryDetails"]["DeliveryMedium"], "SMS");
     let dest = b["CodeDeliveryDetails"]["Destination"].as_str().unwrap();
@@ -7177,7 +7177,7 @@ fn verify_user_attribute_wrong_code() {
 
     let body = json!({"AccessToken": token, "AttributeName": "email"});
     let req = make_req("GetUserAttributeVerificationCode", &body.to_string());
-    svc.get_user_attribute_verification_code(&req).unwrap();
+    block_on(svc.get_user_attribute_verification_code(&req)).unwrap();
 
     let body = json!({"AccessToken": token, "AttributeName": "email", "Code": "000000"});
     let req = make_req("VerifyUserAttribute", &body.to_string());
@@ -7632,7 +7632,7 @@ fn run_confirmation_flows(
     };
     let base = json!({"ClientId": client_id, "Username": username});
     check("ResendConfirmationCode", &base, &|b| {
-        svc.resend_confirmation_code(&make_req("ResendConfirmationCode", &b.to_string()))
+        block_on(svc.resend_confirmation_code(&make_req("ResendConfirmationCode", &b.to_string())))
     });
     let mut body = base.clone();
     body["ConfirmationCode"] = json!(code());
@@ -12783,4 +12783,205 @@ fn failed_pre_token_generation_keeps_the_rotated_refresh_token() {
     let tokens = &st.default_ref().refresh_tokens;
     assert!(tokens.contains_key("rt-keep"), "the old token still works");
     assert_eq!(tokens.len(), 1, "no orphaned replacement token");
+}
+
+fn trigger_said_no() -> fakecloud_core::delivery::LambdaInvocationOutput {
+    fakecloud_core::delivery::LambdaInvocationOutput::unhandled(
+        br#"{"errorType":"Error","errorMessage":"trigger said no"}"#.to_vec(),
+    )
+}
+
+fn user_status_of(
+    state: &crate::state::SharedCognitoState,
+    pool_id: &str,
+    username: &str,
+) -> Option<String> {
+    let r = state.read();
+    r.default_ref()
+        .users
+        .get(pool_id)
+        .and_then(|users| users.get(username))
+        .map(|u| u.user_status.clone())
+}
+
+/// Recorded: `cognito."PostConfirmation/AdminConfirmSignUp"` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json. The
+/// call fails, yet the user is confirmed.
+#[test]
+fn post_confirmation_failure_fails_the_call_but_confirms() {
+    let (svc, state) = svc_with_trigger_output(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    let body = json!({"ClientId": client_id, "Username": "u1", "Password": "P@ssw0rd!"});
+    block_on(svc.sign_up(&make_req("SignUp", &body.to_string()))).unwrap();
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PostConfirmation": "arn:aws:lambda:us-east-1:123456789012:function:post"}),
+    );
+    let body = json!({"UserPoolId": pool_id, "Username": "u1"});
+    let err = match block_on(
+        svc.admin_confirm_sign_up(&make_req("AdminConfirmSignUp", &body.to_string())),
+    ) {
+        Ok(_) => panic!("a failing PostConfirmation trigger must fail the call"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "PostConfirmation failed with error trigger said no."
+    );
+    assert_eq!(
+        user_status_of(&state, &pool_id, "u1").as_deref(),
+        Some("CONFIRMED")
+    );
+}
+
+/// Recorded: `cognito."PostAuthentication/InitiateAuth"`. No tokens come back.
+#[test]
+fn post_authentication_failure_fails_sign_in() {
+    let (svc, state) = svc_with_trigger_output(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "u1");
+    set_user_password(&svc, &pool_id, "u1", "P@ssw0rd!");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PostAuthentication": "arn:aws:lambda:us-east-1:123456789012:function:post"}),
+    );
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientId": client_id,
+        "AuthFlow": "ADMIN_NO_SRP_AUTH",
+        "AuthParameters": {"USERNAME": "u1", "PASSWORD": "P@ssw0rd!"},
+    });
+    let err = match block_on(
+        svc.admin_initiate_auth(&make_req("AdminInitiateAuth", &body.to_string())),
+    ) {
+        Ok(_) => panic!("a failing PostAuthentication trigger must fail sign-in"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "PostAuthentication failed with error trigger said no."
+    );
+}
+
+/// Recorded: `cognito."CustomMessage/SignUp"`. SignUp fails and the user
+/// exists, UNCONFIRMED.
+#[test]
+fn custom_message_failure_fails_sign_up_but_keeps_the_user() {
+    let (svc, state) = svc_with_trigger_output(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"CustomMessage": "arn:aws:lambda:us-east-1:123456789012:function:msg"}),
+    );
+    let body = json!({
+        "ClientId": client_id,
+        "Username": "u2",
+        "Password": "P@ssw0rd!",
+        "UserAttributes": [{"Name": "email", "Value": "u2@example.com"}],
+    });
+    let err = match block_on(svc.sign_up(&make_req("SignUp", &body.to_string()))) {
+        Ok(_) => panic!("a failing CustomMessage trigger must fail SignUp"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "CustomMessage failed with error trigger said no."
+    );
+    assert_eq!(
+        user_status_of(&state, &pool_id, "u2").as_deref(),
+        Some("UNCONFIRMED")
+    );
+}
+
+/// Custom sender triggers are invoked asynchronously: their failure never
+/// fails the call (Cognito developer guide, "Things to know about Lambda
+/// triggers").
+#[test]
+fn custom_email_sender_failure_does_not_fail_sign_up() {
+    let (svc, state) = svc_with_trigger_output(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"CustomEmailSender": {"LambdaArn": "arn:aws:lambda:us-east-1:123456789012:function:sender", "LambdaVersion": "V1_0"}}),
+    );
+    let body = json!({
+        "ClientId": client_id,
+        "Username": "u3",
+        "Password": "P@ssw0rd!",
+        "UserAttributes": [{"Name": "email", "Value": "u3@example.com"}],
+    });
+    block_on(svc.sign_up(&make_req("SignUp", &body.to_string()))).expect("sign-up succeeds");
+}
+
+/// Recorded: `cognito."PreTokenGeneration/oauth2-token refresh_token grant"`.
+/// The hosted-UI token endpoint answers a failing trigger with 400 and the
+/// trigger message in `error`.
+#[test]
+fn oauth_refresh_grant_fails_on_pre_token_generation_error() {
+    let (svc, state) = svc_with_trigger_output(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "u1");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreTokenGeneration": "arn:aws:lambda:us-east-1:123456789012:function:pretoken"}),
+    );
+    {
+        let mut w = state.write();
+        w.default_mut().refresh_tokens.insert(
+            "rt-fail".to_string(),
+            crate::state::RefreshTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "u1".to_string(),
+                client_id: client_id.clone(),
+                issued_at: Utc::now(),
+                auth_context: None,
+            },
+        );
+    }
+    let ctx = svc.delivery_ctx.clone().unwrap();
+    let mut params = std::collections::BTreeMap::new();
+    params.insert("grant_type".to_string(), "refresh_token".to_string());
+    params.insert("refresh_token".to_string(), "rt-fail".to_string());
+    params.insert("client_id".to_string(), client_id.clone());
+    let err = match block_on(handle_oauth2_token(
+        &state,
+        &params,
+        None,
+        "us-east-1",
+        Some(&ctx),
+    )) {
+        Ok(_) => panic!("a failing PreTokenGeneration trigger must fail the grant"),
+        Err(e) => e,
+    };
+    assert_eq!(err.status_code(), 400);
+    let error = err.as_oauth_code();
+    assert!(
+        error.starts_with("PreTokenGeneration failed with error trigger said no. (Service: AWSCognitoIdentityProviderInternalService; Status Code: 400; Error Code: UserLambdaValidationException; Request ID: "),
+        "{error}"
+    );
+    assert!(error.ends_with("; Proxy: null)"), "{error}");
+    assert!(err.description().is_none());
+}
+
+/// InitiateAuth REFRESH_TOKEN_AUTH reports `TokenGeneration_RefreshTokens`
+/// (recorded: `cognito."PreTokenGeneration/InitiateAuth REFRESH_TOKEN_AUTH"`).
+#[test]
+fn refresh_token_auth_trigger_source_is_refresh_tokens() {
+    assert_eq!(
+        crate::triggers::TriggerSource::TokenGenerationRefreshTokens.as_str(),
+        "TokenGeneration_RefreshTokens"
+    );
 }

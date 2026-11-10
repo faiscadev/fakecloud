@@ -1049,7 +1049,7 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    pub(super) fn get_user_attribute_verification_code(
+    pub(super) async fn get_user_attribute_verification_code(
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
@@ -1057,86 +1057,110 @@ impl CognitoService {
         let access_token = require_str(&body, "AccessToken")?;
         let attribute_name = require_str(&body, "AttributeName")?;
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let (
+            pool_id,
+            username,
+            code,
+            user_attrs,
+            user_phone,
+            user_email,
+            region,
+            account_id,
+            delivery_medium,
+            destination,
+        ) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
 
-        let token_data = state.valid_access_token(access_token).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotAuthorizedException",
-                "Invalid access token.",
-            )
-        })?;
-        let pool_id = token_data.user_pool_id.clone();
-        let username = token_data.username.clone();
-
-        let user = state
-            .users
-            .get_mut(&pool_id)
-            .and_then(|users| users.get_mut(&username))
-            .ok_or_else(|| {
+            let token_data = state.valid_access_token(access_token).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotAuthorizedException",
                     "Invalid access token.",
                 )
             })?;
+            let pool_id = token_data.user_pool_id.clone();
+            let username = token_data.username.clone();
 
-        let code = generate_confirmation_code();
-        user.attribute_verification_codes
-            .insert(attribute_name.to_string(), code.clone());
-        let user_attrs = user.attributes.clone();
-        let user_phone = user
-            .attributes
-            .iter()
-            .find(|a| a.name == "phone_number")
-            .map(|a| a.value.clone());
-        let user_email = user
-            .attributes
-            .iter()
-            .find(|a| a.name == "email")
-            .map(|a| a.value.clone());
-        let region = state.region.clone();
-        let account_id = state.account_id.clone();
+            let user = state
+                .users
+                .get_mut(&pool_id)
+                .and_then(|users| users.get_mut(&username))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "Invalid access token.",
+                    )
+                })?;
 
-        // Determine delivery details based on attribute
-        let (delivery_medium, destination) = if attribute_name == "phone_number" {
-            let phone = user
+            let code = generate_confirmation_code();
+            user.attribute_verification_codes
+                .insert(attribute_name.to_string(), code.clone());
+            let user_attrs = user.attributes.clone();
+            let user_phone = user
                 .attributes
                 .iter()
                 .find(|a| a.name == "phone_number")
-                .map(|a| {
-                    // Mask phone: show last 4 digits
-                    let len = a.value.len();
-                    if len > 4 {
-                        let first: String = a.value.chars().take(1).collect();
-                        let last4: String = a.value.chars().skip(len.saturating_sub(4)).collect();
-                        format!("{first}***{last4}")
-                    } else {
-                        "***".to_string()
-                    }
-                })
-                .unwrap_or_else(|| "***".to_string());
-            ("SMS", phone)
-        } else {
-            let email = user
+                .map(|a| a.value.clone());
+            let user_email = user
                 .attributes
                 .iter()
                 .find(|a| a.name == "email")
-                .map(|a| {
-                    if let Some(at_pos) = a.value.find('@') {
-                        let first = a.value.chars().next().unwrap_or('*');
-                        let domain = &a.value[at_pos..];
-                        format!("{first}***{domain}")
-                    } else {
-                        "***".to_string()
-                    }
-                })
-                .unwrap_or_else(|| "***".to_string());
-            ("EMAIL", email)
-        };
+                .map(|a| a.value.clone());
+            let region = state.region.clone();
+            let account_id = state.account_id.clone();
 
-        drop(accounts);
+            // Determine delivery details based on attribute
+            let (delivery_medium, destination) = if attribute_name == "phone_number" {
+                let phone = user
+                    .attributes
+                    .iter()
+                    .find(|a| a.name == "phone_number")
+                    .map(|a| {
+                        // Mask phone: show last 4 digits
+                        let len = a.value.len();
+                        if len > 4 {
+                            let first: String = a.value.chars().take(1).collect();
+                            let last4: String =
+                                a.value.chars().skip(len.saturating_sub(4)).collect();
+                            format!("{first}***{last4}")
+                        } else {
+                            "***".to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "***".to_string());
+                ("SMS", phone)
+            } else {
+                let email = user
+                    .attributes
+                    .iter()
+                    .find(|a| a.name == "email")
+                    .map(|a| {
+                        if let Some(at_pos) = a.value.find('@') {
+                            let first = a.value.chars().next().unwrap_or('*');
+                            let domain = &a.value[at_pos..];
+                            format!("{first}***{domain}")
+                        } else {
+                            "***".to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "***".to_string());
+                ("EMAIL", email)
+            };
+            (
+                pool_id,
+                username,
+                code,
+                user_attrs,
+                user_phone,
+                user_email,
+                region,
+                account_id,
+                delivery_medium,
+                destination,
+            )
+        };
 
         if attribute_name == "phone_number" {
             if let Some(phone) = user_phone {
@@ -1165,7 +1189,8 @@ impl CognitoService {
                     crate::triggers::TriggerSource::CustomEmailSenderVerifyUserAttribute,
                     &region,
                     &account_id,
-                );
+                )
+                .await?;
             }
         }
 
@@ -1255,7 +1280,7 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    pub(super) fn resend_confirmation_code(
+    pub(super) async fn resend_confirmation_code(
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
@@ -1263,61 +1288,70 @@ impl CognitoService {
         let client_id = require_str(&body, "ClientId")?;
         let username = require_str(&body, "Username")?;
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let (pool_id, code, email, user_attrs, region, account_id, destination) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
 
-        // Find pool from client
-        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("User pool client {client_id} does not exist."),
-            )
-        })?;
-        // When the app client has a secret, ResendConfirmationCode must present a valid
-        // SECRET_HASH (matches the SignUp + InitiateAuth checks).
-        crate::service::validate_secret_hash(client, body["SecretHash"].as_str(), username)?;
-        let pool_id = client.user_pool_id.clone();
-
-        let user = state
-            .users
-            .get_mut(&pool_id)
-            .and_then(|users| users.get_mut(username))
-            .ok_or_else(|| {
+            // Find pool from client
+            let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "UserNotFoundException",
-                    "User does not exist.",
+                    "ResourceNotFoundException",
+                    format!("User pool client {client_id} does not exist."),
                 )
             })?;
+            // When the app client has a secret, ResendConfirmationCode must present a valid
+            // SECRET_HASH (matches the SignUp + InitiateAuth checks).
+            crate::service::validate_secret_hash(client, body["SecretHash"].as_str(), username)?;
+            let pool_id = client.user_pool_id.clone();
 
-        let code = generate_confirmation_code();
-        user.confirmation_code = Some(code.clone());
+            let user = state
+                .users
+                .get_mut(&pool_id)
+                .and_then(|users| users.get_mut(username))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "UserNotFoundException",
+                        "User does not exist.",
+                    )
+                })?;
 
-        // Find email from user attributes for CodeDeliveryDetails
-        let email = user
-            .attributes
-            .iter()
-            .find(|a| a.name == "email")
-            .map(|a| a.value.clone());
-        let user_attrs = user.attributes.clone();
-        let region = state.region.clone();
-        let account_id = state.account_id.clone();
+            let code = generate_confirmation_code();
+            user.confirmation_code = Some(code.clone());
 
-        let destination = email
-            .clone()
-            .map(|e| {
-                if let Some(at_pos) = e.find('@') {
-                    let first = e.chars().next().unwrap_or('*');
-                    let domain = &e[at_pos..];
-                    format!("{first}***{domain}")
-                } else {
-                    "***".to_string()
-                }
-            })
-            .unwrap_or_else(|| "***".to_string());
+            // Find email from user attributes for CodeDeliveryDetails
+            let email = user
+                .attributes
+                .iter()
+                .find(|a| a.name == "email")
+                .map(|a| a.value.clone());
+            let user_attrs = user.attributes.clone();
+            let region = state.region.clone();
+            let account_id = state.account_id.clone();
 
-        drop(accounts);
+            let destination = email
+                .clone()
+                .map(|e| {
+                    if let Some(at_pos) = e.find('@') {
+                        let first = e.chars().next().unwrap_or('*');
+                        let domain = &e[at_pos..];
+                        format!("{first}***{domain}")
+                    } else {
+                        "***".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "***".to_string());
+            (
+                pool_id,
+                code,
+                email,
+                user_attrs,
+                region,
+                account_id,
+                destination,
+            )
+        };
 
         if let Some(addr) = email {
             self.dispatch_verification_email(
@@ -1331,7 +1365,8 @@ impl CognitoService {
                 crate::triggers::TriggerSource::CustomEmailSenderResendCode,
                 &region,
                 &account_id,
-            );
+            )
+            .await?;
         }
 
         Ok(AwsResponse::ok_json(json!({
