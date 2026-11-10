@@ -36,7 +36,8 @@ use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
 use fakecloud_persistence::SnapshotHook;
 
 use crate::stream_esm_failures::{
-    Attempt, DiscardedBatch, FailurePolicy, Resolution, RetryTracker, Step, StreamKind,
+    Attempt, DiscardCause, DiscardedBatch, FailurePolicy, Pending, Resolution, RetryTracker, Step,
+    StreamKind,
 };
 
 /// AWS caps a single GetRecords call at 10,000 records and 10 MiB.
@@ -489,18 +490,36 @@ impl KinesisLambdaFirehosePoller {
         } in deliveries
         {
             let retry_key = format!("{}:{shard_id}", mapping.uuid);
-            let arrivals: Vec<DateTime<Utc>> = records
+            let pending: Vec<Pending> = records
                 .iter()
-                .map(|r| r.approximate_arrival_timestamp)
+                .map(|r| (r.sequence_number.clone(), r.approximate_arrival_timestamp))
                 .collect();
             let n = match self
                 .retries
-                .plan(&retry_key, &mapping.policy, &arrivals, Utc::now())
+                .plan(&retry_key, &mapping.policy, &pending, Utc::now())
             {
                 Step::Wait => continue,
                 Step::DiscardTooOld { n, invoke_count } => {
-                    self.discard(mapping, &shard_id, &records[..n], invoke_count, None);
-                    self.retries.discarded(&retry_key);
+                    self.discard(
+                        mapping,
+                        &shard_id,
+                        &records[..n],
+                        invoke_count,
+                        DiscardCause::RecordAge,
+                        json!({
+                            "Records": records[..n]
+                                .iter()
+                                .map(|r| kinesis_event_record(
+                                    r,
+                                    &shard_id,
+                                    &mapping.stream_arn,
+                                    mapping.invoke_identity_arn.as_deref(),
+                                ))
+                                .collect::<Vec<_>>()
+                        })
+                        .to_string(),
+                    );
+                    self.retries.discarded(&retry_key, &pending, n);
                     self.checkpoint(mapping, &shard_id, start + n).await;
                     continue;
                 }
@@ -539,7 +558,7 @@ impl KinesisLambdaFirehosePoller {
             // as consumed and never retries them.
             if matched.is_empty() {
                 self.retries
-                    .resolve(&retry_key, &mapping.policy, n, Attempt::Succeeded);
+                    .resolve(&retry_key, &mapping.policy, &pending, n, Attempt::Succeeded);
                 self.checkpoint(mapping, &shard_id, end).await;
                 continue;
             }
@@ -558,7 +577,7 @@ impl KinesisLambdaFirehosePoller {
 
             let Some(ref delivery) = self.lambda_delivery else {
                 self.retries
-                    .resolve(&retry_key, &mapping.policy, n, Attempt::Succeeded);
+                    .resolve(&retry_key, &mapping.policy, &pending, n, Attempt::Succeeded);
                 self.checkpoint(mapping, &shard_id, end).await;
                 // Recorded in the account and region the function ARN names.
                 let mut lambda_accounts = self.lambda_state.write();
@@ -597,7 +616,7 @@ impl KinesisLambdaFirehosePoller {
             }
             match self
                 .retries
-                .resolve(&retry_key, &mapping.policy, n, attempt)
+                .resolve(&retry_key, &mapping.policy, &pending, n, attempt)
             {
                 Resolution::Advance(k) => self.checkpoint(mapping, &shard_id, start + k).await,
                 Resolution::Retry => {}
@@ -611,7 +630,8 @@ impl KinesisLambdaFirehosePoller {
                         &shard_id,
                         &records[..n],
                         invoke_count,
-                        Some(function_error),
+                        DiscardCause::RetriesExhausted { function_error },
+                        payload.clone(),
                     );
                     self.checkpoint(mapping, &shard_id, start + n).await;
                 }
@@ -635,7 +655,8 @@ impl KinesisLambdaFirehosePoller {
         shard_id: &str,
         records: &[KinesisRecord],
         invoke_count: u32,
-        response: Option<Option<String>>,
+        cause: DiscardCause,
+        payload: String,
     ) {
         tracing::warn!(
             function_arn = %mapping.function_arn,
@@ -664,7 +685,8 @@ impl KinesisLambdaFirehosePoller {
             last_arrival: last.approximate_arrival_timestamp,
             batch_size: records.len(),
             invoke_count,
-            response,
+            cause,
+            payload,
         }
         .send(bus, destination);
     }

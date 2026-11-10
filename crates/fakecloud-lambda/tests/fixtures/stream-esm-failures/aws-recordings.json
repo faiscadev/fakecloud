@@ -515,6 +515,57 @@
           }
         }
       ]
+    },
+    "S3_DESTINATION": {
+      "source": "kinesis",
+      "handler": "failall",
+      "mapping_args": "--maximum-retry-attempts 0, OnFailure S3 bucket",
+      "invocations": [
+        {
+          "after_s": 0.0,
+          "records": [
+            "s-1",
+            "s-2"
+          ]
+        }
+      ],
+      "object_key_shape": "aws/lambda/<mapping uuid>/<shard id>/YYYY/MM/DD/YYYY-MM-DDTHH.MM.SS-<uuid>",
+      "object_content_type": "application/octet-stream",
+      "on_failure": [
+        {
+          "requestContext": {
+            "requestId": "395d7962-a030-4cb3-b9dd-b687aa31b74d",
+            "functionArn": "arn:aws:lambda:us-east-1:123456789012:function:fcrec-esm2-s3",
+            "condition": "RetryAttemptsExhausted",
+            "approximateInvokeCount": 1
+          },
+          "responseContext": {
+            "statusCode": 200,
+            "executedVersion": "$LATEST",
+            "functionError": "Unhandled"
+          },
+          "version": "1.0",
+          "payload": "{\"Records\":[{\"kinesis\":{\"kinesisSchemaVersion\":\"1.0\",\"partitionKey\":\"pk\",\"sequenceNumber\":\"49680101223505697810703734285538549586004877709632602114\",\"data\":\"eyJpZCI6InMtMSJ9\",\"approximateArrivalTimestamp\":1.794345876839E9},\"eventSource\":\"aws:kinesis\",\"eventVersion\":\"1.0\",\"eventID\":\"shardId-000000000000:49680101223505697810703734285538549586004877709632602114\",\"eventName\":\"aws:kinesis:record\",\"invokeIdentityArn\":\"arn:aws:iam::123456789012:role/fcrec-esm2-role\",\"awsRegion\":\"us-east-1\",\"eventSourceARN\":\"arn:aws:kinesis:us-east-1:123456789012:stream/fcrec-esm2\"},{\"kinesis\":{\"kinesisSchemaVersion\":\"1.0\",\"partitionKey\":\"pk\",\"sequenceNumber\":\"49680101223505697810703734285539758511824492338807308290\",\"data\":\"eyJpZCI6InMtMiJ9\",\"approximateArrivalTimestamp\":1.794345876842E9},\"eventSource\":\"aws:kinesis\",\"eventVersion\":\"1.0\",\"eventID\":\"shardId-000000000000:49680101223505697810703734285539758511824492338807308290\",\"eventName\":\"aws:kinesis:record\",\"invokeIdentityArn\":\"arn:aws:iam::123456789012:role/fcrec-esm2-role\",\"awsRegion\":\"us-east-1\",\"eventSourceARN\":\"arn:aws:kinesis:us-east-1:123456789012:stream/fcrec-esm2\"}]}",
+          "timestamp": "2026-11-10T21:24:38.687Z",
+          "KinesisBatchInfo": {
+            "shardId": "shardId-000000000000",
+            "startSequenceNumber": "49680101223505697810703734285538549586004877709632602114",
+            "endSequenceNumber": "49680101223505697810703734285539758511824492338807308290",
+            "approximateArrivalOfFirstRecord": "2026-11-10T21:24:36.839Z",
+            "approximateArrivalOfLastRecord": "2026-11-10T21:24:36.842Z",
+            "batchSize": 2,
+            "streamArn": "arn:aws:kinesis:us-east-1:123456789012:stream/fcrec-esm2"
+          }
+        }
+      ]
+    },
+    "THROTTLED": {
+      "source": "kinesis",
+      "handler": "failall with reserved concurrency 0 (every invocation throttled)",
+      "mapping_args": "--maximum-retry-attempts 1 --bisect-batch-on-function-error, OnFailure SQS",
+      "invocations": [],
+      "observed": "12 Throttles in CloudWatch over about 4 minutes, no OnFailure record: a batch Lambda cannot run (throttled) is retried without using up MaximumRetryAttempts, and is not bisected away",
+      "on_failure": []
     }
   }
 }

@@ -356,3 +356,102 @@ async fn dynamodb_streams_partial_batch_failure_retries_then_discards() {
         ]
     );
 }
+
+/// Recorded scenario S3_DESTINATION: an S3 OnFailure destination gets an
+/// object under `aws/lambda/<mapping>/<shard>/...` holding the record and
+/// the failed batch's event as `payload`.
+#[tokio::test]
+async fn kinesis_discard_to_s3_carries_the_batch() {
+    if !require_docker_or_skip("kinesis_discard_to_s3_carries_the_batch") {
+        return;
+    }
+    let server = TestServer::start().await;
+    let kinesis = server.kinesis_client().await;
+    kinesis
+        .create_stream()
+        .stream_name("esm-s3")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+    let s3 = server.s3_client().await;
+    s3.create_bucket()
+        .bucket("esm-s3-dest")
+        .send()
+        .await
+        .unwrap();
+    create_function(&server, "esm-s3-fn", "raise").await;
+    let lambda = server.lambda_client().await;
+    let uuid = lambda
+        .create_event_source_mapping()
+        .function_name("esm-s3-fn")
+        .event_source_arn("arn:aws:kinesis:us-east-1:123456789012:stream/esm-s3")
+        .starting_position(EventSourcePosition::TrimHorizon)
+        .maximum_retry_attempts(0)
+        .destination_config(
+            DestinationConfig::builder()
+                .on_failure(
+                    OnFailure::builder()
+                        .destination("arn:aws:s3:::esm-s3-dest")
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .uuid()
+        .unwrap()
+        .to_string();
+    kinesis
+        .put_record()
+        .stream_name("esm-s3")
+        .partition_key("pk")
+        .data(aws_sdk_kinesis::primitives::Blob::new(
+            serde_json::json!({ "id": "poison-1" }).to_string(),
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    let mut key = None;
+    for _ in 0..60 {
+        let listed = s3
+            .list_objects_v2()
+            .bucket("esm-s3-dest")
+            .send()
+            .await
+            .unwrap();
+        if let Some(k) = listed.contents().first().and_then(|o| o.key()) {
+            key = Some(k.to_string());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let key = key.expect("the discarded batch reaches the bucket");
+    assert!(
+        key.starts_with(&format!("aws/lambda/{uuid}/shardId-000000000000/")),
+        "{key}"
+    );
+    let body = s3
+        .get_object()
+        .bucket("esm-s3-dest")
+        .key(&key)
+        .send()
+        .await
+        .unwrap()
+        .body
+        .collect()
+        .await
+        .unwrap()
+        .into_bytes();
+    let record: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        record["requestContext"]["condition"],
+        "RetryAttemptsExhausted"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(record["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["Records"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["Records"][0]["eventSource"], "aws:kinesis");
+}

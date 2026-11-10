@@ -28,3 +28,12 @@ What the recordings show:
 - Destination records carry `KinesisBatchInfo` / `DDBStreamBatchInfo` with the
   failed batch's first and last sequence numbers, size and arrival times
   (milliseconds for Kinesis, whole seconds for DynamoDB).
+- An S3 OnFailure destination gets an object keyed
+  `aws/lambda/<mapping uuid>/<shard id>/YYYY/MM/DD/YYYY-MM-DDTHH.MM.SS-<uuid>`
+  (content type `application/octet-stream`) whose record also carries the
+  failed batch's event, as a JSON string, in `payload` (scenario
+  `S3_DESTINATION`).
+- A batch Lambda cannot run at all (scenario `THROTTLED`, a function with
+  reserved concurrency 0) is retried without using up
+  `MaximumRetryAttempts` and is not bisected: 12 throttles in four minutes
+  with `MaximumRetryAttempts` 1, and no OnFailure record.

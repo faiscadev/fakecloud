@@ -19,7 +19,8 @@ use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
 use fakecloud_persistence::SnapshotHook;
 
 use crate::stream_esm_failures::{
-    Attempt, DiscardedBatch, FailurePolicy, Resolution, RetryTracker, Step, StreamKind,
+    Attempt, DiscardCause, DiscardedBatch, FailurePolicy, Pending, Resolution, RetryTracker, Step,
+    StreamKind,
 };
 
 /// The one shard a DynamoDB stream reports (`DescribeStream`).
@@ -129,8 +130,12 @@ impl DynamoDbStreamsLambdaPoller {
         };
 
         // A deleted (or disabled) mapping's retries go with it.
-        self.retries
-            .retain(|key| mappings.iter().any(|m| m.uuid == key));
+        self.retries.retain(|key| {
+            mappings.iter().any(|m| {
+                key.strip_prefix(m.uuid.as_str())
+                    .is_some_and(|rest| rest.starts_with(':'))
+            })
+        });
 
         if mappings.is_empty() {
             return;
@@ -239,13 +244,12 @@ impl DynamoDbStreamsLambdaPoller {
                 continue;
             }
 
-            let retry_key = mapping_id.clone();
-            let arrivals: Vec<chrono::DateTime<Utc>> =
-                records.iter().map(|r| r.timestamp).collect();
-            let n = match self
-                .retries
-                .plan(&retry_key, &policy, &arrivals, Utc::now())
-            {
+            let retry_key = format!("{mapping_id}:{STREAM_SHARD_ID}");
+            let pending: Vec<Pending> = records
+                .iter()
+                .map(|r| (r.dynamodb.sequence_number.clone(), r.timestamp))
+                .collect();
+            let n = match self.retries.plan(&retry_key, &policy, &pending, Utc::now()) {
                 Step::Wait => continue,
                 Step::DiscardTooOld { n, invoke_count } => {
                     let batch = &records[..n];
@@ -256,9 +260,11 @@ impl DynamoDbStreamsLambdaPoller {
                         &policy,
                         batch,
                         invoke_count,
-                        None,
+                        DiscardCause::RecordAge,
+                        json!({ "Records": batch.iter().map(ddb_event_record).collect::<Vec<_>>() })
+                            .to_string(),
                     );
-                    self.retries.discarded(&retry_key);
+                    self.retries.discarded(&retry_key, &pending, n);
                     self.checkpoint_past(&stream_arn, &mapping_id, batch).await;
                     continue;
                 }
@@ -273,28 +279,7 @@ impl DynamoDbStreamsLambdaPoller {
             let event_records: Vec<serde_json::Value> = records
                 .iter()
                 .filter_map(|record| {
-                    let mut event_record = json!({
-                        "eventID": record.event_id,
-                        "eventName": record.event_name,
-                        "eventVersion": record.event_version,
-                        "eventSource": record.event_source,
-                        "awsRegion": record.aws_region,
-                        "dynamodb": {
-                            "Keys": record.dynamodb.keys,
-                            "SequenceNumber": record.dynamodb.sequence_number,
-                            "SizeBytes": record.dynamodb.size_bytes,
-                            "StreamViewType": record.dynamodb.stream_view_type,
-                        },
-                        "eventSourceARN": record.event_source_arn,
-                    });
-
-                    if let Some(ref new_img) = record.dynamodb.new_image {
-                        event_record["dynamodb"]["NewImage"] = json!(new_img);
-                    }
-                    if let Some(ref old_img) = record.dynamodb.old_image {
-                        event_record["dynamodb"]["OldImage"] = json!(old_img);
-                    }
-
+                    let event_record = ddb_event_record(record);
                     if filter.matches(&event_record) {
                         Some(event_record)
                     } else {
@@ -307,7 +292,7 @@ impl DynamoDbStreamsLambdaPoller {
             // past them — AWS treats filtered records as consumed.
             if event_records.is_empty() {
                 self.retries
-                    .resolve(&retry_key, &policy, n, Attempt::Succeeded);
+                    .resolve(&retry_key, &policy, &pending, n, Attempt::Succeeded);
                 self.checkpoint_past(&stream_arn, &mapping_id, records)
                     .await;
                 continue;
@@ -318,7 +303,7 @@ impl DynamoDbStreamsLambdaPoller {
 
             let Some(delivery) = &self.lambda_delivery else {
                 self.retries
-                    .resolve(&retry_key, &policy, n, Attempt::Succeeded);
+                    .resolve(&retry_key, &policy, &pending, n, Attempt::Succeeded);
                 self.checkpoint_past(&stream_arn, &mapping_id, records)
                     .await;
                 // Recorded in the account and region the function ARN names.
@@ -363,7 +348,10 @@ impl DynamoDbStreamsLambdaPoller {
                     "DynamoDB Streams->Lambda invocation succeeded"
                 ),
             }
-            match self.retries.resolve(&retry_key, &policy, n, attempt) {
+            match self
+                .retries
+                .resolve(&retry_key, &policy, &pending, n, attempt)
+            {
                 Resolution::Advance(k) => {
                     self.checkpoint_past(&stream_arn, &mapping_id, &records[..k])
                         .await;
@@ -382,7 +370,8 @@ impl DynamoDbStreamsLambdaPoller {
                         &policy,
                         batch,
                         invoke_count,
-                        Some(function_error),
+                        DiscardCause::RetriesExhausted { function_error },
+                        payload.clone(),
                     );
                     self.checkpoint_past(&stream_arn, &mapping_id, batch).await;
                 }
@@ -418,7 +407,8 @@ impl DynamoDbStreamsLambdaPoller {
         policy: &FailurePolicy,
         records: &[fakecloud_dynamodb::StreamRecord],
         invoke_count: u32,
-        response: Option<Option<String>>,
+        cause: DiscardCause,
+        payload: String,
     ) {
         tracing::warn!(
             function_arn,
@@ -446,7 +436,8 @@ impl DynamoDbStreamsLambdaPoller {
             last_arrival: last.timestamp,
             batch_size: records.len(),
             invoke_count,
-            response,
+            cause,
+            payload,
         }
         .send(bus, destination);
     }
@@ -461,6 +452,31 @@ impl DynamoDbStreamsLambdaPoller {
             dynamodb.set_lambda_stream_checkpoint(mapping_id, sequence_number);
         }
     }
+}
+
+/// A stream record as the function receives it.
+fn ddb_event_record(record: &fakecloud_dynamodb::StreamRecord) -> serde_json::Value {
+    let mut event_record = json!({
+        "eventID": record.event_id,
+        "eventName": record.event_name,
+        "eventVersion": record.event_version,
+        "eventSource": record.event_source,
+        "awsRegion": record.aws_region,
+        "dynamodb": {
+            "Keys": record.dynamodb.keys,
+            "SequenceNumber": record.dynamodb.sequence_number,
+            "SizeBytes": record.dynamodb.size_bytes,
+            "StreamViewType": record.dynamodb.stream_view_type,
+        },
+        "eventSourceARN": record.event_source_arn,
+    });
+    if let Some(ref new_img) = record.dynamodb.new_image {
+        event_record["dynamodb"]["NewImage"] = json!(new_img);
+    }
+    if let Some(ref old_img) = record.dynamodb.old_image {
+        event_record["dynamodb"]["OldImage"] = json!(old_img);
+    }
+    event_record
 }
 
 #[cfg(test)]

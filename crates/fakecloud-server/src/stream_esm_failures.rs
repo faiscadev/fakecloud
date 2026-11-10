@@ -4,7 +4,9 @@
 //!
 //! - A failing batch is retried until `MaximumRetryAttempts` is used up
 //!   (`-1`, the default, retries until the records expire), backing off
-//!   exponentially from about 200ms.
+//!   exponentially from about 200ms. A batch Lambda could not run at all
+//!   (recorded with a throttled function) is retried the same way without
+//!   using up retries and is never bisected: only its records' age ends it.
 //! - `MaximumRecordAgeInSeconds` discards a batch whose oldest record is
 //!   older than that before it is invoked again.
 //! - `BisectBatchOnFunctionError` splits a failing batch in two, earlier half
@@ -13,7 +15,8 @@
 //! - With `ReportBatchItemFailures`, the shard checkpoints up to the first
 //!   reported failure and the rest is a new batch with fresh retries.
 //! - A discarded batch is described to the `OnFailure` destination (SQS,
-//!   SNS or S3) and the shard moves past it.
+//!   SNS or S3, where the record also carries the batch's event as
+//!   `payload`) and the shard moves past it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -74,10 +77,11 @@ pub(crate) enum Attempt {
     /// The function handled the records before this index (only with
     /// `ReportBatchItemFailures`); the rest failed.
     Partial(usize),
-    /// The batch failed: a function error (`function_error` its type), a
-    /// partial failure that made no progress (`None`), or an invocation that
-    /// could not run (`None`).
+    /// The function failed the batch: a function error (`function_error`
+    /// its type), or a partial failure that made no progress (`None`).
     Failed { function_error: Option<String> },
+    /// Lambda could not run the invocation at all.
+    Unrunnable,
 }
 
 impl Attempt {
@@ -102,9 +106,7 @@ impl Attempt {
                 }
             }
             Ok(_) => Attempt::Succeeded,
-            Err(_) => Attempt::Failed {
-                function_error: None,
-            },
+            Err(_) => Attempt::Unrunnable,
         }
     }
 }
@@ -129,7 +131,8 @@ pub(crate) enum Resolution {
     /// Keep the checkpoint; the batch is retried (whole or split).
     Retry,
     /// Retries are used up: discard the batch (checkpoint past its `n`
-    /// records) and describe it to the OnFailure destination.
+    /// records) and describe it to the OnFailure destination, with the last
+    /// invocation's function error.
     Discard {
         n: usize,
         invoke_count: u32,
@@ -145,26 +148,41 @@ struct ShardRetry {
     /// the last one is next.
     segments: Vec<usize>,
     not_before: Option<Instant>,
+    /// Attempts of the current batch Lambda could not run.
+    unrun: u32,
+    /// The sequence number the next batch should start at. A batch starting
+    /// anywhere else (its records expired, the checkpoint moved) is not the
+    /// one this state describes, and starts afresh.
+    next_first: Option<String>,
 }
 
-/// Retry bookkeeping for every (mapping, shard) pair of one poller.
+/// Retry bookkeeping for every (mapping, shard) pair of one poller, keyed
+/// `<mapping uuid>:<shard id>`.
 #[derive(Debug, Default)]
 pub(crate) struct RetryTracker {
     shards: parking_lot::Mutex<HashMap<String, ShardRetry>>,
 }
 
+/// A pending record: its sequence number and arrival time.
+pub(crate) type Pending = (String, DateTime<Utc>);
+
 impl RetryTracker {
-    /// Decide what to do with `pending` records (oldest first, arrival
-    /// times in `arrivals`) of the shard `key`.
+    /// Decide what to do with the shard `key`'s `pending` records, oldest
+    /// first.
     pub(crate) fn plan(
         &self,
         key: &str,
         policy: &FailurePolicy,
-        arrivals: &[DateTime<Utc>],
+        pending: &[Pending],
         now: DateTime<Utc>,
     ) -> Step {
         let mut shards = self.shards.lock();
         let shard = shards.entry(key.to_string()).or_default();
+        let first = pending.first().map(|(seq, _)| seq);
+        if shard.next_first.is_some() && shard.next_first.as_ref() != first {
+            *shard = ShardRetry::default();
+        }
+        shard.next_first = first.cloned();
         if shard.not_before.is_some_and(|t| Instant::now() < t) {
             return Step::Wait;
         }
@@ -172,9 +190,9 @@ impl RetryTracker {
             .segments
             .last()
             .copied()
-            .unwrap_or(arrivals.len())
-            .min(arrivals.len());
-        if let (Some(max_age), Some(oldest)) = (policy.max_record_age, arrivals.first()) {
+            .unwrap_or(pending.len())
+            .min(pending.len());
+        if let (Some(max_age), Some((_, oldest))) = (policy.max_record_age, pending.first()) {
             if now - *oldest > max_age {
                 return Step::DiscardTooOld {
                     n,
@@ -185,24 +203,31 @@ impl RetryTracker {
         Step::Invoke(n)
     }
 
-    /// Record how invoking the first `n` pending records of `key` went.
+    /// Record how invoking the first `n` of the shard `key`'s `pending`
+    /// records went.
     pub(crate) fn resolve(
         &self,
         key: &str,
         policy: &FailurePolicy,
+        pending: &[Pending],
         n: usize,
         attempt: Attempt,
     ) -> Resolution {
         let mut shards = self.shards.lock();
         let shard = shards.entry(key.to_string()).or_default();
-        match attempt {
+        let resolution = match attempt {
             Attempt::Succeeded => {
                 shard.finish_segment();
                 Resolution::Advance(n)
             }
             Attempt::Partial(idx) => {
-                // What is left is a new batch.
-                *shard = ShardRetry::default();
+                // The rest of this batch is a new batch with fresh retries;
+                // the bisected batches after it stay as they were.
+                if let Some(last) = shard.segments.last_mut() {
+                    *last -= idx;
+                }
+                shard.failures = 0;
+                shard.not_before = None;
                 Resolution::Advance(idx)
             }
             Attempt::Failed { function_error } => {
@@ -213,31 +238,35 @@ impl RetryTracker {
                     shard.segments.push(left);
                     shard.failures = 0;
                     shard.not_before = None;
-                    return Resolution::Retry;
+                    Resolution::Retry
+                } else {
+                    shard.retry_or_discard(policy, n, function_error)
                 }
-                shard.failures += 1;
-                if policy.max_retries.is_some_and(|max| shard.failures > max) {
-                    let invoke_count = shard.failures;
-                    shard.finish_segment();
-                    return Resolution::Discard {
-                        n,
-                        invoke_count,
-                        function_error,
-                    };
-                }
-                let backoff = RETRY_BACKOFF_BASE
-                    .saturating_mul(1u32 << (shard.failures - 1).min(16))
-                    .min(RETRY_BACKOFF_MAX);
-                shard.not_before = Some(Instant::now() + backoff);
+            }
+            // A batch Lambda could not run says nothing about its records:
+            // it is retried whole, never bisected, and uses up no retries
+            // (recorded with a throttled function).
+            Attempt::Unrunnable => {
+                shard.unrun += 1;
+                shard.not_before = Some(Instant::now() + backoff(shard.unrun));
                 Resolution::Retry
             }
-        }
+        };
+        let consumed = match &resolution {
+            Resolution::Advance(k) => *k,
+            Resolution::Retry => 0,
+            Resolution::Discard { n, .. } => *n,
+        };
+        shard.next_first = pending.get(consumed).map(|(seq, _)| seq.clone());
+        resolution
     }
 
-    /// The first `n` pending records of `key` were discarded for their age.
-    pub(crate) fn discarded(&self, key: &str) {
+    /// The first `n` of the shard `key`'s `pending` records were discarded
+    /// for their age.
+    pub(crate) fn discarded(&self, key: &str, pending: &[Pending], n: usize) {
         if let Some(shard) = self.shards.lock().get_mut(key) {
             shard.finish_segment();
+            shard.next_first = pending.get(n).map(|(seq, _)| seq.clone());
         }
     }
 
@@ -251,14 +280,54 @@ impl ShardRetry {
     fn finish_segment(&mut self) {
         self.segments.pop();
         self.failures = 0;
+        self.unrun = 0;
         self.not_before = None;
     }
+
+    /// Count a failed invocation: discard once retries are used up, else
+    /// back off.
+    fn retry_or_discard(
+        &mut self,
+        policy: &FailurePolicy,
+        n: usize,
+        function_error: Option<String>,
+    ) -> Resolution {
+        self.failures += 1;
+        if policy.max_retries.is_some_and(|max| self.failures > max) {
+            let invoke_count = self.failures;
+            self.finish_segment();
+            return Resolution::Discard {
+                n,
+                invoke_count,
+                function_error,
+            };
+        }
+        self.not_before = Some(Instant::now() + backoff(self.failures));
+        Resolution::Retry
+    }
+}
+
+/// The wait after the `nth` failure in a row.
+fn backoff(nth: u32) -> Duration {
+    RETRY_BACKOFF_BASE
+        .saturating_mul(1u32 << nth.saturating_sub(1).min(16))
+        .min(RETRY_BACKOFF_MAX)
 }
 
 /// Which stream a discarded batch came from.
 pub(crate) enum StreamKind {
     Kinesis,
     DynamoDb,
+}
+
+/// Why a batch was discarded.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DiscardCause {
+    /// Its oldest record was older than `MaximumRecordAgeInSeconds`.
+    RecordAge,
+    /// `MaximumRetryAttempts` were used up; the last invocation's function
+    /// error.
+    RetriesExhausted { function_error: Option<String> },
 }
 
 /// A discarded batch, as its OnFailure record describes it.
@@ -274,22 +343,23 @@ pub(crate) struct DiscardedBatch<'a> {
     pub last_arrival: DateTime<Utc>,
     pub batch_size: usize,
     pub invoke_count: u32,
-    /// `None` when the records aged out (no invocation to report on);
-    /// otherwise the last invocation's function error, if any.
-    pub response: Option<Option<String>>,
+    pub cause: DiscardCause,
+    /// The batch's event (`{"Records": [...]}`), which an S3 record carries
+    /// as `payload`.
+    pub payload: String,
 }
 
 impl DiscardedBatch<'_> {
     fn condition(&self) -> &'static str {
-        if self.response.is_some() {
-            "RetryAttemptsExhausted"
-        } else {
-            "RecordAgeExceeded"
+        match self.cause {
+            DiscardCause::RetriesExhausted { .. } => "RetryAttemptsExhausted",
+            DiscardCause::RecordAge => "RecordAgeExceeded",
         }
     }
 
-    /// The record Lambda sends the OnFailure destination.
-    pub(crate) fn record(&self) -> Value {
+    /// The record Lambda sends the OnFailure destination; an S3 one also
+    /// carries the batch's event.
+    pub(crate) fn record(&self, with_payload: bool) -> Value {
         let unqualified: String = self
             .function_arn
             .splitn(8, ':')
@@ -322,7 +392,10 @@ impl DiscardedBatch<'_> {
             "version": "1.0",
             "timestamp": Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
         });
-        if let Some(function_error) = &self.response {
+        if with_payload {
+            record["payload"] = Value::String(self.payload.clone());
+        }
+        if let DiscardCause::RetriesExhausted { function_error } = &self.cause {
             record["responseContext"] = json!({
                 "statusCode": 200,
                 "executedVersion": "$LATEST",
@@ -343,8 +416,8 @@ impl DiscardedBatch<'_> {
 
     /// Describe the batch to `destination`.
     pub(crate) fn send(&self, bus: &Arc<DeliveryBus>, destination: &str) {
-        let body = self.record().to_string();
         let service = destination.split(':').nth(2).unwrap_or_default();
+        let body = self.record(service == "s3").to_string();
         match service {
             "sqs" => bus.send_to_sqs(destination, &body, &HashMap::new()),
             "sns" => bus.publish_to_sns(destination, &body, None),
@@ -365,7 +438,7 @@ impl DiscardedBatch<'_> {
                     bucket,
                     &key,
                     body.into_bytes(),
-                    Some("application/json"),
+                    Some("application/octet-stream"),
                 ) {
                     tracing::warn!(destination, %err, "stream mapping OnFailure: S3 refused the record");
                 }
@@ -445,7 +518,7 @@ mod tests {
         let mut discarded = Vec::new();
         let now = Utc::now();
         while !pending.is_empty() {
-            let arrivals = vec![now; pending.len()];
+            let arrivals: Vec<Pending> = pending.iter().map(|r| (r.0.to_string(), now)).collect();
             // Skip backoffs: the tracker is told nothing about time.
             if let Some(shard) = tracker.shards.lock().get_mut("k") {
                 shard.not_before = None;
@@ -468,7 +541,7 @@ mod tests {
             } else {
                 Attempt::Succeeded
             };
-            match tracker.resolve("k", policy, n, attempt) {
+            match tracker.resolve("k", policy, &arrivals, n, attempt) {
                 Resolution::Advance(k) => {
                     pending.drain(..k);
                 }
@@ -565,7 +638,7 @@ mod tests {
             ..FailurePolicy::default()
         };
         let now = Utc::now();
-        let arrival = vec![now - chrono::Duration::seconds(10)];
+        let arrival = vec![("1".to_string(), now - chrono::Duration::seconds(10))];
         for _ in 0..9 {
             tracker
                 .shards
@@ -574,10 +647,13 @@ mod tests {
                 .or_default()
                 .not_before = None;
             assert_eq!(tracker.plan("k", &p, &arrival, now), Step::Invoke(1));
-            assert_eq!(tracker.resolve("k", &p, 1, failed()), Resolution::Retry);
+            assert_eq!(
+                tracker.resolve("k", &p, &arrival, 1, failed()),
+                Resolution::Retry
+            );
         }
         tracker.shards.lock().get_mut("k").unwrap().not_before = None;
-        let old = vec![now - chrono::Duration::seconds(61)];
+        let old = vec![("1".to_string(), now - chrono::Duration::seconds(61))];
         assert_eq!(
             tracker.plan("k", &p, &old, now),
             Step::DiscardTooOld {
@@ -587,19 +663,103 @@ mod tests {
         );
     }
 
+    fn pending(seqs: &[&str]) -> Vec<Pending> {
+        seqs.iter().map(|s| (s.to_string(), Utc::now())).collect()
+    }
+
+    fn ready(tracker: &RetryTracker) {
+        if let Some(shard) = tracker.shards.lock().get_mut("k") {
+            shard.not_before = None;
+        }
+    }
+
+    /// Retries belong to the batch they counted: a batch starting at another
+    /// record (the earlier ones expired) starts with fresh retries.
+    #[test]
+    fn a_batch_starting_elsewhere_starts_afresh() {
+        let tracker = RetryTracker::default();
+        let p = policy(Some(1), false, false);
+        let first = pending(&["1", "2"]);
+        assert_eq!(tracker.plan("k", &p, &first, Utc::now()), Step::Invoke(2));
+        assert_eq!(
+            tracker.resolve("k", &p, &first, 2, failed()),
+            Resolution::Retry
+        );
+        ready(&tracker);
+        let moved = pending(&["2", "3"]);
+        assert_eq!(tracker.plan("k", &p, &moved, Utc::now()), Step::Invoke(2));
+        assert_eq!(
+            tracker.resolve("k", &p, &moved, 2, failed()),
+            Resolution::Retry,
+            "the retry used on the old batch does not count"
+        );
+    }
+
+    /// Recorded (scenario THROTTLED): a batch Lambda could not run is
+    /// retried whole, never bisected, and uses up no retries.
+    #[test]
+    fn an_unrunnable_batch_is_not_bisected_nor_discarded() {
+        let tracker = RetryTracker::default();
+        let p = policy(Some(1), true, false);
+        let batch = pending(&["1", "2", "3", "4"]);
+        for _ in 0..5 {
+            ready(&tracker);
+            assert_eq!(tracker.plan("k", &p, &batch, Utc::now()), Step::Invoke(4));
+            assert_eq!(
+                tracker.resolve("k", &p, &batch, 4, Attempt::Unrunnable),
+                Resolution::Retry
+            );
+        }
+        // It backs off like any failure.
+        assert_eq!(tracker.plan("k", &p, &batch, Utc::now()), Step::Wait);
+    }
+
+    /// A partial failure inside a bisected half keeps the other half
+    /// pending.
+    #[test]
+    fn a_partial_failure_keeps_the_pending_halves() {
+        let tracker = RetryTracker::default();
+        let p = policy(Some(2), true, true);
+        let batch = pending(&["1", "2", "3", "4"]);
+        tracker.plan("k", &p, &batch, Utc::now());
+        tracker.resolve("k", &p, &batch, 4, failed());
+        // Left half: the second record fails.
+        assert_eq!(tracker.plan("k", &p, &batch, Utc::now()), Step::Invoke(2));
+        assert_eq!(
+            tracker.resolve("k", &p, &batch, 2, Attempt::Partial(1)),
+            Resolution::Advance(1)
+        );
+        let rest = pending(&["2", "3", "4"]);
+        assert_eq!(
+            tracker.plan("k", &p, &rest, Utc::now()),
+            Step::Invoke(1),
+            "the rest of the left half"
+        );
+        assert_eq!(
+            tracker.resolve("k", &p, &rest, 1, Attempt::Succeeded),
+            Resolution::Advance(1)
+        );
+        let right = pending(&["3", "4"]);
+        assert_eq!(
+            tracker.plan("k", &p, &right, Utc::now()),
+            Step::Invoke(2),
+            "then the right half"
+        );
+    }
+
     #[test]
     fn failures_back_off_exponentially() {
         let tracker = RetryTracker::default();
         let p = policy(None, false, false);
         let now = Utc::now();
-        let arrivals = vec![now];
+        let arrivals = vec![("1".to_string(), now)];
         assert_eq!(tracker.plan("k", &p, &arrivals, now), Step::Invoke(1));
-        tracker.resolve("k", &p, 1, failed());
+        tracker.resolve("k", &p, &arrivals, 1, failed());
         assert_eq!(tracker.plan("k", &p, &arrivals, now), Step::Wait);
         let waits: Vec<Duration> = (0..3)
             .map(|_| {
                 let before = Instant::now();
-                tracker.resolve("k", &p, 1, failed());
+                tracker.resolve("k", &p, &arrivals, 1, failed());
                 tracker.shards.lock()["k"].not_before.unwrap() - before
             })
             .collect();
@@ -624,9 +784,18 @@ mod tests {
             last_arrival: at,
             batch_size: 3,
             invoke_count: 2,
-            response: Some(None),
+            cause: DiscardCause::RetriesExhausted {
+                function_error: None,
+            },
+            payload: r#"{"Records":[]}"#.to_string(),
         };
-        let r = batch.record();
+        let r = batch.record(false);
+        assert!(r.get("payload").is_none());
+        assert_eq!(
+            batch.record(true)["payload"],
+            r#"{"Records":[]}"#,
+            "an S3 record carries the batch's event (scenario S3_DESTINATION)"
+        );
         assert_eq!(r["requestContext"]["condition"], "RetryAttemptsExhausted");
         assert_eq!(r["requestContext"]["approximateInvokeCount"], 2);
         assert_eq!(
@@ -643,8 +812,8 @@ mod tests {
         assert_eq!(r["KinesisBatchInfo"]["batchSize"], 3);
 
         batch.kind = StreamKind::DynamoDb;
-        batch.response = None;
-        let r = batch.record();
+        batch.cause = DiscardCause::RecordAge;
+        let r = batch.record(false);
         assert_eq!(r["requestContext"]["condition"], "RecordAgeExceeded");
         assert!(r.get("responseContext").is_none());
         assert_eq!(
