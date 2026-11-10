@@ -575,7 +575,11 @@ pub fn render_verification_email(
     let body_html = body_template
         .replace("{####}", code)
         .replace("{username}", username);
-    let body_text = strip_html(&body_html);
+    // Strip the template's markup, not the values put into it: a code or a
+    // temporary password may hold `<` or `>`.
+    let body_text = strip_html(body_template)
+        .replace("{####}", code)
+        .replace("{username}", username);
     VerificationEmail {
         from: from_address
             .unwrap_or("no-reply@fakecloud.local")
@@ -610,6 +614,18 @@ pub fn render_verification_sms(sms_template: Option<&str>, username: &str, code:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn text_body_keeps_markup_like_characters_of_the_code() {
+        let email = render_verification_email(
+            None,
+            None,
+            Some("<p>Your password is <b>{####}</b></p>"),
+            "u",
+            "a<b>c&d",
+        );
+        assert_eq!(email.body_text, "Your password is a<b>c&d");
+    }
+
     use super::*;
 
     #[test]
