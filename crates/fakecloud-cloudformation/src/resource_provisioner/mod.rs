@@ -1172,6 +1172,38 @@ impl CustomResponses {
     pub(crate) fn take(&self, request_id: &str) -> Option<CustomResponse> {
         self.waiting.lock().remove(request_id).flatten()
     }
+
+    /// Whether the handler has answered `request_id` yet.
+    pub(crate) fn answered(&self, request_id: &str) -> bool {
+        self.waiting
+            .lock()
+            .get(request_id)
+            .is_some_and(Option::is_some)
+    }
+}
+
+/// How long CloudFormation waits for a custom resource's answer: the
+/// resource's `ServiceTimeout` (1-3600 seconds), else an hour.
+fn custom_service_timeout(event: &serde_json::Value) -> std::time::Duration {
+    let secs = event["ResourceProperties"]["ServiceTimeout"]
+        .as_u64()
+        .or_else(|| {
+            event["ResourceProperties"]["ServiceTimeout"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+        })
+        .filter(|s| (1..=3600).contains(s))
+        .unwrap_or(3600);
+    std::time::Duration::from_secs(secs)
+}
+
+/// CloudFormation's failure when a custom resource never answered, as
+/// recorded on AWS (fakecloud-lambda/tests/fixtures/function-errors/
+/// aws-recordings.json, `cloudformation.custom_resource_no_response`).
+pub(crate) fn custom_no_response_reason(request_id: &str) -> String {
+    format!(
+        "CloudFormation did not receive a response from your Custom Resource. Please check your logs for requestId [{request_id}]. If you are using the Python cfn-response module, you may need to update your Lambda function code so that CloudFormation can attach the updated version."
+    )
 }
 
 /// A container-backed resource the synchronous provisioning pass inserted as a
@@ -3535,47 +3567,6 @@ impl ResourceProvisioner {
 
     // --- Organizations ---
 
-    fn invoke_lambda_sync(&self, function_arn: &str, payload: &str) -> Result<(), String> {
-        let delivery = self.delivery.clone();
-        let function_arn = function_arn.to_string();
-        let payload = payload.to_string();
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|e| format!("Failed to create runtime: {e}"))?;
-                rt.block_on(async {
-                    match delivery.invoke_lambda(&function_arn, &payload).await {
-                        Some(Ok(_)) => {
-                            tracing::info!(
-                                "Custom resource Lambda {} invoked successfully",
-                                function_arn
-                            );
-                            Ok(())
-                        }
-                        Some(Err(e)) => {
-                            tracing::warn!(
-                                "Custom resource Lambda {} invocation failed: {e}",
-                                function_arn
-                            );
-                            Err(format!("Lambda invocation failed: {e}"))
-                        }
-                        None => {
-                            tracing::warn!(
-                                "No Lambda delivery configured; skipping custom resource invocation for {}",
-                                function_arn
-                            );
-                            Ok(())
-                        }
-                    }
-                })
-            })
-            .join()
-            .map_err(|_| "Lambda invocation thread panicked".to_string())?
-        })
-    }
-
     /// The URL a handler answers a request at.
     fn custom_response_url(&self, request_id: &str) -> String {
         let base = self
@@ -3586,11 +3577,12 @@ impl ResourceProvisioner {
         format!("{base}/_fakecloud/cloudformation/custom-resource-response/{request_id}")
     }
 
-    /// Send a custom resource's request. The queued form (`defer_custom_invokes`)
-    /// has no answer to read; the direct form returns what the handler put to its
-    /// `ResponseURL` by the time the invocation ended. A handler that answered
-    /// nothing is taken as having succeeded, since nothing here will hear from it
-    /// later.
+    /// Send a custom resource's request. CloudFormation invokes the handler
+    /// asynchronously (Lambda's async error handling retries a function
+    /// error) and waits for its answer at the `ResponseURL` until the
+    /// resource's `ServiceTimeout`; a handler that never answers fails the
+    /// operation (`custom_no_response_reason`). The queued form
+    /// (`defer_custom_invokes`) has no answer to read.
     fn send_custom_request(
         &self,
         service_token: &str,
@@ -3606,9 +3598,36 @@ impl ResourceProvisioner {
             return Ok(None);
         }
         self.custom_responses.expect(request_id);
-        let invoked = self.invoke_lambda_sync(service_token, &payload);
-        let response = self.custom_responses.take(request_id);
-        invoked.map(|()| response)
+        // The invocation runs on the server's runtime while this provisioning
+        // pass waits for the answer.
+        let handle = tokio::runtime::Handle::try_current().ok();
+        let queued = {
+            let _entered = handle.as_ref().map(tokio::runtime::Handle::enter);
+            self.delivery.invoke_lambda_async(service_token, &payload)
+        };
+        match queued {
+            None => {
+                tracing::warn!(
+                    "No Lambda delivery configured; skipping custom resource invocation for {}",
+                    service_token
+                );
+                return Ok(self.custom_responses.take(request_id));
+            }
+            Some(Err(e)) => {
+                self.custom_responses.take(request_id);
+                return Err(format!("Lambda invocation failed: {e}"));
+            }
+            Some(Ok(())) => {}
+        }
+        let deadline = std::time::Instant::now() + custom_service_timeout(&event);
+        while !self.custom_responses.answered(request_id) {
+            if std::time::Instant::now() >= deadline {
+                self.custom_responses.take(request_id);
+                return Err(custom_no_response_reason(request_id));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        Ok(self.custom_responses.take(request_id))
     }
 
     fn custom_failure_reason(response: &CustomResponse, request_id: &str) -> String {
@@ -12991,6 +13010,21 @@ mod tests {
                 ))
             })
         }
+
+        /// CloudFormation invokes custom resources asynchronously; the
+        /// handler answers at its ResponseURL before the call returns.
+        fn invoke_lambda_async(&self, _function_arn: &str, payload: &str) -> Result<(), String> {
+            let request: serde_json::Value = serde_json::from_str(payload).unwrap();
+            // A null answer models a handler that never answers.
+            if !self.answer.is_null() {
+                self.responses.accept(
+                    request["RequestId"].as_str().unwrap(),
+                    self.answer.to_string().as_bytes(),
+                );
+            }
+            self.requests.lock().push(request);
+            Ok(())
+        }
     }
 
     fn answering(
@@ -13039,6 +13073,56 @@ mod tests {
                 requests[0]["RequestId"].as_str().unwrap()
             )),
             "{url}"
+        );
+    }
+
+    /// A handler that never answers fails the resource once its
+    /// `ServiceTimeout` passes, with CloudFormation's recorded reason
+    /// (`cloudformation.custom_resource_no_response` in
+    /// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json).
+    #[test]
+    fn a_silent_handler_fails_after_its_service_timeout() {
+        let (prov, requests) = answering(serde_json::Value::Null);
+        let resource = make_resource(
+            "Custom::Thing",
+            "Thing",
+            serde_json::json!({
+                "ServiceToken": "arn:aws:lambda:us-east-1:1:function:f",
+                "ServiceTimeout": "1"
+            }),
+        );
+        let started = std::time::Instant::now();
+        let reason = prov.create_resource(&resource).unwrap_err();
+        assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+        let request_id = requests.lock()[0]["RequestId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(reason, custom_no_response_reason(&request_id));
+        assert!(reason.starts_with(
+            "CloudFormation did not receive a response from your Custom Resource. Please check your logs for requestId ["
+        ));
+    }
+
+    #[test]
+    fn custom_service_timeout_reads_the_property() {
+        let ev =
+            |v: serde_json::Value| serde_json::json!({"ResourceProperties": {"ServiceTimeout": v}});
+        assert_eq!(
+            custom_service_timeout(&ev(serde_json::json!("5"))).as_secs(),
+            5
+        );
+        assert_eq!(
+            custom_service_timeout(&ev(serde_json::json!(90))).as_secs(),
+            90
+        );
+        assert_eq!(
+            custom_service_timeout(&ev(serde_json::json!("9999"))).as_secs(),
+            3600
+        );
+        assert_eq!(
+            custom_service_timeout(&serde_json::json!({})).as_secs(),
+            3600
         );
     }
 

@@ -1255,29 +1255,26 @@ pub(crate) fn spawn_custom_invokes(provisioner: &ResourceProvisioner) {
     if intents.is_empty() {
         return;
     }
-    let delivery = provisioner.delivery.clone();
+    // CloudFormation invokes custom resource handlers asynchronously.
     for intent in intents {
-        let delivery = delivery.clone();
-        tokio::spawn(async move {
-            match delivery
-                .invoke_lambda(&intent.service_token, &intent.payload)
-                .await
-            {
-                Some(Ok(_)) => {
-                    tracing::info!(
-                        "Custom resource Lambda {} invoked successfully",
-                        intent.service_token
-                    );
-                }
-                Some(Err(e)) => {
-                    tracing::warn!(
-                        "Custom resource Lambda {} invocation failed: {e}",
-                        intent.service_token
-                    );
-                }
-                None => {}
+        match provisioner
+            .delivery
+            .invoke_lambda_async(&intent.service_token, &intent.payload)
+        {
+            Some(Ok(())) => {
+                tracing::info!(
+                    "Custom resource Lambda {} invocation queued",
+                    intent.service_token
+                );
             }
-        });
+            Some(Err(e)) => {
+                tracing::warn!(
+                    "Custom resource Lambda {} invocation failed: {e}",
+                    intent.service_token
+                );
+            }
+            None => {}
+        }
     }
 }
 

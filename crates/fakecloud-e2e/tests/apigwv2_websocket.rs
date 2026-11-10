@@ -355,3 +355,123 @@ async fn websocket_message_falls_back_to_default_route() {
 
     ws_stream.close(None).await.unwrap();
 }
+
+/// A WebSocket API whose `$connect` route proxies to a Python function
+/// with `code` as `lambda_function.py`.
+async fn connect_route_api(server: &TestServer, name: &str, code: &str) -> String {
+    let apigw = server.apigatewayv2_client().await;
+    let lambda = server.lambda_client().await;
+    lambda
+        .create_function()
+        .function_name(name)
+        .runtime(Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("lambda_function.lambda_handler")
+        .code(
+            FunctionCode::builder()
+                .zip_file(Blob::new(make_zip(&[(
+                    "lambda_function.py",
+                    code.as_bytes(),
+                )])))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let api_id = apigw
+        .create_api()
+        .name(name)
+        .protocol_type(ProtocolType::Websocket)
+        .send()
+        .await
+        .unwrap()
+        .api_id()
+        .unwrap()
+        .to_string();
+    let integration_id = apigw
+        .create_integration()
+        .api_id(&api_id)
+        .integration_type(aws_sdk_apigatewayv2::types::IntegrationType::AwsProxy)
+        .integration_uri(format!(
+            "arn:aws:lambda:us-east-1:123456789012:function:{name}"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .integration_id()
+        .unwrap()
+        .to_string();
+    apigw
+        .create_route()
+        .api_id(&api_id)
+        .route_key("$connect")
+        .target(format!("integrations/{integration_id}"))
+        .send()
+        .await
+        .unwrap();
+    apigw
+        .create_stage()
+        .api_id(&api_id)
+        .stage_name("dev")
+        .send()
+        .await
+        .unwrap();
+    api_id
+}
+
+/// The refused upgrade's HTTP status and body.
+async fn refused_connect(server: &TestServer, api_id: &str) -> (u16, String) {
+    match tokio_tungstenite::connect_async(ws_url(server, api_id, "dev")).await {
+        Ok(_) => panic!("the $connect failure must refuse the connection"),
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+            let body = resp
+                .body()
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .unwrap_or_default();
+            (resp.status().as_u16(), body)
+        }
+        Err(e) => panic!("unexpected handshake error: {e}"),
+    }
+}
+
+/// Recorded on AWS (`apigateway_websocket_connect` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json): a
+/// `$connect` function error refuses the connection with 502
+/// `{"message": "Internal server error", "connectionId":..., "requestId":...}`,
+/// and a non-2xx `statusCode` refuses it with that status and body.
+#[tokio::test]
+async fn websocket_connect_failure_refuses_the_connection() {
+    if !container_cli_available() {
+        if std::env::var("CI").is_ok() {
+            panic!("container runtime is not available but is required in CI");
+        }
+        eprintln!("skipping: container runtime not available");
+        return;
+    }
+    let server = TestServer::start().await;
+
+    let api_id = connect_route_api(
+        &server,
+        "ws-connect-raises",
+        "def lambda_handler(event, context):\n    raise ValueError('no')\n",
+    )
+    .await;
+    let (status, body) = refused_connect(&server, &api_id).await;
+    assert_eq!(status, 502);
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["message"], "Internal server error");
+    assert!(body["connectionId"].as_str().is_some_and(|s| !s.is_empty()));
+    assert!(body["requestId"].as_str().is_some_and(|s| !s.is_empty()));
+
+    let api_id = connect_route_api(
+        &server,
+        "ws-connect-403",
+        "def lambda_handler(event, context):\n    return {'statusCode': 403, 'body': 'nope'}\n",
+    )
+    .await;
+    assert_eq!(
+        refused_connect(&server, &api_id).await,
+        (403, "nope".to_string())
+    );
+}

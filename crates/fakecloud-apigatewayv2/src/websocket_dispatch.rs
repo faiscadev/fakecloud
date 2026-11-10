@@ -121,6 +121,71 @@ fn construct_event(
     serde_json::Value::Object(event)
 }
 
+/// What dispatching a WebSocket event to its route's integration produced.
+/// Only `$connect` acts on it: a rejected `$connect` refuses the
+/// connection with that HTTP response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebSocketDispatchOutcome {
+    /// No route / integration handled the event (or no Lambda is wired).
+    NotRouted,
+    /// The integration answered successfully.
+    Accepted,
+    /// The integration answered with a failure: refuse with this response
+    /// (`Content-Type: application/json; charset=UTF-8`).
+    Rejected { status: u16, body: String },
+}
+
+/// The outcome of a Lambda proxy integration answer on a WebSocket route,
+/// as recorded on AWS for `$connect`
+/// (`apigateway_websocket_connect` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json): a
+/// 2xx `statusCode` accepts; another `statusCode` is answered with that
+/// status and `body`; a function error, a failed invocation or a response
+/// without `statusCode` is a 502 naming the connection and request.
+pub fn integration_outcome(
+    result: &Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+    connection_id: &str,
+    request_id: &str,
+) -> WebSocketDispatchOutcome {
+    let internal_error = || {
+        WebSocketDispatchOutcome::Rejected {
+        status: 502,
+        body: format!(
+            "{{\"message\": \"Internal server error\", \"connectionId\":\"{connection_id}\", \"requestId\":\"{request_id}\"}}"
+        ),
+    }
+    };
+    let output = match result {
+        Ok(output) if !output.is_function_error() => output,
+        _ => return internal_error(),
+    };
+    let Some(response) = serde_json::from_slice::<serde_json::Value>(&output.payload)
+        .ok()
+        .filter(serde_json::Value::is_object)
+    else {
+        return internal_error();
+    };
+    let Some(status) = response
+        .get("statusCode")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|s| u16::try_from(s).ok())
+    else {
+        return internal_error();
+    };
+    if (200..300).contains(&status) {
+        WebSocketDispatchOutcome::Accepted
+    } else {
+        WebSocketDispatchOutcome::Rejected {
+            status,
+            body: response
+                .get("body")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }
+    }
+}
+
 /// Dispatch a WebSocket event to the Lambda integration for the given route.
 ///
 /// Silently returns when:
@@ -147,14 +212,14 @@ pub async fn dispatch_websocket_event(
     connected_at: chrono::DateTime<chrono::Utc>,
     headers: Option<&std::collections::HashMap<String, String>>,
     query_params: Option<&std::collections::HashMap<String, String>>,
-) {
+) -> WebSocketDispatchOutcome {
     let (integration_id, function_arn, matched_route_key) = {
         let accounts = state.read();
         let empty = ApiGatewayV2State::new(account_id, region);
         let state = accounts.get(account_id).unwrap_or(&empty);
 
         let Some(_api) = state.apis.get(api_id) else {
-            return;
+            return WebSocketDispatchOutcome::NotRouted;
         };
 
         // WebSocket APIs don't have a `$default` route automatically;
@@ -172,15 +237,15 @@ pub async fn dispatch_websocket_event(
                 .map(|r| (r, "$default".to_string()))
         });
         let Some((route, matched_route_key)) = matched else {
-            return;
+            return WebSocketDispatchOutcome::NotRouted;
         };
 
         let Some(target) = route.target.as_ref() else {
-            return;
+            return WebSocketDispatchOutcome::NotRouted;
         };
 
         let Some(integration_id) = target.strip_prefix("integrations/") else {
-            return;
+            return WebSocketDispatchOutcome::NotRouted;
         };
 
         let Some(integration) = state
@@ -188,15 +253,15 @@ pub async fn dispatch_websocket_event(
             .get(api_id)
             .and_then(|ints| ints.get(integration_id))
         else {
-            return;
+            return WebSocketDispatchOutcome::NotRouted;
         };
 
         if integration.integration_type != "AWS_PROXY" {
-            return;
+            return WebSocketDispatchOutcome::NotRouted;
         }
 
         let Some(function_arn) = integration.integration_uri.clone() else {
-            return;
+            return WebSocketDispatchOutcome::NotRouted;
         };
 
         (integration_id.to_string(), function_arn, matched_route_key)
@@ -204,7 +269,7 @@ pub async fn dispatch_websocket_event(
 
     let lambda_delivery = match lambda_delivery {
         Some(d) => d,
-        None => return,
+        None => return WebSocketDispatchOutcome::NotRouted,
     };
 
     let event = construct_event(
@@ -226,11 +291,16 @@ pub async fn dispatch_websocket_event(
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(%e, "failed to serialize websocket event");
-            return;
+            return WebSocketDispatchOutcome::NotRouted;
         }
     };
 
-    match lambda_delivery.invoke_lambda(&function_arn, &payload).await {
+    let request_id = event["requestContext"]["requestId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let result = lambda_delivery.invoke_lambda(&function_arn, &payload).await;
+    match &result {
         Ok(output) if output.is_function_error() => {
             tracing::warn!(
                 route_key,
@@ -246,11 +316,56 @@ pub async fn dispatch_websocket_event(
             tracing::warn!(%e, route_key, "websocket lambda invocation failed");
         }
     }
+    integration_outcome(&result, connection_id, &request_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use fakecloud_core::delivery::LambdaInvocationOutput;
+
+    fn ok(v: serde_json::Value) -> Result<LambdaInvocationOutput, String> {
+        Ok(LambdaInvocationOutput::success(v.to_string().into_bytes()))
+    }
+
+    // Recorded: `apigateway_websocket_connect` in
+    // fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json.
+    #[test]
+    fn connect_outcome_matches_aws_recordings() {
+        let internal = WebSocketDispatchOutcome::Rejected {
+            status: 502,
+            body: r#"{"message": "Internal server error", "connectionId":"c1", "requestId":"r1"}"#
+                .to_string(),
+        };
+        let failed = Ok(LambdaInvocationOutput::unhandled(
+            br#"{"errorType":"ValueError","errorMessage":"no"}"#.to_vec(),
+        ));
+        assert_eq!(integration_outcome(&failed, "c1", "r1"), internal);
+        assert_eq!(
+            integration_outcome(&ok(serde_json::json!({"hello": "x"})), "c1", "r1"),
+            internal
+        );
+        assert_eq!(
+            integration_outcome(&Err("boom".into()), "c1", "r1"),
+            internal
+        );
+        assert_eq!(
+            integration_outcome(
+                &ok(serde_json::json!({"statusCode": 403, "body": "nope"})),
+                "c1",
+                "r1"
+            ),
+            WebSocketDispatchOutcome::Rejected {
+                status: 403,
+                body: "nope".to_string()
+            }
+        );
+        assert_eq!(
+            integration_outcome(&ok(serde_json::json!({"statusCode": 200})), "c1", "r1"),
+            WebSocketDispatchOutcome::Accepted
+        );
+    }
 
     #[test]
     fn resolve_route_key_default() {

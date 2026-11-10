@@ -40,9 +40,28 @@ pub fn register(
     source_ip: String,
     user_agent: Option<String>,
 ) -> (String, UnboundedReceiver<Message>) {
+    register_with_id(
+        registry,
+        generate_connection_id(),
+        api_id,
+        stage,
+        source_ip,
+        user_agent,
+    )
+}
+
+/// [`register`] under a connection ID chosen beforehand (the `$connect`
+/// route runs, with that ID, before the connection is accepted).
+pub fn register_with_id(
+    registry: SharedWebSocketRegistry,
+    connection_id: String,
+    api_id: String,
+    stage: String,
+    source_ip: String,
+    user_agent: Option<String>,
+) -> (String, UnboundedReceiver<Message>) {
     let (tx, rx) = unbounded_channel();
     let now = Utc::now();
-    let connection_id = generate_connection_id();
     let info = ConnectionInfo {
         connection_id: connection_id.clone(),
         api_id,

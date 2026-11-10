@@ -11623,35 +11623,51 @@ async fn main() {
                             .into_iter()
                             .filter(|(k, _)| k != "stage")
                             .collect();
+                        // The `$connect` route runs while the upgrade
+                        // request is pending: an integration failure
+                        // refuses the connection with its HTTP response
+                        // (recorded: `apigateway_websocket_connect` in
+                        // fakecloud-lambda/tests/fixtures/function-errors/).
+                        let conn_id = fakecloud_apigatewayv2::websocket::generate_connection_id();
+                        let connected_at = chrono::Utc::now();
+                        let connect = fakecloud_apigatewayv2::websocket_dispatch::dispatch_websocket_event(
+                            &apigw_state,
+                            lambda_delivery.as_ref(),
+                            &account_id,
+                            &region,
+                            &api_id,
+                            &stage,
+                            &conn_id,
+                            "$connect",
+                            "CONNECT",
+                            None,
+                            &source_ip,
+                            user_agent.as_deref(),
+                            connected_at,
+                            Some(&header_map),
+                            Some(&query_map),
+                        )
+                        .await;
+                        if let fakecloud_apigatewayv2::websocket_dispatch::WebSocketDispatchOutcome::Rejected { status, body } = connect {
+                            use axum::response::IntoResponse;
+                            return (
+                                axum::http::StatusCode::from_u16(status)
+                                    .unwrap_or(axum::http::StatusCode::BAD_GATEWAY),
+                                [(axum::http::header::CONTENT_TYPE, "application/json; charset=UTF-8")],
+                                body,
+                            )
+                                .into_response();
+                        }
                         ws.on_upgrade(move |socket| async move {
-                            let (conn_id, rx) = fakecloud_apigatewayv2::websocket::register(
+                            let (conn_id, rx) = fakecloud_apigatewayv2::websocket::register_with_id(
                                 reg.clone(),
+                                conn_id,
                                 api_id.clone(),
                                 stage.clone(),
                                 source_ip.clone(),
                                 user_agent.clone(),
                             );
                             let conn_id_for_lifecycle = conn_id.clone();
-                            let connected_at = chrono::Utc::now();
-                            // Dispatch $connect route
-                            fakecloud_apigatewayv2::websocket_dispatch::dispatch_websocket_event(
-                                &apigw_state,
-                                lambda_delivery.as_ref(),
-                                &account_id,
-                                &region,
-                                &api_id,
-                                &stage,
-                                &conn_id,
-                                "$connect",
-                                "CONNECT",
-                                None,
-                                &source_ip,
-                                user_agent.as_deref(),
-                                connected_at,
-                                Some(&header_map),
-                                Some(&query_map),
-                            )
-                            .await;
                             let on_disconnect = {
                                 let apigw_state = apigw_state.clone();
                                 let lambda_delivery = lambda_delivery.clone();
@@ -11767,6 +11783,7 @@ async fn main() {
                             fakecloud_apigatewayv2::websocket::deregister(&reg, &conn_id,
                             );
                         })
+                        .into_response()
                     }
                 }
             }),

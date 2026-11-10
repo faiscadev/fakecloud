@@ -195,6 +195,36 @@
       "x_amzn_errortype": "InternalServerErrorException"
     }
   },
+  "apigateway_websocket_connect": {
+    "_setup": "WebSocket API, $connect route -> AWS_PROXY Lambda integration, curl upgrade request",
+    "typed (function error)": {
+      "body": "{\"message\": \"Internal server error\", \"connectionId\":\"ggUV1K6HgQAYKEhP3A==\", \"requestId\":\"GoySqFaAIAMEWLQ=\"}",
+      "content_type": "application/json; charset=UTF-8",
+      "status": 502
+    },
+    "ws403 (returns {statusCode:403, body:\"nope\"})": {
+      "body": "nope",
+      "content_type": "application/json; charset=UTF-8",
+      "status": 403
+    },
+    "wsnostatus (returns {hello})": {
+      "body": "{\"message\": \"Internal server error\", \"connectionId\":\"ggUVqS_p4QAYKEiKqA==\", \"requestId\":\"GoyNOH7NIAMEvww=\"}",
+      "content_type": "application/json; charset=UTF-8",
+      "status": 502
+    },
+    "wsok (returns {statusCode:200})": {
+      "status": 101
+    }
+  },
+  "cloudformation": {
+    "custom_resource_no_response": {
+      "_setup": "Custom::Thing with ServiceTimeout 5, handler python3.12 that raises ValueError without answering the ResponseURL",
+      "delete": "DeleteStack of the same resource failed with DELETE_FAILED and the same reason",
+      "invocations": "three invocations with the same request ID at t=0, +67s and +200s (Lambda async retries), so CloudFormation invokes asynchronously",
+      "reason": "CloudFormation did not receive a response from your Custom Resource. Please check your logs for requestId [4ae793ab-4166-43a5-9e75-5159c16ab332]. If you are using the Python cfn-response module, you may need to update your Lambda function code so that CloudFormation can attach the updated version.",
+      "resource_status": "CREATE_FAILED"
+    }
+  },
   "cognito": {
     "CustomMessage/AdminCreateUser": {
       "error_code": "UserLambdaValidationException",

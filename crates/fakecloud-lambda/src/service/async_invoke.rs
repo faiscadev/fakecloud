@@ -189,9 +189,16 @@ pub(crate) struct AsyncInvocation {
     pub guard: Option<Box<dyn Send>>,
 }
 
-/// Process `inv` in the background.
+/// Process `inv` in the background, on the current Tokio runtime.
 pub(crate) fn spawn(inv: AsyncInvocation) {
-    tokio::spawn(async move {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::error!(
+            function = %inv.func.function_name,
+            "async Lambda invocation dropped: no async runtime on this thread"
+        );
+        return;
+    };
+    handle.spawn(async move {
         let AsyncInvocation {
             runtime,
             bus,
@@ -282,6 +289,9 @@ pub fn queue_async_invocation(
             "Function {} has no deployment package",
             func.function_name
         ));
+    }
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Err("no async runtime is available to queue the invocation".to_string());
     }
     spawn(AsyncInvocation {
         bus: runtime.async_destinations(),
