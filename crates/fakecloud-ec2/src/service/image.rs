@@ -1645,10 +1645,7 @@ pub(crate) fn replace_image_instance_type_specification(
         ));
     }
 
-    let dry_run = req
-        .query_params
-        .get("DryRun")
-        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    let dry_run = crate::service_helpers::is_dry_run(&req.query_params);
 
     let mut accounts = svc.state.write();
     let state = accounts.regional_mut(&req.account_id, &req.region);

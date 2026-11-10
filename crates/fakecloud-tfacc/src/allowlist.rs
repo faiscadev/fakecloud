@@ -1615,6 +1615,23 @@ pub const SHARDS: &[Shard] = &[
         ),
         extra_deny: &[],
     },
+    // The instance type data sources, against the catalog vendored from EC2's own
+    // DescribeInstanceTypes: each reads a real type's values back, including GPU,
+    // FPGA, Neuron and media accelerators. Control plane only.
+    Shard {
+        name: "ec2-instance-types",
+        service: "ec2",
+        run_regex: "^TestAccEC2InstanceTypes?(Offerings?)?DataSource_",
+        extra_deny: &[
+            // unsupportable: asserts m5.large is current generation. Real EC2 now
+            // answers false (dumped 2026-11-09), and the other 64 checks passed with
+            // that one corrected.
+            "TestAccEC2InstanceTypeDataSource_basic",
+            // unsupportable: reads f1.2xlarge in us-east-1, where real EC2 no longer
+            // sells it and answers InvalidInstanceType.
+            "TestAccEC2InstanceTypeDataSource_fpga",
+        ],
+    },
     Shard {
         name: "rds",
         service: "rds",

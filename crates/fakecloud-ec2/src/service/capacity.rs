@@ -4,7 +4,7 @@
 use fakecloud_aws::ec2query::{ec2_elem, ec2_list, ec2_return};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::instance_types::CAPACITY_BLOCK_INSTANCE_TYPES;
+use crate::instance_types::capacity_block_types;
 use crate::service::Ec2Service;
 use crate::service_helpers::{
     ec2_arn, filter_value_matches, gen_id, incorrect_state, indexed_list, invalid_parameter_value,
@@ -1003,18 +1003,7 @@ fn unsupported_operation(message: String) -> AwsServiceError {
 
 /// `DryRunOperation`: the request would have succeeded without `DryRun`.
 fn dry_run_succeeded(req: &AwsRequest) -> Result<(), AwsServiceError> {
-    if req
-        .query_params
-        .get("DryRun")
-        .is_some_and(|v| v.eq_ignore_ascii_case("true"))
-    {
-        return Err(AwsServiceError::aws_error(
-            http::StatusCode::PRECONDITION_FAILED,
-            "DryRunOperation",
-            "Request would have succeeded, but DryRun flag is set.",
-        ));
-    }
-    Ok(())
+    crate::service_helpers::refuse_dry_run(&req.query_params)
 }
 
 /// The required `InstanceCount` of a split / move: an integer of at least 1.
@@ -1405,6 +1394,34 @@ fn valid_capacity_block_hours(h: i64) -> bool {
     (h % 24 == 0 && (1..=14).contains(&(h / 24))) || (h % 168 == 0 && (1..=26).contains(&(h / 168)))
 }
 
+/// The zones real EC2 answered DescribeCapacityBlockOfferings with (24 hours, one
+/// instance).
+const RECORDED_CAPACITY_BLOCK_ZONES: &[(&str, &str)] = &[
+    ("p4de.24xlarge", "us-east-1d"),
+    ("p4de.24xlarge", "us-west-2a"),
+    ("p5.48xlarge", "us-east-1f"),
+    ("p5.48xlarge", "us-west-2a"),
+    ("trn1.32xlarge", "us-east-1c"),
+    ("trn1.32xlarge", "us-west-2d"),
+];
+
+/// The zone offering Capacity Blocks of `instance_type`: the recorded one, else the
+/// Region's first zone selling the type.
+fn capacity_block_zone(region: &str, instance_type: &str) -> String {
+    let recorded = RECORDED_CAPACITY_BLOCK_ZONES
+        .iter()
+        .find(|(t, zone)| *t == instance_type && zone.starts_with(region))
+        .map(|(_, zone)| zone.to_string());
+    recorded
+        .or_else(|| {
+            crate::instance_types::lookup(instance_type)?
+                .zones_selling(region)
+                .into_iter()
+                .next()
+        })
+        .unwrap_or_else(|| format!("{region}a"))
+}
+
 /// The first Capacity Block start (11:30 UTC) at or after `t`.
 fn next_block_start(t: DateTime<Utc>) -> DateTime<Utc> {
     let day = t.date_naive();
@@ -1438,8 +1455,8 @@ fn offering_xml(o: &crate::state::CapacityBlockOffering) -> String {
 
 /// `DescribeCapacityBlockOfferings`: one offering per supported instance
 /// type (or the requested one) at the earliest 11:30 UTC start within the
-/// requested date range and the eight-week booking window, in the request
-/// Region's first Availability Zone. Each offering is remembered so
+/// requested date range and the eight-week booking window, in a zone selling it (see
+/// [`capacity_block_zone`]). Each offering is remembered so
 /// `PurchaseCapacityBlock` buys exactly what was offered. UltraServer
 /// offerings are not available.
 pub(crate) fn describe_capacity_block_offerings(
@@ -1483,20 +1500,17 @@ pub(crate) fn describe_capacity_block_offerings(
     let available = start <= now + Duration::days(CAPACITY_BLOCK_MAX_ADVANCE_DAYS)
         && range_end.is_none_or(|e| end <= e)
         && !req.query_params.contains_key("UltraserverType");
-    let types: Vec<&str> = match req.query_params.get("InstanceType") {
-        Some(t) => CAPACITY_BLOCK_INSTANCE_TYPES
-            .iter()
-            .copied()
-            .filter(|c| c == t)
-            .collect(),
-        None => CAPACITY_BLOCK_INSTANCE_TYPES.to_vec(),
-    };
-    let region = if req.region.is_empty() {
-        "us-east-1"
-    } else {
-        req.region.as_str()
-    };
-    let az = format!("{region}a");
+    let region = crate::service::instance::request_region(req);
+    let mut types = capacity_block_types(region);
+    if let Some(t) = req.query_params.get("InstanceType") {
+        types.retain(|c| c == t);
+        if types.is_empty() {
+            return Err(invalid_parameter_value(format!(
+                "The instance type '{t}' is not supported for Capacity Blocks in '{region}'. \
+                 Specify a compatible instance type and try again."
+            )));
+        }
+    }
     let mut items = Vec::new();
     if available {
         let mut accounts = svc.state.write();
@@ -1505,7 +1519,7 @@ pub(crate) fn describe_capacity_block_offerings(
             let mut offering = crate::state::CapacityBlockOffering {
                 id: String::new(),
                 instance_type: t.to_string(),
-                availability_zone: az.clone(),
+                availability_zone: capacity_block_zone(region, t),
                 instance_count: count,
                 start_date: fmt_ts(start),
                 end_date: fmt_ts(end),
@@ -3347,7 +3361,8 @@ mod split_move_tests {
         );
         // Described again, the same offering keeps its id.
         assert_eq!(between(&offered, "capacityBlockOfferingId"), id);
-        assert_eq!(between(&offered, "availabilityZone"), "us-east-1a");
+        // The zone real EC2 offers this one in.
+        assert_eq!(between(&offered, "availabilityZone"), "us-east-1f");
         let start = parse_ts(between(&offered, "startDate")).unwrap();
         let end = parse_ts(between(&offered, "endDate")).unwrap();
         assert_eq!(end - start, Duration::hours(48));
@@ -3368,7 +3383,7 @@ mod split_move_tests {
         );
         assert_eq!(between(&out, "instanceType"), "p5.48xlarge");
         assert_eq!(between(&out, "totalInstanceCount"), "2");
-        assert_eq!(between(&out, "availabilityZone"), "us-east-1a");
+        assert_eq!(between(&out, "availabilityZone"), "us-east-1f");
         assert_eq!(between(&out, "startDate"), between(&offered, "startDate"));
         assert_eq!(between(&out, "endDate"), between(&offered, "endDate"));
         assert_eq!(between(&out, "reservationType"), "capacity-block");
@@ -3403,9 +3418,9 @@ mod split_move_tests {
                 ("CapacityDurationHours", "24"),
             ],
         );
-        r.region = "eu-west-1".into();
+        r.region = "us-west-2".into();
         let out = body(describe_capacity_block_offerings(&svc, &r).unwrap());
-        assert_eq!(between(&out, "availabilityZone"), "eu-west-1a");
+        assert_eq!(between(&out, "availabilityZone"), "us-west-2d");
         let id = between(&out, "capacityBlockOfferingId").to_string();
         let mut p = req(
             "PurchaseCapacityBlock",
@@ -3414,9 +3429,25 @@ mod split_move_tests {
                 ("InstancePlatform", "Linux/UNIX"),
             ],
         );
-        p.region = "eu-west-1".into();
+        p.region = "us-west-2".into();
         let bought = body(purchase_capacity_block(&svc, &p).unwrap());
-        assert!(bought.contains("arn:aws:ec2:eu-west-1:"), "{bought}");
+        assert!(bought.contains("arn:aws:ec2:us-west-2:"), "{bought}");
+        // Refused as recorded where the Region does not sell the type that way.
+        let mut elsewhere = req(
+            "DescribeCapacityBlockOfferings",
+            &[
+                ("InstanceType", "p4de.24xlarge"),
+                ("CapacityDurationHours", "24"),
+            ],
+        );
+        elsewhere.region = "ap-south-1".into();
+        let e = err_of(describe_capacity_block_offerings(&svc, &elsewhere));
+        assert_eq!(e.code(), "InvalidParameterValue");
+        assert_eq!(
+            e.message(),
+            "The instance type 'p4de.24xlarge' is not supported for Capacity Blocks in \
+             'ap-south-1'. Specify a compatible instance type and try again."
+        );
         for bad in ["0", "25", "200", "abc"] {
             assert_eq!(
                 err_of(describe_capacity_block_offerings(
@@ -3431,20 +3462,49 @@ mod split_move_tests {
                 "{bad}"
             );
         }
-        // An instance type not sold as Capacity Blocks has no offerings.
-        let out = body(
-            describe_capacity_block_offerings(
-                &svc,
-                &req(
-                    "DescribeCapacityBlockOfferings",
-                    &[
-                        ("InstanceType", "t3.micro"),
-                        ("CapacityDurationHours", "672"),
-                    ],
-                ),
-            )
-            .unwrap(),
+        // Inferred from the recorded refusal: a type never sold that way at all.
+        let e = err_of(describe_capacity_block_offerings(
+            &svc,
+            &req(
+                "DescribeCapacityBlockOfferings",
+                &[
+                    ("InstanceType", "t3.micro"),
+                    ("CapacityDurationHours", "672"),
+                ],
+            ),
+        ));
+        assert_eq!(e.code(), "InvalidParameterValue");
+    }
+
+    #[test]
+    fn capacity_block_offerings_are_in_the_recorded_zones() {
+        let svc = Ec2Service::new();
+        for (t, zone) in RECORDED_CAPACITY_BLOCK_ZONES {
+            let mut r = req(
+                "DescribeCapacityBlockOfferings",
+                &[("InstanceType", t), ("CapacityDurationHours", "24")],
+            );
+            r.region = zone[..zone.len() - 1].to_string();
+            let out = body(describe_capacity_block_offerings(&svc, &r).unwrap());
+            assert_eq!(between(&out, "availabilityZone"), *zone, "{t}");
+            // Each is a zone the offerings say sells the type.
+            assert!(crate::instance_types::lookup(t)
+                .unwrap()
+                .offered_in_zone(&r.region, zone));
+        }
+        // Not recorded: the Region's first zone selling it, never one that does not.
+        let mut r = req(
+            "DescribeCapacityBlockOfferings",
+            &[
+                ("InstanceType", "p5.4xlarge"),
+                ("CapacityDurationHours", "24"),
+            ],
         );
-        assert!(!out.contains("<item>"), "{out}");
+        r.region = "us-east-1".to_string();
+        let out = body(describe_capacity_block_offerings(&svc, &r).unwrap());
+        let zone = between(&out, "availabilityZone");
+        assert!(crate::instance_types::lookup("p5.4xlarge")
+            .unwrap()
+            .offered_in_zone("us-east-1", zone));
     }
 }

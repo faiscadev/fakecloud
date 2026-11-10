@@ -40,9 +40,7 @@ fn endpoint_not_found(id: &str) -> AwsServiceError {
 }
 
 fn dry_run(req: &AwsRequest) -> bool {
-    req.query_params
-        .get("DryRun")
-        .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+    crate::service_helpers::is_dry_run(&req.query_params)
 }
 
 /// An optional boolean query parameter; anything but `true`/`false` is

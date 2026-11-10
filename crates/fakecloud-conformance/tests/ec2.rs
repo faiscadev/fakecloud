@@ -5762,14 +5762,22 @@ async fn ec2_describe_reserved_instances_offerings() {
 async fn ec2_purchase_reserved_instances_offering() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
-    let r = c
-        .purchase_reserved_instances_offering()
-        .instance_count(1)
-        .reserved_instances_offering_id("offering-1")
+    let offerings = c
+        .describe_reserved_instances_offerings()
         .send()
         .await
         .unwrap();
-    assert!(r.reserved_instances_id().unwrap().starts_with("ri-"));
+    let offering = offerings.reserved_instances_offerings()[0]
+        .reserved_instances_offering_id()
+        .unwrap();
+    let r = c
+        .purchase_reserved_instances_offering()
+        .instance_count(1)
+        .reserved_instances_offering_id(offering)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.reserved_instances_id().unwrap().len(), 36);
 }
 
 #[test_action("ec2", "DescribeReservedInstancesListings", checksum = "3ef7be7d")]
@@ -5882,13 +5890,38 @@ async fn ec2_accept_reserved_instances_exchange_quote() {
 async fn ec2_delete_queued_reserved_instances() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let offerings = c
+        .describe_reserved_instances_offerings()
+        .send()
+        .await
+        .unwrap();
+    let offering = offerings
+        .reserved_instances_offerings()
+        .iter()
+        .find(|o| o.availability_zone().is_none())
+        .and_then(|o| o.reserved_instances_offering_id())
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let queued = c
+        .purchase_reserved_instances_offering()
+        .instance_count(1)
+        .reserved_instances_offering_id(offering)
+        .purchase_time(aws_smithy_types::DateTime::from_secs(now + 86_400))
+        .send()
+        .await
+        .unwrap();
     let r = c
         .delete_queued_reserved_instances()
+        .reserved_instances_ids(queued.reserved_instances_id().unwrap())
         .reserved_instances_ids("ri-1")
         .send()
         .await
         .unwrap();
-    assert!(!r.successful_queued_purchase_deletions().is_empty());
+    assert_eq!(r.successful_queued_purchase_deletions().len(), 1);
+    assert_eq!(r.failed_queued_purchase_deletions().len(), 1);
 }
 
 // ---- dedicated hosts ----

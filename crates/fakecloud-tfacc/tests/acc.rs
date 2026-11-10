@@ -98,6 +98,11 @@ async fn ec2_vpc2_acceptance() {
 }
 
 #[tokio::test]
+async fn ec2_instance_types_acceptance() {
+    run_shard("ec2-instance-types").await;
+}
+
+#[tokio::test]
 async fn elasticache_acceptance() {
     run_shard("elasticache").await;
 }

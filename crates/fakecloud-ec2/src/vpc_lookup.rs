@@ -616,7 +616,8 @@ mod tests {
     fn resolves_default_subnets_and_reports_unknown_ids() {
         let ec2 = ec2();
         let defaults = default_vpc_subnets(&ec2, ACCOUNT, "us-east-1");
-        assert_eq!(defaults.len(), 3);
+        // One per us-east-1 zone.
+        assert_eq!(defaults.len(), 6);
         let vpc = default_vpc_id(&ec2, ACCOUNT, "us-east-1").unwrap();
         assert!(defaults.iter().all(|s| s.vpc_id == vpc));
         let ids: Vec<String> = defaults.iter().map(|s| s.subnet_id.clone()).collect();
@@ -648,7 +649,7 @@ mod tests {
         let ids: Vec<String> = defaults.iter().map(|s| s.subnet_id.clone()).collect();
         let placed = resolve_subnet_group(&ec2, ACCOUNT, "us-east-1", &ids).unwrap();
         assert_eq!(placed.vpc_id, defaults[0].vpc_id);
-        assert_eq!(placed.distinct_availability_zones(), 3);
+        assert_eq!(placed.distinct_availability_zones(), 6);
         assert_eq!(
             resolve_subnet_group(
                 &ec2,
