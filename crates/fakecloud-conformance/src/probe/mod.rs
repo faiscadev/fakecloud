@@ -157,6 +157,11 @@ pub fn probe_variant_with_model(
                 }
                 shape_id.rsplit('#').next().unwrap_or(shape_id).to_string()
             })
+            .chain(
+                operation_common_errors(service_name, operation_name)
+                    .iter()
+                    .map(|c| c.to_string()),
+            )
             .collect()
     });
 
@@ -881,6 +886,121 @@ mod tests {
                 "{code} must not pass for a service without it in its list"
             );
         }
+    }
+
+    #[test]
+    fn s3_operation_specific_codes_pass_only_on_their_operations() {
+        // Each S3 code recorded for one family of operations is accepted on
+        // exactly those operations. Accepting it service-wide would let a
+        // regression (bodies dropped -> MissingRequestBodyError on every
+        // operation) still score 100%.
+        let scoped: &[(&str, &[&str])] = &[
+            (
+                "PreconditionFailed",
+                &[
+                    "AbortMultipartUpload",
+                    "CompleteMultipartUpload",
+                    "CopyObject",
+                    "DeleteObject",
+                    "DeleteObjectAnnotation",
+                    "GetObject",
+                    "HeadObject",
+                    "PutObject",
+                    "PutObjectAnnotation",
+                    "RenameObject",
+                    "UploadPartCopy",
+                ],
+            ),
+            (
+                "InvalidRange",
+                &["GetObject", "HeadObject", "UploadPartCopy"],
+            ),
+            ("InvalidPart", &["CompleteMultipartUpload"]),
+            (
+                "MissingRequestBodyError",
+                &[
+                    "PutBucketEncryption",
+                    "PutBucketTagging",
+                    "PutObjectTagging",
+                    "PutBucketRequestPayment",
+                    "PutObjectLockConfiguration",
+                    "CreateBucketMetadataConfiguration",
+                    "CreateBucketMetadataTableConfiguration",
+                    "UpdateBucketMetadataInventoryTableConfiguration",
+                    "UpdateBucketMetadataJournalTableConfiguration",
+                ],
+            ),
+            (
+                "NoSuchConfiguration",
+                &[
+                    "GetBucketAnalyticsConfiguration",
+                    "DeleteBucketAnalyticsConfiguration",
+                    "GetBucketInventoryConfiguration",
+                    "DeleteBucketInventoryConfiguration",
+                    "GetBucketMetricsConfiguration",
+                    "DeleteBucketMetricsConfiguration",
+                    "GetBucketIntelligentTieringConfiguration",
+                    "DeleteBucketIntelligentTieringConfiguration",
+                ],
+            ),
+            (
+                "ReplicationConfigurationNotFoundError",
+                &["GetBucketReplication"],
+            ),
+            ("NoSuchWebsiteConfiguration", &["GetBucketWebsite"]),
+            (
+                "InvalidBucketAclWithBlockPublicAccessError",
+                &["CreateBucket"],
+            ),
+            ("InvalidExpression", &["SelectObjectContent"]),
+            ("InvalidCompressionFormat", &["SelectObjectContent"]),
+        ];
+        let model = crate::smithy::parse_model(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../aws-models/s3.json"
+        )))
+        .unwrap();
+        for (code, ops) in scoped {
+            assert!(
+                !service_common_errors("s3").contains(code),
+                "{code} must not be accepted on every S3 operation"
+            );
+            for op in &model.operations {
+                let allowed = operation_common_errors("s3", &op.name).contains(code);
+                assert_eq!(
+                    allowed,
+                    ops.contains(&op.name.as_str()),
+                    "{code} on {}",
+                    op.name
+                );
+            }
+            // Every listed operation is a real S3 operation.
+            for op in *ops {
+                assert!(
+                    model.operations.iter().any(|o| o.name == *op),
+                    "{op} is not in the S3 model"
+                );
+            }
+        }
+        // Scoped to S3: the same operation name elsewhere gets nothing.
+        assert!(operation_common_errors("s3control", "GetObject").is_empty());
+
+        // The runner folds the scoped codes into the op's declared list, so
+        // the classifier passes the code on its operation and rejects it on
+        // any other.
+        let body = "<Error><Code>MissingRequestBodyError</Code><Message>m</Message></Error>";
+        let declared_for = |op: &str| -> Vec<String> {
+            operation_common_errors("s3", op)
+                .iter()
+                .map(|c| c.to_string())
+                .collect()
+        };
+        let on = declared_for("PutBucketEncryption");
+        let result = classify_response("v1", 400, body, &Expectation::Success, 0, Some(&on), "s3");
+        assert_eq!(result.status, ProbeStatus::Pass);
+        let off = declared_for("GetObject");
+        let result = classify_response("v1", 400, body, &Expectation::Success, 0, Some(&off), "s3");
+        assert!(matches!(result.status, ProbeStatus::UnexpectedResult(_)));
     }
 
     #[test]
