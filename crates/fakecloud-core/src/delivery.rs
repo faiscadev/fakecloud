@@ -314,7 +314,8 @@ impl LambdaInvocationOutput {
 }
 
 /// Trait for invoking Lambda functions from cross-service integrations.
-/// Told why an attempt of a queued `Event` invocation could not run.
+/// Told why Lambda discarded a queued `Event` invocation without running the
+/// function.
 pub type AsyncUnrunnableHook = Box<dyn FnOnce(String) + Send>;
 
 pub trait LambdaDelivery: Send + Sync {
@@ -344,10 +345,13 @@ pub trait LambdaDelivery: Send + Sync {
         Err("this Lambda invoker does not support asynchronous invocation".to_string())
     }
 
-    /// [`Self::invoke_lambda_async`], also telling `on_unrunnable` (at most
-    /// once) when an attempt of the queued event could not run at all, so a
-    /// caller waiting on the event's effects need not wait out Lambda's
-    /// system-error retries. Invokers that cannot report it never call it.
+    /// [`Self::invoke_lambda_async`], also telling `on_unrunnable` why if
+    /// Lambda discards the queued event without having run the function (it
+    /// can never run as configured, or every attempt failed to start it
+    /// until the event aged out), so a caller waiting on the event's effects
+    /// learns it will never come. A single failed attempt that a retry may
+    /// still fix is never reported. Invokers that cannot report it never call
+    /// it.
     fn invoke_lambda_async_observed(
         &self,
         function_arn: &str,

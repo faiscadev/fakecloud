@@ -200,7 +200,33 @@ impl LambdaService {
                         bus: self.delivery_bus.clone(),
                         settings: self.async_settings(&func, account_id, region, qualifier),
                         func: func.clone(),
-                        layer_zips: layer_zips.clone(),
+                        resolve: {
+                            let state = self.state.clone();
+                            let (account, region, name) = (
+                                account_id.to_string(),
+                                region.to_string(),
+                                function_name.to_string(),
+                            );
+                            let version = resolved_version.clone();
+                            Box::new(move || {
+                                let accounts = state.read();
+                                let st = accounts.regional(&account, &region)?;
+                                // A deleted function's events are dropped,
+                                // whatever version they were for.
+                                let live = st.functions.get(&name)?;
+                                let func = version
+                                    .as_deref()
+                                    .and_then(|v| {
+                                        st.function_version_snapshots
+                                            .get(&name)
+                                            .and_then(|m| m.get(v))
+                                    })
+                                    .unwrap_or(live)
+                                    .clone();
+                                let layers = crate::state::attached_layer_zips(&accounts, &func);
+                                Some((func, layers))
+                            })
+                        },
                         payload: payload.to_vec(),
                         executed_version: executed_version.clone(),
                         request_id: request_id.to_string(),

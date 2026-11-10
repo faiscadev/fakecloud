@@ -130,6 +130,34 @@ impl Condition {
     }
 }
 
+/// Why an attempt could not run the function.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AttemptError {
+    /// A passing condition (the container did not start or answer): retried
+    /// with backoff.
+    Transient(String),
+    /// The function cannot run as configured: the event is discarded.
+    Permanent(String),
+    /// The function (or the version invoked) no longer exists: the event is
+    /// dropped, with nothing recorded.
+    FunctionGone(String),
+}
+
+impl AttemptError {
+    /// Classify a runtime failure.
+    pub(crate) fn of_runtime(err: &crate::runtime::RuntimeError) -> Self {
+        use crate::runtime::RuntimeError;
+        match err {
+            RuntimeError::NoCodeZip(_)
+            | RuntimeError::UnsupportedRuntime(_)
+            | RuntimeError::ZipExtractionFailed(_) => AttemptError::Permanent(err.to_string()),
+            RuntimeError::ContainerStartFailed(_) | RuntimeError::InvocationFailed(_) => {
+                AttemptError::Transient(err.to_string())
+            }
+        }
+    }
+}
+
 /// The result of processing one queued event.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AsyncOutcome {
@@ -138,17 +166,28 @@ pub(crate) struct AsyncOutcome {
     /// How many times the function was invoked.
     pub invoke_count: u32,
     pub condition: Condition,
+    /// The function was gone: nothing is recorded for the event.
+    pub function_gone: bool,
 }
 
 impl AsyncOutcome {
     fn succeeded(&self) -> bool {
         self.condition == Condition::Success
     }
+
+    /// Why the event was discarded without the function having run, if it
+    /// was.
+    fn unrun_reason(&self) -> Option<&str> {
+        match &self.result {
+            Err(err) if !self.succeeded() => Some(err),
+            _ => None,
+        }
+    }
 }
 
 /// Run `attempt` with Lambda's async retry policy: function errors use up
-/// `MaximumRetryAttempts`, system errors (`Err`, the attempt could not run)
-/// back off and retry until `MaximumEventAge`.
+/// `MaximumRetryAttempts`, transient system errors back off and retry until
+/// `MaximumEventAge`, and an event that can never run ends at once.
 pub(crate) async fn run_attempts<F, Fut>(
     settings: &AsyncSettings,
     delays: RetryDelays,
@@ -156,7 +195,7 @@ pub(crate) async fn run_attempts<F, Fut>(
 ) -> AsyncOutcome
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<LambdaInvocationOutput, String>>,
+    Fut: Future<Output = Result<LambdaInvocationOutput, AttemptError>>,
 {
     // Tokio's clock, so a paused test clock moves the event's age too.
     let start = tokio::time::Instant::now();
@@ -164,55 +203,69 @@ where
     let mut function_errors = 0u32;
     let mut system_errors = 0u32;
     loop {
-        let result = attempt().await;
+        let attempted = attempt().await;
         invoke_count += 1;
-        let delay = match &result {
+        let outcome = |result, condition| AsyncOutcome {
+            result,
+            invoke_count,
+            condition,
+            function_gone: false,
+        };
+        let delay = match attempted {
             Ok(output) if !output.is_function_error() => {
-                return AsyncOutcome {
-                    result,
-                    invoke_count,
-                    condition: Condition::Success,
-                };
+                return outcome(Ok(output), Condition::Success);
             }
-            Ok(_) => {
+            Ok(output) => {
                 function_errors += 1;
                 let retries_done = function_errors - 1;
                 if retries_done >= settings.max_retries {
-                    return AsyncOutcome {
-                        result,
-                        invoke_count,
-                        condition: Condition::RetriesExhausted,
-                    };
+                    return outcome(Ok(output), Condition::RetriesExhausted);
                 }
-                delays.function_error[(retries_done as usize).min(delays.function_error.len() - 1)]
+                let delay = delays.function_error
+                    [(retries_done as usize).min(delays.function_error.len() - 1)];
+                if start.elapsed() + delay > settings.max_event_age {
+                    return outcome(Ok(output), Condition::EventAgeExceeded);
+                }
+                delay
             }
-            Err(_) => {
-                let backoff = delays
+            Err(AttemptError::FunctionGone(err)) => {
+                return AsyncOutcome {
+                    function_gone: true,
+                    ..outcome(Err(err), Condition::RetriesExhausted)
+                };
+            }
+            Err(AttemptError::Permanent(err)) => {
+                return outcome(Err(err), Condition::RetriesExhausted);
+            }
+            Err(AttemptError::Transient(err)) => {
+                let delay = delays
                     .system_error_base
                     .saturating_mul(1u32 << system_errors.min(16))
                     .min(delays.system_error_max);
                 system_errors += 1;
-                backoff
+                if start.elapsed() + delay > settings.max_event_age {
+                    return outcome(Err(err), Condition::EventAgeExceeded);
+                }
+                delay
             }
         };
-        if start.elapsed() + delay > settings.max_event_age {
-            return AsyncOutcome {
-                result,
-                invoke_count,
-                condition: Condition::EventAgeExceeded,
-            };
-        }
         tokio::time::sleep(delay).await;
     }
 }
+
+/// Looks the invoked function (and its layers) up again, `None` once it is
+/// gone.
+pub(crate) type Resolver = Box<dyn Fn() -> Option<(LambdaFunction, Vec<Vec<u8>>)> + Send + Sync>;
 
 /// A queued `Event` invocation.
 pub(crate) struct AsyncInvocation {
     pub runtime: Arc<ContainerRuntime>,
     pub bus: Option<Arc<DeliveryBus>>,
     pub settings: AsyncSettings,
+    /// The function as queued, for the records.
     pub func: LambdaFunction,
-    pub layer_zips: Vec<Vec<u8>>,
+    /// The function as each attempt runs it.
+    pub resolve: Resolver,
     pub payload: Vec<u8>,
     pub executed_version: String,
     /// The invocation's request ID (the 202 response's), which its
@@ -220,8 +273,9 @@ pub(crate) struct AsyncInvocation {
     pub request_id: String,
     /// Held until processing finishes (the reserved-concurrency counter).
     pub guard: Option<Box<dyn Send>>,
-    /// Told, once, that an attempt could not run, for a caller waiting on
-    /// the event's effects (a CloudFormation custom resource).
+    /// Told why, if Lambda discards the event without having run the
+    /// function, for a caller waiting on the event's effects (a
+    /// CloudFormation custom resource). Never told about a single attempt.
     pub on_unrunnable: Option<fakecloud_core::delivery::AsyncUnrunnableHook>,
 }
 
@@ -240,7 +294,7 @@ pub(crate) fn spawn(inv: AsyncInvocation) {
             bus,
             settings,
             func,
-            layer_zips,
+            resolve,
             payload,
             executed_version,
             request_id,
@@ -250,29 +304,43 @@ pub(crate) fn spawn(inv: AsyncInvocation) {
         // The reserved-concurrency slot covers the first attempt only: an
         // event waiting for a retry uses no concurrency on AWS.
         let guard = std::sync::Mutex::new(guard);
-        let on_unrunnable = std::sync::Mutex::new(on_unrunnable);
         let outcome = run_attempts(&settings, RETRY_DELAYS, || {
             let runtime = runtime.clone();
-            let func = &func;
             let payload = &payload;
-            let layer_zips = &layer_zips;
+            let current = resolve();
+            let queued_arn = func.function_arn.clone();
             let slot = guard.lock().ok().and_then(|mut g| g.take());
-            let on_unrunnable = &on_unrunnable;
             async move {
-                let result = runtime
-                    .invoke(func, payload, layer_zips)
-                    .await
-                    .map_err(|e| e.to_string());
-                drop(slot);
-                if let Err(err) = &result {
-                    if let Some(hook) = on_unrunnable.lock().ok().and_then(|mut h| h.take()) {
-                        hook(err.clone());
-                    }
+                let Some((func, layer_zips)) = current else {
+                    return Err(AttemptError::FunctionGone(format!(
+                        "Function not found: {queued_arn}"
+                    )));
+                };
+                if func.code_zip.is_none() && func.package_type != "Image" {
+                    return Err(AttemptError::Permanent(format!(
+                        "Function {} has no deployment package",
+                        func.function_name
+                    )));
                 }
+                let result = runtime
+                    .invoke(&func, payload, &layer_zips)
+                    .await
+                    .map_err(|e| AttemptError::of_runtime(&e));
+                drop(slot);
                 result
             }
         })
         .await;
+        if let (Some(reason), Some(hook)) = (outcome.unrun_reason(), on_unrunnable) {
+            hook(reason.to_string());
+        }
+        if outcome.function_gone {
+            tracing::warn!(
+                function = %func.function_name,
+                "async Lambda invocation dropped: the function no longer exists"
+            );
+            return;
+        }
         if !outcome.succeeded() {
             tracing::warn!(
                 function = %func.function_name,
@@ -311,8 +379,8 @@ pub fn queue_async_invocation(
     queue_async_invocation_observed(state, runtime, function_arn, payload, None)
 }
 
-/// [`queue_async_invocation`], telling `on_unrunnable` (once) when an
-/// attempt of the event could not run.
+/// [`queue_async_invocation`], telling `on_unrunnable` why if the event is
+/// discarded without the function having run.
 pub fn queue_async_invocation_observed(
     state: &crate::SharedLambdaState,
     runtime: Arc<ContainerRuntime>,
@@ -349,12 +417,26 @@ pub fn queue_async_invocation_observed(
     if tokio::runtime::Handle::try_current().is_err() {
         return Err("no async runtime is available to queue the invocation".to_string());
     }
+    let _ = layer_zips;
+    let resolve: Resolver = {
+        let state = state.clone();
+        let function_arn = function_arn.to_string();
+        Box::new(move || {
+            let accounts = state.read();
+            let (account, region, _) = crate::function_location(
+                &function_arn,
+                accounts.default_account_id(),
+                accounts.region(),
+            );
+            crate::resolve_invocable(&accounts, &function_arn, account, region)
+        })
+    };
     spawn(AsyncInvocation {
         bus: runtime.async_destinations(),
         runtime,
         settings,
         func,
-        layer_zips,
+        resolve,
         payload: payload.to_vec(),
         executed_version,
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -634,7 +716,9 @@ mod tests {
         let calls = AtomicU32::new(0);
         let outcome = run_attempts(&settings, NO_DELAYS, || {
             let i = calls.fetch_add(1, Ordering::SeqCst) as usize;
-            let r = results[i.min(results.len() - 1)].clone();
+            let r = results[i.min(results.len() - 1)]
+                .clone()
+                .map_err(AttemptError::Transient);
             async move { r }
         })
         .await;
@@ -708,6 +792,65 @@ mod tests {
         assert_eq!(outcome.condition, Condition::Success);
     }
 
+    #[tokio::test]
+    async fn an_event_that_can_never_run_is_discarded_at_once() {
+        let calls = AtomicU32::new(0);
+        let outcome = run_attempts(&AsyncSettings::default(), NO_DELAYS, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err(AttemptError::Permanent("unsupported runtime: x".into())) }
+        })
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(outcome.condition, Condition::RetriesExhausted);
+        assert_eq!(outcome.unrun_reason(), Some("unsupported runtime: x"));
+        assert!(!outcome.function_gone);
+    }
+
+    #[tokio::test]
+    async fn an_event_for_a_deleted_function_is_dropped() {
+        let outcome = run_attempts(&AsyncSettings::default(), NO_DELAYS, || async {
+            Err(AttemptError::FunctionGone("Function not found: f".into()))
+        })
+        .await;
+        assert!(outcome.function_gone);
+        assert_eq!(outcome.invoke_count, 1);
+    }
+
+    #[test]
+    fn runtime_failures_are_classified() {
+        use crate::runtime::RuntimeError;
+        assert!(matches!(
+            AttemptError::of_runtime(&RuntimeError::ContainerStartFailed("x".into())),
+            AttemptError::Transient(_)
+        ));
+        assert!(matches!(
+            AttemptError::of_runtime(&RuntimeError::InvocationFailed("x".into())),
+            AttemptError::Transient(_)
+        ));
+        for permanent in [
+            RuntimeError::NoCodeZip("f".into()),
+            RuntimeError::UnsupportedRuntime("x".into()),
+            RuntimeError::ZipExtractionFailed("x".into()),
+        ] {
+            assert!(matches!(
+                AttemptError::of_runtime(&permanent),
+                AttemptError::Permanent(_)
+            ));
+        }
+    }
+
+    /// A transient failure followed by a success never reaches a waiter.
+    #[tokio::test]
+    async fn a_transient_failure_then_success_has_no_unrun_reason() {
+        let (outcome, _) = run_with(
+            AsyncSettings::default(),
+            vec![Err("container failed to start".into()), ok()],
+        )
+        .await;
+        assert_eq!(outcome.condition, Condition::Success);
+        assert_eq!(outcome.unrun_reason(), None);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn system_errors_back_off_exponentially_until_the_event_is_too_old() {
         let settings = AsyncSettings {
@@ -718,7 +861,11 @@ mod tests {
         let start = tokio::time::Instant::now();
         let outcome = run_attempts(&settings, RETRY_DELAYS, || {
             calls.lock().unwrap().push(start.elapsed().as_secs());
-            async { Err::<LambdaInvocationOutput, _>("no container".to_string()) }
+            async {
+                Err::<LambdaInvocationOutput, _>(AttemptError::Transient(
+                    "no container".to_string(),
+                ))
+            }
         })
         .await;
         assert_eq!(outcome.condition, Condition::EventAgeExceeded);
@@ -735,7 +882,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         run_attempts(&AsyncSettings::default(), RETRY_DELAYS, || {
             calls.lock().unwrap().push(start.elapsed());
-            async { function_error() }
+            async { function_error().map_err(AttemptError::Transient) }
         })
         .await;
         let at = calls.into_inner().unwrap();
@@ -758,7 +905,7 @@ mod tests {
         let calls = AtomicU32::new(0);
         let outcome = run_attempts(&settings, RETRY_DELAYS, || {
             calls.fetch_add(1, Ordering::SeqCst);
-            async { function_error() }
+            async { function_error().map_err(AttemptError::Transient) }
         })
         .await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -821,6 +968,7 @@ mod tests {
             result: function_error(),
             invoke_count: 3,
             condition: Condition::RetriesExhausted,
+            function_gone: false,
         };
         let record = invocation_record(&test_func(), "$LATEST", "req-1", br#"{"a":1}"#, &outcome);
         assert_eq!(record["requestContext"]["condition"], "RetriesExhausted");
@@ -842,6 +990,7 @@ mod tests {
             result: ok(),
             invoke_count: 1,
             condition: Condition::Success,
+            function_gone: false,
         };
         let record = invocation_record(&test_func(), "3", "req-1", b"{}", &outcome);
         assert_eq!(record["requestContext"]["condition"], "Success");
