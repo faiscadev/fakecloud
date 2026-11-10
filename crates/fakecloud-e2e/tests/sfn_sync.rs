@@ -108,6 +108,31 @@ async fn sfn_sync_athena_start_query_execution_returns_full_result() {
         qe["QueryExecutionId"].is_string(),
         "QueryExecutionId must be present"
     );
+    // The recorded shape: epoch milliseconds and every field present.
+    assert!(
+        qe["Status"]["CompletionDateTime"].as_i64() > Some(1_000_000_000_000),
+        "{qe}"
+    );
+    assert!(
+        qe["Status"]["SubmissionDateTime"].as_i64() > Some(1_000_000_000_000),
+        "{qe}"
+    );
+    assert_eq!(qe["EngineVersion"]["SelectedEngineVersion"], "AUTO");
+    assert_eq!(qe["StatementType"], "DML");
+    assert_eq!(qe["SubstatementType"], "SELECT");
+    assert_eq!(qe["WorkGroup"], "primary");
+    assert_eq!(
+        qe["Statistics"]["ResultReuseInformation"]["ReusedPreviousResult"],
+        false
+    );
+    assert_eq!(
+        qe["ResultReuseConfiguration"]["ResultReuseByAgeConfiguration"]["Enabled"],
+        false
+    );
+    let location = qe["ResultConfiguration"]["OutputLocation"]
+        .as_str()
+        .unwrap();
+    assert!(location.ends_with(".csv"), "{location}");
 }
 
 #[tokio::test]
@@ -539,8 +564,28 @@ async fn sfn_sync_glue_start_job_run_returns_real_job_run() {
         desc.cause()
     );
     let output: Value = serde_json::from_str(desc.output().expect("output")).unwrap();
-    let jr = &output["JobRun"];
+    // Recorded: the job run itself, with no wrapper.
+    assert!(output.get("JobRun").is_none(), "{output}");
+    let jr = &output;
     assert_eq!(jr["JobRunState"].as_str(), Some("SUCCEEDED"));
+    for field in [
+        "AllocatedCapacity",
+        "Attempt",
+        "CompletedOn",
+        "ExecutionTime",
+        "JobMode",
+        "LastModifiedOn",
+        "LogGroupName",
+        "PredecessorRuns",
+        "Timeout",
+    ] {
+        assert!(jr.get(field).is_some(), "{field}: {output}");
+    }
+    assert_eq!(jr["Attempt"], 0);
+    assert!(
+        jr["StartedOn"].as_i64() > Some(1_000_000_000_000),
+        "{output}"
+    );
     // Real GetJobRun shape carries the run Id (the synthetic stub had it too,
     // but also JobName/StartedOn which the real shape includes).
     assert!(jr["Id"].is_string(), "real JobRun has an Id: {output}");
@@ -548,4 +593,393 @@ async fn sfn_sync_glue_start_job_run_returns_real_job_run() {
         jr["JobName"].is_string(),
         "real JobRun has JobName: {output}"
     );
+}
+
+// A definition names ECS parameters in PascalCase at every depth and reads the
+// result in PascalCase, in every form of the optimized integration.
+#[tokio::test]
+async fn sfn_ecs_run_task_converts_nested_parameters_and_results() {
+    let server = TestServer::start().await;
+    let ecs = server.ecs_client().await;
+    let sfn = server.sfn_client().await;
+
+    ecs.create_cluster()
+        .cluster_name("casing-cluster")
+        .send()
+        .await
+        .unwrap();
+    ecs.register_task_definition()
+        .family("casing-family")
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/docker/library/alpine:latest")
+                .essential(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let definition = json!({
+        "StartAt": "RunIt",
+        "States": {
+            "RunIt": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::ecs:runTask",
+                "Parameters": {
+                    "Cluster": "casing-cluster",
+                    "TaskDefinition": "casing-family",
+                    "LaunchType": "FARGATE",
+                    "Overrides": {
+                        "ContainerOverrides": [{
+                            "Name": "app",
+                            "Environment": [{"Name": "FROM_ASL", "Value": "yes"}]
+                        }]
+                    }
+                },
+                "End": true
+            }
+        }
+    });
+    let created = sfn
+        .create_state_machine()
+        .name("ecs-casing-sm")
+        .definition(definition.to_string())
+        .role_arn("arn:aws:iam::123456789012:role/sfn-role")
+        .send()
+        .await
+        .unwrap();
+    let started = sfn
+        .start_execution()
+        .state_machine_arn(created.state_machine_arn())
+        .send()
+        .await
+        .unwrap();
+
+    let desc = wait_for_execution_full(&sfn, started.execution_arn()).await;
+    assert_eq!(
+        desc.status().as_str(),
+        "SUCCEEDED",
+        "error={:?} cause={:?}",
+        desc.error(),
+        desc.cause()
+    );
+    let output: Value = serde_json::from_str(desc.output().unwrap()).unwrap();
+    let task_arn = output["Tasks"][0]["TaskArn"]
+        .as_str()
+        .unwrap_or_else(|| panic!("PascalCase task result: {output}"));
+    // Recorded for the plain integration.
+    assert_eq!(output["Failures"], json!([]));
+    assert!(output["SdkResponseMetadata"]["RequestId"].is_string());
+    assert_eq!(
+        output["SdkHttpMetadata"]["HttpHeaders"]["Content-Type"],
+        "application/x-amz-json-1.1"
+    );
+    assert!(
+        output["Tasks"][0]["CreatedAt"].as_i64() > Some(1_000_000_000_000),
+        "{output}"
+    );
+
+    let described = ecs
+        .describe_tasks()
+        .cluster("casing-cluster")
+        .tasks(task_arn)
+        .send()
+        .await
+        .unwrap();
+    let overrides = described.tasks()[0].overrides().unwrap();
+    let container = &overrides.container_overrides()[0];
+    assert_eq!(container.name(), Some("app"));
+    assert_eq!(container.environment()[0].name(), Some("FROM_ASL"));
+    assert_eq!(container.environment()[0].value(), Some("yes"));
+}
+
+#[tokio::test]
+async fn sfn_ecs_run_task_wait_for_task_token_reaches_ecs() {
+    let server = TestServer::start().await;
+    let ecs = server.ecs_client().await;
+    let sfn = server.sfn_client().await;
+
+    ecs.create_cluster()
+        .cluster_name("token-cluster")
+        .send()
+        .await
+        .unwrap();
+    ecs.register_task_definition()
+        .family("token-family")
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/docker/library/alpine:latest")
+                .essential(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let definition = json!({
+        "StartAt": "RunIt",
+        "States": {
+            "RunIt": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::ecs:runTask.waitForTaskToken",
+                "Parameters": {
+                    "Cluster": "token-cluster",
+                    "TaskDefinition": "token-family",
+                    "LaunchType": "FARGATE",
+                    "Overrides": {
+                        "ContainerOverrides": [{
+                            "Name": "app",
+                            "Environment": [{"Name": "TASK_TOKEN", "Value.$": "$$.Task.Token"}]
+                        }]
+                    }
+                },
+                "End": true
+            }
+        }
+    });
+    let created = sfn
+        .create_state_machine()
+        .name("ecs-token-sm")
+        .definition(definition.to_string())
+        .role_arn("arn:aws:iam::123456789012:role/sfn-role")
+        .send()
+        .await
+        .unwrap();
+    let started = sfn
+        .start_execution()
+        .state_machine_arn(created.state_machine_arn())
+        .send()
+        .await
+        .unwrap();
+
+    let mut token = None;
+    for _ in 0..200 {
+        let listed = ecs
+            .list_tasks()
+            .cluster("token-cluster")
+            .desired_status(aws_sdk_ecs::types::DesiredStatus::Running)
+            .send()
+            .await
+            .unwrap();
+        let stopped = ecs
+            .list_tasks()
+            .cluster("token-cluster")
+            .desired_status(aws_sdk_ecs::types::DesiredStatus::Stopped)
+            .send()
+            .await
+            .unwrap();
+        let arns: Vec<String> = listed
+            .task_arns()
+            .iter()
+            .chain(stopped.task_arns())
+            .cloned()
+            .collect();
+        if let Some(arn) = arns.first() {
+            let described = ecs
+                .describe_tasks()
+                .cluster("token-cluster")
+                .tasks(arn)
+                .send()
+                .await
+                .unwrap();
+            token = described.tasks()[0]
+                .overrides()
+                .and_then(|o| o.container_overrides().first())
+                .and_then(|c| c.environment().first())
+                .and_then(|e| e.value())
+                .map(String::from);
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    let token = token.expect("the task must carry the token in its overrides");
+
+    sfn.send_task_success()
+        .task_token(token)
+        .output(r#"{"done":true}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let desc = wait_for_execution_full(&sfn, started.execution_arn()).await;
+    assert_eq!(desc.status().as_str(), "SUCCEEDED", "{:?}", desc.cause());
+    let output: Value = serde_json::from_str(desc.output().unwrap()).unwrap();
+    assert_eq!(output, json!({"done": true}));
+}
+
+// Recorded per integration: which optimized results carry SDK metadata.
+#[tokio::test]
+async fn optimized_results_carry_sdk_metadata_where_aws_does() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+
+    let run = |resource: &'static str, parameters: Value| {
+        let sfn = sfn.clone();
+        async move {
+            let definition = json!({"StartAt":"T","States":{"T":{
+                "Type":"Task",
+                "Resource": format!("arn:aws:states:::{resource}"),
+                "Parameters": parameters,
+                "End":true
+            }}});
+            let created = sfn
+                .create_state_machine()
+                .name(format!("sm-{}", uuid::Uuid::new_v4().simple()))
+                .definition(definition.to_string())
+                .role_arn("arn:aws:iam::123456789012:role/sfn-role")
+                .send()
+                .await
+                .unwrap();
+            let started = sfn
+                .start_execution()
+                .state_machine_arn(created.state_machine_arn())
+                .send()
+                .await
+                .unwrap();
+            let desc = wait_for_execution_full(&sfn, started.execution_arn()).await;
+            assert_eq!(
+                desc.status().as_str(),
+                "SUCCEEDED",
+                "{resource}: {:?}",
+                desc.cause()
+            );
+            serde_json::from_str::<Value>(desc.output().unwrap()).unwrap()
+        }
+    };
+
+    let queue = server
+        .sqs_client()
+        .await
+        .create_queue()
+        .queue_name("meta")
+        .send()
+        .await
+        .unwrap();
+    let sent = run(
+        "sqs:sendMessage",
+        json!({"QueueUrl": queue.queue_url().unwrap(), "MessageBody": "hi"}),
+    )
+    .await;
+    assert!(sent["MessageId"].is_string());
+    assert_eq!(
+        sent["SdkHttpMetadata"]["HttpHeaders"]["connection"],
+        "keep-alive"
+    );
+    assert_eq!(
+        sent["SdkHttpMetadata"]["HttpHeaders"]["x-amzn-RequestId"],
+        sent["SdkResponseMetadata"]["RequestId"]
+    );
+
+    let topic = server
+        .sns_client()
+        .await
+        .create_topic()
+        .name("meta")
+        .send()
+        .await
+        .unwrap();
+    let published = run(
+        "sns:publish",
+        json!({"TopicArn": topic.topic_arn().unwrap(), "Message": "hi"}),
+    )
+    .await;
+    assert_eq!(
+        published["SdkHttpMetadata"]["HttpHeaders"]["Content-Type"],
+        "text/xml"
+    );
+
+    let events = run(
+        "events:putEvents",
+        json!({"Entries": [{"Source": "s", "DetailType": "d", "Detail": "{}"}]}),
+    )
+    .await;
+    assert_eq!(events["FailedEntryCount"], 0);
+    assert!(events["Entries"][0]["EventId"].is_string());
+    assert!(events.get("SdkHttpMetadata").is_none(), "{events}");
+
+    server
+        .s3_client()
+        .await
+        .create_bucket()
+        .bucket("meta-results")
+        .send()
+        .await
+        .unwrap();
+    let query = run(
+        "athena:startQueryExecution",
+        json!({
+            "QueryString": "SELECT 1",
+            "ResultConfiguration": {"OutputLocation": "s3://meta-results/r/"}
+        }),
+    )
+    .await;
+    assert_eq!(query.as_object().unwrap().len(), 1, "{query}");
+    assert!(query["QueryExecutionId"].is_string());
+
+    server
+        .glue_client()
+        .await
+        .create_job()
+        .name("meta-job")
+        .role("arn:aws:iam::123456789012:role/glue")
+        .command(
+            aws_sdk_glue::types::JobCommand::builder()
+                .name("glueetl")
+                .script_location("s3://example/script.py")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let job = run("glue:startJobRun", json!({"JobName": "meta-job"})).await;
+    assert!(job["JobRunId"].is_string());
+    assert_eq!(job["JobName"], "meta-job");
+    assert_eq!(
+        job["SdkHttpMetadata"]["HttpHeaders"]["Cache-Control"],
+        "no-cache"
+    );
+}
+
+// Recorded format for optimized service errors.
+#[tokio::test]
+async fn optimized_service_errors_read_like_the_sdk() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+
+    let definition = json!({"StartAt":"T","States":{"T":{
+        "Type":"Task",
+        "Resource":"arn:aws:states:::glue:startJobRun",
+        "Parameters":{"JobName":"no-such-job"},
+        "End":true
+    }}});
+    let created = sfn
+        .create_state_machine()
+        .name("glue-missing")
+        .definition(definition.to_string())
+        .role_arn("arn:aws:iam::123456789012:role/sfn-role")
+        .send()
+        .await
+        .unwrap();
+    let started = sfn
+        .start_execution()
+        .state_machine_arn(created.state_machine_arn())
+        .send()
+        .await
+        .unwrap();
+    let desc = wait_for_execution_full(&sfn, started.execution_arn()).await;
+    assert_eq!(desc.status().as_str(), "FAILED");
+    let error = desc.error().unwrap();
+    assert!(error.starts_with("Glue."), "{error}");
+    let code = error.strip_prefix("Glue.").unwrap();
+    let cause = desc.cause().unwrap();
+    assert!(
+        cause.contains(&format!(
+            "(Service: AWSGlue; Status Code: 400; Error Code: {code}; Request ID: "
+        )),
+        "{cause}"
+    );
+    assert!(cause.ends_with("; Proxy: null)"), "{cause}");
 }

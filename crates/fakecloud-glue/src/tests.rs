@@ -155,8 +155,10 @@ fn start_trigger_activates_scheduled_trigger() {
     assert_eq!(got["Trigger"]["State"], "ACTIVATED");
 }
 
+/// Recorded: a job naming no Glue version gets 6.0 and its 480-minute timeout;
+/// before 5.0 the default is 2880.
 #[test]
-fn create_job_defaults_timeout_to_2880() {
+fn create_job_defaults_timeout_by_glue_version() {
     let svc = GlueService::default();
     svc.create_job(&req(
         "CreateJob",
@@ -167,7 +169,37 @@ fn create_job_defaults_timeout_to_2880() {
         svc.get_job(&req("GetJob", json!({"JobName": "j"})))
             .unwrap(),
     );
+    assert_eq!(got["Job"]["Timeout"], 480);
+    assert_eq!(got["Job"]["GlueVersion"], "6.0");
+    assert_eq!(got["Job"]["MaxCapacity"], 10.0);
+    assert_eq!(got["Job"]["AllocatedCapacity"], 10);
+    assert_eq!(got["Job"]["JobMode"], "SCRIPT");
+
+    svc.create_job(&req(
+        "CreateJob",
+        json!({"Name": "four", "Role": "r", "Command": {"Name": "glueetl"},
+               "GlueVersion": "4.0", "WorkerType": "G.1X", "NumberOfWorkers": 2}),
+    ))
+    .unwrap();
+    let got = body_of(
+        svc.get_job(&req("GetJob", json!({"JobName": "four"})))
+            .unwrap(),
+    );
     assert_eq!(got["Job"]["Timeout"], 2880);
+    assert_eq!(got["Job"]["MaxCapacity"], 2.0);
+    assert_eq!(got["Job"]["AllocatedCapacity"], 2);
+
+    svc.create_job(&req(
+        "CreateJob",
+        json!({"Name": "py", "Role": "r", "Command": {"Name": "pythonshell"}}),
+    ))
+    .unwrap();
+    let got = body_of(
+        svc.get_job(&req("GetJob", json!({"JobName": "py"})))
+            .unwrap(),
+    );
+    assert_eq!(got["Job"]["MaxCapacity"], 0.0625);
+    assert_eq!(got["Job"]["AllocatedCapacity"], 0);
 
     // Streaming jobs have no default timeout.
     svc.create_job(&req(
@@ -3054,4 +3086,90 @@ fn column_statistics_task_runs_scoped_by_catalog() {
         json!({"DatabaseName": "db", "TableName": "t", "CatalogID": "999988887777"}),
     )));
     assert_eq!(err, "ColumnStatisticsTaskNotRunningException");
+}
+
+/// A run keeps what it started with: the job's settings and its own overrides,
+/// whatever later happens to the job. The recorded Python shell run reports
+/// `AllocatedCapacity` 0 for `MaxCapacity` 0.0625, and leaves out what it lacks.
+#[test]
+fn job_runs_keep_the_settings_they_started_with() {
+    let svc = GlueService::default();
+    svc.create_job(&req(
+        "CreateJob",
+        json!({"Name": "py", "Role": "r", "MaxCapacity": 0.0625,
+               "Command": {"Name": "pythonshell", "PythonVersion": "3.9"}}),
+    ))
+    .unwrap();
+    let start = |body: Value| {
+        body_of(svc.start_job_run(&req("StartJobRun", body)).unwrap())["JobRunId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let get = |run: &str| {
+        body_of(
+            svc.get_job_run(&req("GetJobRun", json!({"JobName": "py", "RunId": run})))
+                .unwrap(),
+        )["JobRun"]
+            .clone()
+    };
+    let plain = start(json!({"JobName": "py"}));
+    let overridden = start(json!({"JobName": "py", "Timeout": 5, "MaxCapacity": 1.0}));
+
+    svc.update_job(&req(
+        "UpdateJob",
+        json!({"JobName": "py", "JobUpdate": {"Timeout": 99, "MaxCapacity": 1.0}}),
+    ))
+    .unwrap();
+    svc.delete_job(&req("DeleteJob", json!({"JobName": "py"})))
+        .unwrap();
+
+    let run = get(&plain);
+    assert_eq!(run["Timeout"], 480);
+    assert_eq!(run["MaxCapacity"], 0.0625);
+    assert_eq!(run["AllocatedCapacity"], 0);
+    assert_eq!(run["GlueVersion"], "6.0");
+    assert_eq!(run["JobMode"], "SCRIPT");
+    assert_eq!(run["LogGroupName"], "/aws-glue/python-jobs");
+    for absent in ["WorkerType", "NumberOfWorkers", "Arguments", "ErrorMessage"] {
+        assert!(run.get(absent).is_none(), "{absent}: {run}");
+    }
+    let run = get(&overridden);
+    assert_eq!(run["Timeout"], 5);
+    assert_eq!(run["MaxCapacity"], 1.0);
+    assert_eq!(run["AllocatedCapacity"], 1);
+}
+
+/// A run takes the job's stored `AllocatedCapacity` unless it overrides its own
+/// capacity or workers.
+#[test]
+fn job_runs_prefer_the_jobs_allocated_capacity() {
+    let svc = GlueService::default();
+    svc.create_job(&req(
+        "CreateJob",
+        json!({"Name": "j", "Role": "r", "Command": {"Name": "glueetl"},
+               "MaxCapacity": 10.0, "AllocatedCapacity": 7}),
+    ))
+    .unwrap();
+    let allocated = |body: Value| {
+        let run = body_of(svc.start_job_run(&req("StartJobRun", body)).unwrap())["JobRunId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        body_of(
+            svc.get_job_run(&req("GetJobRun", json!({"JobName": "j", "RunId": run})))
+                .unwrap(),
+        )["JobRun"]["AllocatedCapacity"]
+            .clone()
+    };
+    assert_eq!(allocated(json!({"JobName": "j"})), 7);
+    assert_eq!(allocated(json!({"JobName": "j", "MaxCapacity": 3.0})), 3);
+    assert_eq!(
+        allocated(json!({"JobName": "j", "WorkerType": "G.2X", "NumberOfWorkers": 2})),
+        4
+    );
+    assert_eq!(
+        allocated(json!({"JobName": "j", "AllocatedCapacity": 5})),
+        5
+    );
 }

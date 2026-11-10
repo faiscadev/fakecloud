@@ -28,3 +28,11 @@ sha1 = { workspace = true }
 sha2 = { workspace = true }
 hex = "0.4"
 rand = { workspace = true }
+axum = { workspace = true }
+crc32fast = { workspace = true }
+flate2 = { workspace = true }
+percent-encoding = { workspace = true }
+jsonata-core = { version = "2.2", default-features = false }
+quick-xml = { workspace = true }
+parquet = { version = "60", default-features = false, features = ["snap", "zstd", "flate2-zlib-rs", "json", "base64"] }
+zstd = { workspace = true }

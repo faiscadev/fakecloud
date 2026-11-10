@@ -15,16 +15,28 @@ pub fn evaluate_choice(
     input: &Value,
     context: Option<&Value>,
 ) -> Result<Option<String>, StatesError> {
+    Ok(choose_transition(state_def, input, context)?.map(|(next, _)| next))
+}
+
+/// The transition a Choice state takes and what holds its fields: the rule that
+/// matched, or the state itself for its `Default`.
+pub(crate) fn choose_transition<'d>(
+    state_def: &'d Value,
+    input: &Value,
+    context: Option<&Value>,
+) -> Result<Option<(String, &'d Value)>, StatesError> {
     if let Some(choices) = state_def["Choices"].as_array() {
         for choice in choices {
             if evaluate_rule(choice, input, context)? {
-                return Ok(choice["Next"].as_str().map(|s| s.to_string()));
+                return Ok(choice["Next"].as_str().map(|s| (s.to_string(), choice)));
             }
         }
     }
 
     // Fall through to Default
-    Ok(state_def["Default"].as_str().map(|s| s.to_string()))
+    Ok(state_def["Default"]
+        .as_str()
+        .map(|s| (s.to_string(), state_def)))
 }
 
 fn invalid_variable(path: &str) -> StatesError {
