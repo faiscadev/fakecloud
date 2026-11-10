@@ -6,8 +6,10 @@
 mod helpers;
 
 use aws_sdk_bedrockagent::types::{
-    FlowAliasRoutingConfigurationListItem, FlowDefinition, FlowNode, FlowNodeConfiguration,
-    FlowNodeType, InputFlowNodeConfiguration,
+    FlowAliasRoutingConfigurationListItem, FlowConnection, FlowConnectionConfiguration,
+    FlowConnectionType, FlowDataConnectionConfiguration, FlowDefinition, FlowNode,
+    FlowNodeConfiguration, FlowNodeInput, FlowNodeIoDataType, FlowNodeOutput, FlowNodeType,
+    InputFlowNodeConfiguration, OutputFlowNodeConfiguration,
 };
 use aws_sdk_bedrockagentruntime::error::ProvideErrorMetadata;
 use aws_sdk_bedrockagentruntime::types::FlowExecutionStatus;
@@ -15,6 +17,8 @@ use helpers::TestServer;
 
 const ROLE: &str = "arn:aws:iam::123456789012:role/service-role/flow-exec-role";
 
+/// A flow that prepares cleanly: Input node `node` passes its document
+/// straight to an Output node.
 fn definition(node: &str) -> FlowDefinition {
     FlowDefinition::builder()
         .nodes(
@@ -24,8 +28,49 @@ fn definition(node: &str) -> FlowDefinition {
                 .configuration(FlowNodeConfiguration::Input(
                     InputFlowNodeConfiguration::builder().build(),
                 ))
+                .outputs(
+                    FlowNodeOutput::builder()
+                        .name("document")
+                        .r#type(FlowNodeIoDataType::String)
+                        .build()
+                        .expect("node output"),
+                )
                 .build()
                 .expect("flow node"),
+        )
+        .nodes(
+            FlowNode::builder()
+                .name("FlowOutputNode")
+                .r#type(FlowNodeType::Output)
+                .configuration(FlowNodeConfiguration::Output(
+                    OutputFlowNodeConfiguration::builder().build(),
+                ))
+                .inputs(
+                    FlowNodeInput::builder()
+                        .name("document")
+                        .r#type(FlowNodeIoDataType::String)
+                        .expression("$.data")
+                        .build()
+                        .expect("node input"),
+                )
+                .build()
+                .expect("flow node"),
+        )
+        .connections(
+            FlowConnection::builder()
+                .name("ToOutput")
+                .r#type(FlowConnectionType::Data)
+                .source(node)
+                .target("FlowOutputNode")
+                .configuration(FlowConnectionConfiguration::Data(
+                    FlowDataConnectionConfiguration::builder()
+                        .source_output("document")
+                        .target_input("document")
+                        .build()
+                        .expect("data connection"),
+                ))
+                .build()
+                .expect("flow connection"),
         )
         .build()
 }
@@ -793,4 +838,173 @@ fn decode_events(mut buf: &[u8]) -> Vec<(String, serde_json::Value)> {
         buf = &buf[total..];
     }
     out
+}
+
+/// PrepareFlow validates the definition: one with errors ends `Failed`, and
+/// GetFlow reports the same findings ValidateFlowDefinition does. A failed
+/// draft can't be versioned until it is fixed and prepared again.
+#[tokio::test]
+async fn prepare_flow_fails_an_invalid_definition_with_its_validations() {
+    use aws_sdk_bedrockagent::error::ProvideErrorMetadata as _;
+    use aws_sdk_bedrockagent::types::{
+        FlowStatus, FlowValidationDetails, FlowValidationSeverity, FlowValidationType,
+    };
+
+    let server = TestServer::start().await;
+    let agent = server.bedrock_agent_client().await;
+
+    // An Input node without its `document` output, and a connection to a
+    // node that doesn't exist.
+    let broken = FlowDefinition::builder()
+        .nodes(
+            FlowNode::builder()
+                .name("FlowInputNode")
+                .r#type(FlowNodeType::Input)
+                .configuration(FlowNodeConfiguration::Input(
+                    InputFlowNodeConfiguration::builder().build(),
+                ))
+                .build()
+                .expect("flow node"),
+        )
+        .connections(
+            FlowConnection::builder()
+                .name("ToGhost")
+                .r#type(FlowConnectionType::Data)
+                .source("FlowInputNode")
+                .target("Ghost")
+                .configuration(FlowConnectionConfiguration::Data(
+                    FlowDataConnectionConfiguration::builder()
+                        .source_output("document")
+                        .target_input("document")
+                        .build()
+                        .expect("data connection"),
+                ))
+                .build()
+                .expect("flow connection"),
+        )
+        .build();
+
+    let validated = agent
+        .validate_flow_definition()
+        .definition(broken.clone())
+        .send()
+        .await
+        .expect("validate flow definition");
+    let summary = |v: &aws_sdk_bedrockagent::types::FlowValidation| {
+        (
+            v.r#type().cloned(),
+            v.severity().clone(),
+            v.message().to_string(),
+        )
+    };
+    let expected = vec![
+        (
+            Some(FlowValidationType::MissingEndingNodes),
+            FlowValidationSeverity::Warning,
+            "The flow is missing a required Flow Output node. Add an Output node to define what the flow returns when it completes.".to_string(),
+        ),
+        (
+            Some(FlowValidationType::MissingNodeOutput),
+            FlowValidationSeverity::Error,
+            "The node 'FlowInputNode' is missing the required output 'document'. Add this output to the node definition.".to_string(),
+        ),
+        (
+            Some(FlowValidationType::UnknownConnectionTarget),
+            FlowValidationSeverity::Error,
+            "The connection between the nodes 'FlowInputNode' and 'Ghost' references an unknown target node 'Ghost'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.".to_string(),
+        ),
+    ];
+    assert_eq!(
+        validated
+            .validations()
+            .iter()
+            .map(summary)
+            .collect::<Vec<_>>(),
+        expected
+    );
+
+    let flow_id = agent
+        .create_flow()
+        .name("broken-flow")
+        .execution_role_arn(ROLE)
+        .definition(broken)
+        .send()
+        .await
+        .expect("create flow")
+        .id;
+    let unprepared = agent
+        .get_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("get flow");
+    assert_eq!(unprepared.status(), &FlowStatus::NotPrepared);
+    assert!(unprepared.validations.is_none());
+
+    let prepared = agent
+        .prepare_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("prepare flow");
+    assert_eq!(prepared.status(), &FlowStatus::Preparing);
+    let failed = agent
+        .get_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("get flow");
+    assert_eq!(failed.status(), &FlowStatus::Failed);
+    assert_eq!(
+        failed.validations().iter().map(summary).collect::<Vec<_>>(),
+        expected
+    );
+    let FlowValidationDetails::UnknownConnectionTarget(target) =
+        failed.validations()[2].details().expect("details")
+    else {
+        panic!("{:?}", failed.validations()[2]);
+    };
+    assert_eq!(target.connection(), "ToGhost");
+
+    let err = agent
+        .create_flow_version()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect_err("a failed draft can't be versioned");
+    assert_eq!(err.code(), Some("ConflictException"), "{err:?}");
+
+    // Fixed and prepared again, it versions.
+    let fixed = agent
+        .update_flow()
+        .flow_identifier(&flow_id)
+        .name("broken-flow")
+        .execution_role_arn(ROLE)
+        .definition(definition("FlowInputNode"))
+        .send()
+        .await
+        .expect("update flow");
+    assert_eq!(fixed.status(), &FlowStatus::NotPrepared);
+    agent
+        .prepare_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("prepare fixed flow");
+    let ready = agent
+        .get_flow()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("get flow");
+    assert_eq!(ready.status(), &FlowStatus::Prepared);
+    assert!(ready.validations().is_empty());
+    let version = agent
+        .create_flow_version()
+        .flow_identifier(&flow_id)
+        .send()
+        .await
+        .expect("create flow version")
+        .version;
+    assert_eq!(version, "1");
 }
