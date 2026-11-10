@@ -1702,6 +1702,7 @@ impl AwsService for LambdaService {
                     invocation_type,
                     qualifier,
                     log_tail,
+                    &req.request_id,
                 )
                 .await
             }

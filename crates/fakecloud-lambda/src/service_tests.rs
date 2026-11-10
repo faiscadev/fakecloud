@@ -3702,6 +3702,7 @@ async fn invoke_unknown_alias_returns_not_found() {
             InvocationType::RequestResponse,
             Some("no-such-alias"),
             false,
+            "req-1",
         )
         .await;
     match result {

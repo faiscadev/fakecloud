@@ -1152,11 +1152,27 @@ pub struct CustomResponse {
 #[derive(Debug, Default)]
 pub struct CustomResponses {
     waiting: parking_lot::Mutex<BTreeMap<String, Option<CustomResponse>>>,
+    /// Why Lambda could not run the handler for a request being waited on.
+    unrunnable: parking_lot::Mutex<BTreeMap<String, String>>,
 }
 
 impl CustomResponses {
     pub(crate) fn expect(&self, request_id: &str) {
         self.waiting.lock().insert(request_id.to_string(), None);
+        self.unrunnable.lock().remove(request_id);
+    }
+
+    /// Lambda could not run the handler for `request_id` (an emulator-side
+    /// failure such as a missing container runtime): the wait ends with
+    /// that error rather than running out the ServiceTimeout.
+    pub(crate) fn could_not_run(&self, request_id: &str, error: String) {
+        if self.waiting.lock().contains_key(request_id) {
+            self.unrunnable.lock().insert(request_id.to_string(), error);
+        }
+    }
+
+    pub(crate) fn take_unrunnable(&self, request_id: &str) -> Option<String> {
+        self.unrunnable.lock().remove(request_id)
     }
 
     pub fn accept(&self, request_id: &str, body: &[u8]) {
@@ -1170,6 +1186,7 @@ impl CustomResponses {
     }
 
     pub(crate) fn take(&self, request_id: &str) -> Option<CustomResponse> {
+        self.unrunnable.lock().remove(request_id);
         self.waiting.lock().remove(request_id).flatten()
     }
 
@@ -3605,7 +3622,13 @@ impl ResourceProvisioner {
         let handle = tokio::runtime::Handle::try_current().ok();
         let queued = {
             let _entered = handle.as_ref().map(tokio::runtime::Handle::enter);
-            self.delivery.invoke_lambda_async(service_token, &payload)
+            let responses = self.custom_responses.clone();
+            let id = request_id.to_string();
+            self.delivery.invoke_lambda_async_observed(
+                service_token,
+                &payload,
+                Box::new(move |error| responses.could_not_run(&id, error)),
+            )
         };
         match queued {
             None => {
@@ -3623,6 +3646,10 @@ impl ResourceProvisioner {
         }
         let deadline = std::time::Instant::now() + custom_service_timeout(&event);
         while !self.custom_responses.answered(request_id) {
+            if let Some(error) = self.custom_responses.take_unrunnable(request_id) {
+                self.custom_responses.take(request_id);
+                return Err(format!("Lambda invocation failed: {error}"));
+            }
             if std::time::Instant::now() >= deadline {
                 self.custom_responses.take(request_id);
                 return Err(custom_no_response_reason(request_id));
@@ -13040,6 +13067,55 @@ mod tests {
             self.requests.lock().push(request);
             Ok(())
         }
+    }
+
+    /// Lambda accepts the event, then cannot run the handler.
+    struct Unrunnable;
+
+    impl fakecloud_core::delivery::LambdaDelivery for Unrunnable {
+        fn invoke_lambda(
+            &self,
+            _function_arn: &str,
+            _payload: &str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                    > + Send,
+            >,
+        > {
+            Box::pin(async { Err("unused".to_string()) })
+        }
+
+        fn invoke_lambda_async_observed(
+            &self,
+            _function_arn: &str,
+            _payload: &str,
+            on_unrunnable: fakecloud_core::delivery::AsyncUnrunnableHook,
+        ) -> Result<(), String> {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                on_unrunnable("container failed to start: no container runtime".to_string());
+            });
+            Ok(())
+        }
+    }
+
+    /// A handler Lambda cannot run fails the resource with that error at
+    /// once instead of after its (hour-long) ServiceTimeout.
+    #[test]
+    fn a_handler_lambda_cannot_run_fails_without_waiting_out_the_timeout() {
+        let mut prov = make_provisioner();
+        prov.delivery = Arc::new(
+            fakecloud_core::delivery::DeliveryBus::new().with_lambda(Arc::new(Unrunnable)),
+        );
+        let started = std::time::Instant::now();
+        let reason = prov.create_resource(&custom_definition()).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(
+            reason,
+            "Lambda invocation failed: container failed to start: no container runtime"
+        );
     }
 
     fn answering(

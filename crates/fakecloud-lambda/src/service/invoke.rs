@@ -15,6 +15,7 @@ impl LambdaService {
         invocation_type: InvocationType,
         qualifier: Option<&str>,
         log_tail: bool,
+        request_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         // An unknown alias must 404 like GetFunction does, not silently fall
         // through to $LATEST. resolve_qualifier_to_version returns None for both
@@ -202,7 +203,9 @@ impl LambdaService {
                         layer_zips: layer_zips.clone(),
                         payload: payload.to_vec(),
                         executed_version: executed_version.clone(),
+                        request_id: request_id.to_string(),
                         guard: Some(Box::new(_concurrency_guard)),
+                        on_unrunnable: None,
                     });
                     let mut resp = AwsResponse::json(StatusCode::ACCEPTED, "");
                     if let Ok(v) = http::header::HeaderValue::from_str(&executed_version) {

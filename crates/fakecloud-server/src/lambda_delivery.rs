@@ -116,4 +116,20 @@ impl LambdaDelivery for LambdaDeliveryImpl {
             payload.as_bytes(),
         )
     }
+
+    fn invoke_lambda_async_observed(
+        &self,
+        function_arn: &str,
+        payload: &str,
+        on_unrunnable: fakecloud_core::delivery::AsyncUnrunnableHook,
+    ) -> Result<(), String> {
+        self.record_invocation(function_arn, payload);
+        fakecloud_lambda::queue_async_invocation_observed(
+            &self.lambda_state,
+            self.runtime.clone(),
+            function_arn,
+            payload.as_bytes(),
+            Some(on_unrunnable),
+        )
+    }
 }

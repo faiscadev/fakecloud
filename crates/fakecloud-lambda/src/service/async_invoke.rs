@@ -1,10 +1,13 @@
 //! Asynchronous (`Event`) invocation: Lambda's error handling for queued
-//! events. A failed attempt (a function error, or an invocation Lambda could
-//! not run) is retried up to `MaximumRetryAttempts` times, one minute after
-//! the first attempt and two minutes after the second, unless the event
-//! would outlive `MaximumEventAge`. The final outcome is recorded to the
-//! configured `OnSuccess` / `OnFailure` destination, and a discarded event is
-//! also sent as-is to the function's dead-letter queue.
+//! events. A function error is retried up to `MaximumRetryAttempts` times,
+//! one minute after the first attempt and two minutes after the second. An
+//! attempt Lambda could not run at all (a system error) does not count
+//! against `MaximumRetryAttempts`: the event goes back to the queue and is
+//! tried again with exponential backoff (one second, doubling, at most five
+//! minutes). Either way an event that would outlive `MaximumEventAge` is
+//! discarded. The final outcome is recorded to the configured `OnSuccess` /
+//! `OnFailure` destination, and a discarded event is also sent as-is to the
+//! function's dead-letter queue.
 //!
 //! See <https://docs.aws.amazon.com/lambda/latest/dg/invocation-async-error-handling.html>
 //! and <https://docs.aws.amazon.com/lambda/latest/dg/invocation-async-retain-records.html>.
@@ -12,7 +15,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fakecloud_core::delivery::{DeliveryBus, LambdaInvocationOutput, SqsMessageAttribute};
 
@@ -25,8 +28,22 @@ use fakecloud_core::multi_account::MultiRegionState;
 const DEFAULT_MAX_RETRIES: u32 = 2;
 /// Default `MaximumEventAge`: six hours.
 const DEFAULT_MAX_EVENT_AGE: Duration = Duration::from_secs(6 * 60 * 60);
-/// Wait before the first retry and before the second.
-pub(crate) const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(60), Duration::from_secs(120)];
+/// How long Lambda waits between attempts.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RetryDelays {
+    /// Before the first and the second retry of a function error.
+    pub function_error: [Duration; 2],
+    /// First backoff after a system error; doubles per system error.
+    pub system_error_base: Duration,
+    /// Cap on the system-error backoff.
+    pub system_error_max: Duration,
+}
+
+pub(crate) const RETRY_DELAYS: RetryDelays = RetryDelays {
+    function_error: [Duration::from_secs(60), Duration::from_secs(120)],
+    system_error_base: Duration::from_secs(1),
+    system_error_max: Duration::from_secs(300),
+};
 /// `ErrorMessage` on a dead-letter message is the first 1 KB of the error.
 const DLQ_ERROR_MESSAGE_LIMIT: usize = 1024;
 
@@ -129,42 +146,55 @@ impl AsyncOutcome {
     }
 }
 
-/// Run `attempt` with Lambda's async retry policy. An attempt fails when it
-/// produced a function error or could not run.
+/// Run `attempt` with Lambda's async retry policy: function errors use up
+/// `MaximumRetryAttempts`, system errors (`Err`, the attempt could not run)
+/// back off and retry until `MaximumEventAge`.
 pub(crate) async fn run_attempts<F, Fut>(
     settings: &AsyncSettings,
-    delays: [Duration; 2],
+    delays: RetryDelays,
     mut attempt: F,
 ) -> AsyncOutcome
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<LambdaInvocationOutput, String>>,
 {
-    let start = Instant::now();
+    // Tokio's clock, so a paused test clock moves the event's age too.
+    let start = tokio::time::Instant::now();
     let mut invoke_count = 0u32;
+    let mut function_errors = 0u32;
+    let mut system_errors = 0u32;
     loop {
         let result = attempt().await;
         invoke_count += 1;
-        let failed = match &result {
-            Ok(output) => output.is_function_error(),
-            Err(_) => true,
+        let delay = match &result {
+            Ok(output) if !output.is_function_error() => {
+                return AsyncOutcome {
+                    result,
+                    invoke_count,
+                    condition: Condition::Success,
+                };
+            }
+            Ok(_) => {
+                function_errors += 1;
+                let retries_done = function_errors - 1;
+                if retries_done >= settings.max_retries {
+                    return AsyncOutcome {
+                        result,
+                        invoke_count,
+                        condition: Condition::RetriesExhausted,
+                    };
+                }
+                delays.function_error[(retries_done as usize).min(delays.function_error.len() - 1)]
+            }
+            Err(_) => {
+                let backoff = delays
+                    .system_error_base
+                    .saturating_mul(1u32 << system_errors.min(16))
+                    .min(delays.system_error_max);
+                system_errors += 1;
+                backoff
+            }
         };
-        if !failed {
-            return AsyncOutcome {
-                result,
-                invoke_count,
-                condition: Condition::Success,
-            };
-        }
-        let retries_done = invoke_count - 1;
-        if retries_done >= settings.max_retries {
-            return AsyncOutcome {
-                result,
-                invoke_count,
-                condition: Condition::RetriesExhausted,
-            };
-        }
-        let delay = delays[(retries_done as usize).min(delays.len() - 1)];
         if start.elapsed() + delay > settings.max_event_age {
             return AsyncOutcome {
                 result,
@@ -185,8 +215,14 @@ pub(crate) struct AsyncInvocation {
     pub layer_zips: Vec<Vec<u8>>,
     pub payload: Vec<u8>,
     pub executed_version: String,
+    /// The invocation's request ID (the 202 response's), which its
+    /// destination record and dead-letter message carry.
+    pub request_id: String,
     /// Held until processing finishes (the reserved-concurrency counter).
     pub guard: Option<Box<dyn Send>>,
+    /// Told, once, that an attempt could not run, for a caller waiting on
+    /// the event's effects (a CloudFormation custom resource).
+    pub on_unrunnable: Option<fakecloud_core::delivery::AsyncUnrunnableHook>,
 }
 
 /// Process `inv` in the background, on the current Tokio runtime.
@@ -207,23 +243,32 @@ pub(crate) fn spawn(inv: AsyncInvocation) {
             layer_zips,
             payload,
             executed_version,
+            request_id,
             guard,
+            on_unrunnable,
         } = inv;
         // The reserved-concurrency slot covers the first attempt only: an
         // event waiting for a retry uses no concurrency on AWS.
         let guard = std::sync::Mutex::new(guard);
+        let on_unrunnable = std::sync::Mutex::new(on_unrunnable);
         let outcome = run_attempts(&settings, RETRY_DELAYS, || {
             let runtime = runtime.clone();
             let func = &func;
             let payload = &payload;
             let layer_zips = &layer_zips;
             let slot = guard.lock().ok().and_then(|mut g| g.take());
+            let on_unrunnable = &on_unrunnable;
             async move {
                 let result = runtime
                     .invoke(func, payload, layer_zips)
                     .await
                     .map_err(|e| e.to_string());
                 drop(slot);
+                if let Err(err) = &result {
+                    if let Some(hook) = on_unrunnable.lock().ok().and_then(|mut h| h.take()) {
+                        hook(err.clone());
+                    }
+                }
                 result
             }
         })
@@ -237,7 +282,6 @@ pub(crate) fn spawn(inv: AsyncInvocation) {
             );
         }
         if let Some(bus) = bus {
-            let request_id = uuid::Uuid::new_v4().to_string();
             record_outcome(
                 &bus,
                 &func,
@@ -263,6 +307,18 @@ pub fn queue_async_invocation(
     runtime: Arc<ContainerRuntime>,
     function_arn: &str,
     payload: &[u8],
+) -> Result<(), String> {
+    queue_async_invocation_observed(state, runtime, function_arn, payload, None)
+}
+
+/// [`queue_async_invocation`], telling `on_unrunnable` (once) when an
+/// attempt of the event could not run.
+pub fn queue_async_invocation_observed(
+    state: &crate::SharedLambdaState,
+    runtime: Arc<ContainerRuntime>,
+    function_arn: &str,
+    payload: &[u8],
+    on_unrunnable: Option<fakecloud_core::delivery::AsyncUnrunnableHook>,
 ) -> Result<(), String> {
     let (func, layer_zips, settings, executed_version) = {
         let accounts = state.read();
@@ -301,7 +357,9 @@ pub fn queue_async_invocation(
         layer_zips,
         payload: payload.to_vec(),
         executed_version,
+        request_id: uuid::Uuid::new_v4().to_string(),
         guard: None,
+        on_unrunnable,
     });
     Ok(())
 }
@@ -574,7 +632,7 @@ mod tests {
         results: Vec<Result<LambdaInvocationOutput, String>>,
     ) -> (AsyncOutcome, u32) {
         let calls = AtomicU32::new(0);
-        let outcome = run_attempts(&settings, [Duration::ZERO; 2], || {
+        let outcome = run_attempts(&settings, NO_DELAYS, || {
             let i = calls.fetch_add(1, Ordering::SeqCst) as usize;
             let r = results[i.min(results.len() - 1)].clone();
             async move { r }
@@ -618,15 +676,57 @@ mod tests {
         assert_eq!(outcome.invoke_count, 2);
     }
 
+    const NO_DELAYS: RetryDelays = RetryDelays {
+        function_error: [Duration::ZERO; 2],
+        system_error_base: Duration::ZERO,
+        system_error_max: Duration::ZERO,
+    };
+
     #[tokio::test]
     async fn zero_retries_fails_after_one_attempt() {
         let settings = AsyncSettings {
             max_retries: 0,
             ..AsyncSettings::default()
         };
-        let (outcome, calls) = run_with(settings, vec![Err("no container".into())]).await;
+        let (outcome, calls) = run_with(settings, vec![function_error()]).await;
         assert_eq!(calls, 1);
         assert_eq!(outcome.condition, Condition::RetriesExhausted);
+    }
+
+    #[tokio::test]
+    async fn system_errors_do_not_use_up_retries() {
+        let settings = AsyncSettings {
+            max_retries: 0,
+            ..AsyncSettings::default()
+        };
+        let (outcome, calls) = run_with(
+            settings,
+            vec![Err("no container".into()), Err("no container".into()), ok()],
+        )
+        .await;
+        assert_eq!(calls, 3);
+        assert_eq!(outcome.condition, Condition::Success);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn system_errors_back_off_exponentially_until_the_event_is_too_old() {
+        let settings = AsyncSettings {
+            max_event_age: Duration::from_secs(1000),
+            ..AsyncSettings::default()
+        };
+        let calls = std::sync::Mutex::new(Vec::new());
+        let start = tokio::time::Instant::now();
+        let outcome = run_attempts(&settings, RETRY_DELAYS, || {
+            calls.lock().unwrap().push(start.elapsed().as_secs());
+            async { Err::<LambdaInvocationOutput, _>("no container".to_string()) }
+        })
+        .await;
+        assert_eq!(outcome.condition, Condition::EventAgeExceeded);
+        // 1, 2, 4, ... seconds apart, capped at five minutes.
+        assert_eq!(
+            calls.into_inner().unwrap(),
+            vec![0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 811]
+        );
     }
 
     #[tokio::test(start_paused = true)]

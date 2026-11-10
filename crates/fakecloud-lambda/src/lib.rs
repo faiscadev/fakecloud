@@ -11,7 +11,7 @@ pub(crate) mod state;
 pub mod vpc;
 pub(crate) mod workflows;
 
-pub use service::async_invoke::queue_async_invocation;
+pub use service::async_invoke::{queue_async_invocation, queue_async_invocation_observed};
 pub use service::{
     check_latest_published, publish_latest_published, validate_execution_role, LambdaService,
 };

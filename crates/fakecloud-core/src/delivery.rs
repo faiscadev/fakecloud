@@ -314,6 +314,9 @@ impl LambdaInvocationOutput {
 }
 
 /// Trait for invoking Lambda functions from cross-service integrations.
+/// Told why an attempt of a queued `Event` invocation could not run.
+pub type AsyncUnrunnableHook = Box<dyn FnOnce(String) + Send>;
+
 pub trait LambdaDelivery: Send + Sync {
     /// Invoke a Lambda function with the given payload, synchronously
     /// (`RequestResponse`). The function is identified by ARN. `Ok` means
@@ -339,6 +342,20 @@ pub trait LambdaDelivery: Send + Sync {
     fn invoke_lambda_async(&self, function_arn: &str, payload: &str) -> Result<(), String> {
         let _ = (function_arn, payload);
         Err("this Lambda invoker does not support asynchronous invocation".to_string())
+    }
+
+    /// [`Self::invoke_lambda_async`], also telling `on_unrunnable` (at most
+    /// once) when an attempt of the queued event could not run at all, so a
+    /// caller waiting on the event's effects need not wait out Lambda's
+    /// system-error retries. Invokers that cannot report it never call it.
+    fn invoke_lambda_async_observed(
+        &self,
+        function_arn: &str,
+        payload: &str,
+        on_unrunnable: AsyncUnrunnableHook,
+    ) -> Result<(), String> {
+        drop(on_unrunnable);
+        self.invoke_lambda_async(function_arn, payload)
     }
 }
 
@@ -1179,6 +1196,19 @@ impl DeliveryBus {
         self.lambda_invoker
             .as_ref()
             .map(|invoker| invoker.invoke_lambda_async(function_arn, payload))
+    }
+
+    /// [`Self::invoke_lambda_async`] with an
+    /// [`LambdaDelivery::invoke_lambda_async_observed`] hook.
+    pub fn invoke_lambda_async_observed(
+        &self,
+        function_arn: &str,
+        payload: &str,
+        on_unrunnable: AsyncUnrunnableHook,
+    ) -> Option<Result<(), String>> {
+        self.lambda_invoker.as_ref().map(|invoker| {
+            invoker.invoke_lambda_async_observed(function_arn, payload, on_unrunnable)
+        })
     }
 
     /// Put a record to a Kinesis stream identified by ARN.
