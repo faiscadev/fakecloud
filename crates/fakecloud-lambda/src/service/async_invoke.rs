@@ -151,9 +151,9 @@ impl AttemptError {
             RuntimeError::NoCodeZip(_)
             | RuntimeError::UnsupportedRuntime(_)
             | RuntimeError::ZipExtractionFailed(_) => AttemptError::Permanent(err.to_string()),
-            RuntimeError::ContainerStartFailed(_) | RuntimeError::InvocationFailed(_) => {
-                AttemptError::Transient(err.to_string())
-            }
+            RuntimeError::ContainerStartFailed(_)
+            | RuntimeError::InvocationFailed(_)
+            | RuntimeError::LocalIo(_) => AttemptError::Transient(err.to_string()),
         }
     }
 }
@@ -256,6 +256,50 @@ where
 /// Looks the invoked function (and its layers) up again, `None` once it is
 /// gone.
 pub(crate) type Resolver = Box<dyn Fn() -> Option<(LambdaFunction, Vec<Vec<u8>>)> + Send + Sync>;
+
+/// What an `Invoke` call queued an event for.
+pub(crate) struct InvokedVersion {
+    pub account_id: String,
+    pub region: String,
+    pub function_name: String,
+    /// The alias the call named, if it named one.
+    pub alias: Option<String>,
+    /// The version the call resolved to (`$LATEST` or a number).
+    pub executed_version: String,
+}
+
+/// The function an `Invoke`-queued event runs on each attempt: the version
+/// the call resolved to, while it still exists. Once the function, that
+/// version, or the alias the call named is gone, the event is dropped
+/// rather than run on other code.
+pub(crate) fn invoked_version_resolver(
+    state: crate::SharedLambdaState,
+    target: InvokedVersion,
+) -> Resolver {
+    Box::new(move || {
+        let accounts = state.read();
+        let st = accounts.regional(&target.account_id, &target.region)?;
+        let func = resolve_invoked(st, &target)?;
+        let layers = crate::state::attached_layer_zips(&accounts, &func);
+        Some((func, layers))
+    })
+}
+
+fn resolve_invoked(state: &LambdaState, target: &InvokedVersion) -> Option<LambdaFunction> {
+    let name = &target.function_name;
+    let live = state.functions.get(name)?;
+    if let Some(alias) = &target.alias {
+        state.aliases.get(&format!("{name}:{alias}"))?;
+    }
+    if target.executed_version == "$LATEST" {
+        return Some(live.clone());
+    }
+    state
+        .function_version_snapshots
+        .get(name)
+        .and_then(|versions| versions.get(&target.executed_version))
+        .cloned()
+}
 
 /// A queued `Event` invocation.
 pub(crate) struct AsyncInvocation {
@@ -816,6 +860,54 @@ mod tests {
         assert_eq!(outcome.invoke_count, 1);
     }
 
+    /// An event for a version (or through an alias) deleted before a retry
+    /// is dropped, never run on `$LATEST` instead.
+    #[test]
+    fn a_retry_never_falls_back_from_a_deleted_version() {
+        let mut state = LambdaState::new("123456789012", "us-east-1");
+        let mut latest = test_func();
+        latest.description = "latest".into();
+        state.functions.insert("f".into(), latest);
+        let mut v1 = test_func();
+        v1.description = "v1".into();
+        state
+            .function_version_snapshots
+            .entry("f".into())
+            .or_default()
+            .insert("1".into(), v1);
+        let target = |alias: Option<&str>, version: &str| InvokedVersion {
+            account_id: "123456789012".into(),
+            region: "us-east-1".into(),
+            function_name: "f".into(),
+            alias: alias.map(str::to_string),
+            executed_version: version.into(),
+        };
+        assert_eq!(
+            resolve_invoked(&state, &target(None, "1"))
+                .unwrap()
+                .description,
+            "v1"
+        );
+        assert_eq!(
+            resolve_invoked(&state, &target(None, "$LATEST"))
+                .unwrap()
+                .description,
+            "latest"
+        );
+        // The alias the call named is gone.
+        assert!(resolve_invoked(&state, &target(Some("live"), "1")).is_none());
+        // The version is gone.
+        state
+            .function_version_snapshots
+            .get_mut("f")
+            .unwrap()
+            .clear();
+        assert!(resolve_invoked(&state, &target(None, "1")).is_none());
+        // The function is gone.
+        state.functions.clear();
+        assert!(resolve_invoked(&state, &target(None, "$LATEST")).is_none());
+    }
+
     #[test]
     fn runtime_failures_are_classified() {
         use crate::runtime::RuntimeError;
@@ -825,6 +917,11 @@ mod tests {
         ));
         assert!(matches!(
             AttemptError::of_runtime(&RuntimeError::InvocationFailed("x".into())),
+            AttemptError::Transient(_)
+        ));
+        // A full disk or a lost temp directory is fakecloud's, not the package's.
+        assert!(matches!(
+            AttemptError::of_runtime(&RuntimeError::LocalIo("No space left on device".into())),
             AttemptError::Transient(_)
         ));
         for permanent in [

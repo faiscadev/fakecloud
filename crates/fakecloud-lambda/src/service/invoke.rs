@@ -200,33 +200,20 @@ impl LambdaService {
                         bus: self.delivery_bus.clone(),
                         settings: self.async_settings(&func, account_id, region, qualifier),
                         func: func.clone(),
-                        resolve: {
-                            let state = self.state.clone();
-                            let (account, region, name) = (
-                                account_id.to_string(),
-                                region.to_string(),
-                                function_name.to_string(),
-                            );
-                            let version = resolved_version.clone();
-                            Box::new(move || {
-                                let accounts = state.read();
-                                let st = accounts.regional(&account, &region)?;
-                                // A deleted function's events are dropped,
-                                // whatever version they were for.
-                                let live = st.functions.get(&name)?;
-                                let func = version
-                                    .as_deref()
-                                    .and_then(|v| {
-                                        st.function_version_snapshots
-                                            .get(&name)
-                                            .and_then(|m| m.get(v))
+                        resolve: super::async_invoke::invoked_version_resolver(
+                            self.state.clone(),
+                            super::async_invoke::InvokedVersion {
+                                account_id: account_id.to_string(),
+                                region: region.to_string(),
+                                function_name: function_name.to_string(),
+                                alias: qualifier
+                                    .filter(|q| {
+                                        *q != "$LATEST" && !q.chars().all(|c| c.is_ascii_digit())
                                     })
-                                    .unwrap_or(live)
-                                    .clone();
-                                let layers = crate::state::attached_layer_zips(&accounts, &func);
-                                Some((func, layers))
-                            })
-                        },
+                                    .map(str::to_string),
+                                executed_version: executed_version.clone(),
+                            },
+                        ),
                         payload: payload.to_vec(),
                         executed_version: executed_version.clone(),
                         request_id: request_id.to_string(),

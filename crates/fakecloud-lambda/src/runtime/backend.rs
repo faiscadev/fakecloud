@@ -23,8 +23,14 @@ pub enum RuntimeError {
     ContainerStartFailed(String),
     #[error("invocation failed: {0}")]
     InvocationFailed(String),
+    /// The deployment package is not a readable ZIP archive.
     #[error("ZIP extraction failed: {0}")]
     ZipExtractionFailed(String),
+    /// Unpacking the package failed on fakecloud's side (temporary
+    /// directory, full disk, a worker task dying), not because of the
+    /// package.
+    #[error("could not unpack the deployment package locally: {0}")]
+    LocalIo(String),
 }
 
 /// Opaque per-backend identifier for a launched runtime instance. The
