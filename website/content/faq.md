@@ -67,7 +67,7 @@ Yes. Fits as a GitHub Actions service container, GitLab CI service, CircleCI ser
 
 ### Does fakecloud require Docker?
 
-To run fakecloud itself, no. Single binary, ~120 MB. Docker is required for services that run real containers (Lambda runtimes, RDS engines, ElastiCache engines) — same as LocalStack Pro requires.
+To run fakecloud itself, no. Single binary, ~130 MB. Docker is required for services that run real containers (Lambda runtimes, RDS engines, ElastiCache engines) — same as LocalStack Pro requires.
 
 ### Is fakecloud written from scratch?
 
@@ -119,7 +119,7 @@ GitHub issues: [github.com/faiscadev/fakecloud/issues](https://github.com/faisca
     {"@type": "Question", "name": "Does fakecloud work with Terraform?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. CI runs the upstream hashicorp/terraform-provider-aws TestAcc suites against fakecloud on every commit."}},
     {"@type": "Question", "name": "Does fakecloud work with CDK?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Use the plain cdk binary with AWS_ENDPOINT_URL=http://localhost:4566, or the cdklocal wrapper."}},
     {"@type": "Question", "name": "Can I use fakecloud in CI?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Fits as a GitHub Actions service container, GitLab CI service, CircleCI service, or install-and-run background step. ~300ms startup means negligible CI overhead."}},
-    {"@type": "Question", "name": "Does fakecloud require Docker?", "acceptedAnswer": {"@type": "Answer", "text": "To run fakecloud itself, no. Single binary, ~120 MB. Docker is required only for services that run real containers such as Lambda runtimes, RDS engines, and ElastiCache engines."}},
+    {"@type": "Question", "name": "Does fakecloud require Docker?", "acceptedAnswer": {"@type": "Answer", "text": "To run fakecloud itself, no. Single binary, ~130 MB. Docker is required only for services that run real containers such as Lambda runtimes, RDS engines, and ElastiCache engines."}},
     {"@type": "Question", "name": "Is fakecloud written from scratch?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Written in Rust, no LocalStack code was used. LocalStack is written in Python; fakecloud is written in Rust and ships as a single static binary."}},
     {"@type": "Question", "name": "How does fakecloud validate correctness?", "acceptedAnswer": {"@type": "Answer", "text": "Every commit runs 258,545 conformance test variants generated from AWS's own Smithy models, plus end-to-end tests using the official AWS SDKs, plus the upstream hashicorp/terraform-provider-aws TestAcc suites."}},
     {"@type": "Question", "name": "Can AI coding agents like Claude Code, Cursor, and GitHub Copilot use fakecloud?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Paste-ready snippets for CLAUDE.md, .cursor/rules, and .github/copilot-instructions.md are in the README. Agents can also fetch https://fakecloud.dev/llms.txt for a structured API surface."}},
