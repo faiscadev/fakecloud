@@ -301,6 +301,21 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             // answers with this code (EC2 "Error codes" reference: "The
             // specified Reserved Instances offering does not exist.").
             "InvalidReservedInstancesOfferingId",
+            // The Reserved Instances secondary operations resolve the
+            // reservation, listing and offering ids they are given. Each code
+            // below was recorded from real EC2 for a synthetic id:
+            // `InvalidInput` (Create/CancelReservedInstancesListing on an id
+            // that is not UUID-shaped or an unknown listing,
+            // ModifyReservedInstances on an unknown reservation),
+            // `InvalidReservedInstanceId` and
+            // `InvalidReservedInstancesID.NotFound` (Get/
+            // AcceptReservedInstancesExchangeQuote on an unknown or malformed
+            // reservation), and `InvalidOfferingId` (an exchange target that
+            // names no offering).
+            "InvalidInput",
+            "InvalidReservedInstanceId",
+            "InvalidReservedInstancesID.NotFound",
+            "InvalidOfferingId",
             // A request with `DryRun=true` that would have succeeded: EC2's
             // documented common client error (HTTP 412), answered from the
             // permission check before the request is validated
