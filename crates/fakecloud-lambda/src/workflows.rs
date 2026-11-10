@@ -39,13 +39,6 @@ fn arn_for_capacity_provider(region: &str, account: &str, name: &str) -> String 
     .to_string()
 }
 
-/// `[a-zA-Z0-9-_]+`: a bare capacity provider name.
-pub(crate) fn is_capacity_provider_name(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
 fn capacity_provider_json(cp: &CapacityProvider) -> Value {
     json!({
         "CapacityProviderArn": cp.arn,
@@ -138,7 +131,7 @@ pub(crate) fn get_capacity_provider(
     name: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
     check_len("CapacityProviderName", name, 1, 140)?;
-    let name = crate::capacity::capacity_provider_name_from_label(name)?;
+    let name = crate::capacity::capacity_provider_name_from_label(name, &req.region)?;
     let accts = state.read();
     let empty = crate::state::LambdaState::new(&req.account_id, &req.region);
     let s = accts
@@ -212,7 +205,7 @@ pub fn update_capacity_provider_in(
 ) -> Result<CapacityProvider, AwsServiceError> {
     check_len("CapacityProviderName", name, 1, 140)?;
     let label = name;
-    let name = crate::capacity::capacity_provider_name_from_label(label)?;
+    let name = crate::capacity::capacity_provider_name_from_label(label, region)?;
     let mut accts = state.write();
     let s = accts.regional_mut(account, region);
     let cp = s
@@ -261,7 +254,7 @@ pub fn delete_capacity_provider_in(
 ) -> Result<CapacityProvider, AwsServiceError> {
     check_len("CapacityProviderName", name, 1, 140)?;
     let label = name;
-    let name = crate::capacity::capacity_provider_name_from_label(label)?;
+    let name = crate::capacity::capacity_provider_name_from_label(label, region)?;
     let mut accts = state.write();
     let arn = accts
         .regional(account, region)
@@ -297,7 +290,7 @@ pub(crate) fn list_function_versions_by_capacity_provider(
 ) -> Result<AwsResponse, AwsServiceError> {
     check_len("CapacityProviderName", name, 1, 140)?;
     let label = name;
-    let name = crate::capacity::capacity_provider_name_from_label(label)?;
+    let name = crate::capacity::capacity_provider_name_from_label(label, &req.region)?;
     // `MaxItems` (1..50) is range-checked by the dispatcher.
     let max_items = req
         .query_params

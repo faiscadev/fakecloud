@@ -166,14 +166,15 @@ fn validate_invoke_headers(action: &str, req: &AwsRequest) -> Result<(), AwsServ
 /// Smithy `CapacityProviderArn`: `@length(1, 140)` and the
 /// `...:lambda:<region>:<account>:capacity-provider:<name>` `@pattern` (the
 /// form `CreateCapacityProvider` issues). `own_region` is the request's
-/// region, accepted as the ARN region like every ARN fakecloud mints.
-fn validate_capacity_provider_arn(arn: &str, own_region: &str) -> Result<(), AwsServiceError> {
+/// region, accepted as the ARN region like every ARN fakecloud mints; the
+/// pattern is the one `CreateFunction` checks through
+/// [`crate::capacity::parse_capacity_provider_arn`].
+pub(crate) fn validate_capacity_provider_arn(
+    arn: &str,
+    own_region: &str,
+) -> Result<(), AwsServiceError> {
     crate::extras::check_len("CapacityProviderArn", arn, 1, 140)?;
-    let ok = match crate::extras::lambda_arn_resource(arn, false, Some(own_region)).as_deref() {
-        Some(["capacity-provider", name]) => crate::workflows::is_capacity_provider_name(name),
-        _ => false,
-    };
-    if ok {
+    if crate::capacity::parse_capacity_provider_arn(arn, own_region).is_some() {
         Ok(())
     } else {
         Err(crate::extras::constraint_violation(
@@ -838,7 +839,7 @@ struct CreateFunctionInput {
 }
 
 impl CreateFunctionInput {
-    fn from_body(body: &Value) -> Result<Self, AwsServiceError> {
+    fn from_body(body: &Value, own_region: &str) -> Result<Self, AwsServiceError> {
         let function_name = body["FunctionName"]
             .as_str()
             .ok_or_else(|| {
@@ -954,7 +955,7 @@ impl CreateFunctionInput {
         let durable_config = body["DurableConfig"]
             .is_object()
             .then(|| body["DurableConfig"].clone());
-        let capacity_provider_config = crate::capacity::parse_config(body)?;
+        let capacity_provider_config = crate::capacity::parse_config(body, own_region)?;
         // A Lambda Managed Instances function defaults to the smallest size
         // it can run with (2048 MB, 1 vCPU) instead of 128 MB.
         let default_memory = if capacity_provider_config.is_some() {

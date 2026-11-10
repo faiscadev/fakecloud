@@ -74,7 +74,7 @@ impl ResourceProvisioner {
             ));
         }
 
-        let cfg = parse_lambda_function_props(props)?;
+        let cfg = parse_lambda_function_props(props, &self.region)?;
         self.validate_lambda_execution_role(&cfg.role)?;
         let function_arn =
             fakecloud_lambda::function_arn(&self.region, &self.account_id, &function_name);
@@ -324,7 +324,7 @@ impl ResourceProvisioner {
     ) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
         let function_name = existing.physical_id.clone();
-        let cfg = parse_lambda_function_props(props)?;
+        let cfg = parse_lambda_function_props(props, &self.region)?;
         self.validate_lambda_execution_role(&cfg.role)?;
 
         let new_code_zip = if cfg.code_zip.is_some() {
@@ -1393,7 +1393,7 @@ impl ResourceProvisioner {
         let name = props
             .get("CapacityProviderName")
             .and_then(|v| v.as_str())
-            .map(|n| fakecloud_lambda::capacity::name_from_reference(n).to_string())
+            .map(|n| fakecloud_lambda::capacity::name_from_reference(n, &self.region).to_string())
             .unwrap_or_else(|| self.physical_name(resource));
         let mut body = props.clone();
         if !body.is_object() {
@@ -1433,7 +1433,9 @@ impl ResourceProvisioner {
         let name_changed = props
             .get("CapacityProviderName")
             .and_then(|v| v.as_str())
-            .is_some_and(|n| fakecloud_lambda::capacity::name_from_reference(n) != cp.name);
+            .is_some_and(|n| {
+                fakecloud_lambda::capacity::name_from_reference(n, &self.region) != cp.name
+            });
         let null = serde_json::Value::Null;
         let prop = |key: &str| props.get(key).unwrap_or(&null);
         name_changed

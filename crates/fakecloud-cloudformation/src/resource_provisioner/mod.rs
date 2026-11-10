@@ -513,7 +513,10 @@ struct LambdaFunctionProps {
 /// into a `LambdaFunctionProps`. Defaults match the AWS Lambda
 /// CreateFunction API: `python3.12` runtime, `index.handler` handler,
 /// `Zip` package type, `x86_64` architecture, 3s timeout, 128MB memory.
-fn parse_lambda_function_props(props: &serde_json::Value) -> Result<LambdaFunctionProps, String> {
+fn parse_lambda_function_props(
+    props: &serde_json::Value,
+    region: &str,
+) -> Result<LambdaFunctionProps, String> {
     let runtime = props
         .get("Runtime")
         .and_then(|v| v.as_str())
@@ -535,7 +538,7 @@ fn parse_lambda_function_props(props: &serde_json::Value) -> Result<LambdaFuncti
         .unwrap_or_default()
         .to_string();
     let timeout = props.get("Timeout").and_then(|v| v.as_i64()).unwrap_or(3);
-    let capacity_provider_config = fakecloud_lambda::capacity::parse_config(props)
+    let capacity_provider_config = fakecloud_lambda::capacity::parse_config(props, region)
         .map_err(|e| format!("{}: {}", e.code(), e.message()))?;
     // A Lambda Managed Instances function defaults to 2048 MB, the smallest
     // size it can run with.

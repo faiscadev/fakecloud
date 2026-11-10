@@ -50,7 +50,13 @@ pub(crate) fn is_bare_name(s: &str) -> bool {
 
 /// The parts of a capacity provider ARN matching
 /// [`CAPACITY_PROVIDER_ARN_PATTERN`]: `(partition, region, account, name)`.
-pub(crate) fn parse_capacity_provider_arn(arn: &str) -> Option<(&str, &str, &str, &str)> {
+/// `own_region` (the server's region) is accepted as the ARN region too: the
+/// server's `--region` need not look like an AWS region (`--region local`),
+/// yet the provider ARNs fakecloud mints there must still parse.
+pub(crate) fn parse_capacity_provider_arn<'a>(
+    arn: &'a str,
+    own_region: &str,
+) -> Option<(&'a str, &'a str, &'a str, &'a str)> {
     let parts: Vec<&str> = arn.split(':').collect();
     let [prefix, partition, service, region, account, kind, name] = parts.as_slice() else {
         return None;
@@ -61,7 +67,7 @@ pub(crate) fn parse_capacity_provider_arn(arn: &str) -> Option<(&str, &str, &str
     let ok = *prefix == "arn"
         && partition_ok
         && *service == "lambda"
-        && crate::extras::is_lambda_arn_region(region)
+        && (crate::extras::is_lambda_arn_region(region) || *region == own_region)
         && account.len() == 12
         && account.bytes().all(|b| b.is_ascii_digit())
         && *kind == "capacity-provider"
@@ -71,9 +77,10 @@ pub(crate) fn parse_capacity_provider_arn(arn: &str) -> Option<(&str, &str, &str
 }
 
 /// The name a capacity provider reference names: the name itself, or the
-/// last segment of a provider ARN.
-pub fn name_from_reference(reference: &str) -> &str {
-    parse_capacity_provider_arn(reference)
+/// last segment of a provider ARN. `own_region` as for
+/// [`parse_capacity_provider_arn`].
+pub fn name_from_reference<'a>(reference: &'a str, own_region: &str) -> &'a str {
+    parse_capacity_provider_arn(reference, own_region)
         .map(|(_, _, _, name)| name)
         .unwrap_or(reference)
 }
@@ -82,11 +89,14 @@ pub fn name_from_reference(reference: &str) -> &str {
 /// provider's ARN: the bare name, or the `ValidationException` the label's
 /// pattern raises. An ARN naming another account or region resolves to its
 /// name too; the lookup in the caller's state then finds no such provider.
-pub(crate) fn capacity_provider_name_from_label(label: &str) -> Result<&str, AwsServiceError> {
+pub(crate) fn capacity_provider_name_from_label<'a>(
+    label: &'a str,
+    own_region: &str,
+) -> Result<&'a str, AwsServiceError> {
     if is_bare_name(label) {
         return Ok(label);
     }
-    if let Some((_, _, _, name)) = parse_capacity_provider_arn(label) {
+    if let Some((_, _, _, name)) = parse_capacity_provider_arn(label, own_region) {
         return Ok(name);
     }
     Err(constraint_violation(
@@ -122,9 +132,11 @@ fn validation(msg: impl Into<String>) -> AwsServiceError {
 
 /// Parse a request's `CapacityProviderConfig` member, applying its Smithy
 /// constraints (`ValidationException`, as Lambda's input validation
-/// reports them). `None` when the request carries no config.
+/// reports them). `None` when the request carries no config. `own_region` as
+/// for [`parse_capacity_provider_arn`].
 pub fn parse_config(
     body: &Value,
+    own_region: &str,
 ) -> Result<Option<FunctionCapacityProviderConfig>, AwsServiceError> {
     let Some(cfg) = body.get("CapacityProviderConfig").filter(|v| !v.is_null()) else {
         return Ok(None);
@@ -138,7 +150,7 @@ pub fn parse_config(
         None | Some(Value::Null) => return Err(not_null(&arn_member)),
         Some(v) => v.as_str().unwrap_or_default().to_string(),
     };
-    if parse_capacity_provider_arn(&arn).is_none() {
+    if parse_capacity_provider_arn(&arn, own_region).is_none() {
         return Err(constraint_violation(
             &arn,
             &arn_member,
@@ -357,8 +369,8 @@ pub(crate) fn locate_provider<'a>(
     region: &str,
     iam_mode: IamMode,
 ) -> Result<(&'a str, &'a str), AwsServiceError> {
-    let (partition, arn_region, account, name) =
-        parse_capacity_provider_arn(arn).ok_or_else(|| {
+    let (partition, arn_region, account, name) = parse_capacity_provider_arn(arn, region)
+        .ok_or_else(|| {
             invalid_param(format!(
                 "Capacity provider arn invalid: capacity-provider:{arn}"
             ))
@@ -591,9 +603,10 @@ mod tests {
 
     #[test]
     fn arn_pattern_matches_the_model() {
-        assert!(parse_capacity_provider_arn(ARN).is_some());
+        assert!(parse_capacity_provider_arn(ARN, "us-east-1").is_some());
         assert!(parse_capacity_provider_arn(
-            "arn:aws-cn:lambda:cn-north-1:123456789012:capacity-provider:x"
+            "arn:aws-cn:lambda:cn-north-1:123456789012:capacity-provider:x",
+            "us-east-1"
         )
         .is_some());
         for bad in [
@@ -603,26 +616,71 @@ mod tests {
             "arn:aws:s3:us-east-1:123456789012:capacity-provider:x",
             "arn:aws:lambda:us-east-1:123456789012:capacity-provider:a.b",
         ] {
-            assert!(parse_capacity_provider_arn(bad).is_none(), "{bad}");
+            assert!(
+                parse_capacity_provider_arn(bad, "us-east-1").is_none(),
+                "{bad}"
+            );
         }
     }
 
     #[test]
+    fn the_server_region_is_an_arn_region_even_when_it_is_not_aws_shaped() {
+        // Under `--region local` fakecloud mints provider ARNs in `local`; the
+        // parser, prevalidation and CreateFunction must all accept them.
+        let minted = "arn:aws:lambda:local:123456789012:capacity-provider:cp1";
+        assert_eq!(
+            parse_capacity_provider_arn(minted, "local"),
+            Some(("aws", "local", "123456789012", "cp1"))
+        );
+        assert!(parse_capacity_provider_arn(minted, "us-east-1").is_none());
+        assert!(
+            parse_capacity_provider_arn(
+                "arn:aws:lambda:other:123456789012:capacity-provider:cp1",
+                "local"
+            )
+            .is_none(),
+            "only the server's own non-AWS region is accepted"
+        );
+        assert_eq!(name_from_reference(minted, "local"), "cp1");
+        assert_eq!(
+            capacity_provider_name_from_label(minted, "local").unwrap(),
+            "cp1"
+        );
+        let cfg = parse_config(
+            &json!({"CapacityProviderConfig": {
+                "LambdaManagedInstancesCapacityProviderConfig": {
+                    "CapacityProviderArn": minted}}}),
+            "local",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(cfg.capacity_provider_arn, minted);
+        assert_eq!(
+            locate_provider(minted, "123456789012", "local", IamMode::Off).unwrap(),
+            ("123456789012", "cp1")
+        );
+        assert!(crate::service::validate_capacity_provider_arn(minted, "local").is_ok());
+    }
+
+    #[test]
     fn parse_config_reports_constraint_violations_like_lambda() {
-        let err = parse_config(&json!({"CapacityProviderConfig": {}})).unwrap_err();
+        let err = parse_config(&json!({"CapacityProviderConfig": {}}), "us-east-1").unwrap_err();
         assert_eq!(err.code(), "ValidationException");
         assert!(err.message().contains(
             "Value null at 'capacityProviderConfig.lambdaManagedInstancesCapacityProviderConfig'"
         ));
 
-        let err = parse_config(&json!({"CapacityProviderConfig": {
-            "LambdaManagedInstancesCapacityProviderConfig": {}}}))
+        let err = parse_config(
+            &json!({"CapacityProviderConfig": {
+            "LambdaManagedInstancesCapacityProviderConfig": {}}}),
+            "us-east-1",
+        )
         .unwrap_err();
         assert!(err.message().contains("capacityProviderArn' failed"));
 
         let err = parse_config(&json!({"CapacityProviderConfig": {
             "LambdaManagedInstancesCapacityProviderConfig": {
-                "CapacityProviderArn": "arn:aws:lambda:us-east-1:123456789012:capacity-provider/x"}}}))
+                "CapacityProviderArn": "arn:aws:lambda:us-east-1:123456789012:capacity-provider/x"}}}), "us-east-1")
         .unwrap_err();
         assert!(err.message().contains("regular expression pattern"));
 
@@ -630,21 +688,27 @@ mod tests {
             (0, "greater than or equal to 1"),
             (1601, "less than or equal to 1600"),
         ] {
-            let err = parse_config(&json!({"CapacityProviderConfig": {
+            let err = parse_config(
+                &json!({"CapacityProviderConfig": {
                 "LambdaManagedInstancesCapacityProviderConfig": {
-                    "CapacityProviderArn": ARN, "PerExecutionEnvironmentMaxConcurrency": n}}}))
+                    "CapacityProviderArn": ARN, "PerExecutionEnvironmentMaxConcurrency": n}}}),
+                "us-east-1",
+            )
             .unwrap_err();
             assert_eq!(err.code(), "ValidationException");
             assert!(err.message().contains(needle), "{}", err.message());
         }
         for (r, needle) in [(1.0, "Value '1.0'"), (9.0, "less than or equal to 8")] {
-            let err = parse_config(&json!({"CapacityProviderConfig": {
+            let err = parse_config(
+                &json!({"CapacityProviderConfig": {
                 "LambdaManagedInstancesCapacityProviderConfig": {
-                    "CapacityProviderArn": ARN, "ExecutionEnvironmentMemoryGiBPerVCpu": r}}}))
+                    "CapacityProviderArn": ARN, "ExecutionEnvironmentMemoryGiBPerVCpu": r}}}),
+                "us-east-1",
+            )
             .unwrap_err();
             assert!(err.message().contains(needle), "{}", err.message());
         }
-        assert_eq!(parse_config(&json!({})).unwrap(), None);
+        assert_eq!(parse_config(&json!({}), "us-east-1").unwrap(), None);
     }
 
     #[test]
@@ -810,9 +874,15 @@ mod tests {
 
     #[test]
     fn name_labels_take_a_name_or_an_arn() {
-        assert_eq!(capacity_provider_name_from_label("cp1").unwrap(), "cp1");
-        assert_eq!(capacity_provider_name_from_label(ARN).unwrap(), "cp1");
-        let err = capacity_provider_name_from_label("bad/name").unwrap_err();
+        assert_eq!(
+            capacity_provider_name_from_label("cp1", "us-east-1").unwrap(),
+            "cp1"
+        );
+        assert_eq!(
+            capacity_provider_name_from_label(ARN, "us-east-1").unwrap(),
+            "cp1"
+        );
+        let err = capacity_provider_name_from_label("bad/name", "us-east-1").unwrap_err();
         assert_eq!(err.code(), "ValidationException");
         assert!(err.message().contains("at 'capacityProviderName'"));
     }

@@ -5,7 +5,7 @@ use super::*;
 impl LambdaService {
     pub(crate) fn create_function(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
-        let mut input = CreateFunctionInput::from_body(&body)?;
+        let mut input = CreateFunctionInput::from_body(&body, &req.region)?;
         if let Some(cfg) = input.vpc_config.take() {
             input.vpc_config = Some(self.resolve_vpc_config(&req.account_id, &req.region, cfg)?);
         }

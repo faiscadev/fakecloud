@@ -256,15 +256,8 @@ pub(crate) fn check_optional_len(
 /// ARN patterns: `arn:<partition>:lambda:<region>:\d{12}:...`, the partition
 /// `aws[a-zA-Z-]*` (or empty when `partition_optional`, for patterns that
 /// write `(aws[a-zA-Z-]*)?`) and the region
-/// `(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\d{1}`. `own_region` is
-/// also accepted as the region: the server's `--region` need not look like an
-/// AWS region (`--region local`), yet the ARNs fakecloud mints there must
-/// still address their resource.
-pub(crate) fn lambda_arn_resource<'a>(
-    arn: &'a str,
-    partition_optional: bool,
-    own_region: Option<&str>,
-) -> Option<Vec<&'a str>> {
+/// `(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\d{1}`.
+pub(crate) fn lambda_arn_resource(arn: &str, partition_optional: bool) -> Option<Vec<&str>> {
     let mut parts = arn.split(':');
     let (prefix, partition, service, region, account) = (
         parts.next()?,
@@ -280,7 +273,7 @@ pub(crate) fn lambda_arn_resource<'a>(
     let head_ok = prefix == "arn"
         && partition_ok
         && service == "lambda"
-        && (is_lambda_arn_region(region) || own_region == Some(region))
+        && is_lambda_arn_region(region)
         && account.len() == 12
         && account.bytes().all(|b| b.is_ascii_digit());
     head_ok.then(|| parts.collect())
@@ -294,7 +287,7 @@ const CSC_ARN_PATTERN: &str = "arn:(aws[a-zA-Z-]*)?:lambda:(eusc-)?[a-z]{2}((-go
 /// letters or digits.
 pub(crate) fn validate_csc_arn(arn: &str) -> Result<(), AwsServiceError> {
     check_len("CodeSigningConfigArn", arn, 0, 200)?;
-    let ok = match lambda_arn_resource(arn, true, None).as_deref() {
+    let ok = match lambda_arn_resource(arn, true).as_deref() {
         Some(["code-signing-config", id]) => id.strip_prefix("csc-").is_some_and(|rest| {
             rest.len() == 17
                 && rest
@@ -363,7 +356,7 @@ pub(crate) fn is_lambda_arn_region(region: &str) -> bool {
 /// `arn:(aws[a-zA-Z-]*)?:lambda:<region>:\d{12}:layer:[a-zA-Z0-9-_]+`.
 fn is_layer_name_arn(arn: &str) -> bool {
     matches!(
-        lambda_arn_resource(arn, true, None).as_deref(),
+        lambda_arn_resource(arn, true).as_deref(),
         Some(["layer", name]) if is_bare_layer_name(name)
     )
 }
@@ -592,7 +585,7 @@ impl LambdaService {
         } else {
             None
         };
-        let requested_cpc = crate::capacity::parse_config(&body)?;
+        let requested_cpc = crate::capacity::parse_config(&body, &req.region)?;
         let caller = self.layer_caller(req);
         let mut accounts = self.state.write();
         // Pre-resolve layer attachments before re-borrowing accounts mutably
