@@ -573,15 +573,15 @@ fn account_references(account: &AccountState) -> impl Iterator<Item = Reference<
         let query_args = f
             .config
             .query_arg_profile_config
-            .query_arg_profiles
             .iter()
+            .flat_map(|c| &c.query_arg_profiles)
             .flat_map(|p| p.items.iter().flat_map(|i| &i.query_arg_profile))
             .map(|p| p.profile_id.as_str());
         let content_types = f
             .config
             .content_type_profile_config
-            .content_type_profiles
             .iter()
+            .flat_map(|c| &c.content_type_profiles)
             .flat_map(|p| p.items.iter().flat_map(|i| &i.content_type_profile))
             .filter_map(|p| p.profile_id.as_deref());
         query_args
@@ -1995,7 +1995,7 @@ mod tests {
                 etag: "E1".into(),
                 last_modified_time: now,
                 config: crate::fle::FieldLevelEncryptionConfig {
-                    content_type_profile_config: crate::fle::ContentTypeProfileConfig {
+                    content_type_profile_config: Some(crate::fle::ContentTypeProfileConfig {
                         content_type_profiles: Some(crate::fle::ContentTypeProfiles {
                             quantity: 1,
                             items: Some(crate::fle::ContentTypeProfileItems {
@@ -2006,7 +2006,7 @@ mod tests {
                             }),
                         }),
                         ..Default::default()
-                    },
+                    }),
                     ..Default::default()
                 },
             },

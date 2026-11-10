@@ -1180,7 +1180,7 @@ mod tests {
 
     /// Every generated CreateDistribution / CreateDistributionWithTags body
     /// reaches the real CloudFront handler as XML it can deserialize, and the
-    /// minimal `required_only` request creates a distribution. Before the
+    /// `required_only` request, given a cache policy, creates a distribution. Before the
     /// probe serialized restXml, these were JSON and every variant was
     /// rejected as `InvalidArgument` without the handler ever running.
     #[tokio::test]
@@ -1201,8 +1201,24 @@ mod tests {
                 &std::collections::HashMap::new(),
             );
             assert!(!variants.is_empty());
+            // The generated variants follow the Smithy shapes only, and
+            // CloudFront refuses each of them on semantics AWS also checks
+            // (a legacy cache behavior without MinTTL, tenant-only fields on a
+            // direct distribution, ...). One request made valid by naming a
+            // cache policy proves a probe-serialized body is accepted.
+            let required_only = variants
+                .iter()
+                .find(|v| v.name == "required_only")
+                .expect("required_only variant");
+            let mut valid_input = required_only.input.clone();
+            with_cache_policy(&mut valid_input);
+            let valid = crate::generators::TestVariant {
+                name: "required_only_with_cache_policy".into(),
+                input: valid_input,
+                ..required_only.clone()
+            };
             let mut created = false;
-            for variant in &variants {
+            for variant in variants.iter().chain(std::iter::once(&valid)) {
                 let (method, path_and_query, headers, body) =
                     super::super::rest_request::build_http_request_from_model(
                         op,
@@ -1245,6 +1261,9 @@ mod tests {
                         assert_eq!(resp.status.as_u16(), 201, "{op_name} {}", variant.name);
                         created = true;
                     }
+                    Err(e) if variant.name == valid.name => {
+                        panic!("{op_name} {}: {}\n{body}", variant.name, e.message())
+                    }
                     Err(e) => {
                         // A generated body may still be semantically invalid
                         // (random origin ids, omitted required members), but a
@@ -1278,6 +1297,30 @@ mod tests {
                 }
             }
             assert!(created, "no {op_name} variant created a distribution");
+        }
+    }
+
+    /// Points every `DefaultCacheBehavior` in `input` at the AWS managed
+    /// `CachingOptimized` policy, which replaces the legacy TTL and
+    /// forwarded-values members a cache behavior otherwise requires.
+    fn with_cache_policy(input: &mut serde_json::Value) {
+        match input {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map.iter_mut() {
+                    if key == "DefaultCacheBehavior" {
+                        if let serde_json::Value::Object(behavior) = value {
+                            behavior.insert(
+                                "CachePolicyId".into(),
+                                "658327ea-f89d-4fab-a63d-7e88639e58f6".into(),
+                            );
+                        }
+                    } else {
+                        with_cache_policy(value);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(with_cache_policy),
+            _ => {}
         }
     }
 }

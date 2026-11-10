@@ -3651,16 +3651,18 @@ mod tests {
                 },
             );
             let mut config = crate::fle::FieldLevelEncryptionConfig::default();
-            config.query_arg_profile_config.query_arg_profiles =
-                Some(crate::fle::QueryArgProfiles {
-                    quantity: 1,
-                    items: Some(crate::fle::QueryArgProfileItems {
-                        query_arg_profile: vec![crate::fle::QueryArgProfile {
-                            query_arg: "q".into(),
-                            profile_id: "prof".into(),
-                        }],
-                    }),
-                });
+            config
+                .query_arg_profile_config
+                .get_or_insert_with(Default::default)
+                .query_arg_profiles = Some(crate::fle::QueryArgProfiles {
+                quantity: 1,
+                items: Some(crate::fle::QueryArgProfileItems {
+                    query_arg_profile: vec![crate::fle::QueryArgProfile {
+                        query_arg: "q".into(),
+                        profile_id: "prof".into(),
+                    }],
+                }),
+            });
             a.field_level_encryptions.insert(
                 "fle".into(),
                 crate::fle::StoredFieldLevelEncryption {
