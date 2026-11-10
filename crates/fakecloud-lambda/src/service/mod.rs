@@ -2225,7 +2225,25 @@ impl AwsService for LambdaService {
                         }
                         _ => &state.account_id,
                     };
-                    function_arn(&request.region, account, &name)
+                    let arn = function_arn(&request.region, account, &name);
+                    // An invocation of a version or alias is of that
+                    // qualified ARN, so identity policies scoped to the
+                    // function alone do not cover it and the resource policy
+                    // consulted is that qualifier's own, as on AWS.
+                    let invoked_qualifier = match action_str {
+                        "Invoke" | "InvokeWithResponseStream" => request
+                            .query_params
+                            .get("Qualifier")
+                            .cloned()
+                            .or_else(|| qualifier_from_function_ref(&raw)),
+                        _ => None,
+                    };
+                    match crate::resource_policy::PolicyQualifier::of(invoked_qualifier.as_deref())
+                        .suffix()
+                    {
+                        Some(q) => format!("{arn}:{q}"),
+                        None => arn,
+                    }
                 }
             }
             "CreateFunction" => {

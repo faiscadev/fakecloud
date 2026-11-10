@@ -6251,3 +6251,137 @@ async fn a_response_stream_to_an_unknown_alias_is_not_found() {
         err.message()
     );
 }
+
+#[test]
+fn iam_action_for_an_invocation_of_a_qualifier_is_of_the_qualified_arn() {
+    let svc = LambdaService::new(make_state());
+    let invoke = |path: &str, qualifier: Option<&str>| {
+        let mut req = make_request(Method::POST, path, "");
+        if let Some(q) = qualifier {
+            req.query_params
+                .insert("Qualifier".to_string(), q.to_string());
+        }
+        svc.iam_action_for(&req).unwrap().resource
+    };
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:f";
+    assert_eq!(
+        invoke("/2015-03-31/functions/f/invocations", Some("PROD")),
+        format!("{arn}:PROD")
+    );
+    assert_eq!(
+        invoke("/2015-03-31/functions/f:7/invocations", None),
+        format!("{arn}:7")
+    );
+    assert_eq!(
+        invoke("/2015-03-31/functions/f/invocations", Some("$LATEST")),
+        arn
+    );
+    // Only invocations are qualified: reading the alias's policy is an
+    // operation on the function.
+    let mut get_policy = make_request(Method::GET, "/2015-03-31/functions/f/policy", "");
+    get_policy
+        .query_params
+        .insert("Qualifier".to_string(), "PROD".to_string());
+    assert_eq!(svc.iam_action_for(&get_policy).unwrap().resource, arn);
+}
+
+#[tokio::test]
+async fn an_alias_has_a_resource_policy_of_its_own() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "pfn").await;
+    call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/functions/pfn/versions",
+        &[],
+        json!({}),
+    )
+    .await
+    .unwrap();
+    call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/functions/pfn/aliases",
+        &[],
+        json!({"Name": "PROD", "FunctionVersion": "1"}),
+    )
+    .await
+    .unwrap();
+    let grant = json!({"StatementId": "alias-only", "Action": "lambda:InvokeFunction", "Principal": "s3.amazonaws.com"});
+    let added = call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/functions/pfn/policy",
+        &[("Qualifier", "PROD")],
+        grant.clone(),
+    )
+    .await
+    .unwrap();
+    let statement: Value =
+        serde_json::from_str(json_of(&added)["Statement"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        statement["Resource"],
+        "arn:aws:lambda:us-east-1:123456789012:function:pfn:PROD"
+    );
+    let policy_of = |qualifier: Option<&'static str>| {
+        let svc = &svc;
+        async move {
+            let query: Vec<(&str, &str)> =
+                qualifier.map(|q| ("Qualifier", q)).into_iter().collect();
+            call_with(
+                svc,
+                Method::GET,
+                "/2015-03-31/functions/pfn/policy",
+                &query,
+                json!({}),
+            )
+            .await
+            .map(|r| json_of(&r))
+        }
+    };
+    let alias_policy = policy_of(Some("PROD")).await.unwrap();
+    assert!(alias_policy["Policy"]
+        .as_str()
+        .unwrap()
+        .contains("alias-only"));
+    // The version the alias points to, and the function, have none.
+    for q in [Some("1"), None] {
+        let err = policy_of(q).await.expect_err("the alias's grant leaked");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND, "{q:?}");
+    }
+    // The same statement id is free on the version: it is another policy.
+    call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/functions/pfn/policy",
+        &[("Qualifier", "1")],
+        grant,
+    )
+    .await
+    .unwrap();
+    call_with(
+        &svc,
+        Method::DELETE,
+        "/2015-03-31/functions/pfn/policy/alias-only",
+        &[("Qualifier", "PROD")],
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let alias_policy = policy_of(Some("PROD")).await.unwrap();
+    assert!(!alias_policy["Policy"]
+        .as_str()
+        .unwrap()
+        .contains("alias-only"));
+    assert!(policy_of(Some("1")).await.unwrap()["Policy"]
+        .as_str()
+        .unwrap()
+        .contains("alias-only"));
+    // A missing alias is not found.
+    let err = policy_of(Some("BETA")).await.unwrap_err();
+    assert!(
+        err.message().ends_with(":function:pfn:BETA"),
+        "{}",
+        err.message()
+    );
+}

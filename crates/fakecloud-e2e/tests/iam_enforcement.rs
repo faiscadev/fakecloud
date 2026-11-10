@@ -2273,6 +2273,109 @@ async fn lambda_function_policy_grants_invoke_without_identity_policy() {
     }
 }
 
+/// An alias has a resource policy of its own: a grant on the alias admits
+/// invocations of the alias only, not of the function or of the version
+/// the alias points to, and GetPolicy reads each qualifier's own document.
+#[tokio::test]
+async fn lambda_alias_policy_grants_invoking_that_alias_only() {
+    let server = start_strict().await;
+    let boot = sdk_config_with(&server, "test", "test").await;
+    let lambda_boot = aws_sdk_lambda::Client::new(&boot);
+    lambda_boot
+        .create_function()
+        .function_name("lam-alias-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(aws_sdk_lambda::primitives::Blob::new(
+                    make_empty_python_zip(),
+                ))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    lambda_boot
+        .publish_version()
+        .function_name("lam-alias-fn")
+        .send()
+        .await
+        .unwrap();
+    lambda_boot
+        .create_alias()
+        .function_name("lam-alias-fn")
+        .name("PROD")
+        .function_version("1")
+        .send()
+        .await
+        .unwrap();
+    lambda_boot
+        .add_permission()
+        .function_name("lam-alias-fn")
+        .qualifier("PROD")
+        .statement_id("alias-grant")
+        .action("lambda:InvokeFunction")
+        .principal("arn:aws:iam::123456789012:user/lam_alias_invoker")
+        .send()
+        .await
+        .unwrap();
+    let alias_policy = lambda_boot
+        .get_policy()
+        .function_name("lam-alias-fn")
+        .qualifier("PROD")
+        .send()
+        .await
+        .unwrap();
+    assert!(alias_policy.policy().unwrap().contains(
+        "\"Resource\":\"arn:aws:lambda:us-east-1:123456789012:function:lam-alias-fn:PROD\""
+    ));
+    for qualifier in [Some("1"), None] {
+        let err = lambda_boot
+            .get_policy()
+            .function_name("lam-alias-fn")
+            .set_qualifier(qualifier.map(str::to_string))
+            .send()
+            .await
+            .expect_err("the alias's grant is not the version's or the function's");
+        assert!(
+            format!("{err:?}").contains("ResourceNotFoundException"),
+            "{err:?}"
+        );
+    }
+
+    let (akid, secret) = bootstrap_user(&server, "lam_alias_invoker").await;
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let lambda = aws_sdk_lambda::Client::new(&cfg);
+    // The alias: allowed (a runtime error at most, never AccessDenied).
+    for invoke in [
+        lambda
+            .invoke()
+            .function_name("lam-alias-fn")
+            .qualifier("PROD"),
+        lambda.invoke().function_name("lam-alias-fn:PROD"),
+    ] {
+        if let Err(err) = invoke.send().await {
+            assert!(
+                !format!("{err:?}").contains("AccessDeniedException"),
+                "the alias grant should admit this invocation: {err:?}"
+            );
+        }
+    }
+    // The function and the version: no grant covers them.
+    for invoke in [
+        lambda.invoke().function_name("lam-alias-fn"),
+        lambda.invoke().function_name("lam-alias-fn").qualifier("1"),
+    ] {
+        let err = invoke.send().await.unwrap_err();
+        assert!(
+            format!("{err:?}").contains("AccessDeniedException"),
+            "expected AccessDeniedException, got {err:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn lambda_function_without_policy_denies_non_root_invoke() {
     // Sanity pair: same function shape but without AddPermission.

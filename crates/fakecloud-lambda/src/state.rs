@@ -361,6 +361,11 @@ pub struct FunctionAlias {
     pub description: String,
     pub revision_id: String,
     pub routing_config: Option<serde_json::Value>,
+    /// The alias's own resource-based policy (`AddPermission` with the
+    /// alias as `Qualifier`): AWS keeps it apart from the policy of the
+    /// version the alias points to and from the function's.
+    #[serde(default)]
+    pub policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -922,6 +927,7 @@ mod tests {
                 description: String::new(),
                 revision_id: "r".into(),
                 routing_config: None,
+                policy: None,
             },
         );
         legacy.function_concurrency.insert("west".into(), 5);
