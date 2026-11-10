@@ -7,6 +7,9 @@ use std::path::Path;
 #[derive(Debug, Default)]
 pub struct ServiceModel {
     pub service_name: String,
+    /// The service's ARN namespace (`aws.api#service` `arnNamespace`): the
+    /// `<service>` in `arn:<partition>:<service>:...` (`lambda`, `bedrock`).
+    pub arn_namespace: Option<String>,
     pub operations: Vec<Operation>,
     pub shapes: HashMap<String, Shape>,
     /// Whether the service carries `aws.protocols#restXml`.
@@ -248,6 +251,7 @@ pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
     // lenient acceptance hack; the strict probe matches only the op's own
     // directly-declared error shapes.
     let mut service_name = String::new();
+    let mut arn_namespace = None;
     let mut rest_xml = false;
     let mut xml_namespace = None;
     let mut operation_targets: Vec<String> = Vec::new();
@@ -257,6 +261,11 @@ pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
             service_name = shape_id.split('#').next().unwrap_or(shape_id).to_string();
             let traits = shape_def.get("traits").and_then(|v| v.as_object());
             rest_xml = traits.is_some_and(|t| t.contains_key("aws.protocols#restXml"));
+            arn_namespace = traits
+                .and_then(|t| t.get("aws.api#service"))
+                .and_then(|v| v.get("arnNamespace"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             xml_namespace = parse_traits(traits).xml_namespace;
             if let Some(ops) = shape_def.get("operations").and_then(|v| v.as_array()) {
                 for op in ops {
@@ -375,6 +384,7 @@ pub fn parse_model_str(content: &str) -> Result<ServiceModel, String> {
 
     Ok(ServiceModel {
         service_name,
+        arn_namespace,
         operations,
         shapes,
         rest_xml,

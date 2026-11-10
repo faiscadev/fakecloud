@@ -1347,6 +1347,31 @@ mod tests {
     }
 
     #[test]
+    fn id_form_arns_reach_the_wire_encoded_exactly_once() {
+        // What an SDK sends for a full-ARN FunctionName: the label
+        // percent-encoded once (`:` -> `%3A`). The removed pre-encoded form
+        // went out as `arn%253Aaws...` and named no function.
+        let model = real_model("lambda.json");
+        let op = model_op(&model, "GetFunction");
+        let overrides =
+            HashMap::from([("FunctionName".to_string(), serde_json::json!("seeded-fn"))]);
+        let variants = crate::generators::id_forms::generate(&model, "GetFunction", &overrides);
+        let full = variants
+            .iter()
+            .find(|v| v.name == "id_form_FunctionName_full_arn")
+            .unwrap();
+        let (_, url, _, _) = build_http_request_from_model(op, &model, &full.input).unwrap();
+        assert_eq!(
+            url,
+            "/2015-03-31/functions/arn%3Aaws%3Alambda%3Aus-east-1%3A123456789012%3Afunction%3Aseeded-fn"
+        );
+        for v in &variants {
+            let (_, url, _, _) = build_http_request_from_model(op, &model, &v.input).unwrap();
+            assert!(!url.contains("%25"), "{}: {url}", v.name);
+        }
+    }
+
+    #[test]
     fn lambda_invoke_binds_its_headers_and_keeps_them_out_of_the_body() {
         let model = real_model("lambda.json");
         let op = model_op(&model, "Invoke");
