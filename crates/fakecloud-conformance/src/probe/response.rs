@@ -166,6 +166,18 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             // outside 1..10000.
             "MalformedXML",
             "InvalidArgument",
+            // The same reference's codes for a body that parses but is not a
+            // valid document of its kind: an ACL body (PutBucketAcl /
+            // PutObjectAcl) that is empty or lacks its Owner, and a bucket
+            // policy that is not valid policy JSON. Neither op declares any
+            // Smithy errors.
+            "MalformedACLError",
+            "MalformedPolicy",
+            // The reference's catch-all for a request whose parts contradict
+            // each other, e.g. a canned `x-amz-acl` together with
+            // `x-amz-grant-*` headers, or grant headers together with an
+            // AccessControlPolicy body, on the ACL-setting operations.
+            "InvalidRequest",
             // Sub-resource "not configured" codes. AWS returns each of these
             // when the bucket exists but the named configuration was never
             // set, which is the state most probe variants find a bucket in.

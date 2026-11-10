@@ -16,8 +16,12 @@ pub struct FieldLevelEncryptionConfig {
     pub caller_reference: String,
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub comment: Option<String>,
-    pub query_arg_profile_config: QueryArgProfileConfig,
-    pub content_type_profile_config: ContentTypeProfileConfig,
+    // Both profile configs are optional in the API; a config may carry
+    // either, both, or neither.
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub query_arg_profile_config: Option<QueryArgProfileConfig>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub content_type_profile_config: Option<ContentTypeProfileConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -162,12 +166,18 @@ pub struct CreateRealtimeLogConfigRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct UpdateRealtimeLogConfigRequest {
-    pub end_points: EndPoints,
-    pub fields: FieldsList,
-    pub name: String,
-    #[serde(rename = "ARN")]
-    pub arn: String,
-    pub sampling_rate: i64,
+    // Every member is optional: the config is addressed by Name or ARN, and
+    // only the settings present in the request are replaced.
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub end_points: Option<EndPoints>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub fields: Option<FieldsList>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none", rename = "ARN")]
+    pub arn: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub sampling_rate: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -190,7 +200,8 @@ pub struct EndPoints {
 #[serde(rename_all = "PascalCase")]
 pub struct EndPoint {
     pub stream_type: String,
-    pub kinesis_stream_config: KinesisStreamConfig,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub kinesis_stream_config: Option<KinesisStreamConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -393,6 +393,7 @@ mod tests {
             service_name: "t".to_string(),
             operations: ops,
             shapes,
+            ..Default::default()
         }
     }
 

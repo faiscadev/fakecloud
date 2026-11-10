@@ -456,6 +456,7 @@ mod tests {
                 );
                 m
             },
+            ..Default::default()
         };
 
         let overrides = HashMap::new();
@@ -505,6 +506,7 @@ mod tests {
                 );
                 m
             },
+            ..Default::default()
         };
 
         let mut overrides = HashMap::new();
@@ -540,6 +542,7 @@ mod tests {
                 );
                 m
             },
+            ..Default::default()
         };
 
         let overrides = HashMap::new();

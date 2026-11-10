@@ -225,6 +225,43 @@ pub(super) fn probe_rest(
         url
     };
 
+    // The hand-curated table only knows the path. For a restXml service (S3)
+    // the body still has to be the model's XML serialization, not the JSON the
+    // generators produce, or every body-carrying op is rejected as malformed
+    // before its handler runs; and the `@httpHeader` / `@httpPrefixHeaders`
+    // members still have to reach the wire, with integrity headers computed
+    // over that body.
+    let (headers, body) = match model {
+        Some(model)
+            if SERVICES_WITH_HARDCODED_REST.contains(&service_name) && model.is_rest_xml() =>
+        {
+            match model.operations.iter().find(|o| o.name == operation_name) {
+                Some(op) => {
+                    let (xml_body, content_type) =
+                        super::rest_xml::rest_xml_body(op, model, &variant.input);
+                    let mut headers = headers;
+                    headers.extend(super::rest_headers::bind_headers(
+                        op,
+                        model,
+                        &variant.input,
+                        xml_body.as_deref().unwrap_or_default(),
+                    ));
+                    if let Some(ct) = content_type {
+                        if !headers
+                            .iter()
+                            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                        {
+                            headers.push(("Content-Type".to_string(), ct.to_string()));
+                        }
+                    }
+                    (headers, xml_body)
+                }
+                None => (headers, body),
+            }
+        }
+        _ => (headers, body),
+    };
+
     let mut req = client
         .request(method.clone(), &url)
         .header("Authorization", sigv4_auth_header(service_name));

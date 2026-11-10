@@ -19,12 +19,26 @@ clap = { workspace = true }
 regex = "1"
 fakecloud-conformance-checksum = { path = "../fakecloud-conformance-checksum" }
 fakecloud-core = { path = "../fakecloud-core" }
+# Request checksums the probe computes over the bodies it sends (S3
+# Content-MD5 / x-amz-checksum-*), independent of the server's own code.
+base64 = { workspace = true }
+md-5 = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+crc32c = { workspace = true }
+crc32fast = { workspace = true }
+crc64fast-nvme = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 sha2 = { workspace = true }
 fakecloud-conformance-macros = { path = "../fakecloud-conformance-macros" }
 fakecloud-testkit = { path = "../fakecloud-testkit", features = ["sdk-clients"] }
 fakecloud-cognito = { path = "../fakecloud-cognito" }
+fakecloud-cloudfront = { path = "../fakecloud-cloudfront" }
+bytes = { workspace = true }
+http = { workspace = true }
+parking_lot = { workspace = true }
 rcgen = { workspace = true, features = ["x509-parser"] }
 aws-config = "1"
 aws-sdk-sqs = "1"
@@ -81,7 +95,6 @@ aws-credential-types = "1"
 aws-types = "1"
 tokio = { workspace = true }
 zip = { workspace = true }
-base64 = { workspace = true }
 flate2 = { workspace = true }
 rsa = { workspace = true }
 rand = { workspace = true }

@@ -16,6 +16,11 @@ impl Route53Service {
         if cfg.document.is_empty() {
             return Err(invalid_argument("Document is required"));
         }
+        check_field_length("name", &cfg.name, 0, 512)?;
+        check_field_length("document", &cfg.document, 0, 102_400)?;
+        if let Some(comment) = &cfg.comment {
+            check_field_length("comment", comment, 0, 1024)?;
+        }
         let policy_type = infer_policy_type(&cfg.document);
         let mut state = self.state.write();
         let account = state.accounts.entry(req.account_id.clone()).or_default();
@@ -77,6 +82,10 @@ impl Route53Service {
             })?;
         if cfg.document.is_empty() {
             return Err(invalid_argument("Document is required"));
+        }
+        check_field_length("document", &cfg.document, 0, 102_400)?;
+        if let Some(comment) = &cfg.comment {
+            check_field_length("comment", comment, 0, 1024)?;
         }
         let policy_type = infer_policy_type(&cfg.document);
         let mut state = self.state.write();

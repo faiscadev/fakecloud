@@ -55,6 +55,11 @@ impl Route53Service {
         if cfg.caller_reference.is_empty() {
             return Err(invalid_argument("CallerReference is required"));
         }
+        check_field_length("name", &cfg.name, 0, 1024)?;
+        check_field_length("callerReference", &cfg.caller_reference, 1, 128)?;
+        if let Some(delegation_set_id) = &cfg.delegation_set_id {
+            check_field_length("delegationSetId", delegation_set_id, 0, 32)?;
+        }
         let mut name = cfg.name.clone();
         if !name.ends_with('.') {
             name.push('.');

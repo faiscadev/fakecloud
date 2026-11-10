@@ -339,6 +339,7 @@ mod tests {
                 ),
             ],
             shapes,
+            ..Default::default()
         }
     }
 
@@ -419,6 +420,7 @@ mod tests {
                 ),
             ],
             shapes,
+            ..Default::default()
         };
         let variants = generate(&model, "PutThing", &HashMap::new());
         assert!(variants.is_empty());
@@ -451,6 +453,7 @@ mod tests {
                 None,
             )],
             shapes,
+            ..Default::default()
         };
         assert!(generate(&model, "CreateOrphan", &HashMap::new()).is_empty());
     }

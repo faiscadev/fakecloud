@@ -13,6 +13,26 @@ impl Route53Service {
         if cfg.name.is_empty() || cfg.caller_reference.is_empty() {
             return Err(invalid_argument("Name and CallerReference are required"));
         }
+        check_field_length("name", &cfg.name, 1, 64)?;
+        if !cfg
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(invalid_argument(format!(
+                "1 validation error detected: Value '{}' at 'name' failed to satisfy \
+                 constraint: Member must satisfy regular expression pattern: [0-9A-Za-z_\\-]+",
+                cfg.name
+            )));
+        }
+        check_field_length("callerReference", &cfg.caller_reference, 1, 64)?;
+        if !cfg.caller_reference.is_ascii() {
+            return Err(invalid_argument(format!(
+                "1 validation error detected: Value '{}' at 'callerReference' failed to satisfy \
+                 constraint: Member must satisfy regular expression pattern: \\p{{ASCII}}+",
+                cfg.caller_reference
+            )));
+        }
         let mut state = self.state.write();
         let account = state.accounts.entry(req.account_id.clone()).or_default();
         if account
