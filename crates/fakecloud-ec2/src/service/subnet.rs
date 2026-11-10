@@ -258,7 +258,13 @@ pub(crate) fn create_default_subnet(
             existing
         } else {
             check_subnet_count(state, &default_vpc, limit)?;
-            let s = build_subnet(default_vpc, "172.31.0.0/20".to_string(), &az, true);
+            // The zone's /20 in the default layout, as seeding gives it.
+            let idx = crate::defaults::region_zones(crate::service::instance::request_region(req))
+                .iter()
+                .position(|(name, _)| *name == az)
+                .unwrap_or(0);
+            let cidr = format!("172.31.{}.0/20", idx * 16);
+            let s = build_subnet(default_vpc, cidr, &az, true);
             state.subnets.insert(s.subnet_id.clone(), s.clone());
             s
         };
@@ -644,6 +650,27 @@ pub(crate) fn get_subnet_cidr_reservations(
 mod tests {
     use super::*;
     use crate::test_support::{ec2_request as req, err_of};
+
+    #[test]
+    fn create_default_subnet_restores_the_zones_place_in_the_layout() {
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let st = accounts.regional_mut("000000000000", "us-east-1");
+            st.subnets
+                .retain(|_, s| !(s.default_for_az && s.availability_zone == "us-east-1d"));
+        }
+        let out = create_default_subnet(
+            &svc,
+            &req("CreateDefaultSubnet", &[("AvailabilityZone", "us-east-1d")]),
+        )
+        .unwrap();
+        let out = String::from_utf8(out.body.expect_bytes().to_vec()).unwrap();
+        assert!(
+            out.contains("<cidrBlock>172.31.48.0/20</cidrBlock>"),
+            "{out}"
+        );
+    }
 
     fn body_of(resp: AwsResponse) -> String {
         String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap()

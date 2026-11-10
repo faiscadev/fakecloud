@@ -1,0 +1,3346 @@
+{
+ "valid": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": []
+ },
+ "missing_output": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    }
+   ],
+   "connections": []
+  },
+  "validations": [
+   {
+    "message": "The flow is missing a required Flow Output node. Add an Output node to define what the flow returns when it completes.",
+    "severity": "Warning",
+    "details": {
+     "missingEndingNodes": {}
+    },
+    "type": "MissingEndingNodes"
+   }
+  ]
+ },
+ "missing_input": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": []
+  },
+  "validations": [
+   {
+    "message": "The flow is missing a required Flow Input node. Add an Input node to define the flow's starting point and input parameters.",
+    "severity": "Error",
+    "details": {
+     "missingStartingNodes": {}
+    },
+    "type": "MissingStartingNodes"
+   },
+   {
+    "message": "The input 'document' in node 'FlowOutputNode' is undefined. Connect a source value to this input.",
+    "severity": "Warning",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The node 'FlowOutputNode' isn't connected to any other nodes. Attach this node to the flow or delete it.",
+    "severity": "Warning",
+    "details": {
+     "unreachableNode": {
+      "node": "FlowOutputNode"
+     }
+    },
+    "type": "UnreachableNode"
+   }
+  ]
+ },
+ "empty_definition": {
+  "definition": {},
+  "validations": [
+   {
+    "message": "The flow is missing a required Flow Input node. Add an Input node to define the flow's starting point and input parameters.",
+    "severity": "Error",
+    "details": {
+     "missingStartingNodes": {}
+    },
+    "type": "MissingStartingNodes"
+   },
+   {
+    "message": "The flow is missing a required Flow Output node. Add an Output node to define what the flow returns when it completes.",
+    "severity": "Warning",
+    "details": {
+     "missingEndingNodes": {}
+    },
+    "type": "MissingEndingNodes"
+   }
+  ]
+ },
+ "empty_nodes": {
+  "definition": {
+   "nodes": [],
+   "connections": []
+  },
+  "validations": [
+   {
+    "message": "The flow is missing a required Flow Input node. Add an Input node to define the flow's starting point and input parameters.",
+    "severity": "Error",
+    "details": {
+     "missingStartingNodes": {}
+    },
+    "type": "MissingStartingNodes"
+   },
+   {
+    "message": "The flow is missing a required Flow Output node. Add an Output node to define what the flow returns when it completes.",
+    "severity": "Warning",
+    "details": {
+     "missingEndingNodes": {}
+    },
+    "type": "MissingEndingNodes"
+   }
+  ]
+ },
+ "conn_missing_target": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "FlowInputNodeToGhost",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "Ghost",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'Ghost' references an unknown target node 'Ghost'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionTarget": {
+      "connection": "FlowInputNodeToGhost"
+     }
+    },
+    "type": "UnknownConnectionTarget"
+   }
+  ]
+ },
+ "conn_missing_source": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "GhostToFlowOutputNode",
+     "type": "Data",
+     "source": "Ghost",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'FlowOutputNode' has multiple incoming connections. Remove all but one connection to this input, as each input can only receive data from a single source.",
+    "severity": "Error",
+    "details": {
+     "multipleNodeInputConnections": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "MultipleNodeInputConnections"
+   },
+   {
+    "message": "The connection between the nodes 'Ghost' and 'FlowOutputNode' references an unknown source node 'Ghost'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionSource": {
+      "connection": "GhostToFlowOutputNode"
+     }
+    },
+    "type": "UnknownConnectionSource"
+   }
+  ]
+ },
+ "both_unknown": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "GhostAToGhostB",
+     "type": "Data",
+     "source": "GhostA",
+     "target": "GhostB",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The connection between the nodes 'GhostA' and 'GhostB' references an unknown source node 'GhostA'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionSource": {
+      "connection": "GhostAToGhostB"
+     }
+    },
+    "type": "UnknownConnectionSource"
+   },
+   {
+    "message": "The connection between the nodes 'GhostA' and 'GhostB' references an unknown target node 'GhostB'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionTarget": {
+      "connection": "GhostAToGhostB"
+     }
+    },
+    "type": "UnknownConnectionTarget"
+   }
+  ]
+ },
+ "no_nodes_ghost_conn": {
+  "definition": {
+   "nodes": [],
+   "connections": [
+    {
+     "name": "GhostAToGhostB",
+     "type": "Data",
+     "source": "GhostA",
+     "target": "GhostB",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The flow is missing a required Flow Input node. Add an Input node to define the flow's starting point and input parameters.",
+    "severity": "Error",
+    "details": {
+     "missingStartingNodes": {}
+    },
+    "type": "MissingStartingNodes"
+   },
+   {
+    "message": "The flow is missing a required Flow Output node. Add an Output node to define what the flow returns when it completes.",
+    "severity": "Warning",
+    "details": {
+     "missingEndingNodes": {}
+    },
+    "type": "MissingEndingNodes"
+   },
+   {
+    "message": "The connection between the nodes 'GhostA' and 'GhostB' references an unknown source node 'GhostA'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionSource": {
+      "connection": "GhostAToGhostB"
+     }
+    },
+    "type": "UnknownConnectionSource"
+   },
+   {
+    "message": "The connection between the nodes 'GhostA' and 'GhostB' references an unknown target node 'GhostB'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionTarget": {
+      "connection": "GhostAToGhostB"
+     }
+    },
+    "type": "UnknownConnectionTarget"
+   }
+  ]
+ },
+ "unknown_source_output": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "nope",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'FlowOutputNode' references an unknown source output 'nope'. Update the connection to use a valid output that exists on the source node 'FlowInputNode'.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionSourceOutput": {
+      "connection": "FlowInputNodeToFlowOutputNode"
+     }
+    },
+    "type": "UnknownConnectionSourceOutput"
+   }
+  ]
+ },
+ "unknown_target_input": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "nope"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'FlowOutputNode' is undefined. Connect a source value to this input.",
+    "severity": "Error",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'FlowOutputNode' references an unknown target input 'nope'. Update the connection to use a valid input that exists on the target node 'FlowOutputNode'.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionTargetInput": {
+      "connection": "FlowInputNodeToFlowOutputNode"
+     }
+    },
+    "type": "UnknownConnectionTargetInput"
+   }
+  ]
+ },
+ "unknown_out_and_in": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "bad",
+       "targetInput": "worse"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'FlowOutputNode' is undefined. Connect a source value to this input.",
+    "severity": "Error",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'FlowOutputNode' references an unknown source output 'bad'. Update the connection to use a valid output that exists on the source node 'FlowInputNode'.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionSourceOutput": {
+      "connection": "FlowInputNodeToFlowOutputNode"
+     }
+    },
+    "type": "UnknownConnectionSourceOutput"
+   },
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'FlowOutputNode' references an unknown target input 'worse'. Update the connection to use a valid input that exists on the target node 'FlowOutputNode'.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionTargetInput": {
+      "connection": "FlowInputNodeToFlowOutputNode"
+     }
+    },
+    "type": "UnknownConnectionTargetInput"
+   }
+  ]
+ },
+ "unconnected_output": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": []
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'FlowOutputNode' is undefined. Connect a source value to this input.",
+    "severity": "Warning",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The node 'FlowOutputNode' isn't connected to any other nodes. Attach this node to the flow or delete it.",
+    "severity": "Warning",
+    "details": {
+     "unreachableNode": {
+      "node": "FlowOutputNode"
+     }
+    },
+    "type": "UnreachableNode"
+   }
+  ]
+ },
+ "extra_unreachable_output": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "Second",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'Second' is undefined. Connect a source value to this input.",
+    "severity": "Warning",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "Second",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The node 'Second' isn't connected to any other nodes. Attach this node to the flow or delete it.",
+    "severity": "Warning",
+    "details": {
+     "unreachableNode": {
+      "node": "Second"
+     }
+    },
+    "type": "UnreachableNode"
+   }
+  ]
+ },
+ "unreachable_order": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "Zed",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "Alpha",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'Zed' is undefined. Connect a source value to this input.",
+    "severity": "Warning",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "Zed",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The input 'document' in node 'Alpha' is undefined. Connect a source value to this input.",
+    "severity": "Warning",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "Alpha",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The node 'Zed' isn't connected to any other nodes. Attach this node to the flow or delete it.",
+    "severity": "Warning",
+    "details": {
+     "unreachableNode": {
+      "node": "Zed"
+     }
+    },
+    "type": "UnreachableNode"
+   },
+   {
+    "message": "The node 'Alpha' isn't connected to any other nodes. Attach this node to the flow or delete it.",
+    "severity": "Warning",
+    "details": {
+     "unreachableNode": {
+      "node": "Alpha"
+     }
+    },
+    "type": "UnreachableNode"
+   }
+  ]
+ },
+ "two_outputs": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "OutTwo",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "FlowInputNodeToOutTwo",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "OutTwo",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": []
+ },
+ "type_mismatch": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'FlowOutputNode' has incompatible data types: type 'String -> Number'. Make sure that the input and output data types for this connection match each other.",
+    "severity": "Error",
+    "details": {
+     "incompatibleConnectionDataType": {
+      "connection": "FlowInputNodeToFlowOutputNode"
+     }
+    },
+    "type": "IncompatibleConnectionDataType"
+   }
+  ]
+ },
+ "object_to_string_whole": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "Object"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'FlowOutputNode' has incompatible data types: type 'Object -> String'. Make sure that the input and output data types for this connection match each other.",
+    "severity": "Error",
+    "details": {
+     "incompatibleConnectionDataType": {
+      "connection": "FlowInputNodeToFlowOutputNode"
+     }
+    },
+    "type": "IncompatibleConnectionDataType"
+   }
+  ]
+ },
+ "object_to_string_member": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "Object"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data.genre"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": []
+ },
+ "array_to_string_index": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "Array"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data[0]"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": []
+ },
+ "string_to_number_member": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "Number",
+       "expression": "$.data.x"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'FlowOutputNode' has incompatible data types: type 'String -> Number'. Make sure that the input and output data types for this connection match each other.",
+    "severity": "Error",
+    "details": {
+     "incompatibleConnectionDataType": {
+      "connection": "FlowInputNodeToFlowOutputNode"
+     }
+    },
+    "type": "IncompatibleConnectionDataType"
+   }
+  ]
+ },
+ "duplicate_connections": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "Dup",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'FlowOutputNode' has multiple incoming connections. Remove all but one connection to this input, as each input can only receive data from a single source.",
+    "severity": "Error",
+    "details": {
+     "multipleNodeInputConnections": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "MultipleNodeInputConnections"
+   },
+   {
+    "message": "The flow has duplicate connections between node 'FlowInputNode' and node 'FlowOutputNode' that perform the same data transfer. Remove the redundant connections.",
+    "severity": "Error",
+    "details": {
+     "duplicateConnections": {
+      "source": "FlowInputNode",
+      "target": "FlowOutputNode"
+     }
+    },
+    "type": "DuplicateConnections"
+   }
+  ]
+ },
+ "duplicate_and_mismatched": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "Dup",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'FlowOutputNode' has multiple incoming connections. Remove all but one connection to this input, as each input can only receive data from a single source.",
+    "severity": "Error",
+    "details": {
+     "multipleNodeInputConnections": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "MultipleNodeInputConnections"
+   },
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'FlowOutputNode' has incompatible data types: type 'String -> Number'. Make sure that the input and output data types for this connection match each other.",
+    "severity": "Error",
+    "details": {
+     "incompatibleConnectionDataType": {
+      "connection": "FlowInputNodeToFlowOutputNode"
+     }
+    },
+    "type": "IncompatibleConnectionDataType"
+   },
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'FlowOutputNode' has incompatible data types: type 'String -> Number'. Make sure that the input and output data types for this connection match each other.",
+    "severity": "Error",
+    "details": {
+     "incompatibleConnectionDataType": {
+      "connection": "Dup"
+     }
+    },
+    "type": "IncompatibleConnectionDataType"
+   },
+   {
+    "message": "The flow has duplicate connections between node 'FlowInputNode' and node 'FlowOutputNode' that perform the same data transfer. Remove the redundant connections.",
+    "severity": "Error",
+    "details": {
+     "duplicateConnections": {
+      "source": "FlowInputNode",
+      "target": "FlowOutputNode"
+     }
+    },
+    "type": "DuplicateConnections"
+   }
+  ]
+ },
+ "input_no_outputs": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     }
+    }
+   ],
+   "connections": []
+  },
+  "validations": [
+   {
+    "message": "The flow is missing a required Flow Output node. Add an Output node to define what the flow returns when it completes.",
+    "severity": "Warning",
+    "details": {
+     "missingEndingNodes": {}
+    },
+    "type": "MissingEndingNodes"
+   },
+   {
+    "message": "The node 'FlowInputNode' is missing the required output 'document'. Add this output to the node definition.",
+    "severity": "Error",
+    "details": {
+     "missingNodeOutput": {
+      "node": "FlowInputNode",
+      "output": "document"
+     }
+    },
+    "type": "MissingNodeOutput"
+   }
+  ]
+ },
+ "input_no_outputs_with_output": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     }
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": []
+  },
+  "validations": [
+   {
+    "message": "The node 'FlowInputNode' is missing the required output 'document'. Add this output to the node definition.",
+    "severity": "Error",
+    "details": {
+     "missingNodeOutput": {
+      "node": "FlowInputNode",
+      "output": "document"
+     }
+    },
+    "type": "MissingNodeOutput"
+   },
+   {
+    "message": "The input 'document' in node 'FlowOutputNode' is undefined. Connect a source value to this input.",
+    "severity": "Warning",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The node 'FlowOutputNode' isn't connected to any other nodes. Attach this node to the flow or delete it.",
+    "severity": "Warning",
+    "details": {
+     "unreachableNode": {
+      "node": "FlowOutputNode"
+     }
+    },
+    "type": "UnreachableNode"
+   }
+  ]
+ },
+ "output_no_inputs": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     }
+    }
+   ],
+   "connections": []
+  },
+  "validations": [
+   {
+    "message": "The node 'FlowOutputNode' is missing the required input 'document'. Add this input to the node definition.",
+    "severity": "Warning",
+    "details": {
+     "missingNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "MissingNodeInput"
+   },
+   {
+    "message": "The node 'FlowOutputNode' isn't connected to any other nodes. Attach this node to the flow or delete it.",
+    "severity": "Warning",
+    "details": {
+     "unreachableNode": {
+      "node": "FlowOutputNode"
+     }
+    },
+    "type": "UnreachableNode"
+   }
+  ]
+ },
+ "reachable_output_no_inputs": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     }
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The node 'FlowOutputNode' is missing the required input 'document'. Add this input to the node definition.",
+    "severity": "Error",
+    "details": {
+     "missingNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "MissingNodeInput"
+   },
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'FlowOutputNode' references an unknown target input 'document'. Update the connection to use a valid input that exists on the target node 'FlowOutputNode'.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionTargetInput": {
+      "connection": "FlowInputNodeToFlowOutputNode"
+     }
+    },
+    "type": "UnknownConnectionTargetInput"
+   }
+  ]
+ },
+ "input_renamed_output": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "other",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "other",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The node 'FlowInputNode' is missing the required output 'document'. Add this output to the node definition.",
+    "severity": "Error",
+    "details": {
+     "missingNodeOutput": {
+      "node": "FlowInputNode",
+      "output": "document"
+     }
+    },
+    "type": "MissingNodeOutput"
+   },
+   {
+    "message": "The node 'FlowInputNode' has an unknown output 'other' that is not supported by this node type. Remove the output or use a valid output name for this node type.",
+    "severity": "Error",
+    "details": {
+     "unknownNodeOutput": {
+      "node": "FlowInputNode",
+      "output": "other"
+     }
+    },
+    "type": "UnknownNodeOutput"
+   }
+  ]
+ },
+ "output_extra_input": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      },
+      {
+       "name": "extra",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The node 'FlowOutputNode' has an unknown input 'extra' that is not supported by this node type. Remove the input or use a valid input name for this node type.",
+    "severity": "Error",
+    "details": {
+     "unknownNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "extra"
+     }
+    },
+    "type": "UnknownNodeInput"
+   },
+   {
+    "message": "The input 'extra' in node 'FlowOutputNode' is undefined. Connect a source value to this input.",
+    "severity": "Error",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "extra"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   }
+  ]
+ },
+ "input_two_outputs": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      },
+      {
+       "name": "more",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The node 'FlowInputNode' has an unknown output 'more' that is not supported by this node type. Remove the output or use a valid output name for this node type.",
+    "severity": "Error",
+    "details": {
+     "unknownNodeOutput": {
+      "node": "FlowInputNode",
+      "output": "more"
+     }
+    },
+    "type": "UnknownNodeOutput"
+   }
+  ]
+ },
+ "conn_no_config": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "Bare",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode"
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'FlowOutputNode' is undefined. Connect a source value to this input.",
+    "severity": "Warning",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'FlowOutputNode' is missing its configuration. Add configuration to specify how data should flow between these nodes.",
+    "severity": "Error",
+    "details": {
+     "missingConnectionConfiguration": {
+      "connection": "Bare"
+     }
+    },
+    "type": "MissingConnectionConfiguration"
+   },
+   {
+    "message": "The node 'FlowOutputNode' isn't connected to any other nodes. Attach this node to the flow or delete it.",
+    "severity": "Warning",
+    "details": {
+     "unreachableNode": {
+      "node": "FlowOutputNode"
+     }
+    },
+    "type": "UnreachableNode"
+   }
+  ]
+ },
+ "combined": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "Zed",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "NumOut",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "Alpha",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToNumOut",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "NumOut",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "FlowInputNodeToGhost",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "Ghost",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "GhostTwoToFlowOutputNode",
+     "type": "Data",
+     "source": "GhostTwo",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "FlowInputNodeToAlpha",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "Alpha",
+     "configuration": {
+      "data": {
+       "sourceOutput": "bad",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'Zed' is undefined. Connect a source value to this input.",
+    "severity": "Warning",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "Zed",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'NumOut' has incompatible data types: type 'String -> Number'. Make sure that the input and output data types for this connection match each other.",
+    "severity": "Error",
+    "details": {
+     "incompatibleConnectionDataType": {
+      "connection": "FlowInputNodeToNumOut"
+     }
+    },
+    "type": "IncompatibleConnectionDataType"
+   },
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'Ghost' references an unknown target node 'Ghost'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionTarget": {
+      "connection": "FlowInputNodeToGhost"
+     }
+    },
+    "type": "UnknownConnectionTarget"
+   },
+   {
+    "message": "The connection between the nodes 'GhostTwo' and 'FlowOutputNode' references an unknown source node 'GhostTwo'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionSource": {
+      "connection": "GhostTwoToFlowOutputNode"
+     }
+    },
+    "type": "UnknownConnectionSource"
+   },
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'Alpha' references an unknown source output 'bad'. Update the connection to use a valid output that exists on the source node 'FlowInputNode'.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionSourceOutput": {
+      "connection": "FlowInputNodeToAlpha"
+     }
+    },
+    "type": "UnknownConnectionSourceOutput"
+   },
+   {
+    "message": "The node 'Zed' isn't connected to any other nodes. Attach this node to the flow or delete it.",
+    "severity": "Warning",
+    "details": {
+     "unreachableNode": {
+      "node": "Zed"
+     }
+    },
+    "type": "UnreachableNode"
+   },
+   {
+    "message": "The node 'FlowOutputNode' isn't connected to any other nodes. Attach this node to the flow or delete it.",
+    "severity": "Warning",
+    "details": {
+     "unreachableNode": {
+      "node": "FlowOutputNode"
+     }
+    },
+    "type": "UnreachableNode"
+   }
+  ]
+ },
+ "cond_valid": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "Number"
+      }
+     ]
+    },
+    {
+     "name": "CondOne",
+     "type": "Condition",
+     "configuration": {
+      "condition": {
+       "conditions": [
+        {
+         "name": "c1",
+         "expression": "xval == 1"
+        },
+        {
+         "name": "default"
+        }
+       ]
+      }
+     },
+     "inputs": [
+      {
+       "name": "xval",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "OutTwo",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToCondOne",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "CondOne",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "xval"
+      }
+     }
+    },
+    {
+     "name": "CondOnec1ToFlowOutputNode",
+     "type": "Conditional",
+     "source": "CondOne",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "conditional": {
+       "condition": "c1"
+      }
+     }
+    },
+    {
+     "name": "CondOnedefaultToOutTwo",
+     "type": "Conditional",
+     "source": "CondOne",
+     "target": "OutTwo",
+     "configuration": {
+      "conditional": {
+       "condition": "default"
+      }
+     }
+    },
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "FlowInputNodeToOutTwo",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "OutTwo",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": []
+ },
+ "unreachable_chain": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "Number"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "CondOne",
+     "type": "Condition",
+     "configuration": {
+      "condition": {
+       "conditions": [
+        {
+         "name": "c1",
+         "expression": "xval == 1"
+        },
+        {
+         "name": "default"
+        }
+       ]
+      }
+     },
+     "inputs": [
+      {
+       "name": "xval",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "OutTwo",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "CondOnec1ToOutTwo",
+     "type": "Conditional",
+     "source": "CondOne",
+     "target": "OutTwo",
+     "configuration": {
+      "conditional": {
+       "condition": "c1"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'xval' in node 'CondOne' is undefined. Connect a source value to this input.",
+    "severity": "Warning",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "CondOne",
+      "input": "xval"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The input 'document' in node 'OutTwo' is undefined. Connect a source value to this input.",
+    "severity": "Warning",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "OutTwo",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The node 'CondOne' isn't connected to any other nodes. Attach this node to the flow or delete it.",
+    "severity": "Warning",
+    "details": {
+     "unreachableNode": {
+      "node": "CondOne"
+     }
+    },
+    "type": "UnreachableNode"
+   },
+   {
+    "message": "The node 'OutTwo' isn't connected to any other nodes. Attach this node to the flow or delete it.",
+    "severity": "Warning",
+    "details": {
+     "unreachableNode": {
+      "node": "OutTwo"
+     }
+    },
+    "type": "UnreachableNode"
+   }
+  ]
+ },
+ "cond_cycle": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "Number"
+      }
+     ]
+    },
+    {
+     "name": "CondOne",
+     "type": "Condition",
+     "configuration": {
+      "condition": {
+       "conditions": [
+        {
+         "name": "c1",
+         "expression": "xval == 1"
+        },
+        {
+         "name": "default"
+        }
+       ]
+      }
+     },
+     "inputs": [
+      {
+       "name": "xval",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "CondTwo",
+     "type": "Condition",
+     "configuration": {
+      "condition": {
+       "conditions": [
+        {
+         "name": "c1",
+         "expression": "xval == 1"
+        },
+        {
+         "name": "default"
+        }
+       ]
+      }
+     },
+     "inputs": [
+      {
+       "name": "xval",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToCondOne",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "CondOne",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "xval"
+      }
+     }
+    },
+    {
+     "name": "FlowInputNodeToCondTwo",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "CondTwo",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "xval"
+      }
+     }
+    },
+    {
+     "name": "CondOnec1ToCondTwo",
+     "type": "Conditional",
+     "source": "CondOne",
+     "target": "CondTwo",
+     "configuration": {
+      "conditional": {
+       "condition": "c1"
+      }
+     }
+    },
+    {
+     "name": "CondTwoc1ToCondOne",
+     "type": "Conditional",
+     "source": "CondTwo",
+     "target": "CondOne",
+     "configuration": {
+      "conditional": {
+       "condition": "c1"
+      }
+     }
+    },
+    {
+     "name": "CondOnedefaultToFlowOutputNode",
+     "type": "Conditional",
+     "source": "CondOne",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "conditional": {
+       "condition": "default"
+      }
+     }
+    },
+    {
+     "name": "CondTwodefaultToFlowOutputNode",
+     "type": "Conditional",
+     "source": "CondTwo",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "conditional": {
+       "condition": "default"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'FlowOutputNode' is undefined. Connect a source value to this input.",
+    "severity": "Error",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The connection between the nodes 'CondOne' and 'CondTwo' has conditions that are never satisfied during flow execution. Review the conditional logic to ensure this path can be reached, or remove the connection if it's not needed.",
+    "severity": "Error",
+    "details": {
+     "unsatisfiedConnectionConditions": {
+      "connection": "CondOnec1ToCondTwo"
+     }
+    },
+    "type": "UnsatisfiedConnectionConditions"
+   },
+   {
+    "message": "The connection between the nodes 'CondTwo' and 'FlowOutputNode' has conditions that are never satisfied during flow execution. Review the conditional logic to ensure this path can be reached, or remove the connection if it's not needed.",
+    "severity": "Error",
+    "details": {
+     "unsatisfiedConnectionConditions": {
+      "connection": "CondTwodefaultToFlowOutputNode"
+     }
+    },
+    "type": "UnsatisfiedConnectionConditions"
+   },
+   {
+    "message": "The connection between the nodes 'CondOne' and 'CondTwo' creates a circular loop in the flow. Restructure your flow to avoid circular loops between nodes.",
+    "severity": "Error",
+    "details": {
+     "cyclicConnection": {
+      "connection": "CondOnec1ToCondTwo"
+     }
+    },
+    "type": "CyclicConnection"
+   }
+  ]
+ },
+ "cond_cycle_back_edge_first": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "Number"
+      }
+     ]
+    },
+    {
+     "name": "CondOne",
+     "type": "Condition",
+     "configuration": {
+      "condition": {
+       "conditions": [
+        {
+         "name": "c1",
+         "expression": "xval == 1"
+        },
+        {
+         "name": "default"
+        }
+       ]
+      }
+     },
+     "inputs": [
+      {
+       "name": "xval",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "CondTwo",
+     "type": "Condition",
+     "configuration": {
+      "condition": {
+       "conditions": [
+        {
+         "name": "c1",
+         "expression": "xval == 1"
+        },
+        {
+         "name": "default"
+        }
+       ]
+      }
+     },
+     "inputs": [
+      {
+       "name": "xval",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "CondTwoc1ToCondOne",
+     "type": "Conditional",
+     "source": "CondTwo",
+     "target": "CondOne",
+     "configuration": {
+      "conditional": {
+       "condition": "c1"
+      }
+     }
+    },
+    {
+     "name": "FlowInputNodeToCondOne",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "CondOne",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "xval"
+      }
+     }
+    },
+    {
+     "name": "FlowInputNodeToCondTwo",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "CondTwo",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "xval"
+      }
+     }
+    },
+    {
+     "name": "CondOnec1ToCondTwo",
+     "type": "Conditional",
+     "source": "CondOne",
+     "target": "CondTwo",
+     "configuration": {
+      "conditional": {
+       "condition": "c1"
+      }
+     }
+    },
+    {
+     "name": "CondOnedefaultToFlowOutputNode",
+     "type": "Conditional",
+     "source": "CondOne",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "conditional": {
+       "condition": "default"
+      }
+     }
+    },
+    {
+     "name": "CondTwodefaultToFlowOutputNode",
+     "type": "Conditional",
+     "source": "CondTwo",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "conditional": {
+       "condition": "default"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'FlowOutputNode' is undefined. Connect a source value to this input.",
+    "severity": "Error",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The connection between the nodes 'CondTwo' and 'FlowOutputNode' has conditions that are never satisfied during flow execution. Review the conditional logic to ensure this path can be reached, or remove the connection if it's not needed.",
+    "severity": "Error",
+    "details": {
+     "unsatisfiedConnectionConditions": {
+      "connection": "CondTwodefaultToFlowOutputNode"
+     }
+    },
+    "type": "UnsatisfiedConnectionConditions"
+   },
+   {
+    "message": "The connection between the nodes 'CondOne' and 'CondTwo' has conditions that are never satisfied during flow execution. Review the conditional logic to ensure this path can be reached, or remove the connection if it's not needed.",
+    "severity": "Error",
+    "details": {
+     "unsatisfiedConnectionConditions": {
+      "connection": "CondOnec1ToCondTwo"
+     }
+    },
+    "type": "UnsatisfiedConnectionConditions"
+   },
+   {
+    "message": "The connection between the nodes 'CondOne' and 'CondTwo' creates a circular loop in the flow. Restructure your flow to avoid circular loops between nodes.",
+    "severity": "Error",
+    "details": {
+     "cyclicConnection": {
+      "connection": "CondOnec1ToCondTwo"
+     }
+    },
+    "type": "CyclicConnection"
+   }
+  ]
+ },
+ "cond_cycle_entered_from_two": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "Number"
+      }
+     ]
+    },
+    {
+     "name": "CondOne",
+     "type": "Condition",
+     "configuration": {
+      "condition": {
+       "conditions": [
+        {
+         "name": "c1",
+         "expression": "xval == 1"
+        },
+        {
+         "name": "default"
+        }
+       ]
+      }
+     },
+     "inputs": [
+      {
+       "name": "xval",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "CondTwo",
+     "type": "Condition",
+     "configuration": {
+      "condition": {
+       "conditions": [
+        {
+         "name": "c1",
+         "expression": "xval == 1"
+        },
+        {
+         "name": "default"
+        }
+       ]
+      }
+     },
+     "inputs": [
+      {
+       "name": "xval",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "Number",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToCondTwo",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "CondTwo",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "xval"
+      }
+     }
+    },
+    {
+     "name": "FlowInputNodeToCondOne",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "CondOne",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "xval"
+      }
+     }
+    },
+    {
+     "name": "CondOnec1ToCondTwo",
+     "type": "Conditional",
+     "source": "CondOne",
+     "target": "CondTwo",
+     "configuration": {
+      "conditional": {
+       "condition": "c1"
+      }
+     }
+    },
+    {
+     "name": "CondTwoc1ToCondOne",
+     "type": "Conditional",
+     "source": "CondTwo",
+     "target": "CondOne",
+     "configuration": {
+      "conditional": {
+       "condition": "c1"
+      }
+     }
+    },
+    {
+     "name": "CondOnedefaultToFlowOutputNode",
+     "type": "Conditional",
+     "source": "CondOne",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "conditional": {
+       "condition": "default"
+      }
+     }
+    },
+    {
+     "name": "CondTwodefaultToFlowOutputNode",
+     "type": "Conditional",
+     "source": "CondTwo",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "conditional": {
+       "condition": "default"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The input 'document' in node 'FlowOutputNode' is undefined. Connect a source value to this input.",
+    "severity": "Error",
+    "details": {
+     "unfulfilledNodeInput": {
+      "node": "FlowOutputNode",
+      "input": "document"
+     }
+    },
+    "type": "UnfulfilledNodeInput"
+   },
+   {
+    "message": "The connection between the nodes 'CondOne' and 'FlowOutputNode' has conditions that are never satisfied during flow execution. Review the conditional logic to ensure this path can be reached, or remove the connection if it's not needed.",
+    "severity": "Error",
+    "details": {
+     "unsatisfiedConnectionConditions": {
+      "connection": "CondOnedefaultToFlowOutputNode"
+     }
+    },
+    "type": "UnsatisfiedConnectionConditions"
+   },
+   {
+    "message": "The connection between the nodes 'CondTwo' and 'CondOne' has conditions that are never satisfied during flow execution. Review the conditional logic to ensure this path can be reached, or remove the connection if it's not needed.",
+    "severity": "Error",
+    "details": {
+     "unsatisfiedConnectionConditions": {
+      "connection": "CondTwoc1ToCondOne"
+     }
+    },
+    "type": "UnsatisfiedConnectionConditions"
+   },
+   {
+    "message": "The connection between the nodes 'CondTwo' and 'CondOne' creates a circular loop in the flow. Restructure your flow to avoid circular loops between nodes.",
+    "severity": "Error",
+    "details": {
+     "cyclicConnection": {
+      "connection": "CondTwoc1ToCondOne"
+     }
+    },
+    "type": "CyclicConnection"
+   }
+  ]
+ },
+ "duplicate_node_names": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "FlowInputNodeToFlowOutputNode",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "error": {
+   "code": "ValidationException",
+   "message": "Node name FlowOutputNode must be unique"
+  }
+ },
+ "input_without_output_to_ghost": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     }
+    }
+   ],
+   "connections": [
+    {
+     "name": "ToGhost",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "Ghost",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The flow is missing a required Flow Output node. Add an Output node to define what the flow returns when it completes.",
+    "severity": "Warning",
+    "details": {
+     "missingEndingNodes": {}
+    },
+    "type": "MissingEndingNodes"
+   },
+   {
+    "message": "The node 'FlowInputNode' is missing the required output 'document'. Add this output to the node definition.",
+    "severity": "Error",
+    "details": {
+     "missingNodeOutput": {
+      "node": "FlowInputNode",
+      "output": "document"
+     }
+    },
+    "type": "MissingNodeOutput"
+   },
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'Ghost' references an unknown target node 'Ghost'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionTarget": {
+      "connection": "ToGhost"
+     }
+    },
+    "type": "UnknownConnectionTarget"
+   }
+  ]
+ },
+ "bare_input_to_output": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     }
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "Link",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The node 'FlowInputNode' is missing the required output 'document'. Add this output to the node definition.",
+    "severity": "Error",
+    "details": {
+     "missingNodeOutput": {
+      "node": "FlowInputNode",
+      "output": "document"
+     }
+    },
+    "type": "MissingNodeOutput"
+   },
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'FlowOutputNode' references an unknown source output 'document'. Update the connection to use a valid output that exists on the source node 'FlowInputNode'.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionSourceOutput": {
+      "connection": "Link"
+     }
+    },
+    "type": "UnknownConnectionSourceOutput"
+   }
+  ]
+ },
+ "bad_output_to_ghost": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "Ok",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "Link",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "Ghost",
+     "configuration": {
+      "data": {
+       "sourceOutput": "bad",
+       "targetInput": "document"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The connection between the nodes 'FlowInputNode' and 'Ghost' references an unknown target node 'Ghost'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionTarget": {
+      "connection": "Link"
+     }
+    },
+    "type": "UnknownConnectionTarget"
+   }
+  ]
+ },
+ "ghost_to_bad_input": {
+  "definition": {
+   "nodes": [
+    {
+     "name": "FlowInputNode",
+     "type": "Input",
+     "configuration": {
+      "input": {}
+     },
+     "outputs": [
+      {
+       "name": "document",
+       "type": "String"
+      }
+     ]
+    },
+    {
+     "name": "FlowOutputNode",
+     "type": "Output",
+     "configuration": {
+      "output": {}
+     },
+     "inputs": [
+      {
+       "name": "document",
+       "type": "String",
+       "expression": "$.data"
+      }
+     ]
+    }
+   ],
+   "connections": [
+    {
+     "name": "Ok",
+     "type": "Data",
+     "source": "FlowInputNode",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "document"
+      }
+     }
+    },
+    {
+     "name": "Link",
+     "type": "Data",
+     "source": "Ghost",
+     "target": "FlowOutputNode",
+     "configuration": {
+      "data": {
+       "sourceOutput": "document",
+       "targetInput": "bad"
+      }
+     }
+    }
+   ]
+  },
+  "validations": [
+   {
+    "message": "The connection between the nodes 'Ghost' and 'FlowOutputNode' references an unknown source node 'Ghost'. Update the connection to reference a valid node that exists in the flow, or add the missing node to the flow.",
+    "severity": "Error",
+    "details": {
+     "unknownConnectionSource": {
+      "connection": "Link"
+     }
+    },
+    "type": "UnknownConnectionSource"
+   }
+  ]
+ }
+}

@@ -379,27 +379,6 @@ impl ResourceProvisioner {
             })
     }
 
-    /// Whether an `AWS::EC2::EIP` update changes a property that requires
-    /// replacement (`Domain`, `NetworkBorderGroup`, `PublicIpv4Pool`,
-    /// `Address`); `InstanceId` and `Tags` update in place.
-    pub(super) fn eip_requires_replacement(
-        &self,
-        existing: &StackResource,
-        new_def: &ResourceDefinition,
-    ) -> bool {
-        let Some(eip) = self.eip_record(&existing.physical_id) else {
-            return true;
-        };
-        let props = &new_def.properties;
-        let differs = |key: &str, current: &str, default: &str| {
-            prop_str(props, key).unwrap_or(default) != current
-        };
-        differs("Domain", &eip.domain, "vpc")
-            || prop_str(props, "NetworkBorderGroup").is_some_and(|v| v != eip.network_border_group)
-            || prop_str(props, "PublicIpv4Pool").is_some_and(|v| v != eip.public_ipv4_pool)
-            || prop_str(props, "Address").is_some_and(|v| v != eip.public_ip)
-    }
-
     /// In-place `AWS::EC2::EIP` update: re-associate to a changed
     /// `InstanceId` (or disassociate when dropped) and replace the tags.
     pub(super) fn update_ec2_eip(
@@ -425,33 +404,27 @@ impl ResourceProvisioner {
                 self.ec2_dispatch("AssociateAddress", params)?;
             }
         }
+        // Neither is create-only in the registry, so the address stays and the
+        // record follows the template, an omitted property going back to the
+        // default create gives it.
+        let domain = prop_str(props, "Domain").unwrap_or("vpc");
+        let pool = prop_str(props, "PublicIpv4Pool").unwrap_or("amazon");
+        if domain != eip.domain || pool != eip.public_ipv4_pool {
+            let mut accounts = self.ec2_state.write();
+            if let Some(record) = accounts
+                .regional_mut(&self.account_id, &self.region)
+                .elastic_ips
+                .values_mut()
+                .find(|e| e.allocation_id == eip.allocation_id)
+            {
+                record.domain = domain.to_string();
+                record.public_ipv4_pool = pool.to_string();
+            }
+        }
         self.replace_ec2_tags(&eip.allocation_id, props)?;
         Ok(ProvisionResult::new(existing.physical_id.clone())
             .with("PublicIp", eip.public_ip)
             .with("AllocationId", eip.allocation_id))
-    }
-
-    /// Whether an `AWS::EC2::NatGateway` update changes a property that
-    /// requires replacement (`SubnetId`, `AllocationId`, `ConnectivityType`);
-    /// `Tags` update in place.
-    pub(super) fn nat_gateway_requires_replacement(
-        &self,
-        existing: &StackResource,
-        new_def: &ResourceDefinition,
-    ) -> bool {
-        let nat = {
-            let accounts = self.ec2_state.read();
-            accounts
-                .regional(&self.account_id, &self.region)
-                .and_then(|s| s.nat_gateways.get(&existing.physical_id).cloned())
-        };
-        let Some(nat) = nat else {
-            return true;
-        };
-        let props = &new_def.properties;
-        prop_str(props, "SubnetId").unwrap_or_default() != nat.subnet_id
-            || prop_str(props, "ConnectivityType").unwrap_or("public") != nat.connectivity_type
-            || prop_str(props, "AllocationId") != nat.allocation_id.as_deref()
     }
 
     /// In-place `AWS::EC2::NatGateway` update: replace the tags.

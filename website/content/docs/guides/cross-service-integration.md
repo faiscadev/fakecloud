@@ -46,7 +46,7 @@ fakecloud actually executes the cross-service wiring. When an EventBridge rule m
 **Orchestration and APIs:**
 
 - **Step Functions -> Lambda / SQS / SNS / EventBridge / DynamoDB** — Task states invoke Lambda, send SQS messages, publish to SNS topics, put EventBridge events, and read/write DynamoDB items.
-- **Step Functions -> Step Functions (nested executions)** — Task states with resource `arn:aws:states:::states:startExecution` (and the `.sync` variant) start a child state machine execution. The `.sync` form waits for the child to terminate and returns its output; the fire-and-forget form returns immediately with the child's execution ARN.
+- **Step Functions -> Step Functions (nested executions)**: Task states with resource `arn:aws:states:::states:startExecution` (and the `.sync`, `.sync:2` and `.waitForTaskToken` variants) start a child state machine execution. The `.sync` forms wait for the child to terminate and return its description, with the child's output in `Output`; the fire-and-forget form returns immediately with the child's `ExecutionArn` and `StartDate`.
 - **API Gateway v2 -> Lambda** — HTTP API routes invoke Lambda functions with proxy integration v2.0 format.
 - **API Gateway v2 -> CloudWatch Logs (access logs)** — Stages with `AccessLogSettings.DestinationArn` set to a Logs log group publish one `PutLogEvents` entry per request, formatted per the stage's `Format` template (defaulting to the standard `$context` placeholders).
 

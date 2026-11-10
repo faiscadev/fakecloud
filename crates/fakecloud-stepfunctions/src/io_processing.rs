@@ -30,12 +30,35 @@ pub fn apply_output_path(output: &Value, path: Option<&str>) -> Result<Value, St
 /// - `None` or `Some("$")` -> result replaces input entirely
 /// - `Some("null")` -> discard result, return original input
 /// - `Some("$.foo")` -> set result at that path within input
-pub fn apply_result_path(input: &Value, result: &Value, path: Option<&str>) -> Value {
+///
+/// A path that walks into a value that can't hold its next step (`$.a.b` with
+/// `a: 1`) fails with `States.ReferencePathConflict`, as recorded.
+pub fn apply_result_path(
+    input: &Value,
+    result: &Value,
+    path: Option<&str>,
+) -> Result<Value, StatesError> {
     match path {
-        None | Some("$") => result.clone(),
-        Some("null") => input.clone(),
+        None | Some("$") => Ok(result.clone()),
+        Some("null") => Ok(input.clone()),
         Some(p) => set_at_path(input, p, result),
     }
+}
+
+/// The error a `ResultPath` that can't be applied fails with.
+pub const REFERENCE_PATH_CONFLICT: &str = "States.ReferencePathConflict";
+
+/// As recorded: `Unable to apply step "b" to input {"a":1}`, naming the step and
+/// the whole input.
+fn reference_path_conflict(step: &Step, input: &Value) -> StatesError {
+    let step = match step {
+        Step::Name(name) => name.clone(),
+        Step::Index(index) => index.to_string(),
+    };
+    (
+        REFERENCE_PATH_CONFLICT.to_string(),
+        format!("Unable to apply step \"{step}\" to input {input}"),
+    )
 }
 
 /// Evaluate a JSONPath against `root` (see [`crate::jsonpath`]).
@@ -47,7 +70,7 @@ pub fn resolve_path(root: &Value, path: &str) -> Result<Value, PathError> {
 /// for InputPath / OutputPath / ItemsPath / SecondsPath and friends:
 /// `Invalid path '$.x' : No results for path: $['x']`.
 pub fn resolve_reference(root: &Value, path: &str) -> Result<Value, StatesError> {
-    resolve_path(root, path).map_err(|e| runtime_error(path_error_cause(path, &e)))
+    resolve_with_context(root, None, path).map_err(|e| runtime_error(path_error_cause(path, &e)))
 }
 
 /// [`resolve_reference`] for a path that may address the context object
@@ -68,6 +91,11 @@ pub fn resolve_with_context(
     context: Option<&Value>,
     path: &str,
 ) -> Result<Value, PathError> {
+    if let Some((name, within)) = crate::variables::split_reference(path) {
+        let value = crate::variables::lookup(name)
+            .ok_or_else(|| PathError::Invalid(format!("the variable '{name}' is not defined")))?;
+        return resolve_path(&value, &within);
+    }
     match path.strip_prefix("$$") {
         Some(rest) => match context {
             Some(ctx) => resolve_path(ctx, &format!("${rest}")),
@@ -82,7 +110,20 @@ pub fn path_error_cause(path: &str, err: &PathError) -> String {
         PathError::NoResults(norm) => {
             format!("Invalid path '{path}' : No results for path: {norm}")
         }
+        // As recorded for `$.missing` on an array: `Invalid path '$.missing' :
+        // Property ['missing'] not found in path $`.
+        PathError::MissingProperty { property, parent } => {
+            format!("Invalid path '{path}' : Property {property} not found in path {parent}")
+        }
         PathError::Invalid(msg) => format!("Invalid path '{path}' : {msg}"),
+    }
+}
+
+/// A value as error messages quote it: a string's text, anything else as JSON.
+pub(crate) fn value_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -92,12 +133,12 @@ pub fn runtime_error(cause: String) -> StatesError {
 
 /// Set a value at a reference path (`$.a.b`, `$['a'][0]`) within a JSON
 /// structure. An index step descends into the array stored at that point,
-/// growing it with nulls as needed. A path that runs into a scalar leaves the
-/// input unchanged.
-fn set_at_path(root: &Value, path: &str, value: &Value) -> Value {
+/// growing it with nulls as needed. A step into a value that can't hold it (a
+/// property of a non-object, an index of a non-array) is a conflict.
+fn set_at_path(root: &Value, path: &str, value: &Value) -> Result<Value, StatesError> {
     let mut result = root.clone();
     let Some(steps) = JsonPath::parse(path).ok().and_then(|p| p.reference_steps()) else {
-        return result;
+        return Ok(result);
     };
 
     // The empty container a missing intermediate node is created as.
@@ -108,33 +149,40 @@ fn set_at_path(root: &Value, path: &str, value: &Value) -> Value {
         }
     }
 
-    fn assign(current: &mut Value, steps: &[Step], value: &Value) {
+    /// Assign `value` at `steps` below `current`, or return the step that
+    /// can't be taken.
+    fn assign<'s>(current: &mut Value, steps: &'s [Step], value: &Value) -> Result<(), &'s Step> {
         let Some((step, rest)) = steps.split_first() else {
             *current = value.clone();
-            return;
+            return Ok(());
         };
         match step {
             Step::Name(name) => {
-                if let Some(obj) = current.as_object_mut() {
-                    match rest.first() {
-                        None => {
-                            obj.insert(name.clone(), value.clone());
-                        }
-                        Some(next) => {
-                            let child = obj
-                                .entry(name.clone())
-                                .or_insert_with(|| container_for(next));
-                            assign(child, rest, value);
-                        }
+                let Some(obj) = current.as_object_mut() else {
+                    return Err(step);
+                };
+                match rest.first() {
+                    None => {
+                        obj.insert(name.clone(), value.clone());
+                        Ok(())
+                    }
+                    Some(next) => {
+                        let child = obj
+                            .entry(name.clone())
+                            .or_insert_with(|| container_for(next));
+                        assign(child, rest, value)
                     }
                 }
             }
             Step::Index(idx) => {
-                if let Some(arr) = current.as_array_mut() {
+                let Some(arr) = current.as_array_mut() else {
+                    return Err(step);
+                };
+                {
                     let idx = if *idx < 0 {
                         match usize::try_from(arr.len() as i64 + idx) {
                             Ok(i) => i,
-                            Err(_) => return,
+                            Err(_) => return Err(step),
                         }
                     } else {
                         *idx as usize
@@ -147,14 +195,14 @@ fn set_at_path(root: &Value, path: &str, value: &Value) -> Value {
                             arr[idx] = container_for(next);
                         }
                     }
-                    assign(&mut arr[idx], rest, value);
+                    assign(&mut arr[idx], rest, value)
                 }
             }
         }
     }
 
-    assign(&mut result, &steps, value);
-    result
+    assign(&mut result, &steps, value).map_err(|step| reference_path_conflict(step, root))?;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -184,9 +232,16 @@ mod tests {
     #[test]
     fn test_resolve_path_missing() {
         let input = json!({"a": 1});
+        // Both recorded.
+        let error = resolve_path(&input, "$.missing").unwrap_err();
         assert_eq!(
-            resolve_path(&input, "$.missing").unwrap_err(),
-            PathError::NoResults("$['missing']".into())
+            path_error_cause("$.missing", &error),
+            "Invalid path '$.missing' : No results for path: $['missing']"
+        );
+        let error = resolve_path(&json!([{}]), "$.missing").unwrap_err();
+        assert_eq!(
+            path_error_cause("$.missing", &error),
+            "Invalid path '$.missing' : Property ['missing'] not found in path $"
         );
     }
 
@@ -209,8 +264,11 @@ mod tests {
         let input = json!({"x": 1});
         let result = json!({"y": 2});
         // Default: result replaces input
-        assert_eq!(apply_result_path(&input, &result, None), result);
-        assert_eq!(apply_result_path(&input, &result, Some("$")), result);
+        assert_eq!(apply_result_path(&input, &result, None).unwrap(), result);
+        assert_eq!(
+            apply_result_path(&input, &result, Some("$")).unwrap(),
+            result
+        );
     }
 
     #[test]
@@ -218,26 +276,29 @@ mod tests {
         let input = json!({"x": 1});
         let result = json!({"y": 2});
         // null: discard result, keep input
-        assert_eq!(apply_result_path(&input, &result, Some("null")), input);
+        assert_eq!(
+            apply_result_path(&input, &result, Some("null")).unwrap(),
+            input
+        );
     }
 
     #[test]
     fn test_apply_result_path_nested() {
         let input = json!({"x": 1});
         let result = json!("hello");
-        let output = apply_result_path(&input, &result, Some("$.result"));
+        let output = apply_result_path(&input, &result, Some("$.result")).unwrap();
         assert_eq!(output, json!({"x": 1, "result": "hello"}));
     }
 
     #[test]
     fn test_set_at_path_non_object_intermediate() {
-        // When an intermediate path segment is a non-object (e.g., a number),
-        // set_at_path should not panic — it should bail out gracefully.
+        // An intermediate non-object can't take the next step: a conflict, as
+        // recorded, never a panic.
         let input = json!({"x": 42});
         let result = json!("hello");
-        let output = apply_result_path(&input, &result, Some("$.x.nested"));
-        // x is a number, can't set nested on it — should return input unchanged
-        assert_eq!(output, json!({"x": 42}));
+        let (error, cause) = apply_result_path(&input, &result, Some("$.x.nested")).unwrap_err();
+        assert_eq!(error, REFERENCE_PATH_CONFLICT);
+        assert_eq!(cause, r#"Unable to apply step "nested" to input {"x":42}"#);
     }
 
     // L8: ResultPath with an array-index segment must descend into the array,
@@ -246,7 +307,7 @@ mod tests {
     fn test_set_at_path_array_index_leaf() {
         let input = json!({"a": [1, 2, 3]});
         let result = json!(99);
-        let output = apply_result_path(&input, &result, Some("$.a[1]"));
+        let output = apply_result_path(&input, &result, Some("$.a[1]")).unwrap();
         assert_eq!(output, json!({"a": [1, 99, 3]}));
         // No stray literal "a[1]" key was created.
         assert!(output.get("a[1]").is_none());
@@ -256,7 +317,7 @@ mod tests {
     fn test_set_at_path_array_index_then_field() {
         let input = json!({"items": [{"v": 1}]});
         let result = json!("done");
-        let output = apply_result_path(&input, &result, Some("$.items[0].status"));
+        let output = apply_result_path(&input, &result, Some("$.items[0].status")).unwrap();
         assert_eq!(output, json!({"items": [{"v": 1, "status": "done"}]}));
     }
 
@@ -264,7 +325,7 @@ mod tests {
     fn test_set_at_path_array_index_grows_array() {
         let input = json!({});
         let result = json!("x");
-        let output = apply_result_path(&input, &result, Some("$.a[2]"));
+        let output = apply_result_path(&input, &result, Some("$.a[2]")).unwrap();
         assert_eq!(output, json!({"a": [null, null, "x"]}));
     }
 
@@ -393,9 +454,9 @@ mod missing_path_tests {
 
     #[test]
     fn result_path_bracket_notation() {
-        let out = apply_result_path(&json!({"a": {}}), &json!(1), Some("$['a']['b c']"));
+        let out = apply_result_path(&json!({"a": {}}), &json!(1), Some("$['a']['b c']")).unwrap();
         assert_eq!(out, json!({"a": {"b c": 1}}));
-        let out = apply_result_path(&json!({"a": [1, 2]}), &json!(9), Some("$.a[-1]"));
+        let out = apply_result_path(&json!({"a": [1, 2]}), &json!(9), Some("$.a[-1]")).unwrap();
         assert_eq!(out, json!({"a": [1, 9]}));
     }
 
@@ -410,6 +471,37 @@ mod missing_path_tests {
         assert_eq!(
             resolve_with_context(&json!({"a": 1}), None, "$.a").unwrap(),
             json!(1)
+        );
+    }
+}
+
+#[cfg(test)]
+mod reference_path_conflict_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Recorded: `ResultPath: $.a.b` over `{"a":1}`.
+    #[test]
+    fn a_step_into_a_scalar_is_a_conflict() {
+        assert_eq!(
+            apply_result_path(&json!({"a": 1}), &json!([{}]), Some("$.a.b")).unwrap_err(),
+            (
+                "States.ReferencePathConflict".to_string(),
+                r#"Unable to apply step "b" to input {"a":1}"#.to_string()
+            )
+        );
+        // Inferred: an index into a non-array, and a property of a scalar input.
+        assert_eq!(
+            apply_result_path(&json!({"a": {}}), &json!(1), Some("$.a[0]"))
+                .unwrap_err()
+                .0,
+            REFERENCE_PATH_CONFLICT
+        );
+        assert!(apply_result_path(&json!(5), &json!(1), Some("$.x")).is_err());
+        // Missing nodes are still created.
+        assert_eq!(
+            apply_result_path(&json!({}), &json!(1), Some("$.a.b")).unwrap(),
+            json!({"a": {"b": 1}})
         );
     }
 }

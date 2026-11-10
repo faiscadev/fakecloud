@@ -79,6 +79,9 @@ pub enum PathError {
     /// A definite path matched nothing. Carries the normalized path
     /// (`$['a'][0]`) as Jayway reports it.
     NoResults(String),
+    /// A definite path asked an array for a property: the property (`['b']`)
+    /// and the normalized path to the array (`$['a']`).
+    MissingProperty { property: String, parent: String },
 }
 
 impl JsonPath {
@@ -128,6 +131,52 @@ impl JsonPath {
         )
     }
 
+    /// Why a definite path matched nothing: the first array it asked for a
+    /// property, as Jayway reports it, or else no results.
+    fn definite_miss(&self, root: &Value) -> PathError {
+        let mut current = root;
+        let mut parent = String::from("$");
+        for segment in &self.segments {
+            let next = match segment {
+                // As recorded, a property an object lacks is no results
+                // (`$.missing` on `{}`: `No results for path: $['missing']`),
+                // while an array has no properties at all (`$.missing` on
+                // `[{}]`: `Property ['missing'] not found in path $`).
+                Segment::Names(names) => match current {
+                    Value::Object(object) => match object.get(&names[0]) {
+                        Some(next) => next,
+                        None => break,
+                    },
+                    Value::Array(_) => {
+                        let mut property = String::new();
+                        render_segment(segment, &mut property);
+                        return PathError::MissingProperty { property, parent };
+                    }
+                    _ => break,
+                },
+                Segment::Indexes(indexes) => {
+                    let Value::Array(items) = current else {
+                        break;
+                    };
+                    let index = indexes[0];
+                    let at = if index < 0 {
+                        items.len() as i64 + index
+                    } else {
+                        index
+                    };
+                    match usize::try_from(at).ok().and_then(|at| items.get(at)) {
+                        Some(next) => next,
+                        None => break,
+                    }
+                }
+                _ => break,
+            };
+            render_segment(segment, &mut parent);
+            current = next;
+        }
+        PathError::NoResults(self.normalized())
+    }
+
     /// Jayway-style normalized rendering, used in error messages.
     pub fn normalized(&self) -> String {
         let mut out = String::from("$");
@@ -146,7 +195,7 @@ impl JsonPath {
                 .into_iter()
                 .next()
                 .cloned()
-                .ok_or_else(|| PathError::NoResults(self.normalized()))
+                .ok_or_else(|| self.definite_miss(root))
         } else {
             Ok(Value::Array(results.into_iter().cloned().collect()))
         }
@@ -679,6 +728,18 @@ mod tests {
         );
         // A present null is a result, not a miss.
         assert_eq!(evaluate(&d, "$.n").unwrap(), Value::Null);
+    }
+
+    /// Recorded: an array root has no properties either.
+    #[test]
+    fn a_property_of_an_array_is_missing() {
+        assert_eq!(
+            evaluate(&json!([{}]), "$.missing").unwrap_err(),
+            PathError::MissingProperty {
+                property: "['missing']".into(),
+                parent: "$".into()
+            }
+        );
     }
 
     #[test]

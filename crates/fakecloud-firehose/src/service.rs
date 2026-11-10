@@ -532,6 +532,45 @@ async fn require_cluster_endpoints(
     Ok(())
 }
 
+/// What `CreateDeliveryStream` (or, with `updating`, `UpdateDestination`) checks
+/// of a request's destinations and source before anything changes, for a caller
+/// that builds streams without the API: CloudFormation. The model's patterns, then
+/// the buckets, search domains and (on create) source stream the request names.
+/// Existence goes unchecked with no topology wired, as for the API.
+pub fn check_request_destinations(
+    engine: &FirehoseEngine,
+    account: &str,
+    body: &Value,
+    updating: bool,
+) -> Result<(), AwsServiceError> {
+    let suffix = if updating { "Update" } else { "Configuration" };
+    validate_model_patterns(body, suffix)?;
+    for base in ["S3Destination", "ExtendedS3Destination"] {
+        require_destination_resources(engine, account, &body[format!("{base}{suffix}")], &[])?;
+    }
+    for block in extract_extra_destinations(body, suffix).values() {
+        require_destination_resources(engine, account, block, &["S3Update", "S3Configuration"])?;
+    }
+    if !updating {
+        let stream_type = body["DeliveryStreamType"].as_str().unwrap_or("DirectPut");
+        if let Some(source) = parse_kinesis_source(stream_type, body)? {
+            engine.require_kinesis_stream(account, &source.kinesis_stream_arn)?;
+        }
+    }
+    Ok(())
+}
+
+/// The `ClusterEndpoint` reachability the API checks last, for the same callers.
+/// Bounded; hold no lock across it.
+pub async fn check_request_cluster_endpoints(
+    engine: &FirehoseEngine,
+    body: &Value,
+    updating: bool,
+) -> Result<(), AwsServiceError> {
+    let suffix = if updating { "Update" } else { "Configuration" };
+    require_cluster_endpoints(engine, &extract_extra_destinations(body, suffix)).await
+}
+
 /// An `UpdateDestination` request's members, read before the stream is looked at.
 struct DestinationUpdate<'a> {
     name: &'a str,

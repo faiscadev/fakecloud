@@ -263,26 +263,6 @@ fn generate_with_suffix(stack_id: &str, logical_id: &str, rule: NameRule, suffix
     }
 }
 
-/// Whether `name` is the name [`generate`] gives `logical_id` in this stack
-/// (with whatever random suffix it drew).
-pub(crate) fn is_generated_name(
-    stack_id: &str,
-    logical_id: &str,
-    resource_type: &str,
-    name: &str,
-) -> bool {
-    generated_with_rule(stack_id, logical_id, name_rule(resource_type), name)
-}
-
-fn generated_with_rule(stack_id: &str, logical_id: &str, rule: NameRule, name: &str) -> bool {
-    // The suffix is whatever follows the last separator; regenerating with it
-    // reproduces the name exactly when the name was generated.
-    let Some((_, suffix)) = name.rsplit_once(rule.separator) else {
-        return false;
-    };
-    generate_with_suffix(stack_id, logical_id, rule, suffix) == name
-}
-
 /// Whether `name` is one an older build gave an unnamed resource: the bare
 /// logical id, `{LogicalId}-{8 hex}`, `cfn-{kind}-{LogicalId}`, or
 /// `cfn-[{kind}-]{logicalid}-{8 alphanumerics}`.
@@ -527,44 +507,5 @@ mod tests {
     fn identity_pools_avoid_hyphens() {
         let name = generate(STACK, "Pool", name_rule("AWS::Cognito::IdentityPool"));
         assert!(name.starts_with("my_app_Pool_"), "{name}");
-    }
-
-    #[test]
-    fn generated_names_are_recognised_for_every_rule_shape() {
-        let long_stack = "arn:aws:cloudformation:us-east-1:123456789012:stack/a-really-long-stack-name-that-goes-on-and-on-and-on-forever/1b2c3d4e-0000-4000-8000-000000000000";
-        let long_logical = "AVeryLongLogicalIdentifierThatWillNeedTruncatingForSure";
-        let rules = [
-            NameRule::new(255),
-            NameRule::new(64).lower(),
-            NameRule::new(64).without_stack(),
-            NameRule::new(63).separated_by('_'),
-            NameRule::new(32),
-            NameRule::new(32).lower().separated_by('_'),
-        ];
-        for rule in rules {
-            for (stack, logical) in [(STACK, "Tmpl"), (long_stack, long_logical)] {
-                for _ in 0..5 {
-                    let name = generate(stack, logical, rule);
-                    assert!(
-                        generated_with_rule(stack, logical, rule, &name),
-                        "{rule:?} {name}"
-                    );
-                    // Another logical id's name, or a repeat with an extra
-                    // part, is not this resource's generated name.
-                    assert!(!generated_with_rule(stack, "Other", rule, &name), "{name}");
-                    let repeated = format!("{name}{}{name}", rule.separator);
-                    assert!(!generated_with_rule(stack, logical, rule, &repeated));
-                }
-            }
-        }
-        // Explicit and legacy names are not generated ones.
-        let rule = name_rule("AWS::EC2::LaunchTemplate");
-        assert!(!generated_with_rule(STACK, "Tmpl", rule, "named"));
-        assert!(!generated_with_rule(
-            STACK,
-            "Tmpl",
-            rule,
-            "cfn-tmpl-4f3a9c1e"
-        ));
     }
 }

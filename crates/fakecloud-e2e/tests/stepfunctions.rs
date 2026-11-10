@@ -4302,7 +4302,6 @@ async fn sfn_introspection_sync_executions_endpoint() {
 }
 
 #[tokio::test]
-#[ignore = "execution tree state propagation timing flaky; introspection covered by unit tests"]
 async fn sfn_introspection_execution_tree_endpoint() {
     let server = TestServer::start().await;
     let sfn = server.sfn_client().await;
@@ -4756,8 +4755,8 @@ async fn sfn_rejects_out_of_range_timeout_seconds() {
 }
 
 /// `States.ArrayRange` beyond AWS's 1000-item cap fails the execution with
-/// `States.IntrinsicFailure` rather than allocating (or overflowing) without
-/// bound.
+/// `States.Runtime`, as a failing intrinsic does on AWS, rather than allocating
+/// (or overflowing) without bound.
 #[tokio::test]
 async fn sfn_array_range_cap_fails_execution() {
     let server = TestServer::start().await;
@@ -4798,5 +4797,5 @@ async fn sfn_array_range_cap_fails_execution() {
         .send()
         .await
         .unwrap();
-    assert_eq!(desc.error().unwrap(), "States.IntrinsicFailure");
+    assert_eq!(desc.error().unwrap(), "States.Runtime");
 }

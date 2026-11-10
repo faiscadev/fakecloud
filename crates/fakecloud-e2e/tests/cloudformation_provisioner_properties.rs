@@ -530,9 +530,22 @@ async fn cfn_redeploy_over_retained_table_fails_and_keeps_data() {
     let reason = match result {
         Err(e) => format!("{e:?}"),
         Ok(_) => {
-            let (status, reason) = wait_stack_terminal(&cfn, "retain-2").await;
+            let (status, _) = wait_stack_terminal(&cfn, "retain-2").await;
             assert_ne!(status, "CREATE_COMPLETE");
-            reason
+            // A rolled-back stack keeps no reason; the failed resource's event does.
+            let events = cfn
+                .describe_stack_events()
+                .stack_name("retain-2")
+                .send()
+                .await
+                .unwrap();
+            events
+                .stack_events()
+                .iter()
+                .find(|e| e.resource_status().map(|s| s.as_str()) == Some("CREATE_FAILED"))
+                .and_then(|e| e.resource_status_reason())
+                .unwrap_or_default()
+                .to_string()
         }
     };
     assert!(reason.contains("already exists"), "{reason}");

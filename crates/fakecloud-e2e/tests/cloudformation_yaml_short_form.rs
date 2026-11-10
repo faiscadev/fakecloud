@@ -361,7 +361,9 @@ async fn unparseable_update_does_not_delete_the_stacks_resources() {
     // A well-formed update still succeeds, so the guard isn't over-rejecting.
     cfn.update_stack()
         .stack_name("bad-update")
-        .template_body(UPDATE_BASE_TEMPLATE)
+        .template_body(format!(
+            "{UPDATE_BASE_TEMPLATE}Description: a real change\n"
+        ))
         .send()
         .await
         .expect("a valid update must still work");
@@ -383,12 +385,21 @@ async fn use_previous_template_does_not_delete_the_stacks_resources() {
         .await
         .expect("create_stack");
 
-    cfn.update_stack()
+    // The stored template changes nothing, so AWS refuses the update: what matters
+    // is that it was read as that template and not as an empty one, which would be
+    // an update removing everything.
+    let refused = cfn
+        .update_stack()
         .stack_name("prev-template")
         .use_previous_template(true)
         .send()
         .await
-        .expect("update_stack with the previous template");
+        .expect_err("nothing to update")
+        .into_service_error();
+    assert_eq!(
+        refused.meta().message(),
+        Some("No updates are to be performed.")
+    );
 
     let after = cfn
         .describe_stack_resources()

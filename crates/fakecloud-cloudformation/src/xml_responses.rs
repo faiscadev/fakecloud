@@ -237,16 +237,28 @@ pub fn list_stack_resources_response(resources: &[StackResource], request_id: &s
     )
 }
 
+/// The `<PhysicalResourceId>` element of a resource, or nothing when the id is
+/// empty, as it is for a failed create. Includes its own line ending.
+pub(crate) fn physical_id_xml(physical_id: &str) -> String {
+    if physical_id.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "        <PhysicalResourceId>{}</PhysicalResourceId>\n",
+            xml_escape(physical_id)
+        )
+    }
+}
+
 fn stack_resource_summary_xml(resource: &StackResource) -> String {
     format!(
         r#"      <member>
         <LogicalResourceId>{logical_id}</LogicalResourceId>
-        <PhysicalResourceId>{physical_id}</PhysicalResourceId>
-        <ResourceType>{resource_type}</ResourceType>
+{physical_id}        <ResourceType>{resource_type}</ResourceType>
         <ResourceStatus>{status}</ResourceStatus>
       </member>"#,
         logical_id = xml_escape(&resource.logical_id),
-        physical_id = xml_escape(&resource.physical_id),
+        physical_id = physical_id_xml(&resource.physical_id),
         resource_type = xml_escape(&resource.resource_type),
         status = xml_escape(&resource.status),
     )
@@ -264,13 +276,12 @@ pub fn describe_stack_resources_response(
                 r#"      <member>
         <StackName>{stack_name}</StackName>
         <LogicalResourceId>{logical_id}</LogicalResourceId>
-        <PhysicalResourceId>{physical_id}</PhysicalResourceId>
-        <ResourceType>{resource_type}</ResourceType>
+{physical_id}        <ResourceType>{resource_type}</ResourceType>
         <ResourceStatus>{status}</ResourceStatus>
       </member>"#,
                 stack_name = xml_escape(stack_name),
                 logical_id = xml_escape(&r.logical_id),
-                physical_id = xml_escape(&r.physical_id),
+                physical_id = physical_id_xml(&r.physical_id),
                 resource_type = xml_escape(&r.resource_type),
                 status = xml_escape(&r.status),
             )
@@ -311,6 +322,32 @@ pub fn get_template_response(template_body: &str, request_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_physical_id_leaves_the_element_out() {
+        assert_eq!(physical_id_xml(""), "");
+        assert_eq!(
+            physical_id_xml("a&b"),
+            "        <PhysicalResourceId>a&amp;b</PhysicalResourceId>\n"
+        );
+        let failed = StackResource {
+            logical_id: "Bad".to_string(),
+            physical_id: String::new(),
+            resource_type: "AWS::SQS::Queue".to_string(),
+            status: "CREATE_FAILED".to_string(),
+            service_token: None,
+            attributes: Default::default(),
+            deletion_policy: None,
+            update_replace_policy: None,
+        };
+        for response in [
+            list_stack_resources_response(std::slice::from_ref(&failed), "r"),
+            describe_stack_resources_response(std::slice::from_ref(&failed), "s", "r"),
+        ] {
+            assert!(!response.contains("PhysicalResourceId"), "{response}");
+            assert!(response.contains("CREATE_FAILED"), "{response}");
+        }
+    }
     use chrono::Utc;
     use fakecloud_aws::arn::Arn;
     use std::collections::BTreeMap;
@@ -337,7 +374,8 @@ mod tests {
             notification_arns: vec![],
             outputs: vec![],
             enable_termination_protection: false,
-            reapply_logical_ids: Default::default(),
+            pending_update: None,
+            cancel_requested: false,
         }
     }
 

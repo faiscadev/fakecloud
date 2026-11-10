@@ -340,10 +340,10 @@ that concurrency limit, as Lambda always does.
   target's, for example) count toward the quota but those services do not
   refuse a create past it.
 - vCPU counts come from a table of the instance types EC2 offered when it was
-  generated. While a vCPU quota is enforced, launching or requesting as Spot
-  an instance type missing from the table, such as one newer than the table,
-  is refused with `InvalidParameterValue`; while it is not enforced, such a
-  type is accepted and counts 0 vCPUs, also when it is started later. The
+  generated. `RunInstances` always refuses an instance type missing from the
+  table, such as one newer than it, with `InvalidParameterValue`. Requesting one
+  as Spot is refused the same way while a vCPU quota is enforced; otherwise it is
+  accepted and counts 0 vCPUs, also when it is started later. The
   Trn, DL, HPC and Mac families' quotas are reported but not enforced.
 - Lambda "Concurrent executions" (`L-B99A9384`) is not enforceable: invocations
   from event source mappings, SNS, S3, EventBridge and other services run the

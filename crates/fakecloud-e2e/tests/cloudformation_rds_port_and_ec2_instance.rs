@@ -271,5 +271,5 @@ async fn cfn_rejects_an_instance_profile_that_is_not_an_instance_profile() {
         .await
         .expect("describe_stacks");
     let stack = described.stacks().first().expect("stack present");
-    assert_eq!(stack.stack_status().unwrap().as_str(), "CREATE_FAILED");
+    assert_eq!(stack.stack_status().unwrap().as_str(), "ROLLBACK_COMPLETE");
 }

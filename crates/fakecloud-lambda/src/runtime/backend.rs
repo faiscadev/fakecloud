@@ -76,6 +76,11 @@ impl StreamingInvocation {
 
 #[async_trait]
 pub trait LambdaBackend: Send + Sync + 'static {
+    /// How this backend's functions reach fakecloud, for a URL handed to one.
+    fn callback_endpoint(&self) -> Option<String> {
+        None
+    }
+
     /// Short identifier surfaced via logs and introspection (e.g.
     /// `"docker"`, `"podman"`, `"kubernetes"`).
     fn name(&self) -> &str;

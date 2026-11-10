@@ -87,18 +87,170 @@ fn opt_value(v: &Value) -> Option<Value> {
     }
 }
 
+/// A job run as `GetJobRun` reports it, with the settings it started with. An
+/// absent field is left out, as AWS leaves it out.
 fn job_run_to_json(r: &JobRun) -> Value {
-    json!({
+    let settings = &r.settings;
+    let mut run = json!({
         "Id": r.id,
         "JobName": r.job_name,
         "StartedOn": r.started_on.timestamp(),
-        "CompletedOn": r.completed_on.map(|d| d.timestamp()),
+        "LastModifiedOn": r.completed_on.unwrap_or(r.started_on).timestamp(),
         "JobRunState": r.state,
-        "Arguments": r.arguments,
-        "ErrorMessage": r.error_message,
         "ExecutionTime": r.execution_time,
         "Attempt": r.attempt,
+        "PredecessorRuns": [],
+    });
+    let optional = [
+        ("CompletedOn", r.completed_on.map(|d| json!(d.timestamp()))),
+        (
+            "Arguments",
+            (!r.arguments.is_empty()).then(|| json!(r.arguments)),
+        ),
+        ("ErrorMessage", r.error_message.as_ref().map(|m| json!(m))),
+        ("Timeout", settings.timeout.map(|t| json!(t))),
+        ("MaxCapacity", settings.max_capacity.map(|c| json!(c))),
+        (
+            "AllocatedCapacity",
+            settings.allocated_capacity.map(|c| json!(c)),
+        ),
+        (
+            "GlueVersion",
+            settings.glue_version.as_ref().map(|v| json!(v)),
+        ),
+        (
+            "WorkerType",
+            settings.worker_type.as_ref().map(|v| json!(v)),
+        ),
+        (
+            "NumberOfWorkers",
+            settings.number_of_workers.map(|n| json!(n)),
+        ),
+        (
+            "ExecutionClass",
+            settings.execution_class.as_ref().map(|v| json!(v)),
+        ),
+        ("JobMode", settings.job_mode.as_ref().map(|v| json!(v))),
+        (
+            "LogGroupName",
+            settings.log_group_name.as_ref().map(|v| json!(v)),
+        ),
+    ];
+    for (field, value) in optional {
+        if let Some(value) = value {
+            run[field] = value;
+        }
+    }
+    run
+}
+
+/// The Glue version a job gets when it names none, as recorded.
+const DEFAULT_GLUE_VERSION: &str = "6.0";
+
+/// A job's default timeout in minutes, as recorded: 480 from Glue 5.0 on and 2880
+/// before it; a streaming job has none.
+fn default_timeout(command: &Value, glue_version: &str) -> Option<i64> {
+    if command["Name"].as_str() == Some("gluestreaming") {
+        return None;
+    }
+    let major = glue_version
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u32>().ok())
+        .unwrap_or(0);
+    Some(if major >= 5 { 480 } else { 2880 })
+}
+
+/// The DPUs one worker of a type provides.
+fn worker_dpus(worker_type: &str) -> Option<f64> {
+    Some(match worker_type {
+        "G.025X" => 0.25,
+        "G.1X" | "Standard" => 1.0,
+        "G.2X" | "Z.2X" => 2.0,
+        "G.4X" => 4.0,
+        "G.8X" => 8.0,
+        "G.12X" => 12.0,
+        "G.16X" => 16.0,
+        "R.1X" => 1.0,
+        "R.2X" => 2.0,
+        "R.4X" => 4.0,
+        "R.8X" => 8.0,
+        _ => return None,
     })
+}
+
+/// A job's capacity in DPUs, as recorded: its workers' when it names them, else
+/// 0.0625 for a Python shell job and 10 for any other.
+fn default_max_capacity(
+    command: &Value,
+    worker_type: Option<&str>,
+    number_of_workers: Option<i64>,
+) -> f64 {
+    if let (Some(dpus), Some(workers)) = (worker_type.and_then(worker_dpus), number_of_workers) {
+        return dpus * workers as f64;
+    }
+    if command["Name"].as_str() == Some("pythonshell") {
+        0.0625
+    } else {
+        10.0
+    }
+}
+
+/// `AllocatedCapacity`, the deprecated whole-DPU count: the capacity's whole
+/// DPUs, as recorded (0.0625 is 0, 10 is 10).
+fn allocated_capacity(max_capacity: f64) -> i64 {
+    max_capacity.floor() as i64
+}
+
+/// The settings a run of `job` starts with, the run's own overrides applied.
+fn run_settings(job: &Job, body: &Value) -> crate::state::JobRunSettings {
+    let worker_type = body["WorkerType"]
+        .as_str()
+        .map(String::from)
+        .or_else(|| job.worker_type.clone());
+    let number_of_workers = body["NumberOfWorkers"].as_i64().or(job.number_of_workers);
+    let workers_overridden = body["WorkerType"].is_string() || body["NumberOfWorkers"].is_i64();
+    let max_capacity = body["MaxCapacity"]
+        .as_f64()
+        .or_else(|| {
+            workers_overridden.then(|| {
+                default_max_capacity(&job.command, worker_type.as_deref(), number_of_workers)
+            })
+        })
+        .or(job.max_capacity);
+    // A run's own capacity (or workers) first, then the job's stored count,
+    // then the whole DPUs of the capacity.
+    let capacity_overridden = workers_overridden || body["MaxCapacity"].is_number();
+    let allocated = body["AllocatedCapacity"]
+        .as_i64()
+        .or_else(|| {
+            capacity_overridden
+                .then(|| max_capacity.map(allocated_capacity))
+                .flatten()
+        })
+        .or(job.allocated_capacity)
+        .or_else(|| max_capacity.map(allocated_capacity));
+    crate::state::JobRunSettings {
+        timeout: body["Timeout"].as_i64().or(job.timeout),
+        max_capacity,
+        allocated_capacity: allocated,
+        glue_version: job.glue_version.clone(),
+        worker_type,
+        number_of_workers,
+        execution_class: body["ExecutionClass"]
+            .as_str()
+            .map(String::from)
+            .or_else(|| job.execution_class.clone()),
+        job_mode: job.job_mode.clone(),
+        log_group_name: Some(
+            if job.command["Name"] == "pythonshell" {
+                "/aws-glue/python-jobs"
+            } else {
+                "/aws-glue/jobs"
+            }
+            .to_string(),
+        ),
+    }
 }
 
 impl GlueService {
@@ -110,14 +262,19 @@ impl GlueService {
         if command.is_null() {
             return Err(missing("Command"));
         }
-        // AWS defaults the job timeout to 2880 minutes (48h) for batch jobs when
-        // unset; streaming jobs (gluestreaming) have no default timeout.
-        let timeout = body["Timeout"].as_i64().or_else(|| {
-            if command["Name"].as_str() == Some("gluestreaming") {
-                None
-            } else {
-                Some(2880)
-            }
+        // Unset settings take AWS's defaults, as recorded: the current Glue
+        // version, its timeout, and the capacity of the job's command or workers.
+        let glue_version = body["GlueVersion"]
+            .as_str()
+            .unwrap_or(DEFAULT_GLUE_VERSION)
+            .to_string();
+        let timeout = body["Timeout"]
+            .as_i64()
+            .or_else(|| default_timeout(&command, &glue_version));
+        let worker_type = body["WorkerType"].as_str().map(String::from);
+        let number_of_workers = body["NumberOfWorkers"].as_i64();
+        let max_capacity = body["MaxCapacity"].as_f64().unwrap_or_else(|| {
+            default_max_capacity(&command, worker_type.as_deref(), number_of_workers)
         });
         let now = Utc::now();
         let mut accounts = self.state.write();
@@ -135,10 +292,10 @@ impl GlueService {
             default_arguments: parse_string_map(&body["DefaultArguments"]),
             max_retries: body["MaxRetries"].as_i64().unwrap_or(0),
             timeout,
-            glue_version: body["GlueVersion"].as_str().map(String::from),
-            max_capacity: body["MaxCapacity"].as_f64(),
-            worker_type: body["WorkerType"].as_str().map(String::from),
-            number_of_workers: body["NumberOfWorkers"].as_i64(),
+            glue_version: Some(glue_version),
+            max_capacity: Some(max_capacity),
+            worker_type,
+            number_of_workers,
             execution_class: body["ExecutionClass"].as_str().map(String::from),
             connections: opt_value(&body["Connections"]),
             execution_property: opt_value(&body["ExecutionProperty"]),
@@ -149,8 +306,12 @@ impl GlueService {
             code_gen_configuration_nodes: opt_value(&body["CodeGenConfigurationNodes"]),
             maintenance_window: body["MaintenanceWindow"].as_str().map(String::from),
             log_uri: body["LogUri"].as_str().map(String::from),
-            allocated_capacity: body["AllocatedCapacity"].as_i64(),
-            job_mode: body["JobMode"].as_str().map(String::from),
+            allocated_capacity: Some(
+                body["AllocatedCapacity"]
+                    .as_i64()
+                    .unwrap_or_else(|| allocated_capacity(max_capacity)),
+            ),
+            job_mode: Some(body["JobMode"].as_str().unwrap_or("SCRIPT").to_string()),
             job_run_queuing_enabled: body["JobRunQueuingEnabled"].as_bool(),
         };
         state.jobs.insert(name.to_string(), job);
@@ -312,9 +473,10 @@ impl GlueService {
         let name = body["JobName"].as_str().ok_or_else(|| missing("JobName"))?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
-        if !state.jobs.contains_key(name) {
+        let Some(job) = state.jobs.get(name) else {
             return Err(entity_not_found(format!("Job {name} not found")));
-        }
+        };
+        let settings = run_settings(job, &body);
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let run = JobRun {
@@ -326,7 +488,9 @@ impl GlueService {
             arguments: parse_string_map(&body["Arguments"]),
             error_message: None,
             execution_time: 0,
-            attempt: 1,
+            // The first attempt is number 0, as recorded.
+            attempt: 0,
+            settings,
         };
         state.job_runs.insert(id.clone(), run);
         Ok(AwsResponse::ok_json(json!({ "JobRunId": id })))

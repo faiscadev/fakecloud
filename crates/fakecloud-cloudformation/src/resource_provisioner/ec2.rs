@@ -758,48 +758,6 @@ impl ResourceProvisioner {
         Ok(result)
     }
 
-    /// Whether an `AWS::EC2::Instance` update points at a different launch
-    /// template version than the instance was launched from (compared via the
-    /// `aws:ec2launchtemplate:*` tags the launch recorded), which AWS handles
-    /// by replacing the instance.
-    pub(super) fn instance_launch_template_changed(
-        &self,
-        existing: &StackResource,
-        resource: &ResourceDefinition,
-    ) -> bool {
-        let launched = {
-            let accounts = self.ec2_state.read();
-            let Some(st) = accounts.regional(&self.account_id, &self.region) else {
-                return false;
-            };
-            let tag = |k: &str| {
-                st.tags_for(&existing.physical_id)
-                    .iter()
-                    .find(|t| t.key == k)
-                    .map(|t| t.value.clone())
-            };
-            tag("aws:ec2launchtemplate:id").zip(tag("aws:ec2launchtemplate:version"))
-        };
-        let wanted = cfn_launch_template_ref(&resource.properties).map(|lt| {
-            fakecloud_ec2::service::launch_template::resolve_launch_template_in(
-                &self.ec2_state,
-                &self.account_id,
-                &self.region,
-                lt.id.as_deref(),
-                lt.name.as_deref(),
-                lt.version.as_deref(),
-            )
-            .map(|r| (r.id, r.version.to_string()))
-        });
-        match (launched, wanted) {
-            (None, None) => false,
-            // An unresolvable template: let the replacement surface the error.
-            (_, Some(Err(_))) => true,
-            (Some(l), Some(Ok(w))) => l != w,
-            _ => true,
-        }
-    }
-
     /// In-place stack update for `AWS::EC2::Instance`. An instance is stateful
     /// (a real backing container / attached EBS with data), so a benign
     /// property or tag change must NOT terminate + relaunch it the way the
@@ -996,34 +954,6 @@ impl ResourceProvisioner {
             .with("LaunchTemplateId", id)
             .with("LatestVersionNumber", "1".to_string())
             .with("DefaultVersionNumber", "1".to_string()))
-    }
-
-    /// Whether an `AWS::EC2::LaunchTemplate` update keeps the template's name
-    /// (an explicit `LaunchTemplateName` change replaces the template).
-    pub(super) fn launch_template_name_kept(
-        &self,
-        existing: &StackResource,
-        resource: &ResourceDefinition,
-    ) -> bool {
-        let accounts = self.ec2_state.read();
-        let Some(current) = accounts
-            .regional(&self.account_id, &self.region)
-            .and_then(|s| s.launch_templates.get(&existing.physical_id))
-            .map(|t| t.name.clone())
-        else {
-            return false;
-        };
-        match prop_str(&resource.properties, "LaunchTemplateName") {
-            Some(wanted) => current == wanted,
-            // Dropping an explicit name replaces the template with a
-            // generated-name one; a generated name is kept.
-            None => super::naming::is_generated_name(
-                &self.stack_id,
-                &resource.logical_id,
-                &resource.resource_type,
-                &current,
-            ),
-        }
     }
 
     /// In-place update of an `AWS::EC2::LaunchTemplate`: new

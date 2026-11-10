@@ -295,7 +295,12 @@ impl SqsService {
         // resume still matches on the next page fetch.
         let base = resolve_endpoint_base(&req.headers, &state.endpoint);
         let rendered: Vec<String> = page.iter().map(|u| render_queue_url(u, &base)).collect();
-        let mut result = json!({ "QueueUrls": rendered });
+        // AWS leaves the member out when there is nothing to list.
+        let mut result = if rendered.is_empty() {
+            json!({})
+        } else {
+            json!({ "QueueUrls": rendered })
+        };
         if has_more {
             if let Some(last) = page.last() {
                 result["NextToken"] = json!(encode_list_queues_token(last));

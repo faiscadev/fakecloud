@@ -988,17 +988,20 @@ pub(crate) fn describe_instance_type_offerings(
     _svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    validate_enum(
-        &req.query_params,
-        "LocationType",
-        &[
-            "region",
-            "availability-zone",
-            "availability-zone-id",
-            "outpost",
-        ],
-    )?;
-    validate_max_results(&req.query_params, 5, 1000)?;
+    let location_type = req
+        .query_params
+        .get("LocationType")
+        .filter(|v| !v.is_empty())
+        .map_or("region", String::as_str);
+    if !matches!(
+        location_type,
+        "region" | "availability-zone" | "availability-zone-id" | "outpost"
+    ) {
+        return Err(invalid_parameter_value(format!(
+            "Invalid value for location type: {location_type}. \
+             Must be one of [availability-zone, availability-zone-id, outpost, region]"
+        )));
+    }
     let filters = parse_filters(&req.query_params);
     if let Some(f) = filters
         .iter()
@@ -1009,24 +1012,21 @@ pub(crate) fn describe_instance_type_offerings(
             f.name
         )));
     }
-    let location_type = req
-        .query_params
-        .get("LocationType")
-        .filter(|v| !v.is_empty())
-        .map_or("region", String::as_str);
     let region = crate::service::instance::request_region(req);
-    // The catalog holds the Regions that sell each type, so every zone of such a
-    // Region is reported as offering it. An account here has no Outposts (there is
-    // no such resource, and `DescribeLocalGateways` is empty), so none is listed.
-    let locations: Vec<String> = match location_type {
-        "region" => vec![region.to_string()],
+    // Each location with the zone it stands for. Zone IDs come from the same zone
+    // names DescribeAvailabilityZones reports them for, so the two stay consistent
+    // (real EC2 maps names to physical zones per account; here that map is fixed).
+    // An account here has no Outposts (there is no such resource, and
+    // `DescribeLocalGateways` is empty), so none is listed.
+    let locations: Vec<(String, Option<String>)> = match location_type {
+        "region" => vec![(region.to_string(), None)],
         "availability-zone" => crate::defaults::region_zones(region)
             .into_iter()
-            .map(|(zone, _)| zone)
+            .map(|(zone, _)| (zone.clone(), Some(zone)))
             .collect(),
         "availability-zone-id" => crate::defaults::region_zones(region)
             .into_iter()
-            .map(|(_, id)| id)
+            .map(|(zone, id)| (id, Some(zone)))
             .collect(),
         _ => Vec::new(),
     };
@@ -1042,11 +1042,13 @@ pub(crate) fn describe_instance_type_offerings(
         if !t.offered_in(region) || !passes("instance-type", &t.name) {
             continue;
         }
-        for location in locations.iter().filter(|l| passes("location", l)) {
-            matching.push((t.name.as_str(), location.as_str()));
+        for (location, zone) in locations.iter().filter(|(l, _)| passes("location", l)) {
+            if zone.as_ref().is_none_or(|z| t.offered_in_zone(region, z)) {
+                matching.push((t.name.as_str(), location.as_str()));
+            }
         }
     }
-    let (page, next_token) = crate::service::instance::catalog_page(&matching, req)?;
+    let (page, next_token) = crate::service::instance::catalog_page(&matching, req, Some(1000))?;
     let items: Vec<String> = page
         .iter()
         .map(|(name, location)| {

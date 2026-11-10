@@ -132,3 +132,4 @@ hmac = { workspace = true }
 sha1 = { workspace = true }
 hex = "0.4"
 uuid = { workspace = true }
+parquet = { version = "60", default-features = false, features = ["snap"] }

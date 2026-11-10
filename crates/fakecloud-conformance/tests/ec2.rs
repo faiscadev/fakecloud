@@ -5762,14 +5762,22 @@ async fn ec2_describe_reserved_instances_offerings() {
 async fn ec2_purchase_reserved_instances_offering() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
-    let r = c
-        .purchase_reserved_instances_offering()
-        .instance_count(1)
-        .reserved_instances_offering_id("offering-1")
+    let offerings = c
+        .describe_reserved_instances_offerings()
         .send()
         .await
         .unwrap();
-    assert!(r.reserved_instances_id().unwrap().starts_with("ri-"));
+    let offering = offerings.reserved_instances_offerings()[0]
+        .reserved_instances_offering_id()
+        .unwrap();
+    let r = c
+        .purchase_reserved_instances_offering()
+        .instance_count(1)
+        .reserved_instances_offering_id(offering)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.reserved_instances_id().unwrap().len(), 36);
 }
 
 #[test_action("ec2", "DescribeReservedInstancesListings", checksum = "3ef7be7d")]
@@ -5783,26 +5791,60 @@ async fn ec2_describe_reserved_instances_listings() {
         .unwrap();
 }
 
+/// Buy one m5.large of a one-year offering of `class` and wait out its
+/// payment, so the reservation is active.
+async fn active_reserved_instance(c: &aws_sdk_ec2::Client, class: &str) -> String {
+    let offerings = c
+        .describe_reserved_instances_offerings()
+        .instance_type(aws_sdk_ec2::types::InstanceType::M5Large)
+        .offering_class(aws_sdk_ec2::types::OfferingClassType::from(class))
+        .max_duration(31_536_000)
+        .send()
+        .await
+        .unwrap();
+    let offering = offerings
+        .reserved_instances_offerings()
+        .iter()
+        .find(|o| class == "convertible" || o.availability_zone() == Some("us-east-1a"))
+        .and_then(|o| o.reserved_instances_offering_id())
+        .unwrap();
+    let id = c
+        .purchase_reserved_instances_offering()
+        .instance_count(1)
+        .reserved_instances_offering_id(offering)
+        .send()
+        .await
+        .unwrap()
+        .reserved_instances_id()
+        .unwrap()
+        .to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    id
+}
+
 #[test_action("ec2", "CreateReservedInstancesListing", checksum = "cbfdaa8c")]
 #[tokio::test]
 async fn ec2_create_reserved_instances_listing() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let ri = active_reserved_instance(&c, "standard").await;
     let r = c
         .create_reserved_instances_listing()
-        .reserved_instances_id("ri-1")
+        .reserved_instances_id(&ri)
         .instance_count(1)
         .client_token("tok")
         .price_schedules(
             aws_sdk_ec2::types::PriceScheduleSpecification::builder()
                 .price(1.0)
-                .term(12)
+                .term(11)
                 .build(),
         )
         .send()
         .await
         .unwrap();
-    assert!(!r.reserved_instances_listings().is_empty());
+    let listing = &r.reserved_instances_listings()[0];
+    assert_eq!(listing.reserved_instances_id(), Some(ri.as_str()));
+    assert_eq!(listing.status().map(|s| s.as_str()), Some("active"));
 }
 
 #[test_action("ec2", "CancelReservedInstancesListing", checksum = "529138f5")]
@@ -5810,13 +5852,37 @@ async fn ec2_create_reserved_instances_listing() {
 async fn ec2_cancel_reserved_instances_listing() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let ri = active_reserved_instance(&c, "standard").await;
+    let listing = c
+        .create_reserved_instances_listing()
+        .reserved_instances_id(&ri)
+        .instance_count(1)
+        .client_token("tok")
+        .price_schedules(
+            aws_sdk_ec2::types::PriceScheduleSpecification::builder()
+                .price(1.0)
+                .term(11)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .reserved_instances_listings()[0]
+        .reserved_instances_listing_id()
+        .unwrap()
+        .to_string();
     let r = c
         .cancel_reserved_instances_listing()
-        .reserved_instances_listing_id("ril-1")
+        .reserved_instances_listing_id(&listing)
         .send()
         .await
         .unwrap();
-    assert!(!r.reserved_instances_listings().is_empty());
+    assert_eq!(
+        r.reserved_instances_listings()[0]
+            .status()
+            .map(|s| s.as_str()),
+        Some("cancelled")
+    );
 }
 
 #[test_action("ec2", "DescribeReservedInstancesModifications", checksum = "4dcc2509")]
@@ -5835,18 +5901,38 @@ async fn ec2_describe_reserved_instances_modifications() {
 async fn ec2_modify_reserved_instances() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let ri = active_reserved_instance(&c, "standard").await;
     let r = c
         .modify_reserved_instances()
-        .reserved_instances_ids("ri-1")
+        .reserved_instances_ids(&ri)
         .target_configurations(
             aws_sdk_ec2::types::ReservedInstancesConfiguration::builder()
                 .instance_count(1)
+                .availability_zone("us-east-1b")
                 .build(),
         )
         .send()
         .await
         .unwrap();
-    assert!(r.reserved_instances_modification_id().is_some());
+    assert!(r
+        .reserved_instances_modification_id()
+        .unwrap()
+        .starts_with("rimod-"));
+}
+
+/// A one-year convertible m5.xlarge offering, to exchange into.
+async fn convertible_target(c: &aws_sdk_ec2::Client) -> String {
+    c.describe_reserved_instances_offerings()
+        .instance_type(aws_sdk_ec2::types::InstanceType::M5Xlarge)
+        .offering_class(aws_sdk_ec2::types::OfferingClassType::Convertible)
+        .max_duration(31_536_000)
+        .send()
+        .await
+        .unwrap()
+        .reserved_instances_offerings()[0]
+        .reserved_instances_offering_id()
+        .unwrap()
+        .to_string()
 }
 
 #[test_action("ec2", "GetReservedInstancesExchangeQuote", checksum = "962e59d8")]
@@ -5854,9 +5940,16 @@ async fn ec2_modify_reserved_instances() {
 async fn ec2_get_reserved_instances_exchange_quote() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let ri = active_reserved_instance(&c, "convertible").await;
+    let target = convertible_target(&c).await;
     let r = c
         .get_reserved_instances_exchange_quote()
-        .reserved_instance_ids("ri-1")
+        .reserved_instance_ids(&ri)
+        .target_configurations(
+            aws_sdk_ec2::types::TargetConfigurationRequest::builder()
+                .offering_id(target)
+                .build(),
+        )
         .send()
         .await
         .unwrap();
@@ -5868,9 +5961,16 @@ async fn ec2_get_reserved_instances_exchange_quote() {
 async fn ec2_accept_reserved_instances_exchange_quote() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let ri = active_reserved_instance(&c, "convertible").await;
+    let target = convertible_target(&c).await;
     let r = c
         .accept_reserved_instances_exchange_quote()
-        .reserved_instance_ids("ri-1")
+        .reserved_instance_ids(&ri)
+        .target_configurations(
+            aws_sdk_ec2::types::TargetConfigurationRequest::builder()
+                .offering_id(target)
+                .build(),
+        )
         .send()
         .await
         .unwrap();
@@ -5882,13 +5982,38 @@ async fn ec2_accept_reserved_instances_exchange_quote() {
 async fn ec2_delete_queued_reserved_instances() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let offerings = c
+        .describe_reserved_instances_offerings()
+        .send()
+        .await
+        .unwrap();
+    let offering = offerings
+        .reserved_instances_offerings()
+        .iter()
+        .find(|o| o.availability_zone().is_none())
+        .and_then(|o| o.reserved_instances_offering_id())
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let queued = c
+        .purchase_reserved_instances_offering()
+        .instance_count(1)
+        .reserved_instances_offering_id(offering)
+        .purchase_time(aws_smithy_types::DateTime::from_secs(now + 86_400))
+        .send()
+        .await
+        .unwrap();
     let r = c
         .delete_queued_reserved_instances()
+        .reserved_instances_ids(queued.reserved_instances_id().unwrap())
         .reserved_instances_ids("ri-1")
         .send()
         .await
         .unwrap();
-    assert!(!r.successful_queued_purchase_deletions().is_empty());
+    assert_eq!(r.successful_queued_purchase_deletions().len(), 1);
+    assert_eq!(r.failed_queued_purchase_deletions().len(), 1);
 }
 
 // ---- dedicated hosts ----

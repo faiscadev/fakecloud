@@ -222,7 +222,7 @@ const TEMPLATE_V2: &str = r#"{
       "Type": "AWS::ApiGateway::RequestValidator",
       "Properties": {
         "RestApiId": {"Ref": "Api"},
-        "Name": "full-validator",
+        "Name": "body-only",
         "ValidateRequestBody": true,
         "ValidateRequestParameters": true
       }
@@ -294,7 +294,7 @@ const TEMPLATE_V2: &str = r#"{
     "Key": {
       "Type": "AWS::ApiGateway::ApiKey",
       "Properties": {
-        "Name": "cfn-key-renamed",
+        "Name": "cfn-key",
         "Description": "updated key",
         "Enabled": false,
         "Tags": [{"Key": "owner", "Value": "fakecloud-v2"}]
@@ -625,7 +625,8 @@ async fn cfn_provisions_all_apigateway_v1_types() {
         .expect("get_model v2");
     assert_eq!(model2.description(), Some("Pet model v2"));
 
-    // Validator rename + both flags true
+    // Both flags true, in place. (A validator's Name is create-only, so a rename
+    // would be a replacement under a new id.)
     let validator2 = agw
         .get_request_validator()
         .rest_api_id(api_id)
@@ -633,7 +634,7 @@ async fn cfn_provisions_all_apigateway_v1_types() {
         .send()
         .await
         .expect("get_request_validator v2");
-    assert_eq!(validator2.name(), Some("full-validator"));
+    assert_eq!(validator2.name(), Some("body-only"));
     assert!(validator2.validate_request_body());
     assert!(validator2.validate_request_parameters());
 
@@ -699,7 +700,8 @@ async fn cfn_provisions_all_apigateway_v1_types() {
         .send()
         .await
         .expect("get_api_key v2");
-    assert_eq!(key2.name(), Some("cfn-key-renamed"));
+    // A key's Name is create-only: a rename would be a replacement under a new id.
+    assert_eq!(key2.name(), Some("cfn-key"));
     assert!(!key2.enabled());
     assert_eq!(
         key2.tags().expect("tags").get("owner").map(String::as_str),

@@ -184,4 +184,8 @@ else
 fi
 
 echo ""
-echo "Done. Review changes with: git diff aws-models/"
+echo "Regenerating the Step Functions SDK table..."
+python3 "$REPO_ROOT/scripts/gen-sfn-sdk-models.py"
+
+echo ""
+echo "Done. Review changes with: git diff aws-models/ crates/fakecloud-stepfunctions/data/"

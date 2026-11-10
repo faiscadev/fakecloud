@@ -239,6 +239,11 @@ const OPERATION_INTERRUPTED: &str = "The operation was interrupted by a restart"
 /// process stopped. Nothing resumes those, so left RUNNING they would block
 /// every later operation on their stack set.
 pub fn restore_stack_sets(accounts: &mut MultiAccountState<CloudFormationAccountState>) {
+    for (_, state) in accounts.iter_mut() {
+        for region in state.regions.values_mut() {
+            crate::stack_update::settle_interrupted_updates(region);
+        }
+    }
     migrate_legacy_stack_sets(accounts);
     let sets: Vec<(String, String)> = accounts
         .iter()
@@ -3129,11 +3134,18 @@ impl CloudFormationService {
                 .filter(|st| st.stack_id == stack_id_or_name || st.name == stack_id_or_name)
                 .max_by_key(|st| st.created_at)
                 .map(|st| {
-                    (
-                        st.stack_id.clone(),
-                        st.status.clone(),
-                        st.status_reason.clone(),
-                    )
+                    // A rolled-back stack keeps no reason of its own; its events do.
+                    let rolled_back = st.status_reason.clone().or_else(|| {
+                        s.events.get(&st.stack_id)?.iter().rev().find(|e| {
+                            matches!(
+                                e["ResourceStatus"].as_str(),
+                                Some("UPDATE_ROLLBACK_IN_PROGRESS" | "ROLLBACK_IN_PROGRESS")
+                            )
+                        })?["ResourceStatusReason"]
+                            .as_str()
+                            .map(str::to_string)
+                    });
+                    (st.stack_id.clone(), st.status.clone(), rolled_back)
                 })
         })
     }
@@ -3278,6 +3290,11 @@ impl CloudFormationService {
             stack_params,
         );
         if let Err(e) = self.update_stack(&request).await {
+            // A stack set update reaching an instance it does not change is
+            // success for that instance, not the error a direct UpdateStack gets.
+            if e.message() == "No updates are to be performed." {
+                return (Outcome::Succeeded, Some(stack_id.to_string()));
+            }
             return (Outcome::Failed(e.message()), Some(stack_id.to_string()));
         }
         let outcome = match self.stack_status(&target.account, &target.region, stack_id) {

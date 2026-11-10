@@ -49,7 +49,7 @@ pub const COMMERCIAL_REGIONS: &[(&str, bool)] = &[
 pub fn availability_zone_letters(region: &str) -> &'static str {
     match region {
         "us-east-1" => "abcdef",
-        "us-west-2" | "ap-northeast-2" | "ap-northeast-1" => "abcd",
+        "us-west-2" | "ap-northeast-2" | "ap-northeast-1" | "eu-west-2" => "abcd",
         "ca-central-1" => "abd",
         _ => "abc",
     }
@@ -90,6 +90,7 @@ mod tests {
     fn availability_zone_counts_follow_aws() {
         assert_eq!(availability_zone_letters("us-east-1").len(), 6);
         assert_eq!(availability_zone_letters("us-west-2").len(), 4);
+        assert_eq!(availability_zone_letters("eu-west-2"), "abcd");
         // Unions of the letters different accounts see.
         assert_eq!(availability_zone_letters("us-west-1"), "abc");
         assert_eq!(availability_zone_letters("ap-northeast-1"), "abcd");

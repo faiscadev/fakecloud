@@ -5,8 +5,10 @@
 mod helpers;
 
 use aws_sdk_bedrockagent::types::{
-    FlowAliasRoutingConfigurationListItem, FlowDefinition, FlowNode, FlowNodeConfiguration,
-    FlowNodeType, InputFlowNodeConfiguration,
+    FlowAliasRoutingConfigurationListItem, FlowConnection, FlowConnectionConfiguration,
+    FlowConnectionType, FlowDataConnectionConfiguration, FlowDefinition, FlowNode,
+    FlowNodeConfiguration, FlowNodeInput, FlowNodeIoDataType, FlowNodeOutput, FlowNodeType,
+    InputFlowNodeConfiguration, OutputFlowNodeConfiguration,
 };
 use aws_sdk_bedrockagentruntime::primitives::DateTime;
 use aws_sdk_bedrockagentruntime::types::{
@@ -16,6 +18,8 @@ use helpers::TestServer;
 
 const ROLE: &str = "arn:aws:iam::123456789012:role/service-role/persist-flow-role";
 
+/// A flow that prepares cleanly: Input node `PersistInput` passes its document
+/// straight to an Output node.
 fn definition() -> FlowDefinition {
     FlowDefinition::builder()
         .nodes(
@@ -25,8 +29,49 @@ fn definition() -> FlowDefinition {
                 .configuration(FlowNodeConfiguration::Input(
                     InputFlowNodeConfiguration::builder().build(),
                 ))
+                .outputs(
+                    FlowNodeOutput::builder()
+                        .name("document")
+                        .r#type(FlowNodeIoDataType::String)
+                        .build()
+                        .expect("node output"),
+                )
                 .build()
                 .expect("flow node"),
+        )
+        .nodes(
+            FlowNode::builder()
+                .name("FlowOutputNode")
+                .r#type(FlowNodeType::Output)
+                .configuration(FlowNodeConfiguration::Output(
+                    OutputFlowNodeConfiguration::builder().build(),
+                ))
+                .inputs(
+                    FlowNodeInput::builder()
+                        .name("document")
+                        .r#type(FlowNodeIoDataType::String)
+                        .expression("$.data")
+                        .build()
+                        .expect("node input"),
+                )
+                .build()
+                .expect("flow node"),
+        )
+        .connections(
+            FlowConnection::builder()
+                .name("ToOutput")
+                .r#type(FlowConnectionType::Data)
+                .source("PersistInput")
+                .target("FlowOutputNode")
+                .configuration(FlowConnectionConfiguration::Data(
+                    FlowDataConnectionConfiguration::builder()
+                        .source_output("document")
+                        .target_input("document")
+                        .build()
+                        .expect("data connection"),
+                ))
+                .build()
+                .expect("flow connection"),
         )
         .build()
 }

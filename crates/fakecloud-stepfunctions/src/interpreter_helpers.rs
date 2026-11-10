@@ -1,4 +1,5 @@
 use super::*;
+use std::borrow::Cow;
 
 /// Core execution loop: runs through states in a definition and returns the output.
 /// Used by the top-level executor, Parallel branches, and Map iterations.
@@ -45,22 +46,19 @@ pub(crate) fn run_states<'a>(
                 ));
             }
 
-            let state_def = states.get(&current_state).cloned().ok_or_else(|| {
+            let state_def: &Value = states.get(&current_state).ok_or_else(|| {
                 (
                     "States.Runtime".to_string(),
                     format!("State '{current_state}' not found in definition"),
                 )
             })?;
 
-            let state_type = state_def["Type"]
-                .as_str()
-                .ok_or_else(|| {
-                    (
-                        "States.Runtime".to_string(),
-                        format!("State '{current_state}' missing Type field"),
-                    )
-                })?
-                .to_string();
+            let state_type = state_def["Type"].as_str().ok_or_else(|| {
+                (
+                    "States.Runtime".to_string(),
+                    format!("State '{current_state}' missing Type field"),
+                )
+            })?;
 
             debug!(
                 execution_arn = %execution_arn,
@@ -69,89 +67,235 @@ pub(crate) fn run_states<'a>(
                 "Executing state"
             );
 
-            let advance = match state_type.as_str() {
-                "Pass" => run_pass_state(
-                    &current_state,
-                    &state_def,
-                    effective_input,
-                    shared_state,
-                    execution_arn,
-                ),
-                "Succeed" => run_succeed_state(
-                    &current_state,
-                    &state_def,
-                    effective_input,
-                    shared_state,
-                    execution_arn,
-                ),
-                "Fail" => run_fail_state(
-                    &current_state,
-                    &state_def,
-                    effective_input,
-                    shared_state,
-                    execution_arn,
-                ),
-                "Choice" => run_choice_state(
-                    &current_state,
-                    &state_def,
-                    effective_input,
-                    shared_state,
-                    execution_arn,
-                ),
-                "Wait" => {
-                    run_wait_state(
-                        &current_state,
-                        &state_def,
-                        effective_input,
-                        shared_state,
-                        execution_arn,
-                    )
-                    .await
-                }
-                "Task" => {
-                    run_task_state(
-                        &current_state,
-                        &state_def,
-                        effective_input,
-                        delivery,
-                        dynamodb_state,
-                        registry,
-                        shared_state,
-                        execution_arn,
-                    )
-                    .await
-                }
-                "Parallel" => {
-                    run_parallel_state(
-                        &current_state,
-                        &state_def,
-                        effective_input,
-                        delivery,
-                        dynamodb_state,
-                        registry,
-                        shared_state,
-                        execution_arn,
-                    )
-                    .await
-                }
-                "Map" => {
-                    run_map_state(
-                        &current_state,
-                        &state_def,
-                        effective_input,
-                        delivery,
-                        dynamodb_state,
-                        registry,
-                        shared_state,
-                        execution_arn,
-                    )
-                    .await
-                }
-                other => Advance::Fail(
-                    "States.Runtime".to_string(),
-                    format!("Unsupported state type: '{other}'"),
-                ),
+            // A JSONata state runs as the literal state its expressions evaluate
+            // to; its `Assign` and `Output` apply to what comes out.
+            let jsonata_state = crate::jsonata::is_jsonata(state_def);
+            let mut state_input = std::mem::take(&mut effective_input);
+            // These states can retry and catch, and are entered once however many
+            // attempts they take.
+            let recoverable = matches!(state_type, "Task" | "Parallel" | "Map");
+            let is_task = state_type == "Task";
+            let retriers: &[Value] = state_def["Retry"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            // The state's input outlives a run only when something reads it after:
+            // another attempt, a catcher, or a JSONata state's `Assign`/`Output`.
+            // Otherwise the run takes it.
+            let keeps_input = jsonata_state
+                || (recoverable && (!retriers.is_empty() || state_def.get("Catch").is_some()));
+            let entered_at = chrono::Utc::now();
+            let entered = add_event(
+                shared_state,
+                execution_arn,
+                &format!("{state_type}StateEntered"),
+                0,
+                json!({
+                    "name": current_state,
+                    "input": serde_json::to_string(&state_input).expect("serde_json::Value serialization is infallible"),
+                }),
+            );
+            let entry = StateEntry {
+                name: &current_state,
+                entered,
+                entered_at,
             };
+            let mut attempt = 0u32;
+            let advance = loop {
+                let jsonata_ctx = jsonata_state.then(|| {
+                    context_object(
+                        shared_state,
+                        execution_arn,
+                        &current_state,
+                        entered_at,
+                        attempt,
+                    )
+                });
+                let prepared = match &jsonata_ctx {
+                    Some(ctx) if state_type != "Choice" => {
+                        crate::jsonata::prepare_state(state_def, &state_input, ctx)
+                            .map(|(prepared, run_input)| (Cow::Owned(prepared), run_input))
+                    }
+                    _ if keeps_input => Ok((Cow::Borrowed(state_def), state_input.clone())),
+                    _ => Ok((Cow::Borrowed(state_def), std::mem::take(&mut state_input))),
+                };
+                let advance = match prepared {
+                    // The state was entered, and failed before it could run.
+                    Err((error, cause)) => {
+                        let cause = own_failure(shared_state, execution_arn, &entry, &error, cause);
+                        Advance::Fail(error, cause)
+                    }
+                    Ok((prepared_def, run_input)) => {
+                        let prepared_def = prepared_def.as_ref();
+                        let advance = match state_type {
+                            "Choice" if jsonata_state => run_jsonata_choice_state(
+                                &entry,
+                                prepared_def,
+                                run_input,
+                                jsonata_ctx.as_ref().unwrap_or(&Value::Null),
+                                shared_state,
+                                execution_arn,
+                            ),
+                            "Pass" => run_pass_state(
+                                &entry,
+                                prepared_def,
+                                run_input,
+                                shared_state,
+                                execution_arn,
+                            ),
+                            "Succeed" => run_succeed_state(
+                                &entry,
+                                prepared_def,
+                                run_input,
+                                shared_state,
+                                execution_arn,
+                            ),
+                            "Fail" => run_fail_state(
+                                &entry,
+                                prepared_def,
+                                run_input,
+                                shared_state,
+                                execution_arn,
+                            ),
+                            "Choice" => run_choice_state(
+                                &entry,
+                                prepared_def,
+                                run_input,
+                                shared_state,
+                                execution_arn,
+                            ),
+                            "Wait" => {
+                                run_wait_state(
+                                    &entry,
+                                    prepared_def,
+                                    run_input,
+                                    shared_state,
+                                    execution_arn,
+                                )
+                                .await
+                            }
+                            "Task" => {
+                                run_task_state(
+                                    &entry,
+                                    prepared_def,
+                                    run_input,
+                                    &mut attempt,
+                                    delivery,
+                                    dynamodb_state,
+                                    registry,
+                                    shared_state,
+                                    execution_arn,
+                                )
+                                .await
+                            }
+                            "Parallel" => {
+                                run_parallel_state(
+                                    &entry,
+                                    prepared_def,
+                                    run_input,
+                                    attempt,
+                                    delivery,
+                                    dynamodb_state,
+                                    registry,
+                                    shared_state,
+                                    execution_arn,
+                                )
+                                .await
+                            }
+                            "Map" => {
+                                run_map_state(
+                                    &entry,
+                                    prepared_def,
+                                    run_input,
+                                    attempt,
+                                    delivery,
+                                    dynamodb_state,
+                                    registry,
+                                    shared_state,
+                                    execution_arn,
+                                )
+                                .await
+                            }
+                            other => Advance::Fail(
+                                "States.Runtime".to_string(),
+                                format!("Unsupported state type: '{other}'"),
+                            ),
+                        };
+                        match &jsonata_ctx {
+                            // A Map applies its own `Assign` and `Output`, which
+                            // its map run ends with.
+                            Some(ctx) if !matches!(state_type, "Choice" | "Map") => {
+                                finish_jsonata_state(
+                                    state_def,
+                                    &entry,
+                                    &state_input,
+                                    ctx,
+                                    advance,
+                                    shared_state,
+                                    execution_arn,
+                                )
+                            }
+                            _ => advance,
+                        }
+                    }
+                };
+                // A Task has already spent its retries on what its resource failed
+                // with; anything else that failed gets them here, the whole state
+                // running again.
+                if let Advance::Fail(error, _) = &advance {
+                    if recoverable && (!is_task || error == "States.QueryEvaluationError") {
+                        if let Some(delay_ms) =
+                            crate::error_handling::should_retry(retriers, error, attempt, is_task)
+                        {
+                            attempt += 1;
+                            crate::variables::discard_staged();
+                            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                            continue;
+                        }
+                    }
+                }
+                break advance;
+            };
+
+            let advance = match advance {
+                Advance::Fail(error, cause) if recoverable => {
+                    // As recorded, a failure no wildcard takes (`States.Runtime`,
+                    // `States.ReferencePathConflict`) ends the execution with no
+                    // `<Type>StateFailed` of its own.
+                    if !is_task && !crate::error_handling::ends_execution(&error) {
+                        add_event(
+                            shared_state,
+                            execution_arn,
+                            &format!("{state_type}StateFailed"),
+                            entered,
+                            json!({ "error": error, "cause": cause }),
+                        );
+                    }
+                    advance_from_error(state_def, &state_input, error, cause, is_task)
+                }
+                other => other,
+            };
+            let jsonata_ctx = jsonata_state.then(|| {
+                context_object(
+                    shared_state,
+                    execution_arn,
+                    &current_state,
+                    entered_at,
+                    attempt,
+                )
+            });
+            let advance = settle_advance(
+                advance,
+                &entry,
+                attempt,
+                state_type,
+                jsonata_state.then_some(&state_input),
+                jsonata_ctx.as_ref(),
+                shared_state,
+                execution_arn,
+            );
+
+            crate::variables::commit();
 
             match advance {
                 Advance::Next(next, new_input) => {
@@ -160,9 +304,244 @@ pub(crate) fn run_states<'a>(
                 }
                 Advance::End(output) => return Ok(output),
                 Advance::Fail(error, cause) => return Err((error, cause)),
+                Advance::Caught(_) => unreachable!("settle_advance resolves every catcher"),
             }
         }
     })
+}
+
+/// A state as entered: its name, its entered event, and when.
+pub(crate) struct StateEntry<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) entered: i64,
+    pub(crate) entered_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl StateEntry<'_> {
+    /// The state's context object for an attempt.
+    pub(crate) fn context(
+        &self,
+        shared_state: &SharedStepFunctionsState,
+        execution_arn: &str,
+        attempt: u32,
+    ) -> Value {
+        context_object(
+            shared_state,
+            execution_arn,
+            self.name,
+            self.entered_at,
+            attempt,
+        )
+    }
+}
+
+/// A JSONPath state's exit event. A JSONata state exits once its `Output` has
+/// evaluated, which is what `finish_jsonata_state` records.
+pub(crate) fn add_state_exit_event(
+    state_def: &Value,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+    event_type: &str,
+    previous_event_id: i64,
+    details: Value,
+) {
+    if !crate::jsonata::is_jsonata(state_def) {
+        add_event(
+            shared_state,
+            execution_arn,
+            event_type,
+            previous_event_id,
+            details,
+        );
+    }
+}
+
+/// A state's own failure (its paths, templates, expressions or settings, not
+/// what it ran) as AWS reports it: in the state, `An error occurred while
+/// executing the state 'A' (entered at the event id #2). ...`, with a query
+/// failure also recorded as an `EvaluationFailed` event. Returns the cause.
+pub(crate) fn own_failure(
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+    entry: &StateEntry<'_>,
+    error: &str,
+    cause: String,
+) -> String {
+    match error {
+        "States.QueryEvaluationError" => {
+            let location = crate::jsonata::failed_field(&cause).map(String::from);
+            let cause = crate::jsonata::in_state_cause(entry.name, entry.entered, &cause);
+            let mut details = json!({ "error": error, "cause": cause, "state": entry.name });
+            if let Some(location) = location {
+                details["location"] = json!(location);
+            }
+            add_event(
+                shared_state,
+                execution_arn,
+                "EvaluationFailed",
+                entry.entered,
+                details,
+            );
+            cause
+        }
+        "States.Runtime" => crate::jsonata::in_state_cause(entry.name, entry.entered, &cause),
+        _ => cause,
+    }
+}
+
+/// [`own_failure`] as the state's outcome.
+pub(crate) fn fail_own(
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+    entry: &StateEntry<'_>,
+    (error, cause): (String, String),
+) -> Advance {
+    let cause = own_failure(shared_state, execution_arn, entry, &error, cause);
+    Advance::Fail(error, cause)
+}
+
+/// Resolve a catcher's transition: a failed state keeps none of its own
+/// assignments, and the catcher's `Assign` and (in JSONata) `Output` apply. The
+/// state exits once they have, with what the catcher produced, as recorded; a
+/// failure in them is the execution's.
+#[allow(clippy::too_many_arguments)]
+fn settle_advance(
+    advance: Advance,
+    entry: &StateEntry<'_>,
+    attempt: u32,
+    state_type: &str,
+    jsonata_input: Option<&Value>,
+    jsonata_ctx: Option<&Value>,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Advance {
+    match advance {
+        Advance::Caught(caught) => {
+            crate::variables::discard_staged();
+            let settled = match (jsonata_input, jsonata_ctx) {
+                (Some(input), Some(ctx)) => crate::jsonata::finish_state(
+                    &caught.catcher,
+                    &format!("Catch[{}]/", caught.index),
+                    input,
+                    ctx,
+                    caught.error_output,
+                    true,
+                ),
+                _ => {
+                    let ctx = entry.context(shared_state, execution_arn, attempt);
+                    crate::variables::assign_jsonpath(
+                        caught.catcher.get("Assign"),
+                        &caught.error_output,
+                        Some(&ctx),
+                    )
+                    .map(|()| caught.output)
+                }
+            };
+            match settled {
+                Ok(output) => {
+                    add_event(
+                        shared_state,
+                        execution_arn,
+                        &format!("{state_type}StateExited"),
+                        entry.entered,
+                        json!({
+                            "name": entry.name,
+                            "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
+                        }),
+                    );
+                    Advance::Next(caught.next, output)
+                }
+                // A catcher has nothing further to go to.
+                Err(failure) => {
+                    let failed = fail_own(shared_state, execution_arn, entry, failure);
+                    crate::variables::discard_staged();
+                    failed
+                }
+            }
+        }
+        Advance::Fail(error, cause) => {
+            crate::variables::discard_staged();
+            Advance::Fail(error, cause)
+        }
+        settled => settled,
+    }
+}
+
+/// Apply a JSONata state's `Assign` and `Output` to where the state ended up. A
+/// failing expression fails the state, and what a failure leads to is the state
+/// loop's to decide.
+fn finish_jsonata_state(
+    state_def: &Value,
+    entry: &StateEntry<'_>,
+    input: &Value,
+    ctx: &Value,
+    advance: Advance,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Advance {
+    let state_type = state_def["Type"].as_str().unwrap_or_default();
+    let exited = |output: &Value| {
+        add_event(
+            shared_state,
+            execution_arn,
+            &format!("{state_type}StateExited"),
+            entry.entered,
+            json!({
+                "name": entry.name,
+                "output": serde_json::to_string(output).expect("serde_json::Value serialization is infallible"),
+            }),
+        );
+    };
+    let finished = match advance {
+        Advance::Next(next, produced) => {
+            crate::jsonata::finish_state(state_def, "", input, ctx, produced, false).map(|output| {
+                exited(&output);
+                Advance::Next(next, output)
+            })
+        }
+        Advance::End(produced) => {
+            crate::jsonata::finish_state(state_def, "", input, ctx, produced, false).map(|output| {
+                exited(&output);
+                Advance::End(output)
+            })
+        }
+        other => Ok(other),
+    };
+    finished.unwrap_or_else(|failure| fail_own(shared_state, execution_arn, entry, failure))
+}
+
+/// A JSONata Choice state: its rules are `Condition` expressions.
+fn run_jsonata_choice_state(
+    entry: &StateEntry<'_>,
+    state_def: &Value,
+    input: Value,
+    ctx: &Value,
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Advance {
+    match crate::jsonata::choose(state_def, &input, ctx) {
+        Ok(Some((next, output))) => {
+            add_event(
+                shared_state,
+                execution_arn,
+                "ChoiceStateExited",
+                entry.entered,
+                json!({
+                    "name": entry.name,
+                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
+                }),
+            );
+            Advance::Next(next, output)
+        }
+        Ok(None) => Advance::Fail(
+            "States.NoChoiceMatched".to_string(),
+            format!(
+                "No choice rule matched and no Default in state '{}'",
+                entry.name
+            ),
+        ),
+        Err(failure) => fail_own(shared_state, execution_arn, entry, failure),
+    }
 }
 
 /// Build the Step Functions context object (`$$`) for a state of
@@ -246,42 +625,33 @@ pub(crate) fn advance_from_error(
     is_task_error: bool,
 ) -> Advance {
     match apply_state_catcher(state_def, input, &error, &cause, is_task_error) {
-        Some((next, new_input)) => Advance::Next(next, new_input),
+        Some(Ok(caught)) => Advance::Caught(caught),
+        Some(Err((error, cause))) => Advance::Fail(error, cause),
         None => Advance::Fail(error, cause),
     }
 }
 
 pub(crate) fn run_pass_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: Value,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let entered_event_id = add_event(
-        shared_state,
-        execution_arn,
-        "PassStateEntered",
-        0,
-        json!({
-            "name": name,
-            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
-        }),
-    );
-
-    let ctx = context_object(shared_state, execution_arn, name, chrono::Utc::now(), 0);
+    let ctx = entry.context(shared_state, execution_arn, 0);
     let result = match execute_pass_state(state_def, &input, Some(&ctx)) {
         Ok(r) => r,
-        Err((error, cause)) => return Advance::Fail(error, cause),
+        Err(failure) => return fail_own(shared_state, execution_arn, entry, failure),
     };
 
-    add_event(
+    add_state_exit_event(
+        state_def,
         shared_state,
         execution_arn,
         "PassStateExited",
-        entered_event_id,
+        entry.entered,
         json!({
-            "name": name,
+            "name": entry.name,
             "output": serde_json::to_string(&result).expect("serde_json::Value serialization is infallible"),
         }),
     );
@@ -290,23 +660,12 @@ pub(crate) fn run_pass_state(
 }
 
 pub(crate) fn run_succeed_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: Value,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    add_event(
-        shared_state,
-        execution_arn,
-        "SucceedStateEntered",
-        0,
-        json!({
-            "name": name,
-            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
-        }),
-    );
-
     let input_path = state_def["InputPath"].as_str();
     let output_path = state_def["OutputPath"].as_str();
 
@@ -315,7 +674,7 @@ pub(crate) fn run_succeed_state(
     } else {
         match apply_input_path(&input, input_path) {
             Ok(v) => v,
-            Err((error, cause)) => return Advance::Fail(error, cause),
+            Err(failure) => return fail_own(shared_state, execution_arn, entry, failure),
         }
     };
 
@@ -324,17 +683,18 @@ pub(crate) fn run_succeed_state(
     } else {
         match apply_output_path(&processed, output_path) {
             Ok(v) => v,
-            Err((error, cause)) => return Advance::Fail(error, cause),
+            Err(failure) => return fail_own(shared_state, execution_arn, entry, failure),
         }
     };
 
-    add_event(
+    add_state_exit_event(
+        state_def,
         shared_state,
         execution_arn,
         "SucceedStateExited",
-        0,
+        entry.entered,
         json!({
-            "name": name,
+            "name": entry.name,
             "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
         }),
     );
@@ -342,88 +702,129 @@ pub(crate) fn run_succeed_state(
     Advance::End(output)
 }
 
+/// A Fail state's `Error` or `Cause`: the literal field, or its `*Path` form, a
+/// reference path or intrinsic that must produce a string, failing as recorded.
+fn fail_field(
+    state_def: &Value,
+    field: &str,
+    path_field: &str,
+    input: &Value,
+    ctx: &Value,
+) -> Result<Option<String>, (String, String)> {
+    let Some(path) = state_def.get(path_field) else {
+        return Ok(state_def[field].as_str().map(String::from));
+    };
+    let path = path.as_str().unwrap_or_default();
+    let resolved = if crate::intrinsics::is_intrinsic_call(path) {
+        crate::intrinsics::evaluate_with_context(path, input, Some(ctx))
+            .map_err(|e| e.into_states_error(path))?
+    } else {
+        crate::io_processing::resolve_with_context(input, Some(ctx), path).map_err(|error| {
+            // A variable reference reads within the variable; one that isn't
+            // defined says so.
+            let variable = crate::variables::split_reference(path)
+                .map(|(name, _)| crate::variables::lookup(name));
+            let scope = match &variable {
+                Some(Some(value)) => value,
+                Some(None) => {
+                    return crate::io_processing::runtime_error(
+                        crate::io_processing::path_error_cause(path, &error),
+                    )
+                }
+                None if path.starts_with("$$") => ctx,
+                None => input,
+            };
+            (
+                "States.Runtime".to_string(),
+                format!(
+                    "The JSONPath '{path}' specified for the field '{path_field}' could not be \
+                     found in the input '{scope}'"
+                ),
+            )
+        })?
+    };
+    match resolved {
+        Value::String(text) => Ok(Some(text)),
+        other => Err((
+            "States.Runtime".to_string(),
+            format!(
+                "The value referenced by {path_field} must be a string, but the value was: {other}"
+            ),
+        )),
+    }
+}
+
 pub(crate) fn run_fail_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: Value,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let error = state_def["Error"]
-        .as_str()
-        .unwrap_or("States.Fail")
-        .to_string();
-    let cause = state_def["Cause"].as_str().unwrap_or("").to_string();
-
-    add_event(
-        shared_state,
-        execution_arn,
-        "FailStateEntered",
-        0,
-        json!({
-            "name": name,
-            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
-        }),
-    );
+    let ctx = entry.context(shared_state, execution_arn, 0);
+    let error = match fail_field(state_def, "Error", "ErrorPath", &input, &ctx) {
+        Ok(error) => error.unwrap_or_else(|| "States.Fail".to_string()),
+        Err(failure) => return fail_own(shared_state, execution_arn, entry, failure),
+    };
+    let cause = match fail_field(state_def, "Cause", "CausePath", &input, &ctx) {
+        Ok(cause) => cause.unwrap_or_default(),
+        Err(failure) => return fail_own(shared_state, execution_arn, entry, failure),
+    };
 
     Advance::Fail(error, cause)
 }
 
 pub(crate) fn run_choice_state(
-    name: &str,
+    entry: &StateEntry<'_>,
     state_def: &Value,
     input: Value,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let entered_event_id = add_event(
-        shared_state,
-        execution_arn,
-        "ChoiceStateEntered",
-        0,
-        json!({
-            "name": name,
-            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
-        }),
-    );
-
     let input_path = state_def["InputPath"].as_str();
     let processed_input = if input_path == Some("null") {
         json!({})
     } else {
         match apply_input_path(&input, input_path) {
             Ok(v) => v,
-            Err((error, cause)) => return Advance::Fail(error, cause),
+            Err(failure) => return fail_own(shared_state, execution_arn, entry, failure),
         }
     };
 
-    let ctx = context_object(shared_state, execution_arn, name, chrono::Utc::now(), 0);
-    let chosen = match evaluate_choice(state_def, &processed_input, Some(&ctx)) {
+    let ctx = entry.context(shared_state, execution_arn, 0);
+    let chosen = match crate::choice::choose_transition(state_def, &processed_input, Some(&ctx)) {
         Ok(chosen) => chosen,
-        Err((error, cause)) => return Advance::Fail(error, cause),
+        Err(failure) => return fail_own(shared_state, execution_arn, entry, failure),
     };
     match chosen {
-        Some(next) => {
+        Some((next, holder)) => {
             // A Choice state has no Parameters/ResultPath, so its effective
             // result is the InputPath-filtered input; OutputPath then filters
-            // what flows to the next state. Previously the raw input was
-            // forwarded, silently ignoring OutputPath.
+            // what flows to the next state.
             let output_path = state_def["OutputPath"].as_str();
             let output = if output_path == Some("null") {
                 json!({})
             } else {
                 match apply_output_path(&processed_input, output_path) {
                     Ok(v) => v,
-                    Err((error, cause)) => return Advance::Fail(error, cause),
+                    Err(failure) => return fail_own(shared_state, execution_arn, entry, failure),
                 }
             };
+            // `Assign` belongs to the rule taken, or the state for its Default.
+            if let Err(failure) = crate::variables::assign_jsonpath(
+                holder.get("Assign"),
+                &processed_input,
+                Some(&ctx),
+            ) {
+                return fail_own(shared_state, execution_arn, entry, failure);
+            }
             add_event(
                 shared_state,
                 execution_arn,
                 "ChoiceStateExited",
-                entered_event_id,
+                entry.entered,
                 json!({
-                    "name": name,
+                    "name": entry.name,
                     "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
                 }),
             );
@@ -431,7 +832,10 @@ pub(crate) fn run_choice_state(
         }
         None => Advance::Fail(
             "States.NoChoiceMatched".to_string(),
-            format!("No choice rule matched and no Default in state '{name}'"),
+            format!(
+                "No choice rule matched and no Default in state '{}'",
+                entry.name
+            ),
         ),
     }
 }
@@ -467,17 +871,17 @@ pub(crate) fn execute_pass_state(
         transformed
     };
 
-    let after_result = if result_path == Some("null") {
-        input.clone()
-    } else {
-        apply_result_path(input, &result, result_path)
-    };
+    let after_result = apply_result_path(input, &result, result_path)?;
 
-    if output_path == Some("null") {
-        Ok(json!({}))
+    let output = if output_path == Some("null") {
+        json!({})
     } else {
-        apply_output_path(&after_result, output_path)
+        apply_output_path(&after_result, output_path)?
+    };
+    if !crate::jsonata::is_jsonata(state_def) {
+        crate::variables::assign_jsonpath(state_def.get("Assign"), &result, context)?;
     }
+    Ok(output)
 }
 
 /// Send a message to an SQS queue via DeliveryBus.
@@ -1375,11 +1779,10 @@ pub(crate) fn apply_parameters(
                 if let Some(stripped) = key.strip_suffix(".$") {
                     if let Some(expr) = value.as_str() {
                         let resolved = if crate::intrinsics::is_intrinsic_call(expr) {
-                            // A failing intrinsic fails the state
-                            // (States.IntrinsicFailure; a path argument that
-                            // matches nothing is States.Runtime).
+                            // A failing intrinsic fails the state with
+                            // States.Runtime, as recorded.
                             crate::intrinsics::evaluate_with_context(expr, input, context)
-                                .map_err(|e| e.into_states_error())?
+                                .map_err(|e| e.into_states_error(expr))?
                         } else {
                             crate::io_processing::resolve_with_context(input, context, expr)
                                 .map_err(|_| {
@@ -1424,6 +1827,17 @@ pub(crate) fn next_state(state_def: &Value) -> NextState {
     }
 }
 
+/// A state's failure going to a catcher.
+pub(crate) struct CaughtError {
+    pub(crate) next: String,
+    /// The next state's input under the catcher's `ResultPath`.
+    pub(crate) output: Value,
+    pub(crate) error_output: Value,
+    pub(crate) catcher: Value,
+    /// Its position in `Catch`, which a failure in its fields is reported by.
+    pub(crate) index: usize,
+}
+
 /// Find the first `Catch` clause on `state_def` that matches `error` and
 /// apply its `ResultPath` to produce the state to transition to and the
 /// new effective input. Returns None when no catcher applies, in which
@@ -1434,15 +1848,27 @@ pub(crate) fn apply_state_catcher(
     error: &str,
     cause: &str,
     is_task_error: bool,
-) -> Option<(String, Value)> {
-    let catchers = state_def["Catch"].as_array().cloned().unwrap_or_default();
-    let (next, result_path) = find_catcher(&catchers, error, is_task_error)?;
+) -> Option<Result<CaughtError, (String, String)>> {
+    let catchers = state_def["Catch"].as_array()?;
+    let (next, result_path, index) =
+        crate::error_handling::matching_catcher(catchers, error, is_task_error)?;
     let error_output = json!({
         "Error": error,
         "Cause": cause,
     });
-    let new_input = apply_result_path(effective_input, &error_output, result_path.as_deref());
-    Some((next, new_input))
+    // A catcher's `ResultPath` that can't be applied fails the execution
+    // (inferred from the state's own, as recorded).
+    let output = match apply_result_path(effective_input, &error_output, result_path.as_deref()) {
+        Ok(output) => output,
+        Err(conflict) => return Some(Err(conflict)),
+    };
+    Some(Ok(CaughtError {
+        next,
+        output,
+        error_output,
+        catcher: catchers[index].clone(),
+        index,
+    }))
 }
 
 /// Extract the region from an execution ARN (`arn:aws:states:region:account_id:...`).
@@ -2134,11 +2560,11 @@ mod tests {
         // Bad call: missing closing paren.
         let template = json!({"y.$": "States.Format('{}'"});
         let (error, _) = apply_parameters(&template, &Value::Null, None).unwrap_err();
-        assert_eq!(error, "States.IntrinsicFailure");
+        assert_eq!(error, "States.Runtime");
         // Nested inside an array/object too.
         let template = json!({"a": [{"r.$": "States.ArrayGetItem($.arr, -1)"}]});
         let (error, _) = apply_parameters(&template, &json!({"arr": [1]}), None).unwrap_err();
-        assert_eq!(error, "States.IntrinsicFailure");
+        assert_eq!(error, "States.Runtime");
     }
 
     #[test]
@@ -2202,14 +2628,14 @@ mod tests {
     }
 
     #[test]
-    fn pass_and_task_parameters_intrinsic_failure_is_states_intrinsic_failure() {
+    fn pass_and_task_parameters_intrinsic_failure_is_states_runtime() {
         let state_def = json!({
             "Type": "Pass",
             "Parameters": {"r.$": "States.ArrayRange(1, 5000, 1)"},
             "End": true,
         });
         let (error, cause) = execute_pass_state(&state_def, &json!({}), None).unwrap_err();
-        assert_eq!(error, "States.IntrinsicFailure");
+        assert_eq!(error, "States.Runtime");
         assert!(cause.contains("1000"), "{cause}");
         let (error, _) = apply_parameters(
             &json!({"nested": [{"r.$": "States.ArrayRange(1, 5000, 1)"}]}),
@@ -2217,7 +2643,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(error, "States.IntrinsicFailure");
+        assert_eq!(error, "States.Runtime");
     }
 }
 

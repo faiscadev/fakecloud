@@ -45,6 +45,7 @@ Bedrock Agent is a separate AWS service from Bedrock — it has its own endpoint
 - **CRUD** — CreateFlow, GetFlow, ListFlows, UpdateFlow, DeleteFlow, PrepareFlow
 - **Versions** — CreateFlowVersion, GetFlowVersion, ListFlowVersions, DeleteFlowVersion
 - **Aliases** — CreateFlowAlias, GetFlowAlias, ListFlowAliases, UpdateFlowAlias, DeleteFlowAlias
+- **Validation**: ValidateFlowDefinition, with the same findings PrepareFlow records
 
 ### Prompts
 
@@ -64,12 +65,14 @@ REST + JSON. Path-based routing; identifiers are URL-safe strings minted by fake
 - Agents start `NOT_PREPARED`. `PrepareAgent` advances to `PREPARED` (and immediately becomes invokable from Bedrock Agent Runtime). `DRAFT` version is implicit; explicit versions are created on first alias attached to `DRAFT`.
 - Knowledge bases start `CREATING` and transition to `ACTIVE` on next describe. Ingestion jobs follow `STARTING -> IN_PROGRESS -> COMPLETE`.
 - Data sources transition the same way and persist their `vectorIngestionConfiguration` verbatim.
+- Flows start `NotPrepared`. `PrepareFlow` answers `Preparing` and validates the definition the way `ValidateFlowDefinition` does (missing Input/Output nodes, missing or unknown node inputs/outputs, unfed or multiply fed inputs, unknown connection ends, missing connection configuration, incompatible data types, duplicate connections, cycles, unreachable nodes, with AWS's messages and severities). Any `Error` finding leaves the flow `Failed`; warnings alone leave it `Prepared`. GetFlow reports the findings as `validations` until the draft is updated, which returns it to `NotPrepared`. Preparing a flow with no definition is a `ValidationException`. Only a `Prepared` draft can be versioned (`ConflictException` otherwise), aliases must route to a numbered version (not `DRAFT`), a definition holds at most one Input node, and node names must be unique.
 
 ## Limitations
 
 - Embedding pipelines are not executed; ingestion jobs report success without indexing real content.
 - Action group Lambda executors and OpenAPI schemas are stored verbatim and returned by the runtime in `RETURN_CONTROL` traces; the agent does not actually call Lambda for action group execution.
 - Prompt evaluation is not performed; prompts are stored and returned for SDK round-trip tests.
+- Flow validation does not report `UnsatisfiedConnectionConditions` (conditional paths that can never run), and only checks the required inputs/outputs of Input and Output nodes.
 
 For the data plane (InvokeAgent, Retrieve, RetrieveAndGenerate), see [Bedrock Agent Runtime](/docs/services/bedrock-agent-runtime/).
 
