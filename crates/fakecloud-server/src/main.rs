@@ -35,6 +35,7 @@ mod ses_smtp;
 mod sfn_execution_tree;
 mod sqs_lambda_poller;
 mod stepfunctions_delivery;
+mod stream_esm_failures;
 mod support_attachments;
 use cli::Cli;
 use dynamodb_streams_lambda_poller::DynamoDbStreamsLambdaPoller;
@@ -2196,6 +2197,7 @@ async fn main() {
     }
     let lambda_destinations_bus =
         Arc::new(lambda_destinations_inner.with_eventbridge(eb_delivery.clone()));
+    let stream_failure_destinations = lambda_destinations_bus.clone();
     // Event invocations queued by other services (S3, SNS, EventBridge,
     // Scheduler, Logs, SES) record their outcome through the same bus.
     if let Some(ref rt) = container_runtime {
@@ -7567,7 +7569,8 @@ async fn main() {
     tokio::spawn(sqs_lambda_poller.run());
     let mut kinesis_lambda_firehose_poller =
         KinesisLambdaFirehosePoller::new(kinesis_state.clone(), lambda_invocations_state.clone())
-            .with_firehose(firehose_state.clone(), firehose_engine.clone());
+            .with_firehose(firehose_state.clone(), firehose_engine.clone())
+            .with_failure_destinations(stream_failure_destinations.clone());
     if let Some(ref ld) = lambda_delivery {
         kinesis_lambda_firehose_poller =
             kinesis_lambda_firehose_poller.with_lambda_delivery(ld.clone());
@@ -7582,7 +7585,8 @@ async fn main() {
     let kinesis_lambda_firehose_poller = Arc::new(kinesis_lambda_firehose_poller);
     tokio::spawn(kinesis_lambda_firehose_poller.clone().run());
     let mut dynamodb_streams_poller =
-        DynamoDbStreamsLambdaPoller::new(dynamodb_state.clone(), lambda_invocations_state.clone());
+        DynamoDbStreamsLambdaPoller::new(dynamodb_state.clone(), lambda_invocations_state.clone())
+            .with_failure_destinations(stream_failure_destinations);
     if let Some(ref ld) = lambda_delivery {
         dynamodb_streams_poller = dynamodb_streams_poller.with_lambda_delivery(ld.clone());
     }

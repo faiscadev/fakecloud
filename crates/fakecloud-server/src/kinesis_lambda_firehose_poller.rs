@@ -6,6 +6,8 @@
 //! - `StartingPosition` — `TRIM_HORIZON` (default), `LATEST`, or
 //!   `AT_TIMESTAMP` paired with `StartingPositionTimestamp` to seed
 //!   the per-shard checkpoint on first poll.
+//! - Failed batches: retries, record age, bisection, partial-batch responses
+//!   and the OnFailure destination, as `stream_esm_failures` describes.
 //!
 //! Each Firehose delivery stream reads its source stream from the position it
 //! was created at (AWS starts at LATEST) and hands every record's data to the
@@ -24,7 +26,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use fakecloud_core::delivery::{LambdaDelivery, LambdaInvocationOutput};
+use fakecloud_core::delivery::{DeliveryBus, LambdaDelivery, LambdaInvocationOutput};
 use fakecloud_firehose::{
     FirehoseEngine, SharedFirehoseState, SourceLimit, SourceRead, SourceRecord, StreamKey,
 };
@@ -32,6 +34,10 @@ use fakecloud_kinesis::{KinesisRecord, KinesisShard, KinesisStream, SharedKinesi
 use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
 use fakecloud_persistence::SnapshotHook;
+
+use crate::stream_esm_failures::{
+    Attempt, DiscardedBatch, FailurePolicy, Resolution, RetryTracker, Step, StreamKind,
+};
 
 /// AWS caps a single GetRecords call at 10,000 records and 10 MiB.
 const MAX_RECORDS_PER_READ: usize = 10_000;
@@ -82,11 +88,9 @@ struct Mapping {
     filter: FilterSet,
     starting_position: Option<String>,
     starting_position_timestamp: Option<f64>,
-    /// True when the function opted into partial-batch failure handling
-    /// via `FunctionResponseTypes: ["ReportBatchItemFailures"]`. The
-    /// checkpoint advances only past the first failed sequence number;
-    /// records at or after that point are retried on the next poll.
-    report_batch_item_failures: bool,
+    /// Retries, bisection, partial-batch responses and the OnFailure
+    /// destination (`stream_esm_failures`).
+    policy: FailurePolicy,
     /// The function's execution role ARN, reported as each record's
     /// `invokeIdentityArn` (the identity Lambda polls the stream with).
     /// `None` when the mapped function no longer exists.
@@ -113,6 +117,10 @@ pub struct KinesisLambdaFirehosePoller {
     /// Why each delivery stream last refused records, so the reason is logged
     /// once per change rather than on every poll.
     firehose_refusals: parking_lot::Mutex<BTreeMap<StreamKey, String>>,
+    /// Failed-batch retries per mapping and shard.
+    retries: RetryTracker,
+    /// Where a mapping's OnFailure destination records go.
+    failure_destinations: Option<Arc<DeliveryBus>>,
 }
 
 impl KinesisLambdaFirehosePoller {
@@ -124,7 +132,14 @@ impl KinesisLambdaFirehosePoller {
             snapshot_hook: None,
             firehose: None,
             firehose_refusals: parking_lot::Mutex::default(),
+            retries: RetryTracker::default(),
+            failure_destinations: None,
         }
+    }
+
+    pub fn with_failure_destinations(mut self, bus: Arc<DeliveryBus>) -> Self {
+        self.failure_destinations = Some(bus);
+        self
     }
 
     pub fn with_lambda_delivery(mut self, delivery: Arc<dyn LambdaDelivery>) -> Self {
@@ -384,6 +399,13 @@ impl KinesisLambdaFirehosePoller {
 
     async fn poll(&self) {
         let mappings = self.collect_mappings();
+        // A deleted (or disabled) mapping's retries go with it.
+        self.retries.retain(|key| {
+            mappings.iter().any(|m| {
+                key.strip_prefix(m.uuid.as_str())
+                    .is_some_and(|rest| rest.starts_with(':'))
+            })
+        });
 
         if mappings.is_empty() {
             return;
@@ -412,10 +434,7 @@ impl KinesisLambdaFirehosePoller {
                         filter: FilterSet::from_strings(m.filter_patterns.iter()),
                         starting_position: m.starting_position.clone(),
                         starting_position_timestamp: m.starting_position_timestamp,
-                        report_batch_item_failures: m
-                            .function_response_types
-                            .iter()
-                            .any(|t| t.eq_ignore_ascii_case("ReportBatchItemFailures")),
+                        policy: FailurePolicy::of(m),
                         invoke_identity_arn: m
                             .function_arn
                             .split(':')
@@ -465,11 +484,31 @@ impl KinesisLambdaFirehosePoller {
         for ShardRead {
             shard_id,
             start,
-            end,
             records,
             ..
         } in deliveries
         {
+            let retry_key = format!("{}:{shard_id}", mapping.uuid);
+            let arrivals: Vec<DateTime<Utc>> = records
+                .iter()
+                .map(|r| r.approximate_arrival_timestamp)
+                .collect();
+            let n = match self
+                .retries
+                .plan(&retry_key, &mapping.policy, &arrivals, Utc::now())
+            {
+                Step::Wait => continue,
+                Step::DiscardTooOld { n, invoke_count } => {
+                    self.discard(mapping, &shard_id, &records[..n], invoke_count, None);
+                    self.retries.discarded(&retry_key);
+                    self.checkpoint(mapping, &shard_id, start + n).await;
+                    continue;
+                }
+                Step::Invoke(n) => n,
+            };
+            let records = &records[..n];
+            let end = start + n;
+
             // Build per-record JSON, then split into matched + dropped
             // by FilterCriteria. Dropped records still advance the
             // checkpoint — AWS docs say filtered-out records "do not
@@ -499,97 +538,28 @@ impl KinesisLambdaFirehosePoller {
             // checkpoint past them — AWS treats filtered-out records
             // as consumed and never retries them.
             if matched.is_empty() {
-                if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&mapping.stream_arn) {
-                    kinesis.set_lambda_checkpoint(
-                        &mapping.stream_arn,
-                        &mapping.uuid,
-                        &shard_id,
-                        end,
-                    );
-                }
-                self.persist().await;
+                self.retries
+                    .resolve(&retry_key, &mapping.policy, n, Attempt::Succeeded);
+                self.checkpoint(mapping, &shard_id, end).await;
                 continue;
             }
 
             let payload = json!({ "Records": matched }).to_string();
 
-            let used_real_delivery = self.lambda_delivery.is_some();
-            // Sequence numbers of the source records in batch order —
-            // used below to compute the partial-batch checkpoint when
-            // the function opted into ReportBatchItemFailures. We use
-            // `records` (not `matched`) so a failure at a given seqno
-            // also retries the filter-dropped records before it on the
-            // next poll, which is what AWS does — filtered records get
-            // re-evaluated and dropped again, but the failure point
-            // anchors to the actual stream offset.
+            // Sequence numbers of the source records in batch order, for a
+            // ReportBatchItemFailures response. We use `records` (not
+            // `matched`) so a failure at a given seqno also retries the
+            // filter-dropped records before it on the next poll, which is
+            // what AWS does — filtered records get re-evaluated and dropped
+            // again, but the failure point anchors to the actual stream
+            // offset.
             let record_seqs: Vec<String> =
                 records.iter().map(|r| r.sequence_number.clone()).collect();
 
-            let invoke_result: Option<Result<LambdaInvocationOutput, String>> =
-                if let Some(ref delivery) = self.lambda_delivery {
-                    Some(
-                        delivery
-                            .invoke_lambda(&mapping.function_arn, &payload)
-                            .await,
-                    )
-                } else {
-                    None
-                };
-
-            let advance_to: Option<usize> = match &invoke_result {
-                // A function error fails the whole batch: the checkpoint
-                // holds and the batch is retried (ReportBatchItemFailures
-                // or not).
-                Some(Ok(output)) if output.is_function_error() => {
-                    tracing::warn!(
-                        function_arn = %mapping.function_arn,
-                        stream_arn = %mapping.stream_arn,
-                        shard_id = %shard_id,
-                        error = %String::from_utf8_lossy(&output.payload),
-                        "Kinesis->Lambda: function returned an error; batch will be retried"
-                    );
-                    None
-                }
-                Some(Ok(output)) if mapping.report_batch_item_failures => {
-                    match first_failed_index(&output.payload, &record_seqs) {
-                        Some(idx) => Some(start.saturating_add(idx)),
-                        None => Some(end),
-                    }
-                }
-                Some(Ok(_)) => Some(end),
-                Some(Err(error)) => {
-                    tracing::warn!(
-                        function_arn = %mapping.function_arn,
-                        stream_arn = %mapping.stream_arn,
-                        shard_id = %shard_id,
-                        error = %error,
-                        "Kinesis->Lambda: function invocation failed; batch will be retried"
-                    );
-                    None
-                }
-                None => Some(end),
-            };
-
-            // Only advance the checkpoint after a successful invoke.
-            // A failed invoke leaves the records pending so the next
-            // poll retries them — matches AWS's at-least-once guarantee.
-            let Some(new_checkpoint) = advance_to else {
-                continue;
-            };
-
-            if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&mapping.stream_arn) {
-                kinesis.set_lambda_checkpoint(
-                    &mapping.stream_arn,
-                    &mapping.uuid,
-                    &shard_id,
-                    new_checkpoint,
-                );
-            }
-            // Persist the advanced checkpoint so a restart resumes past the
-            // records this batch already delivered.
-            self.persist().await;
-
-            if !used_real_delivery {
+            let Some(ref delivery) = self.lambda_delivery else {
+                self.retries
+                    .resolve(&retry_key, &mapping.policy, n, Attempt::Succeeded);
+                self.checkpoint(mapping, &shard_id, end).await;
                 // Recorded in the account and region the function ARN names.
                 let mut lambda_accounts = self.lambda_state.write();
                 let default_account = lambda_accounts.default_account_id().to_string();
@@ -606,8 +576,97 @@ impl KinesisLambdaFirehosePoller {
                     timestamp: Utc::now(),
                     source: "aws:kinesis".to_string(),
                 });
+                continue;
+            };
+            let result: Result<LambdaInvocationOutput, String> = delivery
+                .invoke_lambda(&mapping.function_arn, &payload)
+                .await;
+            let attempt = Attempt::of(&result, &mapping.policy, &record_seqs);
+            if let Attempt::Failed { .. } = attempt {
+                let error = match &result {
+                    Ok(output) => String::from_utf8_lossy(&output.payload).into_owned(),
+                    Err(e) => e.clone(),
+                };
+                tracing::warn!(
+                    function_arn = %mapping.function_arn,
+                    stream_arn = %mapping.stream_arn,
+                    shard_id = %shard_id,
+                    %error,
+                    "Kinesis->Lambda: batch failed"
+                );
+            }
+            match self
+                .retries
+                .resolve(&retry_key, &mapping.policy, n, attempt)
+            {
+                Resolution::Advance(k) => self.checkpoint(mapping, &shard_id, start + k).await,
+                Resolution::Retry => {}
+                Resolution::Discard {
+                    n,
+                    invoke_count,
+                    function_error,
+                } => {
+                    self.discard(
+                        mapping,
+                        &shard_id,
+                        &records[..n],
+                        invoke_count,
+                        Some(function_error),
+                    );
+                    self.checkpoint(mapping, &shard_id, start + n).await;
+                }
             }
         }
+    }
+
+    /// Move the mapping's checkpoint on `shard_id` to `position` and persist
+    /// it, so a restart resumes past the records already handled.
+    async fn checkpoint(&self, mapping: &Mapping, shard_id: &str, position: usize) {
+        if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&mapping.stream_arn) {
+            kinesis.set_lambda_checkpoint(&mapping.stream_arn, &mapping.uuid, shard_id, position);
+        }
+        self.persist().await;
+    }
+
+    /// Describe a discarded batch to the mapping's OnFailure destination.
+    fn discard(
+        &self,
+        mapping: &Mapping,
+        shard_id: &str,
+        records: &[KinesisRecord],
+        invoke_count: u32,
+        response: Option<Option<String>>,
+    ) {
+        tracing::warn!(
+            function_arn = %mapping.function_arn,
+            stream_arn = %mapping.stream_arn,
+            shard_id,
+            records = records.len(),
+            "Kinesis->Lambda: discarding a failed batch"
+        );
+        let (Some(destination), Some(bus), Some(first), Some(last)) = (
+            mapping.policy.on_failure.as_deref(),
+            self.failure_destinations.as_ref(),
+            records.first(),
+            records.last(),
+        ) else {
+            return;
+        };
+        DiscardedBatch {
+            kind: StreamKind::Kinesis,
+            mapping_uuid: &mapping.uuid,
+            function_arn: &mapping.function_arn,
+            stream_arn: &mapping.stream_arn,
+            shard_id,
+            first_sequence: &first.sequence_number,
+            last_sequence: &last.sequence_number,
+            first_arrival: first.approximate_arrival_timestamp,
+            last_arrival: last.approximate_arrival_timestamp,
+            batch_size: records.len(),
+            invoke_count,
+            response,
+        }
+        .send(bus, destination);
     }
 
     async fn poll_firehose(&self) {
@@ -901,43 +960,10 @@ fn kinesis_event_record(
     event
 }
 
-/// Apply a `ReportBatchItemFailures` response
-/// (`{"batchItemFailures":[{"itemIdentifier":"<seqno>"}]}`) to the batch:
-/// the index in `batch_seqs` of the first failed record, or `None` when the
-/// whole batch succeeded. Callers checkpoint at this index, so the failed
-/// record and everything after it is retried on the next poll.
-///
-/// As on AWS, an empty or null `batchItemFailures` list or an empty or null
-/// response is a complete success, while an invalid JSON response or an
-/// entry whose `itemIdentifier` is empty, null, missing (a bad key name) or
-/// names a sequence number not in the batch is a complete failure (index 0:
-/// the whole batch is retried).
-fn first_failed_index(body: &[u8], batch_seqs: &[String]) -> Option<usize> {
-    if body.iter().all(u8::is_ascii_whitespace) {
-        return None;
-    }
-    let Ok(parsed) = serde_json::from_slice::<Value>(body) else {
-        return Some(0);
-    };
-    let failures = parsed.get("batchItemFailures")?.as_array()?;
-    let mut first: Option<usize> = None;
-    for failure in failures {
-        let idx = failure
-            .get("itemIdentifier")
-            .and_then(|v| v.as_str())
-            .filter(|id| !id.is_empty())
-            .and_then(|id| batch_seqs.iter().position(|seq| seq == id));
-        match idx {
-            Some(idx) => first = Some(first.map_or(idx, |f| f.min(idx))),
-            None => return Some(0),
-        }
-    }
-    first
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stream_esm_failures::first_failed_index;
 
     #[test]
     fn first_failed_index_finds_lowest_in_batch_order() {
@@ -1206,7 +1232,7 @@ mod tests {
             filter: FilterSet::from_strings(std::iter::empty::<&String>()),
             starting_position: Some("TRIM_HORIZON".to_string()),
             starting_position_timestamp: None,
-            report_batch_item_failures: false,
+            policy: FailurePolicy::default(),
             invoke_identity_arn: None,
         };
         (kinesis, mapping)
@@ -1230,6 +1256,8 @@ mod tests {
         )
         .with_lambda_delivery(delivery.clone());
         poller.process_mapping(&mapping).await;
+        // Retries wait out a backoff (about 200ms after the first failure).
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         poller.process_mapping(&mapping).await;
         assert_eq!(*delivery.0.lock(), 2, "the failed batch is redelivered");
         let mas = kinesis.read();
@@ -1300,7 +1328,7 @@ mod tests {
             filter: FilterSet::from_strings(std::iter::empty::<&String>()),
             starting_position: Some("TRIM_HORIZON".to_string()),
             starting_position_timestamp: None,
-            report_batch_item_failures: false,
+            policy: FailurePolicy::default(),
             invoke_identity_arn: None,
         };
         poller.process_mapping(&mapping).await;
@@ -1851,7 +1879,7 @@ mod tests {
                 filter: FilterSet::from_strings(std::iter::empty::<&String>()),
                 starting_position: Some("TRIM_HORIZON".to_string()),
                 starting_position_timestamp: None,
-                report_batch_item_failures: false,
+                policy: FailurePolicy::default(),
                 invoke_identity_arn: None,
             };
             poller.process_mapping(&mapping).await;
