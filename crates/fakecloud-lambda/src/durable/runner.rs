@@ -52,6 +52,12 @@ struct HubInner {
     kick: tokio::sync::Notify,
     /// Executions with an invocation task alive in this process.
     running: Mutex<HashSet<String>>,
+    /// Chained invokes (execution ARN, operation id) with a task alive in
+    /// this process. A dispatched one missing here was lost with a previous
+    /// process and is dispatched again.
+    chained_live: Mutex<HashSet<(String, String)>>,
+    /// A snapshot write is in flight.
+    persisting: AtomicBool,
     started: AtomicBool,
 }
 
@@ -187,6 +193,8 @@ impl DurableHub {
                 persist_pending: AtomicBool::new(false),
                 kick: tokio::sync::Notify::new(),
                 running: Mutex::new(HashSet::new()),
+                chained_live: Mutex::new(HashSet::new()),
+                persisting: AtomicBool::new(false),
                 started: AtomicBool::new(false),
             }),
         }
@@ -194,6 +202,10 @@ impl DurableHub {
 
     pub(crate) fn state(&self) -> &SharedLambdaState {
         &self.inner.state
+    }
+
+    pub(crate) fn has_runtime(&self) -> bool {
+        self.inner.runtime.read().is_some()
     }
 
     pub fn set_runtime(&self, runtime: Arc<ContainerRuntime>) {
@@ -235,13 +247,27 @@ impl DurableHub {
                 _ = self.inner.kick.notified() => {}
             }
             self.pass();
-            if self.inner.persist_pending.swap(false, Ordering::AcqRel) {
-                let hook = self.inner.persist.read().clone();
-                if let Some(hook) = hook {
-                    hook().await;
-                }
-            }
+            self.persist_if_requested();
         }
+    }
+
+    /// Write the snapshot in the background when one was requested and no
+    /// write is in flight; requests made meanwhile coalesce into the next.
+    fn persist_if_requested(&self) {
+        if self.inner.persisting.load(Ordering::Acquire)
+            || !self.inner.persist_pending.swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+        let Some(hook) = self.inner.persist.read().clone() else {
+            return;
+        };
+        self.inner.persisting.store(true, Ordering::Release);
+        let hub = self.clone();
+        tokio::spawn(async move {
+            hook().await;
+            hub.inner.persisting.store(false, Ordering::Release);
+        });
     }
 
     /// One scheduler pass.
@@ -254,13 +280,27 @@ impl DurableHub {
         {
             let mut accounts = self.inner.state.write();
             let running = self.inner.running.lock().clone();
-            // Resolve chained targets against a read view first; the
-            // dispatch itself needs the write lock below.
-            let mut pending_dispatch: Vec<(String, String, String, String, String)> = Vec::new();
+            let chained_live = self.inner.chained_live.lock().clone();
+            let has_runtime = self.inner.runtime.read().is_some();
+            // Chained invokes are collected first; dispatching them needs
+            // the whole state.
+            let mut pending_dispatch: Vec<(String, String, String, String, String, bool)> =
+                Vec::new();
             for (account, region, st) in accounts.iter_regional_mut() {
                 let mut expired = Vec::new();
+                let functions: HashSet<String> = st.functions.keys().cloned().collect();
                 for (arn, exec) in st.durable_executions.iter_mut() {
                     if engine::tick(exec, now) {
+                        changed = true;
+                    }
+                    if exec.is_running() && !functions.contains(&exec.function_name) {
+                        // The function was deleted: nothing can run the
+                        // execution any more.
+                        let e = json!({
+                            "ErrorType": "ResourceNotFoundException",
+                            "ErrorMessage": format!("Function not found: {}", exec.function_arn),
+                        });
+                        engine::finish(exec, FAILED, None, Some(e), now);
                         changed = true;
                     }
                     if exec.is_running() {
@@ -275,22 +315,36 @@ impl DurableHub {
                             && (exec.wake || retry_due)
                             && !running.contains(arn)
                         {
-                            launch.push((account.to_string(), region.to_string(), arn.clone()));
+                            if has_runtime {
+                                launch.push((account.to_string(), region.to_string(), arn.clone()));
+                            } else {
+                                // Without a container runtime the function
+                                // can never run; fail now instead of retrying
+                                // until the execution times out.
+                                engine::finish(exec, FAILED, None, Some(no_runtime_error()), now);
+                                changed = true;
+                                continue;
+                            }
                         }
                         for op in &exec.operations {
-                            if op.op_type == OpType::ChainedInvoke
-                                && op.status == OpStatus::Started
-                                && op.chained.as_ref().is_some_and(|c| !c.dispatched)
+                            let Some(c) = op.chained.as_ref() else {
+                                continue;
+                            };
+                            if op.op_type != OpType::ChainedInvoke || op.status != OpStatus::Started
                             {
+                                continue;
+                            }
+                            let lost = c.dispatched
+                                && c.child_execution_arn.is_none()
+                                && !chained_live.contains(&(arn.clone(), op.id.clone()));
+                            if !c.dispatched || lost {
                                 pending_dispatch.push((
                                     account.to_string(),
                                     region.to_string(),
                                     arn.clone(),
                                     op.id.clone(),
-                                    op.chained
-                                        .as_ref()
-                                        .map(|c| c.function_name.clone())
-                                        .unwrap_or_default(),
+                                    c.function_name.clone(),
+                                    lost,
                                 ));
                             }
                         }
@@ -316,7 +370,7 @@ impl DurableHub {
                     changed = true;
                 }
             }
-            for (account, region, arn, op_id, function_ref) in pending_dispatch {
+            for (account, region, arn, op_id, function_ref, redispatch) in pending_dispatch {
                 if let Some(job) = dispatch_chained(
                     &mut accounts,
                     &account,
@@ -324,6 +378,7 @@ impl DurableHub {
                     &arn,
                     &op_id,
                     &function_ref,
+                    redispatch,
                 ) {
                     jobs.push(job);
                 }
@@ -348,6 +403,10 @@ impl DurableHub {
             }
         }
         for job in jobs {
+            self.inner
+                .chained_live
+                .lock()
+                .insert((job.parent_arn.clone(), job.op_id.clone()));
             let hub = self.clone();
             tokio::spawn(async move { hub.run_chained(job).await });
         }
@@ -374,8 +433,21 @@ impl DurableHub {
                     .and_then(|st| st.durable_executions.get_mut(&arn))
                 {
                     Some(exec) if exec.is_running() && exec.invocation.is_none() => {
-                        let payload = engine::begin_invocation(exec, &request_id, model::now());
-                        Some((func.flatten(), layers, payload))
+                        match func.flatten() {
+                            Some(func) => {
+                                let payload =
+                                    engine::begin_invocation(exec, &request_id, model::now());
+                                Some((func, layers, payload))
+                            }
+                            None => {
+                                let e = json!({
+                                    "ErrorType": "ResourceNotFoundException",
+                                    "ErrorMessage": format!("Function not found: {}", exec.function_arn),
+                                });
+                                engine::finish(exec, FAILED, None, Some(e), model::now());
+                                None
+                            }
+                        }
                     }
                     _ => None,
                 }
@@ -384,7 +456,7 @@ impl DurableHub {
                 break;
             };
             self.request_persist();
-            let outcome = self.invoke_function(func.as_ref(), &layers, &payload).await;
+            let outcome = self.invoke_function(&func, &layers, &payload).await;
             let again = {
                 let mut accounts = self.inner.state.write();
                 match accounts
@@ -409,25 +481,13 @@ impl DurableHub {
 
     async fn invoke_function(
         &self,
-        func: Option<&LambdaFunction>,
+        func: &LambdaFunction,
         layers: &[Vec<u8>],
         payload: &Value,
     ) -> InvocationOutcome {
-        let Some(func) = func else {
-            return InvocationOutcome::FunctionError(json!({
-                "ErrorType": "ResourceNotFoundException",
-                "ErrorMessage": "Function not found",
-            }));
-        };
         let runtime = self.inner.runtime.read().clone();
         let Some(runtime) = runtime else {
-            return InvocationOutcome::FunctionError(json!({
-                "ErrorType": "ServiceException",
-                "ErrorMessage": format!(
-                    "Docker/Podman is required for Lambda execution but is not available. {}",
-                    fakecloud_core::container_net::CONTAINER_RUNTIME_HINT
-                ),
-            }));
+            return InvocationOutcome::FunctionError(no_runtime_error());
         };
         let bytes = serde_json::to_vec(payload).unwrap_or_default();
         match runtime.invoke(func, &bytes, layers).await {
@@ -491,6 +551,10 @@ impl DurableHub {
                 engine::complete_chained(exec, &job.op_id, outcome, model::now());
             }
         }
+        self.inner
+            .chained_live
+            .lock()
+            .remove(&(job.parent_arn.clone(), job.op_id.clone()));
         self.request_persist();
         self.inner.kick.notify_one();
     }
@@ -520,6 +584,30 @@ impl DurableHub {
             tokio::time::sleep(StdDuration::from_millis(100)).await;
         }
     }
+}
+
+/// The error an execution fails with when no container runtime can run it.
+pub(crate) fn no_runtime_error() -> Value {
+    json!({
+        "ErrorType": "ServiceException",
+        "ErrorMessage": format!(
+            "Docker/Podman is required for Lambda execution but is not available. {}",
+            fakecloud_core::container_net::CONTAINER_RUNTIME_HINT
+        ),
+    })
+}
+
+/// Whether `version` of `function_name` exists (`$LATEST` always does).
+pub(crate) fn version_exists(st: &LambdaState, function_name: &str, version: &str) -> bool {
+    version == "$LATEST"
+        || st
+            .function_versions
+            .get(function_name)
+            .is_some_and(|vs| vs.iter().any(|v| v == version))
+        || st
+            .function_version_snapshots
+            .get(function_name)
+            .is_some_and(|m| m.contains_key(version))
 }
 
 /// The `ErrorObject` a function error envelope (`errorMessage` /
@@ -580,6 +668,7 @@ fn dispatch_chained(
     parent_arn: &str,
     op_id: &str,
     function_ref: &str,
+    redispatch: bool,
 ) -> Option<ChainedJob> {
     let now = model::now();
     let (target_account, target_region, name) =
@@ -595,7 +684,9 @@ fn dispatch_chained(
             .regional_get_mut(account, region)
             .and_then(|st| st.durable_executions.get_mut(parent_arn))
         {
-            engine::chained_dispatched(parent, op_id, None, None);
+            if !redispatch {
+                engine::chained_dispatched(parent, op_id, None, None);
+            }
             engine::complete_chained(
                 parent,
                 op_id,
@@ -642,6 +733,10 @@ fn dispatch_chained(
         }
         let version = crate::service::resolve_qualifier_to_version(st, &name, qualifier.as_deref())
             .unwrap_or_else(|| "$LATEST".to_string());
+        if !version_exists(st, &name, &version) {
+            fail(accounts, not_found());
+            return None;
+        }
         let pinned = pinned_function(st, &name, &version).unwrap_or(func);
         let payload = st
             .durable_executions
@@ -688,7 +783,11 @@ fn dispatch_chained(
             StartOutcome::Started(a) | StartOutcome::Existing(a) | StartOutcome::Conflict(a) => a,
         };
         if let Some(parent) = st.durable_executions.get_mut(parent_arn) {
-            engine::chained_dispatched(parent, op_id, Some(&version), Some(&child));
+            if redispatch {
+                engine::set_chained_child(parent, op_id, &child);
+            } else {
+                engine::chained_dispatched(parent, op_id, Some(&version), Some(&child));
+            }
         }
         return None;
     }
@@ -698,7 +797,9 @@ fn dispatch_chained(
         .regional_get_mut(account, region)
         .and_then(|st| st.durable_executions.get_mut(parent_arn))
     {
-        engine::chained_dispatched(parent, op_id, Some(&version), None);
+        if !redispatch {
+            engine::chained_dispatched(parent, op_id, Some(&version), None);
+        }
     }
     if func.code_zip.is_none() && func.package_type != "Image" {
         if let Some(parent) = accounts
@@ -756,6 +857,129 @@ pub(crate) fn sync_response_body(exec: &DurableExecution) -> (Vec<u8>, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::RwLock;
+
+    const ACCOUNT: &str = "123456789012";
+
+    fn hub_with(functions: &[(&str, bool)]) -> DurableHub {
+        let state: SharedLambdaState = Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(
+                ACCOUNT,
+                "us-east-1",
+                "http://localhost:4566",
+            ),
+        ));
+        {
+            let mut accounts = state.write();
+            let st = accounts.regional_mut(ACCOUNT, "us-east-1");
+            for (name, durable) in functions {
+                st.functions.insert(
+                    name.to_string(),
+                    LambdaFunction {
+                        function_name: name.to_string(),
+                        function_arn: crate::state::function_arn("us-east-1", ACCOUNT, name),
+                        durable_config: durable.then(|| json!({"ExecutionTimeout": 600})),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        DurableHub::new(state)
+    }
+
+    fn start(hub: &DurableHub) -> String {
+        let mut accounts = hub.state().write();
+        let st = accounts.regional_mut(ACCOUNT, "us-east-1");
+        let settings = DurableSettings::of(&st.functions["f"]).unwrap();
+        match start_execution(
+            st,
+            "us-east-1",
+            "f",
+            "$LATEST",
+            &settings,
+            None,
+            "{}",
+            None,
+            None,
+        ) {
+            StartOutcome::Started(a) => a,
+            _ => unreachable!(),
+        }
+    }
+
+    fn with_exec<T>(hub: &DurableHub, arn: &str, f: impl FnOnce(&mut DurableExecution) -> T) -> T {
+        let mut accounts = hub.state().write();
+        f(accounts
+            .regional_mut(ACCOUNT, "us-east-1")
+            .durable_executions
+            .get_mut(arn)
+            .unwrap())
+    }
+
+    #[tokio::test]
+    async fn executions_without_a_runtime_or_function_fail_instead_of_retrying() {
+        let hub = hub_with(&[("f", true)]);
+        let arn = start(&hub);
+        hub.pass();
+        with_exec(&hub, &arn, |e| {
+            assert_eq!(e.status, FAILED);
+            assert_eq!(e.error.as_ref().unwrap()["ErrorType"], "ServiceException");
+        });
+
+        let hub = hub_with(&[("f", true)]);
+        let arn = start(&hub);
+        hub.state()
+            .write()
+            .regional_mut(ACCOUNT, "us-east-1")
+            .functions
+            .remove("f");
+        hub.pass();
+        with_exec(&hub, &arn, |e| {
+            assert_eq!(e.status, FAILED);
+            assert_eq!(
+                e.error.as_ref().unwrap()["ErrorType"],
+                "ResourceNotFoundException"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn a_chained_invoke_lost_with_its_process_is_dispatched_again() {
+        let hub = hub_with(&[("f", true), ("target", false)]);
+        let arn = start(&hub);
+        with_exec(&hub, &arn, |e| {
+            engine::begin_invocation(e, "r1", model::now());
+            let token = e.invocation.as_ref().unwrap().token.clone().unwrap();
+            engine::checkpoint(
+                e,
+                &token,
+                None,
+                &[json!({"Id":"ci","Type":"CHAINED_INVOKE","Action":"START","ChainedInvokeOptions":{"FunctionName":"target"}})],
+                model::now(),
+            )
+            .unwrap();
+            engine::complete_invocation(
+                e,
+                "r1",
+                InvocationOutcome::Output(json!({"Status":"PENDING"})),
+                model::now(),
+            );
+            // Dispatched by a process that is gone: no live job tracks it.
+            engine::chained_dispatched(e, "ci", Some("$LATEST"), None);
+        });
+        hub.pass();
+        with_exec(&hub, &arn, |e| {
+            // Dispatched again (the target has no code, so it fails), without
+            // a second ChainedInvokeStarted.
+            assert_eq!(e.op("ci").unwrap().status, OpStatus::Failed);
+            let started = e
+                .events
+                .iter()
+                .filter(|ev| ev["EventType"] == "ChainedInvokeStarted")
+                .count();
+            assert_eq!(started, 1);
+        });
+    }
 
     #[test]
     fn function_error_envelopes_become_error_objects() {

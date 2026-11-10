@@ -540,16 +540,7 @@ impl LambdaService {
             }
             let version = crate::service::resolve_qualifier_to_version(st, function_name, Some(q))
                 .unwrap_or_else(|| "$LATEST".to_string());
-            if version != "$LATEST"
-                && !st
-                    .function_versions
-                    .get(function_name)
-                    .is_some_and(|vs| vs.contains(&version))
-                && !st
-                    .function_version_snapshots
-                    .get(function_name)
-                    .is_some_and(|m| m.contains_key(&version))
-            {
+            if !runner::version_exists(st, function_name, &version) {
                 return Some(Err(AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "ResourceNotFoundException",
@@ -559,10 +550,26 @@ impl LambdaService {
                     ),
                 )));
             }
+            // The pinned version's configuration governs its executions.
+            let settings = runner::pinned_function(st, function_name, &version)
+                .as_ref()
+                .and_then(DurableSettings::of)
+                .unwrap_or(settings);
             (settings, version)
         };
         if matches!(invocation_type, InvocationType::DryRun) {
             return Some(Ok(AwsResponse::json(StatusCode::NO_CONTENT, "")));
+        }
+        if !self.durable.has_runtime() {
+            // As for any invoke: nothing can run the function.
+            return Some(Err(AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ServiceException",
+                format!(
+                    "Docker/Podman is required for Lambda execution but is not available. {}",
+                    fakecloud_core::container_net::CONTAINER_RUNTIME_HINT
+                ),
+            )));
         }
         let name = header(req, "x-amz-durable-execution-name");
         if let Some(n) = &name {
@@ -682,6 +689,16 @@ pub async fn invoke_for_delivery(
         };
         let version = crate::service::resolve_qualifier_to_version(st, &name, Some(&qualifier))
             .unwrap_or_else(|| "$LATEST".to_string());
+        if !runner::version_exists(st, &name, &version) {
+            return Some(Err(format!(
+                "Function not found: {}",
+                crate::state::qualified_function_arn(&region, &account, &name, &qualifier)
+            )));
+        }
+        let settings = runner::pinned_function(st, &name, &version)
+            .as_ref()
+            .and_then(DurableSettings::of)
+            .unwrap_or(settings);
         let input = if payload.is_empty() { "{}" } else { payload };
         let arn = match runner::start_execution(
             st, &region, &name, &version, &settings, None, input, None, None,
@@ -1141,6 +1158,44 @@ mod tests {
             .delete_function("plain", ACCOUNT, "us-east-1", None)
             .unwrap();
         assert_eq!(plain.status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn durable_invokes_need_a_container_runtime() {
+        let (hub, _) = seeded(None);
+        let svc = crate::service::LambdaService::new(hub.state().clone());
+        let resp = svc
+            .invoke_durable(
+                &req(&[], b"{}"),
+                "f",
+                ACCOUNT,
+                Some("$LATEST"),
+                InvocationType::Event,
+            )
+            .await
+            .expect("f is durable");
+        let err = resp.err().unwrap();
+        assert_eq!(err.code(), "ServiceException");
+        // Unqualified is still refused first, and DryRun needs no runtime.
+        let err = svc
+            .invoke_durable(&req(&[], b"{}"), "f", ACCOUNT, None, InvocationType::Event)
+            .await
+            .unwrap()
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "InvalidParameterValueException");
+        let dry = svc
+            .invoke_durable(
+                &req(&[], b"{}"),
+                "f",
+                ACCOUNT,
+                Some("$LATEST"),
+                InvocationType::DryRun,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(dry.status, StatusCode::NO_CONTENT);
     }
 
     #[test]

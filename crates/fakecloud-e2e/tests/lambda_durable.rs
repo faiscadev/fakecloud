@@ -28,15 +28,14 @@ const SDK_VERSION: &str = "3.0.0";
 const HANDLER: &str = r#"
 import { withDurableExecution } from "@aws/durable-execution-sdk-js";
 
-const flaked = new Set();
-
 export const handler = withDurableExecution(async (event, context) => {
   const doubled = await context.step("double", async () => (event.n ?? 1) * 2);
   let flaky = null;
   if (event.retryKey) {
-    flaky = await context.step("flaky", async () => {
-      if (!flaked.has(event.retryKey)) {
-        flaked.add(event.retryKey);
+    // The attempt number comes from the service's StepDetails.Attempt, so
+    // the first attempt fails whichever container runs it.
+    flaky = await context.step("flaky", async (ctx) => {
+      if (ctx.attempt === 1) {
         throw new Error("transient failure");
       }
       return "recovered";
@@ -198,7 +197,8 @@ async fn wait_until_done(client: &aws_sdk_lambda::Client, arn: &str) -> Executio
     }
 }
 
-/// Poll the history until the callback has started; returns its id.
+/// Poll the history until the callback has started and the invocation that
+/// started it has ended (the execution is suspended on it); returns its id.
 async fn wait_for_callback(client: &aws_sdk_lambda::Client, arn: &str) -> String {
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
@@ -208,14 +208,19 @@ async fn wait_for_callback(client: &aws_sdk_lambda::Client, arn: &str) -> String
             .send()
             .await
             .unwrap();
-        if let Some(id) = history
-            .events()
+        let events = history.events();
+        if let Some(pos) = events
             .iter()
-            .find(|e| e.event_type() == Some(&EventType::CallbackStarted))
-            .and_then(|e| e.callback_started_details())
-            .map(|d| d.callback_id().to_string())
+            .position(|e| e.event_type() == Some(&EventType::CallbackStarted))
         {
-            return id;
+            let suspended = events[pos..]
+                .iter()
+                .any(|e| e.event_type() == Some(&EventType::InvocationCompleted));
+            if suspended {
+                if let Some(d) = events[pos].callback_started_details() {
+                    return d.callback_id().to_string();
+                }
+            }
         }
         assert!(Instant::now() < deadline, "callback of {arn} never started");
         tokio::time::sleep(Duration::from_millis(300)).await;

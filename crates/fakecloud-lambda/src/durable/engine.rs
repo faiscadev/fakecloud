@@ -147,6 +147,8 @@ pub(crate) fn visible_operations(exec: &DurableExecution) -> Vec<&Operation> {
             && matches!(op.status, OpStatus::Succeeded | OpStatus::Failed)
             && op.replay_children != Some(true)
     };
+    let by_id: std::collections::HashMap<&str, &Operation> =
+        exec.operations.iter().map(|o| (o.id.as_str(), o)).collect();
     exec.operations
         .iter()
         .filter(|op| {
@@ -157,7 +159,7 @@ pub(crate) fn visible_operations(exec: &DurableExecution) -> Vec<&Operation> {
                 if hops > exec.operations.len() {
                     break;
                 }
-                let Some(parent) = exec.op(pid) else { break };
+                let Some(parent) = by_id.get(pid) else { break };
                 if prunes(parent) {
                     return false;
                 }
@@ -274,7 +276,7 @@ pub(crate) fn state_page(
     } else {
         max_items
     };
-    let end = (start + limit).min(visible.len());
+    let end = start.saturating_add(limit).min(visible.len());
     let ops: Vec<Value> = visible
         .get(start..end)
         .unwrap_or_default()
@@ -318,9 +320,9 @@ pub(crate) fn checkpoint(
         .filter_map(|id| exec.op(id))
         .map(|o| o.to_wire(TimeFormat::Seconds))
         .collect();
-    // The operations the service changed are delivered now, so the
-    // function needs no extra invocation to learn about them.
-    exec.wake = false;
+    // `wake` stays set: the SDK may already have suspended the branch an
+    // operation the service just changed belongs to, so the function runs
+    // again once it answers PENDING (at worst one extra replay).
     let mut m = Map::new();
     let next_token = (!finished).then(new_checkpoint_token);
     if let Some(t) = &next_token {
@@ -975,6 +977,14 @@ pub(crate) fn chained_dispatched(
     );
 }
 
+/// Record the child execution of a chained invoke dispatched again after a
+/// restart (its `ChainedInvokeStarted` event already exists).
+pub(crate) fn set_chained_child(exec: &mut DurableExecution, op_id: &str, child: &str) {
+    if let Some(ch) = exec.op_mut(op_id).and_then(|o| o.chained.as_mut()) {
+        ch.child_execution_arn = Some(child.to_string());
+    }
+}
+
 /// How a chained invoke ended.
 pub(crate) struct ChainedOutcome {
     pub status: OpStatus,
@@ -1050,7 +1060,7 @@ pub(crate) fn page<T: Clone>(
     } else {
         max_items.min(MAX_PAGE)
     };
-    let end = (start + limit).min(ordered.len());
+    let end = start.saturating_add(limit).min(ordered.len());
     let slice = ordered
         .get(start..end)
         .map(<[T]>::to_vec)
@@ -1563,6 +1573,53 @@ mod tests {
         ));
         assert_eq!(e.events.last().unwrap()["EventType"], "ChainedInvokeFailed");
         assert!(e.wake);
+    }
+
+    #[test]
+    fn a_change_delivered_mid_invocation_still_reinvokes_on_pending() {
+        let mut e = new_exec(600);
+        begin_invocation(&mut e, "r1", t0());
+        let r = ck(
+            &mut e,
+            json!([{"Id":"cb","Type":"CALLBACK","Action":"START"}]),
+            t0(),
+        );
+        let id = r["NewExecutionState"]["Operations"][0]["CallbackDetails"]["CallbackId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(complete_callback(
+            &mut e,
+            &id,
+            CallbackOutcome::Succeeded(None),
+            t0()
+        ));
+        // The SDK's next checkpoint hands the completed callback back...
+        let r = ck(&mut e, json!([]), t0());
+        assert_eq!(
+            r["NewExecutionState"]["Operations"][0]["Status"],
+            "SUCCEEDED"
+        );
+        // ...but if the branch had already suspended, PENDING must not strand it.
+        assert!(complete_invocation(
+            &mut e,
+            "r1",
+            InvocationOutcome::Output(json!({"Status":"PENDING"})),
+            t0()
+        ));
+    }
+
+    #[test]
+    fn huge_markers_do_not_overflow() {
+        let items: Vec<u32> = (1..=3).collect();
+        let marker = encode_marker(usize::MAX);
+        let (p, next) = page(&items, Some(&marker), 2, false).unwrap();
+        assert!(p.is_empty() && next.is_none());
+        let mut e = new_exec(600);
+        begin_invocation(&mut e, "r1", t0());
+        let t = token(&e);
+        let page = state_page(&e, &t, Some(&marker), 5).unwrap();
+        assert_eq!(page["Operations"], json!([]));
     }
 
     #[test]
