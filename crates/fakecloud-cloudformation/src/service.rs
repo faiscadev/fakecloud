@@ -3151,6 +3151,12 @@ impl CloudFormationService {
                     {
                         stack.status = "DELETE_IN_PROGRESS".to_string();
                         stack.status_reason = None;
+                        // A retried delete tries again what failed last time.
+                        for resource in &mut stack.resources {
+                            if resource.status == "DELETE_FAILED" {
+                                resource.status = "DELETE_IN_PROGRESS".to_string();
+                            }
+                        }
                     }
                     record_stack_status_event_with_reason(
                         state,
@@ -3253,8 +3259,12 @@ impl CloudFormationService {
     /// DeleteStack of a stack whose custom resources must answer: one
     /// resource at a time, latest first, each Delete waiting for its handler.
     /// The stack's resource list is the journal: a deleted resource leaves
-    /// it, a failed one stays `DELETE_FAILED`, and each step is persisted, so
-    /// after a restart the delete carries on from where it was. A stack that
+    /// it, a failed one stays `DELETE_FAILED`. It is persisted when the
+    /// delete starts, after each resource that waited on a handler, after a
+    /// failure and at the end, so after a restart the delete carries on from
+    /// there; a plain resource deleted since the last save is deleted again,
+    /// which `delete_resource` treats as done (a resource already gone counts
+    /// as deleted). A stack that
     /// is gone, or no longer DELETE_IN_PROGRESS (a reset, a delete finished
     /// elsewhere), ends the job without touching anything.
     pub(crate) async fn run_background_delete(
@@ -3271,8 +3281,9 @@ impl CloudFormationService {
                 .find(|s| s.stack_id == stack_id && s.status == "DELETE_IN_PROGRESS")
                 .cloned()
         };
+        let mut touched_since_save: Vec<String> = Vec::new();
         loop {
-            let (resource, touched) = {
+            let (resource, touched, waited) = {
                 let accounts = self.state.read();
                 let Some(state) = accounts.regional(account_id, region) else {
                     return;
@@ -3297,7 +3308,17 @@ impl CloudFormationService {
                     &mut touched,
                     0,
                 );
-                (resource, touched)
+                // A custom resource, or a nested stack holding one, waited
+                // on its handler: worth persisting past.
+                let waited = (is_custom_resource_type(&resource.resource_type)
+                    && resource.service_token.is_some())
+                    || (resource.resource_type == "AWS::CloudFormation::Stack"
+                        && state
+                            .stacks
+                            .values()
+                            .find(|s| s.stack_id == resource.physical_id)
+                            .is_some_and(|child| family_waits_for_handlers(state, child)));
+                (resource, touched, waited)
             };
             let worker = provisioner.clone();
             let target = resource.clone();
@@ -3347,8 +3368,15 @@ impl CloudFormationService {
                 }
             }
             self.drain_delete_intents(&provisioner);
-            persist_touched_services(&self.snapshot_hooks, touched).await;
-            self.save_snapshot().await;
+            touched_since_save.extend(touched);
+            if waited || result.is_err() {
+                persist_touched_services(
+                    &self.snapshot_hooks,
+                    std::mem::take(&mut touched_since_save),
+                )
+                .await;
+                self.save_snapshot().await;
+            }
         }
 
         // What a held update replaced or created outside the resource list.
@@ -3393,6 +3421,7 @@ impl CloudFormationService {
                 .unwrap_or_default()
         };
         self.finish_stack_delete(account_id, region, stack_id, &failed, false);
+        persist_touched_services(&self.snapshot_hooks, touched_since_save).await;
         self.save_snapshot().await;
     }
 
@@ -5955,9 +5984,12 @@ pub(crate) mod tests {
             .expect("bad-body create succeeds");
     }
 
-    /// Answers a custom resource's Create with SUCCESS; never answers its
-    /// Delete (so a stack delete waits out the ServiceTimeout).
-    struct CreateOnlyHandler(Arc<crate::resource_provisioner::CustomResponses>);
+    /// Answers a custom resource's Create with SUCCESS, and its Delete only
+    /// once the flag is set (so a stack delete waits out the ServiceTimeout).
+    struct CreateOnlyHandler(
+        Arc<crate::resource_provisioner::CustomResponses>,
+        Arc<std::sync::atomic::AtomicBool>,
+    );
 
     impl fakecloud_core::delivery::LambdaDelivery for CreateOnlyHandler {
         fn invoke_lambda(
@@ -5976,7 +6008,10 @@ pub(crate) mod tests {
 
         fn invoke_lambda_async(&self, _function_arn: &str, payload: &str) -> Result<(), String> {
             let event: serde_json::Value = serde_json::from_str(payload).unwrap();
-            if event["RequestType"] == "Create" {
+            let answers = event["RequestType"] == "Create"
+                || (event["RequestType"] == "Delete"
+                    && self.1.load(std::sync::atomic::Ordering::SeqCst));
+            if answers {
                 let body =
                     serde_json::json!({"Status": "SUCCESS", "PhysicalResourceId": "custom-1"});
                 self.0.accept(
@@ -5989,11 +6024,18 @@ pub(crate) mod tests {
     }
 
     fn service_with_create_only_handler() -> CloudFormationService {
+        service_with_handler(Default::default())
+    }
+
+    /// A handler that answers Create, and Delete once `answers_delete` is set.
+    fn service_with_handler(
+        answers_delete: Arc<std::sync::atomic::AtomicBool>,
+    ) -> CloudFormationService {
         let mut svc = make_service();
-        svc.deps.delivery = Arc::new(
-            DeliveryBus::new()
-                .with_lambda(Arc::new(CreateOnlyHandler(svc.custom_responses.clone()))),
-        );
+        svc.deps.delivery = Arc::new(DeliveryBus::new().with_lambda(Arc::new(CreateOnlyHandler(
+            svc.custom_responses.clone(),
+            answers_delete,
+        ))));
         svc
     }
 
@@ -6217,6 +6259,85 @@ pub(crate) mod tests {
         }
         svc.resume_interrupted_cleanups().await;
         stack_status_becomes(&svc, "s", "DELETE_COMPLETE").await;
+        assert!(queue_names(&svc).is_empty());
+    }
+
+    /// A retried DeleteStack of a DELETE_FAILED stack asks the handler
+    /// again: once it answers, the stack is deleted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retrying_a_failed_delete_asks_the_handler_again() {
+        let answers_delete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let svc = service_with_handler(answers_delete.clone());
+        svc.create_stack(&create_stack_params("s", queue_and_silent_custom()))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "CREATE_COMPLETE").await;
+        let delete = || {
+            let mut params = HashMap::new();
+            params.insert("StackName".to_string(), "s".to_string());
+            make_request("DeleteStack", params)
+        };
+        svc.delete_stack(&delete()).await.unwrap();
+        stack_status_becomes(&svc, "s", "DELETE_FAILED").await;
+
+        answers_delete.store(true, std::sync::atomic::Ordering::SeqCst);
+        svc.delete_stack(&delete()).await.unwrap();
+        stack_status_becomes(&svc, "s", "DELETE_COMPLETE").await;
+    }
+
+    /// Counts snapshot writes.
+    #[derive(Default)]
+    struct CountingStore(std::sync::atomic::AtomicUsize);
+
+    impl SnapshotStore for CountingStore {
+        fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn save(&self, _bytes: &[u8]) -> std::io::Result<()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A background delete persists at its transitions and after resources
+    /// that waited on a handler, not after every plain resource.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_background_delete_persists_at_handler_steps_only() {
+        let answers_delete = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let store = Arc::new(CountingStore::default());
+        let svc = service_with_handler(answers_delete).with_snapshot_store(store.clone());
+        let template = serde_json::json!({
+            "Resources": {
+                "Q1": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "q1"}},
+                "Q2": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "q2"}},
+                "Q3": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "q3"}},
+                "Custom": {
+                    "Type": "Custom::Thing",
+                    "DependsOn": ["Q1", "Q2", "Q3"],
+                    "Properties": {
+                        "ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:h",
+                        "ServiceTimeout": "5"
+                    }
+                }
+            }
+        });
+        svc.create_stack(&create_stack_params("s", template))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "CREATE_COMPLETE").await;
+        // Let the create's own saves land before counting.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let before = store.0.load(std::sync::atomic::Ordering::SeqCst);
+        let mut params = HashMap::new();
+        params.insert("StackName".to_string(), "s".to_string());
+        svc.delete_stack(&make_request("DeleteStack", params))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "DELETE_COMPLETE").await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let saves = store.0.load(std::sync::atomic::Ordering::SeqCst) - before;
+        // The start, after the custom resource, the end.
+        assert_eq!(saves, 3);
         assert!(queue_names(&svc).is_empty());
     }
 
