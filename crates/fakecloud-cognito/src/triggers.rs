@@ -52,7 +52,10 @@ pub enum TriggerSource {
     PreAuthenticationAuthentication,
     PostAuthenticationAuthentication,
     CustomMessageSignUp,
+    CustomMessageAdminCreateUser,
+    CustomMessageResendCode,
     CustomMessageForgotPassword,
+    CustomMessageVerifyUserAttribute,
     TokenGenerationAuthentication,
     TokenGenerationRefreshTokens,
     TokenGenerationHostedAuth,
@@ -89,7 +92,10 @@ impl TriggerSource {
             Self::PreAuthenticationAuthentication => "PreAuthentication_Authentication",
             Self::PostAuthenticationAuthentication => "PostAuthentication_Authentication",
             Self::CustomMessageSignUp => "CustomMessage_SignUp",
+            Self::CustomMessageAdminCreateUser => "CustomMessage_AdminCreateUser",
+            Self::CustomMessageResendCode => "CustomMessage_ResendCode",
             Self::CustomMessageForgotPassword => "CustomMessage_ForgotPassword",
+            Self::CustomMessageVerifyUserAttribute => "CustomMessage_VerifyUserAttribute",
             Self::TokenGenerationAuthentication => "TokenGeneration_Authentication",
             Self::TokenGenerationRefreshTokens => "TokenGeneration_RefreshTokens",
             Self::TokenGenerationHostedAuth => "TokenGeneration_HostedAuth",
@@ -127,7 +133,11 @@ impl TriggerSource {
             }
             Self::PreAuthenticationAuthentication => "PreAuthentication",
             Self::PostAuthenticationAuthentication => "PostAuthentication",
-            Self::CustomMessageSignUp | Self::CustomMessageForgotPassword => "CustomMessage",
+            Self::CustomMessageSignUp
+            | Self::CustomMessageAdminCreateUser
+            | Self::CustomMessageResendCode
+            | Self::CustomMessageForgotPassword
+            | Self::CustomMessageVerifyUserAttribute => "CustomMessage",
             Self::TokenGenerationAuthentication
             | Self::TokenGenerationRefreshTokens
             | Self::TokenGenerationHostedAuth => "PreTokenGeneration",
@@ -626,6 +636,18 @@ mod tests {
         assert_eq!(
             TriggerSource::CustomMessageForgotPassword.as_str(),
             "CustomMessage_ForgotPassword"
+        );
+        assert_eq!(
+            TriggerSource::CustomMessageAdminCreateUser.as_str(),
+            "CustomMessage_AdminCreateUser"
+        );
+        assert_eq!(
+            TriggerSource::CustomMessageResendCode.as_str(),
+            "CustomMessage_ResendCode"
+        );
+        assert_eq!(
+            TriggerSource::CustomMessageVerifyUserAttribute.as_str(),
+            "CustomMessage_VerifyUserAttribute"
         );
     }
 

@@ -145,7 +145,22 @@ impl CognitoService {
                 });
             }
 
-            let temporary_password = body["TemporaryPassword"].as_str().map(|s| s.to_string());
+            // Without a TemporaryPassword, Cognito generates one (it is what
+            // the invitation carries).
+            let temporary_password = Some(
+                body["TemporaryPassword"]
+                    .as_str()
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        let policy = state
+                            .user_pools
+                            .get(pool_id)
+                            .map(|p| p.policies.password_policy.clone())
+                            .unwrap_or_default();
+                        super::generate_temporary_password(&policy)
+                    }),
+            );
 
             let user = crate::state::User {
                 username: stored_username.clone(),
@@ -224,6 +239,29 @@ impl CognitoService {
                     }
                 }
             }
+        }
+
+        // The invitation, unless suppressed; DesiredDeliveryMediums defaults
+        // to SMS.
+        if body["MessageAction"].as_str() != Some("SUPPRESS") {
+            let mediums: Vec<String> = body["DesiredDeliveryMediums"]
+                .as_array()
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_else(|| vec!["SMS".to_string()]);
+            self.dispatch_invitation(
+                &pool_id_owned,
+                &username_owned,
+                &user_clone.attributes,
+                user_clone.temporary_password.as_deref().unwrap_or_default(),
+                &mediums,
+                &region,
+                &account_id,
+            )
+            .await?;
         }
 
         Ok(AwsResponse::ok_json(json!({ "User": response })))
@@ -1185,7 +1223,7 @@ impl CognitoService {
                     &user_attrs,
                     &addr,
                     &code,
-                    crate::triggers::TriggerSource::CustomMessageSignUp,
+                    crate::triggers::TriggerSource::CustomMessageVerifyUserAttribute,
                     crate::triggers::TriggerSource::CustomEmailSenderVerifyUserAttribute,
                     &region,
                     &account_id,
@@ -1361,7 +1399,7 @@ impl CognitoService {
                 &user_attrs,
                 &addr,
                 &code,
-                crate::triggers::TriggerSource::CustomMessageSignUp,
+                crate::triggers::TriggerSource::CustomMessageResendCode,
                 crate::triggers::TriggerSource::CustomEmailSenderResendCode,
                 &region,
                 &account_id,

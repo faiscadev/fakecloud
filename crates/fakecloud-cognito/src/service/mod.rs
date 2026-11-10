@@ -182,6 +182,163 @@ impl CognitoService {
         Ok(())
     }
 
+    /// Send AdminCreateUser's invitation (the username and temporary
+    /// password) over each requested medium the user has an address for.
+    /// The CustomMessage trigger (`CustomMessage_AdminCreateUser`) runs first
+    /// and can rewrite the messages; its failure fails AdminCreateUser
+    /// although the user stays created, as recorded
+    /// (`cognito."CustomMessage/AdminCreateUser"`). A configured custom sender
+    /// takes over its medium.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn dispatch_invitation(
+        &self,
+        pool_id: &str,
+        username: &str,
+        user_attributes: &[crate::state::UserAttribute],
+        temporary_password: &str,
+        mediums: &[String],
+        region: &str,
+        account_id: &str,
+    ) -> Result<(), AwsServiceError> {
+        use crate::triggers::TriggerSource;
+        let Some(ref ctx) = self.delivery_ctx else {
+            return Ok(());
+        };
+        let attr = |name: &str| {
+            user_attributes
+                .iter()
+                .find(|a| a.name == name)
+                .map(|a| a.value.clone())
+        };
+        let email = attr("email").filter(|_| mediums.iter().any(|m| m == "EMAIL"));
+        let phone = attr("phone_number").filter(|_| mediums.iter().any(|m| m == "SMS"));
+        if email.is_none() && phone.is_none() {
+            return Ok(());
+        }
+        let email_sender = crate::triggers::get_trigger_arn(
+            &self.state,
+            pool_id,
+            TriggerSource::CustomEmailSenderAdminCreateUser,
+        );
+        let sms_sender = crate::triggers::get_trigger_arn(
+            &self.state,
+            pool_id,
+            TriggerSource::CustomSmsSenderAdminCreateUser,
+        );
+
+        let (from_addr, template) = {
+            let accounts = self.state.read();
+            accounts
+                .default_ref()
+                .user_pools
+                .get(pool_id)
+                .map(|p| {
+                    (
+                        p.email_configuration
+                            .as_ref()
+                            .and_then(|c| c.from_email_address.clone()),
+                        p.admin_create_user_config
+                            .as_ref()
+                            .and_then(|c| c.invite_message_template.clone()),
+                    )
+                })
+                .unwrap_or((None, None))
+        };
+        let mut subject = template.as_ref().and_then(|t| t.email_subject.clone());
+        let mut message = template.as_ref().and_then(|t| t.email_message.clone());
+        let mut sms_message = template.as_ref().and_then(|t| t.sms_message.clone());
+
+        let needs_messages = (email.is_some() && email_sender.is_none())
+            || (phone.is_some() && sms_sender.is_none());
+        if needs_messages {
+            if let Some(function_arn) = crate::triggers::get_trigger_arn(
+                &self.state,
+                pool_id,
+                TriggerSource::CustomMessageAdminCreateUser,
+            ) {
+                let mut event = crate::triggers::build_trigger_event(
+                    TriggerSource::CustomMessageAdminCreateUser,
+                    pool_id,
+                    None,
+                    username,
+                    user_attributes,
+                    region,
+                    account_id,
+                );
+                event["request"]["codeParameter"] = serde_json::json!("{####}");
+                event["request"]["usernameParameter"] = serde_json::json!("{username}");
+                if let Some(resp) =
+                    crate::triggers::invoke_trigger(ctx, &function_arn, &event).await?
+                {
+                    let field = |name: &str| resp["response"][name].as_str().map(str::to_string);
+                    subject = field("emailSubject").or(subject);
+                    message = field("emailMessage").or(message);
+                    sms_message = field("smsMessage").or(sms_message);
+                }
+            }
+        }
+
+        if let Some(to) = email {
+            if let Some(function_arn) = &email_sender {
+                let event = crate::triggers::build_custom_sender_event(
+                    TriggerSource::CustomEmailSenderAdminCreateUser,
+                    pool_id,
+                    None,
+                    username,
+                    user_attributes,
+                    temporary_password,
+                    region,
+                    account_id,
+                );
+                crate::triggers::invoke_custom_sender(ctx, function_arn, &event);
+            } else if let Some(ref dispatcher) = ctx.email {
+                let rendered = crate::triggers::render_verification_email(
+                    from_addr.as_deref(),
+                    Some(subject.as_deref().unwrap_or(DEFAULT_INVITE_SUBJECT)),
+                    Some(message.as_deref().unwrap_or(DEFAULT_INVITE_MESSAGE)),
+                    username,
+                    temporary_password,
+                );
+                dispatcher.send_email(
+                    account_id,
+                    &rendered.from,
+                    &to,
+                    &rendered.subject,
+                    &rendered.body_text,
+                    rendered.body_html.as_deref(),
+                );
+            }
+        }
+        if let Some(to) = phone {
+            if let Some(function_arn) = &sms_sender {
+                let event = crate::triggers::build_custom_sender_event(
+                    TriggerSource::CustomSmsSenderAdminCreateUser,
+                    pool_id,
+                    None,
+                    username,
+                    user_attributes,
+                    temporary_password,
+                    region,
+                    account_id,
+                );
+                crate::triggers::invoke_custom_sender(ctx, function_arn, &event);
+            } else if let Some(ref dispatcher) = ctx.sms {
+                let text = crate::triggers::render_verification_sms(
+                    Some(sms_message.as_deref().unwrap_or(DEFAULT_INVITE_MESSAGE)),
+                    username,
+                    temporary_password,
+                );
+                let dispatcher = dispatcher.clone();
+                let acct = account_id.to_string();
+                let region = pool_id.split('_').next().unwrap_or_default().to_string();
+                tokio::spawn(async move {
+                    dispatcher.send_sms(&acct, &region, &to, &text);
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Dispatch a Cognito verification SMS. Routes through the
     /// CustomSMSSender Lambda when configured, otherwise through the
     /// wired SNS dispatcher. No-op when neither is wired.
@@ -752,6 +909,37 @@ fn generate_client_id() -> String {
         .take(26)
         .collect::<String>()
         .to_lowercase()
+}
+
+/// Cognito's invitation message when the pool sets no InviteMessageTemplate.
+const DEFAULT_INVITE_SUBJECT: &str = "Your temporary password";
+const DEFAULT_INVITE_MESSAGE: &str =
+    "Your username is {username} and temporary password is {####}.";
+
+/// A temporary password Cognito generates for AdminCreateUser when none is
+/// given: it satisfies the pool's policy (one of each character class, at
+/// least the minimum length).
+pub(crate) fn generate_temporary_password(policy: &PasswordPolicy) -> String {
+    const UPPER: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ";
+    const LOWER: &[u8] = b"abcdefghijkmnopqrstuvwxyz";
+    const DIGITS: &[u8] = b"23456789";
+    const SYMBOLS: &[u8] = b"^$*.[]{}()?-!@#%&,><:;|_~";
+    let len = usize::try_from(policy.minimum_length).unwrap_or(8).max(12);
+    let mut bytes = Vec::with_capacity(len + 16);
+    while bytes.len() < len + 16 {
+        bytes.extend_from_slice(Uuid::new_v4().as_bytes());
+    }
+    let pick = |set: &[u8], b: u8| set[usize::from(b) % set.len()] as char;
+    let classes = [UPPER, LOWER, DIGITS, SYMBOLS];
+    let mut out: Vec<char> = (0..len)
+        .map(|i| pick(classes[i % classes.len()], bytes[i]))
+        .collect();
+    // Shuffle so the class pattern is not positional.
+    for i in (1..out.len()).rev() {
+        let j = usize::from(bytes[len + (i % 16)]) % (i + 1);
+        out.swap(i, j);
+    }
+    out.into_iter().collect()
 }
 
 /// Generate a 6-digit confirmation code for password reset flows.
