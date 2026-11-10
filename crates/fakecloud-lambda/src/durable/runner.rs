@@ -58,6 +58,8 @@ struct HubInner {
     chained_live: Mutex<HashSet<(String, String)>>,
     /// A snapshot write is in flight.
     persisting: AtomicBool,
+    /// KMS, for the customer managed keys of durable functions.
+    kms: RwLock<Option<Arc<dyn fakecloud_core::delivery::KmsHook>>>,
     started: AtomicBool,
 }
 
@@ -195,6 +197,7 @@ impl DurableHub {
                 running: Mutex::new(HashSet::new()),
                 chained_live: Mutex::new(HashSet::new()),
                 persisting: AtomicBool::new(false),
+                kms: RwLock::new(None),
                 started: AtomicBool::new(false),
             }),
         }
@@ -202,6 +205,14 @@ impl DurableHub {
 
     pub(crate) fn state(&self) -> &SharedLambdaState {
         &self.inner.state
+    }
+
+    pub fn set_kms(&self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) {
+        *self.inner.kms.write() = Some(hook);
+    }
+
+    pub(crate) fn kms(&self) -> Option<Arc<dyn fakecloud_core::delivery::KmsHook>> {
+        self.inner.kms.read().clone()
     }
 
     pub(crate) fn has_runtime(&self) -> bool {
@@ -309,6 +320,7 @@ impl DurableHub {
                             // it (restart): run the function again.
                             exec.invocation = None;
                             exec.wake = true;
+                            engine::apply_deferred_chained(exec, now);
                         }
                         let retry_due = exec.retry.as_ref().is_some_and(|r| r.at <= now);
                         if exec.invocation.is_none()
@@ -978,6 +990,82 @@ mod tests {
                 .filter(|ev| ev["EventType"] == "ChainedInvokeStarted")
                 .count();
             assert_eq!(started, 1);
+        });
+    }
+
+    /// A parent with a chained-invoke operation waiting on `child`.
+    fn parent_and_child(hub: &DurableHub) -> (String, String) {
+        let parent = start(hub);
+        let child = start(hub);
+        with_exec(hub, &child, |c| {
+            c.wake = false;
+            c.parent = Some(ParentLink {
+                execution_arn: parent.clone(),
+                operation_id: "ci".into(),
+            });
+        });
+        with_exec(hub, &parent, |p| {
+            engine::begin_invocation(p, "r1", model::now());
+            let token = p.invocation.as_ref().unwrap().token.clone().unwrap();
+            engine::checkpoint(
+                p,
+                &token,
+                None,
+                &[json!({"Id":"ci","Type":"CHAINED_INVOKE","Action":"START","ChainedInvokeOptions":{"FunctionName":"f:$LATEST"}})],
+                model::now(),
+            )
+            .unwrap();
+            engine::complete_invocation(
+                p,
+                "r1",
+                InvocationOutcome::Output(json!({"Status":"PENDING"})),
+                model::now(),
+            );
+            engine::chained_dispatched(p, "ci", Some("$LATEST"), Some(&child));
+        });
+        (parent, child)
+    }
+
+    /// Recorded: stopping a parent leaves its durable child running, and
+    /// the child ending later changes nothing on the parent.
+    #[tokio::test]
+    async fn stopping_a_parent_leaves_its_child_running() {
+        let hub = hub_with(&[("f", true)]);
+        let (parent, child) = parent_and_child(&hub);
+        with_exec(&hub, &parent, |p| engine::stop(p, None, model::now()));
+        hub.pass();
+        with_exec(&hub, &child, |c| assert!(c.is_running()));
+        let events = with_exec(&hub, &parent, |p| p.events.len());
+        with_exec(&hub, &child, |c| engine::stop(c, None, model::now()));
+        hub.pass();
+        with_exec(&hub, &parent, |p| {
+            assert_eq!(p.status, STOPPED);
+            assert_eq!(p.events.len(), events);
+        });
+    }
+
+    /// Recorded: stopping the child records `ChainedInvokeStopped` on the
+    /// parent with the child's stop error.
+    #[tokio::test]
+    async fn stopping_a_child_reports_to_its_parent() {
+        let hub = hub_with(&[("f", true)]);
+        let (parent, child) = parent_and_child(&hub);
+        with_exec(&hub, &child, |c| {
+            engine::stop(
+                c,
+                Some(json!({"ErrorType":"Manual","ErrorMessage":"stop the child"})),
+                model::now(),
+            )
+        });
+        hub.pass();
+        with_exec(&hub, &parent, |p| {
+            assert_eq!(p.op("ci").unwrap().status, OpStatus::Stopped);
+            let ev = p.events.last().unwrap();
+            assert_eq!(ev["EventType"], "ChainedInvokeStopped");
+            assert_eq!(
+                ev["ChainedInvokeStoppedDetails"],
+                json!({"Error":{"Truncated":false,"Payload":{"ErrorType":"Manual","ErrorMessage":"stop the child"}}})
+            );
         });
     }
 

@@ -671,6 +671,183 @@ async fn durable_function_behind_an_sqs_event_source_mapping() {
     assert_eq!(done.version(), Some(version.as_str()));
 }
 
+/// A raw Lambda REST call (the vendored SDK predates `DurableConfig.KMSKeyArn`
+/// and the KMS errors of the durable operations): status, JSON body, and
+/// error code.
+async fn lambda_raw(
+    server: &TestServer,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> (u16, serde_json::Value, Option<String>) {
+    let mut req = reqwest::Client::new()
+        .request(method, format!("{}{path}", server.endpoint()))
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/lambda/aws4_request, SignedHeaders=host, Signature=0",
+        );
+    if let Some(b) = body {
+        req = req
+            .header("content-type", "application/json")
+            .body(b.to_string());
+    }
+    let resp = req.send().await.unwrap();
+    let status = resp.status().as_u16();
+    let header_code = resp
+        .headers()
+        .get("x-amz-error-code")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let text = resp.text().await.unwrap();
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    let code = header_code.or_else(|| body["__type"].as_str().map(str::to_string));
+    (status, body, code)
+}
+
+fn encode_label(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// `DurableConfig` validation and the customer managed key, against
+/// fakecloud's KMS: the key policy must admit the Lambda service principal,
+/// and once the key is disabled or pending deletion the execution's data
+/// can no longer be read while its metadata still can.
+#[tokio::test]
+async fn durable_config_validation_and_customer_managed_key() {
+    use base64::Engine as _;
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let kms = server.kms_client().await;
+    let zip = base64::engine::general_purpose::STANDARD.encode(durable_zip());
+    let create = |name: &str, cfg: serde_json::Value| {
+        let body = serde_json::json!({
+            "FunctionName": name,
+            "Runtime": "nodejs22.x",
+            "Role": "arn:aws:iam::123456789012:role/durable-role",
+            "Handler": "index.handler",
+            "Code": {"ZipFile": zip},
+            "DurableConfig": cfg,
+        });
+        lambda_raw(
+            &server,
+            reqwest::Method::POST,
+            "/2015-03-31/functions",
+            Some(body),
+        )
+    };
+
+    let (status, body, code) = create("durable-no-timeout", serde_json::json!({})).await;
+    assert_eq!(
+        (status, code.as_deref()),
+        (400, Some("InvalidParameterValueException"))
+    );
+    assert_eq!(
+        body["message"],
+        "You cannot create a function with a durable configuration without an executionTimeout"
+    );
+    let (status, _, code) = create(
+        "durable-bad-retention",
+        serde_json::json!({"ExecutionTimeout": 60, "RetentionPeriodInDays": 91}),
+    )
+    .await;
+    assert_eq!(
+        (status, code.as_deref()),
+        (400, Some("ValidationException"))
+    );
+
+    // A key whose policy only admits the account root.
+    let key = kms.create_key().send().await.unwrap();
+    let key_arn = key.key_metadata().unwrap().arn().unwrap().to_string();
+    let key_id = key.key_metadata().unwrap().key_id().to_string();
+    let with_key = serde_json::json!({"ExecutionTimeout": 300, "KMSKeyArn": key_arn});
+    let (status, _, code) = create("durable-kms", with_key.clone()).await;
+    assert_eq!(
+        (status, code.as_deref()),
+        (403, Some("AccessDeniedException"))
+    );
+
+    let policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:root"}, "Action": "kms:*", "Resource": "*"},
+            {"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": ["kms:GenerateDataKey", "kms:Decrypt"], "Resource": "*"}
+        ]
+    });
+    kms.put_key_policy()
+        .key_id(&key_id)
+        .policy_name("default")
+        .policy(policy.to_string())
+        .send()
+        .await
+        .unwrap();
+    let (status, body, _) = create("durable-kms", with_key).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["DurableConfig"]["KMSKeyArn"], key_arn.as_str());
+    let missing = "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000";
+    let (status, _, code) = create(
+        "durable-kms-missing",
+        serde_json::json!({"ExecutionTimeout": 300, "KMSKeyArn": missing}),
+    )
+    .await;
+    assert_eq!(
+        (status, code.as_deref()),
+        (400, Some("InvalidParameterValueException"))
+    );
+
+    let resp = client
+        .invoke()
+        .function_name("durable-kms:$LATEST")
+        .payload(Blob::new(br#"{"n":2}"#.to_vec()))
+        .send()
+        .await
+        .unwrap();
+    let arn = resp.durable_execution_arn().unwrap().to_string();
+    let path = format!("/2025-12-01/durable-executions/{}", encode_label(&arn));
+    let (status, got, _) = lambda_raw(&server, reqwest::Method::GET, &path, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(got["DurableConfig"]["KMSKeyArn"], key_arn.as_str());
+
+    kms.disable_key().key_id(&key_id).send().await.unwrap();
+    let (status, _, code) = lambda_raw(&server, reqwest::Method::GET, &path, None).await;
+    assert_eq!(
+        (status, code.as_deref()),
+        (502, Some("KMSDisabledException"))
+    );
+    let (status, meta, _) = lambda_raw(
+        &server,
+        reqwest::Method::GET,
+        &format!("{path}?IncludeExecutionData=false"),
+        None,
+    )
+    .await;
+    assert_eq!((status, meta["Status"].as_str()), (200, Some("SUCCEEDED")));
+
+    kms.schedule_key_deletion()
+        .key_id(&key_id)
+        .pending_window_in_days(7)
+        .send()
+        .await
+        .unwrap();
+    let (status, _, code) = lambda_raw(
+        &server,
+        reqwest::Method::GET,
+        &format!("{path}/history?IncludeExecutionData=true"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        (status, code.as_deref()),
+        (502, Some("KMSInvalidStateException"))
+    );
+}
+
 /// A synchronous invoke waits for the whole execution, waits included, and
 /// answers with its result.
 #[tokio::test]

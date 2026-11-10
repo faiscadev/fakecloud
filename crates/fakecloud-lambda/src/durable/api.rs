@@ -23,8 +23,13 @@ use super::model::{self, callback_execution_arn, strip_event_data, TimeFormat};
 use super::runner::{self, DurableHub, DurableSettings, StartOutcome};
 use super::validate::invalid_parameter;
 
-/// Longest a synchronous invocation of a durable function waits.
-const MAX_SYNC_WAIT: StdDuration = StdDuration::from_secs(900);
+/// How long a synchronous caller waits: until the execution ends, which its
+/// `ExecutionTimeout` bounds. AWS keeps the request open for the whole
+/// execution (recorded: a 1200 s execution answered after 1200 s, past the
+/// documented 15 minutes); the margin covers the scheduler tick.
+fn sync_wait(execution_timeout: i64) -> StdDuration {
+    StdDuration::from_secs(execution_timeout.max(1) as u64 + 30)
+}
 
 fn not_found() -> AwsServiceError {
     AwsServiceError::aws_error(
@@ -88,35 +93,63 @@ fn with_execution<T>(
         .map(f)
 }
 
+/// The KMS error a read or write of `exec`'s data answers, when its
+/// customer managed key is no longer usable.
+fn key_error(
+    hub: &DurableHub,
+    req: &AwsRequest,
+    exec: &super::model::DurableExecution,
+) -> Option<AwsServiceError> {
+    super::config::execution_key_error(hub.kms().as_deref(), &req.account_id, &req.region, exec)
+}
+
 /// `GetDurableExecution`.
 pub(crate) fn get_durable_execution(
-    state: &SharedLambdaState,
+    hub: &DurableHub,
     req: &AwsRequest,
     arn: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
     check_len("DurableExecutionArn", arn, 1, 1024)?;
     let include = query_bool(req, "IncludeExecutionData").unwrap_or(true);
-    with_execution(state, req, arn, |e| e.detail_json(include))
-        .map(AwsResponse::ok_json)
-        .ok_or_else(not_found)
+    // Metadata needs no key; the execution's data does.
+    with_execution(hub.state(), req, arn, |e| {
+        match key_error(hub, req, e).filter(|_| include) {
+            Some(err) => Err(err),
+            None => Ok(e.detail_json(include)),
+        }
+    })
+    .ok_or_else(not_found)?
+    .map(AwsResponse::ok_json)
 }
 
 /// `GetDurableExecutionHistory`.
 pub(crate) fn get_durable_execution_history(
-    state: &SharedLambdaState,
+    hub: &DurableHub,
     req: &AwsRequest,
     arn: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let state = hub.state();
     check_len("DurableExecutionArn", arn, 1, 1024)?;
     let include = query_bool(req, "IncludeExecutionData").unwrap_or(false);
     let reverse = query_bool(req, "ReverseOrder").unwrap_or(false);
     let max = max_items(req)?;
-    let events = with_execution(state, req, arn, |e| e.events.clone()).ok_or_else(not_found)?;
-    let (page, next) = engine::page(
-        &events,
+    let events = with_execution(state, req, arn, |e| {
+        match key_error(hub, req, e).filter(|_| include) {
+            Some(err) => Err(err),
+            None => Ok(e.events.clone()),
+        }
+    })
+    .ok_or_else(not_found)??;
+    // Event ids only grow, so a marker keeps its place while events arrive.
+    let keyed: Vec<(u64, Value)> = events
+        .into_iter()
+        .map(|e| (e["EventId"].as_u64().unwrap_or_default(), e))
+        .collect();
+    let (page, next) = engine::page_by_key(
+        keyed,
+        reverse,
         req.query_params.get("Marker").map(String::as_str),
         max,
-        reverse,
     )?;
     let events: Vec<Value> = if include {
         page
@@ -216,6 +249,14 @@ pub(crate) fn stop_durable_execution(
             .regional_get_mut(&req.account_id, &req.region)
             .and_then(|st| st.durable_executions.get_mut(arn))
             .ok_or_else(not_found)?;
+        if let Some(err) = super::config::execution_key_error(
+            hub.kms().as_deref(),
+            &req.account_id,
+            &req.region,
+            exec,
+        ) {
+            return Err(err);
+        }
         engine::stop(exec, error, model::now())
     };
     hub.request_persist();
@@ -299,6 +340,17 @@ fn callback_call(
             .regional_get_mut(&req.account_id, &req.region)
             .and_then(|st| st.durable_executions.get_mut(&arn))
             .ok_or_else(callback_closed)?;
+        // Completing a callback stores its result or error under the key.
+        if matches!(action, CallbackAction::Complete(_)) {
+            if let Some(err) = super::config::execution_key_error(
+                hub.kms().as_deref(),
+                &req.account_id,
+                &req.region,
+                exec,
+            ) {
+                return Err(err);
+            }
+        }
         match action {
             CallbackAction::Complete(outcome) => {
                 engine::complete_callback(exec, callback_id, outcome, model::now())
@@ -467,7 +519,7 @@ pub(crate) fn list_durable_executions_by_function(
                 .unwrap_or_else(|| q.to_string())
         }
     });
-    let mut matching: Vec<&super::model::DurableExecution> = st
+    let matching: Vec<&super::model::DurableExecution> = st
         .durable_executions
         .values()
         .filter(|e| e.function_name == name)
@@ -477,18 +529,23 @@ pub(crate) fn list_durable_executions_by_function(
         .filter(|e| after.is_none_or(|t| e.start_timestamp > t))
         .filter(|e| before.is_none_or(|t| e.start_timestamp < t))
         .collect();
-    // Newest first; ReverseOrder lists oldest first.
-    matching.sort_by(|a, b| {
-        b.start_timestamp
-            .cmp(&a.start_timestamp)
-            .then_with(|| b.arn.cmp(&a.arn))
-    });
-    let summaries: Vec<Value> = matching.iter().map(|e| e.summary_json()).collect();
-    let (page, next) = engine::page(
-        &summaries,
+    // Newest first; ReverseOrder lists oldest first. The marker names the
+    // last execution returned by (start, ARN), so executions started
+    // between pages do not shift the next one.
+    let keyed: Vec<((i64, String), Value)> = matching
+        .iter()
+        .map(|e| {
+            (
+                (e.start_timestamp.timestamp_millis(), e.arn.clone()),
+                e.summary_json(),
+            )
+        })
+        .collect();
+    let (page, next) = engine::page_by_key(
+        keyed,
+        !reverse,
         req.query_params.get("Marker").map(String::as_str),
         max,
-        reverse,
     )?;
     let mut body = json!({ "DurableExecutions": page });
     if let Some(n) = next {
@@ -624,12 +681,14 @@ impl LambdaService {
             set_header(&mut resp, "x-amz-durable-execution-arn", &arn);
             return Some(Ok(resp));
         }
-        let wait = MAX_SYNC_WAIT.min(StdDuration::from_secs(
-            settings.execution_timeout.max(1) as u64 + 5,
-        ));
         let ended = self
             .durable
-            .wait_for_end(account_id, region, &arn, wait)
+            .wait_for_end(
+                account_id,
+                region,
+                &arn,
+                sync_wait(settings.execution_timeout),
+            )
             .await;
         let mut resp = match ended {
             Some(exec) => {
@@ -641,19 +700,13 @@ impl LambdaService {
                 resp
             }
             None => {
-                let mut resp = AwsResponse::json(
-                    StatusCode::OK,
-                    json!({
-                        "errorType": "Sandbox.Timedout",
-                        "errorMessage": format!(
-                            "Task timed out after {:.2} seconds",
-                            wait.as_secs_f64()
-                        ),
-                    })
-                    .to_string(),
-                );
-                set_header(&mut resp, "x-amz-function-error", "Unhandled");
-                resp
+                // Only a reset of fakecloud's state removes a running
+                // execution from under its caller.
+                return Some(Err(AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ServiceException",
+                    format!("Durable execution {arn} is no longer available"),
+                )));
             }
         };
         set_header(&mut resp, "x-amz-durable-execution-arn", &arn);
@@ -709,13 +762,18 @@ pub async fn invoke_for_delivery(
     };
     hub.request_persist();
     hub.kick();
-    let wait = MAX_SYNC_WAIT.min(StdDuration::from_secs(
-        settings.execution_timeout.max(1) as u64 + 5,
-    ));
     Some(
-        match hub.wait_for_end(&account, &region, &arn, wait).await {
+        match hub
+            .wait_for_end(
+                &account,
+                &region,
+                &arn,
+                sync_wait(settings.execution_timeout),
+            )
+            .await
+        {
             Some(exec) => Ok(runner::sync_response_body(&exec).0),
-            None => Err(format!("Durable execution {arn} did not finish in time")),
+            None => Err(format!("Durable execution {arn} is no longer available")),
         },
     )
 }
@@ -854,7 +912,7 @@ mod tests {
         assert!(arn.starts_with(
             "arn:aws:lambda:us-east-1:123456789012:function:f:$LATEST/durable-execution/order-1/"
         ));
-        let got = body(&get_durable_execution(hub.state(), &req(&[], b""), &arn).unwrap());
+        let got = body(&get_durable_execution(&hub, &req(&[], b""), &arn).unwrap());
         assert_eq!(got["Status"], "RUNNING");
         assert_eq!(got["InputPayload"], "{\"a\":1}");
         assert_eq!(got["ExecutionDataIncluded"], true);
@@ -864,24 +922,20 @@ mod tests {
         );
         assert!(got["StartTimestamp"].is_f64() || got["StartTimestamp"].is_u64());
         let compact = body(
-            &get_durable_execution(
-                hub.state(),
-                &req(&[("IncludeExecutionData", "false")], b""),
-                &arn,
-            )
-            .unwrap(),
+            &get_durable_execution(&hub, &req(&[("IncludeExecutionData", "false")], b""), &arn)
+                .unwrap(),
         );
         assert!(compact.get("InputPayload").is_none());
         assert_eq!(compact["ExecutionDataIncluded"], false);
 
-        let h = body(&get_durable_execution_history(hub.state(), &req(&[], b""), &arn).unwrap());
+        let h = body(&get_durable_execution_history(&hub, &req(&[], b""), &arn).unwrap());
         assert_eq!(
             h["Events"][0]["ExecutionStartedDetails"],
             json!({"Input":{"Truncated":true},"ExecutionTimeout":600})
         );
         let h = body(
             &get_durable_execution_history(
-                hub.state(),
+                &hub,
                 &req(&[("IncludeExecutionData", "true")], b""),
                 &arn,
             )
@@ -900,10 +954,8 @@ mod tests {
             "arn:aws:lambda:us-east-1:123456789012:function:f:$LATEST/durable-execution/nope/x";
         let r = req(&[], b"");
         for err in [
-            get_durable_execution(hub.state(), &r, arn).err().unwrap(),
-            get_durable_execution_history(hub.state(), &r, arn)
-                .err()
-                .unwrap(),
+            get_durable_execution(&hub, &r, arn).err().unwrap(),
+            get_durable_execution_history(&hub, &r, arn).err().unwrap(),
             stop_durable_execution(&hub, &r, arn).err().unwrap(),
         ] {
             assert_eq!(
@@ -1010,7 +1062,7 @@ mod tests {
         );
         let second = body(&stop_durable_execution(&hub, &req(&[], b""), &arn).unwrap());
         assert_eq!(first["StopTimestamp"], second["StopTimestamp"]);
-        let got = body(&get_durable_execution(hub.state(), &req(&[], b""), &arn).unwrap());
+        let got = body(&get_durable_execution(&hub, &req(&[], b""), &arn).unwrap());
         assert_eq!(got["Status"], "STOPPED");
         assert_eq!(got["Error"], json!({"ErrorMessage":"operator stop"}));
     }
@@ -1196,6 +1248,238 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(dry.status, StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn list_and_history_markers_survive_inserts_between_pages() {
+        let (hub, arn) = seeded(Some("a"));
+        let start = |name: &str| {
+            let mut accounts = hub.state().write();
+            let st = accounts.regional_mut(ACCOUNT, "us-east-1");
+            let settings = DurableSettings::of(&st.functions["f"]).unwrap();
+            runner::start_execution(
+                st,
+                "us-east-1",
+                "f",
+                "$LATEST",
+                &settings,
+                Some(name),
+                "{}",
+                None,
+                None,
+            );
+        };
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        start("b");
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        start("c");
+        let names = |v: &Value| -> Vec<String> {
+            v["DurableExecutions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["DurableExecutionName"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let first = body(
+            &list_durable_executions_by_function(hub.state(), &req(&[("MaxItems", "2")], b""), "f")
+                .unwrap(),
+        );
+        assert_eq!(names(&first), ["c", "b"]);
+        // A newer execution starts before the next page is read.
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        start("d");
+        let marker = first["NextMarker"].as_str().unwrap().to_string();
+        let second = body(
+            &list_durable_executions_by_function(
+                hub.state(),
+                &req(&[("MaxItems", "2"), ("Marker", &marker)], b""),
+                "f",
+            )
+            .unwrap(),
+        );
+        assert_eq!(names(&second), ["a"]);
+        assert!(second.get("NextMarker").is_none());
+        let bad = list_durable_executions_by_function(
+            hub.state(),
+            &req(&[("Marker", "garbage")], b""),
+            "f",
+        )
+        .err()
+        .unwrap();
+        assert_eq!(bad.message(), "Invalid marker");
+
+        // History: events appended after a page do not shift the next page.
+        let page1 = body(
+            &get_durable_execution_history(&hub, &req(&[("MaxItems", "1")], b""), &arn).unwrap(),
+        );
+        {
+            let mut accounts = hub.state().write();
+            let exec = accounts
+                .regional_mut(ACCOUNT, "us-east-1")
+                .durable_executions
+                .get_mut(&arn)
+                .unwrap();
+            engine::stop(exec, None, model::now());
+        }
+        let marker = page1["NextMarker"].as_str().map(str::to_string);
+        assert!(marker.is_none(), "one event only before the stop");
+        let reversed = body(
+            &get_durable_execution_history(
+                &hub,
+                &req(&[("MaxItems", "1"), ("ReverseOrder", "true")], b""),
+                &arn,
+            )
+            .unwrap(),
+        );
+        assert_eq!(reversed["Events"][0]["EventType"], "ExecutionStopped");
+        let marker = reversed["NextMarker"].as_str().unwrap().to_string();
+        let older = body(
+            &get_durable_execution_history(
+                &hub,
+                &req(&[("ReverseOrder", "true"), ("Marker", &marker)], b""),
+                &arn,
+            )
+            .unwrap(),
+        );
+        assert_eq!(older["Events"][0]["EventType"], "ExecutionStarted");
+    }
+
+    /// A KMS hook whose keys are in a fixed state.
+    struct StubKms(Option<fakecloud_core::delivery::KmsKeyUnusable>);
+
+    impl fakecloud_core::delivery::KmsHook for StubKms {
+        fn encrypt(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[u8],
+            _: &str,
+            _: std::collections::HashMap<String, String>,
+        ) -> Result<String, String> {
+            Err("unused".into())
+        }
+        fn decrypt(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: std::collections::HashMap<String, String>,
+        ) -> Result<Vec<u8>, String> {
+            Err("unused".into())
+        }
+        fn check_service_key_use(
+            &self,
+            _: &str,
+            _: &str,
+            key_id: &str,
+            _: &str,
+            _: &str,
+            _: &[&str],
+            _: &std::collections::HashMap<String, String>,
+        ) -> Result<String, fakecloud_core::delivery::KmsKeyUnusable> {
+            match &self.0 {
+                Some(r) => Err(r.clone()),
+                None => Ok(key_id.to_string()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unusable_key_blocks_data_but_not_metadata() {
+        use fakecloud_core::delivery::KmsKeyUnusable;
+        let (hub, arn) = seeded(None);
+        {
+            let mut accounts = hub.state().write();
+            accounts
+                .regional_mut(ACCOUNT, "us-east-1")
+                .durable_executions
+                .get_mut(&arn)
+                .unwrap()
+                .kms_key_arn = Some("arn:aws:kms:us-east-1:123456789012:key/k".into());
+        }
+        hub.set_kms(Arc::new(StubKms(Some(KmsKeyUnusable::Disabled))));
+        let err = get_durable_execution(&hub, &req(&[], b""), &arn)
+            .err()
+            .unwrap();
+        assert_eq!(
+            (err.status(), err.code()),
+            (StatusCode::BAD_GATEWAY, "KMSDisabledException")
+        );
+        let meta = body(
+            &get_durable_execution(&hub, &req(&[("IncludeExecutionData", "false")], b""), &arn)
+                .unwrap(),
+        );
+        assert_eq!(
+            meta["DurableConfig"]["KMSKeyArn"],
+            "arn:aws:kms:us-east-1:123456789012:key/k"
+        );
+        assert!(get_durable_execution_history(&hub, &req(&[], b""), &arn).is_ok());
+        let err = get_durable_execution_history(
+            &hub,
+            &req(&[("IncludeExecutionData", "true")], b""),
+            &arn,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err.code(), "KMSDisabledException");
+        let err = stop_durable_execution(&hub, &req(&[], b""), &arn)
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "KMSDisabledException");
+        hub.set_kms(Arc::new(StubKms(Some(KmsKeyUnusable::InvalidState(
+            "PendingDeletion".into(),
+        )))));
+        let err = get_durable_execution(&hub, &req(&[], b""), &arn)
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "KMSInvalidStateException");
+        // Once the key is usable again, the data reads work.
+        hub.set_kms(Arc::new(StubKms(None)));
+        assert!(get_durable_execution(&hub, &req(&[], b""), &arn).is_ok());
+    }
+
+    #[test]
+    fn configured_keys_are_checked_on_create() {
+        use crate::durable::config::check_configured_key;
+        use fakecloud_core::delivery::KmsKeyUnusable;
+        let cfg = json!({"ExecutionTimeout": 60, "KMSKeyArn": "arn:aws:kms:us-east-1:123456789012:key/k"});
+        let fa = "arn:aws:lambda:us-east-1:123456789012:function:f";
+        for (reason, status, code) in [
+            (
+                KmsKeyUnusable::NotFound,
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+            ),
+            (
+                KmsKeyUnusable::Disabled,
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+            ),
+            (
+                KmsKeyUnusable::AccessDenied,
+                StatusCode::FORBIDDEN,
+                "AccessDeniedException",
+            ),
+        ] {
+            let hook = StubKms(Some(reason));
+            let err = check_configured_key(Some(&hook), ACCOUNT, "us-east-1", fa, &cfg)
+                .err()
+                .unwrap();
+            assert_eq!((err.status(), err.code()), (status, code));
+        }
+        assert!(check_configured_key(Some(&StubKms(None)), ACCOUNT, "us-east-1", fa, &cfg).is_ok());
+        // No key, no check.
+        let hook = StubKms(Some(KmsKeyUnusable::Disabled));
+        assert!(check_configured_key(
+            Some(&hook),
+            ACCOUNT,
+            "us-east-1",
+            fa,
+            &json!({"ExecutionTimeout": 60})
+        )
+        .is_ok());
     }
 
     #[test]

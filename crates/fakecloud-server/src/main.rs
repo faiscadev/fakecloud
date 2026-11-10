@@ -2171,6 +2171,7 @@ async fn main() {
     let delivery_for_dynamodb_register = delivery_for_dynamodb;
     let mut lambda_service = LambdaService::new(lambda_state.clone())
         .with_durable_hub(lambda_durable.clone())
+        .with_kms_hook(kms_hook_for_services.clone())
         .with_ec2_state(ec2_state.clone())
         .with_quota_provider(Some(quota_provider.clone()));
     lambda_service = lambda_service.with_role_trust_validator(

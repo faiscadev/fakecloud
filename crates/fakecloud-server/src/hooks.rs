@@ -82,6 +82,74 @@ impl KmsHookAdapter {
 }
 
 impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
+    fn check_service_key_use(
+        &self,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        service_principal: &str,
+        source_arn: &str,
+        actions: &[&str],
+        encryption_context: &std::collections::HashMap<String, String>,
+    ) -> Result<String, fakecloud_core::delivery::KmsKeyUnusable> {
+        use fakecloud_core::delivery::KmsKeyUnusable;
+        // A key ARN names the account (and region) that owns the key.
+        let owner = key_id
+            .strip_prefix("arn:")
+            .and_then(|rest| rest.split(':').nth(3))
+            .filter(|a| !a.is_empty())
+            .unwrap_or(account_id)
+            .to_string();
+        let arn = self
+            .inner
+            .resolve_key_arn(&owner, region, key_id, service_principal)
+            .map_err(|_| KmsKeyUnusable::NotFound)?;
+        let short = arn.rsplit('/').next().unwrap_or_default().to_string();
+        let (state, policy) = {
+            let accounts = self.state.read();
+            let key = accounts
+                .get(&owner)
+                .and_then(|s| s.keys.get(&short))
+                .ok_or(KmsKeyUnusable::NotFound)?;
+            (key.key_state.clone(), key.policy.clone())
+        };
+        match state.as_str() {
+            "Enabled" => {}
+            "Disabled" => return Err(KmsKeyUnusable::Disabled),
+            other => return Err(KmsKeyUnusable::InvalidState(other.to_string())),
+        }
+        let caller = fakecloud_core::auth::InternalCaller::Service {
+            service: service_principal.to_string(),
+            source_arn: source_arn.to_string(),
+            source_account: account_id.to_string(),
+        };
+        let mut context = fakecloud_iam::evaluator::RequestContext {
+            service_keys: caller.condition_keys(),
+            ..Default::default()
+        };
+        for (k, v) in encryption_context {
+            context
+                .service_keys
+                .insert(format!("kms:EncryptionContext:{k}"), vec![v.clone()]);
+        }
+        let principal = caller.principal();
+        let document = fakecloud_iam::evaluator::PolicyDocument::parse(&policy);
+        for action in actions {
+            let request = fakecloud_iam::evaluator::EvalRequest {
+                principal: &principal,
+                action: action.to_string(),
+                resource: arn.clone(),
+                context: context.clone(),
+            };
+            if !fakecloud_iam::evaluator::evaluate_resource_policy_only(&document, &request)
+                .is_allow()
+            {
+                return Err(KmsKeyUnusable::AccessDenied);
+            }
+        }
+        Ok(arn)
+    }
+
     fn encrypt(
         &self,
         account_id: &str,

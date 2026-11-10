@@ -138,6 +138,20 @@ pub struct ChainedInvokeState {
     pub child_execution_arn: Option<String>,
     #[serde(default)]
     pub executed_version: Option<String>,
+    /// The outcome of a call that returned while the parent's invocation was
+    /// still running, applied when that invocation ends.
+    #[serde(default)]
+    pub deferred: Option<DeferredOutcome>,
+}
+
+/// A chained invoke's outcome held until the parent's invocation ends.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeferredOutcome {
+    pub status: OpStatus,
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub error: Option<Value>,
 }
 
 /// One entry of the operation log.

@@ -468,6 +468,45 @@ impl LambdaService {
         if let Some(env) = &environment {
             crate::service::validate_environment(env)?;
         }
+        // DurableConfig merges into the stored one and is validated (with its
+        // KMS key) before anything changes.
+        let durable_update = if body["DurableConfig"].is_object() {
+            let existing = {
+                let accounts = self.state.read();
+                accounts
+                    .regional(&req.account_id, &req.region)
+                    .and_then(|s| s.functions.get(function_name))
+                    .map(|f| (f.durable_config.clone(), f.function_arn.clone()))
+            };
+            match existing {
+                Some((stored, arn)) => {
+                    let merged = crate::durable::config::validate_update(
+                        stored.as_ref(),
+                        &body["DurableConfig"],
+                    )?;
+                    // Lambda validates the key when it is set or changed;
+                    // keeping the configured key needs no KMS call.
+                    let key = |c: Option<&Value>| {
+                        c.and_then(|c| c.get("KMSKeyArn"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    };
+                    if key(Some(&merged)) != key(stored.as_ref()) {
+                        crate::durable::config::check_configured_key(
+                            self.durable.kms().as_deref(),
+                            &req.account_id,
+                            &req.region,
+                            &arn,
+                            &merged,
+                        )?;
+                    }
+                    Some(merged)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         if let Some(role) = body["Role"].as_str() {
             crate::service::validate_execution_role(
                 &req.account_id,
@@ -561,10 +600,8 @@ impl LambdaService {
         if body["ImageConfig"].is_object() {
             func.image_config = Some(body["ImageConfig"].clone());
         }
-        if body["DurableConfig"].is_object() {
-            func.durable_config = Some(crate::durable::model::normalize_durable_config(
-                &body["DurableConfig"],
-            ));
+        if let Some(merged) = durable_update {
+            func.durable_config = Some(merged);
         }
         if let Some(attachments) = layer_attachments {
             func.layers = attachments;

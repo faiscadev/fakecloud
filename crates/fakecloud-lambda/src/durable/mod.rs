@@ -17,6 +17,7 @@
 //! - [`api`]: the HTTP operations and the `Invoke` integration.
 
 pub(crate) mod api;
+pub(crate) mod config;
 pub(crate) mod engine;
 pub(crate) mod model;
 pub(crate) mod runner;

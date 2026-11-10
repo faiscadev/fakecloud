@@ -6,6 +6,15 @@ impl LambdaService {
     pub(crate) fn create_function(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         let mut input = CreateFunctionInput::from_body(&body)?;
+        if let Some(cfg) = &input.durable_config {
+            crate::durable::config::check_configured_key(
+                self.durable.kms().as_deref(),
+                &req.account_id,
+                &req.region,
+                &function_arn(&req.region, &req.account_id, &input.function_name),
+                cfg,
+            )?;
+        }
         if let Some(cfg) = input.vpc_config.take() {
             input.vpc_config = Some(self.resolve_vpc_config(&req.account_id, &req.region, cfg)?);
         }

@@ -864,9 +864,13 @@ impl CreateFunctionInput {
         let image_config = body["ImageConfig"]
             .is_object()
             .then(|| body["ImageConfig"].clone());
-        let durable_config = body["DurableConfig"]
-            .is_object()
-            .then(|| crate::durable::model::normalize_durable_config(&body["DurableConfig"]));
+        let durable_config = if body["DurableConfig"].is_object() {
+            Some(crate::durable::config::validate_create(
+                &body["DurableConfig"],
+            )?)
+        } else {
+            None
+        };
 
         Ok(Self {
             function_name,
@@ -1335,6 +1339,13 @@ impl LambdaService {
 
     pub fn with_s3_delivery(mut self, s3: Arc<dyn fakecloud_core::delivery::S3Delivery>) -> Self {
         self.s3_delivery = Some(s3);
+        self
+    }
+
+    /// Attach KMS, which checks the customer managed keys of durable
+    /// functions.
+    pub fn with_kms_hook(self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
+        self.durable.set_kms(hook);
         self
     }
 
@@ -1897,12 +1908,12 @@ impl AwsService for LambdaService {
                 )
             }
             "GetDurableExecution" => crate::durable::api::get_durable_execution(
-                &self.state,
+                &self.durable,
                 &req,
                 resource_name.as_deref().unwrap_or(""),
             ),
             "GetDurableExecutionHistory" => crate::durable::api::get_durable_execution_history(
-                &self.state,
+                &self.durable,
                 &req,
                 resource_name.as_deref().unwrap_or(""),
             ),

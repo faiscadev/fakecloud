@@ -17,8 +17,9 @@ use fakecloud_core::service::AwsServiceError;
 
 use super::model::{
     error_wrapper, new_callback_id, new_checkpoint_token, payload_wrapper, ts, ActiveInvocation,
-    CallbackState, ChainedInvokeState, DurableExecution, InvocationRetry, OpStatus, OpType,
-    Operation, ParentLink, RetryKind, TimeFormat, FAILED, RUNNING, STOPPED, SUCCEEDED, TIMED_OUT,
+    CallbackState, ChainedInvokeState, DeferredOutcome, DurableExecution, InvocationRetry,
+    OpStatus, OpType, Operation, ParentLink, RetryKind, TimeFormat, FAILED, RUNNING, STOPPED,
+    SUCCEEDED, TIMED_OUT,
 };
 use super::validate::{invalid_parameter, service_integer, validate_updates};
 
@@ -141,7 +142,9 @@ pub(crate) fn create_execution(p: NewExecution, now: DateTime<Utc>) -> DurableEx
 /// The operations handed to the function: every descendant of a closed
 /// CONTEXT that did not ask to replay its children is left out, since the
 /// SDK replays such a context from its own result.
-pub(crate) fn visible_operations(exec: &DurableExecution) -> Vec<&Operation> {
+/// Each operation comes with its position in the operation log, which never
+/// changes (the log only grows) and so keys pagination.
+pub(crate) fn visible_operations(exec: &DurableExecution) -> Vec<(usize, &Operation)> {
     let prunes = |op: &Operation| {
         op.op_type == OpType::Context
             && matches!(op.status, OpStatus::Succeeded | OpStatus::Failed)
@@ -151,7 +154,8 @@ pub(crate) fn visible_operations(exec: &DurableExecution) -> Vec<&Operation> {
         exec.operations.iter().map(|o| (o.id.as_str(), o)).collect();
     exec.operations
         .iter()
-        .filter(|op| {
+        .enumerate()
+        .filter(|(_, op)| {
             let mut current = op.parent_id.as_deref();
             let mut hops = 0;
             while let Some(pid) = current {
@@ -170,22 +174,58 @@ pub(crate) fn visible_operations(exec: &DurableExecution) -> Vec<&Operation> {
         .collect()
 }
 
-/// Encode an offset as a pagination marker.
-pub(crate) fn encode_marker(offset: usize) -> String {
+/// An opaque pagination marker naming the last item returned by a stable
+/// key, so items added or removed between pages neither repeat nor go
+/// missing (an offset would shift).
+pub(crate) fn encode_marker<K: serde::Serialize>(after: &K) -> String {
     use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(format!("offset:{offset}"))
+    base64::engine::general_purpose::STANDARD.encode(json!({ "v": 1, "after": after }).to_string())
 }
 
-pub(crate) fn decode_marker(marker: &str) -> Option<usize> {
+pub(crate) fn decode_marker<K: serde::de::DeserializeOwned>(
+    marker: &str,
+) -> Result<K, AwsServiceError> {
     use base64::Engine as _;
-    let raw = base64::engine::general_purpose::STANDARD
+    base64::engine::general_purpose::STANDARD
         .decode(marker)
-        .ok()?;
-    std::str::from_utf8(&raw)
-        .ok()?
-        .strip_prefix("offset:")?
-        .parse()
         .ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .filter(|v| v["v"] == 1)
+        .and_then(|v| serde_json::from_value(v["after"].clone()).ok())
+        .ok_or_else(|| invalid_parameter("Invalid marker"))
+}
+
+/// One page of `items`, each with its sort key: ascending by key, or
+/// descending. A marker resumes after the key it names, wherever that item
+/// is now (or would be).
+pub(crate) fn page_by_key<K, T>(
+    mut items: Vec<(K, T)>,
+    descending: bool,
+    marker: Option<&str>,
+    max_items: usize,
+) -> Result<(Vec<T>, Option<String>), AwsServiceError>
+where
+    K: Ord + Clone + serde::Serialize + serde::de::DeserializeOwned,
+{
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    if descending {
+        items.reverse();
+    }
+    if let Some(m) = marker.filter(|m| !m.is_empty()) {
+        let after: K = decode_marker(m)?;
+        items.retain(|(k, _)| if descending { *k < after } else { *k > after });
+    }
+    let limit = if max_items == 0 {
+        DEFAULT_PAGE
+    } else {
+        max_items.min(MAX_PAGE)
+    };
+    let more = items.len() > limit;
+    items.truncate(limit);
+    let next = more
+        .then(|| items.last().map(|(k, _)| encode_marker(k)))
+        .flatten();
+    Ok((items.into_iter().map(|(_, t)| t).collect(), next))
 }
 
 /// Start an invocation: mint its checkpoint token and build the payload
@@ -223,14 +263,19 @@ pub(crate) fn begin_invocation(
     let mut ops = Vec::new();
     let mut size = 0usize;
     let mut next_marker = None;
-    for (i, op) in visible.iter().enumerate() {
+    let mut last_index = None;
+    for (index, op) in visible {
         let wire = op.to_wire(TimeFormat::Millis);
         size += wire.to_string().len();
-        if size > MAX_INITIAL_STATE_BYTES && i > 0 {
-            next_marker = Some(encode_marker(i));
-            break;
+        if size > MAX_INITIAL_STATE_BYTES {
+            if let Some(last) = last_index {
+                // The rest is read with GetDurableExecutionState.
+                next_marker = Some(encode_marker(&last));
+                break;
+            }
         }
         ops.push(wire);
+        last_index = Some(index);
     }
     let mut state = Map::new();
     state.insert("Operations".into(), Value::Array(ops));
@@ -266,27 +311,15 @@ pub(crate) fn state_page(
     max_items: usize,
 ) -> Result<Value, AwsServiceError> {
     require_token(exec, token)?;
-    let visible = visible_operations(exec);
-    let start = match marker.filter(|m| !m.is_empty()) {
-        Some(m) => decode_marker(m).ok_or_else(|| invalid_parameter("Invalid marker"))?,
-        None => 0,
-    };
-    let limit = if max_items == 0 {
-        DEFAULT_PAGE
-    } else {
-        max_items
-    };
-    let end = start.saturating_add(limit).min(visible.len());
-    let ops: Vec<Value> = visible
-        .get(start..end)
-        .unwrap_or_default()
-        .iter()
-        .map(|o| o.to_wire(TimeFormat::Seconds))
+    let items: Vec<(usize, Value)> = visible_operations(exec)
+        .into_iter()
+        .map(|(i, o)| (i, o.to_wire(TimeFormat::Seconds)))
         .collect();
+    let (ops, next) = page_by_key(items, false, marker, max_items)?;
     let mut m = Map::new();
     m.insert("Operations".into(), Value::Array(ops));
-    if end < visible.len() {
-        m.insert("NextMarker".into(), json!(encode_marker(end)));
+    if let Some(n) = next {
+        m.insert("NextMarker".into(), json!(n));
     }
     Ok(Value::Object(m))
 }
@@ -426,6 +459,7 @@ fn open_operation(exec: &mut DurableExecution, u: &Value, op_type: OpType, now: 
                 dispatched: false,
                 child_execution_arn: None,
                 executed_version: None,
+                deferred: None,
             });
             // `ChainedInvokeStarted` is recorded when the service dispatches
             // the call, once the invoked version is known.
@@ -716,6 +750,7 @@ pub(crate) fn complete_invocation(
     let output = match outcome {
         InvocationOutcome::FunctionError(e) => {
             invocation_completed(exec, &inv, Some(&e), now);
+            apply_deferred_chained(exec, now);
             invocation_failed(exec, RetryKind::FunctionError, e, now);
             return false;
         }
@@ -745,6 +780,7 @@ pub(crate) fn complete_invocation(
         }
         Some("PENDING") if has_pending_work(exec) => {
             invocation_completed(exec, &inv, None, now);
+            apply_deferred_chained(exec, now);
             exec.retry = None;
             exec.wake
         }
@@ -993,6 +1029,11 @@ pub(crate) struct ChainedOutcome {
 }
 
 /// Complete a chained-invoke operation. Returns false when it is not open.
+///
+/// A call that returns while the parent's invocation is still running is
+/// recorded when that invocation ends: the parent learns of it on its next
+/// invocation, and its history shows `ChainedInvokeSucceeded` (or `Failed`,
+/// ...) after `InvocationCompleted`, as on AWS.
 pub(crate) fn complete_chained(
     exec: &mut DurableExecution,
     op_id: &str,
@@ -1002,11 +1043,64 @@ pub(crate) fn complete_chained(
     if !exec.is_running() {
         return false;
     }
+    let in_invocation = exec.invocation.is_some();
     let Some(op) = exec
         .op_mut(op_id)
         .filter(|o| o.op_type == OpType::ChainedInvoke && o.status == OpStatus::Started)
     else {
         return false;
+    };
+    if in_invocation {
+        let Some(ch) = op.chained.as_mut().filter(|c| c.deferred.is_none()) else {
+            return false;
+        };
+        ch.deferred = Some(DeferredOutcome {
+            status: outcome.status,
+            result: outcome.result,
+            error: outcome.error,
+        });
+        return true;
+    }
+    apply_chained(exec, op_id, outcome, now);
+    true
+}
+
+/// Record the chained invokes that returned during the invocation that just
+/// ended.
+pub(crate) fn apply_deferred_chained(exec: &mut DurableExecution, now: DateTime<Utc>) {
+    let deferred: Vec<(String, DeferredOutcome)> = exec
+        .operations
+        .iter_mut()
+        .filter_map(|o| {
+            let d = o.chained.as_mut()?.deferred.take()?;
+            Some((o.id.clone(), d))
+        })
+        .collect();
+    for (id, d) in deferred {
+        apply_chained(
+            exec,
+            &id,
+            ChainedOutcome {
+                status: d.status,
+                result: d.result,
+                error: d.error,
+            },
+            now,
+        );
+    }
+}
+
+fn apply_chained(
+    exec: &mut DurableExecution,
+    op_id: &str,
+    outcome: ChainedOutcome,
+    now: DateTime<Utc>,
+) {
+    let Some(op) = exec
+        .op_mut(op_id)
+        .filter(|o| o.op_type == OpType::ChainedInvoke && o.status == OpStatus::Started)
+    else {
+        return;
     };
     op.status = outcome.status;
     op.end = Some(now);
@@ -1036,37 +1130,6 @@ pub(crate) fn complete_chained(
     push_event(exec, now, event, Some(&subject), details);
     exec.mark_dirty(&id);
     exec.wake = true;
-    true
-}
-
-/// A paginated slice of `items` (oldest first unless `reverse`).
-pub(crate) fn page<T: Clone>(
-    items: &[T],
-    marker: Option<&str>,
-    max_items: usize,
-    reverse: bool,
-) -> Result<(Vec<T>, Option<String>), AwsServiceError> {
-    let ordered: Vec<T> = if reverse {
-        items.iter().rev().cloned().collect()
-    } else {
-        items.to_vec()
-    };
-    let start = match marker.filter(|m| !m.is_empty()) {
-        Some(m) => decode_marker(m).ok_or_else(|| invalid_parameter("Invalid marker"))?,
-        None => 0,
-    };
-    let limit = if max_items == 0 {
-        DEFAULT_PAGE
-    } else {
-        max_items.min(MAX_PAGE)
-    };
-    let end = start.saturating_add(limit).min(ordered.len());
-    let slice = ordered
-        .get(start..end)
-        .map(<[T]>::to_vec)
-        .unwrap_or_default();
-    let next = (end < ordered.len()).then(|| encode_marker(end));
-    Ok((slice, next))
 }
 
 #[cfg(test)]
@@ -1543,35 +1606,107 @@ mod tests {
         );
     }
 
+    /// The event types of a recorded history (`tests/fixtures/durable`).
+    fn recorded_event_types(label: &str) -> Vec<String> {
+        let fixture = include_str!("../../tests/fixtures/durable/aws-round2.jsonl");
+        let line = fixture
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .find(|r| r["label"] == label && r["status"] == 200)
+            .unwrap_or_else(|| panic!("{label} not recorded"));
+        let body: Value = serde_json::from_str(line["body"].as_str().unwrap()).unwrap();
+        body["Events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["EventType"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A chained invoke whose target returns while the parent invocation is
+    /// still running is recorded after that invocation's
+    /// `InvocationCompleted`, matching the AWS recordings, whether it
+    /// succeeds or fails.
     #[test]
-    fn chained_invoke_lifecycle() {
+    fn chained_invoke_history_matches_the_recordings() {
+        for (label, status, error) in [
+            ("chain-unqualified-history", OpStatus::Succeeded, None),
+            (
+                "chainfail-history",
+                OpStatus::Failed,
+                Some(json!({"ErrorType":"Error","ErrorMessage":"target exploded"})),
+            ),
+        ] {
+            let mut e = new_exec(600);
+            begin_invocation(&mut e, "r1", t0());
+            ck(
+                &mut e,
+                json!([{"Id":"ci","Type":"CHAINED_INVOKE","Action":"START","Name":"call-target","SubType":"ChainedInvoke","Payload":"{\"hello\":\"world\"}","ChainedInvokeOptions":{"FunctionName":"target"}}]),
+                t0(),
+            );
+            chained_dispatched(&mut e, "ci", Some("$LATEST"), None);
+            // The target returns before the parent's invocation has ended.
+            assert!(complete_chained(
+                &mut e,
+                "ci",
+                ChainedOutcome {
+                    status,
+                    result: (status == OpStatus::Succeeded).then(|| "{\"echo\":{}}".to_string()),
+                    error: error.clone(),
+                },
+                t0()
+            ));
+            assert_eq!(e.op("ci").unwrap().status, OpStatus::Started);
+            let again = complete_invocation(
+                &mut e,
+                "r1",
+                InvocationOutcome::Output(json!({"Status":"PENDING"})),
+                t0(),
+            );
+            assert!(again, "the returned call needs a replay");
+            assert_eq!(e.op("ci").unwrap().status, status);
+            begin_invocation(&mut e, "r2", t0());
+            complete_invocation(
+                &mut e,
+                "r2",
+                InvocationOutcome::Output(json!({"Status":"SUCCEEDED","Result":"{}"})),
+                t0(),
+            );
+            assert_eq!(event_types(&e), recorded_event_types(label), "{label}");
+        }
+    }
+
+    /// A target that returns after the parent suspended is recorded at once.
+    #[test]
+    fn chained_invoke_completing_after_the_invocation_is_recorded_at_once() {
         let mut e = new_exec(600);
         begin_invocation(&mut e, "r1", t0());
-        let r = ck(
+        ck(
             &mut e,
-            json!([{"Id":"ci","Type":"CHAINED_INVOKE","Action":"START","Name":"call-target","SubType":"ChainedInvoke","Payload":"{\"hello\":\"world\"}","ChainedInvokeOptions":{"FunctionName":"target:$LATEST"}}]),
+            json!([{"Id":"ci","Type":"CHAINED_INVOKE","Action":"START","ChainedInvokeOptions":{"FunctionName":"target"}}]),
             t0(),
         );
-        assert_eq!(
-            r["NewExecutionState"]["Operations"][0]["ChainedInvokeDetails"],
-            json!({})
-        );
         chained_dispatched(&mut e, "ci", Some("$LATEST"), None);
-        assert_eq!(
-            e.events.last().unwrap()["ChainedInvokeStartedDetails"],
-            json!({"FunctionName":"target:$LATEST","Input":{"Truncated":false,"Payload":"{\"hello\":\"world\"}"},"ExecutedVersion":"$LATEST"})
-        );
+        assert!(!complete_invocation(
+            &mut e,
+            "r1",
+            InvocationOutcome::Output(json!({"Status":"PENDING"})),
+            t0()
+        ));
         assert!(complete_chained(
             &mut e,
             "ci",
             ChainedOutcome {
-                status: OpStatus::Failed,
-                result: None,
-                error: Some(json!({"ErrorType":"Error","ErrorMessage":"target exploded"}))
+                status: OpStatus::Succeeded,
+                result: Some("1".into()),
+                error: None
             },
             t0()
         ));
-        assert_eq!(e.events.last().unwrap()["EventType"], "ChainedInvokeFailed");
+        assert_eq!(
+            e.events.last().unwrap()["EventType"],
+            "ChainedInvokeSucceeded"
+        );
         assert!(e.wake);
     }
 
@@ -1611,9 +1746,9 @@ mod tests {
 
     #[test]
     fn huge_markers_do_not_overflow() {
-        let items: Vec<u32> = (1..=3).collect();
-        let marker = encode_marker(usize::MAX);
-        let (p, next) = page(&items, Some(&marker), 2, false).unwrap();
+        let items: Vec<(usize, u32)> = (1..=3).map(|i| (i as usize, i)).collect();
+        let marker = encode_marker(&usize::MAX);
+        let (p, next) = page_by_key(items, false, Some(&marker), 2).unwrap();
         assert!(p.is_empty() && next.is_none());
         let mut e = new_exec(600);
         begin_invocation(&mut e, "r1", t0());
@@ -1623,15 +1758,22 @@ mod tests {
     }
 
     #[test]
-    fn pages_walk_forward_and_backward() {
-        let items: Vec<u32> = (1..=5).collect();
-        let (p, m) = page(&items, None, 2, false).unwrap();
+    fn pages_walk_forward_and_backward_by_key() {
+        let items = || (1..=5u32).map(|i| (i, i)).collect::<Vec<_>>();
+        let (p, m) = page_by_key(items(), false, None, 2).unwrap();
         assert_eq!(p, [1, 2]);
-        let (p, m) = page(&items, m.as_deref(), 2, false).unwrap();
+        let (p, m) = page_by_key(items(), false, m.as_deref(), 2).unwrap();
         assert_eq!(p, [3, 4]);
-        let (p, m) = page(&items, m.as_deref(), 2, false).unwrap();
+        let (p, m) = page_by_key(items(), false, m.as_deref(), 2).unwrap();
         assert_eq!((p, m), (vec![5], None));
-        let (p, _) = page(&items, None, 2, true).unwrap();
+        let (p, m) = page_by_key(items(), true, None, 2).unwrap();
         assert_eq!(p, [5, 4]);
+        // An item removed and one added before the marker's key keep the
+        // next page in place.
+        let mut changed = items();
+        changed.retain(|(k, _)| *k != 4);
+        changed.push((0, 0));
+        let (p, _) = page_by_key(changed, true, m.as_deref(), 2).unwrap();
+        assert_eq!(p, [3, 2]);
     }
 }
