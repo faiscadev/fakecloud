@@ -960,6 +960,7 @@ public final class Types {
             long outputChunks,
             Object trace,
             List<Object> citations,
+            List<Object> flowOutputs,
             String invokedAt,
             long durationMs) {}
 

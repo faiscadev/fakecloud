@@ -5568,7 +5568,20 @@ async fn main() {
     };
     let mut bedrock_agent_runtime_service =
         BedrockAgentRuntimeService::new(bedrock_agent_runtime_state.clone())
-            .with_agent_state(bedrock_agent_state.clone());
+            .with_agent_state(bedrock_agent_state.clone())
+            .with_guardrail_check({
+                let bedrock_state = bedrock_state.clone();
+                Arc::new(move |check| {
+                    fakecloud_bedrock::guardrails::check_text(
+                        &bedrock_state,
+                        check.account_id,
+                        check.guardrail_id,
+                        check.guardrail_version,
+                        check.source,
+                        check.text,
+                    )
+                })
+            });
     if let Some(store) = bedrock_agent_runtime_snapshot_store {
         bedrock_agent_runtime_service = bedrock_agent_runtime_service.with_snapshot_store(store);
     }
@@ -12303,6 +12316,7 @@ async fn main() {
                                 "outputChunks": inv.output_chunks,
                                 "trace": inv.trace,
                                 "citations": inv.citations,
+                                "flowOutputs": inv.flow_outputs,
                                 "invokedAt": inv.timestamp.to_rfc3339(),
                                 "durationMs": inv.duration_ms,
                             }));

@@ -262,6 +262,19 @@ fn validate_definition(definition: &Value) -> Vec<Value> {
         ));
     }
 
+    // A node two unnested iterators both repeat has no single iteration to run
+    // in. The model has no dedicated validation type for it, so it is reported
+    // as `Unspecified`, as unaddressable nodes are.
+    let graph = crate::flow_graph::Graph::new(nodes, connections);
+    for (node, first, second) in crate::flow_graph::ambiguous_iterations(&graph) {
+        out.push(flow_validation(
+            "Error",
+            "Unspecified",
+            crate::flow_graph::ambiguous_iteration(node, first, second),
+            json!({ "unspecified": {} }),
+        ));
+    }
+
     let mut reached: BTreeSet<&str> = by_name
         .iter()
         .filter(|(_, (t, _, _))| t == "Input")

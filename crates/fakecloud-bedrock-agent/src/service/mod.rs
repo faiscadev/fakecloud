@@ -2281,6 +2281,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validation_refuses_a_node_two_unnested_iterators_repeat() {
+        let svc = BedrockAgentService::new(Arc::new(RwLock::new(BedrockAgentAccounts::new())));
+        let data = |name: &str, source: &str, output: &str, target: &str, input: &str| {
+            json!({"name": name, "type": "Data", "source": source, "target": target,
+                "configuration": {"data": {"sourceOutput": output, "targetInput": input}}})
+        };
+        let iterator = |name: &str| {
+            json!({"name": name, "type": "Iterator",
+                "inputs": [{"name": "array", "type": "Array", "expression": "$.data"}],
+                "outputs": [{"name": "arrayItem", "type": "String"},
+                            {"name": "arraySize", "type": "Number"}]})
+        };
+        let definition = json!({
+            "nodes": [
+                {"name": "In", "type": "Input", "outputs": [{"name": "document", "type": "Array"}]},
+                iterator("One"),
+                iterator("Two"),
+                {"name": "Shared", "type": "Prompt",
+                 "inputs": [{"name": "a", "type": "String", "expression": "$.data"},
+                            {"name": "b", "type": "String", "expression": "$.data"}],
+                 "outputs": [{"name": "modelCompletion", "type": "String"}]},
+                {"name": "Out", "type": "Output",
+                 "inputs": [{"name": "document", "type": "String", "expression": "$.data"}]}
+            ],
+            "connections": [
+                data("c1", "In", "document", "One", "array"),
+                data("c2", "In", "document", "Two", "array"),
+                data("c3", "One", "arrayItem", "Shared", "a"),
+                data("c4", "Two", "arrayItem", "Shared", "b"),
+                data("c5", "Shared", "modelCompletion", "Out", "document")
+            ]
+        });
+        let (status, got) = call(
+            &svc,
+            Method::POST,
+            "/flows/validate-definition",
+            &[],
+            json!({ "definition": definition }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let validations = got["validations"].as_array().unwrap();
+        assert_eq!(validations.len(), 1, "{validations:?}");
+        assert_eq!(validations[0]["severity"], "Error");
+        assert_eq!(validations[0]["type"], "Unspecified");
+        let message = validations[0]["message"].as_str().unwrap();
+        assert!(
+            message.contains("Shared") && message.contains("One") && message.contains("Two"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
     async fn prompt_responses_carry_the_model_output_members() {
         let svc = BedrockAgentService::new(Arc::new(RwLock::new(BedrockAgentAccounts::new())));
         let variants = json!([{"name": "v1", "templateType": "TEXT",

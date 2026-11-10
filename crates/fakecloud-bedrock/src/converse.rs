@@ -49,6 +49,8 @@ pub(crate) fn converse(
 pub(crate) struct OfflineReply {
     pub(crate) text: String,
     pub(crate) forced_tool: Option<String>,
+    /// The tool calls a configured override replies with.
+    pub(crate) tools: Vec<crate::upstream::ToolCall>,
     pub(crate) stop_reason: &'static str,
     pub(crate) input_tokens: u64,
     pub(crate) output_tokens: u64,
@@ -60,6 +62,7 @@ impl OfflineReply {
         response_json(
             &self.text,
             self.forced_tool.as_deref(),
+            &self.tools,
             self.stop_reason,
             self.input_tokens,
             self.output_tokens,
@@ -81,7 +84,16 @@ pub(crate) fn offline_reply(
         .unwrap_or(u64::MAX);
     let tool_config = input.get("toolConfig");
 
-    let response_text = crate::streaming::get_response_text(state, req, model_id, body);
+    let reply_override = crate::prompt::resolve_override(state, req, model_id, body)
+        .map(|custom| crate::streaming::parse_override(&custom));
+    let (response_text, tools, override_stop) = match reply_override {
+        Some(parsed) => (parsed.text, parsed.tools, parsed.stop),
+        None => (
+            crate::streaming::fallback_text(model_id, body),
+            Vec::new(),
+            None,
+        ),
+    };
 
     // Respect maxTokens by truncating (rough approximation: 1 token ~= 4 chars).
     // `saturating_mul` keeps a hostile `maxTokens` (e.g. `u64::MAX - 1` sent
@@ -105,14 +117,20 @@ pub(crate) fn offline_reply(
     // requires one. A bare `toolConfig` (or `toolChoice:{auto:{}}`) leaves the
     // decision to the model, and offline we choose a plain text reply — forcing
     // an empty-arg tool call here derails LangChain / agent tool-loops.
-    let forced_tool = forced_tool_name(tool_config);
+    // An override that says which tools were called has already decided.
+    let forced_tool = forced_tool_name(tool_config).filter(|_| tools.is_empty());
 
-    let stop_reason = if forced_tool.is_some() {
-        "tool_use"
-    } else if truncated {
-        // Report the real reason the reply ended so tool/agent loops see the
-        // truncation, matching the upstream path's `normalize_stop`.
+    // A reply maxTokens cut off ended on the token limit, whatever else it
+    // holds: tool/agent loops have to see the truncation, as the upstream path's
+    // `normalize_stop` reports it.
+    let stop_reason = if truncated {
         "max_tokens"
+    } else if let (false, Some(stop)) = (tools.is_empty(), override_stop) {
+        crate::upstream::stop_converse(stop)
+    } else if forced_tool.is_some() {
+        "tool_use"
+    } else if let Some(stop) = override_stop {
+        crate::upstream::stop_converse(stop)
     } else {
         "end_turn"
     };
@@ -123,6 +141,7 @@ pub(crate) fn offline_reply(
     OfflineReply {
         text: truncated_text,
         forced_tool,
+        tools,
         stop_reason,
         input_tokens,
         output_tokens,
@@ -145,6 +164,7 @@ pub(crate) fn converse_stream_offline(
         &reply.text,
         reply.stop_reason,
         reply.forced_tool.as_deref(),
+        &reply.tools,
         reply.input_tokens,
         reply.output_tokens,
     );
@@ -172,17 +192,31 @@ pub(crate) fn converse_stream_offline(
 pub(crate) fn response_json(
     text: &str,
     forced_tool: Option<&str>,
+    tools: &[crate::upstream::ToolCall],
     stop_reason: &str,
     input_tokens: u64,
     output_tokens: u64,
 ) -> String {
-    let mut content = vec![json!({"text": text})];
+    let mut content = Vec::new();
+    // A reply of only tool calls has no text block.
+    if !text.is_empty() || tools.is_empty() {
+        content.push(json!({"text": text}));
+    }
     if let Some(tool_name) = forced_tool {
         content.push(json!({
             "toolUse": {
                 "toolUseId": "tooluse_fakecloud_01",
                 "name": tool_name,
                 "input": {}
+            }
+        }));
+    }
+    for tool in tools {
+        content.push(json!({
+            "toolUse": {
+                "toolUseId": tool.id,
+                "name": tool.name,
+                "input": tool.input
             }
         }));
     }
@@ -273,22 +307,48 @@ fn estimate_tokens(input: &Value) -> u64 {
 }
 
 #[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    fn tool() -> crate::upstream::ToolCall {
+        crate::upstream::ToolCall {
+            id: "t1".to_string(),
+            name: "calc".to_string(),
+            input: json!({"a": 1}),
+        }
+    }
+
+    #[test]
+    fn a_converse_body_carries_an_overrides_tools_without_an_empty_text_block() {
+        let body = response_json("", None, &[tool()], "tool_use", 1, 1);
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            parsed["output"]["message"]["content"],
+            json!([{"toolUse": {"toolUseId": "t1", "name": "calc", "input": {"a": 1}}}])
+        );
+        assert_eq!(parsed["stopReason"], "tool_use");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::BedrockState;
     use bytes::Bytes;
     use fakecloud_core::multi_account::MultiAccountState;
     use http::{HeaderMap, Method};
-    use parking_lot::{Mutex, RwLock};
+    use parking_lot::RwLock;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::OnceLock;
 
     /// Serialize tests in this module that observe the process-global
     /// `FAKECLOUD_BEDROCK_ECHO` flag.
-    fn echo_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    /// One lock for every test touching the echo variables: they are process-wide,
+    /// so separate locks per file don't keep the tests apart.
+    fn echo_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::prompt::ECHO_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn shared() -> SharedBedrockState {
@@ -364,6 +424,8 @@ mod tests {
 
     #[test]
     fn converse_stream_records_the_converse_body() {
+        // Both calls must see the same echo setting to reply alike.
+        let _g = echo_lock();
         let s = shared();
         let body = br#"{"messages":[{"content":[{"text":"hi there"}]}],
             "inferenceConfig":{"maxTokens":2},
@@ -378,7 +440,33 @@ mod tests {
         assert_eq!(invs.len(), 2);
         let streamed: Value = serde_json::from_str(&invs[1].output).unwrap();
         assert_eq!(streamed, converse_body);
-        assert_eq!(streamed["stopReason"], "tool_use");
+        // maxTokens cut the reply off before the forced tool call ended it.
+        assert_eq!(streamed["stopReason"], "max_tokens");
+    }
+
+    #[test]
+    fn a_truncated_override_with_tool_calls_stops_on_max_tokens() {
+        let s = shared();
+        s.write().default_mut().custom_responses.insert(
+            "m".to_string(),
+            json!({
+                "output": {"message": {"content": [
+                    {"text": "a reply long enough to run past the limit"},
+                    {"toolUse": {"toolUseId": "t", "name": "calc", "input": {}}}
+                ]}},
+                "stopReason": "tool_use"
+            })
+            .to_string(),
+        );
+        let truncated = br#"{"messages":[], "inferenceConfig": {"maxTokens": 2}}"#;
+        let reply = offline_reply(&s, &req(), "m", truncated);
+        assert_eq!(reply.stop_reason, "max_tokens");
+        assert_eq!(reply.tools.len(), 1);
+        let whole = br#"{"messages":[]}"#;
+        assert_eq!(
+            offline_reply(&s, &req(), "m", whole).stop_reason,
+            "tool_use"
+        );
     }
 
     #[test]
@@ -559,7 +647,7 @@ mod tests {
 
     #[test]
     fn converse_echo_mode_reflects_prompt() {
-        let _g = echo_lock().lock();
+        let _g = echo_lock();
         let prev = std::env::var("FAKECLOUD_BEDROCK_ECHO").ok();
         // SAFETY: the lock above pins us to a single mutation window.
         unsafe { std::env::set_var("FAKECLOUD_BEDROCK_ECHO", "1") };
@@ -585,7 +673,7 @@ mod tests {
 
     #[test]
     fn converse_token_counts_scale_with_input_length() {
-        let _g = echo_lock().lock();
+        let _g = echo_lock();
         let s = shared();
         let short = br#"{"messages":[{"content":[{"text":"hi"}]}]}"#;
         let long = br#"{"messages":[{"content":[{"text":"please count many words across this longer message body"}]}]}"#;
