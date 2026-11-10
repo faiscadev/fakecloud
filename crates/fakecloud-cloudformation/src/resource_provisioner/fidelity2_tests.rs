@@ -326,6 +326,81 @@ fn lambda_managed_instances_function_runs_on_a_template_capacity_provider() {
 }
 
 #[test]
+fn lambda_version_of_a_managed_instances_function_respects_the_provider_quota() {
+    let prov = make_provisioner();
+    create(
+        &prov,
+        "AWS::Lambda::CapacityProvider",
+        "Cp",
+        json!({
+            "CapacityProviderName": "cfn-cp",
+            "VpcConfig": {"SubnetIds": ["subnet-1"], "SecurityGroupIds": ["sg-1"]},
+            "PermissionsConfig": {
+                "CapacityProviderOperatorRoleArn": "arn:aws:iam::123456789012:role/op"
+            }
+        }),
+    );
+    let cp_arn = "arn:aws:lambda:us-east-1:123456789012:capacity-provider:cfn-cp";
+    create(
+        &prov,
+        "AWS::Lambda::Function",
+        "F",
+        function_props(json!({
+            "FunctionName": "mi",
+            "Runtime": "python3.13",
+            "CapacityProviderConfig": {"LambdaManagedInstancesCapacityProviderConfig": {
+                "CapacityProviderArn": cp_arn
+            }}
+        })),
+    );
+    // A first version fits.
+    create(
+        &prov,
+        "AWS::Lambda::Version",
+        "V1",
+        json!({"FunctionName": "mi"}),
+    );
+    // Fill the provider to its 100 versions ($LATEST + 99).
+    {
+        let mut lambda = prov.lambda_state.write();
+        let st = lambda.regional_mut(ACCT, "us-east-1");
+        let func = st.functions["mi"].clone();
+        for i in 2..=99 {
+            let mut snap = func.clone();
+            snap.version = i.to_string();
+            st.function_versions
+                .entry("mi".into())
+                .or_default()
+                .push(i.to_string());
+            st.function_version_snapshots
+                .entry("mi".into())
+                .or_default()
+                .insert(i.to_string(), snap);
+        }
+    }
+    let err = prov
+        .create_resource(&make_resource(
+            "AWS::Lambda::Version",
+            "V100",
+            json!({"FunctionName": "mi"}),
+        ))
+        .unwrap_err();
+    assert!(
+        err.contains("FunctionVersionsPerCapacityProviderLimitExceededException"),
+        "{err}"
+    );
+    let lambda = prov.lambda_state.read();
+    assert_eq!(
+        lambda
+            .regional(ACCT, "us-east-1")
+            .unwrap()
+            .function_version_snapshots["mi"]
+            .len(),
+        99
+    );
+}
+
+#[test]
 fn lambda_function_on_a_missing_capacity_provider_fails() {
     let prov = make_provisioner();
     let err = prov

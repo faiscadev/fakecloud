@@ -1304,7 +1304,7 @@ mod functions;
 mod init;
 mod invoke;
 mod publish;
-pub use publish::publish_latest_published;
+pub use publish::{check_latest_published, publish_latest_published};
 
 impl LambdaService {
     pub fn new(state: SharedLambdaState) -> Self {

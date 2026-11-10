@@ -807,3 +807,211 @@ fn legacy_slash_capacity_provider_arns_are_canonicalized_on_load() {
     let cp: crate::state::CapacityProvider = serde_json::from_value(raw).unwrap();
     assert_eq!(cp.arn, CP_ARN);
 }
+
+// ---- Code storage and version quota around $LATEST.PUBLISHED ----
+
+/// A code storage quota of `bytes` bytes, in the quota's gigabytes.
+fn storage_gb(bytes: u64) -> f64 {
+    (bytes as f64 + 0.5) / (1024.0 * 1024.0 * 1024.0)
+}
+
+fn zip(bytes: &[u8]) -> String {
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+}
+
+fn storage_enforcing(bytes: u64) -> LambdaService {
+    LambdaService::new(make_state()).with_quota_provider(Some(Arc::new(
+        fakecloud_core::quota::FixedQuotas::default().with(
+            "lambda",
+            "L-2ACBD22F",
+            storage_gb(bytes),
+        ),
+    )))
+}
+
+async fn create_managed_with_code(svc: &LambdaService, name: &str, code: &[u8]) {
+    let mut body = managed_function(name, cpc(CP_ARN));
+    body["Code"] = json!({"ZipFile": zip(code)});
+    create_function(svc, body).await.unwrap();
+}
+
+fn latest_published_of(svc: &LambdaService, name: &str) -> Option<LambdaFunction> {
+    svc.state
+        .read()
+        .regional(ACCOUNT, "us-east-1")
+        .and_then(|s| s.latest_published.get(name).cloned())
+}
+
+fn live_sha(svc: &LambdaService, name: &str) -> String {
+    svc.state
+        .read()
+        .regional(ACCOUNT, "us-east-1")
+        .unwrap()
+        .functions[name]
+        .code_sha256
+        .clone()
+}
+
+#[tokio::test]
+async fn latest_published_copy_counts_against_code_storage() {
+    // 7 bytes: the 4-byte $LATEST fits, a second 4-byte copy does not.
+    let svc = storage_enforcing(7);
+    create_provider(&svc, "cp1").await;
+    create_managed_with_code(&svc, "mi", b"four").await;
+    let err = call(
+        &svc,
+        request(
+            Method::POST,
+            "/2015-03-31/functions/mi/versions",
+            &json!({"PublishTo": "LATEST_PUBLISHED"}),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), "CodeStorageExceededException");
+    assert!(latest_published_of(&svc, "mi").is_none());
+
+    // With room for both copies, republishing replaces the copy rather than
+    // adding another one.
+    let svc = storage_enforcing(8);
+    create_provider(&svc, "cp1").await;
+    create_managed_with_code(&svc, "mi", b"four").await;
+    for _ in 0..2 {
+        call(
+            &svc,
+            request(
+                Method::POST,
+                "/2015-03-31/functions/mi/versions",
+                &json!({"PublishTo": "LATEST_PUBLISHED"}),
+            ),
+        )
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn create_function_publishing_latest_published_past_storage_creates_nothing() {
+    let svc = storage_enforcing(7);
+    create_provider(&svc, "cp1").await;
+    let mut body = managed_function("mi", cpc(CP_ARN));
+    body["Code"] = json!({"ZipFile": zip(b"four")});
+    body["PublishTo"] = json!("LATEST_PUBLISHED");
+    let err = create_function(&svc, body).await.unwrap_err();
+    assert_eq!(err.code(), "CodeStorageExceededException");
+    let accounts = svc.state.read();
+    let state = accounts.regional(ACCOUNT, "us-east-1").unwrap();
+    assert!(!state.functions.contains_key("mi"));
+    assert!(!state.latest_published.contains_key("mi"));
+}
+
+#[tokio::test]
+async fn update_function_code_refused_publish_keeps_the_old_code_live() {
+    // Storage: the 4 -> 5 byte swap fits 9 bytes, the extra 5-byte
+    // $LATEST.PUBLISHED copy does not.
+    let svc = storage_enforcing(9);
+    create_provider(&svc, "cp1").await;
+    create_managed_with_code(&svc, "mi", b"four").await;
+    let before = live_sha(&svc, "mi");
+    let err = call(
+        &svc,
+        request(
+            Method::PUT,
+            "/2015-03-31/functions/mi/code",
+            &json!({"ZipFile": zip(b"five5"), "PublishTo": "LATEST_PUBLISHED"}),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), "CodeStorageExceededException");
+    assert_eq!(live_sha(&svc, "mi"), before, "$LATEST keeps its code");
+    assert!(latest_published_of(&svc, "mi").is_none());
+
+    // Version quota: the provider is full, so a first $LATEST.PUBLISHED is
+    // refused before the new code goes live.
+    let svc = LambdaService::new(make_state());
+    create_provider(&svc, "cp1").await;
+    create_managed_with_code(&svc, "mi", b"four").await;
+    seed_versions(&svc, ACCOUNT, "mi", 99);
+    let before = live_sha(&svc, "mi");
+    let err = call(
+        &svc,
+        request(
+            Method::PUT,
+            "/2015-03-31/functions/mi/code",
+            &json!({"ZipFile": zip(b"five5"), "PublishTo": "LATEST_PUBLISHED"}),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err.code(),
+        "FunctionVersionsPerCapacityProviderLimitExceededException"
+    );
+    assert_eq!(live_sha(&svc, "mi"), before, "$LATEST keeps its code");
+    assert!(latest_published_of(&svc, "mi").is_none());
+}
+
+/// Store `count` numbered versions of `name` (in `account`) directly, as
+/// PublishVersion would.
+fn seed_versions(svc: &LambdaService, account: &str, name: &str, count: usize) {
+    let mut accounts = svc.state.write();
+    let state = accounts.regional_mut(account, "us-east-1");
+    let func = state.functions[name].clone();
+    for i in 1..=count {
+        let mut snap = func.clone();
+        snap.version = i.to_string();
+        state
+            .function_versions
+            .entry(name.to_string())
+            .or_default()
+            .push(i.to_string());
+        state
+            .function_version_snapshots
+            .entry(name.to_string())
+            .or_default()
+            .insert(i.to_string(), snap);
+    }
+}
+
+#[tokio::test]
+async fn version_quota_counts_versions_in_every_account() {
+    const OTHER: &str = "222222222222";
+    let svc = LambdaService::new(make_state());
+    create_provider(&svc, "cp1").await;
+    // 99 versions in the provider's own account ($LATEST + 98).
+    create_managed_with_code(&svc, "mi", b"four").await;
+    seed_versions(&svc, ACCOUNT, "mi", 98);
+
+    // Another account (IAM off) puts its $LATEST on the same provider: 100.
+    let mut req = request(
+        Method::POST,
+        "/2015-03-31/functions",
+        &managed_function("other", cpc(CP_ARN)),
+    );
+    req.account_id = OTHER.to_string();
+    svc.handle(req).await.unwrap();
+
+    let mut req = request(
+        Method::POST,
+        "/2015-03-31/functions/other/versions",
+        &json!({}),
+    );
+    req.account_id = OTHER.to_string();
+    let err = svc.handle(req).await.err().unwrap();
+    assert_eq!(
+        err.code(),
+        "FunctionVersionsPerCapacityProviderLimitExceededException"
+    );
+    let mut req = request(
+        Method::POST,
+        "/2015-03-31/functions/other/versions",
+        &json!({"PublishTo": "LATEST_PUBLISHED"}),
+    );
+    req.account_id = OTHER.to_string();
+    let err = svc.handle(req).await.err().unwrap();
+    assert_eq!(
+        err.code(),
+        "FunctionVersionsPerCapacityProviderLimitExceededException"
+    );
+}

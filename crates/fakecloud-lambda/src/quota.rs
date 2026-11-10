@@ -132,6 +132,25 @@ pub fn check_replaced_code(
     Ok(())
 }
 
+/// Refuse a change that stops storing `removed` bytes of code and starts
+/// storing `added` when that grows storage past the enforced `limit`.
+pub fn check_storage_change(
+    state: &LambdaState,
+    limit: Option<i64>,
+    removed: i64,
+    added: i64,
+) -> Result<(), AwsServiceError> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
+    let before = code_storage_used(state);
+    let after = before - removed + added;
+    if after > limit && after > before {
+        return Err(storage_exceeded());
+    }
+    Ok(())
+}
+
 /// "Concurrent executions", the account concurrency limit.
 pub const CONCURRENT_EXECUTIONS: &str = "L-B99A9384";
 

@@ -528,6 +528,24 @@ pub(crate) fn versions_using(
     out
 }
 
+/// Refuse publishing one more version of `func` when it is a Lambda Managed
+/// Instances function whose capacity provider already carries the most
+/// function versions it can (counted across every account). Shared with
+/// CloudFormation's `AWS::Lambda::Version`.
+pub fn check_new_version_quota(
+    accounts: &MultiRegionState<LambdaState>,
+    func: &LambdaFunction,
+) -> Result<(), AwsServiceError> {
+    let Some(cpc) = &func.capacity_provider_config else {
+        return Ok(());
+    };
+    check_version_quota(
+        versions_using(accounts, &cpc.capacity_provider_arn).len(),
+        1,
+        &cpc.capacity_provider_arn,
+    )
+}
+
 /// Refuse attaching `adding` more function versions to a provider that
 /// already carries `existing`.
 pub(crate) fn check_version_quota(

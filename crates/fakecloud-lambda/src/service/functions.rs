@@ -191,20 +191,39 @@ impl LambdaService {
 
         // `PublishTo=LATEST_PUBLISHED` publishes `$LATEST.PUBLISHED` of a
         // Lambda Managed Instances function; a Lambda (default) function has
-        // no such version and the member is ignored.
+        // no such version and the member is ignored. `Publish` creates
+        // version 1 from the initial configuration and answers with that
+        // version. The function is created whole or not at all.
+        let (account, region) = (req.account_id.as_str(), req.region.as_str());
+        let name = input.function_name.as_str();
+        let mut published = None;
+        let mut outcome = Ok(());
         if input.publish_to_latest_published && managed_instances {
-            self.publish_latest_published_locked(state, &input.function_name, None)?;
+            outcome = self
+                .publish_latest_published_locked(
+                    &mut accounts,
+                    account,
+                    region,
+                    name,
+                    None,
+                    storage_limit,
+                )
+                .map(|_| ());
         }
-        // `Publish` creates version 1 from the initial configuration and
-        // answers with that version.
-        if input.publish {
-            let published = self.publish_locked(state, &input.function_name, None, storage_limit);
-            if published.is_err() {
-                // The function is created whole or not at all.
-                state.functions.remove(&input.function_name);
-                state.latest_published.remove(&input.function_name);
+        if outcome.is_ok() && input.publish {
+            match self.publish_locked(&mut accounts, account, region, name, None, storage_limit) {
+                Ok(resp) => published = Some(resp),
+                Err(e) => outcome = Err(e),
             }
-            return published;
+        }
+        if let Err(e) = outcome {
+            let state = accounts.regional_mut(account, region);
+            state.functions.remove(name);
+            state.latest_published.remove(name);
+            return Err(e);
+        }
+        if let Some(resp) = published {
+            return Ok(resp);
         }
 
         Ok(AwsResponse::json(StatusCode::CREATED, response.to_string()))

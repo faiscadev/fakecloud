@@ -11,7 +11,9 @@ pub(crate) mod state;
 pub mod vpc;
 pub(crate) mod workflows;
 
-pub use service::{publish_latest_published, validate_execution_role, LambdaService};
+pub use service::{
+    check_latest_published, publish_latest_published, validate_execution_role, LambdaService,
+};
 pub use state::CapacityProvider;
 pub use state::{
     attached_layer_zips, find_function, function_location, parse_lambda_snapshot, resolve_invocable,

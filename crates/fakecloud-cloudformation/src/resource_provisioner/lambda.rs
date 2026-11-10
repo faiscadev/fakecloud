@@ -230,8 +230,21 @@ impl ResourceProvisioner {
                 .insert(function_name.clone(), reserved);
         }
         if cfg.publish_to_latest_published && managed_instances {
-            fakecloud_lambda::publish_latest_published(state, &function_name, None)
-                .map_err(|e| e.to_string())?;
+            if let Err(e) = fakecloud_lambda::publish_latest_published(
+                &mut accounts,
+                &self.account_id,
+                &self.region,
+                &function_name,
+                None,
+                storage_limit,
+            ) {
+                // The function is created whole or not at all.
+                let state = accounts.regional_mut(&self.account_id, &self.region);
+                state.functions.remove(&function_name);
+                state.function_concurrency.remove(&function_name);
+                state.latest_published.remove(&function_name);
+                return Err(e.to_string());
+            }
         }
 
         // Capture every GetAtt-resolvable attribute eagerly. Output
@@ -413,6 +426,23 @@ impl ResourceProvisioner {
         func.last_modified = Utc::now();
         func.revision_id = Uuid::new_v4().to_string();
 
+        // `PublishToLatestPublished` republishes `$LATEST.PUBLISHED` from the
+        // updated configuration; its version slot and stored copy are checked
+        // with the new `$LATEST` before anything changes.
+        let republish = cfg.publish_to_latest_published && func.capacity_provider_config.is_some();
+        if republish {
+            fakecloud_lambda::check_latest_published(
+                &accounts,
+                &self.account_id,
+                &self.region,
+                &function_name,
+                &func,
+                storage_limit,
+                Some(old_size),
+            )
+            .map_err(|e| super::quota::refusal("Lambda", e))?;
+        }
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         // The same check `UpdateFunctionCode` runs on its updated record, so
         // S3-sourced code and container images count alike.
         fakecloud_lambda::quota::check_replaced_code(state, storage_limit, old_size, &func, false)
@@ -423,14 +453,7 @@ impl ResourceProvisioner {
                 .map_err(|e| super::quota::refusal("Lambda", e))?;
         }
         let function_arn = func.function_arn.clone();
-        let managed_instances = func.capacity_provider_config.is_some();
         state.functions.insert(function_name.clone(), func);
-        // `PublishToLatestPublished` republishes `$LATEST.PUBLISHED` from the
-        // updated configuration.
-        if cfg.publish_to_latest_published && managed_instances {
-            fakecloud_lambda::publish_latest_published(state, &function_name, None)
-                .map_err(|e| e.to_string())?;
-        }
         // Reserved concurrency follows the template: set it when present,
         // remove it (DeleteFunctionConcurrency) when the property is dropped.
         match cfg.reserved_concurrent_executions {
@@ -442,6 +465,17 @@ impl ResourceProvisioner {
             None => {
                 state.function_concurrency.remove(&function_name);
             }
+        }
+        if republish {
+            fakecloud_lambda::publish_latest_published(
+                &mut accounts,
+                &self.account_id,
+                &self.region,
+                &function_name,
+                None,
+                storage_limit,
+            )
+            .map_err(|e| e.to_string())?;
         }
         Ok(ProvisionResult::new(function_name.clone())
             .with("Arn", function_arn)
@@ -1098,12 +1132,16 @@ impl ResourceProvisioner {
         let storage_limit = self.lambda_storage_limit();
 
         let mut accounts = self.lambda_state.write();
-        let state = accounts.regional_mut(&self.account_id, &self.region);
-        let func = state
-            .functions
-            .get(&function_name)
+        let func = accounts
+            .regional(&self.account_id, &self.region)
+            .and_then(|s| s.functions.get(&function_name))
             .ok_or_else(|| format!("Function {function_name} does not exist yet — retry once it has been provisioned"))?
             .clone();
+        // A Lambda Managed Instances version takes a slot on its capacity
+        // provider, as PublishVersion checks.
+        fakecloud_lambda::capacity::check_new_version_quota(&accounts, &func)
+            .map_err(|e| e.to_string())?;
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         // The version stores its own copy of the code.
         fakecloud_lambda::quota::check_new_code(
             state,

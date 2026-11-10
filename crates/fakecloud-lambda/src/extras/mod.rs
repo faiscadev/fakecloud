@@ -884,16 +884,37 @@ impl LambdaService {
         // version (unless publishing would return the latest version
         // unchanged), so both copies must fit before `$LATEST` changes.
         // Measured once: the publish step below does not check again.
-        let publish_copy = storage_limit.is_some()
-            && publish
-            && crate::service::publish_creates_version(
-                state,
+        // `PublishTo=LATEST_PUBLISHED` on a Lambda Managed Instances function
+        // also (re)publishes `$LATEST.PUBLISHED` from the new code; a Lambda
+        // (default) function has no such version and the member is ignored.
+        let publish_latest_published = body["PublishTo"].as_str() == Some("LATEST_PUBLISHED")
+            && func.capacity_provider_config.is_some();
+        if publish_latest_published {
+            // The version quota and both stored copies are checked before
+            // `$LATEST` changes, so a refused publish leaves the old code live.
+            crate::service::check_latest_published(
+                &accounts,
+                &req.account_id,
+                &req.region,
                 function_name,
                 &func,
-                body["Description"].as_str(),
-            );
-        crate::quota::check_replaced_code(state, storage_limit, old_size, &func, publish_copy)?;
+                storage_limit,
+                Some(old_size),
+            )?;
+        } else {
+            let state = accounts.regional_mut(&req.account_id, &req.region);
+            let publish_copy = storage_limit.is_some()
+                && publish
+                && crate::service::publish_creates_version(
+                    state,
+                    function_name,
+                    &func,
+                    body["Description"].as_str(),
+                );
+            crate::quota::check_replaced_code(state, storage_limit, old_size, &func, publish_copy)?;
+        }
         let response = self.function_config_json(&func);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.functions.insert(function_name.to_string(), func);
 
         // Publish=true mints a new immutable version snapshot off the
@@ -903,19 +924,25 @@ impl LambdaService {
         // `PublishTo=LATEST_PUBLISHED` republishes `$LATEST.PUBLISHED` of a
         // Lambda Managed Instances function; a Lambda (default) function has
         // no such version and the member is ignored.
-        let managed_instances = state
-            .functions
-            .get(function_name)
-            .is_some_and(|f| f.capacity_provider_config.is_some());
-        if body["PublishTo"].as_str() == Some("LATEST_PUBLISHED") && managed_instances {
+        if publish_latest_published {
             return self.publish_latest_published_locked(
-                state,
+                &mut accounts,
+                &req.account_id,
+                &req.region,
                 function_name,
                 body["Description"].as_str(),
+                storage_limit,
             );
         }
         if publish {
-            return self.publish_locked(state, function_name, body["Description"].as_str(), None);
+            return self.publish_locked(
+                &mut accounts,
+                &req.account_id,
+                &req.region,
+                function_name,
+                body["Description"].as_str(),
+                None,
+            );
         }
 
         ok(response)
