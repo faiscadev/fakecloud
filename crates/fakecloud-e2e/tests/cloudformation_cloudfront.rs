@@ -601,8 +601,19 @@ async fn cfn_rejects_a_custom_error_response_without_an_error_code() {
         .await
         .expect("describe_stacks");
     let stack = described.stacks().first().unwrap();
-    assert_eq!(stack.stack_status().unwrap().as_str(), "CREATE_FAILED");
-    let reason = stack.stack_status_reason().unwrap_or_default();
+    assert_eq!(stack.stack_status().unwrap().as_str(), "ROLLBACK_COMPLETE");
+    let events = cfn
+        .describe_stack_events()
+        .stack_name("cf-bad-errors")
+        .send()
+        .await
+        .expect("describe_stack_events");
+    let reason = events
+        .stack_events()
+        .iter()
+        .find(|e| e.resource_status().map(|s| s.as_str()) == Some("CREATE_FAILED"))
+        .and_then(|e| e.resource_status_reason())
+        .unwrap_or_default();
     assert!(reason.contains("ErrorCode is required"), "reason: {reason}");
 }
 

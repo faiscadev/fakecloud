@@ -1709,6 +1709,7 @@ async fn main() {
             application_autoscaling: app_autoscaling_state.clone(),
             athena: athena_state.clone(),
             firehose: firehose_state.clone(),
+            firehose_engine: Some(firehose_engine.clone()),
             glue: glue_state.clone(),
             eks: eks_state.clone(),
             servicediscovery: servicediscovery_state.clone(),
@@ -7311,6 +7312,11 @@ async fn main() {
     // Keep a concrete handle: Cloud Control API drives the same resource
     // provisioners one resource at a time via this service.
     let cloudformation_arc = Arc::new(cloudformation_service);
+    let cloudformation_responses = cloudformation_arc.clone();
+    // Every service's state is restored by now. Before the pollers, which could
+    // act on a resource this is about to delete, and before anything else can
+    // reach a stack: the org ticks below, then the requests.
+    cloudformation_arc.resume_interrupted_cleanups().await;
     registry.register(cloudformation_arc.clone());
     // StackSets auto-deployment: an account added to (or removed from) an OU a
     // service-managed stack set targets gains (or loses) its stack instances.
@@ -10983,6 +10989,22 @@ async fn main() {
                     let creds = creds.clone();
                     async move {
                         creds.respond(&task_id, ecs_creds::authorization_header(&headers))
+                    }
+                }
+            }),
+        )
+        .route(
+            // A custom-resource handler's answer, at the `ResponseURL` its event
+            // named. Answers like the presigned S3 URL it stands in for.
+            "/_fakecloud/cloudformation/custom-resource-response/{request_id}",
+            axum::routing::put({
+                let cloudformation = cloudformation_responses.clone();
+                move |axum::extract::Path(request_id): axum::extract::Path<String>,
+                      body: axum::body::Bytes| {
+                    let cloudformation = cloudformation.clone();
+                    async move {
+                        cloudformation.accept_custom_response(&request_id, &body);
+                        axum::http::StatusCode::OK
                     }
                 }
             }),

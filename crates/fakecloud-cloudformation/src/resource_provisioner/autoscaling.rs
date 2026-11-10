@@ -49,6 +49,28 @@ fn prop_bool(p: &Value, k: &str) -> Option<bool> {
     })
 }
 
+/// Recorded on a real account, for `LaunchTemplate` and the mixed policy with its
+/// overrides, on create and update: the API takes these versions, CloudFormation
+/// does not.
+pub(super) fn refuse_floating_launch_template_versions(props: &Value) -> Result<(), String> {
+    let lt = &props["MixedInstancesPolicy"]["LaunchTemplate"];
+    let overrides = lt["Overrides"].as_array().into_iter().flatten();
+    let versions = std::iter::once(&props["LaunchTemplate"]["Version"])
+        .chain(std::iter::once(
+            &lt["LaunchTemplateSpecification"]["Version"],
+        ))
+        .chain(overrides.map(|o| &o["LaunchTemplateSpecification"]["Version"]));
+    for version in versions {
+        if matches!(version.as_str(), Some("$Latest" | "$Default")) {
+            return Err(
+                "CloudFormation does not support using $Latest or $Default for LaunchTemplate version.  Please specify a version number or name."
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// CFN `MixedInstancesPolicy`.
 fn parse_cfn_mixed_instances_policy(props: &Value) -> Option<MixedInstancesPolicy> {
     let policy = props.get("MixedInstancesPolicy")?;
@@ -328,6 +350,7 @@ impl ResourceProvisioner {
         // Modern templates use LaunchTemplate (or MixedInstancesPolicy) instead
         // of the legacy LaunchConfigurationName; honor every form so the
         // launch spec isn't silently dropped.
+        refuse_floating_launch_template_versions(props)?;
         let mut launch_template = parse_cfn_launch_template(props.get("LaunchTemplate"));
         let mut mixed_instances_policy = parse_cfn_mixed_instances_policy(props);
         self.validate_asg_launch_source(
@@ -437,6 +460,7 @@ impl ResourceProvisioner {
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
+        refuse_floating_launch_template_versions(props)?;
         let name = existing.physical_id.clone();
         let mut new_lc = prop_str(props, "LaunchConfigurationName").map(String::from);
         let mut new_lt = parse_cfn_launch_template(props.get("LaunchTemplate"));

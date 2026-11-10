@@ -91,6 +91,14 @@ impl ResourceProvisioner {
             .get("QueueName")
             .and_then(|v| v.as_str())
             .unwrap_or(&generated_name);
+        if !fakecloud_sqs::is_valid_queue_name(
+            queue_name.strip_suffix(".fifo").unwrap_or(queue_name),
+        ) {
+            return Err(
+                "Can only include alphanumeric characters, hyphens, or underscores. 1 to 80 in length"
+                    .to_string(),
+            );
+        }
 
         let mut __sqs_mas = self.sqs_state.write();
         let state = __sqs_mas.regional_mut(&self.account_id, &self.region);

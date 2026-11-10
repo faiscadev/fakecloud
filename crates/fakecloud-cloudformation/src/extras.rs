@@ -375,6 +375,185 @@ pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
 }
 
 impl CloudFormationService {
+    /// Mark a finished change set and record its hook results.
+    #[allow(clippy::too_many_arguments)]
+    fn record_change_set_execution(
+        &self,
+        account_id: &str,
+        region: &str,
+        change_set_id: &str,
+        stack_id: &str,
+        stack_name: &str,
+        hooks: &[Value],
+        succeeded: bool,
+    ) {
+        let mut accounts = self.state.write();
+        let Some(state) = accounts.regional_get_mut(account_id, region) else {
+            return;
+        };
+        if let Some(m) = state.extras.get_mut("change_sets") {
+            if let Some(e) = m.get_mut(change_set_id) {
+                e["ExecutionStatus"] = json!(if succeeded {
+                    "EXECUTE_COMPLETE"
+                } else {
+                    "EXECUTE_FAILED"
+                });
+            }
+            if succeeded {
+                retire_sibling_change_sets(m, change_set_id, stack_id);
+            }
+        }
+        // Record a hook result per configured hook. A FAIL-mode hook reflects the
+        // op's outcome; a successful provision records HOOK_COMPLETE_SUCCEEDED
+        // (bug-audit 2026-06-13, 1.8).
+        if !hooks.is_empty() {
+            record_hook_results(
+                &mut state.extras,
+                hooks,
+                &HookTarget {
+                    account_id,
+                    region,
+                    target_type: "CLOUD_FORMATION",
+                    target_id: stack_id,
+                    logical_resource_id: stack_name,
+                    invocation_point: "PRE_PROVISION",
+                    op_failed: !succeeded,
+                },
+            );
+        }
+    }
+
+    /// Run the rollback a stack's stored journal still owes: after
+    /// `UPDATE_ROLLBACK_FAILED` (`ContinueUpdateRollback`) or after a
+    /// `DisableRollback` failure (`RollbackStack`). A stack that does not exist
+    /// is left to the caller's response, and so is one failed by `CreateStack`,
+    /// which cleaned up after itself and holds no journal.
+    fn resume_rollback(
+        &self,
+        account_id: &str,
+        region: &str,
+        stack_ref: &str,
+        allowed: &[&str],
+        options: crate::stack_update::RollbackOptions,
+        reason: Option<&str>,
+    ) -> Result<(), AwsServiceError> {
+        let claimed = {
+            let mut accounts = self.state.write();
+            let Some(stack) = accounts
+                .regional_get_mut(account_id, region)
+                .and_then(|s| s.live_stack_mut(stack_ref))
+            else {
+                return Ok(());
+            };
+            if !allowed.contains(&stack.status.as_str()) {
+                // The recorded wording, which differs by caller and state.
+                let message = if options.continued {
+                    if stack.status == "UPDATE_FAILED" {
+                        "ContinueUpdateRollback cannot be called from stack with UPDATE_FAILED status."
+                    } else {
+                        "RollbackUpdatedStack cannot be called from current stack status"
+                    }
+                } else {
+                    "RollbackStack can only be called on any of the [UPDATE_FAILED, CREATE_FAILED] statuses."
+                };
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    message,
+                ));
+            }
+            // A create held by `DisableRollback` holds what it made, and no stable
+            // state: rolling back deletes it all.
+            if stack.status == "CREATE_FAILED" && stack.pending_update.is_none() {
+                stack.pending_update =
+                    Some(crate::stack_update::UpdateJournal::for_failed_create(stack));
+            }
+            // A restart lost this rollback's undo log: nothing is left to run.
+            if stack.status == "UPDATE_ROLLBACK_FAILED" && stack.pending_update.is_none() {
+                stack.status = "UPDATE_ROLLBACK_COMPLETE".to_string();
+                stack.status_reason = None;
+                return Ok(());
+            }
+            // Taken under the lock, so of two concurrent calls one finds nothing
+            // left to run.
+            stack
+                .pending_update
+                .take()
+                .map(|journal| (stack.stack_id.clone(), stack.name.clone(), journal))
+        };
+        let Some((stack_id, stack_name, journal)) = claimed else {
+            return Ok(());
+        };
+        // A rollback's handler requests are as real as an update's: one that fails
+        // has to stop the rollback, so they run off the request path too.
+        if self.detach_for_handlers(account_id, region, &stack_id) {
+            let provisioner = self.provisioner(&stack_id, account_id, region);
+            let service = self.clone();
+            let (account_id, region, reason) = (
+                account_id.to_string(),
+                region.to_string(),
+                reason.map(str::to_string),
+            );
+            tokio::spawn(async move {
+                let state = service.state.clone();
+                let finished = tokio::task::spawn_blocking(move || {
+                    let outcome = crate::stack_update::UpdateEngine::new(
+                        &state,
+                        &provisioner,
+                        &account_id,
+                        &region,
+                        &stack_id,
+                        &stack_name,
+                    )
+                    .roll_back(journal, options, reason.as_deref());
+                    (
+                        provisioner,
+                        account_id,
+                        region,
+                        stack_id,
+                        stack_name,
+                        outcome,
+                    )
+                })
+                .await;
+                match finished {
+                    Ok((provisioner, account_id, region, stack_id, stack_name, outcome)) => {
+                        service.finish_stack_operation(
+                            &provisioner,
+                            &stack_id,
+                            &stack_name,
+                            &account_id,
+                            &region,
+                            &outcome,
+                        );
+                        service.persist_after_rollback(outcome.touched_types).await;
+                    }
+                    Err(err) => tracing::error!(%err, "a detached stack rollback panicked"),
+                }
+            });
+            return Ok(());
+        }
+        let provisioner = self.provisioner_deferred(&stack_id, account_id, region);
+        let engine = crate::stack_update::UpdateEngine::new(
+            &self.state,
+            &provisioner,
+            account_id,
+            region,
+            &stack_id,
+            &stack_name,
+        );
+        let outcome = engine.roll_back(journal, options, reason);
+        self.finish_stack_operation(
+            &provisioner,
+            &stack_id,
+            &stack_name,
+            account_id,
+            region,
+            &outcome,
+        );
+        Ok(())
+    }
+
     /// Reject a body that is unmistakably a template but will not parse.
     ///
     /// Telling the caller a broken template is fine is the whole failure this
@@ -863,6 +1042,7 @@ impl CloudFormationService {
                 // request and store an empty Changes[] so callers that
                 // only exercise the route still see success.
                 let mut changes: Vec<Value> = Vec::new();
+                let mut no_changes = false;
                 if !template_body.trim().is_empty() {
                     // Best-effort parse: synthetic conformance inputs supply
                     // single-character or otherwise-malformed template bodies
@@ -894,62 +1074,55 @@ impl CloudFormationService {
                         }
                     };
 
-                    let existing_resources = stack_lookup
+                    CloudFormationService::reject_resource_dependent_export_names(
+                        &template_body,
+                        &full_params,
+                    )?;
+                    let imports = CloudFormationService::collect_account_imports(
+                        &self.state,
+                        &aid,
+                        &region,
+                        Some(&stack_name),
+                    );
+                    let target = stack_lookup.as_ref().and_then(|(sid, _)| {
+                        let accounts = self.state.read();
+                        accounts
+                            .regional(&aid, &region)
+                            .and_then(|s| s.stacks.values().find(|st| &st.stack_id == sid).cloned())
+                    });
+                    if let Some(message) = target
                         .as_ref()
-                        .map(|(_, r)| r.clone())
-                        .unwrap_or_default();
-                    let existing_by_id: BTreeMap<&str, &crate::state::StackResource> =
-                        existing_resources
-                            .iter()
-                            .map(|r| (r.logical_id.as_str(), r))
-                            .collect();
-                    let new_by_id: BTreeMap<&str, &template::ResourceDefinition> = parsed
-                        .resources
-                        .iter()
-                        .map(|r| (r.logical_id.as_str(), r))
-                        .collect();
-
-                    for r in &parsed.resources {
-                        if let Some(existing) = existing_by_id.get(r.logical_id.as_str()) {
-                            let replacement = if existing.resource_type != r.resource_type {
-                                "True"
-                            } else {
-                                "Conditional"
-                            };
-                            changes.push(json!({
-                                "Type": "Resource",
-                                "ResourceChange": {
-                                    "Action": "Modify",
-                                    "LogicalResourceId": r.logical_id,
-                                    "PhysicalResourceId": existing.physical_id,
-                                    "ResourceType": r.resource_type,
-                                    "Replacement": replacement,
-                                }
-                            }));
-                        } else {
-                            changes.push(json!({
-                                "Type": "Resource",
-                                "ResourceChange": {
-                                    "Action": "Add",
-                                    "LogicalResourceId": r.logical_id,
-                                    "ResourceType": r.resource_type,
-                                }
-                            }));
-                        }
+                        .and_then(|stack| crate::stack_update::type_change_refusal(stack, &parsed))
+                    {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ValidationError",
+                            message,
+                        ));
                     }
-                    for r in &existing_resources {
-                        if !new_by_id.contains_key(r.logical_id.as_str()) {
-                            changes.push(json!({
-                                "Type": "Resource",
-                                "ResourceChange": {
-                                    "Action": "Remove",
-                                    "LogicalResourceId": r.logical_id,
-                                    "PhysicalResourceId": r.physical_id,
-                                    "ResourceType": r.resource_type,
-                                }
-                            }));
-                        }
-                    }
+                    // Recorded: created, but with nothing it could execute.
+                    no_changes = target.as_ref().is_some_and(|stack| {
+                        stack.status != "REVIEW_IN_PROGRESS"
+                            && crate::stack_update::update_changes_nothing(
+                                &self.state,
+                                &aid,
+                                &region,
+                                stack,
+                                &parsed,
+                                &template_body,
+                                &full_params,
+                                &imports,
+                                &cs_tags,
+                                &cs_notif,
+                            )
+                    });
+                    changes = crate::stack_update::change_set_rows(
+                        target.as_ref(),
+                        &parsed,
+                        &template_body,
+                        &full_params,
+                        &imports,
+                    );
                 }
 
                 let id = Arn::regional(
@@ -975,8 +1148,8 @@ impl CloudFormationService {
                 let mut entry = json!({
                     "Id": id,
                     "ChangeSetName": cs_name,
-                    "Status": "CREATE_COMPLETE",
-                    "ExecutionStatus": "AVAILABLE",
+                    "Status": if no_changes { "FAILED" } else { "CREATE_COMPLETE" },
+                    "ExecutionStatus": if no_changes { "UNAVAILABLE" } else { "AVAILABLE" },
                     "TemplateBody": template_body,
                     "Parameters": cs_params,
                     "Tags": cs_tags,
@@ -984,6 +1157,11 @@ impl CloudFormationService {
                     "Changes": changes,
                     "Hooks": activated_hooks,
                 });
+                if no_changes {
+                    entry["StatusReason"] = json!(
+                        "The submitted information didn't contain changes. Submit different information to create a change set."
+                    );
+                }
                 let mut accounts = self.state.write();
                 let state = accounts.regional_mut(&aid, &region);
                 // Re-resolve the target stack under the write lock: a
@@ -1083,7 +1261,8 @@ impl CloudFormationService {
                                     notification_arns: Vec::new(),
                                     outputs: Vec::new(),
                                     enable_termination_protection: false,
-                                    reapply_logical_ids: Default::default(),
+                                    pending_update: None,
+                                    cancel_requested: false,
                                 },
                             );
                             // Real CloudFormation emits a stack event when a
@@ -1190,6 +1369,13 @@ impl CloudFormationService {
                     xml_escape(entry["ExecutionStatus"].as_str().unwrap_or("AVAILABLE")),
                     changes_xml,
                 );
+                let inner = match entry["StatusReason"].as_str() {
+                    Some(reason) => format!(
+                        "{inner}\n    <StatusReason>{}</StatusReason>",
+                        xml_escape(reason)
+                    ),
+                    None => inner,
+                };
                 Ok(xml_response("DescribeChangeSet", inner, &rid))
             }
             "DescribeChangeSetHooks" => {
@@ -1417,16 +1603,8 @@ impl CloudFormationService {
                     })?
                 };
 
-                // `provisioner_deferred`: apply_resource_updates runs inside the
-                // state write lock below; a synchronous custom-resource Lambda
-                // invoke there would stall every other CFN op behind the lock and
-                // could block the client (cdk/sam/`aws cloudformation deploy`)
-                // past its read timeout. Queue those invokes and drain them off
-                // the request path after the lock is dropped (bug-audit 0.2).
-                let provisioner = self.provisioner_deferred(&found_stack_id, &aid, &req.region);
-
                 // Cross-stack exports for `Fn::ImportValue` in resource
-                // properties (1.5); collected before the write lock.
+                // properties (1.5).
                 let cs_imports = CloudFormationService::collect_account_imports(
                     &self.state,
                     &aid,
@@ -1434,221 +1612,83 @@ impl CloudFormationService {
                     None,
                 );
 
-                let stack_missing = || {
-                    AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "ValidationError",
-                        format!("Stack [{stack_name}] does not exist"),
-                    )
+                let target = {
+                    let accounts = self.state.read();
+                    accounts.regional(&aid, &region).and_then(|s| {
+                        s.stacks
+                            .values()
+                            .find(|st| {
+                                st.stack_id == found_stack_id && st.status != "DELETE_COMPLETE"
+                            })
+                            .map(|st| (st.name.clone(), st.status == "REVIEW_IN_PROGRESS"))
+                    })
                 };
-                let mut accounts = self.state.write();
-                let Some(state) = accounts.regional_get_mut(&aid, &region) else {
-                    return Err(stack_missing());
-                };
-
-                // A stack still in `REVIEW_IN_PROGRESS` was minted by a
-                // `CREATE` change set and has no resources yet — executing the
-                // change set creates it. `apply_resource_updates` provisions
-                // every resource as an Add when the stack starts empty, so the
-                // same code path serves both create and update; only the
-                // surfaced status differs (CREATE_* vs UPDATE_*).
-                let (update_result, sid, stack_name_owned, was_review, resources_snapshot) = {
-                    let stack = state
-                        .stacks
-                        .values_mut()
-                        .find(|st| st.stack_id == found_stack_id && st.status != "DELETE_COMPLETE")
-                        .ok_or_else(stack_missing)?;
-                    let was_review = stack.status == "REVIEW_IN_PROGRESS";
-                    stack.status = if was_review {
-                        "CREATE_IN_PROGRESS"
-                    } else {
-                        "UPDATE_IN_PROGRESS"
-                    }
-                    .to_string();
-                    let result = crate::service::apply_resource_updates(
-                        stack,
-                        &parsed.resources,
-                        &template_body,
-                        &cs_params,
-                        &provisioner,
-                        &cs_imports,
-                    );
-                    let sid = stack.stack_id.clone();
-                    let sname = stack.name.clone();
-                    stack.status = match (was_review, result.is_err()) {
-                        (true, false) => "CREATE_COMPLETE",
-                        (true, true) => "ROLLBACK_COMPLETE",
-                        (false, false) => "UPDATE_COMPLETE",
-                        (false, true) => "UPDATE_ROLLBACK_COMPLETE",
-                    }
-                    .to_string();
-                    // Track the reason alongside the status: a success must
-                    // clear any reason left by an earlier failure, and a
-                    // rollback must say why it rolled back.
-                    stack.status_reason = result.as_ref().err().map(ToString::to_string);
-                    stack.updated_at = Some(Utc::now());
-                    if was_review || result.is_ok() {
-                        // Failed updates retain the last successful metadata,
-                        // so an identical retry still reaches validation. CREATE
-                        // has no previously applied template; keep its submitted
-                        // metadata on failure as before. No physical rollback is
-                        // attempted here for partially applied resource updates.
-                        stack.template = template_body.clone();
-                        stack.parameters = cs_params.clone();
-                        if !cs_tags.is_empty() {
-                            stack.tags = cs_tags;
-                        }
-                        if !cs_notif.is_empty() {
-                            stack.notification_arns = cs_notif;
-                        }
-                        // Successful executions resolve their outputs below.
-                        stack.outputs.clear();
-                    }
-                    let resources_snapshot = stack.resources.clone();
-                    (result, sid, sname, was_review, resources_snapshot)
-                };
-
-                // Emit lifecycle events on the per-stack event log.
-                let (in_progress, complete, failed) = if was_review {
-                    ("CREATE_IN_PROGRESS", "CREATE_COMPLETE", "ROLLBACK_COMPLETE")
-                } else {
-                    (
-                        "UPDATE_IN_PROGRESS",
-                        "UPDATE_COMPLETE",
-                        "UPDATE_ROLLBACK_COMPLETE",
-                    )
-                };
-                crate::service::record_stack_status_event(
-                    state,
-                    &sid,
-                    &stack_name_owned,
-                    "AWS::CloudFormation::Stack",
-                    in_progress,
-                );
-                let final_status = match &update_result {
-                    Ok(changes) => {
-                        crate::service::record_stack_events(
-                            state,
-                            &sid,
-                            &stack_name_owned,
-                            changes,
-                        );
-                        complete
-                    }
-                    Err(_) => failed,
-                };
-                // Carry the failure reason onto the terminal event, so
-                // DescribeStackEvents explains a failed execution instead of
-                // reporting a bare ROLLBACK_COMPLETE.
-                crate::service::record_stack_status_event_with_reason(
-                    state,
-                    &sid,
-                    &stack_name_owned,
-                    "AWS::CloudFormation::Stack",
-                    final_status,
-                    update_result.as_ref().err().map(String::as_str),
-                );
-
-                if let Some(m) = state.extras.get_mut("change_sets") {
-                    if let Some(e) = m.get_mut(&cs_id) {
-                        e["ExecutionStatus"] = json!(if update_result.is_err() {
-                            "EXECUTE_FAILED"
-                        } else {
-                            "EXECUTE_COMPLETE"
-                        });
-                    }
-                    if update_result.is_ok() {
-                        retire_sibling_change_sets(m, &cs_id, &sid);
-                    }
-                }
-
-                // Record a hook result per configured hook. A FAIL-mode
-                // hook reflects the op's outcome; a successful provision
-                // records HOOK_COMPLETE_SUCCEEDED (bug-audit 2026-06-13,
-                // 1.8).
-                if !cs_hooks.is_empty() {
-                    record_hook_results(
-                        &mut state.extras,
-                        &cs_hooks,
-                        &HookTarget {
-                            account_id: &aid,
-                            region: &req.region,
-                            target_type: "CLOUD_FORMATION",
-                            target_id: &sid,
-                            logical_resource_id: &stack_name_owned,
-                            invocation_point: "PRE_PROVISION",
-                            op_failed: update_result.is_err(),
-                        },
-                    );
-                }
-
-                drop(accounts);
-
-                if let Err(msg) = update_result {
+                let Some((stack_name_owned, was_review)) = target else {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "ValidationError",
-                        msg,
+                        format!("Stack [{stack_name}] does not exist"),
                     ));
-                }
-
-                // The change set executed successfully. Back any newly-added
-                // container resources (RDS / ElastiCache / ECS / ASG) with REAL
-                // containers and reap any removed ones, both off the request
-                // path -- cdk/sam/`aws cloudformation deploy` provision via
-                // ExecuteChangeSet, so without this their container-backed
-                // resources sit at `creating` forever and stack deletes leak
-                // containers (the #2031-#2034 create-side hardening reaching the
-                // changeset path, bug-audit 0.1/0.3/0.4). Then run any deferred
-                // custom-resource Lambda invokes (0.2).
-                {
-                    let handles =
-                        crate::service::ContainerBackingHandles::from_provisioner(&provisioner)
-                            .with_snapshot_hooks(&self.snapshot_hooks);
-                    handles.spawn_container_intents(std::mem::take(
-                        &mut *provisioner.pending_container_spawns.lock(),
-                    ));
-                    handles.spawn_teardown_intents(std::mem::take(
-                        &mut *provisioner.pending_container_teardowns.lock(),
-                    ));
-                    crate::service::spawn_custom_invokes(&provisioner);
-                }
-
-                // Resolve the template's `Outputs` for the newly provisioned
-                // stack and persist them, mirroring CreateStack/UpdateStack.
-                // Without this, a changeset-created stack reports empty Outputs
-                // — SAM's `--resolve-s3` managed-bucket health check requires
-                // the template's `SourceBucket` output to be present in
-                // `DescribeStacks`. Resolution reads cross-stack exports, so it
-                // runs after the write lock is dropped.
-                let outputs = CloudFormationService::resolve_template_outputs(
-                    &template_body,
-                    &cs_params,
-                    &resources_snapshot,
-                    &self.state,
-                    &aid,
-                    &region,
+                };
+                // A stack still in `REVIEW_IN_PROGRESS` was minted by a `CREATE`
+                // change set and has no resources yet: executing the change set
+                // creates it, every resource an Add.
+                let kind = if was_review {
+                    crate::stack_update::OperationKind::Create
+                } else {
+                    crate::stack_update::OperationKind::Update
+                };
+                let flag = |name: &str| {
+                    params
+                        .get(name)
+                        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+                };
+                let imported_names = template::imported_names(&template_body, &cs_params);
+                let export_names = template::export_names(&template_body, &cs_params);
+                let update = crate::service::StackUpdate {
+                    kind,
+                    account_id: aid.clone(),
+                    region: region.clone(),
+                    stack_id: found_stack_id.clone(),
+                    stack_name: stack_name_owned.clone(),
+                    template_body,
+                    parsed,
+                    parameters: cs_params,
+                    tags: cs_tags,
+                    notification_arns: cs_notif,
+                    imports: cs_imports,
+                    imported_names,
+                    export_names,
+                    disable_rollback: flag("DisableRollback"),
+                    retain_except_on_create: flag("RetainExceptOnCreate"),
+                };
+                // A failure from here on is not this call's failure: it was
+                // accepted, the stack rolls back, and DescribeStackEvents tells
+                // why, as on AWS.
+                let recording = self.clone();
+                let (record_account, record_region, record_stack, record_name) = (
+                    aid.clone(),
+                    req.region.clone(),
+                    found_stack_id.clone(),
+                    stack_name_owned.clone(),
                 );
-                let mut accounts = self.state.write();
-                if let Some(state) = accounts.regional_get_mut(&aid, &region) {
-                    if let Some(stack) = state
-                        .stacks
-                        .values_mut()
-                        .find(|s| s.stack_id == sid && s.status != "DELETE_COMPLETE")
-                    {
-                        stack.outputs = outputs.clone();
-                    }
-                    // Re-register this stack's exports so other stacks can
-                    // `Fn::ImportValue` them, as CreateStack/UpdateStack do.
-                    CloudFormationService::sync_exports_imports(
-                        state,
-                        &sid,
-                        &stack_name_owned,
-                        &outputs,
-                        &[],
-                    );
-                }
-                drop(accounts);
+                self.run_stack_update(
+                    update,
+                    Box::new(move |outcome| {
+                        recording.record_change_set_execution(
+                            &record_account,
+                            &record_region,
+                            &cs_id,
+                            &record_stack,
+                            &record_name,
+                            &cs_hooks,
+                            outcome.succeeded,
+                        );
+                    }),
+                )
+                .map_err(|message| {
+                    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", message)
+                })?;
 
                 Ok(xml_response("ExecuteChangeSet", String::new(), &rid))
             }
@@ -2296,11 +2336,11 @@ impl CloudFormationService {
                         )
                     });
                 let inner = format!(
-                    "    <StackResourceDetail>\n      <StackName>{}</StackName>{}\n      <LogicalResourceId>{}</LogicalResourceId>\n      <PhysicalResourceId>{}</PhysicalResourceId>\n      <ResourceType>{}</ResourceType>\n      <ResourceStatus>{}</ResourceStatus>\n      <LastUpdatedTimestamp>{}</LastUpdatedTimestamp>\n    </StackResourceDetail>",
+                    "    <StackResourceDetail>\n      <StackName>{}</StackName>{}\n      <LogicalResourceId>{}</LogicalResourceId>\n{}      <ResourceType>{}</ResourceType>\n      <ResourceStatus>{}</ResourceStatus>\n      <LastUpdatedTimestamp>{}</LastUpdatedTimestamp>\n    </StackResourceDetail>",
                     xml_escape(shown_name),
                     stack_id_el,
                     xml_escape(&logical),
-                    xml_escape(&detail.0),
+                    crate::xml_responses::physical_id_xml(&detail.0).replacen("        ", "      ", 1),
                     xml_escape(&detail.1),
                     xml_escape(&detail.2),
                     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
@@ -2364,11 +2404,68 @@ impl CloudFormationService {
                 };
                 Ok(xml_response("DescribeStackEvents", inner, &rid))
             }
-            "DescribeEvents" => Ok(xml_response(
-                "DescribeEvents",
-                "    <Events/>".to_string(),
-                &rid,
-            )),
+            "DescribeEvents" => {
+                // Stack updates and their rollbacks, newest first as AWS lists
+                // them. A plain CreateStack or DeleteStack files nothing here.
+                let stack = params.get("StackName");
+                let operation = params.get("OperationId");
+                // No filter this store can answer for a change set.
+                let change_set = params.contains_key("ChangeSetName");
+                let failed_only = params
+                    .get("Filters.FailedEvents")
+                    .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+                let accounts = self.state.read();
+                let stack_id = stack.and_then(|name| {
+                    accounts
+                        .regional(&aid, &region)
+                        .and_then(|s| s.live_stack(name))
+                        .map(|s| s.stack_id.clone())
+                });
+                let events: Vec<Value> = accounts
+                    .regional(&aid, &region)
+                    .and_then(|s| s.extras.get("operation_events"))
+                    .filter(|_| !change_set)
+                    .map(|events| {
+                        events
+                            .values()
+                            .rev()
+                            .filter(|e| {
+                                stack.is_none_or(|name| {
+                                    e["StackId"].as_str() == Some(name.as_str())
+                                        || e["StackId"].as_str() == stack_id.as_deref()
+                                }) && operation
+                                    .is_none_or(|id| e["OperationId"].as_str() == Some(id.as_str()))
+                                    && (!failed_only
+                                        || matches!(
+                                            e["EventType"].as_str(),
+                                            Some("VALIDATION_ERROR" | "PROVISIONING_ERROR")
+                                        )
+                                        || e["OperationStatus"].as_str() == Some("FAILED"))
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let inner = format!(
+                    "    <OperationEvents>\n{}\n    </OperationEvents>",
+                    members_xml(&events, |event| {
+                        event
+                            .as_object()
+                            .map(|fields| {
+                                fields
+                                    .iter()
+                                    .filter_map(|(key, value)| {
+                                        let text = value.as_str()?;
+                                        Some(format!("        <{key}>{}</{key}>", xml_escape(text)))
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
+                            .unwrap_or_default()
+                    }),
+                );
+                Ok(xml_response("DescribeEvents", inner, &rid))
+            }
 
             // ── Hooks ──
             "GetHookResult" => {
@@ -2687,9 +2784,26 @@ impl CloudFormationService {
                 ))
             }
             "CancelUpdateStack" => {
-                params
+                let stack_ref = params
                     .get("StackName")
                     .ok_or_else(|| missing("StackName"))?;
+                let mut accounts = self.state.write();
+                // No stack: the synthetic conformance inputs name none.
+                if let Some(stack) = accounts
+                    .regional_get_mut(&aid, &region)
+                    .and_then(|s| s.live_stack_mut(stack_ref))
+                {
+                    // The running update reads this at its next resource boundary.
+                    if stack.status != "UPDATE_IN_PROGRESS" {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ValidationError",
+                            "CancelUpdateStack cannot be called from current stack status",
+                        ));
+                    }
+                    stack.cancel_requested = true;
+                }
+                drop(accounts);
                 Ok(xml_response_no_result("CancelUpdateStack", &rid))
             }
             "ContinueUpdateRollback" => {
@@ -2711,6 +2825,26 @@ impl CloudFormationService {
                         "ForceRollback and ResourcesToSkip are mutually exclusive",
                     ));
                 }
+                let skip: std::collections::BTreeSet<String> = params
+                    .iter()
+                    .filter(|(k, _)| k.starts_with("ResourcesToSkip.member."))
+                    .map(|(_, v)| v.clone())
+                    .collect();
+                // No stack: the synthetic conformance inputs name none, and the
+                // operation has nothing to do.
+                self.resume_rollback(
+                    &aid,
+                    &region,
+                    &params["StackName"],
+                    &["UPDATE_ROLLBACK_FAILED"],
+                    crate::stack_update::RollbackOptions {
+                        skip,
+                        force,
+                        continued: true,
+                        ..Default::default()
+                    },
+                    None,
+                )?;
                 Ok(xml_response("ContinueUpdateRollback", String::new(), &rid))
             }
             "RollbackStack" => {
@@ -2718,6 +2852,20 @@ impl CloudFormationService {
                     .get("StackName")
                     .ok_or_else(|| missing("StackName"))?
                     .clone();
+                let retain_except_on_create = params
+                    .get("RetainExceptOnCreate")
+                    .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+                self.resume_rollback(
+                    &aid,
+                    &region,
+                    &stack,
+                    &["UPDATE_FAILED", "CREATE_FAILED"],
+                    crate::stack_update::RollbackOptions {
+                        retain_except_on_create,
+                        ..Default::default()
+                    },
+                    Some(crate::stack_update::USER_INITIATED_ROLLBACK_REASON),
+                )?;
                 let stack_id = {
                     let accounts = self.state.read();
                     accounts
@@ -3202,6 +3350,7 @@ pub(crate) mod tests {
             firehose: Arc::new(parking_lot::RwLock::new(
                 fakecloud_firehose::FirehoseAccounts::new(),
             )),
+            firehose_engine: None,
             glue: Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new())),
             eks: shared::<fakecloud_eks::EksState>(),
             servicediscovery: shared::<fakecloud_servicediscovery::ServiceDiscoveryState>(),
@@ -3366,7 +3515,8 @@ pub(crate) mod tests {
                     notification_arns: vec![],
                     outputs: vec![],
                     enable_termination_protection: false,
-                    reapply_logical_ids: Default::default(),
+                    pending_update: None,
+                    cancel_requested: false,
                 },
             );
 
@@ -3542,7 +3692,8 @@ pub(crate) mod tests {
                     notification_arns: vec![],
                     outputs: vec![],
                     enable_termination_protection: false,
-                    reapply_logical_ids: Default::default(),
+                    pending_update: None,
+                    cancel_requested: false,
                 },
             );
 
