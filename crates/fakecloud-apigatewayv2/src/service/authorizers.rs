@@ -644,6 +644,17 @@ impl ApiGatewayV2Service {
             }));
         }
 
+        // A response with neither a simple `isAuthorized` nor a policy
+        // document is invalid: 500 (recorded: `apigateway_http.authinvalid`
+        // in fakecloud-lambda/tests/fixtures/function-errors/
+        // aws-recordings.json).
+        if !response
+            .get("policyDocument")
+            .is_some_and(serde_json::Value::is_object)
+        {
+            return Err(authorizer_internal_error());
+        }
+
         // IAM-policy format (same as v1 TOKEN/REQUEST)
         let effect = parse_policy_effect(&response, &method_arn);
         let principal_id = response

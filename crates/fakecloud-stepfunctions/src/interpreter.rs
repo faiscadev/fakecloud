@@ -742,6 +742,16 @@ struct TaskEvents {
     resource_fields: serde_json::Map<String, Value>,
 }
 
+/// `<service>:<action>` -> (`<service>`, `<action>`); `aws-sdk:<service>:<action>`
+/// -> (`aws-sdk:<service>`, `<action>`).
+fn split_integration(rest: &str) -> Option<(&str, &str)> {
+    if let Some(sdk) = rest.strip_prefix("aws-sdk:") {
+        let (service, action) = sdk.split_once(':')?;
+        return Some((&rest[.."aws-sdk:".len() + service.len()], action));
+    }
+    rest.split_once(':')
+}
+
 impl TaskEvents {
     fn for_resource(resource: &str) -> Self {
         let is_lambda_function = fakecloud_aws::arn::arn_resource(resource, "lambda")
@@ -758,10 +768,11 @@ impl TaskEvents {
             };
         }
         let mut fields = serde_json::Map::new();
-        // `arn:<partition>:states:::<service>:<action>` names an integration.
+        // `arn:<partition>:states:::<service>:<action>` names an integration;
+        // an SDK integration's type is `aws-sdk:<service>`.
         match resource
             .split_once(":states:::")
-            .and_then(|(_, rest)| rest.split_once(':'))
+            .and_then(|(_, rest)| split_integration(rest))
         {
             Some((service, action)) if resource.starts_with("arn:") => {
                 fields.insert("resourceType".to_string(), json!(service));

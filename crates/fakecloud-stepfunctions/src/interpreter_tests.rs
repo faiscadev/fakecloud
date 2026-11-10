@@ -1996,6 +1996,26 @@ fn lambda_string_throw_uses_the_string_error_type() {
 }
 
 #[test]
+fn integration_resources_split_into_type_and_resource() {
+    assert_eq!(
+        super::split_integration("aws-sdk:s3:listBuckets"),
+        Some(("aws-sdk:s3", "listBuckets"))
+    );
+    assert_eq!(
+        super::split_integration("lambda:invoke"),
+        Some(("lambda", "invoke"))
+    );
+    assert_eq!(
+        super::split_integration("ecs:runTask.sync"),
+        Some(("ecs", "runTask.sync"))
+    );
+    let started = super::TaskEvents::for_resource("arn:aws:states:::aws-sdk:s3:listBuckets")
+        .started_details();
+    assert_eq!(started["resourceType"], "aws-sdk:s3");
+    assert_eq!(started["resource"], "listBuckets");
+}
+
+#[test]
 fn compact_json_keeps_strings_and_order() {
     assert_eq!(
         super::compact_json(r#"{"b": 1, "a": "x y", "c": ["q\" r", {"d" :  2}]}"#),

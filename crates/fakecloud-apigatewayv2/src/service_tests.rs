@@ -3989,3 +3989,16 @@ fn expect_gateway_response(result: Result<AwsResponse, AwsServiceError>) -> AwsR
         Err(e) => panic!("expected a gateway response, got {e:?}"),
     }
 }
+
+/// Recorded: `apigateway_http.authinvalid` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json. A
+/// response with neither `isAuthorized` nor a policy document is a 500.
+#[tokio::test]
+async fn execute_api_lambda_authorizer_invalid_response_returns_500() {
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({"foo": "bar"})
+        .to_string()
+        .into_bytes()));
+    function_error_api(&svc, true).await;
+    let resp = expect_gateway_response(svc.handle(pets_request()).await);
+    assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+}
