@@ -216,6 +216,7 @@ mod tests {
             state_reason_code: None,
             last_update_status_reason: None,
             last_update_status_reason_code: None,
+            capacity_provider_config: None,
         };
         f.environment = Default::default();
         acct.functions.insert("my-fn".into(), f);

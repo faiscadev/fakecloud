@@ -1,6 +1,8 @@
 //! `LambdaService` `publish` family — extracted from service.rs by audit-2026-05-19.
 
 use super::*;
+use crate::state::LATEST_PUBLISHED;
+use fakecloud_core::multi_account::MultiRegionState;
 
 impl LambdaService {
     pub(crate) fn publish_version(
@@ -16,6 +18,7 @@ impl LambdaService {
         let supplied_revision = body["RevisionId"].as_str().map(String::from);
         let supplied_sha = body["CodeSha256"].as_str().map(String::from);
         let description_override = body["Description"].as_str().map(String::from);
+        let publish_to_latest_published = body["PublishTo"].as_str() == Some("LATEST_PUBLISHED");
         let storage_limit = self.code_storage_limit(account_id, &req.region);
 
         let mut accounts = self.state.write();
@@ -50,12 +53,62 @@ impl LambdaService {
             }
         }
 
+        if publish_to_latest_published {
+            // `$LATEST.PUBLISHED` exists only for Lambda Managed Instances
+            // functions; a Lambda (default) function refuses the value.
+            if func.capacity_provider_config.is_none() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    "LATEST_PUBLISHED' isn't a valid value for this field",
+                ));
+            }
+            return self.publish_latest_published_locked(
+                &mut accounts,
+                account_id,
+                &req.region,
+                function_name,
+                description_override.as_deref(),
+                storage_limit,
+            );
+        }
+
         self.publish_locked(
-            state,
+            &mut accounts,
+            account_id,
+            &req.region,
             function_name,
             description_override.as_deref(),
             storage_limit,
         )
+    }
+
+    /// Create or republish the `$LATEST.PUBLISHED` version of the Lambda
+    /// Managed Instances function `function_name` under the caller's Lambda
+    /// lock, answering with its configuration.
+    pub(crate) fn publish_latest_published_locked(
+        &self,
+        accounts: &mut MultiRegionState<LambdaState>,
+        account: &str,
+        region: &str,
+        function_name: &str,
+        description_override: Option<&str>,
+        storage_limit: Option<i64>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let snapshot = publish_latest_published(
+            accounts,
+            account,
+            region,
+            function_name,
+            description_override,
+            storage_limit,
+        )?;
+        let master = snapshot.function_arn.clone();
+        let mut config = self.function_config_json(&snapshot);
+        config["Version"] = json!(LATEST_PUBLISHED);
+        config["FunctionArn"] = json!(format!("{master}:{LATEST_PUBLISHED}"));
+        config["MasterArn"] = json!(master);
+        Ok(AwsResponse::json(StatusCode::CREATED, config.to_string()))
     }
 
     /// Publish `$LATEST` of `function_name` as a new version, under the
@@ -66,11 +119,17 @@ impl LambdaService {
     /// replaced `$LATEST`.
     pub(crate) fn publish_locked(
         &self,
-        state: &mut LambdaState,
+        accounts: &mut MultiRegionState<LambdaState>,
+        account: &str,
+        region: &str,
         function_name: &str,
         description_override: Option<&str>,
         storage_limit: Option<i64>,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // Function versions already on the function's capacity provider,
+        // counted across every account that uses it.
+        let provider_versions = provider_version_count(accounts, account, region, function_name);
+        let state = accounts.regional_mut(account, region);
         let func = state
             .functions
             .get(function_name)
@@ -109,6 +168,11 @@ impl LambdaService {
 
         // The new version stores its own copy of the code.
         crate::quota::check_new_code(state, storage_limit, crate::quota::stored_code_size(func))?;
+        // A Lambda Managed Instances version takes a slot on its capacity
+        // provider.
+        if let Some((arn, existing)) = &provider_versions {
+            crate::capacity::check_version_quota(*existing, 1, arn)?;
+        }
 
         // Snapshot the function config + code for the new immutable version.
         let mut snapshot = func.clone();
@@ -216,6 +280,9 @@ impl LambdaService {
         if let Some(ref dc) = func.durable_config {
             config["DurableConfig"] = dc.clone();
         }
+        if let Some(ref cpc) = func.capacity_provider_config {
+            config["CapacityProviderConfig"] = crate::capacity::config_json(cpc);
+        }
         if let Some(ref s) = func.signing_profile_version_arn {
             config["SigningProfileVersionArn"] = json!(s);
         }
@@ -253,6 +320,104 @@ impl LambdaService {
         }
         config
     }
+}
+
+/// The capacity provider `function_name` (in `account`/`region`) runs on and
+/// the function versions already on it, counted across every account.
+/// `None` for a Lambda (default) function.
+fn provider_version_count(
+    accounts: &MultiRegionState<LambdaState>,
+    account: &str,
+    region: &str,
+    function_name: &str,
+) -> Option<(String, usize)> {
+    let arn = accounts
+        .regional(account, region)?
+        .functions
+        .get(function_name)?
+        .capacity_provider_config
+        .as_ref()?
+        .capacity_provider_arn
+        .clone();
+    let count = crate::capacity::versions_using(accounts, &arn).len();
+    Some((arn, count))
+}
+
+/// The checks (re)publishing `$LATEST.PUBLISHED` of `function_name` from
+/// `candidate` (the `$LATEST` it is snapshotted from) must pass before
+/// anything changes: a first publish takes a slot on the capacity provider,
+/// and the stored copy (replacing the previous `$LATEST.PUBLISHED`) must fit
+/// the enforced code storage `limit`. `replaced_latest` is the stored size
+/// of the `$LATEST` that `candidate` replaces in the same request
+/// (`UpdateFunctionCode`), so both changes are measured together.
+pub fn check_latest_published(
+    accounts: &MultiRegionState<LambdaState>,
+    account: &str,
+    region: &str,
+    function_name: &str,
+    candidate: &LambdaFunction,
+    limit: Option<i64>,
+    replaced_latest: Option<i64>,
+) -> Result<(), AwsServiceError> {
+    let empty = LambdaState::new(account, region);
+    let state = accounts.regional(account, region).unwrap_or(&empty);
+    let previous = state.latest_published.get(function_name);
+    if previous.is_none() {
+        if let Some(cpc) = &candidate.capacity_provider_config {
+            crate::capacity::check_version_quota(
+                crate::capacity::versions_using(accounts, &cpc.capacity_provider_arn).len(),
+                1,
+                &cpc.capacity_provider_arn,
+            )?;
+        }
+    }
+    let new_size = crate::quota::stored_code_size(candidate);
+    let removed =
+        previous.map(crate::quota::stored_code_size).unwrap_or(0) + replaced_latest.unwrap_or(0);
+    let added = new_size
+        + if replaced_latest.is_some() {
+            new_size
+        } else {
+            0
+        };
+    crate::quota::check_storage_change(state, limit, removed, added)
+}
+
+/// Create or republish the `$LATEST.PUBLISHED` version of the Lambda
+/// Managed Instances function `function_name` (in `account`/`region`) from
+/// its `$LATEST`. Each republish replaces the previous `$LATEST.PUBLISHED`
+/// (no numbered version is created); the first one takes a slot on the
+/// function's capacity provider, and its copy of the code counts against
+/// the enforced code storage `limit` (see [`check_latest_published`]).
+/// Returns the stored snapshot. Shared with CloudFormation's
+/// `PublishToLatestPublished`.
+pub fn publish_latest_published(
+    accounts: &mut MultiRegionState<LambdaState>,
+    account: &str,
+    region: &str,
+    function_name: &str,
+    description_override: Option<&str>,
+    limit: Option<i64>,
+) -> Result<LambdaFunction, AwsServiceError> {
+    let func = accounts
+        .regional(account, region)
+        .and_then(|s| s.functions.get(function_name))
+        .cloned()
+        .ok_or_else(|| not_found_function(&LambdaState::new(account, region), function_name))?;
+    check_latest_published(accounts, account, region, function_name, &func, limit, None)?;
+    let mut snapshot = func;
+    snapshot.version = LATEST_PUBLISHED.to_string();
+    snapshot.master_arn = Some(snapshot.function_arn.clone());
+    if let Some(desc) = description_override {
+        snapshot.description = desc.to_string();
+    }
+    snapshot.revision_id = uuid::Uuid::new_v4().to_string();
+    snapshot.last_modified = Utc::now();
+    accounts
+        .regional_mut(account, region)
+        .latest_published
+        .insert(function_name.to_string(), snapshot.clone());
+    Ok(snapshot)
 }
 
 /// `ResourceNotFoundException` for a function missing from `state`.

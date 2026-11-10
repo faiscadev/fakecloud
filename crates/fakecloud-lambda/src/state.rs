@@ -124,7 +124,29 @@ pub struct LambdaFunction {
     /// (`EniLimitExceeded`, `InsufficientRolePermissions`, …).
     #[serde(default)]
     pub last_update_status_reason_code: Option<String>,
+    /// `CapacityProviderConfig` of a Lambda Managed Instances function: the
+    /// capacity provider it runs on. `None` for a Lambda (default) function.
+    /// Set by `CreateFunction` (it cannot be added later) and copied into
+    /// every published version.
+    #[serde(default)]
+    pub capacity_provider_config: Option<FunctionCapacityProviderConfig>,
 }
+
+/// `CapacityProviderConfig.LambdaManagedInstancesCapacityProviderConfig`
+/// of a function, as the caller supplied it (the ARN canonicalized to the
+/// provider's own).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FunctionCapacityProviderConfig {
+    pub capacity_provider_arn: String,
+    #[serde(default)]
+    pub per_execution_environment_max_concurrency: Option<i64>,
+    #[serde(default)]
+    pub execution_environment_memory_gib_per_vcpu: Option<f64>,
+}
+
+/// The qualifier of a Lambda Managed Instances function's
+/// `$LATEST.PUBLISHED` version.
+pub const LATEST_PUBLISHED: &str = "$LATEST.PUBLISHED";
 
 fn default_revision_id() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -297,11 +319,22 @@ pub struct LambdaState {
     /// belongs to one execution and records its outcome on Send*Callback*.
     #[serde(default)]
     pub durable_execution_callbacks: BTreeMap<String, DurableExecutionCallback>,
+    /// The `$LATEST.PUBLISHED` version of each Lambda Managed Instances
+    /// function, keyed by function name: the snapshot `PublishVersion` with
+    /// `PublishTo=LATEST_PUBLISHED` creates and replaces on every republish.
+    /// Kept apart from the numbered `function_version_snapshots`, which
+    /// `ListVersionsByFunction` and version numbering read.
+    #[serde(default)]
+    pub latest_published: BTreeMap<String, LambdaFunction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapacityProvider {
     pub name: String,
+    /// `arn:<p>:lambda:<region>:<account>:capacity-provider:<name>`.
+    /// Snapshots written before the ARN used `:` read `capacity-provider/`
+    /// and are canonicalized on load.
+    #[serde(deserialize_with = "deserialize_capacity_provider_arn")]
     pub arn: String,
     pub state: String,
     pub vpc_config: serde_json::Value,
@@ -311,13 +344,14 @@ pub struct CapacityProvider {
     pub kms_key_arn: Option<String>,
     pub tags: BTreeMap<String, String>,
     pub last_modified: DateTime<Utc>,
-    /// Function versions associated with the capacity provider, as
-    /// `function_name:qualifier` strings. Populated implicitly when a
-    /// function version references the provider; we don't yet write
-    /// from `CreateFunction`, but `ListFunctionVersionsByCapacityProvider`
-    /// can read whatever is staged here.
-    #[serde(default)]
-    pub function_versions: Vec<String>,
+}
+
+fn deserialize_capacity_provider_arn<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let arn = String::deserialize(deserializer)?;
+    Ok(arn.replacen(":capacity-provider/", ":capacity-provider:", 1))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -548,7 +582,34 @@ impl LambdaState {
             capacity_providers: BTreeMap::new(),
             durable_executions: BTreeMap::new(),
             durable_execution_callbacks: BTreeMap::new(),
+            latest_published: BTreeMap::new(),
         }
+    }
+
+    /// The published version `version` of `function_name`: a numbered
+    /// version, or the `$LATEST.PUBLISHED` version of a Lambda Managed
+    /// Instances function.
+    pub fn version_snapshot(&self, function_name: &str, version: &str) -> Option<&LambdaFunction> {
+        if version == LATEST_PUBLISHED {
+            return self.latest_published.get(function_name);
+        }
+        self.function_version_snapshots
+            .get(function_name)?
+            .get(version)
+    }
+
+    /// Mutable [`Self::version_snapshot`].
+    pub fn version_snapshot_mut(
+        &mut self,
+        function_name: &str,
+        version: &str,
+    ) -> Option<&mut LambdaFunction> {
+        if version == LATEST_PUBLISHED {
+            return self.latest_published.get_mut(function_name);
+        }
+        self.function_version_snapshots
+            .get_mut(function_name)?
+            .get_mut(version)
     }
 
     pub fn reset(&mut self) {
@@ -572,6 +633,7 @@ impl LambdaState {
         self.capacity_providers.clear();
         self.durable_executions.clear();
         self.durable_execution_callbacks.clear();
+        self.latest_published.clear();
     }
 }
 
@@ -660,15 +722,57 @@ pub fn attached_layer_zips(
         .collect()
 }
 
+/// The qualifier (`:VERSION` / `:ALIAS`) a function reference carries:
+/// the segment after the name in a function ARN, partial ARN or
+/// `NAME:QUALIFIER`.
+fn function_ref_qualifier(function_ref: &str) -> Option<&str> {
+    let rest = match fakecloud_aws::arn::arn_resource(function_ref, "lambda") {
+        // `REGION:ACCOUNT:function:NAME[:Q]`
+        Some(rest) => rest.splitn(5, ':').nth(4),
+        None => {
+            let parts: Vec<&str> = function_ref.splitn(4, ':').collect();
+            if parts.len() >= 3 && parts[1] == "function" {
+                parts.get(3).copied()
+            } else {
+                function_ref.split_once(':').map(|(_, q)| q)
+            }
+        }
+    };
+    rest.filter(|q| !q.is_empty())
+}
+
 /// [`find_function`] plus its attached layers' ZIP bytes, cloned out of the
-/// state so the caller can drop the lock before invoking.
+/// state so the caller can drop the lock before invoking. Like the Invoke
+/// API, an unqualified reference to a Lambda Managed Instances function
+/// runs its `$LATEST.PUBLISHED` version (when it has one), and a
+/// `:$LATEST.PUBLISHED` reference runs that version; every other function
+/// and qualifier resolves to `$LATEST`.
 pub fn resolve_invocable(
     accounts: &MultiRegionState<LambdaState>,
     function_ref: &str,
     default_account: &str,
     default_region: &str,
 ) -> Option<(LambdaFunction, Vec<Vec<u8>>)> {
-    let func = find_function(accounts, function_ref, default_account, default_region)?.clone();
+    let (account, region, name) = function_location(function_ref, default_account, default_region);
+    let state = accounts.regional(account, region)?;
+    let live = state.functions.get(name)?;
+    let qualifier = function_ref_qualifier(function_ref);
+    let wants_latest_published = match qualifier {
+        Some(q) => q == LATEST_PUBLISHED,
+        None => live.capacity_provider_config.is_some(),
+    };
+    let func = if wants_latest_published {
+        match state.latest_published.get(name) {
+            Some(snapshot) => snapshot,
+            // An explicit `$LATEST.PUBLISHED` that was never published does
+            // not exist.
+            None if qualifier.is_some() => return None,
+            None => live,
+        }
+    } else {
+        live
+    }
+    .clone();
     let layers = attached_layer_zips(accounts, &func);
     Some((func, layers))
 }
@@ -719,6 +823,7 @@ impl SplitByRegion for LambdaState {
         follow_function!(aliases);
         follow_function!(function_versions);
         follow_function!(function_version_snapshots);
+        follow_function!(latest_published);
         follow_function!(function_url_configs);
         follow_function!(function_concurrency);
         follow_function!(provisioned_concurrency);
@@ -963,6 +1068,79 @@ mod tests {
         let parsed = parse_lambda_snapshot(&serde_json::to_vec(&newer).unwrap()).unwrap();
         assert_eq!(parsed.schema_version, LAMBDA_SNAPSHOT_SCHEMA_VERSION + 1);
         assert!(parsed.accounts.is_none());
+    }
+
+    #[test]
+    fn function_ref_qualifier_reads_every_form() {
+        assert_eq!(function_ref_qualifier("f"), None);
+        assert_eq!(function_ref_qualifier("f:live"), Some("live"));
+        assert_eq!(
+            function_ref_qualifier("arn:aws:lambda:us-east-1:111111111111:function:f"),
+            None
+        );
+        assert_eq!(
+            function_ref_qualifier(
+                "arn:aws:lambda:us-east-1:111111111111:function:f:$LATEST.PUBLISHED"
+            ),
+            Some("$LATEST.PUBLISHED")
+        );
+        assert_eq!(function_ref_qualifier("111111111111:function:f"), None);
+        assert_eq!(
+            function_ref_qualifier("111111111111:function:f:2"),
+            Some("2")
+        );
+    }
+
+    /// Cross-service triggers run a Lambda Managed Instances function's
+    /// `$LATEST.PUBLISHED`, as an unqualified Invoke does; ordinary
+    /// functions and other qualifiers keep running `$LATEST`.
+    #[test]
+    fn resolve_invocable_runs_latest_published_of_managed_instances_functions() {
+        let account = "111111111111";
+        let mut regional: MultiRegionState<LambdaState> =
+            MultiAccountState::new(account, "us-east-1", "");
+        let state = regional.regional_mut(account, "us-east-1");
+        let mut managed = function("mi", "us-east-1", account);
+        managed.description = "latest".into();
+        managed.capacity_provider_config = Some(FunctionCapacityProviderConfig {
+            capacity_provider_arn: "arn:aws:lambda:us-east-1:111111111111:capacity-provider:cp"
+                .into(),
+            per_execution_environment_max_concurrency: None,
+            execution_environment_memory_gib_per_vcpu: None,
+        });
+        state.functions.insert("mi".into(), managed.clone());
+        let mut plain = function("plain", "us-east-1", account);
+        plain.description = "latest".into();
+        state.functions.insert("plain".into(), plain.clone());
+
+        // No $LATEST.PUBLISHED yet: the unqualified ref runs $LATEST, the
+        // explicit qualifier finds nothing.
+        let (f, _) = resolve_invocable(&regional, "mi", account, "us-east-1").unwrap();
+        assert_eq!(f.version, managed.version);
+        assert!(
+            resolve_invocable(&regional, "mi:$LATEST.PUBLISHED", account, "us-east-1").is_none()
+        );
+
+        let mut published = managed.clone();
+        published.version = LATEST_PUBLISHED.into();
+        published.description = "published".into();
+        let state = regional.regional_mut(account, "us-east-1");
+        state.latest_published.insert("mi".into(), published);
+        let mut plain_published = plain.clone();
+        plain_published.description = "never run".into();
+        state
+            .latest_published
+            .insert("plain".into(), plain_published);
+
+        let arn = function_arn("us-east-1", account, "mi");
+        for r in ["mi", arn.as_str(), "mi:$LATEST.PUBLISHED"] {
+            let (f, _) = resolve_invocable(&regional, r, account, "us-east-1").unwrap();
+            assert_eq!(f.description, "published", "{r}");
+        }
+        let (f, _) = resolve_invocable(&regional, "mi:$LATEST", account, "us-east-1").unwrap();
+        assert_eq!(f.description, "latest");
+        let (f, _) = resolve_invocable(&regional, "plain", account, "us-east-1").unwrap();
+        assert_eq!(f.description, "latest");
     }
 
     #[test]

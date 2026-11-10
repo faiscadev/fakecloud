@@ -43,7 +43,7 @@ fn arn_for_capacity_provider(region: &str, account: &str, name: &str) -> String 
         "lambda",
         region,
         account,
-        &format!("capacity-provider/{name}"),
+        &format!("capacity-provider:{name}"),
     )
     .to_string()
 }
@@ -66,6 +66,21 @@ pub(crate) fn create_capacity_provider(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let cp = create_capacity_provider_in(state, &req.account_id, &req.region, body)?;
+    Ok(AwsResponse::json_value(
+        StatusCode::ACCEPTED,
+        json!({ "CapacityProvider": capacity_provider_json(&cp) }),
+    ))
+}
+
+/// `CreateCapacityProvider` in `account`/`region` from a request-shaped
+/// `body`, shared with CloudFormation's `AWS::Lambda::CapacityProvider`.
+pub fn create_capacity_provider_in(
+    state: &SharedLambdaState,
+    account: &str,
+    region: &str,
+    body: &Value,
+) -> Result<CapacityProvider, AwsServiceError> {
     let name = body["CapacityProviderName"]
         .as_str()
         .ok_or_else(|| validation("CapacityProviderName is required"))?
@@ -82,10 +97,10 @@ pub(crate) fn create_capacity_provider(
         .ok_or_else(|| validation("PermissionsConfig is required"))?
         .clone();
 
-    let arn = arn_for_capacity_provider(&req.region, &req.account_id, &name);
+    let arn = arn_for_capacity_provider(region, account, &name);
 
     let mut accts = state.write();
-    let s = accts.regional_mut(&req.account_id, &req.region);
+    let s = accts.regional_mut(account, region);
     if s.capacity_providers.contains_key(&name) {
         return Err(AwsServiceError::aws_error(
             StatusCode::CONFLICT,
@@ -105,7 +120,7 @@ pub(crate) fn create_capacity_provider(
 
     let cp = CapacityProvider {
         name: name.clone(),
-        arn: arn.clone(),
+        arn,
         state: "Active".to_string(),
         vpc_config: vpc,
         permissions_config: perms,
@@ -114,14 +129,9 @@ pub(crate) fn create_capacity_provider(
         kms_key_arn: body["KmsKeyArn"].as_str().map(String::from),
         tags,
         last_modified: Utc::now(),
-        function_versions: Vec::new(),
     };
     s.capacity_providers.insert(name, cp.clone());
-
-    Ok(AwsResponse::json_value(
-        StatusCode::ACCEPTED,
-        json!({ "CapacityProvider": capacity_provider_json(&cp) }),
-    ))
+    Ok(cp)
 }
 
 pub(crate) fn get_capacity_provider(
@@ -130,15 +140,19 @@ pub(crate) fn get_capacity_provider(
     name: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
     check_len("CapacityProviderName", name, 1, 140)?;
+    let name = crate::capacity::capacity_provider_name_from_label(name)?;
     let accts = state.read();
     let empty = crate::state::LambdaState::new(&req.account_id, &req.region);
     let s = accts
         .regional(&req.account_id, &req.region)
         .unwrap_or(&empty);
-    let cp = s
-        .capacity_providers
-        .get(name)
-        .ok_or_else(|| not_found(format!("Capacity provider {name} not found")))?;
+    let cp = s.capacity_providers.get(name).ok_or_else(|| {
+        crate::capacity::provider_not_found(&arn_for_capacity_provider(
+            &req.region,
+            &req.account_id,
+            name,
+        ))
+    })?;
 
     Ok(AwsResponse::ok_json(
         json!({ "CapacityProvider": capacity_provider_json(cp) }),
@@ -182,13 +196,31 @@ pub(crate) fn update_capacity_provider(
     name: &str,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let cp = update_capacity_provider_in(state, &req.account_id, &req.region, name, body)?;
+    Ok(AwsResponse::json_value(
+        StatusCode::ACCEPTED,
+        json!({ "CapacityProvider": capacity_provider_json(&cp) }),
+    ))
+}
+
+/// `UpdateCapacityProvider` of the provider `name` (a name or ARN) in
+/// `account`/`region`, shared with CloudFormation.
+pub fn update_capacity_provider_in(
+    state: &SharedLambdaState,
+    account: &str,
+    region: &str,
+    name: &str,
+    body: &Value,
+) -> Result<CapacityProvider, AwsServiceError> {
     check_len("CapacityProviderName", name, 1, 140)?;
+    let label = name;
+    let name = crate::capacity::capacity_provider_name_from_label(label)?;
     let mut accts = state.write();
-    let s = accts.regional_mut(&req.account_id, &req.region);
+    let s = accts.regional_mut(account, region);
     let cp = s
         .capacity_providers
         .get_mut(name)
-        .ok_or_else(|| not_found(format!("Capacity provider {name} not found")))?;
+        .ok_or_else(|| crate::capacity::provider_not_found(label))?;
     if let Some(v) = body.get("VpcConfig").filter(|v| !v.is_null()) {
         cp.vpc_config = v.clone();
     }
@@ -205,12 +237,7 @@ pub(crate) fn update_capacity_provider(
         cp.kms_key_arn = Some(v.to_string());
     }
     cp.last_modified = Utc::now();
-    let json = capacity_provider_json(cp);
-
-    Ok(AwsResponse::json_value(
-        StatusCode::ACCEPTED,
-        json!({ "CapacityProvider": json }),
-    ))
+    Ok(cp.clone())
 }
 
 pub(crate) fn delete_capacity_provider(
@@ -218,20 +245,51 @@ pub(crate) fn delete_capacity_provider(
     req: &AwsRequest,
     name: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
-    check_len("CapacityProviderName", name, 1, 140)?;
-    let mut accts = state.write();
-    let s = accts.regional_mut(&req.account_id, &req.region);
-    let cp = s
-        .capacity_providers
-        .remove(name)
-        .ok_or_else(|| not_found(format!("Capacity provider {name} not found")))?;
-    let mut deleted = cp;
-    deleted.state = "Deleting".to_string();
-    deleted.last_modified = Utc::now();
+    let deleted = delete_capacity_provider_in(state, &req.account_id, &req.region, name)?;
     Ok(AwsResponse::json_value(
         StatusCode::ACCEPTED,
         json!({ "CapacityProvider": capacity_provider_json(&deleted) }),
     ))
+}
+
+/// `DeleteCapacityProvider` of the provider `name` (a name or ARN) in
+/// `account`/`region`, shared with CloudFormation. A provider still used by
+/// a function version is refused with `ResourceConflictException`.
+pub fn delete_capacity_provider_in(
+    state: &SharedLambdaState,
+    account: &str,
+    region: &str,
+    name: &str,
+) -> Result<CapacityProvider, AwsServiceError> {
+    check_len("CapacityProviderName", name, 1, 140)?;
+    let label = name;
+    let name = crate::capacity::capacity_provider_name_from_label(label)?;
+    let mut accts = state.write();
+    let arn = accts
+        .regional(account, region)
+        .and_then(|s| s.capacity_providers.get(name))
+        .map(|cp| cp.arn.clone())
+        .ok_or_else(|| crate::capacity::provider_not_found(label))?;
+    // A capacity provider cannot be deleted while function versions use it.
+    let in_use = crate::capacity::versions_using(&accts, &arn);
+    if !in_use.is_empty() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::CONFLICT,
+            "ResourceConflictException",
+            format!(
+                "Capacity provider {arn} can't be deleted because it's in use by {} function version(s). Delete the function versions that use it first.",
+                in_use.len()
+            ),
+        ));
+    }
+    let s = accts.regional_mut(account, region);
+    let mut deleted = s
+        .capacity_providers
+        .remove(name)
+        .ok_or_else(|| crate::capacity::provider_not_found(label))?;
+    deleted.state = "Deleting".to_string();
+    deleted.last_modified = Utc::now();
+    Ok(deleted)
 }
 
 pub(crate) fn list_function_versions_by_capacity_provider(
@@ -240,19 +298,42 @@ pub(crate) fn list_function_versions_by_capacity_provider(
     name: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
     check_len("CapacityProviderName", name, 1, 140)?;
+    let label = name;
+    let name = crate::capacity::capacity_provider_name_from_label(label)?;
+    // `MaxItems` (1..50) is range-checked by the dispatcher.
+    let max_items = req
+        .query_params
+        .get("MaxItems")
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(50);
     let accts = state.read();
-    let empty = crate::state::LambdaState::new(&req.account_id, &req.region);
-    let s = accts
+    let cp = accts
         .regional(&req.account_id, &req.region)
-        .unwrap_or(&empty);
-    let cp = s
-        .capacity_providers
-        .get(name)
-        .ok_or_else(|| not_found(format!("Capacity provider {name} not found")))?;
-
-    Ok(AwsResponse::ok_json(json!({
-        "FunctionVersions": cp.function_versions,
-    })))
+        .and_then(|s| s.capacity_providers.get(name))
+        .ok_or_else(|| crate::capacity::provider_not_found(label))?;
+    let versions = crate::capacity::versions_using(&accts, &cp.arn);
+    // `Marker` is the ARN of the last version of the previous page.
+    let start = match req.query_params.get("Marker").filter(|m| !m.is_empty()) {
+        Some(marker) => versions
+            .iter()
+            .position(|v| v.function_arn.as_str() > marker.as_str())
+            .unwrap_or(versions.len()),
+        None => 0,
+    };
+    let page: Vec<_> = versions.iter().skip(start).take(max_items).collect();
+    let mut out = json!({
+        "CapacityProviderArn": cp.arn,
+        "FunctionVersions": page
+            .iter()
+            .map(|v| json!({"FunctionArn": v.function_arn, "State": v.state}))
+            .collect::<Vec<_>>(),
+    });
+    if start + page.len() < versions.len() {
+        if let Some(last) = page.last() {
+            out["NextMarker"] = json!(last.function_arn);
+        }
+    }
+    Ok(AwsResponse::ok_json(out))
 }
 
 // ─── Durable executions ───────────────────────────────────────────────────

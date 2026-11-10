@@ -223,6 +223,232 @@ fn lambda_event_invoke_config_is_stored_for_the_qualifier() {
         .is_empty());
 }
 
+#[test]
+fn lambda_managed_instances_function_runs_on_a_template_capacity_provider() {
+    let prov = make_provisioner();
+    let cp = create(
+        &prov,
+        "AWS::Lambda::CapacityProvider",
+        "Cp",
+        json!({
+            "CapacityProviderName": "cfn-cp",
+            "VpcConfig": {"SubnetIds": ["subnet-1"], "SecurityGroupIds": ["sg-1"]},
+            "PermissionsConfig": {
+                "CapacityProviderOperatorRoleArn": "arn:aws:iam::123456789012:role/op"
+            },
+            "Tags": [{"Key": "team", "Value": "a"}]
+        }),
+    );
+    let cp_arn = "arn:aws:lambda:us-east-1:123456789012:capacity-provider:cfn-cp";
+    assert_eq!(cp.physical_id, "cfn-cp");
+    assert_eq!(cp.attributes["Arn"], cp_arn);
+    assert_eq!(cp.attributes["State"], "Active");
+
+    let props = |extra: serde_json::Value| {
+        let mut p = json!({
+            "FunctionName": "mi",
+            "Runtime": "python3.13",
+            "Role": "arn:aws:iam::123456789012:role/r",
+            "Handler": "index.handler",
+            "Code": {"ZipFile": "def handler(e, c): return e"},
+            "CapacityProviderConfig": {
+                "LambdaManagedInstancesCapacityProviderConfig": {"CapacityProviderArn": cp_arn}
+            },
+            "PublishToLatestPublished": true
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        p
+    };
+    let f = create(&prov, "AWS::Lambda::Function", "F", props(json!({})));
+    {
+        let lambda = prov.lambda_state.read();
+        let st = lambda.regional(ACCT, "us-east-1").unwrap();
+        let func = &st.functions["mi"];
+        assert_eq!(
+            func.capacity_provider_config
+                .as_ref()
+                .unwrap()
+                .capacity_provider_arn,
+            cp_arn
+        );
+        assert_eq!(func.memory_size, 2048, "Managed Instances default memory");
+        assert!(st.latest_published.contains_key("mi"));
+    }
+
+    // An in-place update can retune the config but not run below 2048 MB.
+    update(
+        &prov,
+        &f,
+        props(json!({
+            "MemorySize": 4096,
+            "CapacityProviderConfig": {"LambdaManagedInstancesCapacityProviderConfig": {
+                "CapacityProviderArn": cp_arn, "ExecutionEnvironmentMemoryGiBPerVCpu": 4.0
+            }}
+        })),
+    );
+    {
+        let lambda = prov.lambda_state.read();
+        let func = &lambda.regional(ACCT, "us-east-1").unwrap().functions["mi"];
+        assert_eq!(
+            func.capacity_provider_config
+                .as_ref()
+                .unwrap()
+                .execution_environment_memory_gib_per_vcpu,
+            Some(4.0)
+        );
+    }
+    let err = prov
+        .update_resource(
+            &f,
+            &make_resource(
+                "AWS::Lambda::Function",
+                "F",
+                props(json!({"MemorySize": 1024})),
+            ),
+        )
+        .unwrap_err();
+    assert!(err.contains("2048"), "{err}");
+
+    // The provider can't go while the function (and its versions) use it.
+    let err = prov.delete_resource(&cp).unwrap_err();
+    assert!(err.contains("ResourceConflictException"), "{err}");
+    prov.delete_resource(&f).unwrap();
+    prov.delete_resource(&cp).unwrap();
+    assert!(prov
+        .lambda_state
+        .read()
+        .regional(ACCT, "us-east-1")
+        .unwrap()
+        .capacity_providers
+        .is_empty());
+}
+
+#[test]
+fn lambda_version_of_a_managed_instances_function_respects_the_provider_quota() {
+    let prov = make_provisioner();
+    create(
+        &prov,
+        "AWS::Lambda::CapacityProvider",
+        "Cp",
+        json!({
+            "CapacityProviderName": "cfn-cp",
+            "VpcConfig": {"SubnetIds": ["subnet-1"], "SecurityGroupIds": ["sg-1"]},
+            "PermissionsConfig": {
+                "CapacityProviderOperatorRoleArn": "arn:aws:iam::123456789012:role/op"
+            }
+        }),
+    );
+    let cp_arn = "arn:aws:lambda:us-east-1:123456789012:capacity-provider:cfn-cp";
+    create(
+        &prov,
+        "AWS::Lambda::Function",
+        "F",
+        function_props(json!({
+            "FunctionName": "mi",
+            "Runtime": "python3.13",
+            "CapacityProviderConfig": {"LambdaManagedInstancesCapacityProviderConfig": {
+                "CapacityProviderArn": cp_arn
+            }}
+        })),
+    );
+    // A first version fits.
+    create(
+        &prov,
+        "AWS::Lambda::Version",
+        "V1",
+        json!({"FunctionName": "mi"}),
+    );
+    // Fill the provider to its 100 versions ($LATEST + 99).
+    {
+        let mut lambda = prov.lambda_state.write();
+        let st = lambda.regional_mut(ACCT, "us-east-1");
+        let func = st.functions["mi"].clone();
+        for i in 2..=99 {
+            let mut snap = func.clone();
+            snap.version = i.to_string();
+            st.function_versions
+                .entry("mi".into())
+                .or_default()
+                .push(i.to_string());
+            st.function_version_snapshots
+                .entry("mi".into())
+                .or_default()
+                .insert(i.to_string(), snap);
+        }
+    }
+    let err = prov
+        .create_resource(&make_resource(
+            "AWS::Lambda::Version",
+            "V100",
+            json!({"FunctionName": "mi"}),
+        ))
+        .unwrap_err();
+    assert!(
+        err.contains("FunctionVersionsPerCapacityProviderLimitExceededException"),
+        "{err}"
+    );
+    let lambda = prov.lambda_state.read();
+    assert_eq!(
+        lambda
+            .regional(ACCT, "us-east-1")
+            .unwrap()
+            .function_version_snapshots["mi"]
+            .len(),
+        99
+    );
+}
+
+#[test]
+fn lambda_function_on_a_missing_capacity_provider_fails() {
+    let prov = make_provisioner();
+    let err = prov
+        .create_resource(&make_resource(
+            "AWS::Lambda::Function",
+            "F",
+            function_props(json!({
+                "Runtime": "python3.13",
+                "CapacityProviderConfig": {"LambdaManagedInstancesCapacityProviderConfig": {
+                    "CapacityProviderArn":
+                        "arn:aws:lambda:us-east-1:123456789012:capacity-provider:missing"
+                }}
+            })),
+        ))
+        .unwrap_err();
+    assert!(err.contains("Capacity provider not found"), "{err}");
+}
+
+#[test]
+fn lambda_capacity_provider_scaling_updates_in_place_and_vpc_replaces() {
+    let prov = make_provisioner();
+    let base = json!({
+        "CapacityProviderName": "cfn-cp",
+        "VpcConfig": {"SubnetIds": ["subnet-1"], "SecurityGroupIds": ["sg-1"]},
+        "PermissionsConfig": {
+            "CapacityProviderOperatorRoleArn": "arn:aws:iam::123456789012:role/op"
+        }
+    });
+    let cp = create(&prov, "AWS::Lambda::CapacityProvider", "Cp", base.clone());
+    let mut scaled = base.clone();
+    scaled["CapacityProviderScalingConfig"] = json!({"MaxVCpuCount": 30});
+    let def = make_resource("AWS::Lambda::CapacityProvider", "Cp", scaled.clone());
+    assert!(!prov.lambda_capacity_provider_requires_replacement(&cp, &def));
+    let cp = update(&prov, &cp, scaled);
+    {
+        let lambda = prov.lambda_state.read();
+        let stored = &lambda
+            .regional(ACCT, "us-east-1")
+            .unwrap()
+            .capacity_providers["cfn-cp"];
+        assert_eq!(stored.scaling_config.as_ref().unwrap()["MaxVCpuCount"], 30);
+    }
+    let mut moved = base;
+    moved["VpcConfig"] = json!({"SubnetIds": ["subnet-2"], "SecurityGroupIds": ["sg-1"]});
+    let def = make_resource("AWS::Lambda::CapacityProvider", "Cp", moved);
+    assert!(prov.lambda_capacity_provider_requires_replacement(&cp, &def));
+}
+
 // ---------------------------------------------------------------------------
 // RDS
 // ---------------------------------------------------------------------------

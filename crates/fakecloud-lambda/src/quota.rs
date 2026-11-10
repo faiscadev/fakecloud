@@ -59,7 +59,7 @@ pub fn stored_code_size(func: &LambdaFunction) -> i64 {
 }
 
 /// Code storage `state` uses: every function's `$LATEST`, every published
-/// version and every layer version.
+/// version (numbered and `$LATEST.PUBLISHED`) and every layer version.
 pub fn code_storage_used(state: &LambdaState) -> i64 {
     let functions: i64 = state.functions.values().map(stored_code_size).sum();
     let versions: i64 = state
@@ -67,7 +67,12 @@ pub fn code_storage_used(state: &LambdaState) -> i64 {
         .values()
         .flat_map(|versions| versions.values())
         .map(stored_code_size)
-        .sum();
+        .sum::<i64>()
+        + state
+            .latest_published
+            .values()
+            .map(stored_code_size)
+            .sum::<i64>();
     let layers: i64 = state
         .layers
         .values()
@@ -121,6 +126,25 @@ pub fn check_replaced_code(
     let before = code_storage_used(state);
     let new_size = stored_code_size(new);
     let after = before - old_size + new_size + if publish_copy { new_size } else { 0 };
+    if after > limit && after > before {
+        return Err(storage_exceeded());
+    }
+    Ok(())
+}
+
+/// Refuse a change that stops storing `removed` bytes of code and starts
+/// storing `added` when that grows storage past the enforced `limit`.
+pub fn check_storage_change(
+    state: &LambdaState,
+    limit: Option<i64>,
+    removed: i64,
+    added: i64,
+) -> Result<(), AwsServiceError> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
+    let before = code_storage_used(state);
+    let after = before - removed + added;
     if after > limit && after > before {
         return Err(storage_exceeded());
     }
