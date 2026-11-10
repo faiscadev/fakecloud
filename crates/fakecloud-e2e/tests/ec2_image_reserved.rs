@@ -6,6 +6,29 @@ mod helpers;
 
 use helpers::TestServer;
 
+/// Buy one instance of a real catalog offering and return the reservation id.
+async fn purchase_ri(c: &aws_sdk_ec2::Client) -> String {
+    let offering_id = c
+        .describe_reserved_instances_offerings()
+        .instance_type(aws_sdk_ec2::types::InstanceType::M5Large)
+        .send()
+        .await
+        .unwrap()
+        .reserved_instances_offerings()[0]
+        .reserved_instances_offering_id()
+        .unwrap()
+        .to_string();
+    c.purchase_reserved_instances_offering()
+        .reserved_instances_offering_id(offering_id)
+        .instance_count(1)
+        .send()
+        .await
+        .unwrap()
+        .reserved_instances_id()
+        .unwrap()
+        .to_string()
+}
+
 async fn make_ami(c: &aws_sdk_ec2::Client) -> String {
     c.register_image()
         .name("ami-roundtrip")
@@ -143,16 +166,7 @@ async fn reserved_instances_listings_persist_and_describe() {
     let c = s.ec2_client().await;
 
     // Purchase an RI first so the listing references a real id.
-    let ri = c
-        .purchase_reserved_instances_offering()
-        .reserved_instances_offering_id("offering-1")
-        .instance_count(1)
-        .send()
-        .await
-        .unwrap()
-        .reserved_instances_id()
-        .unwrap()
-        .to_string();
+    let ri = purchase_ri(&c).await;
 
     let created = c
         .create_reserved_instances_listing()
@@ -214,16 +228,7 @@ async fn reserved_instances_modifications_persist_and_describe() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
 
-    let ri = c
-        .purchase_reserved_instances_offering()
-        .reserved_instances_offering_id("offering-1")
-        .instance_count(1)
-        .send()
-        .await
-        .unwrap()
-        .reserved_instances_id()
-        .unwrap()
-        .to_string();
+    let ri = purchase_ri(&c).await;
 
     let modified = c
         .modify_reserved_instances()
