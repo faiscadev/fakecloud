@@ -168,6 +168,26 @@ pub(super) fn check_request(
         ));
     }
 
+    if shape.is_object_write() && req.headers.contains_key("x-amz-copy-source") {
+        // CopyObject's other two directives are enums the same way: S3 answers
+        // a value outside them with the 400 InvalidArgument it gives an
+        // unknown metadata directive, naming the directive.
+        if header(req, "x-amz-tagging-directive").is_some_and(|v| v != "COPY" && v != "REPLACE") {
+            return Err(bad_request(
+                "InvalidArgument",
+                "Unknown tagging directive.",
+            ));
+        }
+        if header(req, "x-amz-object-annotation-directive")
+            .is_some_and(|v| v != "COPY" && v != "EXCLUDE")
+        {
+            return Err(bad_request(
+                "InvalidArgument",
+                "Unknown annotation directive.",
+            ));
+        }
+    }
+
     if shape.is_object_read() && header(req, "x-amz-checksum-mode").is_some_and(|v| v != "ENABLED")
     {
         // Recorded on GetObject (HeadObject answers the same 400 without a
@@ -417,6 +437,33 @@ mod tests {
         // Not a copy: the directive is not read.
         let plain = req(Method::PUT, &[], &[("x-amz-metadata-directive", "x")]);
         assert!(check(&plain, Some("k")).is_ok());
+        for directive in ["x-amz-tagging-directive", "x-amz-object-annotation-directive"] {
+            let bad = req(
+                Method::PUT,
+                &[],
+                &[("x-amz-copy-source", "b/k"), (directive, "x")],
+            );
+            assert_eq!(
+                code(check(&bad, Some("k"))).as_deref(),
+                Some("InvalidArgument"),
+                "{directive}"
+            );
+            let plain = req(Method::PUT, &[], &[(directive, "x")]);
+            assert!(check(&plain, Some("k")).is_ok(), "{directive}");
+        }
+        for (directive, value) in [
+            ("x-amz-tagging-directive", "COPY"),
+            ("x-amz-tagging-directive", "REPLACE"),
+            ("x-amz-object-annotation-directive", "COPY"),
+            ("x-amz-object-annotation-directive", "EXCLUDE"),
+        ] {
+            let ok = req(
+                Method::PUT,
+                &[],
+                &[("x-amz-copy-source", "b/k"), (directive, value)],
+            );
+            assert!(check(&ok, Some("k")).is_ok(), "{directive}: {value}");
+        }
     }
 
     #[test]

@@ -7850,6 +7850,68 @@ fn rename_object_carries_annotations_to_the_new_key() {
 }
 
 #[test]
+fn copy_object_follows_the_annotation_directive() {
+    let (svc, store) = make_recording_service();
+    seed_bucket(&svc, "b");
+    seed_object(&svc, "b", "src", b"payload");
+    let req = make_request(
+        Method::PUT,
+        "/b/src",
+        &[("annotation", ""), ("annotationName", "note")],
+        b"x",
+    );
+    svc.put_object_annotation("123456789012", &req, "b", "src")
+        .unwrap();
+    let copy = |dest: &str, directive: Option<&str>| {
+        let mut req = make_request(Method::PUT, &format!("/b/{dest}"), &[], b"");
+        req.headers
+            .insert("x-amz-copy-source", "b/src".parse().unwrap());
+        if let Some(d) = directive {
+            req.headers
+                .insert("x-amz-object-annotation-directive", d.parse().unwrap());
+        }
+        svc.copy_object("123456789012", &req, "b", dest).unwrap();
+    };
+    let annotations = |key: &str| -> Vec<String> {
+        let mas = svc.state.read();
+        let b = mas.default_ref().buckets.get("b").unwrap();
+        b.objects[key].annotations.keys().cloned().collect()
+    };
+
+    // COPY is the default: the copy carries the source's annotations, in
+    // memory and in the store.
+    copy("default", None);
+    copy("copied", Some("COPY"));
+    copy("excluded", Some("EXCLUDE"));
+    assert_eq!(annotations("default"), vec!["note".to_string()]);
+    assert_eq!(annotations("copied"), vec!["note".to_string()]);
+    assert!(annotations("excluded").is_empty());
+    let calls = store.calls();
+    for key in ["default", "copied"] {
+        assert!(
+            calls.iter().any(|c| *c == format!("put_annotation:b/{key}/note")),
+            "{calls:?}"
+        );
+    }
+    assert!(
+        !calls.iter().any(|c| c.starts_with("put_annotation:b/excluded/")),
+        "{calls:?}"
+    );
+
+    // The copied annotation reads back from the destination.
+    let req = make_request(
+        Method::GET,
+        "/b/copied",
+        &[("annotation", ""), ("annotationName", "note")],
+        b"",
+    );
+    let resp = svc
+        .get_object_annotation("123456789012", &req, "b", "copied")
+        .unwrap();
+    assert_eq!(resp.body.expect_bytes(), b"x");
+}
+
+#[test]
 fn rename_object_persists_move_through_store() {
     let (svc, store) = make_recording_service();
     seed_bucket(&svc, "b");
