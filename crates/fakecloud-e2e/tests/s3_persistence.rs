@@ -1035,7 +1035,14 @@ async fn persistence_bucket_subresources_round_trip() {
         .await
         .unwrap();
 
-    // Policy
+    // Policy (a public one, so the bucket's default Block Public Access has to
+    // go first, as on AWS).
+    client
+        .delete_public_access_block()
+        .bucket("sub-bucket")
+        .send()
+        .await
+        .unwrap();
     let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::sub-bucket/*"}]}"#;
     client
         .put_bucket_policy()
@@ -1272,7 +1279,9 @@ async fn persistence_create_time_acl_object_lock_and_ownership_round_trip() {
     // bucket is CREATED with live in subresources, not in BucketMeta, so
     // without an explicit write at create time they were all gone after a
     // restart -- object-lock retention silently stopped being enforced, and a
-    // public-read bucket came back owner-only.
+    // bucket created with a canned ACL came back owner-only. (A public canned
+    // ACL is refused at create by the default Block Public Access, so the
+    // create-time ACL here is log-delivery-write.)
     let tmp = tempfile::tempdir().unwrap();
     let mut server = TestServer::start_persistent(tmp.path()).await;
     let client = server.s3_client().await;
@@ -1280,7 +1289,7 @@ async fn persistence_create_time_acl_object_lock_and_ownership_round_trip() {
     client
         .create_bucket()
         .bucket("create-subres")
-        .acl(BucketCannedAcl::PublicRead)
+        .acl(BucketCannedAcl::from("log-delivery-write"))
         .object_lock_enabled_for_bucket(true)
         .object_ownership(ObjectOwnership::ObjectWriter)
         .send()
@@ -1300,9 +1309,9 @@ async fn persistence_create_time_acl_object_lock_and_ownership_round_trip() {
         acl.grants().iter().any(|g| {
             g.grantee()
                 .and_then(|gr| gr.uri())
-                .is_some_and(|uri| uri.contains("AllUsers"))
+                .is_some_and(|uri| uri.contains("s3/LogDelivery"))
         }),
-        "create-time public-read grant lost across restart: {:?}",
+        "create-time log-delivery-write grant lost across restart: {:?}",
         acl.grants()
     );
 
@@ -1345,7 +1354,7 @@ async fn persistence_plain_create_clears_orphan_create_time_subresources() {
     std::fs::create_dir_all(&orphan_dir).unwrap();
     std::fs::write(
         orphan_dir.join("ownership.toml"),
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><OwnershipControls><Rule><ObjectOwnership>BucketOwnerEnforced</ObjectOwnership></Rule></OwnershipControls>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>",
     )
     .unwrap();
     std::fs::write(
@@ -1374,13 +1383,20 @@ async fn persistence_plain_create_clears_orphan_create_time_subresources() {
     server.restart().await;
     let client = server.s3_client().await;
 
+    // The plain create gets the new-bucket default, BucketOwnerEnforced, not
+    // the orphan's ObjectWriter.
     let ownership = client
         .get_bucket_ownership_controls()
         .bucket("orphan-subres")
         .send()
-        .await;
-    assert!(
-        ownership.is_err(),
+        .await
+        .unwrap();
+    assert_eq!(
+        ownership
+            .ownership_controls()
+            .and_then(|oc| oc.rules().first())
+            .map(|r| r.object_ownership()),
+        Some(&ObjectOwnership::BucketOwnerEnforced),
         "plain create inherited an orphan ownership rule"
     );
     let lock = client
@@ -1423,7 +1439,10 @@ async fn persistence_create_bucket_grant_headers_round_trip() {
     client
         .create_bucket()
         .bucket("grant-hdr")
-        .grant_read("uri=http://acs.amazonaws.com/groups/global/AllUsers")
+        // A non-public grantee: a public one is refused at create by the
+        // default Block Public Access, and any grant needs ACLs enabled.
+        .grant_read("uri=http://acs.amazonaws.com/groups/s3/LogDelivery")
+        .object_ownership(ObjectOwnership::ObjectWriter)
         .send()
         .await
         .unwrap();
@@ -1439,7 +1458,7 @@ async fn persistence_create_bucket_grant_headers_round_trip() {
             g.permission().map(|p| p.as_str()) == Some("READ")
                 && g.grantee()
                     .and_then(|gr| gr.uri())
-                    .is_some_and(|uri| uri.contains("AllUsers"))
+                    .is_some_and(|uri| uri.contains("s3/LogDelivery"))
         }),
         "grant header ignored at create: {:?}",
         before.grants()
@@ -1459,7 +1478,7 @@ async fn persistence_create_bucket_grant_headers_round_trip() {
             g.permission().map(|p| p.as_str()) == Some("READ")
                 && g.grantee()
                     .and_then(|gr| gr.uri())
-                    .is_some_and(|uri| uri.contains("AllUsers"))
+                    .is_some_and(|uri| uri.contains("s3/LogDelivery"))
         }),
         "create-time grant headers lost across restart: {:?}",
         after.grants()
@@ -2033,6 +2052,15 @@ async fn persistence_put_object_acl_survives_restart() {
 
     client
         .create_bucket()
+        .bucket("obj-acl-persist")
+        // ACLs enabled and the public access block lifted, as a public-read
+        // object ACL needs on a bucket created since April 2023.
+        .object_ownership(ObjectOwnership::ObjectWriter)
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_public_access_block()
         .bucket("obj-acl-persist")
         .send()
         .await

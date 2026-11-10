@@ -337,19 +337,30 @@ impl CloudFrontAccounts {
     /// Domains are unique across all of CloudFront and are matched
     /// case-insensitively, as the data plane routes `Host` headers.
     pub(crate) fn domain_in_use(&self, domain: &str, owner: DomainOwner<'_>) -> bool {
-        self.accounts.values().any(|a| {
-            a.distributions.values().any(|d| {
-                owner != DomainOwner::Distribution(&d.id)
-                    && d.config
-                        .aliases
-                        .as_ref()
-                        .and_then(|al| al.items.as_ref())
-                        .is_some_and(|i| i.cname.iter().any(|c| c.eq_ignore_ascii_case(domain)))
-            }) || a.distribution_tenants.values().any(|t| {
-                owner != DomainOwner::Tenant(&t.id)
-                    && t.domains.iter().any(|d| d.eq_ignore_ascii_case(domain))
+        self.domain_in_use_by(domain, owner, |_| true)
+    }
+
+    /// [`Self::domain_in_use`] limited to the accounts `account` accepts.
+    pub(crate) fn domain_in_use_by(
+        &self,
+        domain: &str,
+        owner: DomainOwner<'_>,
+        account: impl Fn(&str) -> bool,
+    ) -> bool {
+        self.accounts
+            .iter()
+            .filter(|(id, _)| account(id))
+            .any(|(_, a)| {
+                a.distributions.values().any(|d| {
+                    owner != DomainOwner::Distribution(&d.id)
+                        && crate::service::config_aliases(&d.config)
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(domain))
+                }) || a.distribution_tenants.values().any(|t| {
+                    owner != DomainOwner::Tenant(&t.id)
+                        && t.domains.iter().any(|d| d.eq_ignore_ascii_case(domain))
+                })
             })
-        })
     }
 
     /// Iterate every stored distribution across all accounts, paired with the

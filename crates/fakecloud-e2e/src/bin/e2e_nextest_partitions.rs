@@ -30,6 +30,7 @@ const LAMBDA_RUNTIME_PYTHON_FILTER: &str = concat!(
     "test(test_invoke_python3_13) | ",
     "test(test_invoke_python3_14) | ",
     "test(test_invoke_warm_start) | ",
+    "test(test_invoke_function_memory_is_bounded) | ",
     "test(test_invoke_with_payload) | ",
     "test(test_invoke_with_environment) | ",
     "test(test_invoke_no_code) | ",

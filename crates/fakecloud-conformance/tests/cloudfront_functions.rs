@@ -72,6 +72,7 @@ fn dist_cfg(caller_ref: &str) -> DistributionConfig {
             DefaultCacheBehavior::builder()
                 .target_origin_id("o")
                 .viewer_protocol_policy(ViewerProtocolPolicy::AllowAll)
+                .cache_policy_id("658327ea-f89d-4fab-a63d-7e88639e58f6")
                 .build()
                 .unwrap(),
         )

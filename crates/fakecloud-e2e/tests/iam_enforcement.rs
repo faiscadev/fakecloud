@@ -673,19 +673,26 @@ async fn s3_create_bucket_with_acl_needs_put_bucket_acl() {
         "unexpected error: {err:?}"
     );
 
-    // Granting it unblocks the create, and the bucket really is public-read.
+    // Granting it unblocks the create, and the bucket really carries the ACL.
+    // The ACL has to be a non-public one with ACLs enabled (which needs
+    // s3:PutBucketOwnershipControls): new buckets refuse a public ACL at create
+    // under the default Block Public Access, and any ACL under the default
+    // BucketOwnerEnforced.
     attach_inline_policy(
         &server,
         "s3aclcreate",
         "create-and-acl",
         r#"{"Version":"2012-10-17","Statement":[
-            {"Effect":"Allow","Action":["s3:CreateBucket","s3:PutBucketAcl","s3:GetBucketAcl"],"Resource":"*"}
+            {"Effect":"Allow","Action":["s3:CreateBucket","s3:PutBucketAcl","s3:GetBucketAcl","s3:PutBucketOwnershipControls"],"Resource":"*"}
         ]}"#,
     )
     .await;
     s3.create_bucket()
         .bucket("aclperm-allowed")
-        .acl(aws_sdk_s3::types::BucketCannedAcl::PublicRead)
+        .acl(aws_sdk_s3::types::BucketCannedAcl::from(
+            "log-delivery-write",
+        ))
+        .object_ownership(aws_sdk_s3::types::ObjectOwnership::ObjectWriter)
         .send()
         .await
         .unwrap();
@@ -698,7 +705,7 @@ async fn s3_create_bucket_with_acl_needs_put_bucket_acl() {
     assert!(acl.grants().iter().any(|g| {
         g.grantee()
             .and_then(|gr| gr.uri())
-            .is_some_and(|u| u.contains("AllUsers"))
+            .is_some_and(|u| u.contains("s3/LogDelivery"))
     }));
 }
 
@@ -1044,9 +1051,14 @@ async fn s3_create_bucket_tag_condition_applies_to_the_implied_acl_action() {
 
     // Tagged with the required value AND carrying an ACL: allowed, because
     // every action in the request sees `aws:RequestTag/CostCenter=123`.
+    // (A non-public ACL with ACLs enabled: a new bucket refuses a public one,
+    // or any ACL under the default BucketOwnerEnforced, after authorization.)
     s3.create_bucket()
         .bucket("ctx-tagged")
-        .acl(aws_sdk_s3::types::BucketCannedAcl::PublicRead)
+        .acl(aws_sdk_s3::types::BucketCannedAcl::from(
+            "log-delivery-write",
+        ))
+        .object_ownership(aws_sdk_s3::types::ObjectOwnership::ObjectWriter)
         .create_bucket_configuration(
             aws_sdk_s3::types::CreateBucketConfiguration::builder()
                 .tags(
@@ -1578,6 +1590,14 @@ async fn seed_bucket_with_policy(server: &TestServer, bucket: &str, policy_json:
         .bucket(bucket)
         .key("readme.md")
         .body(aws_sdk_s3::primitives::ByteStream::from_static(b"hi"))
+        .send()
+        .await
+        .unwrap();
+    // New buckets block public policies; some of these tests install a
+    // `Principal:"*"` grant, so lift the block first, as a user would.
+    s3_boot
+        .delete_public_access_block()
+        .bucket(bucket)
         .send()
         .await
         .unwrap();

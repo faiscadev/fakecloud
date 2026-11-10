@@ -66,6 +66,19 @@ impl S3Service {
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
+        // Disabling ACLs requires a bucket ACL that gives full control to the
+        // bucket owner and nobody else; S3 refuses to apply BucketOwnerEnforced
+        // over one that grants anything to another account or group, so the
+        // grant cannot silently stop applying.
+        if value == "BucketOwnerEnforced"
+            && !super::grants_are_owner_only(&b.acl_grants, &b.acl_owner_id)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidBucketAclWithObjectOwnership",
+                "Bucket cannot have ACLs set with ObjectOwnership's BucketOwnerEnforced setting",
+            ));
+        }
         // Persist before mutating memory, as the ACL paths do: a store failure
         // would otherwise leave memory ahead of disk, and a restart would
         // silently revert what the caller was told had failed.

@@ -790,6 +790,7 @@ public sealed record BedrockAgentRuntimeInvocation(
     long OutputChunks,
     JsonElement? Trace,
     IReadOnlyList<JsonElement>? Citations,
+    IReadOnlyList<JsonElement>? FlowOutputs,
     string? InvokedAt,
     long DurationMs);
 

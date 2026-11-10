@@ -142,6 +142,15 @@ pub(crate) fn resolve_stream_name(
     Err(invalid_argument("StreamName or StreamARN is required"))
 }
 
+/// A 56-digit sequence number: the shard's discriminator, its incarnation, and
+/// the counter of its records.
+fn sequence_number(discriminator: u32, shard: &KinesisShard, counter: u128) -> String {
+    format!(
+        "{discriminator:05}{:019}{counter:032}",
+        shard.sequence_incarnation
+    )
+}
+
 pub(crate) fn shard_to_json(shard: &KinesisShard) -> Value {
     // The advertised StartingSequenceNumber must match the format records are
     // actually minted with — a per-shard discriminator packed into the low
@@ -157,7 +166,7 @@ pub(crate) fn shard_to_json(shard: &KinesisShard) -> Value {
             "EndingHashKey": shard.ending_hash_key,
         },
         "SequenceNumberRange": {
-            "StartingSequenceNumber": format!("{:05}{:051}", disc, 1),
+            "StartingSequenceNumber": sequence_number(disc, shard, 1),
         },
     });
     if let Some(ref parent) = shard.parent_shard_id {
@@ -167,9 +176,9 @@ pub(crate) fn shard_to_json(shard: &KinesisShard) -> Value {
         obj["AdjacentParentShardId"] = json!(adj);
     }
     if !shard.is_open {
-        obj["SequenceNumberRange"]["EndingSequenceNumber"] = json!(format!(
-            "{:05}{:051}",
+        obj["SequenceNumberRange"]["EndingSequenceNumber"] = json!(sequence_number(
             disc,
+            shard,
             shard.next_sequence_number.saturating_sub(1).max(1)
         ));
     }
@@ -199,6 +208,7 @@ pub fn build_stream_shards(shard_count: i32) -> Vec<KinesisShard> {
                 adjacent_parent_shard_id: None,
                 is_open: true,
                 next_sequence_number: 1,
+                sequence_incarnation: crate::state::new_sequence_incarnation(),
                 records: Vec::new(),
             }
         })
@@ -441,7 +451,7 @@ pub(crate) fn append_record(
     // the high digits keep per-shard monotonic ordering (bug-audit
     // 2026-05-28, 1.12 — values were only per-shard unique).
     let disc = shard_discriminator(&shard.shard_id);
-    let sequence_number = format!("{:05}{:051}", disc, shard.next_sequence_number);
+    let sequence_number = sequence_number(disc, shard, shard.next_sequence_number);
     shard.next_sequence_number += 1;
     shard.records.push(KinesisRecord {
         sequence_number: sequence_number.clone(),

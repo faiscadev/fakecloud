@@ -541,10 +541,9 @@ mod tests {
     use bytes::Bytes;
     use fakecloud_core::multi_account::MultiAccountState;
     use http::{HeaderMap, Method};
-    use parking_lot::{Mutex, RwLock};
+    use parking_lot::RwLock;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::OnceLock;
 
     /// Global mutex to serialize tests that mutate the process-wide
     /// `FAKECLOUD_BEDROCK_ECHO` env var with sibling tests in the same binary that
@@ -553,9 +552,12 @@ mod tests {
     /// `invoke_echo_mode_reflects_prompt` still has the flag flipped, and
     /// the embed handler returns the echo branch's text instead of the
     /// embedding vector.
-    fn echo_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    /// One lock for every test touching the echo variables: they are process-wide,
+    /// so separate locks per file don't keep the tests apart.
+    fn echo_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::prompt::ECHO_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn shared() -> SharedBedrockState {
@@ -624,7 +626,7 @@ mod tests {
         // FAKECLOUD_BEDROCK_ECHO mutation is process-global; the lock serializes
         // this test with sibling tests in the same binary that observe
         // model output (e.g. titan-embed) so they don't race the flag.
-        let _g = echo_lock().lock();
+        let _g = echo_lock();
         let prev = std::env::var("FAKECLOUD_BEDROCK_ECHO").ok();
         // SAFETY: lock above pins us to a single mutation window.
         unsafe { std::env::set_var("FAKECLOUD_BEDROCK_ECHO", "1") };
@@ -655,7 +657,7 @@ mod tests {
         // so they all must serialize with `invoke_echo_mode_reflects_prompt`,
         // which mutates the process-global `FAKECLOUD_BEDROCK_ECHO` flag and would
         // otherwise have them observe the echo branch mid-flip.
-        let _g = echo_lock().lock();
+        let _g = echo_lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "anthropic.claude-3", b"{}", None).unwrap();
         let v: Value =
@@ -667,7 +669,7 @@ mod tests {
 
     #[test]
     fn invoke_amazon_titan_text_returns_results() {
-        let _g = echo_lock().lock();
+        let _g = echo_lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "amazon.titan-text-express-v1", b"{}", None).unwrap();
         let v: Value =
@@ -679,7 +681,7 @@ mod tests {
     fn invoke_amazon_titan_embed_returns_vector() {
         // Lock against `invoke_echo_mode_reflects_prompt` so we don't
         // observe the echo branch's text when the flag is mid-flip.
-        let _g = echo_lock().lock();
+        let _g = echo_lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "amazon.titan-embed-text-v1", b"{}", None).unwrap();
         let v: Value =
@@ -689,7 +691,7 @@ mod tests {
 
     #[test]
     fn invoke_meta_returns_generation() {
-        let _g = echo_lock().lock();
+        let _g = echo_lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "meta.llama3", b"{}", None).unwrap();
         let v: Value =
@@ -699,7 +701,7 @@ mod tests {
 
     #[test]
     fn invoke_cohere_returns_generations() {
-        let _g = echo_lock().lock();
+        let _g = echo_lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "cohere.command", b"{}", None).unwrap();
         let v: Value =
@@ -709,7 +711,7 @@ mod tests {
 
     #[test]
     fn invoke_mistral_returns_outputs() {
-        let _g = echo_lock().lock();
+        let _g = echo_lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "mistral.7b", b"{}", None).unwrap();
         let v: Value =
@@ -719,7 +721,7 @@ mod tests {
 
     #[test]
     fn invoke_unknown_provider_returns_generic() {
-        let _g = echo_lock().lock();
+        let _g = echo_lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "stability.diffusion", b"{}", None).unwrap();
         let v: Value =

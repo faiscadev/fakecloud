@@ -401,6 +401,13 @@ impl S3Service {
             .get("x-amz-tagging")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+        self.reject_blocked_sse_c(
+            account_id,
+            req,
+            bucket,
+            key,
+            super::sse_c_algorithm_header(&req.headers),
+        )?;
         let write_acl = self.resolve_write_acl_headers(account_id, bucket, &req.headers)?;
 
         // Validated now but reported after the bucket lookup, so a request to

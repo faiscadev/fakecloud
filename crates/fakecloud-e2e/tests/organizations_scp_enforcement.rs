@@ -337,6 +337,13 @@ async fn principal_org_id_perimeter_admits_org_members_only() {
         .send()
         .await
         .unwrap();
+    // The Allow statement grants `Principal:"*"`, a public policy the new
+    // bucket's default Block Public Access would refuse.
+    s3_a.delete_public_access_block()
+        .bucket("org-only")
+        .send()
+        .await
+        .unwrap();
     s3_a.put_object()
         .bucket("org-only")
         .key("k")

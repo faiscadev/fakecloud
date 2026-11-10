@@ -8,9 +8,26 @@ use aws_sdk_firehose::types::{
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
 
+/// A stream's destination bucket has to exist. A test making several streams asks
+/// for it again, and only that is ignored.
+async fn create_bucket(server: &TestServer) {
+    let created = server
+        .s3_client()
+        .await
+        .create_bucket()
+        .bucket("conf-firehose-bucket")
+        .send()
+        .await;
+    if let Err(error) = created {
+        let service = error.into_service_error();
+        assert!(service.is_bucket_already_owned_by_you(), "{service:?}");
+    }
+}
+
 /// Create a DirectPut delivery stream with an Extended S3 destination so that
 /// describe/update/put paths all have a concrete destination to work against.
-async fn create_stream(client: &aws_sdk_firehose::Client, name: &str) {
+async fn create_stream(server: &TestServer, client: &aws_sdk_firehose::Client, name: &str) {
+    create_bucket(server).await;
     let dest = ExtendedS3DestinationConfiguration::builder()
         .role_arn("arn:aws:iam::123456789012:role/firehose-role")
         .bucket_arn("arn:aws:s3:::conf-firehose-bucket")
@@ -34,7 +51,7 @@ async fn firehose_stream_lifecycle() {
     let server = TestServer::start().await;
     let client = server.firehose_client().await;
 
-    create_stream(&client, "conf-stream").await;
+    create_stream(&server, &client, "conf-stream").await;
 
     let describe = client
         .describe_delivery_stream()
@@ -74,7 +91,7 @@ async fn firehose_tag_lifecycle() {
     let server = TestServer::start().await;
     let client = server.firehose_client().await;
 
-    create_stream(&client, "conf-tags").await;
+    create_stream(&server, &client, "conf-tags").await;
 
     client
         .tag_delivery_stream()
@@ -115,7 +132,7 @@ async fn firehose_put_record() {
     let server = TestServer::start().await;
     let client = server.firehose_client().await;
 
-    create_stream(&client, "conf-put").await;
+    create_stream(&server, &client, "conf-put").await;
 
     let response = client
         .put_record()
@@ -138,7 +155,7 @@ async fn firehose_put_record_batch() {
     let server = TestServer::start().await;
     let client = server.firehose_client().await;
 
-    create_stream(&client, "conf-batch").await;
+    create_stream(&server, &client, "conf-batch").await;
 
     let response = client
         .put_record_batch()
@@ -158,7 +175,7 @@ async fn firehose_update_destination() {
     let server = TestServer::start().await;
     let client = server.firehose_client().await;
 
-    create_stream(&client, "conf-update").await;
+    create_stream(&server, &client, "conf-update").await;
 
     let describe = client
         .describe_delivery_stream()
@@ -194,7 +211,7 @@ async fn firehose_encryption_lifecycle() {
     let server = TestServer::start().await;
     let client = server.firehose_client().await;
 
-    create_stream(&client, "conf-enc").await;
+    create_stream(&server, &client, "conf-enc").await;
 
     client
         .start_delivery_stream_encryption()

@@ -13,10 +13,12 @@ use crate::policies::{
     not_found, precondition_failed, require_if_match, rfc3339, route_id, xml_with_etag,
 };
 use crate::router::Route;
+use crate::service::config_aliases;
 use crate::service::{
-    aws_error, esc, extract_body_field, generate_id_with_prefix, invalid_argument, xml_response,
-    CloudFrontService,
+    aws_error, check_etag_shape, esc, extract_body_field, generate_etag, generate_id_with_prefix,
+    invalid_argument, no_such_distribution, xml_response, CloudFrontService,
 };
+use crate::state::DomainOwner;
 use crate::xml_io;
 
 const NS: &str = crate::NAMESPACE;
@@ -200,6 +202,9 @@ impl CloudFrontService {
                 "ConnectionGroup must be disabled before delete",
             ));
         }
+        // Model-declared; a distribution tenant names it. Checked after the
+        // disabled check (inferred).
+        crate::validate::refuse_in_use(account, crate::validate::Reference::ConnectionGroup(&id))?;
         let arn = g.arn.clone();
         account.connection_groups.remove(&id);
         account.tags.remove(&arn);
@@ -307,27 +312,9 @@ impl CloudFrontService {
         // A domain is unique across all of CloudFront. Moving it is limited
         // to resources the caller owns: one held by another account's
         // distribution or tenant cannot be taken over.
-        let held_elsewhere = state
-            .accounts
-            .iter()
-            .filter(|(owner, _)| **owner != req.account_id)
-            .any(|(_, a)| {
-                a.distribution_tenants.values().any(|t| {
-                    t.domains
-                        .iter()
-                        .any(|d| d.eq_ignore_ascii_case(&parsed.domain))
-                }) || a.distributions.values().any(|d| {
-                    d.config
-                        .aliases
-                        .as_ref()
-                        .and_then(|al| al.items.as_ref())
-                        .is_some_and(|i| {
-                            i.cname
-                                .iter()
-                                .any(|c| c.eq_ignore_ascii_case(&parsed.domain))
-                        })
-                })
-            });
+        let held_elsewhere = state.domain_in_use_by(&parsed.domain, DomainOwner::New, |owner| {
+            owner != req.account_id
+        });
         if held_elsewhere {
             return Err(aws_error(
                 StatusCode::FORBIDDEN,
@@ -338,48 +325,110 @@ impl CloudFrontService {
                 ),
             ));
         }
-        let account = state.entry(&req.account_id);
-
-        // The target must exist, otherwise AWS returns EntityNotFound.
-        let target_ok = match &target {
-            Target::Tenant(tid) => account.distribution_tenants.contains_key(tid),
-            Target::Distribution(did) => account.distributions.contains_key(did),
-        };
-        if !target_ok {
+        // Recorded from real AWS on 2026-11-09: a domain nothing holds wins over an
+        // unknown target and a bad If-Match. Another account's domains were refused
+        // above, so any holder left is the caller's.
+        if !state.domain_in_use(&parsed.domain, DomainOwner::New) {
             return Err(aws_error(
                 StatusCode::NOT_FOUND,
                 "EntityNotFound",
-                format!("The target resource {} was not found", target.id()),
+                "The provided Domain Name is not associated with any Resource.",
             ));
         }
+        let account = state.entry(&req.account_id);
+
+        // The target must exist, otherwise AWS returns EntityNotFound. The optional
+        // If-Match is checked after this, against the target's ETag (inferred).
+        let target_etag = match &target {
+            Target::Tenant(tid) => account
+                .distribution_tenants
+                .get(tid)
+                .map(|t| t.etag.clone()),
+            Target::Distribution(did) => account.distributions.get(did).map(|d| d.etag.clone()),
+        }
+        .ok_or_else(|| {
+            aws_error(
+                StatusCode::NOT_FOUND,
+                "EntityNotFound",
+                format!("The target resource {} was not found", target.id()),
+            )
+        })?;
+        // A multi-tenant distribution holds no domains itself: they belong to its
+        // tenants, and real AWS refuses `Aliases` on one and `AssociateAlias` to one.
+        // So a domain can't be moved onto one; target one of its tenants instead.
+        // Refused with `AssociateAlias`'s recorded error, the closest AWS answer for
+        // the same request. Inferred: the documentation calls the target "the
+        // multi-tenant distribution" but also "standard distribution or distribution
+        // tenant", and this couldn't be recorded without an owned domain.
+        if let Target::Distribution(did) = &target {
+            if account
+                .distributions
+                .get(did)
+                .is_some_and(|d| d.config.is_multi_tenant())
+            {
+                return Err(crate::service::alias_refused_for_multi_tenant());
+            }
+        }
+        if let Some(if_match) = req.headers.get(http::header::IF_MATCH) {
+            let if_match = if_match.to_str().unwrap_or_default();
+            check_etag_shape(if_match, &target_etag)?;
+            if if_match != target_etag {
+                return Err(precondition_failed());
+            }
+        }
+        let etag = generate_etag();
 
         // Detach the domain from whichever tenant or distribution currently
         // owns it, then attach it to the target. Domains are unique across
-        // resources, so a plain move is correct.
+        // resources, so a plain move is correct. The source changes too, so it gets
+        // a new ETag and modified time, and a distribution's changed config
+        // redeploys, as on `UpdateDistribution`.
+        let now = Utc::now();
+        let mut redeploy = Vec::new();
         for t in account.distribution_tenants.values_mut() {
+            let before = t.domains.len();
             t.domains
                 .retain(|d| !d.eq_ignore_ascii_case(&parsed.domain));
+            if t.domains.len() != before {
+                t.etag = generate_etag();
+                t.last_modified_time = now;
+            }
         }
         for d in account.distributions.values_mut() {
+            let before = config_aliases(&d.config).len();
             remove_alias(&mut d.config, &parsed.domain);
+            if config_aliases(&d.config).len() != before {
+                d.etag = generate_etag();
+                d.last_modified_time = now;
+                d.status = "InProgress".to_string();
+                redeploy.push(d.id.clone());
+            }
         }
         match &target {
             Target::Tenant(tid) => {
                 if let Some(t) = account.distribution_tenants.get_mut(tid) {
                     t.domains.push(parsed.domain.clone());
                     t.last_modified_time = Utc::now();
+                    t.etag = etag.clone();
                 }
             }
             Target::Distribution(did) => {
                 if let Some(d) = account.distributions.get_mut(did) {
                     add_alias(&mut d.config, &parsed.domain);
                     d.last_modified_time = Utc::now();
+                    d.etag = etag.clone();
+                    d.status = "InProgress".to_string();
+                    if !redeploy.contains(&d.id) {
+                        redeploy.push(d.id.clone());
+                    }
                 }
             }
         }
         drop(state);
+        for id in redeploy {
+            self.schedule_distribution_deploy(id);
+        }
 
-        let etag = generate_id_with_prefix("E");
         let mut body = String::with_capacity(256);
         body.push_str(XML_DECL);
         body.push_str(&format!("<UpdateDomainAssociationResult xmlns=\"{NS}\">"));
@@ -461,7 +510,6 @@ impl CloudFrontService {
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = route_id(route, "Distribution")?;
-        let if_match = require_if_match(req)?;
         let staging_id = req
             .query_params
             .get("StagingDistributionId")
@@ -471,31 +519,60 @@ impl CloudFrontService {
         let account = state
             .accounts
             .get_mut(&req.account_id)
-            .ok_or_else(|| not_found("Distribution", &id))?;
-        let staging_config = account
+            .ok_or_else(|| no_such_distribution(&id))?;
+        let staging = account
             .distributions
             .get(&staging_id)
-            .ok_or_else(|| not_found("Distribution", &staging_id))?
-            .config
+            .ok_or_else(|| no_such_distribution(&staging_id))?;
+        let (staging_config, staging_etag) = (staging.config.clone(), staging.etag.clone());
+        let primary_etag = account
+            .distributions
+            .get(&id)
+            .ok_or_else(|| no_such_distribution(&id))?
+            .etag
             .clone();
+        // `<primary ETag>, <staging ETag>`. A malformed pair recorded from real AWS
+        // on 2026-11-09; a lone primary ETag staying accepted is inferred.
+        let if_match = require_if_match(req)?;
+        let mut etags = if_match.split(',').map(str::trim);
+        let primary_match = etags.next().unwrap_or_default();
+        let staging_match = etags.next();
+        if etags.next().is_some() {
+            return Err(crate::policies::invalid_if_match());
+        }
+        check_etag_shape(primary_match, &primary_etag)?;
+        if let Some(staging_match) = staging_match {
+            check_etag_shape(staging_match, &staging_etag)?;
+        }
+        // The staging config is what becomes live; the kinds whose errors the model
+        // declares here are checked. Before staleness, as on `UpdateDistribution`
+        // (inferred), and under the guard that commits.
+        crate::validate::validate_references_for(
+            &staging_config,
+            None,
+            Some(&*account),
+            crate::validate::ReferenceCheck::StagingPromotion,
+        )?;
+        if primary_match != primary_etag || staging_match.is_some_and(|m| m != staging_etag) {
+            return Err(precondition_failed());
+        }
         let dist = account
             .distributions
             .get_mut(&id)
-            .ok_or_else(|| not_found("Distribution", &id))?;
-        if dist.etag != if_match {
-            return Err(precondition_failed());
-        }
+            .ok_or_else(|| no_such_distribution(&id))?;
         // Promote: the staging distribution's configuration becomes the
         // primary distribution's live config. AWS copies the config wholesale
         // and the resulting primary is no longer a staging distribution.
         // Previously this only bumped the ETag, leaving the old config live.
-        // Alternate domain names are not part of the promotion: a staging
-        // distribution carries none, and the primary keeps its own.
+        // Alternate domain names and the continuous deployment policy are not part
+        // of the promotion: AWS documents that the primary keeps its own.
         let mut promoted = staging_config;
         promoted.staging = Some(false);
         promoted.aliases = dist.config.aliases.take();
+        promoted.continuous_deployment_policy_id =
+            dist.config.continuous_deployment_policy_id.take();
         dist.config = promoted;
-        dist.etag = generate_id_with_prefix("E");
+        dist.etag = generate_etag();
         dist.last_modified_time = Utc::now();
         let snap = dist.clone();
         drop(state);
@@ -760,6 +837,61 @@ mod tests {
             .await
             .unwrap();
         body_str(&resp)
+    }
+
+    /// Recorded from real AWS on 2026-11-09: the domain is looked up first.
+    #[tokio::test]
+    async fn update_domain_association_refuses_a_domain_nothing_holds() {
+        let svc = svc();
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<UpdateDomainAssociationRequest xmlns="{NS}">
+  <Domain>unheld.example.com</Domain>
+  <TargetResource><DistributionId>EABCDEFGHIJKLM</DistributionId></TargetResource>
+</UpdateDomainAssociationRequest>"#
+        );
+        let mut request = req(http::Method::POST, "/2020-05-31/domain-association", &body);
+        request
+            .headers
+            .insert(http::header::IF_MATCH, "garbage".parse().unwrap());
+        let err = svc.handle(request).await.err().expect("refused");
+        assert_eq!(
+            (err.code(), err.message().as_str()),
+            (
+                "EntityNotFound",
+                "The provided Domain Name is not associated with any Resource."
+            )
+        );
+    }
+
+    /// Inferred: the If-Match is checked after the domain and the target.
+    #[tokio::test]
+    async fn update_domain_association_checks_the_targets_if_match() {
+        let svc = svc();
+        create_tenant(&svc, "im-src", "imatch.example.com").await;
+        let t2 = create_tenant(&svc, "im-dst", "imatch2.example.com").await;
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<UpdateDomainAssociationRequest xmlns="{NS}">
+  <Domain>imatch.example.com</Domain>
+  <TargetResource><DistributionTenantId>{t2}</DistributionTenantId></TargetResource>
+</UpdateDomainAssociationRequest>"#
+        );
+        let with_if_match = |value: &str| {
+            let mut request = req(http::Method::POST, "/2020-05-31/domain-association", &body);
+            request
+                .headers
+                .insert(http::header::IF_MATCH, value.parse().unwrap());
+            request
+        };
+        let err = svc.handle(with_if_match("garbage")).await.err().unwrap();
+        assert_eq!(err.code(), "InvalidIfMatchVersion");
+        let err = svc
+            .handle(with_if_match("E00000000000A"))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "PreconditionFailed");
     }
 
     #[tokio::test]

@@ -148,6 +148,20 @@ async fn update_domain_association_round_trip() {
         .expect("create");
     let dist_id = dist.distribution().unwrap().id().to_string();
 
+    // The domain must already be held by something; a move starts from there.
+    let holder = cf
+        .create_distribution()
+        .distribution_config(minimal_config("assoc-holder"))
+        .send()
+        .await
+        .expect("create holder");
+    cf.associate_alias()
+        .target_distribution_id(holder.distribution().unwrap().id())
+        .alias("docs.example.com")
+        .send()
+        .await
+        .expect("associate alias");
+
     let resp = cf
         .update_domain_association()
         .domain("docs.example.com")

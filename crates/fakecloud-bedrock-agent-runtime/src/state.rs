@@ -114,9 +114,9 @@ pub struct InvocationRecord {
     pub session_id: Option<String>,
     pub input: String,
     pub output: String,
-    /// Number of chunk frames (or retrieval results) emitted for this
-    /// invocation. Always `>= 1` for eventstream ops, may be `0` for
-    /// session-only `CreateInvocation` rows.
+    /// Number of chunk frames (or retrieval results, or flow outputs) emitted
+    /// for this invocation. `0` for session-only `CreateInvocation` rows and for
+    /// a flow run that reached no output node.
     pub output_chunks: u32,
     /// Optional trace blob captured for InvokeAgent-style ops. Stored as
     /// JSON so the introspection endpoint can hand it back unchanged.
@@ -125,6 +125,12 @@ pub struct InvocationRecord {
     /// don't emit them.
     #[serde(default)]
     pub citations: Vec<serde_json::Value>,
+    /// Every output an `InvokeFlow` produced, in order, as
+    /// `{nodeName, document}`: a run can stream several, and empty means it
+    /// reached no output node, where `output` alone can't tell that from an
+    /// empty document.
+    #[serde(default)]
+    pub flow_outputs: Vec<serde_json::Value>,
     pub timestamp: DateTime<Utc>,
     pub duration_ms: u64,
 }
@@ -258,6 +264,7 @@ mod tests {
             output_chunks: 1,
             trace: None,
             citations: Vec::new(),
+            flow_outputs: Vec::new(),
             timestamp: now,
             duration_ms: 0,
         });
@@ -322,6 +329,7 @@ mod tests {
             output_chunks: 1,
             trace: Some(serde_json::json!({"orchestration": "ok"})),
             citations: vec![serde_json::json!({"ref": "doc1"})],
+            flow_outputs: Vec::new(),
             timestamp: Utc::now(),
             duration_ms: 42,
         };

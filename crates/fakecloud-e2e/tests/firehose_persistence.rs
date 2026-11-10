@@ -14,6 +14,14 @@ async fn persistence_round_trip_stream_tags_and_encryption() {
     let tmp = tempfile::tempdir().unwrap();
     let mut server = TestServer::start_persistent(tmp.path()).await;
     let fh = server.firehose_client().await;
+    server
+        .s3_client()
+        .await
+        .create_bucket()
+        .bucket("landing")
+        .send()
+        .await
+        .unwrap();
 
     fh.create_delivery_stream()
         .delivery_stream_name("events")

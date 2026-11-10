@@ -86,6 +86,14 @@ pub const SERVICES: &[Service] = &[
             //  is opt-in via `FAKECLOUD_S3_EAGER_DELIVERY`.)
             // --- gap: replication configuration is cross-region. ---
             "TestAccS3BucketReplicationConfiguration_basic",
+            // --- upstream asserts pre-April-2023 S3: the deprecated
+            //     `aws_s3_bucket_object` still defaults `acl = "private"` and
+            //     sends it on PutObject into a plain `aws_s3_bucket`, which now
+            //     has ACLs disabled (BucketOwnerEnforced). AWS answers 400
+            //     AccessControlListNotSupported, as reported in
+            //     hashicorp/terraform-provider-aws#27197, which dropped that
+            //     default from `aws_s3_object` for exactly this reason. ---
+            "TestAccS3BucketObject_basic",
             // --- unsupportable: S3 Express One Zone directory buckets are a
             //     separate API surface (ListDirectoryBuckets, etc.) not
             //     implemented. ---

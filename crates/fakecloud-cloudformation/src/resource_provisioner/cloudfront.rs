@@ -6,7 +6,7 @@ use super::*;
 
 mod distribution_config;
 
-use distribution_config::cfn_distribution_config;
+use distribution_config::{cfn_distribution_config, cfn_invalid_request};
 
 impl ResourceProvisioner {
     pub(crate) fn create_cf_origin_access_identity(
@@ -53,6 +53,11 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_origin_access_identity(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        let value = fakecloud_cloudfront::origin_access_identity_value(physical_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::OriginAccessIdentity(&value),
+        )?;
         state.origin_access_identities.remove(physical_id);
         Ok(())
     }
@@ -70,7 +75,7 @@ impl ResourceProvisioner {
             .ok_or_else(|| "DistributionConfig is required".to_string())?;
 
         let caller_reference = format!("cfn-{}-{}", resource.logical_id, Uuid::new_v4().simple());
-        let config = cfn_distribution_config(cfg, caller_reference)?;
+        let config = cfn_distribution_config(cfg, caller_reference, None)?;
 
         // Mint distribution id + ARN + domain in the same shape the
         // CloudFront service uses.
@@ -89,14 +94,7 @@ impl ResourceProvisioner {
             },
             |a, id| a.distributions.contains_key(id),
         );
-        let etag_suffix: String = Uuid::new_v4()
-            .simple()
-            .to_string()
-            .chars()
-            .take(7)
-            .collect::<String>()
-            .to_uppercase();
-        let etag = format!("E{etag_suffix}");
+        let etag = fakecloud_cloudfront::generate_etag();
         let domain_name = format!("{}.cloudfront.net", id.to_lowercase());
         let arn = fakecloud_cloudfront::distribution_arn(&self.region, &self.account_id, &id);
 
@@ -114,6 +112,13 @@ impl ResourceProvisioner {
         };
 
         let mut accounts = self.cloudfront_state.write();
+        // Under the guard that commits, so a reference can't be deleted in between.
+        fakecloud_cloudfront::validate_distribution_references(
+            &stored.config,
+            None,
+            accounts.get(&self.account_id),
+        )
+        .map_err(|e| cfn_invalid_request(e.message().as_str()))?;
         let state = accounts.entry(&self.account_id);
         state.distributions.insert(id.clone(), stored);
         Ok(ProvisionResult::new(id.clone())
@@ -125,6 +130,10 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_distribution(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::Distribution(physical_id),
+        )?;
         state.distributions.remove(physical_id);
         Ok(())
     }
@@ -146,25 +155,32 @@ impl ResourceProvisioner {
             .get("DistributionConfig")
             .ok_or_else(|| "DistributionConfig is required".to_string())?;
 
-        let etag_suffix: String = Uuid::new_v4()
-            .simple()
-            .to_string()
-            .chars()
-            .take(7)
-            .collect::<String>()
-            .to_uppercase();
-
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        let stored = state
+            .distributions
+            .get(&existing.physical_id)
+            .ok_or_else(|| format!("Distribution {} not yet provisioned", existing.physical_id))?;
+        // CallerReference is immutable across an update; keep the stored one.
+        let config = cfn_distribution_config(
+            cfg,
+            stored.config.caller_reference.clone(),
+            Some(&stored.config),
+        )?;
+        fakecloud_cloudfront::validate_distribution_references(
+            &config,
+            Some(&stored.config),
+            Some(&*state),
+        )
+        .map_err(|e| cfn_invalid_request(e.message().as_str()))?;
         let dist = state
             .distributions
             .get_mut(&existing.physical_id)
             .ok_or_else(|| format!("Distribution {} not yet provisioned", existing.physical_id))?;
-        // CallerReference is immutable across an update; keep the stored one.
-        dist.config = cfn_distribution_config(cfg, dist.config.caller_reference.clone())?;
+        dist.config = config;
         dist.status = "InProgress".to_string();
         dist.last_modified_time = Utc::now();
-        dist.etag = format!("E{etag_suffix}");
+        dist.etag = fakecloud_cloudfront::generate_etag();
 
         Ok(ProvisionResult::new(dist.id.clone())
             .with("Id", dist.id.clone())
@@ -229,6 +245,10 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_origin_access_control(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::OriginAccessControl(physical_id),
+        )?;
         state.origin_access_controls.remove(physical_id);
         Ok(())
     }
@@ -291,6 +311,10 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_public_key(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::PublicKey(physical_id),
+        )?;
         state.public_keys.remove(physical_id);
         Ok(())
     }
@@ -346,6 +370,13 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_key_group(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::KeyGroup {
+                id: physical_id,
+                enabled: true,
+            },
+        )?;
         state.key_groups.remove(physical_id);
         Ok(())
     }
@@ -419,6 +450,12 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_function(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        if let Some(f) = state.functions.get(physical_id) {
+            cf_refuse_in_use(
+                state,
+                fakecloud_cloudfront::Reference::Function(&f.function_arn),
+            )?;
+        }
         state.functions.remove(physical_id);
         Ok(())
     }
@@ -484,6 +521,10 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_cache_policy(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::CachePolicy(physical_id),
+        )?;
         state.cache_policies.remove(physical_id);
         Ok(())
     }
@@ -560,6 +601,10 @@ impl ResourceProvisioner {
     pub(crate) fn delete_cf_origin_request_policy(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::OriginRequestPolicy(physical_id),
+        )?;
         state.origin_request_policies.remove(physical_id);
         Ok(())
     }
@@ -614,6 +659,10 @@ impl ResourceProvisioner {
     ) -> Result<(), String> {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry(&self.account_id);
+        cf_refuse_in_use(
+            state,
+            fakecloud_cloudfront::Reference::ResponseHeadersPolicy(physical_id),
+        )?;
         state.response_headers_policies.remove(physical_id);
         Ok(())
     }
@@ -983,4 +1032,23 @@ impl ResourceProvisioner {
             .with("FunctionARN", function_arn)
             .with("Stage", "DEVELOPMENT"))
     }
+}
+
+/// Refuse a delete CloudFront would refuse because something still names the
+/// resource, so the stack's delete fails as on AWS. The model's error text,
+/// wrapped the way a CloudFormation resource handler reports a service error
+/// (the wrapper is inferred, not recorded).
+fn cf_refuse_in_use(
+    state: &fakecloud_cloudfront::AccountState,
+    target: fakecloud_cloudfront::Reference<'_>,
+) -> Result<(), String> {
+    fakecloud_cloudfront::refuse_in_use(state, target).map_err(|e| {
+        format!(
+            "Resource handler returned message: \"{} (Service: CloudFront, Status Code: {}, \
+             Request ID: {})\" (HandlerErrorCode: ResourceConflict)",
+            e.message(),
+            e.status().as_u16(),
+            Uuid::new_v4()
+        )
+    })
 }

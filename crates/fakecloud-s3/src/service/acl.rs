@@ -25,8 +25,18 @@ impl S3Service {
         let b = state.buckets.get(bucket).ok_or_else(|| no_such_key(key))?;
         let obj = b.objects.get(key).ok_or_else(|| no_such_key(key))?;
 
-        let owner_id = obj.acl_owner_id.as_deref().unwrap_or(&b.acl_owner_id);
-        let body = build_acl_xml(owner_id, &obj.acl_grants, &req.account_id);
+        // With ACLs disabled the bucket owner owns every object, and reading an
+        // ACL shows only the bucket owner's full control.
+        let body = if super::config::ownership_xml_enforced(b.ownership_controls.as_deref()) {
+            build_acl_xml(
+                &b.acl_owner_id,
+                &super::config::owner_full_control(&b.acl_owner_id),
+                &req.account_id,
+            )
+        } else {
+            let owner_id = obj.acl_owner_id.as_deref().unwrap_or(&b.acl_owner_id);
+            build_acl_xml(owner_id, &obj.acl_grants, &req.account_id)
+        };
         Ok(s3_xml(StatusCode::OK, body))
     }
 

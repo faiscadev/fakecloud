@@ -1,0 +1,151 @@
+y	2026	2026	2027	2024	
+yy	26	26	27	24	
+yyy	2026	2026	2027	2024	
+yyyy	2026	2026	2027	2024	
+yyyyy	02026	02026	02027	02024	
+u	2026	2026	2027	2024	
+uu	26	26	27	24	
+uuuu	2026	2026	2027	2024	
+Y	2026	2027	2027	2024	
+YY	26	27	27	24	
+YYYY	2026	2027	2027	2024	
+G	AD	AD	AD	AD	
+GGGG	Anno Domini	Anno Domini	Anno Domini	Anno Domini	
+GGGGG	A	A	A	A	
+D	313	361	1	60	
+DD	313	361	01	60	
+DDD	313	361	001	060	
+M	11	12	1	2	
+MM	11	12	01	02	
+MMM	Nov	Dec	Jan	Feb	
+MMMM	November	December	January	February	
+MMMMM	N	D	J	F	
+L	11	12	1	2	
+LL	11	12	01	02	
+LLL	Nov	Dec	Jan	Feb	
+LLLL	November	December	January	February	
+LLLLL	N	D	J	F	
+d	9	27	1	29	
+dd	09	27	01	29	
+Q	4	4	1	1	
+QQ	04	04	01	01	
+QQQ	Q4	Q4	Q1	Q1	
+QQQQ	4th quarter	4th quarter	1st quarter	1st quarter	
+QQQQQ	4	4	1	1	
+q	4	4	1	1	
+qq	04	04	01	01	
+qqq	Q4	Q4	Q1	Q1	
+qqqq	4th quarter	4th quarter	1st quarter	1st quarter	
+qqqqq	4	4	1	1	
+w	46	1	1	9	
+ww	46	01	01	09	
+W	2	5	1	5	
+E	Mon	Sun	Fri	Thu	
+EEE	Mon	Sun	Fri	Thu	
+EEEE	Monday	Sunday	Friday	Thursday	
+EEEEE	M	S	F	T	
+e	2	1	6	5	
+ee	02	01	06	05	
+eee	Mon	Sun	Fri	Thu	
+eeee	Monday	Sunday	Friday	Thursday	
+eeeee	M	S	F	T	
+c	2	1	6	5	
+ccc	Mon	Sun	Fri	Thu	
+cccc	Monday	Sunday	Friday	Thursday	
+ccccc	M	S	F	T	
+F	2	6	1	1	
+a	PM	AM	PM	PM	
+h	2	12	12	11	
+hh	02	12	12	11	
+K	2	0	0	11	
+KK	02	00	00	11	
+k	14	24	12	23	
+kk	14	24	12	23	
+H	14	0	12	23	
+HH	14	00	12	23	
+m	19	5	0	59	
+mm	19	05	00	59	
+s	56	6	0	59	
+ss	56	06	00	59	
+S	1	0	0	0	
+SS	12	00	00	00	
+SSS	123	007	000	000	
+SSSSSS	123456	007000	000000	000000	
+SSSSSSSSS	123456789	007000000	000000000	000000000	
+A	51596123	306007	43200000	86399000	
+AAAAAAAAAA	0051596123	0000306007	0043200000	0086399000	
+n	123456789	7000000	0	0	
+nnnnnnnnn	123456789	007000000	000000000	000000000	
+N	51596123456789	306007000000	43200000000000	86399000000000	
+V	ERR
+VV	UTC	UTC	UTC	UTC	
+z	UTC	UTC	UTC	UTC	
+zzzz	Coordinated Universal Time	Coordinated Universal Time	Coordinated Universal Time	Coordinated Universal Time	
+O	GMT	GMT	GMT	GMT	
+OOOO	GMT	GMT	GMT	GMT	
+X	Z	Z	Z	Z	
+XX	Z	Z	Z	Z	
+XXX	Z	Z	Z	Z	
+XXXX	Z	Z	Z	Z	
+XXXXX	Z	Z	Z	Z	
+x	+00	+00	+00	+00	
+xx	+0000	+0000	+0000	+0000	
+xxx	+00:00	+00:00	+00:00	+00:00	
+xxxx	+0000	+0000	+0000	+0000	
+xxxxx	+00:00	+00:00	+00:00	+00:00	
+Z	+0000	+0000	+0000	+0000	
+ZZZ	+0000	+0000	+0000	+0000	
+ZZZZ	GMT	GMT	GMT	GMT	
+ZZZZZ	Z	Z	Z	Z	
+ppH	14	 0	12	23	
+pppM	 11	 12	  1	  2	
+[yyyy]-MM	2026-11	2026-12	2027-01	2024-02	
+yyyy'-w'ww	2026-w46	2026-w01	2027-w01	2024-w09	
+'a''b'''	a'b'	a'b'	a'b'	a'b'	
+''	'	'	'	'	
+ddd	ERR
+HHH	ERR
+mmm	ERR
+sss	ERR
+hhh	ERR
+kkk	ERR
+KKK	ERR
+DDDD	ERR
+WW	ERR
+FF	ERR
+aa	ERR
+cc	ERR
+VVV	ERR
+zzzzz	ERR
+OO	ERR
+XXXXXX	ERR
+xxxxxx	ERR
+ZZZZZZ	ERR
+GGGGGG	ERR
+QQQQQQ	ERR
+EEEEEE	ERR
+MMMMMM	ERR
+SSSSSSSSSS	ERR
+b	ERR
+f	ERR
+g	61353	61401	61406	60369	
+i	ERR
+j	ERR
+I	ERR
+J	ERR
+l	ERR
+o	ERR
+P	ERR
+R	ERR
+T	ERR
+t	ERR
+U	ERR
+v	UTC	UTC	UTC	UTC	
+vvv	ERR
+r	ERR
+yyyy]	ERR
+#	ERR
+{	ERR
+}	ERR
+'x	ERR
+[y[M]d	2026119	20261227	202711	2024229	

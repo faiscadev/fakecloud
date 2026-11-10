@@ -34,9 +34,14 @@ pub const API_VERSION: &str = "2020-05-31";
 pub const API_PREFIX: &str = "/2020-05-31";
 pub const NAMESPACE: &str = fakecloud_aws::error::CLOUDFRONT_XMLNS;
 
-pub use service::{cloudfront_arn, distribution_arn, CloudFrontService};
+pub use service::{cloudfront_arn, distribution_arn, generate_etag, CloudFrontService};
+pub use state::AccountState;
 pub use state::{
     parse_cloudfront_snapshot, CloudFrontAccounts, CloudFrontSnapshot, SharedCloudFrontState,
     StoredDistribution, CLOUDFRONT_SNAPSHOT_SCHEMA_VERSION,
 };
-pub use validate::validate_distribution_config;
+pub use validate::{
+    canonicalize_distribution_config, canonicalize_distribution_update,
+    origin_access_identity_value, refuse_in_use, validate_distribution_references, ConfigRequest,
+    Reference,
+};

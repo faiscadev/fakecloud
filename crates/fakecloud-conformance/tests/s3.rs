@@ -400,6 +400,15 @@ async fn s3_object_acl() {
     client
         .create_bucket()
         .bucket("conf-oacl")
+        // New buckets have ACLs disabled and Block Public Access on, so a
+        // public ACL needs both lifted first, as on AWS.
+        .object_ownership(aws_sdk_s3::types::ObjectOwnership::ObjectWriter)
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_public_access_block()
+        .bucket("conf-oacl")
         .send()
         .await
         .unwrap();
@@ -584,6 +593,15 @@ async fn s3_bucket_acl() {
 
     client
         .create_bucket()
+        .bucket("conf-bacl")
+        // New buckets have ACLs disabled and Block Public Access on, so a
+        // public ACL needs both lifted first, as on AWS.
+        .object_ownership(aws_sdk_s3::types::ObjectOwnership::ObjectWriter)
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_public_access_block()
         .bucket("conf-bacl")
         .send()
         .await
@@ -1016,6 +1034,14 @@ async fn s3_bucket_policy() {
 
     client
         .create_bucket()
+        .bucket("conf-bpol")
+        .send()
+        .await
+        .unwrap();
+    // The policy is public, which a new bucket's default Block Public Access
+    // refuses; lift it first, as on AWS.
+    client
+        .delete_public_access_block()
         .bucket("conf-bpol")
         .send()
         .await

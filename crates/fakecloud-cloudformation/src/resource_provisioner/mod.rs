@@ -96,7 +96,6 @@ use fakecloud_route53::{
     model::{HealthCheckConfig, ResourceRecordSet},
     SharedRoute53State, StoredHealthCheck,
 };
-use fakecloud_s3::persistence::bucket_meta_snapshot;
 use fakecloud_s3::{S3Bucket, SharedS3State};
 use fakecloud_secretsmanager::{RotationRules, Secret, SecretVersion, SharedSecretsManagerState};
 use fakecloud_servicediscovery::SharedServiceDiscoveryState;
@@ -2603,8 +2602,37 @@ impl ResourceProvisioner {
         self.delete_resource(resource)
     }
 
-    /// Delete a previously created resource.
+    /// Delete a previously created resource. One that is already gone counts as
+    /// deleted, as on AWS: a resource removed out of band never fails a stack's
+    /// delete.
     pub fn delete_resource(&self, resource: &StackResource) -> Result<(), String> {
+        self.keeping_teardowns_on_failure(|| {
+            self.delete_resource_unchecked(resource).or_else(|e| {
+                if is_not_found_error(&e, &resource.physical_id) {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
+        })
+    }
+
+    /// Run a delete, dropping any container teardown it queued if it then failed:
+    /// a resource whose delete failed stays on the stack, so its backing
+    /// containers must not be reaped.
+    fn keeping_teardowns_on_failure(
+        &self,
+        delete: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let queued = self.pending_container_teardowns.lock().len();
+        let result = delete();
+        if result.is_err() {
+            self.pending_container_teardowns.lock().truncate(queued);
+        }
+        result
+    }
+
+    fn delete_resource_unchecked(&self, resource: &StackResource) -> Result<(), String> {
         match resource.resource_type.as_str() {
             "AWS::SQS::Queue" => self.delete_sqs_queue(&resource.physical_id),
             "AWS::SQS::QueuePolicy" => self.delete_sqs_queue_policy(&resource.physical_id),
@@ -4367,6 +4395,42 @@ fn parse_firehose_s3_destination(
     Ok(destination)
 }
 
+/// Whether a delete failed only because the resource is already gone, which AWS
+/// treats as deleted. Either the error's AWS code says not found (`*.NotFound`,
+/// `NoSuch*`, `ResourceNotFoundException`, `EntityNotFound`,
+/// `EntityNotFoundException`), or its message names `physical_id` itself as not
+/// found. A message about some other missing resource (a dependency) is a real
+/// failure.
+pub(crate) fn is_not_found_error(error: &str, physical_id: &str) -> bool {
+    if error_code(error).is_some_and(|code| {
+        code.ends_with(".NotFound")
+            || code.starts_with("NoSuch")
+            || matches!(
+                code,
+                "ResourceNotFoundException" | "EntityNotFound" | "EntityNotFoundException"
+            )
+    }) {
+        return true;
+    }
+    const PHRASES: &[&str] = &["not found", "does not exist", "doesn't exist"];
+    !physical_id.is_empty()
+        && error.contains(physical_id)
+        && PHRASES.iter().any(|p| error.contains(p))
+}
+
+/// The AWS error code a provisioner error carries: `EC2 <Action> failed (<Code>):
+/// ...` from `ec2_dispatch`, or a leading `<Code>: ...` from the other service
+/// dispatchers.
+fn error_code(error: &str) -> Option<&str> {
+    let code = if let Some(rest) = error.strip_prefix("EC2 ") {
+        rest.split_once(" failed (")?.1.split_once("):")?.0
+    } else {
+        error.split_once(": ")?.0
+    };
+    (!code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '.'))
+        .then_some(code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5121,7 +5185,8 @@ mod tests {
                     }
                 }],
                 "DefaultCacheBehavior": {
-                    "TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all"
+                    "TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
+                    "ForwardedValues": {"QueryString": false}
                 }
             }})
         };
@@ -5173,7 +5238,8 @@ mod tests {
                     "Origins": [{"Id": "o1", "DomainName": "ex.com",
                         "CustomOriginConfig": {"HTTPPort": 80, "HTTPSPort": 443,
                             "OriginProtocolPolicy": "http-only"}}],
-                    "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all"},
+                    "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all",
+                                             "ForwardedValues": {"QueryString": false}},
                     "CustomErrorResponses": [{"ErrorCode": 404, "ResponseCode": "200",
                         "ResponsePagePath": "/index.html"}],
                     "Logging": {"Bucket": "logs.s3.amazonaws.com", "IncludeCookies": true, "Prefix": "cf/"},
@@ -5836,6 +5902,129 @@ mod tests {
             Some("allViewer".to_string()),
             "origin request policy config updated in place"
         );
+    }
+
+    /// A resource already gone counts as deleted, whichever service reports it:
+    /// an EC2 `*.NotFound` code, a `NoSuch*` code, or a not-found message.
+    #[test]
+    fn deleting_a_resource_already_gone_succeeds() {
+        for (gone, id) in [
+            (
+                "EC2 DeleteNatGateway failed (InvalidNatGatewayID.NotFound): no such gateway",
+                "nat-1",
+            ),
+            ("NoSuchBucket: The specified bucket does not exist", "b"),
+            (
+                "ResourceNotFoundException: Requested resource not found",
+                "t",
+            ),
+            ("EntityNotFoundException: Database db not found", "db|t"),
+            // Batch reports its own resource missing under a generic code.
+            ("ClientException: Job queue q1 does not exist", "q1"),
+        ] {
+            assert!(is_not_found_error(gone, id), "{gone}");
+        }
+        for (real, id) in [
+            // A dependency missing is a real failure, not the resource gone.
+            (
+                "ClientException: Compute environment ce-other does not exist",
+                "q1",
+            ),
+            (
+                "DependencyViolation: subnet-9 not found in the VPC",
+                "vpc-1",
+            ),
+            (
+                "Resource handler returned message: \"The specified public key is in use.\"",
+                "K1",
+            ),
+            (
+                "The user pool cannot be deleted because deletion protection is activated.",
+                "p",
+            ),
+            ("Invalid Glue table physical id: x", "x"),
+        ] {
+            assert!(!is_not_found_error(real, id), "{real}");
+        }
+
+        let prov = make_provisioner();
+        let table = StackResource {
+            logical_id: "Table".into(),
+            physical_id: "removed-out-of-band|t".into(),
+            resource_type: "AWS::Glue::Table".into(),
+            status: "CREATE_COMPLETE".into(),
+            service_token: None,
+            attributes: Default::default(),
+            deletion_policy: None,
+            update_replace_policy: None,
+        };
+        prov.delete_resource(&table)
+            .expect("a table whose database is gone is already deleted");
+    }
+
+    /// A delete that fails leaves its resource on the stack, so the container
+    /// teardown it queued is dropped rather than reaped; one that succeeds keeps it.
+    #[test]
+    fn a_failed_delete_does_not_reap_its_containers() {
+        let prov = make_provisioner();
+        let queue = |prov: &ResourceProvisioner, ok: bool| {
+            prov.keeping_teardowns_on_failure(|| {
+                prov.pending_container_teardowns.lock().push(
+                    ContainerTeardownIntent::Ec2Instance {
+                        instance_id: "i-1".into(),
+                    },
+                );
+                if ok {
+                    Ok(())
+                } else {
+                    Err("DependencyViolation: in use".into())
+                }
+            })
+        };
+        assert!(queue(&prov, false).is_err());
+        assert!(prov.pending_container_teardowns.lock().is_empty());
+        queue(&prov, true).unwrap();
+        assert_eq!(prov.pending_container_teardowns.lock().len(), 1);
+    }
+
+    /// A CloudFront resource something still names fails to delete with
+    /// CloudFront's in-use error, as on AWS, and deletes once nothing does.
+    #[test]
+    fn cloudfront_delete_of_a_named_resource_fails() {
+        let prov = make_provisioner();
+        let pk = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFront::PublicKey",
+                "PK",
+                serde_json::json!({"PublicKeyConfig": {"Name": "pk", "EncodedKey": "-----KEY-----",
+                    "CallerReference": "cr-in-use"}}),
+            ))
+            .expect("public key provisions");
+        let kg = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFront::KeyGroup",
+                "KG",
+                serde_json::json!({"KeyGroupConfig": {"Name": "kg", "Items": [pk.physical_id.clone()]}}),
+            ))
+            .expect("key group provisions");
+        let err = prov
+            .delete_resource(&pk)
+            .expect_err("named by the key group");
+        assert!(
+            err.contains("The specified public key is in use.")
+                && err.contains("Status Code: 409")
+                && err.contains("HandlerErrorCode: ResourceConflict"),
+            "{err}"
+        );
+        assert!(prov
+            .cloudfront_state
+            .read()
+            .get(&prov.account_id)
+            .unwrap()
+            .public_keys
+            .contains_key(&pk.physical_id));
+        prov.delete_resource(&kg).expect("key group deletes");
+        prov.delete_resource(&pk).expect("public key deletes");
     }
 
     #[test]
@@ -7215,6 +7404,52 @@ mod tests {
     }
 
     #[test]
+    fn s3_public_bucket_policy_needs_block_public_policy_off() {
+        let prov = make_provisioner();
+        let public_policy = |bucket: &str| {
+            serde_json::json!({
+                "Bucket": bucket,
+                "PolicyDocument": {"Version": "2012-10-17", "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": "s3:GetObject",
+                    "Resource": format!("arn:aws:s3:::{bucket}/*")
+                }]}
+            })
+        };
+        prov.create_resource(&make_resource(
+            "AWS::S3::Bucket",
+            "B",
+            serde_json::json!({"BucketName": "pub-default"}),
+        ))
+        .unwrap();
+        let err = prov
+            .create_resource(&make_resource(
+                "AWS::S3::BucketPolicy",
+                "BP",
+                public_policy("pub-default"),
+            ))
+            .unwrap_err();
+        assert!(err.contains("BlockPublicPolicy"), "{err}");
+
+        prov.create_resource(&make_resource(
+            "AWS::S3::Bucket",
+            "B2",
+            serde_json::json!({
+                "BucketName": "pub-open",
+                "PublicAccessBlockConfiguration": {"BlockPublicPolicy": false}
+            }),
+        ))
+        .unwrap();
+        prov.create_resource(&make_resource(
+            "AWS::S3::BucketPolicy",
+            "BP2",
+            public_policy("pub-open"),
+        ))
+        .unwrap();
+    }
+
+    #[test]
     fn s3_bucket_policy_stored_on_bucket_and_cleared_on_delete() {
         let prov = make_provisioner();
         let bucket = prov
@@ -7229,9 +7464,12 @@ mod tests {
             "BP",
             serde_json::json!({
                 "Bucket": bucket.physical_id.clone(),
+                // A principal-scoped grant: a `Principal:"*"` one is refused
+                // by the new bucket's default BlockPublicPolicy (see
+                // `s3_public_bucket_policy_needs_block_public_policy_off`).
                 "PolicyDocument": {"Version": "2012-10-17", "Statement": [{
                     "Effect": "Allow",
-                    "Principal": "*",
+                    "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
                     "Action": "s3:GetObject",
                     "Resource": "arn:aws:s3:::b1/*"
                 }]}

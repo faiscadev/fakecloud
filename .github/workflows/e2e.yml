@@ -234,6 +234,8 @@ jobs:
             case "$1" in
               public.ecr.aws/docker/library/*)
                 echo "mirror.gcr.io/library/${1#public.ecr.aws/docker/library/}" ;;
+              public.ecr.aws/opensearchproject/opensearch:*)
+                echo "mirror.gcr.io/opensearchproject/opensearch:${1##*:} docker.io/opensearchproject/opensearch:${1##*:}" ;;
               public.ecr.aws/aws-cli/aws-cli:*)
                 tag="${1##*:}"
                 echo "mirror.gcr.io/amazon/aws-cli:$tag docker.io/amazon/aws-cli:$tag" ;;
@@ -307,7 +309,27 @@ jobs:
           if [ -n "$NEXTEST_PARTITION" ]; then
             cmd+=(--partition "$NEXTEST_PARTITION")
           fi
-          "${cmd[@]}"
+          # A partition that runs far past its usual time says nothing about why
+          # without this. It cannot explain a lost runner, whose log GitHub never
+          # keeps, but it does explain a slow or starving one.
+          (
+            set +e
+            while sleep 60; do
+              echo "::group::resources $(date -u +%H:%M:%S)"
+              free -m
+              df -h / /mnt 2>/dev/null
+              docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' 2>/dev/null
+              if [ "$INSTALL_PODMAN" = "true" ]; then
+                podman stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' 2>/dev/null
+              fi
+              echo "::endgroup::"
+            done
+          ) &
+          sampler=$!
+          status=0
+          "${cmd[@]}" || status=$?
+          kill "$sampler" 2>/dev/null || true
+          exit "$status"
 
       - name: Disk diagnostics after nextest
         if: always()

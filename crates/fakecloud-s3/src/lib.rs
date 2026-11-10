@@ -17,7 +17,7 @@ pub mod simulation;
 pub(crate) mod state;
 mod xml_util;
 
-pub use cfn::apply_cfn_bucket_properties;
+pub use cfn::{apply_cfn_bucket_properties, apply_cfn_new_bucket, bucket_policy_blocked};
 pub use delivery::S3DeliveryImpl;
 pub use service::S3Service;
 pub use state::{memory_body, S3AccessPoint, S3Bucket, S3Object, S3State, SharedS3State};

@@ -190,7 +190,8 @@ const DIST_TEMPLATE: &str = r#"{
           }],
           "DefaultCacheBehavior": {
             "TargetOriginId": "origin-1",
-            "ViewerProtocolPolicy": "redirect-to-https"
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "ForwardedValues": {"QueryString": false}
           }
         }
       }
@@ -290,7 +291,8 @@ const SPA_ERROR_TEMPLATE: &str = r#"{
           ],
           "DefaultCacheBehavior": {
             "TargetOriginId": "origin-1",
-            "ViewerProtocolPolicy": "allow-all"
+            "ViewerProtocolPolicy": "allow-all",
+            "ForwardedValues": {"QueryString": false}
           },
           "CustomErrorResponses": [
             {"ErrorCode": 403, "ResponseCode": 200, "ResponsePagePath": "/index.html", "ErrorCachingMinTTL": 300},
@@ -373,6 +375,15 @@ fn cdk_shaped_template(error_page: &str, api_max_ttl: u32) -> String {
     "Ipv6": {{"Type": "String", "Default": "true"}}
   }},
   "Resources": {{
+    "Rewrite": {{
+      "Type": "AWS::CloudFront::Function",
+      "Properties": {{
+        "Name": "rewrite",
+        "AutoPublish": true,
+        "FunctionCode": "function handler(event) {{ return event.request; }}",
+        "FunctionConfig": {{"Comment": "rewrite", "Runtime": "cloudfront-js-2.0"}}
+      }}
+    }},
     "Dist": {{
       "Type": "AWS::CloudFront::Distribution",
       "Properties": {{
@@ -392,7 +403,7 @@ fn cdk_shaped_template(error_page: &str, api_max_ttl: u32) -> String {
             "Compress": true,
             "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
             "FunctionAssociations": [
-              {{"EventType": "viewer-request", "FunctionARN": "arn:aws:cloudfront::123456789012:function/rewrite"}}
+              {{"EventType": "viewer-request", "FunctionARN": {{"Fn::GetAtt": ["Rewrite", "FunctionARN"]}}}}
             ]
           }},
           "CacheBehaviors": [{{
@@ -493,9 +504,11 @@ async fn cfn_provisions_and_updates_a_cdk_shaped_distribution() {
     assert_eq!(dcb.compress(), Some(true));
     let fa = dcb.function_associations().unwrap();
     assert_eq!(fa.quantity(), 1);
-    assert_eq!(
-        fa.items()[0].function_arn(),
-        "arn:aws:cloudfront::123456789012:function/rewrite"
+    // The function must exist; CDK references it the same way.
+    assert!(
+        fa.items()[0].function_arn().ends_with(":function/rewrite"),
+        "{}",
+        fa.items()[0].function_arn()
     );
 
     let behaviors = dcfg.cache_behaviors().expect("cache behaviors kept");
@@ -619,7 +632,7 @@ async fn cfn_distribution_with_a_minimal_template_reads_back_with_defaults() {
         "DistributionConfig": {
           "Enabled": true,
           "Origins": [{"Id": "o", "DomainName": "o.example.com", "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}}],
-          "DefaultCacheBehavior": {"TargetOriginId": "o", "ViewerProtocolPolicy": "allow-all"}
+          "DefaultCacheBehavior": {"TargetOriginId": "o", "ViewerProtocolPolicy": "allow-all", "ForwardedValues": {"QueryString": false}}
         }
       }
     }
@@ -678,4 +691,135 @@ async fn cfn_distribution_with_a_minimal_template_reads_back_with_defaults() {
     let dcb = cfg.default_cache_behavior().unwrap();
     assert_eq!(dcb.trusted_signers().unwrap().quantity(), 0);
     assert_eq!(dcb.function_associations().unwrap().quantity(), 0);
+}
+
+/// A stack resource something outside the stack still names fails to delete, as
+/// on AWS: the stack goes to `DELETE_FAILED` naming it, the event carries
+/// CloudFront's in-use error, and the delete succeeds once nothing names it.
+#[tokio::test]
+async fn cfn_delete_of_a_named_cloudfront_resource_fails_the_stack() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let cf = aws_sdk_cloudfront::Client::new(&server.aws_config().await);
+    let template = r#"{
+  "Resources": {
+    "PubKey": {
+      "Type": "AWS::CloudFront::PublicKey",
+      "Properties": {
+        "PublicKeyConfig": {
+          "CallerReference": "cfn-pk-in-use",
+          "Name": "cfn-pubkey-in-use",
+          "EncodedKey": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA\n-----END PUBLIC KEY-----"
+        }
+      }
+    }
+  },
+  "Outputs": {"PubKeyId": {"Value": {"Ref": "PubKey"}}}
+}"#;
+    cfn.create_stack()
+        .stack_name("cf-in-use")
+        .template_body(template)
+        .send()
+        .await
+        .expect("create_stack");
+    let described = cfn
+        .describe_stacks()
+        .stack_name("cf-in-use")
+        .send()
+        .await
+        .expect("describe_stacks");
+    let pk_id = described.stacks()[0]
+        .outputs()
+        .iter()
+        .find(|o| o.output_key() == Some("PubKeyId"))
+        .and_then(|o| o.output_value())
+        .expect("PubKeyId")
+        .to_string();
+
+    let kg = cf
+        .create_key_group()
+        .key_group_config(
+            aws_sdk_cloudfront::types::KeyGroupConfig::builder()
+                .name("outside-the-stack")
+                .items(&pk_id)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create_key_group");
+    let kg_id = kg.key_group().unwrap().id().to_string();
+
+    cfn.delete_stack()
+        .stack_name("cf-in-use")
+        .send()
+        .await
+        .expect("delete_stack");
+    let described = cfn
+        .describe_stacks()
+        .stack_name("cf-in-use")
+        .send()
+        .await
+        .expect("a stack whose delete failed is still there");
+    let stack = &described.stacks()[0];
+    assert_eq!(stack.stack_status().unwrap().as_str(), "DELETE_FAILED");
+    assert_eq!(
+        stack.stack_status_reason(),
+        Some("The following resource(s) failed to delete: [PubKey]. ")
+    );
+    let events = cfn
+        .describe_stack_events()
+        .stack_name("cf-in-use")
+        .send()
+        .await
+        .expect("describe_stack_events");
+    let failed = events
+        .stack_events()
+        .iter()
+        .find(|e| {
+            e.logical_resource_id() == Some("PubKey")
+                && e.resource_status().map(|s| s.as_str()) == Some("DELETE_FAILED")
+        })
+        .expect("the resource's DELETE_FAILED event");
+    assert!(
+        failed
+            .resource_status_reason()
+            .unwrap_or_default()
+            .contains("The specified public key is in use."),
+        "{:?}",
+        failed.resource_status_reason()
+    );
+    cf.get_public_key()
+        .id(&pk_id)
+        .send()
+        .await
+        .expect("the public key survives");
+
+    let etag = cf
+        .get_key_group()
+        .id(&kg_id)
+        .send()
+        .await
+        .unwrap()
+        .e_tag()
+        .unwrap()
+        .to_string();
+    cf.delete_key_group()
+        .id(&kg_id)
+        .if_match(etag)
+        .send()
+        .await
+        .expect("delete_key_group");
+    cfn.delete_stack()
+        .stack_name("cf-in-use")
+        .send()
+        .await
+        .expect("retried delete_stack");
+    assert!(cfn
+        .describe_stacks()
+        .stack_name("cf-in-use")
+        .send()
+        .await
+        .is_err());
+    assert!(cf.get_public_key().id(&pk_id).send().await.is_err());
 }

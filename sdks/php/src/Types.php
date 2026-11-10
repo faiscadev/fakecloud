@@ -2733,6 +2733,8 @@ final class BedrockAgentRuntimeInvocation
         public readonly mixed $trace,
         /** @var array<int, mixed> */
         public readonly array $citations,
+        /** @var array<int, mixed> */
+        public readonly array $flowOutputs,
         public readonly string $invokedAt,
         public readonly int $durationMs,
     ) {}
@@ -2750,6 +2752,7 @@ final class BedrockAgentRuntimeInvocation
             (int) ($data['outputChunks'] ?? 0),
             $data['trace'] ?? null,
             $data['citations'] ?? [],
+            $data['flowOutputs'] ?? [],
             $data['invokedAt'] ?? '',
             (int) ($data['durationMs'] ?? 0),
         );
