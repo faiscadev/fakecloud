@@ -627,3 +627,379 @@ async fn layer_extensions_receive_invoke_events() {
         "arn:aws:lambda:us-east-1:123456789012:function:with-ext"
     );
 }
+
+/// An asynchronous invocation through an alias tells the runtime the alias
+/// ARN it was invoked through and passes the caller's trace header on.
+#[tokio::test]
+async fn async_invoke_keeps_the_invoked_arn_and_trace() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let sqs = server.sqs_client().await;
+    let (url, arn) = queue(&sqs, "rtapi-async-ctx").await;
+    let code = "import os\ndef handler(event, context):\n    return {'arn': context.invoked_function_arn, 'trace': os.environ.get('_X_AMZN_TRACE_ID')}\n";
+    create(
+        &client,
+        "py-async-ctx",
+        Runtime::Python312,
+        "index.handler",
+        &[("index.py", code)],
+        None,
+    )
+    .await;
+    let version = client
+        .publish_version()
+        .function_name("py-async-ctx")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_alias()
+        .function_name("py-async-ctx")
+        .name("live")
+        .function_version(version.version().unwrap())
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_function_event_invoke_config()
+        .function_name("py-async-ctx")
+        .qualifier("live")
+        .destination_config(
+            DestinationConfig::builder()
+                .on_success(OnSuccess::builder().destination(&arn).build())
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let trace = "Root=1-67891233-abcdef012345678912345678;Parent=53995c3f42cd8ad8;Sampled=1";
+    client
+        .invoke()
+        .function_name("py-async-ctx")
+        .qualifier("live")
+        .invocation_type(InvocationType::Event)
+        .payload(Blob::new(b"{}".to_vec()))
+        .customize()
+        .mutate_request(move |req| {
+            req.headers_mut().insert("X-Amzn-Trace-Id", trace);
+        })
+        .send()
+        .await
+        .unwrap();
+    let record = receive_one(&sqs, &url).await;
+    assert_eq!(
+        record["responsePayload"]["arn"],
+        "arn:aws:lambda:us-east-1:123456789012:function:py-async-ctx:live"
+    );
+    assert_eq!(record["responsePayload"]["trace"], trace);
+}
+
+/// `LogType=Tail` returns only this invocation's output, stdout and stderr
+/// in the order they were written (the prints are a second apart: Podman
+/// timestamps log lines to the second).
+#[tokio::test]
+async fn log_tail_is_this_invocations_output_only() {
+    use base64::Engine as _;
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let code = "import sys, time\ndef handler(event, context):\n    tag = event['tag']\n    print(f'{tag}-one', flush=True)\n    time.sleep(1.1)\n    print(f'{tag}-two', file=sys.stderr, flush=True)\n    time.sleep(1.1)\n    print(f'{tag}-three', flush=True)\n    return tag\n";
+    create(
+        &client,
+        "py-tail",
+        Runtime::Python312,
+        "index.handler",
+        &[("index.py", code)],
+        Some(10),
+    )
+    .await;
+    let tail = |tag: &'static str| {
+        let client = client.clone();
+        async move {
+            let resp = client
+                .invoke()
+                .function_name("py-tail")
+                .log_type(aws_sdk_lambda::types::LogType::Tail)
+                .payload(Blob::new(format!("{{\"tag\":\"{tag}\"}}").into_bytes()))
+                .send()
+                .await
+                .unwrap();
+            let id = resp.request_id().unwrap().to_string();
+            let logs = base64::engine::general_purpose::STANDARD
+                .decode(resp.log_result().unwrap())
+                .unwrap();
+            (id, String::from_utf8(logs).unwrap())
+        }
+    };
+    tail("first").await;
+    let (id, logs) = tail("second").await;
+    assert!(
+        !logs.contains("first-"),
+        "another invocation's output: {logs}"
+    );
+    let pos = |needle: &str| {
+        logs.find(needle)
+            .unwrap_or_else(|| panic!("{needle} missing from {logs}"))
+    };
+    assert!(pos(&format!("START RequestId: {id}")) < pos("second-one"));
+    assert!(pos("second-one") < pos("second-two"), "{logs}");
+    assert!(pos("second-two") < pos("second-three"), "{logs}");
+    assert!(pos("second-three") < pos(&format!("END RequestId: {id}")));
+}
+
+async fn publish_layer(
+    client: &aws_sdk_lambda::Client,
+    name: &str,
+    files: &[(&str, &str)],
+) -> String {
+    client
+        .publish_layer_version()
+        .layer_name(name)
+        .content(
+            aws_sdk_lambda::types::LayerVersionContentInput::builder()
+                .zip_file(Blob::new(make_zip(files)))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .layer_version_arn()
+        .unwrap()
+        .to_string()
+}
+
+/// An extension in the style of the Parameters and Secrets extension: it
+/// serves `localhost:2773` and registers; the function's init code calls
+/// it, which works because extensions start (and register) before the
+/// runtime does.
+const LOCAL_SERVER_EXTENSION: &str = r#"#!/var/lang/bin/python3
+import http.server, json, os, threading, urllib.request
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b"from-extension")
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", 2773), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+api = "http://" + os.environ["AWS_LAMBDA_RUNTIME_API"] + "/2020-01-01/extension"
+req = urllib.request.Request(api + "/register", data=json.dumps({"events": ["INVOKE"]}).encode(),
+                             headers={"Lambda-Extension-Name": "local-server"}, method="POST")
+ident = urllib.request.urlopen(req).headers["Lambda-Extension-Identifier"]
+while True:
+    urllib.request.urlopen(urllib.request.Request(api + "/event/next",
+                           headers={"Lambda-Extension-Identifier": ident})).read()
+"#;
+
+#[tokio::test]
+async fn function_init_can_call_an_extension() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let layer = publish_layer(
+        &client,
+        "local-server",
+        &[("extensions/local-server", LOCAL_SERVER_EXTENSION)],
+    )
+    .await;
+    let code = "import urllib.request\nFROM_INIT = urllib.request.urlopen('http://127.0.0.1:2773/', timeout=2).read().decode()\ndef handler(event, context):\n    return FROM_INIT\n";
+    client
+        .create_function()
+        .function_name("init-calls-ext")
+        .runtime(Runtime::Python312)
+        .role(ROLE)
+        .handler("index.handler")
+        .layers(layer)
+        .code(
+            FunctionCode::builder()
+                .zip_file(Blob::new(make_zip(&[("index.py", code)])))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let resp = invoke(&client, "init-calls-ext", "{}").await;
+    assert_eq!(resp.function_error(), None, "{}", json(&resp));
+    assert_eq!(json(&resp), serde_json::json!("from-extension"));
+}
+
+/// An extension that exits during init fails the invocation with
+/// `Extension.Crash` instead of leaving it waiting for the extension.
+#[tokio::test]
+async fn a_crashing_extension_fails_the_init() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let layer = publish_layer(
+        &client,
+        "crasher",
+        &[("extensions/crasher", "#!/bin/sh\necho crashing\nexit 1\n")],
+    )
+    .await;
+    client
+        .create_function()
+        .function_name("with-crasher")
+        .runtime(Runtime::Python312)
+        .role(ROLE)
+        .handler("index.handler")
+        .layers(layer)
+        .code(
+            FunctionCode::builder()
+                .zip_file(Blob::new(make_zip(&[(
+                    "index.py",
+                    "def handler(e, c):\n    return 1\n",
+                )])))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let resp = invoke(&client, "with-crasher", "{}").await;
+    assert!(started.elapsed() < Duration::from_secs(30));
+    assert_eq!(resp.function_error(), Some("Unhandled"));
+    let body = json(&resp);
+    assert_eq!(body["errorType"], "Extension.Crash", "{body}");
+    assert!(
+        body["errorMessage"].as_str().unwrap().contains("crasher"),
+        "{body}"
+    );
+}
+
+/// An extension still working after the response keeps the environment for
+/// the rest of the invoke phase (within the timeout) without it being
+/// reset: once the work is done, the next event runs on the same warm
+/// environment.
+#[tokio::test]
+async fn post_response_extension_work_does_not_reset_the_environment() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let ext = r#"#!/bin/sh
+API="http://${AWS_LAMBDA_RUNTIME_API}/2020-01-01/extension"
+H=$(mktemp)
+curl -sS -D "$H" -o /dev/null -X POST "$API/register" -H "Lambda-Extension-Name: slow-ext" -d '{"events":["INVOKE"]}'
+ID=$(grep -Fi Lambda-Extension-Identifier "$H" | cut -d: -f2- | tr -d '[:space:]')
+while true; do
+  curl -sS -o /dev/null "$API/event/next" -H "Lambda-Extension-Identifier: $ID"
+  sleep 1.5
+done
+"#;
+    let layer = publish_layer(&client, "slow-ext", &[("extensions/slow-ext", ext)]).await;
+    let bootstrap = r#"#!/bin/sh
+API="http://${AWS_LAMBDA_RUNTIME_API}/2018-06-01/runtime"
+N=0
+while true; do
+  HEADERS=$(mktemp)
+  curl -sS -D "$HEADERS" -o /dev/null "$API/invocation/next"
+  ID=$(grep -Fi Lambda-Runtime-Aws-Request-Id "$HEADERS" | cut -d: -f2- | tr -d '[:space:]')
+  N=$((N+1))
+  curl -sS -o /dev/null -X POST "$API/invocation/$ID/response" -d "$N"
+done
+"#;
+    client
+        .create_function()
+        .function_name("slow-ext-fn")
+        .runtime(Runtime::Providedal2023)
+        .role(ROLE)
+        .handler("bootstrap")
+        .timeout(10)
+        .layers(layer)
+        .code(
+            FunctionCode::builder()
+                .zip_file(Blob::new(make_zip(&[("bootstrap", bootstrap)])))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        json(&invoke(&client, "slow-ext-fn", "{}").await),
+        serde_json::json!(1)
+    );
+    // Once the extension is done the environment is free again: not reset.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let resp = invoke(&client, "slow-ext-fn", "{}").await;
+    assert_eq!(resp.function_error(), None);
+    assert_eq!(
+        json(&resp),
+        serde_json::json!(2),
+        "the same warm environment"
+    );
+}
+
+/// An integration targeting a version runs that version's code and
+/// configuration, not `$LATEST`'s.
+#[tokio::test]
+async fn a_qualified_integration_invoke_runs_that_version() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let sqs = server.sqs_client().await;
+    let eb = server.eventbridge_client().await;
+    let (url, arn) = queue(&sqs, "rtapi-qualified").await;
+    let code = |tag: &str| {
+        format!("import os\ndef handler(event, context):\n    return {{'code': '{tag}', 'version': os.environ['AWS_LAMBDA_FUNCTION_VERSION'], 'arn': context.invoked_function_arn}}\n")
+    };
+    create(
+        &client,
+        "py-versions",
+        Runtime::Python312,
+        "index.handler",
+        &[("index.py", &code("v1"))],
+        None,
+    )
+    .await;
+    client
+        .publish_version()
+        .function_name("py-versions")
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_function_code()
+        .function_name("py-versions")
+        .zip_file(Blob::new(make_zip(&[("index.py", &code("latest"))])))
+        .send()
+        .await
+        .unwrap();
+    let fn_arn = "arn:aws:lambda:us-east-1:123456789012:function:py-versions:1";
+    client
+        .put_function_event_invoke_config()
+        .function_name("py-versions")
+        .qualifier("1")
+        .destination_config(
+            DestinationConfig::builder()
+                .on_success(OnSuccess::builder().destination(&arn).build())
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    eb.put_rule()
+        .name("to-v1")
+        .event_pattern(r#"{"source":["rtapi.test"]}"#)
+        .send()
+        .await
+        .unwrap();
+    eb.put_targets()
+        .rule("to-v1")
+        .targets(
+            aws_sdk_eventbridge::types::Target::builder()
+                .id("fn")
+                .arn(fn_arn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    eb.put_events()
+        .entries(
+            aws_sdk_eventbridge::types::PutEventsRequestEntry::builder()
+                .source("rtapi.test")
+                .detail_type("t")
+                .detail("{}")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let record = receive_one(&sqs, &url).await;
+    assert_eq!(record["responsePayload"]["code"], "v1", "{record}");
+    assert_eq!(record["responsePayload"]["version"], "1");
+    assert_eq!(record["responsePayload"]["arn"], fn_arn);
+}
