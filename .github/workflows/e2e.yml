@@ -370,8 +370,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
+      # The runner image ships nftables, which the job needs. conntrack only
+      # backs the best-effort `conntrack -F` between retries, so a runner that
+      # cannot reach the Ubuntu archive (DNS failures resolving *.ubuntu.com
+      # have hit whole days of runs) must not fail the job over it.
       - name: Install nftables
-        run: sudo apt-get update && sudo apt-get install -y nftables conntrack
+        run: |
+          set -u
+          apt_install() {
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update \
+              && sudo apt-get -o Acquire::Retries=3 install -y "$@"
+          }
+          if ! command -v nft >/dev/null; then
+            apt_install nftables conntrack
+          elif ! command -v conntrack >/dev/null; then
+            apt_install conntrack || echo "::warning::conntrack unavailable; retries skip the conntrack flush"
+          fi
+          nft --version
 
       # Same-subnet instances share one Linux bridge, so their traffic is L2-switched
       # and only traverses the nft `forward` chain when bridge netfilter is active.
