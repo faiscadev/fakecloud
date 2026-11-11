@@ -6276,6 +6276,7 @@ dependencies = [
  "http 1.4.0",
  "parking_lot",
  "percent-encoding",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

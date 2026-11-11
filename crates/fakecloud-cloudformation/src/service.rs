@@ -590,6 +590,22 @@ impl CloudControlOutcome {
     }
 }
 
+/// Run the container spawns and teardowns a provisioner queued, off the
+/// request path.
+fn drain_container_intents(
+    provisioner: &ResourceProvisioner,
+    snapshot_hooks: &BTreeMap<&'static str, SnapshotHook>,
+) {
+    let handles =
+        ContainerBackingHandles::from_provisioner(provisioner).with_snapshot_hooks(snapshot_hooks);
+    handles.spawn_container_intents(std::mem::take(
+        &mut *provisioner.pending_container_spawns.lock(),
+    ));
+    handles.spawn_teardown_intents(std::mem::take(
+        &mut *provisioner.pending_container_teardowns.lock(),
+    ));
+}
+
 /// Rebuild the `StackResource` shape the update/delete handlers expect from the
 /// identity Cloud Control persists between calls.
 fn reconstruct_stack_resource(
@@ -705,6 +721,7 @@ pub struct CloudFormationDeps {
     pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
     pub mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
     pub kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
+    pub opensearch_runtime: Option<Arc<fakecloud_opensearch::OpenSearchRuntime>>,
 }
 
 #[derive(Clone)]
@@ -872,6 +889,8 @@ pub(crate) struct ContainerBackingHandles {
     mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
     kafka_state: fakecloud_kafka::SharedKafkaState,
     kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
+    opensearch_state: fakecloud_opensearch::SharedOpenSearchState,
+    opensearch_runtime: Option<Arc<fakecloud_opensearch::OpenSearchRuntime>>,
     /// Snapshot hooks for the services whose DETACHED container-backing task
     /// mutates snapshot-backed state AFTER the stack op has already serialized
     /// it. `persist_touched_services` fires right after the op returns, which
@@ -912,6 +931,8 @@ impl ContainerBackingHandles {
             mq_runtime: p.mq_runtime.clone(),
             kafka_state: p.kafka_state.clone(),
             kafka_runtime: p.kafka_runtime.clone(),
+            opensearch_state: p.opensearch_state.clone(),
+            opensearch_runtime: p.opensearch_runtime.clone(),
             autoscaling_snapshot_hook: None,
             ec2_snapshot_hook: None,
             snapshot_hooks: BTreeMap::new(),
@@ -1095,6 +1116,17 @@ impl ContainerBackingHandles {
                         });
                     }
                 }
+                ContainerSpawnIntent::OpenSearchDomain { domain_name } => {
+                    if let Some(runtime) = self.opensearch_runtime.clone() {
+                        tokio::spawn(fakecloud_opensearch::backing::converge_domain(
+                            self.opensearch_state.clone(),
+                            runtime,
+                            self.account_id.clone(),
+                            domain_name,
+                            self.persist_hook("es"),
+                        ));
+                    }
+                }
                 ContainerSpawnIntent::MskCluster { cluster_arn } => {
                     if let Some(runtime) = self.kafka_runtime.clone() {
                         let kafka_state = self.kafka_state.clone();
@@ -1227,6 +1259,21 @@ impl ContainerBackingHandles {
                                 runtime, broker_id,
                             )
                             .await;
+                        });
+                    }
+                }
+                ContainerTeardownIntent::OpenSearchDomain {
+                    container_id,
+                    volume,
+                } => {
+                    if let Some(runtime) = self.opensearch_runtime.clone() {
+                        tokio::spawn(async move {
+                            if let Some(cid) = container_id {
+                                runtime.remove_container(&cid).await;
+                            }
+                            if let Some(v) = volume {
+                                runtime.remove_volume(&v).await;
+                            }
                         });
                     }
                 }
@@ -1517,6 +1564,7 @@ impl CloudFormationService {
             elasticache_runtime: self.deps.elasticache_runtime.clone(),
             mq_runtime: self.deps.mq_runtime.clone(),
             kafka_runtime: self.deps.kafka_runtime.clone(),
+            opensearch_runtime: self.deps.opensearch_runtime.clone(),
             pending_container_spawns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_container_teardowns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_custom_invokes: Arc::new(parking_lot::Mutex::new(Vec::new())),
@@ -1631,7 +1679,13 @@ impl CloudFormationService {
         };
         // `None` means the handler treated the change as a no-op (nothing to
         // mutate); the resource keeps its prior identity + attributes.
-        match provisioner.update_resource(&existing, &def)? {
+        let updated = provisioner.update_resource(&existing, &def);
+        // An update can queue container work (a search domain whose engine
+        // version or node settings changed replaces its cluster); run it off
+        // the request path, as UpdateStack does, whether or not the update
+        // then failed.
+        drain_container_intents(&provisioner, &self.snapshot_hooks);
+        match updated? {
             Some(updated) => Ok(CloudControlOutcome::from(&updated)),
             None => Ok(CloudControlOutcome::from(&existing)),
         }
@@ -3875,14 +3929,7 @@ impl CloudFormationService {
         region: &str,
         outcome: &crate::stack_update::UpdateOutcome,
     ) {
-        let handles = ContainerBackingHandles::from_provisioner(provisioner)
-            .with_snapshot_hooks(&self.snapshot_hooks);
-        handles.spawn_container_intents(std::mem::take(
-            &mut *provisioner.pending_container_spawns.lock(),
-        ));
-        handles.spawn_teardown_intents(std::mem::take(
-            &mut *provisioner.pending_container_teardowns.lock(),
-        ));
+        drain_container_intents(provisioner, &self.snapshot_hooks);
         spawn_custom_invokes(provisioner);
         let notification_arns = {
             let accounts = self.state.read();
@@ -4700,6 +4747,12 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn make_service() -> CloudFormationService {
+        make_service_with_opensearch(None)
+    }
+
+    fn make_service_with_opensearch(
+        opensearch_runtime: Option<Arc<fakecloud_opensearch::OpenSearchRuntime>>,
+    ) -> CloudFormationService {
         // Fresh empty per-account state for the services added by the
         // orchestration/persistence sweep (all MultiAccountState-backed).
         fn mas<T: fakecloud_core::multi_account::AccountState>(
@@ -5003,8 +5056,172 @@ pub(crate) mod tests {
             elasticache_runtime: None,
             mq_runtime: None,
             kafka_runtime: None,
+            opensearch_runtime,
         };
         CloudFormationService::new(cf_state, deps)
+    }
+
+    /// Wait until domain `name` has settled and its cluster runs `image`.
+    async fn wait_domain_on(
+        svc: &CloudFormationService,
+        engine: &fakecloud_opensearch::runtime::fake::FakeEngine,
+        name: &str,
+        image: &str,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let settled = svc
+                .deps
+                .opensearch
+                .read()
+                .get("123456789012")
+                .and_then(|st| st.domains.get(name))
+                .is_some_and(|d| d.processing.is_none() && d.data_plane.is_some());
+            let on_image = engine
+                .calls()
+                .iter()
+                .any(|c| c.starts_with("create") && c.ends_with(image));
+            if settled && on_image {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "domain {name} never settled on {image}: {:#?}",
+                engine.calls()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A Cloud Control update that changes a search domain's engine version
+    /// replaces its cluster: the queued container work is drained, so the
+    /// domain settles on the new image instead of staying `Processing`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cloudcontrol_update_drains_search_domain_container_work() {
+        let engine = fakecloud_opensearch::runtime::fake::FakeEngine::start().await;
+        let svc = make_service_with_opensearch(Some(engine.runtime.clone()));
+        let created = svc
+            .cloudcontrol_create(
+                "AWS::OpenSearchService::Domain",
+                serde_json::json!({"DomainName": "ccdom", "EngineVersion": "OpenSearch_2.11"}),
+                "123456789012",
+                "us-east-1",
+            )
+            .unwrap();
+        wait_domain_on(&svc, &engine, "ccdom", "opensearch:2.11.1").await;
+        svc.cloudcontrol_update(
+            "AWS::OpenSearchService::Domain",
+            &created.physical_id,
+            &created.attributes,
+            &serde_json::json!({"DomainName": "ccdom", "EngineVersion": "OpenSearch_2.11"}),
+            serde_json::json!({"DomainName": "ccdom", "EngineVersion": "OpenSearch_2.13"}),
+            "123456789012",
+            "us-east-1",
+        )
+        .unwrap();
+        wait_domain_on(&svc, &engine, "ccdom", "opensearch:2.13.0").await;
+    }
+
+    /// An UpdateStack that fails after updating a search domain rolls the
+    /// domain back, and the container work the forward pass and the rollback
+    /// queued still runs: the domain settles on the engine version its state
+    /// ends with instead of staying `Modifying`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_update_stack_drains_search_domain_container_work() {
+        let engine = fakecloud_opensearch::runtime::fake::FakeEngine::start().await;
+        let svc = make_service_with_opensearch(Some(engine.runtime.clone()));
+        let template = |version: &str, bad: bool| {
+            let mut resources = serde_json::json!({
+                "Search": {"Type": "AWS::OpenSearchService::Domain",
+                    "Properties": {"DomainName": "stdom", "EngineVersion": version}}
+            });
+            if bad {
+                resources["BadSub"] = serde_json::json!({
+                    "Type": "AWS::SNS::Subscription",
+                    "DependsOn": "Search",
+                    "Properties": {"TopicArn": "arn:aws:sns:us-east-1:123456789012:nope",
+                        "Protocol": "sqs", "Endpoint": "arn:aws:sqs:us-east-1:123456789012:q1"}
+                });
+            }
+            serde_json::json!({"Resources": resources}).to_string()
+        };
+        let params = |body: String| {
+            HashMap::from([
+                ("StackName".to_string(), "search-stack".to_string()),
+                ("TemplateBody".to_string(), body),
+            ])
+        };
+        svc.create_stack(&make_request(
+            "CreateStack",
+            params(template("OpenSearch_2.11", false)),
+        ))
+        .await
+        .unwrap();
+        wait_domain_on(&svc, &engine, "stdom", "opensearch:2.11.1").await;
+        let result = svc
+            .update_stack(&make_request(
+                "UpdateStack",
+                params(template("OpenSearch_2.13", true)),
+            ))
+            .await;
+        // Accepted, as on AWS: the failure is the stack's to report.
+        assert!(result.is_ok());
+        {
+            let accounts = svc.state.read();
+            let state = accounts.regional("123456789012", "us-east-1").unwrap();
+            let stack = state.live_stack("search-stack").unwrap();
+            assert_eq!(stack.status, "UPDATE_ROLLBACK_COMPLETE");
+        }
+        let version = svc
+            .deps
+            .opensearch
+            .read()
+            .get("123456789012")
+            .and_then(|st| st.domains.get("stdom"))
+            .map(|d| d.engine_version.clone())
+            .unwrap();
+        assert_eq!(version, "OpenSearch_2.11");
+        // The last container brought up runs the rolled-back version, and the
+        // domain is no longer processing.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let settled = svc
+                .deps
+                .opensearch
+                .read()
+                .get("123456789012")
+                .and_then(|st| st.domains.get("stdom"))
+                .is_some_and(|d| d.processing.is_none() && d.data_plane.is_some());
+            let last_create = engine
+                .calls()
+                .iter()
+                .rev()
+                .find(|c| c.starts_with("create"))
+                .cloned();
+            if settled
+                && last_create
+                    .as_deref()
+                    .is_some_and(|c| c.ends_with("opensearch:2.11.1"))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "domain never settled back on 2.11: {:#?} {:#?}",
+                engine.calls(),
+                svc.deps
+                    .opensearch
+                    .read()
+                    .get("123456789012")
+                    .and_then(|st| st.domains.get("stdom"))
+                    .map(|d| (
+                        d.processing.clone(),
+                        d.data_plane.is_some(),
+                        d.change_pending
+                    ))
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     pub(crate) fn make_request(action: &str, params: HashMap<String, String>) -> AwsRequest {

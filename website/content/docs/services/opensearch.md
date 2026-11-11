@@ -1,6 +1,6 @@
 +++
 title = "OpenSearch Service"
-description = "Amazon OpenSearch Service + Amazon Elasticsearch Service (es) on fakecloud: one shared control plane for both APIs (147 operations, 100% conformance) — domains, packages, VPC endpoints, cross-cluster connections, applications, data sources. restJson1."
+description = "Amazon OpenSearch Service + Amazon Elasticsearch Service (es) on fakecloud: one shared control plane for both APIs (147 operations, 100% conformance) plus real single-node OpenSearch / Elasticsearch clusters behind every domain. restJson1."
 weight = 47
 +++
 
@@ -21,17 +21,89 @@ operations + 96 OpenSearch Service operations** — with **100% conformance acro
 both APIs**, backed by account-partitioned state that persists across restarts in
 persistent mode.
 
-## Control-plane only
+## Real search clusters
 
-This is a control-plane emulation: no real Elasticsearch or OpenSearch cluster is
-spawned (mirroring LocalStack Community, which treats these as control-plane
-mocks). CRUD is real — `CreateDomain`/`CreateElasticsearchDomain` persists a
-domain that its Describe/List reflects, config updates persist, and Delete
-removes it. A newly created domain settles to `Processing=false`/`Created=true`
-with a synthetic search endpoint (`search-<name>-<rand>.<region>.es.amazonaws.com`)
-on first describe, mirroring the real control plane's eventual creation, so
-provisioning waiters complete. There is no search data plane (indexing/query
-traffic against the cluster itself).
+With Docker or Podman available, every domain is backed by a **real
+single-node search cluster**, so a client genuinely indexes and searches
+against it:
+
+| Engine version | Image |
+| --- | --- |
+| `OpenSearch_1.0` .. `OpenSearch_3.1` | `public.ecr.aws/opensearchproject/opensearch:<newest patch>` (e.g. `OpenSearch_2.11` -> `2.11.1`); a newer minor runs its `X.Y.0` tag |
+| `Elasticsearch_6.0` .. `Elasticsearch_7.10` | `docker.elastic.co/elasticsearch/elasticsearch-oss:<newest patch>` (e.g. `Elasticsearch_7.10` -> `7.10.2`), the Apache-2.0 distribution Amazon Elasticsearch Service was built from |
+| `Elasticsearch_1.5` .. `Elasticsearch_5.6` | none: these domains stay control-plane only |
+
+`FAKECLOUD_OPENSEARCH_IMAGE_REPO` / `FAKECLOUD_ELASTICSEARCH_IMAGE_REPO`
+override the repositories (a mirror or a private registry); the tag is still
+chosen from the engine version.
+
+- **Lifecycle.** `CreateDomain` / `CreateElasticsearchDomain` returns
+  `Processing=true` (`DomainProcessingStatus=Creating`) and starts the cluster
+  in the background; Describe reports `Processing=false` /
+  `DomainProcessingStatus=Active` only once the node answers
+  `_cluster/health`. `DeleteDomain` removes the container and its data volume.
+- **Endpoint.** The domain keeps reporting its AWS-format `Endpoint`
+  (`search-<name>-<id>.<region>.es.amazonaws.com`, or `Endpoints["vpc"]` for a
+  VPC domain). fakecloud's own listener serves that name: a request to
+  `http://localhost:4566` whose `Host` is the endpoint (or `EndpointV2`) is
+  proxied to the domain's cluster, so pointing the name at fakecloud
+  (`/etc/hosts`, a compose network alias, or a `Host` header) is enough, even
+  when fakecloud runs in a container. While the cluster isn't up that name
+  answers `503`. The cluster's port 9200 is also published on an ephemeral
+  host port (`docker ps --filter label=fakecloud-opensearch=<domain ARN>`).
+- **Firehose.** A delivery stream with a `DomainARN` destination delivers to
+  the domain's cluster once it is up.
+- **Single node, small heap.** `discovery.type=single-node` with a 512 MiB
+  heap, whatever `ClusterConfig` says (instance counts, dedicated masters,
+  zone awareness and warm/cold tiers are stored and echoed, not run).
+- **Plain HTTP, no auth.** The cluster runs with the security plugin
+  disabled, so the endpoint answers HTTP with no credentials.
+  `AccessPolicies`, `AdvancedSecurityOptions` (fine-grained access control,
+  including a master user), `DomainEndpointOptions` (`EnforceHTTPS`) and
+  node-to-node / at-rest encryption are stored and echoed but not enforced on
+  the data plane.
+- **Configuration changes.** The `AdvancedOptions` that are node settings
+  (`rest.action.multi.allow_explicit_index`, `indices.fielddata.cache.size`
+  as a heap percentage, `indices.query.bool.max_clause_count`) are applied to
+  the node. Changing them through `UpdateDomainConfig` (or a CloudFormation
+  update), or upgrading with `UpgradeDomain`, replaces the container on the
+  same data volume, so indices carry over, as AWS's blue/green deployment
+  does; the domain reports `Processing=true` (`Modifying`, or
+  `UpgradingEngineVersion` with `UpgradeProcessing=true`) until the new node
+  is healthy. Other changes leave the running cluster alone.
+  `DescribeDomainChangeProgress` reports the change `PROCESSING`
+  (`ApplyingChanges`) and `GetUpgradeStatus` the upgrade `IN_PROGRESS`
+  meanwhile; a new domain reports `Created=false` until its cluster is up,
+  and `DeleteDomain` returns `DomainProcessingStatus=Deleting`.
+- **Known difference: no blue/green overlap.** AWS keeps the old nodes
+  serving until the new ones take over; fakecloud stops the old container
+  before the new one is healthy, so the endpoint answers `503` (and Firehose
+  `DomainARN` deliveries retry) for the length of the replacement.
+- **Durability.** The data directory is a named volume. A persistent-mode
+  restart (`--storage-mode persistent`) brings each domain back in a fresh
+  container on its persisted volume, reporting `Processing=true` until it
+  answers health again (a node on existing data counts as up even if its
+  indices are red). Before a node starts, any container still mounting the
+  domain's volume is removed, whichever fakecloud process started it. A
+  reset removes every domain's container and volume.
+- **Crashes.** A cluster that crashes is not restarted automatically: its
+  endpoint stays bound to the dead port. An `UpdateDomainConfig` call (when
+  the daemon reports the container gone or exited) or a fakecloud restart
+  brings it back.
+- **CloudFormation.** `AWS::OpenSearchService::Domain` and
+  `AWS::Elasticsearch::Domain` start the same cluster; a stack update that
+  changes node settings or the engine version replaces it, and a stack delete
+  removes it.
+- **Failure.** If the cluster can't start (no image for the platform, a
+  failed pull, a node that never turns healthy), the domain settles to
+  `Processing=false` without a reachable cluster (control-plane only); the
+  next configuration change or restart tries again.
+
+Without a container runtime, or with `FAKECLOUD_OPENSEARCH_DISABLE_BACKEND=1`,
+domains are control-plane only: a new domain settles to
+`Processing=false`/`Created=true` on first describe with its synthetic
+endpoint, and nothing serves it. Search clusters always run through the
+Docker/Podman CLI, also under `FAKECLOUD_CONTAINER_BACKEND=k8s`.
 
 ## Supported now (all 147 operations)
 

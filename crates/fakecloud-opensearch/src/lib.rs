@@ -10,14 +10,18 @@
 //! `ElasticsearchDomainStatus` shape, the 2021 API via the superset
 //! `DomainStatus` shape).
 
+pub mod backing;
+pub mod dataplane;
 mod pagination;
 mod pagination_gen;
 pub mod persistence;
+pub mod runtime;
 pub(crate) mod service;
 pub mod state;
 mod validation_gen;
 pub mod vpc;
 
+pub use runtime::OpenSearchRuntime;
 pub use service::{OpenSearchService, ES_ACTIONS, OPENSEARCH_ACTIONS};
 pub use state::{
     OpenSearchSnapshot, OpenSearchState, SharedOpenSearchState, OPENSEARCH_SNAPSHOT_SCHEMA_VERSION,

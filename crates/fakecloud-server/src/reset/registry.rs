@@ -125,6 +125,7 @@ pub(crate) struct ResetServiceStates {
     pub kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
     pub flink_runtime: Option<Arc<fakecloud_kinesisanalyticsv2::FlinkRuntime>>,
     pub mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
+    pub opensearch_runtime: Option<Arc<fakecloud_opensearch::OpenSearchRuntime>>,
     pub codebuild_running: Option<fakecloud_codebuild::runtime::RunningBuilds>,
 }
 
@@ -192,7 +193,6 @@ pub(crate) fn reset_services(s: ResetServiceStates) -> Vec<ServiceReset> {
         ServiceReset::multi_account(&["memorydb"], "memorydb", s.memorydb),
         ServiceReset::multi_account(&["mwaa", "airflow"], "mwaa", s.mwaa),
         ServiceReset::multi_account(&["neptune"], "neptune", s.neptune),
-        ServiceReset::multi_account(&["es", "opensearch"], "es", s.opensearch),
         ServiceReset::multi_account(&["pinpoint", "mobiletargeting"], "pinpoint", s.pinpoint),
         ServiceReset::multi_account(&["ram"], "ram", s.ram),
         ServiceReset::multi_account(&["resource-groups"], "resource-groups", s.resource_groups),
@@ -259,6 +259,7 @@ pub(crate) fn reset_services(s: ResetServiceStates) -> Vec<ServiceReset> {
     });
     services.push(codebuild_reset(s.codebuild, s.codebuild_running));
     services.push(mq_reset(s.mq, s.mq_runtime));
+    services.push(opensearch_reset(s.opensearch, s.opensearch_runtime));
     services.push(kafka_reset(s.kafka, s.kafka_runtime));
     services.push(flink_reset(s.kinesisanalyticsv2, s.flink_runtime));
     services
@@ -388,6 +389,99 @@ fn mq_reset(
                 rows
             };
             stop_brokers(teardown, &runtime, brokers);
+        },
+    )
+}
+
+/// `(domain ARN, data volume)` of every domain in an OpenSearch state.
+fn opensearch_domains(
+    state: &fakecloud_opensearch::OpenSearchState,
+) -> Vec<(String, Option<String>)> {
+    state
+        .domains
+        .values()
+        .map(|d| {
+            (
+                d.arn.clone(),
+                fakecloud_opensearch::backing::domain_spec(d).map(|s| s.volume),
+            )
+        })
+        .collect()
+}
+
+/// Remove the backing clusters (containers and data volumes) of `domains`
+/// as part of the teardown.
+fn destroy_domains(
+    teardown: &mut Teardown,
+    runtime: &Option<Arc<fakecloud_opensearch::OpenSearchRuntime>>,
+    domains: Vec<(String, Option<String>)>,
+) {
+    if let Some(rt) = runtime.clone() {
+        teardown.push(async move {
+            for (arn, volume) in domains {
+                rt.destroy_domain(&arn, volume.as_deref()).await;
+            }
+        });
+    }
+}
+
+/// OpenSearch / Elasticsearch: the domains' backing clusters go with their
+/// rows. A tracked container whose row is already gone is still removed by a
+/// full reset; an account reset reaches the tracked ones whose ARN names the
+/// account.
+fn opensearch_reset(
+    state: fakecloud_opensearch::SharedOpenSearchState,
+    runtime: Option<Arc<fakecloud_opensearch::OpenSearchRuntime>>,
+) -> ServiceReset {
+    let all = state.clone();
+    let all_rt = runtime.clone();
+    ServiceReset::new(
+        &["es", "opensearch"],
+        "es",
+        move |teardown| {
+            let domains = {
+                let mut mas = all.write();
+                let mut rows: Vec<(String, Option<String>)> = mas
+                    .iter()
+                    .flat_map(|(_, st)| opensearch_domains(st))
+                    .collect();
+                let known: std::collections::BTreeSet<String> =
+                    rows.iter().map(|(arn, _)| arn.clone()).collect();
+                if let Some(rt) = &all_rt {
+                    rows.extend(
+                        rt.tracked_domains()
+                            .into_iter()
+                            .filter(|arn| !known.contains(arn))
+                            .map(|arn| (arn, None)),
+                    );
+                }
+                mas.reset();
+                rows
+            };
+            destroy_domains(teardown, &all_rt, domains);
+        },
+        move |account_id, teardown| {
+            let domains = {
+                let mut mas = state.write();
+                let mut rows: Vec<(String, Option<String>)> = mas
+                    .get(account_id)
+                    .map(opensearch_domains)
+                    .unwrap_or_default();
+                let known: std::collections::BTreeSet<String> =
+                    rows.iter().map(|(arn, _)| arn.clone()).collect();
+                let tracked =
+                    tracked_in_account(runtime.as_ref().map(|rt| rt.tracked_domains()), account_id);
+                rows.extend(
+                    tracked
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|arn| !known.contains(arn))
+                        .map(|arn| (arn, None)),
+                );
+                mas.reset_account(account_id);
+                rows
+            };
+            destroy_domains(teardown, &runtime, domains);
         },
     )
 }
@@ -610,6 +704,7 @@ impl ResetServiceStates {
             kafka_runtime: None,
             flink_runtime: None,
             mq_runtime: None,
+            opensearch_runtime: None,
             codebuild_running: None,
         }
     }
