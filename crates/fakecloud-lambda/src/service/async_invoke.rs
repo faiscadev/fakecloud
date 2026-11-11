@@ -349,6 +349,7 @@ pub(crate) fn spawn(inv: AsyncInvocation) {
         let outcome = run_attempts(&settings, RETRY_DELAYS, || {
             let runtime = runtime.clone();
             let payload = &payload;
+            let request_id = &request_id;
             let current = resolve();
             let queued_arn = func.function_arn.clone();
             let slot = guard.lock().ok().and_then(|mut g| g.take());
@@ -364,9 +365,16 @@ pub(crate) fn spawn(inv: AsyncInvocation) {
                         func.function_name
                     )));
                 }
+                // Every attempt (retries included) runs under the
+                // invocation's request ID, as on Lambda.
+                let ctx = crate::runtime::InvocationContext {
+                    request_id: Some(request_id.to_string()),
+                    ..Default::default()
+                };
                 let result = runtime
-                    .invoke(&func, payload, &layer_zips)
+                    .invoke_with(&func, payload, &layer_zips, &ctx)
                     .await
+                    .map(|(output, _)| output)
                     .map_err(|e| AttemptError::of_runtime(&e));
                 drop(slot);
                 result

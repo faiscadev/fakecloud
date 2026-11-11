@@ -10,7 +10,7 @@ impl LambdaService {
     /// streaming handlers, custom runtimes that flush mid-handler).
     ///
     /// On success: zero or more `PayloadChunk` events (one per chunk
-    /// the RIE flushed) followed by an `InvokeComplete` event with
+    /// the runtime sent) followed by an `InvokeComplete` event with
     /// `ErrorCode = null`. On a function error (uncaught exception in
     /// the handler) or an infrastructure error (timeout, container
     /// crash): an `InvokeComplete` with non-null `ErrorCode`/
@@ -101,77 +101,43 @@ impl LambdaService {
             )
         })?;
 
-        // Drive the streaming RIE call and assemble the eventstream
-        // body. We buffer all frames before returning — `AwsResponse`
-        // is byte-buffered today — but the chunk boundaries the RIE
-        // flushed are preserved as separate `PayloadChunk` events, so
-        // SDK parsers see exactly the streaming structure they expect.
+        // Relay the runtime's response as it arrives and assemble the
+        // eventstream body. We buffer all frames before returning
+        // (`AwsResponse` is byte-buffered today), but each piece the runtime
+        // sent (one per `responseStream.write`) stays its own
+        // `PayloadChunk` event, so SDK parsers see exactly the streaming
+        // structure they expect.
         let mut frames: Vec<u8> = Vec::new();
+        let ctx = crate::runtime::InvocationContext {
+            request_id: Some(req.request_id.clone()),
+            invoked_function_arn: Some(crate::service::invoke::invoked_function_arn(
+                &func.function_arn,
+                req.query_params.get("Qualifier").map(String::as_str),
+            )),
+            trace_id: crate::service::invoke::trace_header(req),
+            client_context: crate::service::invoke::client_context(req),
+            cognito_identity: None,
+        };
         let invoke_result = runtime
-            .invoke_streaming(&func, &req.body, &layer_zips)
+            .invoke_streaming(&func, &req.body, &layer_zips, &ctx, &mut |chunk| {
+                frames.extend_from_slice(&crate::eventstream::payload_chunk_frame(&chunk));
+            })
             .await;
 
         let (error_code, error_details) = match invoke_result {
-            Ok(mut stream) => {
-                let status = stream.status();
-                let mut last_chunk: Option<bytes::Bytes> = None;
-                let mut had_chunks = false;
-                loop {
-                    match stream.next_chunk().await {
-                        Ok(Some(chunk)) => {
-                            had_chunks = true;
-                            frames.extend_from_slice(&crate::eventstream::payload_chunk_frame(
-                                &chunk,
-                            ));
-                            last_chunk = Some(chunk);
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            // Stream-invoke contract: errors are encoded
-                            // in-stream as a terminal InvokeComplete frame
-                            // with HTTP 200. Returning HTTP 500 here breaks
-                            // SDK parsers expecting that envelope.
-                            tracing::error!(function = %function_name, error = %e, "Lambda streaming chunk read failed");
-                            let detail = format!("Lambda streaming read failed: {e}");
-                            frames.extend_from_slice(&crate::eventstream::invoke_complete_frame(
-                                Some("Runtime.StreamReadFailure"),
-                                Some(&detail),
-                                "",
-                            ));
-                            return Ok(AwsResponse {
-                                status: StatusCode::OK,
-                                headers: http::HeaderMap::new(),
-                                body: bytes::Bytes::from(frames).into(),
-                                content_type: "application/vnd.amazon.eventstream".to_string(),
-                            });
-                        }
-                    }
-                }
-
-                // A function error ends the stream with the runtime's error
-                // object as the final chunk (or the whole body, for a
-                // runtime that exited / timed out). The runtime layer's
-                // classification decides, and its error object names the
-                // terminal `InvokeComplete` event's code and details.
-                let mut error: Option<(String, String)> = None;
-                let tail = last_chunk.unwrap_or_default();
-                if had_chunks || status != 200 {
-                    let output = crate::runtime::classify_invocation_response(status, &tail);
-                    if output.is_function_error() {
-                        error = Some((
-                            output
-                                .error_type()
-                                .unwrap_or_else(|| "Runtime.Unknown".to_string()),
-                            output
-                                .error_message()
-                                .unwrap_or_else(|| "function error".to_string()),
-                        ));
-                    }
-                }
-                match error {
-                    Some((code, details)) => (Some(code), Some(details)),
-                    None => (None, None),
-                }
+            Ok(crate::runtime::RunOutcome::Success) => (None, None),
+            // A function error ends the stream with an `InvokeComplete`
+            // naming the error object's type and message.
+            Ok(crate::runtime::RunOutcome::Error(payload)) => {
+                let output = fakecloud_core::delivery::LambdaInvocationOutput::unhandled(payload);
+                (
+                    Some(
+                        output
+                            .error_type()
+                            .unwrap_or_else(|| "Unhandled".to_string()),
+                    ),
+                    Some(output.error_message().unwrap_or_default()),
+                )
             }
             Err(e) => {
                 tracing::error!(function = %function_name, error = %e, "Lambda streaming invocation failed");

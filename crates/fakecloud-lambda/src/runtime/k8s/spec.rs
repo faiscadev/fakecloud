@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::{
-    Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, LocalObjectReference, Pod, PodSpec,
-    ResourceRequirements, Secret, SecretKeySelector, Volume, VolumeMount,
+    Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, HostAlias, LocalObjectReference, Pod,
+    PodSpec, ResourceRequirements, Secret, SecretKeySelector, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -49,6 +49,17 @@ pub struct PodSpecContext<'a> {
     /// Name of the Secret holding this instance's execution-role
     /// credentials (see [`build_credentials_secret`]); `None` exports none.
     pub credentials_secret: Option<&'a str>,
+    /// This instance's Runtime API host name (see
+    /// [`crate::runtime::api::sandbox_host`]).
+    pub runtime_api_host: &'a str,
+    /// The address the Runtime API host is mapped to (`hostAliases`): the
+    /// fakecloud Service the Pod reaches `self_url` through.
+    pub runtime_api_ip: &'a str,
+    /// Port of `self_url`.
+    pub self_port: u16,
+    /// Extensions the attached layers put in `/opt/extensions`; when any,
+    /// the entrypoint is wrapped to start them beside the runtime.
+    pub extensions: usize,
 }
 
 /// Resource cap for the `/tmp` `emptyDir` (`medium: Memory`) — sized
@@ -61,8 +72,10 @@ fn ephemeral_storage_mib(size: Option<i64>) -> i64 {
 
 /// Build the Pod spec for a single Lambda function invocation runtime.
 /// The Pod has one init container (busybox) that downloads code + layers
-/// from fakecloud over HTTP, and one main container running the AWS RIE
-/// image (zip functions) or the user-supplied image (image functions).
+/// from fakecloud over HTTP, and one main container running the AWS base
+/// image (zip functions) or the user-supplied image (image functions), whose
+/// runtime reaches the Runtime API at its own host name, mapped to the
+/// fakecloud Service with `hostAliases`.
 pub fn build_pod_spec(
     func: &LambdaFunction,
     deploy_id: &str,
@@ -107,14 +120,16 @@ pub fn build_pod_spec(
     // Credentials never sit in the Pod spec: they are read from the
     // per-Pod Secret (see [`build_credentials_secret`]).
     let endpoint_url = ctx.self_url.trim_end_matches('/');
-    let mut env: Vec<EnvVar> = function_environment(func, endpoint_url, ctx.self_host, None)
-        .into_iter()
-        .map(|(k, v)| EnvVar {
-            name: k,
-            value: Some(v),
-            value_from: None,
-        })
-        .collect();
+    let runtime_api = format!("{}:{}", ctx.runtime_api_host, ctx.self_port);
+    let mut env: Vec<EnvVar> =
+        function_environment(func, endpoint_url, ctx.self_host, &runtime_api, None)
+            .into_iter()
+            .map(|(k, v)| EnvVar {
+                name: k,
+                value: Some(v),
+                value_from: None,
+            })
+            .collect();
     if let Some(secret) = ctx.credentials_secret {
         env.extend(CREDENTIAL_ENV_KEYS.iter().map(|key| EnvVar {
             name: (*key).to_string(),
@@ -248,11 +263,11 @@ pub fn build_pod_spec(
         ..Container::default()
     };
 
-    // Main container — runs the RIE image (zip) or the user's image.
+    // Main container: runs the runtime's base image (zip) or the user's image.
     // For zip functions the handler is passed as the cmd argument, same
     // as Docker (`docker create <image> <handler>`).
     let mut main_container = Container {
-        name: "fakecloud-lambda".into(),
+        name: super::MAIN_CONTAINER.into(),
         image: Some(main_image.clone()),
         env: Some(env),
         volume_mounts: Some(common_mounts),
@@ -260,7 +275,15 @@ pub fn build_pod_spec(
         ..Container::default()
     };
     if !is_image {
-        main_container.command = None;
+        main_container.command = (ctx.extensions > 0).then(|| {
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                crate::runtime::extensions::LAUNCHER_SCRIPT.to_string(),
+                "sh".to_string(),
+                crate::runtime::extensions::BASE_IMAGE_ENTRYPOINT.to_string(),
+            ]
+        });
         main_container.args = Some(vec![func.handler.clone()]);
     }
 
@@ -283,6 +306,10 @@ pub fn build_pod_spec(
             containers: vec![main_container],
             volumes: Some(volumes),
             image_pull_secrets: pull_secrets,
+            host_aliases: Some(vec![HostAlias {
+                ip: ctx.runtime_api_ip.to_string(),
+                hostnames: Some(vec![ctx.runtime_api_host.to_string()]),
+            }]),
             ..PodSpec::default()
         }),
         ..Pod::default()
@@ -386,6 +413,10 @@ mod tests {
             account_id: "000000000000",
             pull_secret: None,
             credentials_secret: None,
+            runtime_api_host: "fakecloud-runtime-abc123",
+            runtime_api_ip: "10.96.0.15",
+            self_port: 4566,
+            extensions: 0,
         }
     }
 
@@ -522,18 +553,40 @@ mod tests {
     }
 
     #[test]
-    fn function_timeout_env_set() {
+    fn layer_extensions_wrap_the_entrypoint() {
+        let f = zip_function("my-fn");
+        let mut c = ctx();
+        c.extensions = 2;
+        let pod = build_pod_spec(&f, "d", &c).unwrap();
+        let main = &pod.spec.unwrap().containers[0];
+        let command = main.command.clone().unwrap();
+        assert_eq!(command[0], "/bin/sh");
+        assert_eq!(command.last().unwrap(), "/lambda-entrypoint.sh");
+        assert_eq!(
+            main.args.clone().unwrap(),
+            vec!["lambda_function.lambda_handler"]
+        );
+    }
+
+    #[test]
+    fn runtime_reaches_its_own_runtime_api_host_mapped_to_the_service() {
         let f = zip_function("my-fn");
         let pod = build_pod_spec(&f, "d", &ctx()).unwrap();
-        let env = pod.spec.unwrap().containers[0].env.clone().unwrap();
-        let t = env
+        let spec = pod.spec.unwrap();
+        let env = spec.containers[0].env.clone().unwrap();
+        let api = env
             .iter()
-            .find(|e| e.name == "AWS_LAMBDA_FUNCTION_TIMEOUT")
-            .unwrap()
-            .value
-            .clone()
-            .unwrap();
-        assert_eq!(t, "30");
+            .find(|e| e.name == "AWS_LAMBDA_RUNTIME_API")
+            .and_then(|e| e.value.clone());
+        assert_eq!(api.as_deref(), Some("fakecloud-runtime-abc123:4566"));
+        assert!(env.iter().all(|e| e.name != "AWS_LAMBDA_FUNCTION_TIMEOUT"));
+        let aliases = spec.host_aliases.unwrap();
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].ip, "10.96.0.15");
+        assert_eq!(
+            aliases[0].hostnames.as_deref(),
+            Some(&["fakecloud-runtime-abc123".to_string()][..])
+        );
     }
 
     #[test]

@@ -955,9 +955,10 @@ mod tests {
     }
 
     /// Lambda backend double: records which function each launch was for and
-    /// points the instance at an in-process RIE stand-in.
+    /// runs an in-process runtime that records each event's payload and
+    /// answers `{}`.
     struct RecordingBackend {
-        endpoint: String,
+        bodies: Arc<Mutex<Vec<String>>>,
         launched: std::sync::Mutex<Vec<String>>,
     }
 
@@ -973,81 +974,31 @@ mod tests {
             _layers: &[Vec<u8>],
             _deploy_id: &str,
             _credentials: Option<&fakecloud_core::auth::SessionCredentials>,
+            runtime_api: &fakecloud_lambda::runtime::RuntimeApiAddress,
         ) -> Result<fakecloud_lambda::runtime::WarmInstance, fakecloud_lambda::runtime::RuntimeError>
         {
+            use fakecloud_lambda::runtime::api::{spawn_in_process_runtime, InProcessReply};
             self.launched
                 .lock()
                 .unwrap()
                 .push(func.function_arn.clone());
+            let bodies = self.bodies.clone();
+            spawn_in_process_runtime(runtime_api.sandbox.clone(), move |event| {
+                bodies
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&event.payload).to_string());
+                std::future::ready(InProcessReply::Response(b"{}".to_vec()))
+            });
+            let (_, exit) = tokio::sync::watch::channel(None);
             Ok(fakecloud_lambda::runtime::WarmInstance {
-                endpoint: self.endpoint.clone(),
                 handle: fakecloud_lambda::runtime::BackendHandle::Container {
                     id: "c0".to_string(),
                 },
+                exit,
             })
         }
         async fn terminate(&self, _handle: &fakecloud_lambda::runtime::BackendHandle) {}
-    }
-
-    /// Minimal RIE stand-in: records each invocation request body and answers
-    /// 200 `{}`. Readiness probes (`GET /`) are answered 404 and not recorded.
-    async fn spawn_recording_rie(bodies: Arc<Mutex<Vec<String>>>) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((mut sock, _)) = listener.accept().await {
-                let bodies = bodies.clone();
-                tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    let mut chunk = [0u8; 4096];
-                    loop {
-                        let n = sock.read(&mut chunk).await.unwrap_or(0);
-                        if n == 0 {
-                            return;
-                        }
-                        buf.extend_from_slice(&chunk[..n]);
-                        let text = String::from_utf8_lossy(&buf).to_string();
-                        let Some(header_end) = text.find("\r\n\r\n") else {
-                            continue;
-                        };
-                        // The readiness probe (`GET /`): the real RIE
-                        // answers it 404 and runs no invocation.
-                        if text.starts_with("GET ") {
-                            let _ = sock
-                                .write_all(
-                                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                                )
-                                .await;
-                            return;
-                        }
-                        let content_length = text[..header_end]
-                            .lines()
-                            .find_map(|l| {
-                                let (k, v) = l.split_once(':')?;
-                                k.eq_ignore_ascii_case("content-length")
-                                    .then(|| v.trim().parse::<usize>().ok())?
-                            })
-                            .unwrap_or(0);
-                        if buf.len() < header_end + 4 + content_length {
-                            continue;
-                        }
-                        let body = String::from_utf8_lossy(
-                            &buf[header_end + 4..header_end + 4 + content_length],
-                        )
-                        .to_string();
-                        bodies.lock().unwrap().push(body);
-                        let _ = sock
-                            .write_all(
-                                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-                            )
-                            .await;
-                        return;
-                    }
-                });
-            }
-        });
-        addr.to_string()
     }
 
     fn lambda_function(arn: &str) -> fakecloud_lambda::LambdaFunction {
@@ -1071,9 +1022,8 @@ mod tests {
     #[tokio::test]
     async fn put_event_executes_lambda_target_in_container_runtime() {
         let bodies = Arc::new(Mutex::new(Vec::new()));
-        let endpoint = spawn_recording_rie(bodies.clone()).await;
         let backend = Arc::new(RecordingBackend {
-            endpoint,
+            bodies: bodies.clone(),
             launched: std::sync::Mutex::new(Vec::new()),
         });
         let runtime = Arc::new(ContainerRuntime::from_backend(backend.clone()));

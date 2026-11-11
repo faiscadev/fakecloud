@@ -1,8 +1,10 @@
 //! Backend-agnostic Lambda runtime facade.
 //!
 //! Owns the warm-pool bookkeeping, per-function startup serialization,
-//! and the HTTP invocation path. Dispatches container lifecycle to
-//! whatever [`LambdaBackend`] it was constructed with.
+//! and the invocation path: events go to each instance's runtime through the
+//! Runtime API fakecloud serves (see [`super::api`]), which reports exactly
+//! how each one ended. Dispatches container lifecycle to whatever
+//! [`LambdaBackend`] it was constructed with.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,8 +17,12 @@ use fakecloud_core::delivery::LambdaInvocationOutput;
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 
+use super::api::{
+    new_trace_id, Dispatched, InvocationEvent, InvocationOutcome, RuntimeApi, RuntimeSignal,
+    Sandbox, MAX_SYNC_RESPONSE_BYTES,
+};
 use super::backend::{
-    BackendHandle, LambdaBackend, RuntimeError, StreamingInvocation, WarmInstance,
+    BackendHandle, InstanceExit, LambdaBackend, RuntimeApiAddress, RuntimeError, WarmInstance,
 };
 use super::docker::DockerBackend;
 use crate::state::LambdaFunction;
@@ -24,6 +30,12 @@ use crate::state::LambdaFunction;
 /// A running runtime instance kept warm for reuse.
 pub(crate) struct WarmEntry {
     instance: WarmInstance,
+    /// The instance's Runtime API state: its runtime takes events and
+    /// reports outcomes through it.
+    sandbox: Arc<Sandbox>,
+    /// When the instance was launched, for the first invocation's
+    /// `Init Duration`.
+    launched_at: Instant,
     last_used: RwLock<Instant>,
     /// Combined fingerprint of the function's code SHA-256, the launch
     /// configuration baked into the instance (see [`launch_config`]), and
@@ -40,12 +52,10 @@ pub(crate) struct WarmEntry {
     /// free.
     retiring: AtomicBool,
     /// Held for the duration of a single invocation against this
-    /// instance. The AWS Runtime Interface Emulator (and real Lambda)
-    /// handles exactly one event per execution environment at a time;
-    /// the RIE's `rapidcore` server nil-pointer-derefs and the process
-    /// exits if two invokes overlap (issue #1644). Acquiring this lock
-    /// before forwarding guarantees one in-flight event per instance,
-    /// and lets the pool pick a *free* instance via `try_lock`.
+    /// instance. Lambda hands an execution environment exactly one event
+    /// at a time; acquiring this lock before dispatching guarantees one
+    /// in-flight event per instance, and lets the pool pick a *free*
+    /// instance via `try_lock`.
     busy: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -57,16 +67,14 @@ pub(crate) struct WarmEntry {
 const DEFAULT_MAX_CONCURRENCY: usize = 10;
 
 /// Max attempts per invocation when a reserved warm instance turns out to be
-/// unreachable. Each failover is a fast probe (or connect error) plus a cold
-/// start; the connection provably never reached the handler, so retrying can't
-/// double-execute. Bounded so an all-dead pool can't spin forever.
+/// gone. A failover only happens when the instance's runtime never took the
+/// event, so retrying can't double-execute. Bounded so an all-dead pool can't
+/// spin forever.
 const MAX_INVOKE_ATTEMPTS: u32 = 5;
 
-/// Timeout for the pre-invoke TCP reachability probe. A black-holed Pod IP (a
-/// killed pod / drained node that drops packets with no RST) would otherwise
-/// hang the full invoke timeout (~`func.timeout + 5s`); this detects it in ~1s
-/// so the state-machine retry can succeed within its window.
-const REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+/// How long extensions get to handle `SHUTDOWN` before their environment is
+/// torn down.
+const EXTENSION_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 /// Lifetime of the execution-role session minted for each instance: the
 /// longest an IAM role session can last.
@@ -141,11 +149,40 @@ impl Drop for PendingCredentials<'_> {
     }
 }
 
+/// The Runtime API sandbox of an instance that is still being launched.
+/// Unregistered on drop (a failed or cancelled launch) unless
+/// [`disarm`](Self::disarm)ed once the instance is pooled.
+struct PendingSandbox<'a> {
+    api: &'a RuntimeApi,
+    sandbox: Option<Arc<Sandbox>>,
+}
+
+impl PendingSandbox<'_> {
+    fn get(&self) -> &Arc<Sandbox> {
+        self.sandbox
+            .as_ref()
+            .expect("sandbox present until disarmed")
+    }
+
+    fn disarm(mut self) -> Arc<Sandbox> {
+        self.sandbox.take().expect("sandbox present until disarmed")
+    }
+}
+
+impl Drop for PendingSandbox<'_> {
+    fn drop(&mut self) {
+        if let Some(sandbox) = &self.sandbox {
+            self.api.unregister(sandbox);
+        }
+    }
+}
+
 /// A reserved invocation slot: a warm instance plus the held busy guard
 /// that grants exclusive use of it until the guard drops.
 struct Slot {
     entry: Arc<WarmEntry>,
-    guard: tokio::sync::OwnedMutexGuard<()>,
+    /// Held only for its drop, which frees the instance.
+    _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 /// Compute the warm-instance key for a function with its current layer
@@ -206,110 +243,253 @@ fn deploy_id_from(code_sha256: &str, launch_config: &str, layers: &[Vec<u8>]) ->
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
-/// Quick liveness check: does the Runtime Interface Emulator at `endpoint`
-/// (`host:port`) answer HTTP within `timeout`? Used before forwarding a
-/// payload to a warm instance so a dead/black-holed instance is detected in
-/// ~1s instead of hanging the full invoke timeout, and by the Docker backend
-/// to wait for a fresh container.
-///
-/// A TCP connect is not enough: a published Docker port is a forwarder
-/// that accepts connections whether or not anything listens in the
-/// container, then closes them. A freshly started container therefore
-/// looked ready before its RIE listened, and the first invocation failed
-/// with "error sending request" (never retried, since the connection had
-/// been established). `GET /` is answered `404` by a listening RIE and runs
-/// no invocation, so any HTTP response proves the instance is serving; a
-/// failed probe provably never reached the handler, so the caller can
-/// safely evict and retry.
-pub(crate) async fn endpoint_reachable(endpoint: &str, timeout: Duration) -> bool {
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .connect_timeout(timeout)
-        .pool_max_idle_per_host(0)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    client
-        .get(format!("http://{endpoint}/"))
-        .send()
-        .await
-        .is_ok()
+/// How long a runtime may take to initialize (from process start to its first
+/// `/invocation/next`) before the invocation waiting on it times out: Lambda's
+/// 10-second init limit, or the function's timeout when that is longer (an
+/// init that overruns the limit is retried within the invocation, bounded by
+/// the function timeout).
+fn init_budget(timeout: Duration) -> Duration {
+    timeout.max(Duration::from_secs(10))
 }
 
-/// Decide what a Runtime Interface Emulator response means, in the terms of
-/// the Lambda `Invoke` API: the payload plus the `X-Amz-Function-Error`
-/// value. This is the one place fakecloud decides whether an invocation
-/// produced a function error; every consumer (the `Invoke` API, async
-/// destinations, and cross-service integrations through
-/// [`fakecloud_core::delivery::LambdaDelivery`]) reads the result.
-///
-/// The RIE reports the outcomes differently from Lambda:
-/// - a runtime that exited or failed init (`Runtime.ExitError`,
-///   `Runtime.ImportModuleError`, ...) comes back as a non-200 status with the
-///   error object as the body; Lambda returns 200 + `Unhandled`;
-/// - a timeout comes back as 200 with the plain text `Task timed out after
-///   N.00 seconds`; Lambda returns 200 + `Unhandled` with
-///   `{"errorType":"Sandbox.Timedout","errorMessage":"RequestId: <id> Error:
-///   Task timed out after N.00 seconds"}`;
-/// - an exception the handler threw comes back as 200 with the runtime
-///   client's error object, with no header or status distinguishing it from
-///   a normal return. Every AWS runtime client reports a thrown error with
-///   both a string `errorType` and a string `errorMessage`, so that is how it
-///   is recognised here. A handler that *returns* exactly such an object is
-///   indistinguishable at this layer (the RIE swallows the runtime's
-///   `/invocation/<id>/error` call) and is reported as a function error.
-pub fn classify_invocation_response(status: u16, body: &[u8]) -> LambdaInvocationOutput {
-    let parsed: Option<serde_json::Value> = serde_json::from_slice(body).ok();
-    if status != 200 {
-        if parsed.as_ref().is_some_and(serde_json::Value::is_object) {
-            return LambdaInvocationOutput::unhandled(body.to_vec());
+/// The error object of an invocation that ran past the function timeout.
+fn timeout_payload(request_id: &str, timeout_secs: i64) -> Vec<u8> {
+    serde_json::json!({
+        "errorType": "Sandbox.Timedout",
+        "errorMessage": format!(
+            "RequestId: {request_id} Error: Task timed out after {timeout_secs}.00 seconds"
+        ),
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// The error object of an invocation whose runtime process ended before
+/// answering it.
+fn exit_payload(request_id: &str, exit: &InstanceExit) -> Vec<u8> {
+    let message = match exit.reason() {
+        Some(reason) => {
+            format!("RequestId: {request_id} Error: Runtime exited with error: {reason}")
         }
-        let message = String::from_utf8_lossy(body).trim().to_string();
-        let message = if message.is_empty() {
-            format!("Runtime returned HTTP {status}")
-        } else {
-            message
-        };
-        return LambdaInvocationOutput::unhandled(
-            serde_json::json!({ "errorType": "Runtime.Unknown", "errorMessage": message })
-                .to_string(),
-        );
-    }
-    if parsed.is_none() {
-        if let Some(timed_out) = rie_timeout_message(body) {
-            let request_id = uuid::Uuid::new_v4();
-            return LambdaInvocationOutput::unhandled(
-                serde_json::json!({
-                    "errorType": "Sandbox.Timedout",
-                    "errorMessage": format!("RequestId: {request_id} Error: {timed_out}"),
-                })
-                .to_string(),
-            );
-        }
-    }
-    let is_runtime_error_object = parsed
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|m| {
-            m.get("errorType").is_some_and(serde_json::Value::is_string)
-                && m.get("errorMessage")
-                    .is_some_and(serde_json::Value::is_string)
-        });
-    if is_runtime_error_object {
-        LambdaInvocationOutput::unhandled(body.to_vec())
+        None => format!("RequestId: {request_id} Error: Runtime exited without providing a reason"),
+    };
+    let error_type = if exit.oom {
+        "Runtime.OutOfMemory"
     } else {
-        LambdaInvocationOutput::success(body.to_vec())
+        "Runtime.ExitError"
+    };
+    serde_json::json!({ "errorType": error_type, "errorMessage": message })
+        .to_string()
+        .into_bytes()
+}
+
+/// The error object of a buffered response over the synchronous limit.
+fn response_too_large_payload() -> Vec<u8> {
+    serde_json::json!({
+        "errorMessage": format!(
+            "Response payload size exceeded maximum allowed payload size ({MAX_SYNC_RESPONSE_BYTES} bytes)."
+        ),
+        "errorType": "Function.ResponseSizeTooLarge",
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// Per-invocation details the Runtime API hands the runtime with the event.
+/// Every field is optional; unset ones get the values Lambda would use.
+#[derive(Debug, Clone, Default)]
+pub struct InvocationContext {
+    /// The invocation's request ID (the Invoke response's
+    /// `x-amzn-RequestId`, or an asynchronous invocation's); a fresh one
+    /// when unset.
+    pub request_id: Option<String>,
+    /// The ARN the caller invoked (qualified when it named a version or
+    /// alias); the function's own ARN when unset.
+    pub invoked_function_arn: Option<String>,
+    /// The caller's X-Ray trace header; a fresh trace when unset.
+    pub trace_id: Option<String>,
+    /// The client context JSON (`X-Amz-Client-Context`, decoded).
+    pub client_context: Option<String>,
+    /// The Cognito identity JSON.
+    pub cognito_identity: Option<String>,
+}
+
+/// How an invocation the runtime answered ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// The function returned; the response went to the chunk sink.
+    Success,
+    /// A function error, with its error object.
+    Error(Vec<u8>),
+}
+
+/// What waiting on a dispatched event came to.
+enum Awaited {
+    /// The instance went away before its runtime took the event, so the
+    /// function never saw it and the invocation can run elsewhere.
+    NotDelivered,
+    /// The invocation ended. `reset` means the execution environment is no
+    /// longer usable (timeout, exit, failed init), as Lambda resets it.
+    Finished {
+        outcome: RunOutcome,
+        reset: bool,
+        /// From the runtime taking the event to its answer.
+        duration: Duration,
+        /// For the event that ended the runtime's initialization: how long
+        /// from launch until it took it.
+        init_duration: Option<Duration>,
+    },
+}
+
+/// The ARN an invocation of `func` was made through when the caller's is not
+/// known: unqualified for `$LATEST`, version-qualified otherwise.
+fn invoked_arn(func: &LambdaFunction) -> String {
+    if func.version == "$LATEST" {
+        func.function_arn.clone()
+    } else {
+        format!("{}:{}", func.function_arn, func.version)
     }
 }
 
-/// The RIE's timeout body is the bare text `Task timed out after N.00
-/// seconds`; return it when `body` is exactly that.
-fn rie_timeout_message(body: &[u8]) -> Option<&str> {
-    let text = std::str::from_utf8(body).ok()?.trim();
-    let secs = text
-        .strip_prefix("Task timed out after ")?
-        .strip_suffix(" seconds")?;
-    secs.parse::<f64>().ok()?;
-    Some(text)
+/// Follow a dispatched event to its end: the runtime's answer, its process
+/// exiting, or the deadline passing (the init budget until the runtime takes
+/// the event, then the function timeout from delivery).
+async fn await_outcome(
+    entry: &WarmEntry,
+    dispatched: Dispatched,
+    request_id: &str,
+    timeout_secs: i64,
+    on_chunk: &mut (dyn FnMut(bytes::Bytes) + Send),
+) -> Awaited {
+    let Dispatched { mut signals, warm } = dispatched;
+    let timeout = Duration::from_secs(timeout_secs.max(1) as u64);
+    let mut deadline = tokio::time::Instant::now() + init_budget(timeout);
+    let mut delivered_at: Option<Instant> = None;
+    let mut exit = entry.instance.exit.clone();
+    let mut exited: Option<InstanceExit> = None;
+    let mut exit_watched = true;
+    let elapsed = |at: Option<Instant>| at.map(|t| t.elapsed()).unwrap_or_default();
+    let launched_at = entry.launched_at;
+    let init_duration = |at: Option<Instant>| {
+        (!warm).then(|| at.map_or_else(|| launched_at.elapsed(), |t| t - launched_at))
+    };
+    loop {
+        // Once the process is known to be gone, only drain what the runtime
+        // reported before it went.
+        let signal = if exited.is_some() {
+            signals.try_recv().ok()
+        } else {
+            let mut timed_out = false;
+            let mut closed = false;
+            let signal = tokio::select! {
+                biased;
+                signal = signals.recv() => {
+                    // `None`: the sandbox was torn down under the invocation
+                    // (the function was deleted, or the server is resetting).
+                    closed = signal.is_none();
+                    signal
+                }
+                changed = exit.wait_for(Option::is_some), if exit_watched => {
+                    match changed {
+                        Ok(e) => exited = Some(e.unwrap_or_default()),
+                        // The backend stopped watching (it has no exit
+                        // information): only the deadline is left.
+                        Err(_) => exit_watched = false,
+                    }
+                    continue;
+                }
+                () = tokio::time::sleep_until(deadline) => {
+                    timed_out = true;
+                    None
+                }
+            };
+            if closed {
+                exited = Some(exit.borrow().unwrap_or_default());
+            }
+            if timed_out {
+                entry.sandbox.abandon(request_id);
+                if delivered_at.is_none() {
+                    tracing::warn!(
+                        sandbox = %entry.sandbox.host(),
+                        "Lambda runtime never asked the Runtime API for an event; \
+                         check that the instance can reach fakecloud"
+                    );
+                }
+                return Awaited::Finished {
+                    outcome: RunOutcome::Error(timeout_payload(request_id, timeout_secs)),
+                    reset: true,
+                    duration: elapsed(delivered_at),
+                    init_duration: init_duration(delivered_at),
+                };
+            }
+            signal
+        };
+        let Some(signal) = signal else {
+            let exit = exited.unwrap_or_default();
+            if delivered_at.is_none() && warm {
+                return Awaited::NotDelivered;
+            }
+            entry.sandbox.abandon(request_id);
+            return Awaited::Finished {
+                outcome: RunOutcome::Error(exit_payload(request_id, &exit)),
+                reset: true,
+                duration: elapsed(delivered_at),
+                init_duration: init_duration(delivered_at),
+            };
+        };
+        match signal {
+            RuntimeSignal::Delivered { .. } => {
+                delivered_at = Some(Instant::now());
+                deadline = tokio::time::Instant::now() + timeout;
+            }
+            RuntimeSignal::Chunk(chunk) => on_chunk(chunk),
+            RuntimeSignal::Done(outcome) => {
+                let duration = elapsed(delivered_at);
+                let (outcome, reset) = match outcome {
+                    InvocationOutcome::Response => (RunOutcome::Success, false),
+                    InvocationOutcome::Error(payload) => (RunOutcome::Error(payload), false),
+                    InvocationOutcome::InitError(payload) => (RunOutcome::Error(payload), true),
+                    InvocationOutcome::ResponseTooLarge => {
+                        (RunOutcome::Error(response_too_large_payload()), false)
+                    }
+                };
+                return Awaited::Finished {
+                    outcome,
+                    reset,
+                    duration,
+                    init_duration: init_duration(delivered_at),
+                };
+            }
+        }
+    }
+}
+
+/// The log of one invocation as `LogType=Tail` returns it: the platform's
+/// `START` / `END` / `REPORT` lines around what the function printed.
+fn invocation_log(
+    func: &LambdaFunction,
+    request_id: &str,
+    duration: Duration,
+    init_duration: Option<Duration>,
+    function_output: &str,
+) -> String {
+    let ms = duration.as_secs_f64() * 1000.0;
+    let billed = (ms.ceil() as u64).max(1);
+    let mut report = format!(
+        "REPORT RequestId: {request_id}\tDuration: {ms:.2} ms\tBilled Duration: {billed} ms\tMemory Size: {} MB\t",
+        func.memory_size
+    );
+    if let Some(init) = init_duration {
+        let init_ms = init.as_secs_f64() * 1000.0;
+        report.push_str(&format!("Init Duration: {init_ms:.2} ms\t"));
+    }
+    let mut out = format!("START RequestId: {request_id} Version: {}\n", func.version);
+    out.push_str(function_output);
+    if !function_output.is_empty() && !function_output.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("END RequestId: {request_id}\n{report}\n"));
+    out
 }
 
 /// Warm instances taken out of the pool by
@@ -328,6 +508,8 @@ impl TakenInstances {
 
 pub struct LambdaRuntime {
     backend: Arc<dyn LambdaBackend>,
+    /// The Runtime API every instance's runtime talks to.
+    runtime_api: Arc<RuntimeApi>,
     /// Per-function pool of warm instances. Each instance serves one
     /// invocation at a time (its `busy` lock); the pool grows on demand
     /// up to `max_concurrency`, and the idle reaper trims it.
@@ -360,6 +542,7 @@ impl LambdaRuntime {
             .unwrap_or(DEFAULT_MAX_CONCURRENCY);
         Self {
             backend,
+            runtime_api: RuntimeApi::new(),
             instances: RwLock::new(HashMap::new()),
             starting: RwLock::new(HashMap::new()),
             max_concurrency,
@@ -400,8 +583,21 @@ impl LambdaRuntime {
         Some(issuer.issue(&role, &func.function_name, lifetime))
     }
 
+    /// The Runtime API instances' runtimes reach fakecloud through; the
+    /// server routes requests for its hosts to [`RuntimeApi::serve`].
+    pub fn runtime_api(&self) -> Arc<RuntimeApi> {
+        self.runtime_api.clone()
+    }
+
     /// Tear down one instance and revoke the credentials it was given.
     async fn retire(&self, entry: &WarmEntry) {
+        // Extensions registered for `SHUTDOWN` get it, and a moment to
+        // finish, before the environment goes (Lambda allows up to 2s).
+        entry
+            .sandbox
+            .shutdown_extensions("spindown", EXTENSION_SHUTDOWN_GRACE)
+            .await;
+        self.runtime_api.unregister(&entry.sandbox);
         self.backend.terminate(&entry.instance.handle).await;
         self.revoke(entry.credentials.as_ref());
     }
@@ -543,218 +739,206 @@ impl LambdaRuntime {
     /// images already include `/opt/python`, `/opt/nodejs/node_modules`,
     /// `/opt/lib`, and `/opt/bin` on the right import paths.
     ///
-    /// Reserves a warm instance for the call (one in-flight invocation
-    /// per instance — the RIE crashes on overlap, issue #1644). If the
-    /// instance is unreachable (dead Pod/container from a node drain, OOM,
-    /// or prior crash) it is evicted and the call retried (up to four
-    /// times) against a freshly cold-started instance, so a dead instance can't
-    /// wedge the function permanently.
-    ///
     /// `Ok` means the function ran; whether it failed is reported in the
-    /// output's `function_error` (see [`classify_invocation_response`]).
+    /// output's `function_error`, exactly as the runtime reported it through
+    /// the Runtime API.
     pub async fn invoke(
         &self,
         func: &LambdaFunction,
         payload: &[u8],
         layers: &[Vec<u8>],
     ) -> Result<LambdaInvocationOutput, RuntimeError> {
-        self.invoke_inner(func, payload, layers, false)
+        self.invoke_with(func, payload, layers, &InvocationContext::default())
             .await
             .map(|(output, _)| output)
     }
 
-    /// Like [`Self::invoke`] but also returns the instance's recent log tail
-    /// (for `Invoke` with `LogType=Tail` -> `X-Amz-Log-Result`). `None` when the
-    /// backend can't supply logs.
+    /// [`Self::invoke`] with the caller's invocation details.
+    pub async fn invoke_with(
+        &self,
+        func: &LambdaFunction,
+        payload: &[u8],
+        layers: &[Vec<u8>],
+        ctx: &InvocationContext,
+    ) -> Result<(LambdaInvocationOutput, Option<String>), RuntimeError> {
+        self.invoke_buffered(func, payload, layers, ctx, false)
+            .await
+    }
+
+    /// Like [`Self::invoke_with`] but also returns the invocation's log tail
+    /// (for `Invoke` with `LogType=Tail` -> `X-Amz-Log-Result`). `None` when
+    /// the backend can't supply logs.
     pub async fn invoke_with_log_tail(
         &self,
         func: &LambdaFunction,
         payload: &[u8],
         layers: &[Vec<u8>],
+        ctx: &InvocationContext,
     ) -> Result<(LambdaInvocationOutput, Option<String>), RuntimeError> {
-        self.invoke_inner(func, payload, layers, true).await
+        self.invoke_buffered(func, payload, layers, ctx, true).await
     }
 
-    async fn invoke_inner(
+    async fn invoke_buffered(
         &self,
         func: &LambdaFunction,
         payload: &[u8],
         layers: &[Vec<u8>],
+        ctx: &InvocationContext,
         capture_logs: bool,
     ) -> Result<(LambdaInvocationOutput, Option<String>), RuntimeError> {
-        let client = reqwest::Client::builder()
-            .connect_timeout(REACHABILITY_PROBE_TIMEOUT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        let mut attempt: u32 = 0;
-        loop {
-            attempt += 1;
-            let slot = self.acquire_slot(func, layers).await?;
-
-            // Fast reachability probe before forwarding the payload. A warm Pod
-            // that was killed (FakeCloud recreating it, OOM, node reclaim) often
-            // black-holes its old IP, so the POST would hang the full invoke
-            // timeout. A short TCP probe detects the dead instance in ~1s; the
-            // connection never reached the handler, so we can safely evict and
-            // fail over to a cold start.
-            if !endpoint_reachable(&slot.entry.instance.endpoint, REACHABILITY_PROBE_TIMEOUT).await
-            {
-                let entry = slot.entry.clone();
-                drop(slot);
-                self.evict_entry(&pool_key(func), &entry).await;
-                if attempt < MAX_INVOKE_ATTEMPTS {
-                    tracing::warn!(
-                        function = %func.function_name,
-                        endpoint = %entry.instance.endpoint,
-                        "warm Lambda instance failed reachability probe; evicted, retrying with a cold start"
-                    );
-                    continue;
-                }
-                return Err(RuntimeError::InvocationFailed(format!(
-                    "no reachable warm instance for {} after {attempt} attempts",
-                    func.function_name
-                )));
-            }
-
-            let url = format!(
-                "http://{}/2015-03-31/functions/function/invocations",
-                slot.entry.instance.endpoint
-            );
-            let send = client
-                .post(&url)
-                .body(payload.to_vec())
-                .timeout(Duration::from_secs(func.timeout as u64 + 5))
-                .send()
-                .await;
-            match send {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    let body = resp.bytes().await;
-                    *slot.entry.last_used.write() = Instant::now();
-                    return match body {
-                        Ok(b) => {
-                            // Capture the instance's log tail while the slot
-                            // (and thus the container/Pod) is still alive.
-                            let logs = if capture_logs {
-                                self.backend
-                                    .instance_logs(&slot.entry.instance.handle)
-                                    .await
-                            } else {
-                                None
-                            };
-                            Ok((classify_invocation_response(status, &b), logs))
-                        }
-                        Err(e) => {
-                            // Response failed mid-stream — the instance is
-                            // suspect. Evict it but don't retry: the
-                            // function already ran and may have side effects.
-                            let entry = slot.entry.clone();
-                            drop(slot);
-                            self.evict_entry(&pool_key(func), &entry).await;
-                            Err(RuntimeError::InvocationFailed(e.to_string()))
-                        }
-                    };
-                }
-                Err(e) => {
-                    // Transport-level failure. Evict the suspect instance.
-                    // Only retry when the connection was never
-                    // established (`is_connect` — e.g. refused by a dead
-                    // Pod): then the request provably never reached the
-                    // function, so a cold-start retry can't double-execute
-                    // it. A reset/timeout mid-flight may have already run
-                    // the handler, so surface those instead of risking a
-                    // duplicate invoke.
-                    let entry = slot.entry.clone();
-                    drop(slot);
-                    self.evict_entry(&pool_key(func), &entry).await;
-                    if attempt < MAX_INVOKE_ATTEMPTS && e.is_connect() {
-                        tracing::warn!(
-                            function = %func.function_name,
-                            error = %e,
-                            "warm Lambda instance unreachable; evicted, retrying with a cold start"
-                        );
-                        continue;
-                    }
-                    return Err(RuntimeError::InvocationFailed(e.to_string()));
-                }
-            }
-        }
+        let mut body = Vec::new();
+        let (outcome, logs) = self
+            .run(
+                func,
+                payload,
+                layers,
+                ctx,
+                Some(MAX_SYNC_RESPONSE_BYTES),
+                capture_logs,
+                &mut |chunk| body.extend_from_slice(&chunk),
+            )
+            .await?;
+        let output = match outcome {
+            RunOutcome::Success => LambdaInvocationOutput::success(body),
+            RunOutcome::Error(payload) => LambdaInvocationOutput::unhandled(payload),
+        };
+        Ok((output, logs))
     }
 
-    /// Invoke a Lambda function and yield the raw HTTP body as a stream
-    /// of byte chunks. Each chunk corresponds to one HTTP frame the RIE
-    /// flushed to the wire — for streaming-aware handlers this
-    /// preserves the chunk boundaries the function emitted. Buffered
-    /// handlers come back as a single chunk, which is still a valid
-    /// streamed response.
-    ///
-    /// The reserved instance's busy guard travels with the returned
-    /// [`StreamingInvocation`] so the slot stays held until the caller
-    /// finishes draining the stream.
+    /// Invoke a Lambda function and hand each piece of the response body to
+    /// `on_chunk` as the runtime sends it: a streaming handler's writes keep
+    /// their boundaries, a buffered handler's result arrives whole. The
+    /// outcome tells a completed response from a function error.
     pub async fn invoke_streaming(
         &self,
         func: &LambdaFunction,
         payload: &[u8],
         layers: &[Vec<u8>],
-    ) -> Result<StreamingInvocation, RuntimeError> {
-        let client = reqwest::Client::builder()
-            .connect_timeout(REACHABILITY_PROBE_TIMEOUT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        ctx: &InvocationContext,
+        on_chunk: &mut (dyn FnMut(bytes::Bytes) + Send),
+    ) -> Result<RunOutcome, RuntimeError> {
+        self.run(func, payload, layers, ctx, None, false, on_chunk)
+            .await
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// Run one invocation on a warm (or freshly launched) instance.
+    ///
+    /// The event is queued on the instance's Runtime API sandbox; its runtime
+    /// takes it with `/invocation/next` and answers through `/response` or
+    /// `/error`. An instance found gone before its runtime took the event is
+    /// evicted and the invocation retried on a fresh one (up to four times):
+    /// the function provably never saw it. Timeouts, runtime exits and
+    /// failed inits end the invocation with Lambda's error object and reset
+    /// the execution environment.
+    #[allow(clippy::too_many_arguments)]
+    async fn run(
+        &self,
+        func: &LambdaFunction,
+        payload: &[u8],
+        layers: &[Vec<u8>],
+        ctx: &InvocationContext,
+        max_response_bytes: Option<usize>,
+        capture_logs: bool,
+        on_chunk: &mut (dyn FnMut(bytes::Bytes) + Send),
+    ) -> Result<(RunOutcome, Option<String>), RuntimeError> {
+        let request_id = ctx
+            .request_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let timeout = Duration::from_secs(func.timeout.max(1) as u64);
+        // An invocation without a payload hands the function `{}`, as Lambda
+        // does.
+        let payload = if payload.is_empty() {
+            bytes::Bytes::from_static(b"{}")
+        } else {
+            bytes::Bytes::copy_from_slice(payload)
+        };
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
             let slot = self.acquire_slot(func, layers).await?;
+            let entry = slot.entry.clone();
 
-            // Same fast reachability probe as `invoke`: detect a dead/black-holed
-            // warm instance in ~1s and fail over instead of hanging.
-            if !endpoint_reachable(&slot.entry.instance.endpoint, REACHABILITY_PROBE_TIMEOUT).await
-            {
-                let entry = slot.entry.clone();
+            // Gone while idle (killed, crashed, Pod deleted) after serving
+            // earlier events. A runtime that died during its init is not
+            // skipped: that is this invocation's failure to report.
+            let gone = entry.instance.exit.borrow().is_some();
+            if gone && entry.sandbox.is_initialized() {
                 drop(slot);
                 self.evict_entry(&pool_key(func), &entry).await;
                 if attempt < MAX_INVOKE_ATTEMPTS {
+                    tracing::warn!(
+                        function = %func.function_name,
+                        "warm Lambda instance is gone; evicted, retrying with a cold start"
+                    );
                     continue;
                 }
                 return Err(RuntimeError::InvocationFailed(format!(
-                    "no reachable warm instance for {} after {attempt} attempts",
+                    "no live instance for {} after {attempt} attempts",
                     func.function_name
                 )));
             }
 
-            let url = format!(
-                "http://{}/2015-03-31/functions/function/invocations",
-                slot.entry.instance.endpoint
-            );
-            let send = client
-                .post(&url)
-                .body(payload.to_vec())
-                .timeout(Duration::from_secs(func.timeout as u64 + 5))
-                .send()
-                .await;
-            match send {
-                Ok(resp) => {
-                    *slot.entry.last_used.write() = Instant::now();
-                    let Slot {
-                        entry: _entry,
-                        guard,
-                    } = slot;
-                    return Ok(StreamingInvocation {
-                        resp,
-                        _slot_guard: Some(guard),
-                    });
-                }
-                Err(e) => {
-                    // Same connect-only retry policy as `invoke`: retry
-                    // only when the connection never established, so a
-                    // half-run handler isn't invoked twice.
-                    let entry = slot.entry.clone();
+            let event = InvocationEvent {
+                request_id: request_id.clone(),
+                payload: payload.clone(),
+                invoked_function_arn: ctx
+                    .invoked_function_arn
+                    .clone()
+                    .unwrap_or_else(|| invoked_arn(func)),
+                trace_id: ctx.trace_id.clone().unwrap_or_else(new_trace_id),
+                client_context: ctx.client_context.clone(),
+                cognito_identity: ctx.cognito_identity.clone(),
+                timeout,
+                max_response_bytes,
+            };
+            let dispatched = entry.sandbox.dispatch(event);
+            match await_outcome(&entry, dispatched, &request_id, func.timeout, on_chunk).await {
+                Awaited::NotDelivered => {
                     drop(slot);
                     self.evict_entry(&pool_key(func), &entry).await;
-                    if attempt < MAX_INVOKE_ATTEMPTS && e.is_connect() {
+                    if attempt < MAX_INVOKE_ATTEMPTS {
+                        tracing::warn!(
+                            function = %func.function_name,
+                            "Lambda instance went away before taking the event; retrying with a cold start"
+                        );
                         continue;
                     }
-                    return Err(RuntimeError::InvocationFailed(e.to_string()));
+                    return Err(RuntimeError::InvocationFailed(format!(
+                        "no live instance for {} after {attempt} attempts",
+                        func.function_name
+                    )));
+                }
+                Awaited::Finished {
+                    outcome,
+                    reset,
+                    duration,
+                    init_duration,
+                } => {
+                    *entry.last_used.write() = Instant::now();
+                    // Read the log tail while the instance is still alive.
+                    let logs = if capture_logs {
+                        let output = self
+                            .backend
+                            .instance_logs(&entry.instance.handle)
+                            .await
+                            .unwrap_or_default();
+                        Some(invocation_log(
+                            func,
+                            &request_id,
+                            duration,
+                            init_duration,
+                            &output,
+                        ))
+                    } else {
+                        None
+                    };
+                    if reset {
+                        drop(slot);
+                        self.evict_entry(&pool_key(func), &entry).await;
+                    }
+                    return Ok((outcome, logs));
                 }
             }
         }
@@ -842,7 +1026,10 @@ impl LambdaRuntime {
             let waiters = candidates.into_iter().map(|entry| {
                 Box::pin(async move {
                     let guard = entry.busy.clone().lock_owned().await;
-                    Slot { entry, guard }
+                    Slot {
+                        entry,
+                        _guard: guard,
+                    }
                 })
             });
             let (slot, _idx, _rest) = futures_util::future::select_all(waiters).await;
@@ -868,6 +1055,19 @@ impl LambdaRuntime {
             issuer: self.credential_issuer.get(),
             credentials: self.issue_credentials(func),
         };
+        let sandbox = PendingSandbox {
+            api: &self.runtime_api,
+            sandbox: Some(self.runtime_api.register_for(super::api::SandboxInfo {
+                function_name: func.function_name.clone(),
+                function_version: func.version.clone(),
+                handler: func.handler.clone(),
+            })),
+        };
+        let address = RuntimeApiAddress {
+            host: sandbox.get().host(),
+            sandbox: sandbox.get().clone(),
+        };
+        let launched_at = Instant::now();
         let instance = self
             .backend
             .launch(
@@ -876,10 +1076,13 @@ impl LambdaRuntime {
                 layers,
                 &deploy_id,
                 pending.credentials.as_ref(),
+                &address,
             )
             .await?;
         let entry = Arc::new(WarmEntry {
             instance,
+            sandbox: sandbox.disarm(),
+            launched_at,
             last_used: RwLock::new(Instant::now()),
             deploy_id,
             credentials: pending.credentials.clone(),
@@ -899,7 +1102,10 @@ impl LambdaRuntime {
         // Pooled: the entry owns the credentials now and revokes them on
         // retirement.
         pending.disarm();
-        Ok(Slot { entry, guard })
+        Ok(Slot {
+            entry,
+            _guard: guard,
+        })
     }
 
     fn in_pool(&self, key: &str, entry: &Arc<WarmEntry>) -> bool {
@@ -923,7 +1129,7 @@ impl LambdaRuntime {
                 *entry.last_used.write() = Instant::now();
                 return Some(Slot {
                     entry: entry.clone(),
-                    guard,
+                    _guard: guard,
                 });
             }
         }
@@ -1237,54 +1443,79 @@ mod tests {
         assert_ne!(a, deploy_id_from("abc123", "cfg2", &layers));
     }
 
-    // ---- warm-pool concurrency + eviction (issue #1644) ----
+    // ---- warm pool + Runtime API invocation path ----
 
-    use super::LambdaRuntime;
-    use crate::runtime::backend::{BackendHandle, LambdaBackend, RuntimeError, WarmInstance};
+    use super::{InvocationContext, LambdaRuntime, RunOutcome};
+    use crate::runtime::api::{spawn_in_process_runtime, InProcessReply, InvocationEvent};
+    use crate::runtime::backend::{
+        BackendHandle, InstanceExit, LambdaBackend, RuntimeApiAddress, RuntimeError, WarmInstance,
+    };
     use crate::state::LambdaFunction;
     use fakecloud_core::auth::{SessionCredentialIssuer, SessionCredentials};
     use parking_lot::RwLock;
-    use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
+    use tokio::sync::watch;
 
-    /// Backend double: counts launches/terminates and hands out endpoints
-    /// from a queue (falling back to `default_endpoint`), so a test can
-    /// inject a dead endpoint followed by a live one.
-    struct CountingBackend {
-        endpoints: StdMutex<VecDeque<String>>,
-        default_endpoint: String,
+    type Reply = Arc<dyn Fn(&InvocationEvent) -> InProcessReply + Send + Sync>;
+
+    /// Backend double: every launched instance runs an in-process runtime
+    /// against its Runtime API sandbox, holding each event for `delay` and
+    /// answering with `reply`. Records launches/terminates, the peak number
+    /// of events handled at once, every event seen, and keeps each
+    /// instance's exit sender so a test can kill it.
+    struct FakeBackend {
+        delay: Duration,
+        reply: Reply,
+        /// Upcoming launches whose runtime exits during init with status 3.
+        dying_launches: AtomicUsize,
         launches: AtomicUsize,
         terminates: AtomicUsize,
-        /// Access key id of the credentials each launch was handed.
         launched_with: StdMutex<Vec<Option<String>>>,
+        cur: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        events: Arc<StdMutex<Vec<InvocationEvent>>>,
+        exits: StdMutex<Vec<watch::Sender<Option<InstanceExit>>>>,
     }
 
-    impl CountingBackend {
-        fn new(default_endpoint: impl Into<String>) -> Arc<Self> {
+    impl FakeBackend {
+        fn new(delay: Duration) -> Arc<Self> {
+            Self::replying(
+                delay,
+                Arc::new(|_| InProcessReply::Response(b"ok".to_vec())),
+            )
+        }
+
+        fn replying(delay: Duration, reply: Reply) -> Arc<Self> {
             Arc::new(Self {
-                endpoints: StdMutex::new(VecDeque::new()),
-                default_endpoint: default_endpoint.into(),
+                delay,
+                reply,
+                dying_launches: AtomicUsize::new(0),
                 launches: AtomicUsize::new(0),
                 terminates: AtomicUsize::new(0),
                 launched_with: StdMutex::new(Vec::new()),
+                cur: Arc::new(AtomicUsize::new(0)),
+                peak: Arc::new(AtomicUsize::new(0)),
+                events: Arc::new(StdMutex::new(Vec::new())),
+                exits: StdMutex::new(Vec::new()),
             })
         }
-        fn with_queue(default_endpoint: impl Into<String>, queue: Vec<String>) -> Arc<Self> {
-            Arc::new(Self {
-                endpoints: StdMutex::new(queue.into()),
-                default_endpoint: default_endpoint.into(),
-                launches: AtomicUsize::new(0),
-                terminates: AtomicUsize::new(0),
-                launched_with: StdMutex::new(Vec::new()),
-            })
+
+        /// Kill instance `n` (in launch order) as if its process exited.
+        fn kill(&self, n: usize, code: i64) {
+            let _ = self.exits.lock().unwrap()[n]
+                .send(Some(InstanceExit::from_container_code(code, false)));
+        }
+
+        fn handled(&self) -> usize {
+            self.events.lock().unwrap().len()
         }
     }
 
     #[async_trait::async_trait]
-    impl LambdaBackend for CountingBackend {
+    impl LambdaBackend for FakeBackend {
         fn name(&self) -> &str {
             "test"
         }
@@ -1295,23 +1526,46 @@ mod tests {
             _layers: &[Vec<u8>],
             _deploy_id: &str,
             credentials: Option<&SessionCredentials>,
+            runtime_api: &RuntimeApiAddress,
         ) -> Result<WarmInstance, RuntimeError> {
             self.launched_with
                 .lock()
                 .unwrap()
                 .push(credentials.map(|c| c.access_key_id.clone()));
             let n = self.launches.fetch_add(1, SeqCst);
-            let endpoint = self
-                .endpoints
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or_else(|| self.default_endpoint.clone());
+            let (tx, exit) = watch::channel(None);
+            let pending = self.dying_launches.load(SeqCst);
+            let dying = pending > 0
+                && self
+                    .dying_launches
+                    .compare_exchange(pending, pending - 1, SeqCst, SeqCst)
+                    .is_ok();
+            if dying {
+                let _ = tx.send(Some(InstanceExit::from_container_code(3, false)));
+            } else {
+                let (delay, reply) = (self.delay, self.reply.clone());
+                let (cur, peak, events) =
+                    (self.cur.clone(), self.peak.clone(), self.events.clone());
+                spawn_in_process_runtime(runtime_api.sandbox.clone(), move |event| {
+                    let (reply, cur, peak, events) =
+                        (reply.clone(), cur.clone(), peak.clone(), events.clone());
+                    async move {
+                        let now = cur.fetch_add(1, SeqCst) + 1;
+                        peak.fetch_max(now, SeqCst);
+                        tokio::time::sleep(delay).await;
+                        cur.fetch_sub(1, SeqCst);
+                        let answer = reply(&event);
+                        events.lock().unwrap().push(event);
+                        answer
+                    }
+                });
+            }
+            self.exits.lock().unwrap().push(tx);
             Ok(WarmInstance {
-                endpoint,
                 handle: BackendHandle::Container {
                     id: format!("c{n}"),
                 },
+                exit,
             })
         }
         async fn terminate(&self, _handle: &BackendHandle) {
@@ -1319,69 +1573,10 @@ mod tests {
         }
     }
 
-    /// Spin a minimal in-process "RIE": one TCP accept loop that records
-    /// the peak number of simultaneously-open connections, holds each
-    /// request for `delay`, then returns a tiny 200. The peak directly
-    /// observes how many invocations overlapped on the instance(s) it
-    /// backs. Returns the `host:port` to use as a warm endpoint.
-    async fn spawn_rie(delay: Duration, peak: Arc<AtomicUsize>) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let cur = Arc::new(AtomicUsize::new(0));
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut sock, _)) = listener.accept().await else {
-                    break;
-                };
-                let cur = cur.clone();
-                let peak = peak.clone();
-                tokio::spawn(async move {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    // Only connections that actually send a request count as an
-                    // invocation. A bare reachability probe (TCP connect, no
-                    // bytes) reads EOF and is ignored — it neither overlaps a
-                    // real invoke nor inflates the concurrency peak, mirroring
-                    // the real RIE, which only starts an event on a request.
-                    let mut buf = [0u8; 1024];
-                    let n = sock.read(&mut buf).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    // The readiness probe (`GET /`): the real RIE answers it
-                    // 404 at once and starts no event.
-                    if buf[..n].starts_with(b"GET ") {
-                        let _ = sock
-                            .write_all(
-                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                            )
-                            .await;
-                        return;
-                    }
-                    let now = cur.fetch_add(1, SeqCst) + 1;
-                    peak.fetch_max(now, SeqCst);
-                    tokio::time::sleep(delay).await;
-                    let _ = sock
-                        .write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                        )
-                        .await;
-                    let _ = sock.flush().await;
-                    cur.fetch_sub(1, SeqCst);
-                });
-            }
-        });
-        format!("{addr}")
-    }
-
-    fn runtime_with(backend: Arc<CountingBackend>, max_concurrency: usize) -> Arc<LambdaRuntime> {
-        Arc::new(LambdaRuntime {
-            backend,
-            instances: RwLock::new(HashMap::new()),
-            starting: RwLock::new(HashMap::new()),
-            max_concurrency,
-            credential_issuer: std::sync::OnceLock::new(),
-            async_destinations: std::sync::OnceLock::new(),
-        })
+    fn runtime_with(backend: Arc<FakeBackend>, max_concurrency: usize) -> Arc<LambdaRuntime> {
+        let mut rt = LambdaRuntime::from_backend(backend);
+        rt.max_concurrency = max_concurrency;
+        Arc::new(rt)
     }
 
     fn arn(name: &str) -> String {
@@ -1393,8 +1588,7 @@ mod tests {
     }
 
     /// Wait until an invocation holds an instance of `pool` busy. A fixed
-    /// sleep races the spawned invoke under a loaded runner: it may not have
-    /// reserved its instance yet, or (with a short RIE delay) already be done.
+    /// sleep races the spawned invoke under a loaded runner.
     async fn wait_until_busy(rt: &LambdaRuntime, pool: &str) {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
@@ -1438,14 +1632,16 @@ mod tests {
         .expect("build test LambdaFunction")
     }
 
-    /// The core of #1644: with one warm instance, a burst of concurrent
-    /// invocations must be serialized onto it — never delivered in
-    /// parallel (which segfaults the real RIE). Peak overlap must be 1.
+    fn error_body(payload: &[u8]) -> serde_json::Value {
+        serde_json::from_slice(payload).expect("error object is JSON")
+    }
+
+    /// With one warm instance, a burst of concurrent invocations is
+    /// serialized onto it: an execution environment takes one event at a
+    /// time. Peak overlap must be 1.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_invokes_are_serialized_on_a_single_instance() {
-        let peak = Arc::new(AtomicUsize::new(0));
-        let endpoint = spawn_rie(Duration::from_millis(40), peak.clone()).await;
-        let backend = CountingBackend::new(endpoint);
+        let backend = FakeBackend::new(Duration::from_millis(40));
         let rt = runtime_with(backend.clone(), 1);
         let func = test_func("conc", "sha-A");
 
@@ -1458,42 +1654,46 @@ mod tests {
             ));
         }
         for h in handles {
-            h.await.unwrap().expect("invoke ok");
+            let out = h.await.unwrap().expect("invoke ok");
+            assert_eq!(out.payload, b"ok");
         }
 
         assert_eq!(
-            peak.load(SeqCst),
+            backend.peak.load(SeqCst),
             1,
-            "concurrent invokes overlapped on a single RIE instance"
+            "events overlapped on one instance"
         );
         assert_eq!(
             backend.launches.load(SeqCst),
             1,
             "max_concurrency=1 must launch exactly one instance"
         );
+        assert_eq!(backend.handled(), 8);
     }
 
     /// Under load the pool grows beyond one instance but never past the
-    /// cap, so genuine concurrency is served (AWS semantics) without an
-    /// unbounded container/Pod fan-out.
+    /// cap, and every event reaches exactly one runtime.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn pool_scales_under_load_and_respects_cap() {
-        let peak = Arc::new(AtomicUsize::new(0));
-        let endpoint = spawn_rie(Duration::from_millis(60), peak.clone()).await;
-        let backend = CountingBackend::new(endpoint);
+        let backend = FakeBackend::replying(
+            Duration::from_millis(60),
+            Arc::new(|e| InProcessReply::Response(e.payload.to_vec())),
+        );
         let rt = runtime_with(backend.clone(), 4);
         let func = test_func("scale", "sha-A");
 
         let mut handles = Vec::new();
-        for _ in 0..8 {
+        for i in 0..8 {
             let rt = rt.clone();
             let func = func.clone();
-            handles.push(tokio::spawn(
-                async move { rt.invoke(&func, b"{}", &[]).await },
-            ));
+            handles.push(tokio::spawn(async move {
+                let payload = format!("{{\"n\":{i}}}");
+                let out = rt.invoke(&func, payload.as_bytes(), &[]).await.unwrap();
+                assert_eq!(out.payload, payload.as_bytes(), "answers never cross");
+            }));
         }
         for h in handles {
-            h.await.unwrap().expect("invoke ok");
+            h.await.unwrap();
         }
 
         let launched = backend.launches.load(SeqCst);
@@ -1501,90 +1701,280 @@ mod tests {
             (2..=4).contains(&launched),
             "expected the pool to scale within the cap, launched={launched}"
         );
-        assert!(
-            peak.load(SeqCst) > 1,
-            "expected concurrent forwards across the scaled pool"
-        );
+        assert!(backend.peak.load(SeqCst) > 1);
+        assert_eq!(backend.handled(), 8);
     }
 
-    /// An unreachable instance (dead Pod/container) must be evicted and
-    /// the invocation retried against a fresh cold start, instead of
-    /// wedging the function forever.
+    /// A warm instance whose process died while idle is evicted and the
+    /// invocation runs on a fresh one, exactly once.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dead_instance_is_evicted_and_retried() {
-        let peak = Arc::new(AtomicUsize::new(0));
-        let live = spawn_rie(Duration::from_millis(5), peak.clone()).await;
-        // Two launches in a row hand back refused ports; the third gets the
-        // live one. Connect-refused provably never reached a handler, so the
-        // extra retry budget can't double-execute.
-        let backend = CountingBackend::with_queue(
-            live,
-            vec!["127.0.0.1:1".to_string(), "127.0.0.1:1".to_string()],
-        );
+    async fn dead_warm_instance_is_evicted_and_retried() {
+        let backend = FakeBackend::new(Duration::from_millis(5));
         let rt = runtime_with(backend.clone(), 1);
+        let func = test_func("dead", "sha-A");
 
-        let out = rt
-            .invoke(&test_func("dead", "sha-A"), b"{}", &[])
-            .await
-            .expect("should recover via cold-start retry");
-        assert_eq!(out.payload, b"ok");
-        assert_eq!(
-            backend.launches.load(SeqCst),
-            3,
-            "expected two dead instances plus one cold-start replacement"
-        );
-        assert!(
-            backend.terminates.load(SeqCst) >= 2,
-            "both dead instances should have been terminated on eviction"
-        );
-    }
-
-    /// A black-holed warm instance (a killed Pod whose IP now drops packets,
-    /// rather than refusing with an RST) must be detected by the fast
-    /// reachability probe and failed over in seconds — not hang the full invoke
-    /// timeout (~`func.timeout + 5s`). This is the failure mode that flaked the
-    /// LOE workflows: a dead pod cost ~305s, blowing the test window.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn black_holed_instance_fails_over_fast() {
-        let peak = Arc::new(AtomicUsize::new(0));
-        let live = spawn_rie(Duration::from_millis(5), peak.clone()).await;
-        // 192.0.2.1 is RFC 5737 TEST-NET-1: unrouted, so a connect black-holes
-        // (caught by the probe's ~1.5s timeout) instead of getting a fast RST.
-        let backend = CountingBackend::with_queue(live, vec!["192.0.2.1:9".to_string()]);
-        let rt = runtime_with(backend.clone(), 1);
-
-        // test_func timeout is 5 -> the pre-fix hang would be ~10s.
-        let func = test_func("blackhole", "sha-A");
-        let started = std::time::Instant::now();
+        rt.invoke(&func, b"{}", &[]).await.unwrap();
+        backend.kill(0, 137);
         let out = rt
             .invoke(&func, b"{}", &[])
             .await
-            .expect("should recover via cold-start retry");
-        let elapsed = started.elapsed();
-
+            .expect("recovers on a fresh instance");
         assert_eq!(out.payload, b"ok");
+        assert_eq!(out.function_error, None);
+        assert_eq!(backend.launches.load(SeqCst), 2);
+        assert_eq!(backend.terminates.load(SeqCst), 1);
+        assert_eq!(backend.handled(), 2, "the event ran once");
+    }
+
+    /// A runtime that exits during init fails the invocation with
+    /// `Runtime.ExitError` (as Lambda reports an init crash), not a retry,
+    /// and its instance is not reused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_exit_during_init_is_exit_error() {
+        let backend = FakeBackend::new(Duration::from_millis(5));
+        backend.dying_launches.store(1, SeqCst);
+        let rt = runtime_with(backend.clone(), 1);
+        let func = test_func("initcrash", "sha-A");
+        let ctx = InvocationContext {
+            request_id: Some("req-1".into()),
+            ..Default::default()
+        };
+
+        let (out, _) = rt.invoke_with(&func, b"{}", &[], &ctx).await.unwrap();
+        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
+        let body = error_body(&out.payload);
+        assert_eq!(body["errorType"], "Runtime.ExitError");
         assert_eq!(
-            backend.launches.load(SeqCst),
-            2,
-            "expected one black-holed instance plus one cold-start replacement"
+            body["errorMessage"],
+            "RequestId: req-1 Error: Runtime exited with error: exit status 3"
         );
+        assert_eq!(backend.launches.load(SeqCst), 1);
+        assert_eq!(backend.terminates.load(SeqCst), 1);
+
+        // The next invocation gets a fresh environment.
+        let out = rt.invoke(&func, b"{}", &[]).await.unwrap();
+        assert_eq!(out.function_error, None);
+        assert_eq!(backend.launches.load(SeqCst), 2);
+    }
+
+    /// A runtime killed while it holds the event reports the exit for that
+    /// event and is never retried (the handler already ran).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_exit_mid_invocation_is_reported_once() {
+        let backend =
+            FakeBackend::replying(Duration::from_secs(30), Arc::new(|_| InProcessReply::Hang));
+        let rt = runtime_with(backend.clone(), 1);
+        let func = test_func("midexit", "sha-A");
+        let call = {
+            let rt = rt.clone();
+            let func = func.clone();
+            tokio::spawn(async move {
+                let ctx = InvocationContext {
+                    request_id: Some("req-2".into()),
+                    ..Default::default()
+                };
+                rt.invoke_with(&func, b"{}", &[], &ctx).await
+            })
+        };
+        // Wait for the runtime to have taken the event.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while backend.cur.load(SeqCst) == 0 {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        backend.kill(0, 137);
+        let (out, _) = call.await.unwrap().unwrap();
+        let body = error_body(&out.payload);
+        assert_eq!(body["errorType"], "Runtime.ExitError");
+        assert_eq!(
+            body["errorMessage"],
+            "RequestId: req-2 Error: Runtime exited with error: signal: killed"
+        );
+        assert_eq!(backend.launches.load(SeqCst), 1, "no retry once delivered");
+    }
+
+    /// What the function returned is its result, whatever its shape; only
+    /// an error the runtime reports is a function error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_reported_error_is_a_function_error() {
+        let error_shaped = br#"{"errorType":"ValueError","errorMessage":"returned, not raised"}"#;
+        let backend = FakeBackend::replying(
+            Duration::ZERO,
+            Arc::new(|e| {
+                if e.payload.as_ref() == b"raise" {
+                    InProcessReply::Error {
+                        error_type: Some("ValueError".into()),
+                        body:
+                            br#"{"errorMessage":"boom","errorType":"ValueError","stackTrace":[]}"#
+                                .to_vec(),
+                    }
+                } else {
+                    InProcessReply::Response(
+                        br#"{"errorType":"ValueError","errorMessage":"returned, not raised"}"#
+                            .to_vec(),
+                    )
+                }
+            }),
+        );
+        let rt = runtime_with(backend.clone(), 1);
+        let func = test_func("shapes", "sha-A");
+
+        let out = rt.invoke(&func, b"{}", &[]).await.unwrap();
+        assert_eq!(out.function_error, None);
+        assert_eq!(out.payload, error_shaped);
+
+        let out = rt.invoke(&func, b"raise", &[]).await.unwrap();
+        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
+        assert_eq!(out.error_type().as_deref(), Some("ValueError"));
+        assert_eq!(out.error_message().as_deref(), Some("boom"));
+        // A raised error does not reset the environment.
+        assert_eq!(backend.launches.load(SeqCst), 1);
+        assert_eq!(backend.terminates.load(SeqCst), 0);
+    }
+
+    /// An invocation past the function timeout is `Sandbox.Timedout` under
+    /// its own request ID, and the environment is reset.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timeout_is_sandbox_timedout_and_resets_the_instance() {
+        let backend =
+            FakeBackend::replying(Duration::from_secs(30), Arc::new(|_| InProcessReply::Hang));
+        let rt = runtime_with(backend.clone(), 1);
+        let mut func = test_func("slow", "sha-A");
+        func.timeout = 1;
+        let ctx = InvocationContext {
+            request_id: Some("req-t".into()),
+            ..Default::default()
+        };
+        let started = std::time::Instant::now();
+        let (out, _) = rt.invoke_with(&func, b"{}", &[], &ctx).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let body = error_body(&out.payload);
+        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
+        assert_eq!(body["errorType"], "Sandbox.Timedout");
+        assert_eq!(
+            body["errorMessage"],
+            "RequestId: req-t Error: Task timed out after 1.00 seconds"
+        );
+        assert_eq!(backend.terminates.load(SeqCst), 1);
+        assert!(rt.instances.read().get(&key("slow")).is_none());
+    }
+
+    /// The event carries the request ID, invoked ARN, trace and client
+    /// context the caller supplied, and a deadline one timeout away.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn event_carries_the_invocation_context() {
+        let backend = FakeBackend::new(Duration::ZERO);
+        let rt = runtime_with(backend.clone(), 1);
+        let func = test_func("ctx", "sha-A");
+        let ctx = InvocationContext {
+            request_id: Some("req-c".into()),
+            invoked_function_arn: Some(format!("{}:live", arn("ctx"))),
+            trace_id: Some("Root=1-5e1b4151-5ac6c58f5a4b2e2f9c6b3e2d;Sampled=1".into()),
+            client_context: Some(r#"{"custom":{"k":"v"}}"#.into()),
+            cognito_identity: None,
+        };
+        rt.invoke_with(&func, b"{\"a\":1}", &[], &ctx)
+            .await
+            .unwrap();
+        rt.invoke(&func, b"", &[]).await.unwrap();
+        let events = backend.events.lock().unwrap();
+        assert_eq!(events[1].payload.as_ref(), b"{}", "no payload is `{{}}`");
+        assert_eq!(events[0].request_id, "req-c");
+        assert_eq!(
+            events[0].invoked_function_arn,
+            format!("{}:live", arn("ctx"))
+        );
+        assert_eq!(
+            events[0].trace_id,
+            "Root=1-5e1b4151-5ac6c58f5a4b2e2f9c6b3e2d;Sampled=1"
+        );
+        assert_eq!(
+            events[0].client_context.as_deref(),
+            Some(r#"{"custom":{"k":"v"}}"#)
+        );
+        assert_eq!(events[0].payload.as_ref(), b"{\"a\":1}");
+        assert_eq!(events[0].timeout, Duration::from_secs(5));
+        // Defaults: a fresh request ID and trace, the function's own ARN.
+        assert_ne!(events[1].request_id, "req-c");
+        assert_eq!(events[1].invoked_function_arn, arn("ctx"));
+        assert!(events[1].trace_id.starts_with("Root=1-"));
+    }
+
+    /// A streamed response keeps its pieces; a buffered one over 6 MB is
+    /// `Function.ResponseSizeTooLarge`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_keeps_chunks_and_buffered_responses_are_capped() {
+        let backend = FakeBackend::replying(
+            Duration::ZERO,
+            Arc::new(|e| {
+                if e.payload.as_ref() == b"big" {
+                    InProcessReply::Response(vec![b'x'; super::MAX_SYNC_RESPONSE_BYTES + 1])
+                } else {
+                    InProcessReply::Stream(vec![b"one|".to_vec(), b"two".to_vec()])
+                }
+            }),
+        );
+        let rt = runtime_with(backend.clone(), 1);
+        let func = test_func("stream", "sha-A");
+
+        let mut chunks = Vec::new();
+        let outcome = rt
+            .invoke_streaming(&func, b"{}", &[], &InvocationContext::default(), &mut |c| {
+                chunks.push(c)
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Success);
+        assert_eq!(chunks, vec![&b"one|"[..], &b"two"[..]]);
+
+        let out = rt.invoke(&func, b"big", &[]).await.unwrap();
+        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
+        assert_eq!(
+            out.error_type().as_deref(),
+            Some("Function.ResponseSizeTooLarge")
+        );
+    }
+
+    /// `LogType=Tail` output frames the function's output with the
+    /// platform's START / END / REPORT lines; only the cold start reports an
+    /// init duration.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn log_tail_has_the_platform_lines() {
+        let backend = FakeBackend::new(Duration::ZERO);
+        let rt = runtime_with(backend.clone(), 1);
+        let func = test_func("logs", "sha-A");
+        let ctx = InvocationContext {
+            request_id: Some("req-l".into()),
+            ..Default::default()
+        };
+        let (_, logs) = rt
+            .invoke_with_log_tail(&func, b"{}", &[], &ctx)
+            .await
+            .unwrap();
+        let logs = logs.unwrap();
         assert!(
-            backend.terminates.load(SeqCst) >= 1,
-            "the black-holed instance should have been evicted"
+            logs.starts_with("START RequestId: req-l Version: $LATEST\n"),
+            "{logs}"
         );
+        assert!(logs.contains("END RequestId: req-l\n"), "{logs}");
         assert!(
-            elapsed < Duration::from_secs(5),
-            "failover took {elapsed:?}; must be far below the ~10s invoke timeout"
+            logs.contains("REPORT RequestId: req-l\tDuration: "),
+            "{logs}"
         );
+        assert!(logs.contains("Memory Size: 128 MB"), "{logs}");
+        assert!(logs.contains("Init Duration: "), "{logs}");
+        let (_, logs) = rt
+            .invoke_with_log_tail(&func, b"{}", &[], &InvocationContext::default())
+            .await
+            .unwrap();
+        assert!(!logs.unwrap().contains("Init Duration"));
     }
 
     /// Changing the function's code (a new deploy id) tears down the
     /// stale warm instance before serving against a fresh one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deploy_change_evicts_stale_instance() {
-        let peak = Arc::new(AtomicUsize::new(0));
-        let endpoint = spawn_rie(Duration::from_millis(5), peak.clone()).await;
-        let backend = CountingBackend::new(endpoint);
+        let backend = FakeBackend::new(Duration::from_millis(5));
         let rt = runtime_with(backend.clone(), 2);
 
         rt.invoke(&test_func("upd", "sha-A"), b"{}", &[])
@@ -1594,99 +1984,73 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            backend.launches.load(SeqCst),
-            2,
-            "a new deploy id should launch a fresh instance"
-        );
-        assert!(
-            backend.terminates.load(SeqCst) >= 1,
-            "the stale-deploy instance should have been torn down"
-        );
-        // Exactly one current instance remains in the pool.
+        assert_eq!(backend.launches.load(SeqCst), 2);
+        assert!(backend.terminates.load(SeqCst) >= 1);
         let pool_len = rt.instances.read().get(&key("upd")).map_or(0, |v| v.len());
         assert_eq!(pool_len, 1);
+        // The torn-down instance's sandbox is gone from the Runtime API.
+        assert_eq!(rt.runtime_api.len(), 1);
+    }
+
+    fn idle_entry(rt: &LambdaRuntime, id: &str) -> Arc<super::WarmEntry> {
+        let (_tx, exit) = watch::channel(None);
+        Arc::new(super::WarmEntry {
+            instance: WarmInstance {
+                handle: BackendHandle::Container { id: id.to_string() },
+                exit,
+            },
+            sandbox: rt.runtime_api.register(),
+            launched_at: std::time::Instant::now(),
+            last_used: RwLock::new(std::time::Instant::now()),
+            deploy_id: "d".to_string(),
+            credentials: None,
+            retiring: std::sync::atomic::AtomicBool::new(false),
+            busy: Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 
     /// bug-hunt 2026-06-13, finding 4.2: DeleteFunction must snapshot the
     /// warm pool and terminate *that snapshot*, not whatever pool exists
-    /// when the deferred stop runs. Otherwise a CreateFunction + warm-up of
-    /// the same name racing ahead of the stop has its fresh container
-    /// reaped. This exercises the snapshot primitives directly.
+    /// when the deferred stop runs.
     #[tokio::test]
     async fn take_warm_instances_snapshot_does_not_reap_recreated_pool() {
-        let backend = CountingBackend::new("127.0.0.1:1");
+        let backend = FakeBackend::new(Duration::ZERO);
         let rt = runtime_with(backend.clone(), 10);
-        let mk = |id: &str| {
-            Arc::new(super::WarmEntry {
-                instance: WarmInstance {
-                    endpoint: "127.0.0.1:1".to_string(),
-                    handle: BackendHandle::Container { id: id.to_string() },
-                },
-                last_used: RwLock::new(std::time::Instant::now()),
-                deploy_id: "d".to_string(),
-                credentials: None,
-                retiring: std::sync::atomic::AtomicBool::new(false),
-                busy: Arc::new(tokio::sync::Mutex::new(())),
-            })
-        };
 
-        // A function "f" with one warm instance.
-        rt.instances.write().insert(key("f"), vec![mk("old")]);
-
-        // Delete snapshots the pool synchronously and removes it from the map.
+        rt.instances
+            .write()
+            .insert(key("f"), vec![idle_entry(&rt, "old")]);
         let snapshot = rt.take_warm_instances(&arn("f"), None);
         assert_eq!(snapshot.len(), 1);
         assert!(rt.instances.read().get(&key("f")).is_none());
 
-        // A recreate + warm-up of the same name wins the race ahead of the
-        // deferred terminate.
-        rt.instances.write().insert(key("f"), vec![mk("new")]);
-
-        // Terminating the snapshot must touch only the old instance.
+        rt.instances
+            .write()
+            .insert(key("f"), vec![idle_entry(&rt, "new")]);
         rt.terminate_instances(snapshot).await;
-        assert_eq!(
-            backend.terminates.load(SeqCst),
-            1,
-            "only the snapshotted instance is terminated"
-        );
-
-        // The recreated function keeps its fresh warm instance.
-        let pool = rt.instances.read();
-        let f = pool
-            .get(&key("f"))
-            .expect("recreated function pool must survive");
-        assert_eq!(f.len(), 1);
+        assert_eq!(backend.terminates.load(SeqCst), 1);
+        assert_eq!(rt.instances.read().get(&key("f")).map(Vec::len), Some(1));
     }
 
     #[tokio::test]
     async fn take_account_instances_takes_only_that_account() {
-        let backend = CountingBackend::new("127.0.0.1:1");
+        let backend = FakeBackend::new(Duration::ZERO);
         let rt = runtime_with(backend.clone(), 10);
-        let mk = |id: &str| {
-            Arc::new(super::WarmEntry {
-                instance: WarmInstance {
-                    endpoint: "127.0.0.1:1".to_string(),
-                    handle: BackendHandle::Container { id: id.to_string() },
-                },
-                last_used: RwLock::new(std::time::Instant::now()),
-                deploy_id: "d".to_string(),
-                credentials: None,
-                retiring: std::sync::atomic::AtomicBool::new(false),
-                busy: Arc::new(tokio::sync::Mutex::new(())),
-            })
-        };
         let other = "arn:aws:lambda:us-east-1:222222222222:function:g:$LATEST".to_string();
-        rt.instances.write().insert(key("f"), vec![mk("a")]);
         rt.instances
             .write()
-            .insert(other.clone(), vec![mk("b"), mk("c")]);
+            .insert(key("f"), vec![idle_entry(&rt, "a")]);
+        rt.instances.write().insert(
+            other.clone(),
+            vec![idle_entry(&rt, "b"), idle_entry(&rt, "c")],
+        );
 
         let taken = rt.take_account_instances(Some("222222222222"));
         assert_eq!(taken.len(), 2);
         assert!(rt.instances.read().get(&other).is_none());
-        // A pool warmed up after the take is not the taken set's business.
-        rt.instances.write().insert(other.clone(), vec![mk("new")]);
+        rt.instances
+            .write()
+            .insert(other.clone(), vec![idle_entry(&rt, "new")]);
         rt.terminate_taken(taken).await;
         assert_eq!(backend.terminates.load(SeqCst), 2);
         assert_eq!(rt.instances.read().get(&other).map(Vec::len), Some(1));
@@ -1746,9 +2110,7 @@ mod tests {
     /// instance goes away.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn instances_get_execution_role_credentials_revoked_on_teardown() {
-        let peak = Arc::new(AtomicUsize::new(0));
-        let endpoint = spawn_rie(Duration::from_millis(5), peak).await;
-        let backend = CountingBackend::new(endpoint);
+        let backend = FakeBackend::new(Duration::from_millis(5));
         let rt = runtime_with(backend.clone(), 2);
         let issuer = RecordingIssuer::new(chrono::Duration::hours(1));
         rt.set_credential_issuer(issuer.clone());
@@ -1773,6 +2135,7 @@ mod tests {
 
         rt.stop_container(&arn("creds")).await;
         assert_eq!(*issuer.revoked.lock().unwrap(), vec!["KEY0".to_string()]);
+        assert!(rt.runtime_api.is_empty());
     }
 
     /// An IAM reset drops the credentials warm instances hold: free ones are
@@ -1780,14 +2143,11 @@ mod tests {
     /// invocation untouched and take no new work.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn iam_reset_retires_free_instances_and_spares_busy_ones() {
-        let peak = Arc::new(AtomicUsize::new(0));
-        let endpoint = spawn_rie(Duration::from_secs(2), peak).await;
-        let backend = CountingBackend::new(endpoint);
+        let backend = FakeBackend::new(Duration::from_secs(2));
         let rt = runtime_with(backend.clone(), 2);
         let issuer = RecordingIssuer::new(chrono::Duration::hours(12));
         rt.set_credential_issuer(issuer.clone());
 
-        // Two instances: one left free, one kept busy across the reset.
         let func = test_func("reset", "sha-A");
         let (a, b) = tokio::join!(rt.invoke(&func, b"{}", &[]), rt.invoke(&func, b"{}", &[]));
         a.unwrap();
@@ -1800,8 +2160,6 @@ mod tests {
         };
         wait_until_busy(&rt, &key("reset")).await;
 
-        // Marking is synchronous: from here on no invocation can land on
-        // either instance, before any teardown has run.
         rt.mark_credentials_revoked(Some("123456789012"));
         assert!(rt
             .instances
@@ -1811,7 +2169,6 @@ mod tests {
             .iter()
             .all(|e| e.retiring.load(std::sync::atomic::Ordering::Acquire)));
         assert_eq!(backend.terminates.load(SeqCst), 0);
-        // Another account's reset marks nothing further.
         rt.mark_credentials_revoked(Some("999999999999"));
         rt.retire_released().await;
         assert_eq!(
@@ -1823,8 +2180,6 @@ mod tests {
             .unwrap()
             .expect("the in-flight invocation completes");
 
-        // The next invoke never lands on the retiring instance: it gets a
-        // fresh one with new credentials, and the now-free survivor goes.
         rt.invoke(&func, b"{}", &[]).await.unwrap();
         assert_eq!(backend.launches.load(SeqCst), 3);
         assert_eq!(
@@ -1845,9 +2200,7 @@ mod tests {
     /// stale instance finishes and is only reaped once free.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deploy_change_spares_busy_instance() {
-        let peak = Arc::new(AtomicUsize::new(0));
-        let endpoint = spawn_rie(Duration::from_secs(2), peak).await;
-        let backend = CountingBackend::new(endpoint);
+        let backend = FakeBackend::new(Duration::from_secs(2));
         let rt = runtime_with(backend.clone(), 2);
 
         let old = test_func("busy", "sha-A");
@@ -1859,17 +2212,12 @@ mod tests {
         rt.invoke(&test_func("busy", "sha-B"), b"{}", &[])
             .await
             .unwrap();
-        assert_eq!(
-            backend.terminates.load(SeqCst),
-            0,
-            "the busy stale instance must not be terminated"
-        );
+        assert_eq!(backend.terminates.load(SeqCst), 0);
         in_flight
             .await
             .unwrap()
             .expect("in-flight invocation completes");
 
-        // Next launch-path sweep reaps the now-free stale instance.
         rt.evict_stale_deploy(
             &key("busy"),
             &super::deploy_id_for(&test_func("busy", "sha-B"), &[], false),
@@ -1882,9 +2230,7 @@ mod tests {
     /// other, even with identical code.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn versions_do_not_evict_each_other() {
-        let peak = Arc::new(AtomicUsize::new(0));
-        let endpoint = spawn_rie(Duration::from_millis(5), peak).await;
-        let backend = CountingBackend::new(endpoint);
+        let backend = FakeBackend::new(Duration::from_millis(5));
         let rt = runtime_with(backend.clone(), 2);
 
         let latest = test_func("ver", "sha-A");
@@ -1896,8 +2242,14 @@ mod tests {
         }
         assert_eq!(backend.launches.load(SeqCst), 2);
         assert_eq!(backend.terminates.load(SeqCst), 0);
+        // A version's event names the version-qualified ARN.
+        assert!(backend
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.invoked_function_arn == format!("{}:1", arn("ver"))));
 
-        // Deleting one version's pool leaves the other's.
         let taken = rt.take_warm_instances(&arn("ver"), Some("1"));
         assert_eq!(taken.len(), 1);
         assert!(rt.instances.read().contains_key(&key("ver")));
@@ -1909,9 +2261,7 @@ mod tests {
     /// code is unchanged.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn configuration_change_replaces_the_warm_instance() {
-        let peak = Arc::new(AtomicUsize::new(0));
-        let endpoint = spawn_rie(Duration::from_millis(5), peak).await;
-        let backend = CountingBackend::new(endpoint);
+        let backend = FakeBackend::new(Duration::from_millis(5));
         let rt = runtime_with(backend.clone(), 2);
 
         let mut func = test_func("cfg", "sha-A");
@@ -1961,6 +2311,7 @@ mod tests {
             _layers: &[Vec<u8>],
             _deploy_id: &str,
             _credentials: Option<&SessionCredentials>,
+            _runtime_api: &RuntimeApiAddress,
         ) -> Result<WarmInstance, RuntimeError> {
             if self.hang {
                 std::future::pending::<()>().await;
@@ -1971,18 +2322,14 @@ mod tests {
     }
 
     fn broken_runtime(hang: bool) -> Arc<LambdaRuntime> {
-        Arc::new(LambdaRuntime {
-            backend: Arc::new(BrokenBackend { hang }),
-            instances: RwLock::new(HashMap::new()),
-            starting: RwLock::new(HashMap::new()),
-            max_concurrency: 2,
-            credential_issuer: std::sync::OnceLock::new(),
-            async_destinations: std::sync::OnceLock::new(),
-        })
+        let mut rt = LambdaRuntime::from_backend(Arc::new(BrokenBackend { hang }));
+        rt.max_concurrency = 2;
+        Arc::new(rt)
     }
 
     /// Credentials minted for a launch that fails, or whose launching future
-    /// is dropped mid-launch, are revoked rather than left registered.
+    /// is dropped mid-launch, are revoked rather than left registered, and
+    /// so is its Runtime API sandbox.
     #[tokio::test]
     async fn credentials_of_an_unfinished_launch_are_revoked() {
         let func = test_func("broken", "sha-A");
@@ -1992,6 +2339,7 @@ mod tests {
         rt.set_credential_issuer(issuer.clone());
         assert!(rt.invoke(&func, b"{}", &[]).await.is_err());
         assert_eq!(*issuer.revoked.lock().unwrap(), vec!["KEY0".to_string()]);
+        assert!(rt.runtime_api.is_empty());
 
         let rt = broken_runtime(true);
         let issuer = RecordingIssuer::new(chrono::Duration::hours(12));
@@ -2000,17 +2348,15 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(100), rt.invoke(&func, b"{}", &[])).await;
         assert!(cancelled.is_err(), "the launch never finishes");
         assert_eq!(*issuer.revoked.lock().unwrap(), vec!["KEY0".to_string()]);
+        assert!(rt.runtime_api.is_empty());
     }
 
     /// An instance stops taking invocations once its credentials could lapse
     /// during one, judged from the credentials' own expiration.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn instance_whose_credentials_near_expiry_is_replaced() {
-        let peak = Arc::new(AtomicUsize::new(0));
-        let endpoint = spawn_rie(Duration::from_millis(5), peak).await;
-        let backend = CountingBackend::new(endpoint);
+        let backend = FakeBackend::new(Duration::from_millis(5));
         let rt = runtime_with(backend.clone(), 2);
-        // Minted with less than the invocation headroom left.
         let issuer = RecordingIssuer::new(chrono::Duration::minutes(10));
         rt.set_credential_issuer(issuer.clone());
 
@@ -2018,7 +2364,6 @@ mod tests {
         rt.invoke(&func, b"{}", &[]).await.unwrap();
         rt.invoke(&func, b"{}", &[]).await.unwrap();
         assert_eq!(backend.launches.load(SeqCst), 2);
-        // The first (free) one was retired on the second launch.
         assert_eq!(*issuer.revoked.lock().unwrap(), vec!["KEY0".to_string()]);
     }
 
@@ -2026,9 +2371,7 @@ mod tests {
     /// to finish, retiring it once released; other versions are untouched.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deleting_a_version_spares_its_busy_instance() {
-        let peak = Arc::new(AtomicUsize::new(0));
-        let endpoint = spawn_rie(Duration::from_secs(2), peak).await;
-        let backend = CountingBackend::new(endpoint);
+        let backend = FakeBackend::new(Duration::from_secs(2));
         let rt = runtime_with(backend.clone(), 2);
 
         let latest = test_func("delv", "sha-A");
@@ -2077,100 +2420,27 @@ mod tests {
         );
     }
 
-    // Bodies below are what the AWS Runtime Interface Emulator actually
-    // returns for each outcome (probed against public.ecr.aws/lambda images).
-
     #[test]
-    fn classify_plain_return_is_success() {
-        let out = super::classify_invocation_response(200, br#"{"ok": true}"#);
-        assert_eq!(out.function_error, None);
-        assert_eq!(out.payload, br#"{"ok": true}"#);
+    fn exit_messages_follow_lambda() {
+        let exit = |code| InstanceExit::from_container_code(code, false);
+        let msg = |e: InstanceExit| error_body(&super::exit_payload("r", &e));
         assert_eq!(
-            super::classify_invocation_response(200, b"null").function_error,
-            None
+            msg(exit(0))["errorMessage"],
+            "RequestId: r Error: Runtime exited without providing a reason"
         );
-    }
-
-    #[test]
-    fn classify_thrown_error_is_unhandled() {
-        let body = br#"{"errorMessage": "boom", "errorType": "ValueError", "requestId": "r", "stackTrace": []}"#;
-        let out = super::classify_invocation_response(200, body);
-        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
-        assert_eq!(out.payload, body);
-    }
-
-    #[test]
-    fn classify_partial_error_shape_is_success() {
-        // A runtime error object always carries both fields as strings; a
-        // returned object with only one of them is a normal result.
-        for body in [
-            &br#"{"errorMessage": "fine"}"#[..],
-            br#"{"errorType": "X"}"#,
-            br#"{"errorType": 1, "errorMessage": "x"}"#,
-        ] {
-            assert_eq!(
-                super::classify_invocation_response(200, body).function_error,
-                None
-            );
-        }
-    }
-
-    #[test]
-    fn classify_runtime_exit_is_unhandled_with_the_runtime_error() {
-        let body = br#"{"errorType":"Runtime.ExitError","errorMessage":"RequestId: x Error: Runtime exited with error: exit status 3"}"#;
-        let out = super::classify_invocation_response(502, body);
-        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
-        assert_eq!(out.error_type().as_deref(), Some("Runtime.ExitError"));
-    }
-
-    #[test]
-    fn classify_non_json_failure_status_wraps_the_text() {
-        let out = super::classify_invocation_response(500, b"internal failure");
-        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
-        assert_eq!(out.error_type().as_deref(), Some("Runtime.Unknown"));
-        assert_eq!(out.error_message().as_deref(), Some("internal failure"));
-    }
-
-    #[test]
-    fn classify_rie_timeout_reports_sandbox_timedout() {
-        let out = super::classify_invocation_response(200, b"Task timed out after 2.00 seconds");
-        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
-        assert_eq!(out.error_type().as_deref(), Some("Sandbox.Timedout"));
-        let message = out.error_message().unwrap();
-        assert!(message.starts_with("RequestId: "), "{message}");
-        assert!(
-            message.ends_with(" Error: Task timed out after 2.00 seconds"),
-            "{message}"
+        assert_eq!(
+            msg(exit(1))["errorMessage"],
+            "RequestId: r Error: Runtime exited with error: exit status 1"
         );
-    }
-
-    #[test]
-    fn classify_returned_timeout_string_is_success() {
-        // A handler returning that sentence as a string is JSON-encoded.
-        let out =
-            super::classify_invocation_response(200, br#""Task timed out after 2.00 seconds""#);
-        assert_eq!(out.function_error, None);
-    }
-
-    /// The cold-start race: a published Docker port is a forwarder that
-    /// accepts TCP with nothing listening in the container and closes the
-    /// connection. Such an endpoint must not count as ready, while a
-    /// listening RIE (any HTTP answer) must.
-    #[tokio::test]
-    async fn readiness_needs_an_http_answer_not_just_a_tcp_accept() {
-        let forwarder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let fwd_addr = forwarder.local_addr().unwrap().to_string();
-        tokio::spawn(async move {
-            while let Ok((sock, _)) = forwarder.accept().await {
-                drop(sock);
-            }
-        });
-        assert!(
-            !super::endpoint_reachable(&fwd_addr, Duration::from_millis(500)).await,
-            "an accept-and-close forwarder is not a listening RIE"
+        assert_eq!(
+            msg(exit(139))["errorMessage"],
+            "RequestId: r Error: Runtime exited with error: signal: segmentation fault"
         );
-
-        let rie = spawn_rie(Duration::from_secs(5), Arc::new(AtomicUsize::new(0))).await;
-        assert!(super::endpoint_reachable(&rie, Duration::from_millis(500)).await);
+        let oom = msg(InstanceExit::from_container_code(137, true));
+        assert_eq!(oom["errorType"], "Runtime.OutOfMemory");
+        assert_eq!(
+            oom["errorMessage"],
+            "RequestId: r Error: Runtime exited with error: signal: killed"
+        );
     }
 }

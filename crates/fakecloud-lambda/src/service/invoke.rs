@@ -4,6 +4,50 @@ use base64::Engine as _;
 
 use super::*;
 
+/// The ARN a caller invoked a function through: its ARN, qualified when the
+/// caller named a version or alias (`Lambda-Runtime-Invoked-Function-Arn`).
+pub(crate) fn invoked_function_arn(function_arn: &str, qualifier: Option<&str>) -> String {
+    match qualifier.filter(|q| !q.is_empty()) {
+        Some(q) => format!("{function_arn}:{q}"),
+        None => function_arn.to_string(),
+    }
+}
+
+/// The caller's X-Ray trace header, passed on to the runtime.
+pub(crate) fn trace_header(req: &AwsRequest) -> Option<String> {
+    req.headers
+        .get("x-amzn-trace-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// The client context the caller sent (`X-Amz-Client-Context`, base64 JSON),
+/// decoded as the runtime receives it.
+pub(crate) fn client_context(req: &AwsRequest) -> Option<String> {
+    let raw = req.headers.get("x-amz-client-context")?.to_str().ok()?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(raw.trim())
+        .ok()?;
+    String::from_utf8(decoded).ok()
+}
+
+/// The invocation details a synchronous or asynchronous `Invoke` hands the
+/// runtime.
+pub(crate) fn invocation_context(
+    req: &AwsRequest,
+    function_arn: &str,
+    qualifier: Option<&str>,
+) -> crate::runtime::InvocationContext {
+    crate::runtime::InvocationContext {
+        request_id: Some(req.request_id.clone()),
+        invoked_function_arn: Some(invoked_function_arn(function_arn, qualifier)),
+        trace_id: trace_header(req),
+        client_context: client_context(req),
+        cognito_identity: None,
+    }
+}
+
 impl LambdaService {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn invoke(
@@ -16,6 +60,7 @@ impl LambdaService {
         qualifier: Option<&str>,
         log_tail: bool,
         request_id: &str,
+        ctx: &crate::runtime::InvocationContext,
     ) -> Result<AwsResponse, AwsServiceError> {
         // An unknown alias must 404 like GetFunction does, not silently fall
         // through to $LATEST. resolve_qualifier_to_version returns None for both
@@ -238,13 +283,10 @@ impl LambdaService {
                     // 2026-06-24, 1.20).
                     let invoke_result = if log_tail {
                         runtime
-                            .invoke_with_log_tail(&func, payload, &layer_zips)
+                            .invoke_with_log_tail(&func, payload, &layer_zips, ctx)
                             .await
                     } else {
-                        runtime
-                            .invoke(&func, payload, &layer_zips)
-                            .await
-                            .map(|output| (output, None))
+                        runtime.invoke_with(&func, payload, &layer_zips, ctx).await
                     };
                     match invoke_result.map(|(output, logs)| (output, logs.filter(|_| log_tail))) {
                         Ok((output, log_tail_text)) => {

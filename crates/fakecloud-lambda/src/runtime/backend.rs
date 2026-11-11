@@ -2,7 +2,8 @@
 //!
 //! The facade in [`super::facade::LambdaRuntime`] owns the warm-pool
 //! bookkeeping, per-function startup serialization, and the HTTP
-//! invocation logic that's identical across backends. Backends only
+//! invocation logic that's identical across backends (through the Runtime
+//! API fakecloud serves, see [`super::api`]). Backends only
 //! implement how to bring up a fresh runtime instance for a function
 //! (Docker container, Kubernetes pod, ...), how to tear it down, and
 //! optionally how to sweep instances left behind by a previous
@@ -42,48 +43,95 @@ pub enum BackendHandle {
     Pod { namespace: String, name: String },
 }
 
-/// What [`LambdaBackend::launch`] returns. `endpoint` is the `host:port`
-/// the facade POSTs invocation payloads to; `handle` is the
-/// backend-specific identifier handed back on `terminate`.
-#[derive(Debug, Clone)]
-pub struct WarmInstance {
-    pub endpoint: String,
-    pub handle: BackendHandle,
+/// How an instance's runtime process ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InstanceExit {
+    /// The exit status, for a process that exited.
+    pub code: Option<i64>,
+    /// The signal that killed it, for a process that was killed.
+    pub signal: Option<i32>,
+    /// Killed for exceeding its memory limit.
+    pub oom: bool,
 }
 
-/// Wrapper around an in-flight streaming invocation. Yields raw body
-/// chunks via [`Self::next_chunk`] until the RIE closes the response,
-/// at which point the final `Ok(None)` signals the caller to emit the
-/// terminal `InvokeComplete` frame.
-pub struct StreamingInvocation {
-    pub(crate) resp: reqwest::Response,
-    /// Holds the warm instance's per-instance busy lock for the lifetime
-    /// of the stream. The RIE handles exactly one event at a time, so the
-    /// slot must stay reserved until the caller finishes draining the
-    /// response; dropping this guard frees the instance for the next
-    /// invocation. `None` only in unit tests that build the wrapper
-    /// directly.
-    pub(crate) _slot_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
-}
-
-impl StreamingInvocation {
-    /// The HTTP status the runtime answered with (non-200 for a runtime
-    /// that exited or failed init).
-    pub fn status(&self) -> u16 {
-        self.resp.status().as_u16()
-    }
-
-    /// Read the next chunk of the function's response body. Returns
-    /// `Ok(None)` once the RIE has finished streaming. Buffered
-    /// handlers tend to deliver a single chunk; streaming handlers
-    /// deliver one chunk per `responseStream.write(...)` call.
-    pub async fn next_chunk(&mut self) -> Result<Option<bytes::Bytes>, RuntimeError> {
-        match self.resp.chunk().await {
-            Ok(Some(b)) => Ok(Some(b)),
-            Ok(None) => Ok(None),
-            Err(e) => Err(RuntimeError::InvocationFailed(e.to_string())),
+impl InstanceExit {
+    /// From a container runtime's exit code, which reports a process killed
+    /// by signal `n` as `128 + n`.
+    pub fn from_container_code(code: i64, oom: bool) -> Self {
+        if (129..=192).contains(&code) {
+            Self {
+                code: None,
+                signal: Some((code - 128) as i32),
+                oom,
+            }
+        } else {
+            Self {
+                code: Some(code),
+                signal: None,
+                oom,
+            }
         }
     }
+
+    /// The reason Lambda gives for the exit, as Go's `exec.ExitError` renders
+    /// it: `exit status 3`, `signal: killed`; `None` for a clean exit.
+    pub fn reason(&self) -> Option<String> {
+        if let Some(signal) = self.signal {
+            return Some(format!("signal: {}", signal_name(signal)));
+        }
+        match self.code {
+            Some(0) | None => None,
+            Some(code) => Some(format!("exit status {code}")),
+        }
+    }
+}
+
+/// Go's `syscall.Signal` names (Linux), which Lambda's exit messages use.
+fn signal_name(signal: i32) -> String {
+    match signal {
+        1 => "hangup",
+        2 => "interrupt",
+        3 => "quit",
+        4 => "illegal instruction",
+        5 => "trace/breakpoint trap",
+        6 => "aborted",
+        7 => "bus error",
+        8 => "floating point exception",
+        9 => "killed",
+        10 => "user defined signal 1",
+        11 => "segmentation fault",
+        12 => "user defined signal 2",
+        13 => "broken pipe",
+        14 => "alarm clock",
+        15 => "terminated",
+        _ => return format!("signal {signal}"),
+    }
+    .to_string()
+}
+
+/// Watches an instance's runtime process: `None` while it runs, the exit
+/// once it has ended (or the instance disappeared).
+pub type ExitWatch = tokio::sync::watch::Receiver<Option<InstanceExit>>;
+
+/// Where an instance's runtime reaches the Runtime API: the per-instance
+/// host name (see [`super::api::sandbox_host`]) the backend maps to the
+/// fakecloud listener inside the instance, on the port it reaches fakecloud
+/// at. Exported as `AWS_LAMBDA_RUNTIME_API=<host>:<port>`.
+#[derive(Clone)]
+pub struct RuntimeApiAddress {
+    pub host: String,
+    /// The instance's Runtime API state, for backends whose runtime runs
+    /// in-process (test doubles, see
+    /// [`super::api::spawn_in_process_runtime`]).
+    pub sandbox: std::sync::Arc<super::api::Sandbox>,
+}
+
+/// What [`LambdaBackend::launch`] returns: the backend-specific handle
+/// handed back on `terminate`, and a watch on the runtime process.
+#[derive(Debug, Clone)]
+pub struct WarmInstance {
+    pub handle: BackendHandle,
+    pub exit: ExitWatch,
 }
 
 #[async_trait]
@@ -104,7 +152,11 @@ pub trait LambdaBackend: Send + Sync + 'static {
     /// used to label resources so reaper logic can correlate.
     /// `credentials` are the execution role's session credentials for this
     /// instance, exported into its environment (see
-    /// [`super::environment::function_environment`]).
+    /// [`super::environment::function_environment`]). `runtime_api` is the
+    /// Runtime API host the instance's runtime must reach fakecloud by.
+    ///
+    /// Returns once the runtime process has started; its initialization runs
+    /// on, and ends when it first asks the Runtime API for an event.
     async fn launch(
         &self,
         func: &LambdaFunction,
@@ -112,6 +164,7 @@ pub trait LambdaBackend: Send + Sync + 'static {
         layers: &[Vec<u8>],
         deploy_id: &str,
         credentials: Option<&SessionCredentials>,
+        runtime_api: &RuntimeApiAddress,
     ) -> Result<WarmInstance, RuntimeError>;
 
     /// Whether a function's tags shape the instances this backend launches

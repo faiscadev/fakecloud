@@ -3560,6 +3560,7 @@ impl crate::runtime::LambdaBackend for PrepullSpy {
         _layers: &[Vec<u8>],
         _deploy_id: &str,
         _credentials: Option<&fakecloud_core::auth::SessionCredentials>,
+        _runtime_api: &crate::runtime::RuntimeApiAddress,
     ) -> Result<crate::runtime::WarmInstance, crate::runtime::RuntimeError> {
         unreachable!("prepull regression test never invokes launch")
     }
@@ -3703,6 +3704,7 @@ async fn invoke_unknown_alias_returns_not_found() {
             Some("no-such-alias"),
             false,
             "req-1",
+            &crate::runtime::InvocationContext::default(),
         )
         .await;
     match result {

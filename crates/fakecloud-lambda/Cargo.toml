@@ -16,6 +16,8 @@ fakecloud-persistence = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }
+http-body-util = "0.1"
+axum = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -39,6 +41,7 @@ k8s-openapi = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }
+http-body = "1"
 # Paused clock for the async-invoke retry timing tests.
 tokio = { workspace = true, features = ["test-util"] }
 # The opt-in k8s-integration test drives a real cluster directly.

@@ -25,6 +25,7 @@ mod imds;
 mod introspection;
 mod kinesis_lambda_firehose_poller;
 mod lambda_delivery;
+mod lambda_runtime_api;
 mod link_local;
 mod pipes_runner;
 mod reaper;
@@ -12990,6 +12991,14 @@ async fn main() {
         .layer(axum::middleware::from_fn_with_state(
             ecs_task_credentials.clone(),
             ecs_creds::link_local_host_middleware,
+        ))
+        // Lambda Runtime API: each function instance's runtime reaches this
+        // listener at its own `fakecloud-runtime-<token>` host name for its
+        // events (`/2018-06-01/runtime/*`). Matched by `Host` alone, so it
+        // never collides with the AWS API on the same port.
+        .layer(axum::middleware::from_fn_with_state(
+            container_runtime.as_ref().map(|rt| rt.runtime_api()),
+            lambda_runtime_api::middleware,
         ));
     // Optionally bind the AWS link-local metadata addresses (169.254.169.254 for
     // IMDS, 169.254.170.2 for ECS container credentials) so apps that hardcode
@@ -13015,6 +13024,7 @@ async fn main() {
         .start()
         .expect("Firehose engine starts once after stores and snapshots load");
     let shutdown_started = Arc::new(tokio::sync::Notify::new());
+    let lambda_runtime_api = container_runtime.as_ref().map(|rt| rt.runtime_api());
     let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -13023,6 +13033,11 @@ async fn main() {
         let shutdown_started = shutdown_started.clone();
         async move {
             shutdown_signal().await;
+            // Idle Lambda runtimes hold a `/next` long poll open; release
+            // them so graceful shutdown only waits on real requests.
+            if let Some(api) = lambda_runtime_api {
+                api.shutdown();
+            }
             shutdown_started.notify_one();
         }
     });

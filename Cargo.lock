@@ -6080,6 +6080,7 @@ name = "fakecloud-lambda"
 version = "0.51.0"
 dependencies = [
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "bytes",
  "chrono",
@@ -6091,6 +6092,8 @@ dependencies = [
  "fakecloud-persistence",
  "futures-util",
  "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
  "k8s-openapi",
  "kube",
  "parking_lot",

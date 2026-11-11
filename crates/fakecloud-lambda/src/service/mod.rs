@@ -1312,7 +1312,7 @@ pub struct LambdaService {
 pub(crate) mod async_invoke;
 mod functions;
 mod init;
-mod invoke;
+pub(crate) mod invoke;
 mod publish;
 pub use publish::{check_latest_published, publish_latest_published};
 
@@ -1854,6 +1854,15 @@ impl AwsService for LambdaService {
                             qualifier,
                             log_tail,
                             &req.request_id,
+                            &invoke::invocation_context(
+                                &req,
+                                &crate::state::function_arn(
+                                    req.region.as_str(),
+                                    &invoke_account,
+                                    name,
+                                ),
+                                qualifier,
+                            ),
                         )
                         .await
                     }

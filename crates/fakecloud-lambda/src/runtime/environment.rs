@@ -134,12 +134,17 @@ pub fn credential_envs(creds: &SessionCredentials) -> [(&'static str, String); 4
 /// `localhost`/`127.0.0.1` URLs rewritten to `rewrite_host`, since inside the
 /// container those name the container itself), then the reserved variables,
 /// which always win. `endpoint_url` is how this backend's containers reach the
-/// fakecloud server. `credentials` are the execution role's session
-/// credentials; `None` leaves them unset.
+/// fakecloud server, and `runtime_api` (`host:port`) where the instance's
+/// runtime reaches the Runtime API fakecloud serves for it
+/// (`AWS_LAMBDA_RUNTIME_API`; with it set the base images' entrypoint runs the
+/// runtime directly instead of the bundled Runtime Interface Emulator).
+/// `credentials` are the execution role's session credentials; `None` leaves
+/// them unset.
 pub fn function_environment(
     func: &LambdaFunction,
     endpoint_url: &str,
     rewrite_host: &str,
+    runtime_api: &str,
     credentials: Option<&SessionCredentials>,
 ) -> Vec<(String, String)> {
     let started_at = Utc::now();
@@ -169,11 +174,7 @@ pub fn function_environment(
             log_stream_name(&func.version, started_at, &instance_id),
         ),
         ("AWS_LAMBDA_INITIALIZATION_TYPE", "on-demand".to_string()),
-        // Not an AWS variable, and not reserved (a function may set it and
-        // CreateFunction accepts that). The Runtime Interface Emulator
-        // enforces the invocation timeout from it, so the platform's value
-        // (the configured Timeout) is the one the container gets.
-        ("AWS_LAMBDA_FUNCTION_TIMEOUT", func.timeout.to_string()),
+        ("AWS_LAMBDA_RUNTIME_API", runtime_api.to_string()),
     ];
     if let Some(exec_env) = execution_env(func) {
         reserved.push(("AWS_EXECUTION_ENV", exec_env));
@@ -235,6 +236,7 @@ mod tests {
             &func(),
             "http://host.docker.internal:4566",
             "host.docker.internal",
+            "fakecloud-runtime-abc:4566",
             Some(&creds()),
         );
         assert_eq!(
@@ -250,7 +252,11 @@ mod tests {
         assert_eq!(get(&env, "AWS_LAMBDA_FUNCTION_NAME"), Some("probe"));
         assert_eq!(get(&env, "AWS_LAMBDA_FUNCTION_VERSION"), Some("$LATEST"));
         assert_eq!(get(&env, "AWS_LAMBDA_FUNCTION_MEMORY_SIZE"), Some("256"));
-        assert_eq!(get(&env, "AWS_LAMBDA_FUNCTION_TIMEOUT"), Some("7"));
+        assert_eq!(
+            get(&env, "AWS_LAMBDA_RUNTIME_API"),
+            Some("fakecloud-runtime-abc:4566")
+        );
+        assert_eq!(get(&env, "AWS_LAMBDA_FUNCTION_TIMEOUT"), None);
         assert_eq!(
             get(&env, "AWS_LAMBDA_LOG_GROUP_NAME"),
             Some("/aws/lambda/probe")
@@ -278,7 +284,7 @@ mod tests {
         let mut f = func();
         f.environment
             .insert("AWS_ENDPOINT_URL".into(), "http://localhost:9999".into());
-        let env = function_environment(&f, "http://h:4566", "h", Some(&creds()));
+        let env = function_environment(&f, "http://h:4566", "h", "rt:4566", Some(&creds()));
         let mut keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         let total = keys.len();
         keys.dedup();
@@ -292,20 +298,18 @@ mod tests {
             .insert("AWS_ENDPOINT_URL".into(), "http://localhost:9999".into());
         f.environment
             .insert("AWS_REGION".into(), "ap-south-1".into());
-        f.environment
-            .insert("AWS_LAMBDA_FUNCTION_TIMEOUT".into(), "900".into());
         f.environment.insert("APP_MODE".into(), "test".into());
-        let env = function_environment(&f, "http://h:4566", "h", Some(&creds()));
+        let env = function_environment(&f, "http://h:4566", "h", "rt:4566", Some(&creds()));
         // Its own endpoint wins, rewritten off `localhost` like any URL.
         assert_eq!(get(&env, "AWS_ENDPOINT_URL"), Some("http://h:9999"));
         assert_eq!(get(&env, "AWS_REGION"), Some("eu-west-2"));
-        assert_eq!(get(&env, "AWS_LAMBDA_FUNCTION_TIMEOUT"), Some("7"));
+        assert_eq!(get(&env, "AWS_LAMBDA_RUNTIME_API"), Some("rt:4566"));
         assert_eq!(get(&env, "APP_MODE"), Some("test"));
     }
 
     #[test]
     fn no_credentials_without_an_issuer() {
-        let env = function_environment(&func(), "http://h:4566", "h", None);
+        let env = function_environment(&func(), "http://h:4566", "h", "rt:4566", None);
         for key in [
             "AWS_ACCESS_KEY_ID",
             "AWS_ACCESS_KEY",
@@ -321,7 +325,7 @@ mod tests {
         let mut f = func();
         f.version = "3".into();
         f.logging_config = Some(serde_json::json!({"LogGroup": "/custom/group"}));
-        let env = function_environment(&f, "http://h:4566", "h", None);
+        let env = function_environment(&f, "http://h:4566", "h", "rt:4566", None);
         assert_eq!(get(&env, "AWS_LAMBDA_FUNCTION_VERSION"), Some("3"));
         assert_eq!(
             get(&env, "AWS_LAMBDA_LOG_GROUP_NAME"),
@@ -332,12 +336,12 @@ mod tests {
             .contains("/[3]"));
 
         f.runtime = "provided.al2023".into();
-        let env = function_environment(&f, "http://h:4566", "h", None);
+        let env = function_environment(&f, "http://h:4566", "h", "rt:4566", None);
         assert_eq!(get(&env, "AWS_EXECUTION_ENV"), None);
 
         f.runtime = String::new();
         f.package_type = "Image".into();
-        let env = function_environment(&f, "http://h:4566", "h", None);
+        let env = function_environment(&f, "http://h:4566", "h", "rt:4566", None);
         assert_eq!(get(&env, "AWS_EXECUTION_ENV"), None);
     }
 
