@@ -397,6 +397,27 @@ pub fn execution_arn(
     )
 }
 
+/// A fresh ARN for one EXPRESS execution: `express:<machine>:<name>:<id>`.
+///
+/// EXPRESS names can be reused immediately and StartExecution is never
+/// idempotent for them, so every start is its own execution. The trailing id
+/// keeps two starts under the same name apart.
+pub fn express_execution_arn(
+    region: &str,
+    account_id: &str,
+    state_machine_name: &str,
+    execution_name: &str,
+) -> String {
+    states_arn(
+        region,
+        account_id,
+        &format!(
+            "express:{state_machine_name}:{execution_name}:{}",
+            uuid::Uuid::new_v4()
+        ),
+    )
+}
+
 /// The ARN of an activity.
 pub fn activity_arn(region: &str, account_id: &str, name: &str) -> String {
     states_arn(region, account_id, &format!("activity:{name}"))

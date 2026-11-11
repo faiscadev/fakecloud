@@ -1467,6 +1467,27 @@ fn camel_to_details_key(event_type: &str) -> String {
     }
 }
 
+/// An EXPRESS execution ARN no stored execution uses yet. The id is a UUID,
+/// so the loop only guards against a collision in principle.
+fn unused_express_arn(
+    state: &StepFunctionsState,
+    region: &str,
+    state_machine_name: &str,
+    execution_name: &str,
+) -> String {
+    loop {
+        let arn = crate::state::express_execution_arn(
+            region,
+            &state.account_id,
+            state_machine_name,
+            execution_name,
+        );
+        if !state.executions.contains_key(&arn) {
+            return arn;
+        }
+    }
+}
+
 /// Compare two StartExecution inputs for STANDARD idempotency. A missing input
 /// defaults to `{}` (AWS's default execution input). Comparison is structural
 /// (parsed JSON), so insignificant whitespace differences still dedup; inputs
@@ -2856,7 +2877,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_execution_express_name_collision_never_idempotent() {
+    async fn start_execution_express_reuses_names_as_new_executions() {
         let svc = StepFunctionsService::new(make_state());
         let arn = create_express_sm(&svc, "dup-exec-express");
 
@@ -2865,13 +2886,54 @@ mod tests {
             "name": "same-name",
             "input": "{\"a\":1}",
         });
+        // AWS: EXPRESS names can be reused immediately and StartExecution is
+        // never idempotent, so an identical re-issue starts a second execution.
         let req = make_request("StartExecution", &body.to_string());
-        svc.start_execution(&req).unwrap();
+        let first = body_json(&svc.start_execution(&req).unwrap());
+        let req = make_request("StartExecution", &body.to_string());
+        let second = body_json(&svc.start_execution(&req).unwrap());
 
-        // EXPRESS has no idempotency: even an identical re-issue conflicts.
-        let req = make_request("StartExecution", &body.to_string());
-        let err = expect_err(svc.start_execution(&req));
-        assert!(err.to_string().contains("ExecutionAlreadyExists"));
+        let (a, b) = (
+            first["executionArn"].as_str().unwrap(),
+            second["executionArn"].as_str().unwrap(),
+        );
+        assert_ne!(a, b);
+        for exec_arn in [a, b] {
+            assert!(
+                exec_arn.starts_with(
+                    "arn:aws:states:us-east-1:123456789012:express:dup-exec-express:same-name:"
+                ),
+                "{exec_arn}"
+            );
+        }
+        let accounts = svc.state.read();
+        let state = accounts.by_arn(a).unwrap();
+        assert_eq!(state.executions[a].name, "same-name");
+        assert_eq!(state.executions[b].name, "same-name");
+    }
+
+    #[tokio::test]
+    async fn start_sync_execution_uses_the_given_name() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_express_sm(&svc, "sync-named");
+        let body = json!({"stateMachineArn": arn, "name": "my-run"});
+
+        let req = make_request("StartSyncExecution", &body.to_string());
+        let first = body_json(&svc.start_sync_execution(&req).await.unwrap());
+        let req = make_request("StartSyncExecution", &body.to_string());
+        let second = body_json(&svc.start_sync_execution(&req).await.unwrap());
+
+        assert_eq!(first["name"], "my-run");
+        assert_eq!(second["name"], "my-run");
+        assert_ne!(first["executionArn"], second["executionArn"]);
+        assert!(first["executionArn"]
+            .as_str()
+            .unwrap()
+            .contains(":express:sync-named:my-run:"));
+
+        let bad = json!({"stateMachineArn": arn, "name": "has space"});
+        let req = make_request("StartSyncExecution", &bad.to_string());
+        assert!(svc.start_sync_execution(&req).await.is_err());
     }
 
     // ── DescribeExecution ──

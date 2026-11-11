@@ -231,6 +231,80 @@ async fn sfn_create_express_state_machine() {
     assert_eq!(describe.r#type().as_str(), "EXPRESS");
 }
 
+/// AWS: EXPRESS execution names can be reused immediately and StartExecution
+/// is never idempotent for them, so repeating a name starts a new execution.
+#[tokio::test]
+async fn sfn_express_start_execution_reuses_names() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let sm = client
+        .create_state_machine()
+        .name("express-reuse")
+        .definition(simple_definition())
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .r#type(aws_sdk_sfn::types::StateMachineType::Express)
+        .send()
+        .await
+        .unwrap();
+
+    let mut arns = Vec::new();
+    for _ in 0..2 {
+        let started = client
+            .start_execution()
+            .state_machine_arn(sm.state_machine_arn())
+            .name("same-name")
+            .input(r#"{"a":1}"#)
+            .send()
+            .await
+            .expect("an EXPRESS name is reusable at once");
+        arns.push(started.execution_arn().to_string());
+    }
+    assert_ne!(arns[0], arns[1]);
+    for arn in &arns {
+        assert!(
+            arn.contains(":express:express-reuse:same-name:"),
+            "unexpected EXPRESS execution ARN {arn}"
+        );
+    }
+
+    // StartSyncExecution, on the wire: the SDK sends it to a `sync-` host
+    // prefix that does not resolve locally, so post the awsJson request
+    // directly.
+    let http = reqwest::Client::new();
+    let mut sync_arns = Vec::new();
+    for _ in 0..2 {
+        let resp = http
+            .post(server.endpoint())
+            .header("Content-Type", "application/x-amz-json-1.0")
+            .header("X-Amz-Target", "AWSStepFunctions.StartSyncExecution")
+            .header(
+                "Authorization",
+                "AWS4-HMAC-SHA256 \
+              Credential=AKIAIOSFODNN7EXAMPLE/20260501/us-east-1/states/aws4_request, \
+              SignedHeaders=host;x-amz-target, Signature=deadbeef",
+            )
+            .json(&serde_json::json!({
+                "stateMachineArn": sm.state_machine_arn(),
+                "name": "sync-name",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "SUCCEEDED", "{body}");
+        assert_eq!(body["name"], "sync-name", "{body}");
+        let arn = body["executionArn"].as_str().unwrap().to_string();
+        assert!(
+            arn.contains(":express:express-reuse:sync-name:"),
+            "unexpected EXPRESS execution ARN {arn}"
+        );
+        sync_arns.push(arn);
+    }
+    assert_ne!(sync_arns[0], sync_arns[1]);
+}
+
 #[tokio::test]
 async fn sfn_create_duplicate_name_fails() {
     let server = TestServer::start().await;

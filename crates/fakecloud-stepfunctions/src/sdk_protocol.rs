@@ -128,7 +128,13 @@ pub(crate) struct Caller<'a> {
 pub(crate) fn execution_principal(role_arn: &str, execution_arn: &str) -> Option<Principal> {
     let account = fakecloud_aws::arn::account_of(role_arn)?;
     let role = role_arn.rsplit('/').next()?;
-    let session = execution_arn.rsplit(':').next().unwrap_or("execution");
+    // The execution's name: the last segment, except for an EXPRESS ARN
+    // (`express:<machine>:<name>:<id>`), whose last segment is its id.
+    let session = match execution_arn.split_once(":express:") {
+        Some((_, tail)) => tail.split(':').nth(1),
+        None => execution_arn.rsplit(':').next(),
+    }
+    .unwrap_or("execution");
     Some(Principal {
         arn: format!("arn:aws:sts::{account}:assumed-role/{role}/{session}"),
         user_id: format!("AROAFAKECLOUDSTATES:{session}"),
@@ -1329,6 +1335,27 @@ mod tests {
 
     fn svc(id: &str) -> Arc<SdkService> {
         service(id).unwrap_or_else(|| panic!("no table for {id}"))
+    }
+
+    #[test]
+    fn execution_principal_session_is_the_execution_name() {
+        let role = "arn:aws:iam::123456789012:role/sfn-role";
+        let standard = execution_principal(
+            role,
+            "arn:aws:states:us-east-1:123456789012:execution:sm:run-1",
+        )
+        .unwrap();
+        assert_eq!(
+            standard.arn,
+            "arn:aws:sts::123456789012:assumed-role/sfn-role/run-1"
+        );
+        let express = execution_principal(
+            role,
+            "arn:aws:states:us-east-1:123456789012:express:sm:run-1:0b1c2d3e-aaaa-bbbb-cccc-0123456789ab",
+        )
+        .unwrap();
+        assert_eq!(express.arn, standard.arn);
+        assert_eq!(express.user_id, "AROAFAKECLOUDSTATES:run-1");
     }
 
     #[test]

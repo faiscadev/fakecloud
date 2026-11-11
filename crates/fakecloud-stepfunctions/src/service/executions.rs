@@ -46,16 +46,21 @@ impl StepFunctionsService {
         let sm_role_arn = sm.role_arn.clone();
         let sm_type = sm.machine_type;
         let definition = sm.definition.clone();
-        let exec_arn = state.execution_arn(&req.region, &sm_name, &execution_name);
+        // EXPRESS names can be reused immediately and StartExecution is never
+        // idempotent for them: every call starts a new execution with its own
+        // ARN, so there is no collision to handle.
+        let exec_arn = if sm_type == crate::state::StateMachineType::Express {
+            unused_express_arn(state, &req.region, &sm_name, &execution_name)
+        } else {
+            state.execution_arn(&req.region, &sm_name, &execution_name)
+        };
 
-        // Handle name collisions. For STANDARD workflows, StartExecution is
-        // idempotent while the execution runs: re-issuing the same name AND the
-        // same input returns the existing executionArn with HTTP 200, while a
-        // different input or a closed execution is a 400 ExecutionAlreadyExists.
-        // (EXPRESS has no idempotency.)
+        // Handle STANDARD name collisions. StartExecution is idempotent while
+        // the execution runs: re-issuing the same name AND the same input
+        // returns the existing executionArn with HTTP 200, while a different
+        // input or a closed execution is a 400 ExecutionAlreadyExists.
         if let Some(existing) = state.executions.get(&exec_arn) {
-            let same_input = sm_type == crate::state::StateMachineType::Standard
-                && existing.status == ExecutionStatus::Running
+            let same_input = existing.status == ExecutionStatus::Running
                 && execution_input_matches(existing.input.as_deref(), input.as_deref());
             if same_input {
                 return Ok(AwsResponse::ok_json(json!({
@@ -420,6 +425,10 @@ impl StepFunctionsService {
             .as_str()
             .ok_or_else(|| missing("stateMachineArn"))?
             .to_string();
+        let exec_name = body["name"].as_str().map(str::to_string);
+        if let Some(name) = &exec_name {
+            validate_name(name)?;
+        }
         let input = body["input"].as_str().unwrap_or("{}").to_string();
         if serde_json::from_str::<serde_json::Value>(&input).is_err() {
             return Err(AwsServiceError::aws_error(
@@ -443,22 +452,11 @@ impl StepFunctionsService {
                 ));
             }
             let now = chrono::Utc::now();
-            // Mint a unique execution name with a UUID rather than a
-            // millisecond timestamp: Express workflows start concurrently, so a
-            // ms-resolution name collides and same-ms starts overwrote each
-            // other (bug-audit 2026-05-28, 4.2). Loop on the (vanishingly
-            // unlikely) UUID collision, mirroring the async StartExecution path.
-            let (exec_name, exec_arn) = loop {
-                let candidate = format!("sync-{}", uuid::Uuid::new_v4());
-                let arn = crate::state::states_arn(
-                    &req.region,
-                    &state.account_id,
-                    &format!("express:{}:{candidate}", sm.name),
-                );
-                if !state.executions.contains_key(&arn) {
-                    break (candidate, arn);
-                }
-            };
+            // The caller's name, else a UUID as AWS generates. The ARN carries
+            // its own id, so concurrent starts (and reused names) never
+            // overwrite each other (bug-audit 2026-05-28, 4.2).
+            let exec_name = exec_name.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let exec_arn = unused_express_arn(state, &req.region, &sm.name, &exec_name);
             let execution = Execution {
                 execution_arn: exec_arn.clone(),
                 state_machine_arn: sm_arn.clone(),
