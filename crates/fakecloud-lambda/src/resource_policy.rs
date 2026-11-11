@@ -409,6 +409,45 @@ mod tests {
     }
 
     #[test]
+    fn latest_published_is_a_version_with_its_own_policy() {
+        // A Lambda Managed Instances function's `$LATEST.PUBLISHED` is a
+        // version, not an alias: its policy lives on that version.
+        assert_eq!(
+            PolicyQualifier::of(Some(crate::state::LATEST_PUBLISHED)),
+            PolicyQualifier::Version(crate::state::LATEST_PUBLISHED)
+        );
+        let published_doc = r#"{"Statement":["published"]}"#;
+        let state = state_with(func_with_policy("my-fn", None));
+        {
+            let mut accounts = state.write();
+            let s = accounts.regional_mut("123456789012", "us-east-1");
+            let mut published = s.functions["my-fn"].clone();
+            published.policy = Some(published_doc.to_string());
+            s.latest_published.insert("my-fn".to_string(), published);
+        }
+        let provider = LambdaResourcePolicyProvider::new(state.clone());
+        assert_eq!(
+            provider.resource_policy(
+                "lambda",
+                "arn:aws:lambda:us-east-1:123456789012:function:my-fn:$LATEST.PUBLISHED"
+            ),
+            Some(published_doc.to_string())
+        );
+        let mut accounts = state.write();
+        let s = accounts.regional_mut("123456789012", "us-east-1");
+        let slot = policy_slot_mut(
+            s,
+            "my-fn",
+            PolicyQualifier::of(Some(crate::state::LATEST_PUBLISHED)),
+        )
+        .expect("the $LATEST.PUBLISHED slot");
+        assert_eq!(
+            slot.arn,
+            "arn:aws:lambda:us-east-1:123456789012:function:my-fn:$LATEST.PUBLISHED"
+        );
+    }
+
+    #[test]
     fn returns_none_when_function_has_no_policy() {
         let state = state_with(func_with_policy("my-fn", None));
         let provider = LambdaResourcePolicyProvider::new(state);
