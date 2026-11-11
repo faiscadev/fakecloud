@@ -83,20 +83,37 @@ fn zip_dir(writer: &mut zip::ZipWriter<std::io::Cursor<Vec<u8>>>, root: &Path, d
     }
 }
 
+fn sdk_marker(dir: &Path) -> PathBuf {
+    dir.join("node_modules/@aws/durable-execution-sdk-js/package.json")
+}
+
 /// `npm install` the SDK once per target directory.
+///
+/// nextest runs every test in its own process, so several processes reach
+/// this at once. Concurrent `npm install`s into one directory leave a tree
+/// that has the marker but misses files, and every later run would bundle
+/// it. Each process therefore installs into its own staging directory and
+/// renames the complete tree into place; the final directory only ever
+/// appears complete, and a process that loses the rename uses the winner's.
 fn sdk_install_dir() -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("durable-sdk-js-{SDK_VERSION}"));
-    let marker = dir.join("node_modules/@aws/durable-execution-sdk-js/package.json");
-    if marker.exists() {
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let dir = tmp.join(format!("durable-sdk-js-{SDK_VERSION}"));
+    if sdk_marker(&dir).exists() {
         return dir;
     }
-    std::fs::create_dir_all(&dir).unwrap();
+    let staging = tmp.join(format!(
+        "durable-sdk-js-{SDK_VERSION}.staging-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).unwrap();
     std::fs::write(
-        dir.join("package.json"),
+        staging.join("package.json"),
         r#"{"name":"durable-e2e","private":true}"#,
     )
     .unwrap();
     let mut last = String::new();
+    let mut installed = false;
     for attempt in 1..=3 {
         let out = std::process::Command::new("npm")
             .args([
@@ -106,18 +123,36 @@ fn sdk_install_dir() -> PathBuf {
                 "--omit=dev",
                 &format!("@aws/durable-execution-sdk-js@{SDK_VERSION}"),
             ])
-            .current_dir(&dir)
+            .current_dir(&staging)
             .output()
             .unwrap_or_else(|e| {
                 panic!("npm is required to bundle the durable execution SDK for this test: {e}")
             });
-        if out.status.success() && marker.exists() {
-            return dir;
+        if out.status.success() && sdk_marker(&staging).exists() {
+            installed = true;
+            break;
         }
         last = String::from_utf8_lossy(&out.stderr).into_owned();
         std::thread::sleep(Duration::from_secs(attempt * 5));
     }
-    panic!("npm install of @aws/durable-execution-sdk-js@{SDK_VERSION} failed: {last}");
+    if !installed {
+        let _ = std::fs::remove_dir_all(&staging);
+        panic!("npm install of @aws/durable-execution-sdk-js@{SDK_VERSION} failed: {last}");
+    }
+    // A directory without the marker is a leftover of an interrupted
+    // install from before staging; only renames create it now.
+    if dir.exists() && !sdk_marker(&dir).exists() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    if std::fs::rename(&staging, &dir).is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    assert!(
+        sdk_marker(&dir).exists(),
+        "durable execution SDK missing from {}",
+        dir.display()
+    );
+    dir
 }
 
 /// The deployment package: the handler plus the SDK's `node_modules`.
