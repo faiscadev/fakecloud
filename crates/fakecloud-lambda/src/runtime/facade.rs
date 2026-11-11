@@ -738,18 +738,22 @@ async fn follow_invocation(inv: FollowedInvocation) {
 /// Every read and write of the launcher's files goes through the backend's
 /// container CLI (or Kubernetes exec), so each is bounded by
 /// [`LAUNCHER_IO_TIMEOUT`]: one that times out is "not known yet" and is
-/// retried, and the launcher's 10-second report deadline ([`INIT_LIMIT`]) is
-/// enforced against the clock, however long a read hangs.
+/// retried. The launcher's 10-second report deadline ([`INIT_LIMIT`]) is
+/// enforced against the clock: no read starts after it, and a read already
+/// under way when it passes may still finish (within its own bound), so a
+/// slow container CLI delays the verdict but does not fail a launch that
+/// reported in time.
 ///
-/// Reading costs a CLI process, so the exit record is not read on a fixed
-/// fast clock for the instance's whole life. While an invocation runs (an
-/// extension may be busy with its `INVOKE` and hold no request open) it is
-/// read every [`BUSY_EXTENSION_POLL`]. Between invocations every extension
-/// is parked in `/event/next`, and an extension process that ends drops
-/// that request, so the dropped request (see [`super::api::ExitMonitor`])
-/// triggers the read, which finds the exit status to report. The record is
-/// then only re-read every [`IDLE_EXTENSION_POLL`] as a backstop (an
-/// extension whose connection outlives it, say).
+/// The exit record is polled for the instance's whole life, every
+/// [`BUSY_EXTENSION_POLL`] while the environment works (an extension may be
+/// busy with its `INVOKE` and hold no request open) and every
+/// [`IDLE_EXTENSION_POLL`] between invocations (each read costs a CLI
+/// process). Polling the record is the only exit signal: Lambda freezes an
+/// idle environment, but fakecloud does not, so an extension's HTTP client
+/// may time out its `/event/next` long poll and ask again, and a dropped
+/// request says nothing about whether its process ended. A dropped request
+/// does take the environment out of idle until the extension asks again,
+/// which moves the record to the busy rate.
 async fn monitor_launcher(teardown: Teardown, entry: std::sync::Weak<WarmEntry>, budget: Duration) {
     use super::extensions::{exited_extensions, EXITED_FILE, GO_FILE, LAUNCHED_FILE};
     let started = tokio::time::Instant::now();
@@ -784,17 +788,11 @@ async fn monitor_launcher(teardown: Teardown, entry: std::sync::Weak<WarmEntry>,
         sandbox.launcher_failed("the extension launcher did not report the extensions it started");
     };
     let count = loop {
-        let remaining = launch_deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            launcher_failed();
-            return;
-        }
-        let read_count = read(LAUNCHED_FILE, LAUNCHER_IO_TIMEOUT.min(remaining));
-        // The deadline holds even if the read never completes.
-        let count = tokio::select! {
-            text = read_count => text.and_then(|t| t.trim().parse::<usize>().ok()),
-            () = tokio::time::sleep_until(launch_deadline) => None,
-        };
+        // A read started before the deadline finishes, bounded by
+        // `LAUNCHER_IO_TIMEOUT`, even if the deadline passes meanwhile.
+        let count = read(LAUNCHED_FILE, LAUNCHER_IO_TIMEOUT)
+            .await
+            .and_then(|t| t.trim().parse::<usize>().ok());
         if let Some(n) = count {
             break n;
         }
@@ -804,24 +802,27 @@ async fn monitor_launcher(teardown: Teardown, entry: std::sync::Weak<WarmEntry>,
         if gone || sandbox.is_closed_or_failed() {
             return;
         }
-        tokio::time::sleep(
-            poll.min(launch_deadline.saturating_duration_since(tokio::time::Instant::now())),
-        )
-        .await;
+        let remaining = launch_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            launcher_failed();
+            return;
+        }
+        tokio::time::sleep(poll.min(remaining)).await;
     };
     sandbox.expect_extensions(count);
     if count == 0 {
         return;
     }
-    let exits = sandbox.monitor_exits();
     let mut reported = 0;
     let mut released = false;
-    // Extensions whose `/event/next` dropped, by when, until the exit record
-    // says how they ended.
-    let mut dropped: Vec<(String, tokio::time::Instant)> = Vec::new();
     loop {
         let Some(live) = entry.upgrade() else { return };
-        if sandbox.is_closed_or_failed() || live.instance.exit.borrow().is_some() {
+        // Once `SHUTDOWN` was sent, an extension ending is expected and
+        // reports nothing, so there is nothing left to watch for.
+        if sandbox.is_closed_or_failed()
+            || sandbox.is_shutting_down()
+            || live.instance.exit.borrow().is_some()
+        {
             return;
         }
         if !released {
@@ -847,60 +848,37 @@ async fn monitor_launcher(teardown: Teardown, entry: std::sync::Weak<WarmEntry>,
         // Extensions that ended, for the instance's whole life: during
         // init, while an invocation runs, and between invocations (the
         // next one then fails with the crash and the instance is reset).
-        let now = tokio::time::Instant::now();
-        dropped.extend(exits.take_dropped().into_iter().map(|name| (name, now)));
         let idle = released && sandbox.is_idle();
         if let Some(exited) = read(EXITED_FILE, LAUNCHER_IO_TIMEOUT).await {
             let exited = exited_extensions(&exited);
             for (name, code) in exited.iter().skip(reported) {
-                sandbox.extension_exited(name, Some(*code));
+                sandbox.extension_exited(name, *code);
             }
             reported = exited.len();
-            dropped.retain(|(name, _)| !exited.iter().any(|(n, _)| n == name));
-        }
-        // A dropped request with no exit recorded in time (the extension
-        // registered under another name, or its record could not be read):
-        // it ended all the same.
-        if let Some((name, _)) = dropped
-            .iter()
-            .find(|(_, at)| at.elapsed() >= DROPPED_EXIT_GRACE)
-        {
-            sandbox.extension_exited(name, None);
         }
         drop(live);
-        if !dropped.is_empty() {
-            tokio::time::sleep(DROPPED_EXIT_POLL).await;
-        } else if released && idle {
-            // Cut short when an invocation starts, so a crash during it is
-            // seen at the busy rate, or when an extension's request drops.
+        if released && idle {
+            // Cut short when the environment gets busy (an invocation
+            // starts, or an extension stops waiting), so an exit then is
+            // seen at the busy rate.
             let until_busy = async {
                 while sandbox.is_idle() {
                     tokio::time::sleep(poll).await;
                 }
             };
-            tokio::select! {
-                _ = tokio::time::timeout(IDLE_EXTENSION_POLL, until_busy) => {}
-                () = exits.dropped() => {}
-            }
+            let _ = tokio::time::timeout(IDLE_EXTENSION_POLL, until_busy).await;
         } else if released {
-            tokio::select! {
-                () = tokio::time::sleep(BUSY_EXTENSION_POLL) => {}
-                () = exits.dropped() => {}
-            }
+            tokio::time::sleep(BUSY_EXTENSION_POLL).await;
         }
     }
 }
 
 /// How often the launcher's exit record is read while an instance works,
-/// and (as a backstop to a dropped `/event/next`) between invocations.
+/// and between invocations.
 const BUSY_EXTENSION_POLL: Duration = Duration::from_millis(250);
-const IDLE_EXTENSION_POLL: Duration = Duration::from_secs(30);
+const IDLE_EXTENSION_POLL: Duration = Duration::from_secs(5);
 /// The longest one read or write of the launcher's files may take.
 const LAUNCHER_IO_TIMEOUT: Duration = Duration::from_secs(5);
-/// After an extension's `/event/next` drops: how often the exit record is
-/// read for its status, and how long before it is reported without one.
-const DROPPED_EXIT_POLL: Duration = Duration::from_millis(100);
-const DROPPED_EXIT_GRACE: Duration = Duration::from_secs(2);
 
 /// Retire an instance whose runtime exits while it is idle (killed, crashed,
 /// Pod deleted), so no event is sent to it; one that is busy is handled by
@@ -1984,6 +1962,9 @@ mod tests {
         files: Arc<StdMutex<std::collections::HashMap<String, Vec<u8>>>>,
         /// Reads of `files` never complete (a hung container CLI).
         hang_reads: bool,
+        /// How long each read of `files` takes (a slow container CLI); it
+        /// sees `files` as they are when it finishes.
+        read_delay: Duration,
         /// How many times `files` was read.
         reads: AtomicUsize,
         /// Each instance's extension process; aborting one ends it (its
@@ -2016,6 +1997,7 @@ mod tests {
                 launcher: false,
                 files: Arc::new(StdMutex::new(std::collections::HashMap::new())),
                 hang_reads: false,
+                read_delay: Duration::ZERO,
                 reads: AtomicUsize::new(0),
                 extension_tasks: StdMutex::new(Vec::new()),
             })
@@ -2065,7 +2047,7 @@ mod tests {
                 Ext::None => {}
                 Ext::FailsInit(code) => {
                     runtime_api.sandbox.expect_extensions(1);
-                    runtime_api.sandbox.extension_exited("bad-ext", Some(code));
+                    runtime_api.sandbox.extension_exited("bad-ext", code);
                 }
                 ext => {
                     let sandbox = runtime_api.sandbox.clone();
@@ -2125,6 +2107,9 @@ mod tests {
             self.reads.fetch_add(1, SeqCst);
             if self.hang_reads {
                 std::future::pending::<()>().await;
+            }
+            if !self.read_delay.is_zero() {
+                tokio::time::sleep(self.read_delay).await;
             }
             self.files.lock().unwrap().get(path).cloned()
         }
@@ -3256,7 +3241,8 @@ mod tests {
         let first = rt.invoke(&func, b"{}", &[]).await.unwrap();
         assert!(first.function_error.is_none(), "{first:?}");
 
-        // An idle environment's exit record is not read on a fast clock.
+        // An idle environment's exit record is read at the idle rate
+        // (`IDLE_EXTENSION_POLL`, 5s), not the busy one.
         let pool = key("ext-dies-idle");
         wait_for(|| {
             rt.instances
@@ -3274,8 +3260,9 @@ mod tests {
             backend.reads.load(SeqCst) - reads
         );
 
-        // The extension process ends: its status is recorded and its
-        // `/event/next` request drops, which gets the record read.
+        // The extension process ends: its status is recorded (and its
+        // `/event/next` request drops, so the environment is no longer idle
+        // and the record is read at the busy rate).
         backend
             .files
             .lock()
@@ -3308,7 +3295,8 @@ mod tests {
 
     /// A container CLI that hangs reading the launcher's report (a wedged
     /// daemon) does not hold the init forever: the launcher's 10-second
-    /// deadline still fails it with `Extension.LaunchError`.
+    /// deadline still fails it with `Extension.LaunchError`, at most one
+    /// bounded read late.
     #[tokio::test(start_paused = true)]
     async fn a_hung_launcher_read_still_fails_the_init_on_time() {
         let mut backend = FakeBackend::new(Duration::ZERO);
@@ -3324,16 +3312,56 @@ mod tests {
         let out = rt.invoke(&func, b"{}", &[]).await.unwrap();
         assert_eq!(out.error_type().as_deref(), Some("Extension.LaunchError"));
         assert!(
-            started.elapsed() < super::INIT_LIMIT + Duration::from_secs(1),
+            started.elapsed() <= super::INIT_LIMIT + super::LAUNCHER_IO_TIMEOUT,
             "{:?}",
             started.elapsed()
         );
     }
 
-    /// An idle extension whose request drops with no exit status recorded
-    /// still fails the next invocation, once the record had its chance.
+    /// A launcher read already under way when the 10-second deadline passes
+    /// is allowed to finish: a slow container CLI that does bring back the
+    /// launcher's report does not turn a good launch into a
+    /// `Extension.LaunchError`.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_launcher_read_finishing_after_the_deadline_still_launches() {
+        use crate::runtime::extensions::LAUNCHED_FILE;
+        let mut backend = FakeBackend::new(Duration::ZERO);
+        {
+            let b = Arc::get_mut(&mut backend).unwrap();
+            b.launcher = true;
+            // Each read takes 4s: reads start at about 0s, 4s and 8s, and the
+            // one started at 8s finishes past the deadline, at about 12s.
+            b.read_delay = Duration::from_secs(4);
+        }
+        // The launcher reports at 9s, after the read started at 4s looked.
+        let files = backend.files.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(9)).await;
+            files
+                .lock()
+                .unwrap()
+                .insert(LAUNCHED_FILE.to_string(), b"0\n".to_vec());
+        });
+        let rt = runtime_with(backend.clone(), 1);
+        let mut func = test_func("slow-launcher", "sha-A");
+        func.timeout = 60;
+        let started = tokio::time::Instant::now();
+        let out = rt.invoke(&func, b"{}", &[]).await.unwrap();
+        assert!(out.function_error.is_none(), "{out:?}");
+        assert_eq!(out.payload, b"ok");
+        assert!(
+            started.elapsed() > super::INIT_LIMIT,
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// An idle extension whose `/event/next` request drops while its
+    /// process lives on (an HTTP client timing out its long poll) is not
+    /// reported as a crash: with no exit in the launcher's record, the
+    /// environment is left alone.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_extension_dropping_its_request_without_a_record_fails_the_next() {
+    async fn an_extension_dropping_its_request_without_an_exit_is_not_a_crash() {
         use crate::runtime::extensions::LAUNCHED_FILE;
         let mut backend = FakeBackend::new(Duration::ZERO);
         {
@@ -3359,24 +3387,15 @@ mod tests {
         })
         .await;
         backend.extension_tasks.lock().unwrap()[0].abort();
-        let started = std::time::Instant::now();
-        wait_for(|| {
-            rt.instances
-                .read()
-                .get(&pool)
-                .is_some_and(|p| p.iter().any(|e| e.sandbox.is_closed_or_failed()))
-        })
-        .await;
-        assert!(started.elapsed() >= super::DROPPED_EXIT_GRACE - Duration::from_millis(200));
-        let second = rt.invoke(&func, b"{}", &[]).await.unwrap();
-        assert_eq!(second.error_type().as_deref(), Some("Extension.Crash"));
-        assert!(
-            second
-                .error_message()
-                .unwrap()
-                .contains("extension ext exited"),
-            "{second:?}"
-        );
+        // Well past several busy-rate reads of the record.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let instances = rt.instances.read();
+        let pool = instances.get(&pool).expect("the instance is still pooled");
+        assert_eq!(pool.len(), 1);
+        assert!(!pool[0].sandbox.is_closed_or_failed());
+        assert!(!pool[0].sandbox.is_idle(), "the extension is not waiting");
+        drop(instances);
+        assert_eq!(backend.terminates.load(SeqCst), 0);
     }
 
     #[test]

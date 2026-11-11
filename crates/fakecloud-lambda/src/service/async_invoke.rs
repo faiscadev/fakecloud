@@ -270,8 +270,10 @@ pub(crate) struct InvokedVersion {
     /// The `$LATEST.PUBLISHED` snapshot the event was queued for. Unlike a
     /// number, `$LATEST.PUBLISHED` names whatever was published last, so a
     /// publish between attempts would otherwise run newer code than the
-    /// event was accepted for.
-    pub published: Option<LambdaFunction>,
+    /// event was accepted for. Shared with the queued
+    /// [`AsyncInvocation::func`], not a second copy of the function (and its
+    /// code).
+    pub published: Option<Arc<LambdaFunction>>,
 }
 
 impl InvokedVersion {
@@ -283,7 +285,7 @@ impl InvokedVersion {
         function_name: &str,
         alias: Option<String>,
         executed_version: &str,
-        func: &LambdaFunction,
+        func: &Arc<LambdaFunction>,
     ) -> Self {
         Self {
             account_id: account_id.to_string(),
@@ -291,7 +293,8 @@ impl InvokedVersion {
             function_name: function_name.to_string(),
             alias,
             executed_version: executed_version.to_string(),
-            published: (executed_version == crate::state::LATEST_PUBLISHED).then(|| func.clone()),
+            published: (executed_version == crate::state::LATEST_PUBLISHED)
+                .then(|| Arc::clone(func)),
         }
     }
 }
@@ -325,7 +328,7 @@ fn resolve_invoked(state: &LambdaState, target: &InvokedVersion) -> Option<Lambd
     }
     if let Some(published) = &target.published {
         state.latest_published.get(name)?;
-        return Some(published.clone());
+        return Some(LambdaFunction::clone(published));
     }
     state
         .version_snapshot(name, &target.executed_version)
@@ -338,7 +341,7 @@ pub(crate) struct AsyncInvocation {
     pub bus: Option<Arc<DeliveryBus>>,
     pub settings: AsyncSettings,
     /// The function as queued, for the records.
-    pub func: LambdaFunction,
+    pub func: Arc<LambdaFunction>,
     /// The function as each attempt runs it.
     pub resolve: Resolver,
     pub payload: Vec<u8>,
@@ -524,6 +527,7 @@ pub fn queue_async_invocation_observed(
     // Each attempt runs the pinned version while it exists; once it (or the
     // alias, or the function) is gone the event is dropped, never run on
     // other code.
+    let func = Arc::new(func);
     let resolve = invoked_version_resolver(
         state.clone(),
         InvokedVersion::new(
@@ -969,7 +973,7 @@ mod tests {
             "f",
             None,
             crate::state::LATEST_PUBLISHED,
-            &published,
+            &Arc::new(published),
         );
         assert_eq!(
             resolve_invoked(&state, &queued).unwrap().description,

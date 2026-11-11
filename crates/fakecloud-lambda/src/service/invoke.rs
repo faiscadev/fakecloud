@@ -170,11 +170,13 @@ impl LambdaService {
                     // handling (retries, event age, destinations, DLQ). The
                     // concurrency guard travels with it so the counter only
                     // drops once the async work finishes.
+                    // One copy of the function, shared by the records and a
+                    // pinned `$LATEST.PUBLISHED` snapshot.
+                    let queued = std::sync::Arc::new(func.clone());
                     super::async_invoke::spawn(super::async_invoke::AsyncInvocation {
                         runtime: runtime.clone(),
                         bus: self.delivery_bus.clone(),
                         settings: self.async_settings(&func, account_id, region, qualifier),
-                        func: func.clone(),
                         resolve: super::async_invoke::invoked_version_resolver(
                             self.state.clone(),
                             super::async_invoke::InvokedVersion::new(
@@ -183,9 +185,10 @@ impl LambdaService {
                                 function_name,
                                 alias.clone(),
                                 &executed_version,
-                                &func,
+                                &queued,
                             ),
                         ),
+                        func: queued,
                         payload: payload.to_vec(),
                         executed_version: executed_version.clone(),
                         request_id: request_id.to_string(),
