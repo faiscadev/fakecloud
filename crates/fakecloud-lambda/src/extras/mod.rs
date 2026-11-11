@@ -1353,21 +1353,18 @@ impl LambdaService {
         if !state.event_source_mappings.contains_key(uuid) {
             return Err(not_found("EventSourceMapping", uuid));
         }
-        if let Some(name) = body["FunctionName"].as_str() {
-            // The mapping must keep invoking a function that exists, as on
-            // AWS.
-            let bare = crate::service::normalize_function_name(name);
-            if !state.functions.contains_key(&bare) {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFoundException",
-                    format!(
-                        "Function not found: {}",
-                        function_arn(&req.region, &state.account_id, &bare)
-                    ),
-                ));
-            }
-        }
+        // The mapping must keep invoking a function (and version or alias)
+        // that exists, resolved as CreateEventSourceMapping resolves it.
+        let new_function_arn = body["FunctionName"]
+            .as_str()
+            .map(|name| {
+                crate::service::service_event_sources::mapping_function_arn(
+                    state,
+                    &req.region,
+                    name,
+                )
+            })
+            .transpose()?;
         let esm = state
             .event_source_mappings
             .get_mut(uuid)
@@ -1375,8 +1372,8 @@ impl LambdaService {
         if let Some(b) = body["BatchSize"].as_i64() {
             esm.batch_size = b;
         }
-        if let Some(name) = body["FunctionName"].as_str() {
-            esm.function_arn = function_arn(&req.region, &state.account_id, name);
+        if let Some(arn) = new_function_arn {
+            esm.function_arn = arn;
         }
         if let Some(filters) = body
             .get("FilterCriteria")

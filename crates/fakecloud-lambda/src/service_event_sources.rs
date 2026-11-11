@@ -36,41 +36,7 @@ impl LambdaService {
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
 
-        // Resolve function name to ARN
-        let function_arn = if function_name.starts_with("arn:") {
-            function_name.clone()
-        } else {
-            // `name` or `name:qualifier`: the mapping targets that version or
-            // alias, which must exist.
-            let name = crate::service::normalize_function_name(&function_name);
-            let qualifier = crate::service::qualifier_from_function_ref(&function_name);
-            let not_found = || {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFoundException",
-                    format!(
-                        "Function not found: {}",
-                        function_arn(&req.region, &state.account_id, &function_name)
-                    ),
-                )
-            };
-            let func = state.functions.get(&name).ok_or_else(not_found)?;
-            match qualifier.as_deref() {
-                None => func.function_arn.clone(),
-                Some(q) => {
-                    let exists = q == "$LATEST"
-                        || state
-                            .function_versions
-                            .get(&name)
-                            .is_some_and(|vs| vs.iter().any(|v| v == q))
-                        || state.aliases.contains_key(&format!("{name}:{q}"));
-                    if !exists {
-                        return Err(not_found());
-                    }
-                    format!("{}:{q}", func.function_arn)
-                }
-            }
-        };
+        let function_arn = mapping_function_arn(state, &req.region, &function_name)?;
 
         let batch_size = body["BatchSize"].as_i64().unwrap_or(10);
         let enabled = body["Enabled"].as_bool().unwrap_or(true);
@@ -375,5 +341,52 @@ impl LambdaService {
             obj.insert("DocumentDBEventSourceConfig".into(), cfg.clone());
         }
         out
+    }
+}
+
+/// The function ARN an event source mapping invokes. `FunctionName` may be a
+/// name, a partial ARN or an ARN, optionally qualified by a version or an
+/// alias; the function (and that qualifier) must exist in the mapping's
+/// account, else `ResourceNotFoundException`, as on AWS. Shared by
+/// `CreateEventSourceMapping` and `UpdateEventSourceMapping`.
+pub(crate) fn mapping_function_arn(
+    state: &crate::state::LambdaState,
+    region: &str,
+    function_name: &str,
+) -> Result<String, AwsServiceError> {
+    let name = crate::service::normalize_function_name(function_name);
+    let qualifier = crate::service::qualifier_from_function_ref(function_name);
+    let account = crate::service::function_ref_scope(function_name)
+        .0
+        .unwrap_or(&state.account_id);
+    let not_found = || {
+        let mut arn = function_arn(region, account, &name);
+        if let Some(q) = &qualifier {
+            arn = format!("{arn}:{q}");
+        }
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("Function not found: {arn}"),
+        )
+    };
+    if account != state.account_id {
+        return Err(not_found());
+    }
+    let func = state.functions.get(&name).ok_or_else(not_found)?;
+    match qualifier.as_deref() {
+        None => Ok(func.function_arn.clone()),
+        Some(q) => {
+            let exists = q == "$LATEST"
+                || state
+                    .function_versions
+                    .get(&name)
+                    .is_some_and(|vs| vs.iter().any(|v| v == q))
+                || state.aliases.contains_key(&format!("{name}:{q}"));
+            if !exists {
+                return Err(not_found());
+            }
+            Ok(format!("{}:{q}", func.function_arn))
+        }
     }
 }

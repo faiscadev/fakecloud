@@ -1181,8 +1181,20 @@ pub(crate) fn default_invoke_qualifier(
 /// An alias that does not exist resolves to the qualifier itself, which no
 /// version snapshot is keyed by (alias names cannot be all digits), so every
 /// caller's version lookup answers `ResourceNotFoundException` for it, as
-/// AWS does, instead of quietly serving `$LATEST`.
+/// AWS does, instead of quietly serving `$LATEST`. An alias pointing at
+/// `$LATEST` (which `CreateAlias` and CloudFormation allow) resolves to
+/// `None`, the live function, like an unqualified call.
 pub(crate) fn resolve_qualifier_to_version(
+    state: &LambdaState,
+    function_name: &str,
+    qualifier: Option<&str>,
+) -> Option<String> {
+    alias_or_version(state, function_name, qualifier).filter(|v| v != "$LATEST")
+}
+
+/// [`resolve_qualifier_to_version`] before an alias's `$LATEST` target is
+/// folded into `None`.
+fn alias_or_version(
     state: &LambdaState,
     function_name: &str,
     qualifier: Option<&str>,
@@ -2330,7 +2342,7 @@ impl AwsService for LambdaService {
 }
 
 #[path = "../service_event_sources.rs"]
-mod service_event_sources;
+pub(crate) mod service_event_sources;
 #[path = "../service_permissions.rs"]
 mod service_permissions;
 

@@ -6385,3 +6385,104 @@ async fn an_alias_has_a_resource_policy_of_its_own() {
         err.message()
     );
 }
+
+#[tokio::test]
+async fn an_alias_pointing_at_latest_serves_the_live_function() {
+    // `CreateAlias` and CloudFormation accept `FunctionVersion: $LATEST`;
+    // reading or invoking through such an alias reaches the live function,
+    // as an unqualified call does, instead of a version that has no snapshot.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "lfn").await;
+    svc.handle(make_request(
+        Method::POST,
+        "/2015-03-31/functions/lfn/aliases",
+        &json!({"Name": "live", "FunctionVersion": "$LATEST"}).to_string(),
+    ))
+    .await
+    .expect("create alias");
+    for path in [
+        "/2015-03-31/functions/lfn",
+        "/2015-03-31/functions/lfn/configuration",
+    ] {
+        let mut req = make_request(Method::GET, path, "");
+        req.query_params
+            .insert("Qualifier".to_string(), "live".to_string());
+        let resp = svc.handle(req).await.expect(path);
+        assert_eq!(resp.status, StatusCode::OK, "{path}");
+    }
+    let state = svc.state.read();
+    let s = state.regional("123456789012", "us-east-1").unwrap();
+    assert_eq!(
+        crate::service::resolve_qualifier_to_version(s, "lfn", Some("live")),
+        None
+    );
+}
+
+#[tokio::test]
+async fn update_event_source_mapping_resolves_function_name_like_create() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "esm-a").await;
+    seed_function(&svc, "esm-b").await;
+    let resp = svc
+        .handle(make_request(
+            Method::POST,
+            "/2015-03-31/event-source-mappings",
+            &json!({
+                "FunctionName": "esm-a",
+                "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:q",
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let uuid = body["UUID"].as_str().unwrap().to_string();
+    let path = format!("/2015-03-31/event-source-mappings/{uuid}");
+
+    // A full ARN (what Terraform sends) is stored as that function's ARN.
+    let resp = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({"FunctionName": "arn:aws:lambda:us-east-1:123456789012:function:esm-b"})
+                .to_string(),
+        ))
+        .await
+        .expect("update by ARN");
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        body["FunctionArn"],
+        "arn:aws:lambda:us-east-1:123456789012:function:esm-b"
+    );
+
+    // An alias that does not exist is refused, as on create.
+    let err = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({"FunctionName": "esm-b:missing"}).to_string(),
+        ))
+        .await
+        .err()
+        .expect("missing alias refused");
+    assert_eq!(err.code(), "ResourceNotFoundException");
+    assert!(
+        err.message()
+            .contains("arn:aws:lambda:us-east-1:123456789012:function:esm-b:missing"),
+        "{}",
+        err.message()
+    );
+
+    // A function of another account is not found in this one.
+    let err = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({"FunctionName": "arn:aws:lambda:us-east-1:210987654321:function:esm-b"})
+                .to_string(),
+        ))
+        .await
+        .err()
+        .expect("foreign function refused");
+    assert_eq!(err.code(), "ResourceNotFoundException");
+}
