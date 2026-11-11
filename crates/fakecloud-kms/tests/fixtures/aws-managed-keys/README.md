@@ -69,3 +69,18 @@ rule and bucket were deleted afterwards and their absence confirmed.
 
 `../aws-managed-key-refusals.txt` holds the key-management refusals recorded
 against `alias/aws/lambda`'s key.
+
+`secrets-eventbridge-dlq-sse-sqs.txt` records Secrets Manager `UpdateSecret`
+changing only `KmsKeyId` (another service's AWS-managed key: 400
+`AccessDeniedException` "Access to KMS is not allowed"; a missing alias:
+`InvalidParameterException` relaying KMS's `NotFoundException`; both leave
+the secret unchanged; `alias/aws/secretsmanager`: accepted with no new
+version, `DescribeSecret` reporting the key as given and the version's
+`KmsKeyIds` gaining it after `DefaultEncryptionKey`), `BatchGetSecretValue`
+listing a missing secret under `Errors`, an EventBridge SQS target under
+`alias/aws/sqs` with a `DeadLetterConfig` (the event lands in the dead-letter
+queue with `ERROR_CODE` `NO_PERMISSIONS`, an `ERROR_MESSAGE` naming
+`events.amazonaws.com` inside SQS's `KMS.AccessDeniedException`, `RULE_ARN`
+and `TARGET_ARN`), and an SNS topic delivering to an SSE-SQS queue (it
+arrives; the queue reports no `KmsMasterKeyId`). Every resource was deleted
+afterwards and its absence confirmed.

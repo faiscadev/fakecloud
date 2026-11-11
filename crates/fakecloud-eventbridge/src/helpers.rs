@@ -522,7 +522,7 @@ pub(crate) fn collect_replay_events_with_targets(
     event_end_time: DateTime<Utc>,
     account_id: &str,
     region: &str,
-) -> Vec<(PutEvent, Vec<EventTarget>)> {
+) -> Vec<(PutEvent, Vec<(String, EventTarget)>)> {
     let Some(archive) = state.archives.get(archive_name) else {
         return Vec::new();
     };
@@ -534,9 +534,11 @@ pub(crate) fn collect_replay_events_with_targets(
         .cloned()
         .collect();
 
-    let mut events_to_deliver: Vec<(PutEvent, Vec<EventTarget>)> = Vec::new();
+    let mut events_to_deliver: Vec<(PutEvent, Vec<(String, EventTarget)>)> = Vec::new();
     for event in replay_events {
-        let matching_targets: Vec<EventTarget> = state
+        // Each target with the rule that matched it: a replayed event is
+        // delivered through that rule, as the original was.
+        let matching_targets: Vec<(String, EventTarget)> = state
             .rules
             .values()
             .filter(|r| {
@@ -554,7 +556,7 @@ pub(crate) fn collect_replay_events_with_targets(
                         &event.time.to_rfc3339(),
                     )
             })
-            .flat_map(|r| r.targets.clone())
+            .flat_map(|r| r.targets.iter().map(|t| (r.arn.clone(), t.clone())))
             .collect();
 
         if !matching_targets.is_empty() {
@@ -1020,12 +1022,15 @@ pub(crate) struct EventDispatchContext<'a> {
 /// key policy does not name `events.amazonaws.com` (one under the
 /// AWS-managed `aws/sqs` key) refuses the message; the failure is counted in
 /// the rule's `AWS/Events` `FailedInvocations` metric (recorded: nothing
-/// arrives, `Invocations` and `FailedInvocations` both count it).
+/// arrives, `Invocations` and `FailedInvocations` both count it), and
+/// `event` goes to the target's dead-letter queue (see
+/// [`send_to_target_dlq`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn deliver_to_sqs_target(
     delivery: &fakecloud_core::delivery::DeliveryBus,
     target: &crate::state::EventTarget,
     body: &str,
+    event: &str,
     source_arn: &str,
     rule_arn: Option<&str>,
     account_id: &str,
@@ -1051,32 +1056,127 @@ pub(crate) fn deliver_to_sqs_target(
     );
     if let Err(err) = result {
         tracing::warn!(target = %target.arn, %err, "EventBridge SQS target invocation failed");
-        let Some(rule_arn) = rule_arn else {
-            return;
-        };
-        // `rule/<name>` on the default bus, `rule/<bus>/<name>` on another;
-        // AWS dimensions a custom bus's rule metrics by both.
-        let resource = rule_arn.split_once(":rule/").map_or("", |(_, r)| r);
-        let mut dimensions = std::collections::BTreeMap::new();
-        match resource.split_once('/') {
-            Some((bus, name)) => {
-                dimensions.insert("EventBusName".to_string(), bus.to_string());
-                dimensions.insert("RuleName".to_string(), name.to_string());
-            }
-            None => {
-                dimensions.insert("RuleName".to_string(), resource.to_string());
-            }
+        let dimensions = rule_arn.map(rule_metric_dimensions);
+        if let Some(dimensions) = dimensions.clone() {
+            delivery.put_cloudwatch_metric(
+                account_id,
+                region,
+                "AWS/Events",
+                "FailedInvocations",
+                1.0,
+                Some("Count"),
+                dimensions,
+                chrono::Utc::now().timestamp_millis(),
+            );
         }
-        delivery.put_cloudwatch_metric(
+        let sent = send_to_target_dlq(
+            delivery,
+            target,
+            event,
+            source_arn,
+            rule_arn,
             account_id,
-            region,
-            "AWS/Events",
-            "FailedInvocations",
-            1.0,
-            Some("Count"),
-            dimensions,
-            chrono::Utc::now().timestamp_millis(),
+            sqs_failure_code(&err),
+            &err.relayed_message(),
         );
+        if let (Some(sent), Some(dimensions)) = (sent, dimensions) {
+            delivery.put_cloudwatch_metric(
+                account_id,
+                region,
+                "AWS/Events",
+                if sent {
+                    "InvocationsSentToDlq"
+                } else {
+                    "InvocationsFailedToBeSentToDlq"
+                },
+                1.0,
+                Some("Count"),
+                dimensions,
+                chrono::Utc::now().timestamp_millis(),
+            );
+        }
+    }
+}
+
+/// The dimensions of a rule's `AWS/Events` metrics: `rule/<name>` on the
+/// default bus, `rule/<bus>/<name>` on another, which AWS dimensions by both.
+fn rule_metric_dimensions(rule_arn: &str) -> std::collections::BTreeMap<String, String> {
+    let resource = rule_arn.split_once(":rule/").map_or("", |(_, r)| r);
+    let mut dimensions = std::collections::BTreeMap::new();
+    match resource.split_once('/') {
+        Some((bus, name)) => {
+            dimensions.insert("EventBusName".to_string(), bus.to_string());
+            dimensions.insert("RuleName".to_string(), name.to_string());
+        }
+        None => {
+            dimensions.insert("RuleName".to_string(), resource.to_string());
+        }
+    }
+    dimensions
+}
+
+/// The dead-letter `ERROR_CODE` for an SQS target EventBridge could not
+/// deliver to. Recorded: a KMS key policy refusing `events.amazonaws.com` is
+/// `NO_PERMISSIONS`. The others follow EventBridge's documented codes (a
+/// missing queue `NO_RESOURCE`, a refused message `INVALID_PARAMETER`, any
+/// other client-side failure `SDK_CLIENT_ERROR`).
+fn sqs_failure_code(err: &fakecloud_core::delivery::SqsDeliveryError) -> &'static str {
+    use fakecloud_core::delivery::{KmsErrorKind, SqsDeliveryError};
+    match err {
+        SqsDeliveryError::AccessDenied(_) => "NO_PERMISSIONS",
+        SqsDeliveryError::Kms(kms) if kms.kind == KmsErrorKind::AccessDenied => "NO_PERMISSIONS",
+        SqsDeliveryError::QueueNotFound(_) | SqsDeliveryError::InvalidArn(_) => "NO_RESOURCE",
+        SqsDeliveryError::InvalidParameter(_) => "INVALID_PARAMETER",
+        SqsDeliveryError::Kms(_) | SqsDeliveryError::TargetUnavailable(_) => "SDK_CLIENT_ERROR",
+    }
+}
+
+/// Send an event a target could not take to the target's dead-letter queue
+/// (`DeadLetterConfig.Arn`), as EventBridge does once a delivery fails for
+/// good. Recorded: the body is the event, with String message attributes
+/// `ERROR_CODE`, `ERROR_MESSAGE`, `RULE_ARN` and `TARGET_ARN`, sent as
+/// `events.amazonaws.com` for the rule (the queue policy must admit it).
+/// `None` when the target has no dead-letter queue, else whether the
+/// dead-letter queue took it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn send_to_target_dlq(
+    delivery: &fakecloud_core::delivery::DeliveryBus,
+    target: &crate::state::EventTarget,
+    event: &str,
+    source_arn: &str,
+    rule_arn: Option<&str>,
+    account_id: &str,
+    error_code: &str,
+    error_message: &str,
+) -> Option<bool> {
+    let dlq_arn = target
+        .dead_letter_config
+        .as_ref()
+        .and_then(|d| d["Arn"].as_str())
+        .filter(|a| !a.is_empty())?;
+    let string_attr = |value: &str| fakecloud_core::delivery::SqsMessageAttribute {
+        data_type: "String".to_string(),
+        string_value: Some(value.to_string()),
+        binary_value: None,
+    };
+    let mut attrs = HashMap::new();
+    attrs.insert("ERROR_CODE".to_string(), string_attr(error_code));
+    attrs.insert("ERROR_MESSAGE".to_string(), string_attr(error_message));
+    if let Some(rule_arn) = rule_arn {
+        attrs.insert("RULE_ARN".to_string(), string_attr(rule_arn));
+    }
+    attrs.insert("TARGET_ARN".to_string(), string_attr(&target.arn));
+    let sender = fakecloud_core::delivery::DeliverySender::Service {
+        principal: "events.amazonaws.com",
+        source_arn,
+        source_account: account_id,
+    };
+    match delivery.try_send_to_sqs_with_attrs(sender, dlq_arn, event, &attrs, None, None) {
+        Ok(()) => Some(true),
+        Err(err) => {
+            tracing::warn!(target = %target.arn, dlq = %dlq_arn, %err, "EventBridge could not send a failed event to the target's dead-letter queue");
+            Some(false)
+        }
     }
 }
 
@@ -1111,6 +1211,7 @@ pub(crate) fn dispatch_event_target(
             ctx.delivery,
             target,
             &body_str,
+            &event_str,
             rule_arn.unwrap_or_default(),
             rule_arn,
             ctx.account_id,

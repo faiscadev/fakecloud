@@ -452,9 +452,10 @@ impl EventBridgeService {
             });
             let event_str = event_json.to_string();
 
-            for target in targets {
+            for (rule_arn, target) in targets {
                 self.deliver_replay_event_to_target(
                     &target,
+                    &rule_arn,
                     &event,
                     &event_json,
                     &event_str,
@@ -474,6 +475,7 @@ impl EventBridgeService {
     pub(super) fn deliver_replay_event_to_target(
         &self,
         target: &EventTarget,
+        rule_arn: &str,
         event: &PutEvent,
         event_json: &Value,
         event_str: &str,
@@ -482,9 +484,7 @@ impl EventBridgeService {
     ) {
         let target_arn = &target.arn;
         let body_str = if let Some(ref transformer) = target.input_transformer {
-            // Replay does not track which rule matched, so the rule-arn
-            // reserved variable is left unresolved here.
-            apply_input_transformer(transformer, event_json, None)
+            apply_input_transformer(transformer, event_json, Some(rule_arn))
         } else if let Some(ref input) = target.input {
             input.clone()
         } else if let Some(ref input_path) = target.input_path {
@@ -496,15 +496,16 @@ impl EventBridgeService {
         };
 
         if target_arn.contains(":sqs:") {
-            // Replay does not track the rule that matched; the replay names
-            // the delivery.
-            let replay_arn = event_json["replay-name"].as_str().unwrap_or_default();
+            // The rule that matched delivers the replayed event: it is the
+            // sender SQS sees (the source ARN a queue policy or key policy
+            // condition names) and the dead-letter message's RULE_ARN.
             crate::service::helpers::deliver_to_sqs_target(
                 &self.delivery,
                 target,
                 &body_str,
-                replay_arn,
-                None,
+                event_str,
+                rule_arn,
+                Some(rule_arn),
                 account_id,
                 region,
             );
