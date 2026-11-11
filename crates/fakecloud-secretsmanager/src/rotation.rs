@@ -28,6 +28,7 @@ pub async fn check_and_rotate(
 ) -> Vec<String> {
     let now = Utc::now();
     let mut rotated = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
 
     // Collect secrets that need rotation while holding the lock briefly.
     let due_secrets: Vec<DueSecret> = {
@@ -46,7 +47,12 @@ pub async fn check_and_rotate(
                 }
                 let rules = secret.rotation_rules.as_ref()?;
                 let days = rules.automatically_after_days?;
-                let last = secret.last_rotated_at?;
+                // A failed scheduled attempt waits a whole interval, as
+                // a rotation does: the next attempt is the next window.
+                let last = match (secret.last_rotated_at?, secret.rotation_failed_at) {
+                    (rotated, Some(failed)) if failed > rotated => failed,
+                    (rotated, _) => rotated,
+                };
                 // Never due if the interval is not representable.
                 let due_at =
                     chrono::Duration::try_days(days).and_then(|d| last.checked_add_signed(d))?;
@@ -87,8 +93,10 @@ pub async fn check_and_rotate(
 
             // The value is re-sealed for the new version first: a value KMS
             // will not open or seal (its key disabled or gone) fails this
-            // rotation, which leaves the secret untouched and is retried on
-            // the next schedule check.
+            // rotation, which leaves the secret's values and rotation
+            // configuration untouched (rotation stays enabled) and records
+            // the failed attempt, so the next one comes a whole interval
+            // later, at the next scheduled window, not on every check.
             let resealed = match current_value.as_ref().map(|cv| {
                 crate::service::reseal_version(
                     kms_hook,
@@ -105,8 +113,10 @@ pub async fn check_and_rotate(
                     tracing::warn!(
                         secret_arn = %due.arn,
                         error = %err.message(),
-                        "scheduled rotation failed: the secret's value could not be re-encrypted"
+                        "scheduled rotation failed: the secret's value could not be re-encrypted; retrying at the next scheduled window"
                     );
+                    secret.rotation_failed_at = Some(now);
+                    failed.push(due.name.clone());
                     continue;
                 }
                 Some(Ok(values)) => Some(values),
@@ -114,6 +124,7 @@ pub async fn check_and_rotate(
             };
 
             secret.last_rotated_at = Some(now);
+            secret.rotation_failed_at = None;
             secret.last_changed_at = now;
 
             let mut version_created = false;
@@ -233,7 +244,9 @@ pub async fn check_and_rotate(
     // Write the rotated state through to disk. The snapshot file is written
     // atomically (temp + rename), so a fresh local lock is sufficient to guard
     // the in-memory clone for this one persist.
-    if !rotated.is_empty() {
+    // A failed attempt is persisted too, so a restart does not retry it at
+    // once.
+    if !rotated.is_empty() || !failed.is_empty() {
         let lock = tokio::sync::Mutex::new(());
         crate::service::save_secretsmanager_snapshot(state, snapshot_store, &lock).await;
     }
@@ -320,6 +333,7 @@ mod tests {
                 schedule_expression: None,
             }),
             last_rotated_at: last_rotated,
+            rotation_failed_at: None,
             resource_policy: None,
             replica_regions: Vec::new(),
             replica_settings: BTreeMap::new(),
@@ -346,6 +360,87 @@ mod tests {
         let s = _accts.default_regional().unwrap();
         let secret = &s.secrets["due-secret"];
         assert!(secret.versions.len() > 1, "new version should be created");
+    }
+
+    /// A KMS hook whose key is disabled, counting decrypt attempts.
+    #[derive(Default)]
+    struct DisabledKeyKms(std::sync::atomic::AtomicUsize);
+    impl fakecloud_core::delivery::KmsHook for DisabledKeyKms {
+        fn encrypt(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            _key_id: &str,
+            _plaintext: &[u8],
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
+            _ctx: std::collections::HashMap<String, String>,
+        ) -> Result<String, fakecloud_core::delivery::KmsError> {
+            unreachable!()
+        }
+        fn decrypt(
+            &self,
+            _account_id: &str,
+            _ciphertext: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
+            _ctx: std::collections::HashMap<String, String>,
+        ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::Disabled,
+                "key is disabled",
+            ))
+        }
+        fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+            stored.starts_with("ENC:")
+        }
+    }
+
+    /// A scheduled rotation whose value KMS will not re-seal fails, leaves
+    /// rotation enabled and the value as it was, and waits for the next
+    /// scheduled window instead of retrying on every check.
+    #[tokio::test]
+    async fn failed_scheduled_rotation_waits_for_the_next_window() {
+        let state = make_state();
+        let mut secret = make_secret("sealed", true, Some(1), Some(2));
+        secret.versions.get_mut("v1").unwrap().secret_string = Some("ENC:v".to_string());
+        state
+            .write()
+            .default_regional_mut()
+            .secrets
+            .insert("sealed".to_string(), secret);
+        let kms = DisabledKeyKms::default();
+
+        assert!(check_and_rotate(&state, None, Some(&kms), None)
+            .await
+            .is_empty());
+        assert_eq!(kms.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        {
+            let accts = state.read();
+            let secret = &accts.default_regional().unwrap().secrets["sealed"];
+            assert_eq!(secret.rotation_enabled, Some(true));
+            assert!(secret.rotation_failed_at.is_some());
+            assert_eq!(secret.versions.len(), 1);
+            assert_eq!(secret.current_version_id.as_deref(), Some("v1"));
+        }
+
+        // The next check does not try again: the next window is a day out.
+        assert!(check_and_rotate(&state, None, Some(&kms), None)
+            .await
+            .is_empty());
+        assert_eq!(kms.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Once that window comes, it is attempted again.
+        state
+            .write()
+            .default_regional_mut()
+            .secrets
+            .get_mut("sealed")
+            .unwrap()
+            .rotation_failed_at = Some(Utc::now() - Duration::days(2));
+        assert!(check_and_rotate(&state, None, Some(&kms), None)
+            .await
+            .is_empty());
+        assert_eq!(kms.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

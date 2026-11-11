@@ -6743,6 +6743,7 @@ fn secretsmanager_reference_fails_when_the_secret_does_not_decrypt() {
             rotation_lambda_arn: None,
             rotation_rules: None,
             last_rotated_at: None,
+            rotation_failed_at: None,
             resource_policy: None,
             replica_regions: Vec::new(),
             replica_settings: BTreeMap::new(),

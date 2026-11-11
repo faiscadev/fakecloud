@@ -134,6 +134,7 @@ impl ResourceProvisioner {
             rotation_lambda_arn: None,
             rotation_rules: None,
             last_rotated_at: None,
+            rotation_failed_at: None,
             resource_policy: None,
             replica_regions: Vec::new(),
             replica_settings: Default::default(),
@@ -419,10 +420,14 @@ impl ResourceProvisioner {
             .ok_or("TargetId is required")?;
         let mut accounts = self.secretsmanager_state.write();
         let state = accounts.regional_mut(&self.account_id, &self.region);
-        let secret = state
+        let stored_secret = state
             .secret_key(&secret_id)
             .and_then(|key| state.secrets.get_mut(&key))
             .ok_or_else(|| format!("Secret {secret_id} not yet provisioned"))?;
+        // Patched on a copy stored only once the value is sealed: a key KMS
+        // refuses fails the attachment with the secret as it was, never
+        // leaving a plaintext version at rest.
+        let mut secret = stored_secret.clone();
         let secret_arn = secret.arn.clone();
         // Patch the AWSCURRENT version with engine/host/dbInstanceIdentifier
         // so it shows as "attached" via the RDS-style schema CFN expects.
@@ -500,6 +505,7 @@ impl ResourceProvisioner {
             }
         }
         secret.last_changed_at = now;
+        *stored_secret = secret;
         Ok(ProvisionResult::new(secret_arn.clone()).with("SecretArn", secret_arn))
     }
 }

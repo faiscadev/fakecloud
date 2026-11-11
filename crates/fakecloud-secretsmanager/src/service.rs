@@ -357,6 +357,7 @@ impl SecretsManagerService {
             rotation_lambda_arn: None,
             rotation_rules: None,
             last_rotated_at: None,
+            rotation_failed_at: None,
             resource_policy: None,
             replica_regions,
             replica_settings,
@@ -935,7 +936,13 @@ impl SecretsManagerService {
         if secret.rotation_enabled == Some(true) {
             if let Some(ref rules) = secret.rotation_rules {
                 if let Some(days) = rules.automatically_after_days {
-                    let base = secret.last_rotated_at.unwrap_or(secret.created_at);
+                    // A failed scheduled attempt moves the schedule on a
+                    // whole interval, like a rotation.
+                    let base = match (secret.last_rotated_at, secret.rotation_failed_at) {
+                        (Some(rotated), Some(failed)) if failed > rotated => failed,
+                        (Some(rotated), _) => rotated,
+                        (None, _) => secret.created_at,
+                    };
                     // Rules are validated to 1-1000 days on write; a stored
                     // value out of range just omits the date.
                     if let Some(next) =

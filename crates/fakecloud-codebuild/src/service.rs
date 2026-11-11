@@ -3877,6 +3877,7 @@ mod tests {
                     rotation_lambda_arn: None,
                     rotation_rules: None,
                     last_rotated_at: None,
+                    rotation_failed_at: None,
                     resource_policy: None,
                     replica_regions: Vec::new(),
                     replica_settings: BTreeMap::new(),

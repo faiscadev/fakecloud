@@ -36,7 +36,8 @@ pub struct SecretValue {
 /// itself refuses an ARN of another region before calling this).
 /// `version_id` / `version_stage` select the version; with neither,
 /// the `AWSCURRENT` version is read. A cross-account read needs the secret's
-/// resource policy to allow the caller. Marks the secret as accessed.
+/// resource policy to allow the caller. Marks the secret as accessed once its
+/// value has been read (a read KMS refuses does not count).
 ///
 /// `caller_arn` is the identity reading it (an IAM user or assumed role),
 /// whom KMS names if the secret's key refuses Secrets Manager; `None` when
@@ -58,7 +59,7 @@ pub fn read_secret_value(
     } else {
         caller_region
     };
-    let (value, kms_key_id) = {
+    let (value, kms_key_id, key) = {
         let mut accounts = state.write();
         let state = accounts
             .regional_get_mut(&owner_account, owner_region)
@@ -141,8 +142,7 @@ pub fn read_secret_value(
             secret_string: version.secret_string.clone(),
             secret_binary: version.secret_binary.clone(),
         };
-        secret.last_accessed_at = Some(Utc::now());
-        (value, secret.kms_key_id.clone())
+        (value, secret.kms_key_id.clone(), key)
     };
 
     let secret_string = value
@@ -172,6 +172,15 @@ pub fn read_secret_value(
             )
         })
         .transpose()?;
+    // Only a read that returned the value counts as an access: one KMS
+    // refused leaves LastAccessedDate as it was.
+    if let Some(secret) = state
+        .write()
+        .regional_get_mut(&owner_account, owner_region)
+        .and_then(|s| s.secrets.get_mut(&key))
+    {
+        secret.last_accessed_at = Some(Utc::now());
+    }
     Ok(SecretValue {
         secret_string,
         secret_binary,

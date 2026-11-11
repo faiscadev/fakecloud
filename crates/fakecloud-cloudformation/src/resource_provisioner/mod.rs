@@ -10529,6 +10529,7 @@ mod tests {
                     rotation_lambda_arn: None,
                     rotation_rules: None,
                     last_rotated_at: None,
+                    rotation_failed_at: None,
                     resource_policy: None,
                     replica_regions: Vec::new(),
                     replica_settings: Default::default(),
@@ -12168,6 +12169,56 @@ mod tests {
         )
         .expect_err("a disabled key does not open the value");
         assert_eq!(err.code(), "DecryptionFailure");
+    }
+
+    /// A SecretTargetAttachment whose secret's key KMS refuses fails, and
+    /// leaves no plaintext version behind: the seeded value is stored only
+    /// once it is sealed.
+    #[test]
+    fn secret_target_attachment_kms_refusal_leaves_no_plaintext_version() {
+        let prov = make_provisioner();
+        let key = prov
+            .create_resource(&make_resource("AWS::KMS::Key", "K", serde_json::json!({})))
+            .expect("key provisions")
+            .physical_id;
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::SecretsManager::Secret",
+                "S",
+                serde_json::json!({"Name": "db-cred", "KmsKeyId": key}),
+            ))
+            .expect("secret provisions");
+        {
+            let mut kms = prov.kms_state.write();
+            let k = kms
+                .get_mut("123456789012")
+                .unwrap()
+                .keys
+                .get_mut(&key)
+                .unwrap();
+            k.enabled = false;
+            k.key_state = "Disabled".to_string();
+        }
+        let err = prov
+            .create_resource(&make_resource(
+                "AWS::SecretsManager::SecretTargetAttachment",
+                "A",
+                serde_json::json!({
+                    "SecretId": created.physical_id,
+                    "TargetType": "AWS::RDS::DBInstance",
+                    "TargetId": "db",
+                }),
+            ))
+            .expect_err("a disabled key fails the attachment");
+        assert!(err.starts_with("EncryptionFailure"), "{err}");
+        let sm = prov.secretsmanager_state.read();
+        let acct = sm.regional("123456789012", "us-east-1").unwrap();
+        let secret = acct
+            .secrets
+            .get(&acct.secret_key(&created.physical_id).unwrap())
+            .unwrap();
+        assert!(secret.versions.is_empty(), "{:?}", secret.versions);
+        assert_eq!(secret.current_version_id, None);
     }
 
     #[test]

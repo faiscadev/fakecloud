@@ -2331,6 +2331,7 @@ fn test_filter_name_prefix() {
         rotation_lambda_arn: None,
         rotation_rules: None,
         last_rotated_at: None,
+        rotation_failed_at: None,
         resource_policy: None,
         replica_regions: Vec::new(),
         replica_settings: BTreeMap::new(),
@@ -2360,6 +2361,7 @@ fn test_filter_tag_value() {
         rotation_lambda_arn: None,
         rotation_rules: None,
         last_rotated_at: None,
+        rotation_failed_at: None,
         resource_policy: None,
         replica_regions: Vec::new(),
         replica_settings: BTreeMap::new(),
@@ -2389,6 +2391,7 @@ fn test_filter_all_searches_name_desc_tags() {
         rotation_lambda_arn: None,
         rotation_rules: None,
         last_rotated_at: None,
+        rotation_failed_at: None,
         resource_policy: None,
         replica_regions: Vec::new(),
         replica_settings: BTreeMap::new(),
@@ -4002,6 +4005,7 @@ fn test_secret(name: &str) -> Secret {
         rotation_lambda_arn: None,
         rotation_rules: None,
         last_rotated_at: None,
+        rotation_failed_at: None,
         resource_policy: None,
         replica_regions: Vec::new(),
         replica_settings: BTreeMap::new(),
@@ -4547,4 +4551,42 @@ async fn replicas_follow_the_staged_versions_after_a_key_change() {
     .await
     .unwrap();
     assert_eq!(status(&state, "us-west-2"), "Failed");
+}
+
+/// A GetSecretValue KMS refuses does not count as an access: only a read
+/// that returned the value stamps LastAccessedDate.
+#[tokio::test]
+async fn refused_read_does_not_stamp_last_accessed() {
+    let state = make_state();
+    let kms = KeyedKms::default();
+    let svc = SecretsManagerService::new(state.clone()).with_kms_hook(Arc::new(kms.clone()));
+    call(
+        &svc,
+        "CreateSecret",
+        json!({"Name": "s", "SecretString": "v1", "KmsKeyId": "k1"}),
+    )
+    .await
+    .unwrap();
+    let last_accessed = |state: &SharedSecretsManagerState| {
+        state
+            .read()
+            .default_regional()
+            .unwrap()
+            .secrets
+            .get("s")
+            .unwrap()
+            .last_accessed_at
+    };
+    kms.disable("k1");
+    let err = call(&svc, "GetSecretValue", json!({"SecretId": "s"}))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "DecryptionFailure");
+    assert_eq!(last_accessed(&state), None);
+
+    kms.disabled.lock().clear();
+    call(&svc, "GetSecretValue", json!({"SecretId": "s"}))
+        .await
+        .unwrap();
+    assert!(last_accessed(&state).is_some());
 }
