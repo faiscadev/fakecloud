@@ -1706,41 +1706,30 @@ fn cmd_check(
     // regression: report each failing operation.
     let mut regressions = failing_operations(&report_data);
 
-    // Per-service ratchet against the baseline, so a service can't keep a
-    // clean 100% by losing variants. No margin by default; a local run can
-    // relax it via FAKECLOUD_CONFORMANCE_FLAKE_MARGIN.
+    // Exact per-service ratchet against the baseline: a service can't keep a
+    // clean 100% by losing variants, and a gain or a changed variant count
+    // means the committed baseline (and every surface quoting it) is stale.
+    // No margin by default; a local run can relax drops via
+    // FAKECLOUD_CONFORMANCE_FLAKE_MARGIN.
     let flake_margin: usize = std::env::var("FAKECLOUD_CONFORMANCE_FLAKE_MARGIN")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    let current_by_service: HashMap<&str, usize> = report_data
+    let current_by_service: HashMap<&str, ServiceBaseline> = report_data
         .services
         .iter()
         .map(|svc| {
             let passed: usize = svc.operations.iter().map(|o| o.passed).sum();
-            (svc.service_name.as_str(), passed)
+            let total: usize = svc.operations.iter().map(|o| o.total_variants).sum();
+            (svc.service_name.as_str(), ServiceBaseline { passed, total })
         })
         .collect();
-
-    for (svc_name, svc_baseline) in &baseline.per_service {
-        let current_passed = current_by_service
-            .get(svc_name.as_str())
-            .copied()
-            .unwrap_or(0);
-        let allowed = svc_baseline.passed.saturating_sub(flake_margin);
-        if current_passed < allowed {
-            regressions.push(format!(
-                "{}: {} → {} variants passing (was {}, lost {}; margin {})",
-                svc_name,
-                svc_baseline.passed,
-                current_passed,
-                svc_baseline.passed,
-                svc_baseline.passed - current_passed,
-                flake_margin,
-            ));
-        }
-    }
+    regressions.extend(baseline_drift(
+        &baseline.per_service,
+        &current_by_service,
+        flake_margin,
+    ));
 
     if let Some(path) = markdown_summary_out {
         let baseline_passed: HashMap<String, usize> = baseline
@@ -1784,6 +1773,63 @@ fn cmd_check(
         eprintln!("  cargo run -p fakecloud-conformance -- update-baseline");
         std::process::exit(1);
     }
+}
+
+/// Every difference between the committed per-service baseline and this run,
+/// one line per service, sorted by service name. Drops below
+/// `baseline - flake_margin` are regressions; a gain, a changed variant total,
+/// or a service missing from either side means the baseline is out of date.
+fn baseline_drift(
+    baseline: &HashMap<String, ServiceBaseline>,
+    current: &HashMap<&str, ServiceBaseline>,
+    flake_margin: usize,
+) -> Vec<String> {
+    let mut names: Vec<&str> = baseline
+        .keys()
+        .map(String::as_str)
+        .chain(current.keys().copied())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+
+    let mut drift = Vec::new();
+    for name in names {
+        match (baseline.get(name), current.get(name)) {
+            (Some(b), None) => drift.push(format!(
+                "{name}: in the baseline ({}/{}) but not probed",
+                b.passed, b.total
+            )),
+            (None, Some(c)) => drift.push(format!(
+                "{name}: probed ({}/{}) but not in the baseline",
+                c.passed, c.total
+            )),
+            (Some(b), Some(c)) => {
+                if c.passed < b.passed.saturating_sub(flake_margin) {
+                    drift.push(format!(
+                        "{name}: {} -> {} variants passing (lost {}; margin {flake_margin})",
+                        b.passed,
+                        c.passed,
+                        b.passed - c.passed
+                    ));
+                } else if c.passed > b.passed {
+                    drift.push(format!(
+                        "{name}: {} -> {} variants passing (gained {}; baseline is stale)",
+                        b.passed,
+                        c.passed,
+                        c.passed - b.passed
+                    ));
+                }
+                if c.total != b.total {
+                    drift.push(format!(
+                        "{name}: {} -> {} variants generated (baseline is stale)",
+                        b.total, c.total
+                    ));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    drift
 }
 
 /// One line per operation with a failing variant: `service Op: passed/total`.
@@ -1843,6 +1889,56 @@ fn cmd_update_baseline(
 
 #[cfg(test)]
 mod tests {
+    fn sb(passed: usize, total: usize) -> ServiceBaseline {
+        ServiceBaseline { passed, total }
+    }
+
+    #[test]
+    fn baseline_matching_exactly_has_no_drift() {
+        let baseline = HashMap::from([("sqs".to_string(), sb(10, 10))]);
+        let current = HashMap::from([("sqs", sb(10, 10))]);
+        assert!(baseline_drift(&baseline, &current, 0).is_empty());
+    }
+
+    #[test]
+    fn every_baseline_difference_is_drift() {
+        let baseline = HashMap::from([
+            ("lost".to_string(), sb(10, 10)),
+            ("gained".to_string(), sb(10, 10)),
+            ("regenerated".to_string(), sb(10, 10)),
+            ("gone".to_string(), sb(5, 5)),
+        ]);
+        let current = HashMap::from([
+            ("lost", sb(8, 10)),
+            ("gained", sb(11, 11)),
+            ("regenerated", sb(10, 12)),
+            ("new", sb(3, 3)),
+        ]);
+        assert_eq!(
+            baseline_drift(&baseline, &current, 0),
+            vec![
+                "gained: 10 -> 11 variants passing (gained 1; baseline is stale)",
+                "gained: 10 -> 11 variants generated (baseline is stale)",
+                "gone: in the baseline (5/5) but not probed",
+                "lost: 10 -> 8 variants passing (lost 2; margin 0)",
+                "new: probed (3/3) but not in the baseline",
+                "regenerated: 10 -> 12 variants generated (baseline is stale)",
+            ]
+        );
+    }
+
+    #[test]
+    fn flake_margin_only_relaxes_drops() {
+        let baseline = HashMap::from([
+            ("flaky".to_string(), sb(10, 10)),
+            ("gained".to_string(), sb(10, 11)),
+        ]);
+        let current = HashMap::from([("flaky", sb(8, 10)), ("gained", sb(11, 11))]);
+        assert_eq!(
+            baseline_drift(&baseline, &current, 2),
+            vec!["gained: 10 -> 11 variants passing (gained 1; baseline is stale)"]
+        );
+    }
 
     #[test]
     fn every_failing_operation_is_a_check_failure() {
