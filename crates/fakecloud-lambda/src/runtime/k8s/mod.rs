@@ -13,6 +13,7 @@
 //! See `website/content/docs/guides/kubernetes-backend.md` for the
 //! operator-facing setup (ServiceAccount, RBAC, Deployment yaml).
 
+mod oci;
 pub mod spec;
 
 use std::time::Duration;
@@ -176,6 +177,47 @@ impl K8sBackend {
         Ok(ip)
     }
 
+    /// What the function's container runs, through the extension launcher:
+    /// the base image entrypoint and handler for a zip function, an image's
+    /// own entrypoint and command (read from its registry; `ImageConfig`
+    /// applied). `None` (the image runs as is, without its extensions) when
+    /// the image's command cannot be read.
+    async fn launch_command(&self, func: &LambdaFunction) -> Option<Vec<String>> {
+        use super::extensions::{function_command, BASE_IMAGE_ENTRYPOINT};
+        if func.package_type != "Image" {
+            return Some(vec![
+                BASE_IMAGE_ENTRYPOINT.to_string(),
+                func.handler.clone(),
+            ]);
+        }
+        let image = spec::main_image(func, &self.ecr_host, self.ecr_port).ok()?;
+        let local = image.starts_with(&format!("{}:{}/", self.ecr_host, self.ecr_port));
+        let arch = if func.architectures.iter().any(|a| a == "arm64") {
+            "arm64"
+        } else {
+            "amd64"
+        };
+        let auth = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode("AWS:fakecloud-lambda-runtime")
+        };
+        match oci::image_command(&image, arch, local, local.then_some(auth.as_str())).await {
+            Ok((entrypoint, cmd)) => Some(function_command(
+                &entrypoint,
+                &cmd,
+                func.image_config.as_ref(),
+            )),
+            Err(e) => {
+                tracing::warn!(
+                    image = %image,
+                    error = %e,
+                    "could not read the image's command; it runs without its extensions"
+                );
+                None
+            }
+        }
+    }
+
     /// Wait for the Pod to be Running, or for its runtime to have already
     /// exited (an init that crashed at once). Errors for a Pod that never got
     /// its runtime started (image pull, code download, scheduling).
@@ -266,13 +308,14 @@ impl LambdaBackend for K8sBackend {
         &self,
         func: &LambdaFunction,
         _code_zip: Option<&[u8]>,
-        layers: &[Vec<u8>],
+        _layers: &[Vec<u8>],
         deploy_id: &str,
         credentials: Option<&SessionCredentials>,
         runtime_api: &RuntimeApiAddress,
     ) -> Result<WarmInstance, RuntimeError> {
         let account_id = account_id_from_arn(&func.function_arn);
         let runtime_api_ip = self.self_ip().await?;
+        let launch_command = self.launch_command(func).await;
         // A per-launch unique name (instead of the deterministic
         // function+deploy one) so concurrent instances of the same function
         // don't collide and a terminating Pod never blocks its replacement
@@ -292,13 +335,13 @@ impl LambdaBackend for K8sBackend {
             runtime_api_host: &runtime_api.host,
             runtime_api_ip: &runtime_api_ip,
             self_port: self.self_port,
-            extensions: if func.package_type == "Image" {
-                0
-            } else {
-                super::extensions::layer_extension_count(layers)
-            },
+            launch_command,
         };
-        runtime_api.sandbox.expect_extensions(ctx.extensions);
+        if ctx.launch_command.is_some() {
+            // The first event waits for the launcher's extension count.
+            runtime_api.sandbox.await_extension_count();
+        }
+        let launcher = ctx.launch_command.is_some();
         let mut pod =
             build_pod_spec(func, deploy_id, &ctx).map_err(RuntimeError::ContainerStartFailed)?;
         pod.metadata.name = Some(pod_name.clone());
@@ -360,6 +403,7 @@ impl LambdaBackend for K8sBackend {
                 name: pod_name,
             },
             exit,
+            launcher,
         })
     }
 
@@ -376,16 +420,85 @@ impl LambdaBackend for K8sBackend {
         }
     }
 
-    async fn instance_logs(&self, handle: &BackendHandle) -> Option<String> {
+    async fn read_instance_file(&self, handle: &BackendHandle, path: &str) -> Option<Vec<u8>> {
         let BackendHandle::Pod { name, .. } = handle else {
             return None;
         };
-        // The function's logs go to the runtime container's stdout/stderr.
-        self.client
-            .pod_logs(name, None)
+        let out = self
+            .client
+            .exec(name, Some(MAIN_CONTAINER), &["cat", path])
             .await
+            .ok()?;
+        out.success().then_some(out.stdout)
+    }
+
+    async fn write_instance_file(
+        &self,
+        handle: &BackendHandle,
+        path: &str,
+        contents: &[u8],
+    ) -> bool {
+        let BackendHandle::Pod { name, .. } = handle else {
+            return false;
+        };
+        let script = format!("cat > '{path}'");
+        self.client
+            .exec_with_stdin(
+                name,
+                Some(MAIN_CONTAINER),
+                &["/bin/sh", "-c", &script],
+                contents,
+            )
+            .await
+            .is_ok_and(|o| o.success())
+    }
+
+    async fn log_cursor(&self, handle: &BackendHandle) -> Option<String> {
+        let BackendHandle::Pod { name, .. } = handle else {
+            return None;
+        };
+        let params = kube::api::LogParams {
+            container: Some(MAIN_CONTAINER.to_string()),
+            timestamps: true,
+            tail_lines: Some(super::logs::CURSOR_TAIL_LINES as i64),
+            ..Default::default()
+        };
+        let logs = self.client.pods().logs(name, &params).await.ok()?;
+        if super::logs::tail_covers_cursor(&[&logs]) {
+            return super::logs::cursor(&[&logs]);
+        }
+        // Every tail line shares the latest timestamp: count them all.
+        let latest = super::logs::cursor(&[&logs])?;
+        let since_time = chrono::DateTime::parse_from_rfc3339(super::logs::cursor_since(&latest))
             .ok()
-            .filter(|s| !s.is_empty())
+            .map(|t| t.with_timezone(&chrono::Utc));
+        let params = kube::api::LogParams {
+            container: Some(MAIN_CONTAINER.to_string()),
+            timestamps: true,
+            since_time,
+            ..Default::default()
+        };
+        let logs = self.client.pods().logs(name, &params).await.ok()?;
+        super::logs::cursor(&[&logs])
+    }
+
+    async fn instance_logs(&self, handle: &BackendHandle, since: Option<&str>) -> Option<String> {
+        let BackendHandle::Pod { name, .. } = handle else {
+            return None;
+        };
+        // The kubelet keeps one stream (stdout and stderr in write order);
+        // `sinceTime` has second precision, the cursor filter the rest.
+        let since_time = since
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(super::logs::cursor_since(s)).ok())
+            .map(|t| t.with_timezone(&chrono::Utc));
+        let params = kube::api::LogParams {
+            container: Some(MAIN_CONTAINER.to_string()),
+            timestamps: true,
+            since_time,
+            ..Default::default()
+        };
+        let logs = self.client.pods().logs(name, &params).await.ok()?;
+        Some(super::logs::lines_since(&[&logs], since))
     }
 
     /// Sweep Lambda Pods that belong to a previous fakecloud process.

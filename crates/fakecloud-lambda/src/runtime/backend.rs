@@ -132,6 +132,9 @@ pub struct RuntimeApiAddress {
 pub struct WarmInstance {
     pub handle: BackendHandle,
     pub exit: ExitWatch,
+    /// The instance runs the extension launcher (see
+    /// [`super::extensions`]); its sandbox waits for the launcher's count.
+    pub launcher: bool,
 }
 
 #[async_trait]
@@ -196,10 +199,36 @@ pub trait LambdaBackend: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Fetch the recent stdout/stderr of a running instance, used to build the
-    /// `X-Amz-Log-Result` tail an `Invoke` with `LogType=Tail` returns. Default
-    /// `None` (no logs available); the container backends override it.
-    async fn instance_logs(&self, _handle: &BackendHandle) -> Option<String> {
+    /// Read a file from the instance's filesystem (the launcher's
+    /// bookkeeping); `None` when it does not exist (yet).
+    async fn read_instance_file(&self, _handle: &BackendHandle, _path: &str) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Create (or replace) a file in the instance's filesystem. `false` on
+    /// failure.
+    async fn write_instance_file(
+        &self,
+        _handle: &BackendHandle,
+        _path: &str,
+        _contents: &[u8],
+    ) -> bool {
+        false
+    }
+
+    /// The instance's current position in its log (an opaque cursor), taken
+    /// just before an event is dispatched so [`Self::instance_logs`] returns
+    /// only what that invocation printed. `None` when the log is empty or
+    /// the backend keeps no logs.
+    async fn log_cursor(&self, _handle: &BackendHandle) -> Option<String> {
+        None
+    }
+
+    /// The instance's stdout and stderr, interleaved in the order they were
+    /// written, from after `since` (a [`Self::log_cursor`]; the whole log
+    /// when `None`), used to build the `X-Amz-Log-Result` tail an `Invoke`
+    /// with `LogType=Tail` returns. Default `None` (no logs available).
+    async fn instance_logs(&self, _handle: &BackendHandle, _since: Option<&str>) -> Option<String> {
         None
     }
 }

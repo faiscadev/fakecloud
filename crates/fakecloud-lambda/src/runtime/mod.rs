@@ -16,6 +16,7 @@ pub mod environment;
 pub(crate) mod extensions;
 pub(crate) mod facade;
 pub mod k8s;
+pub(crate) mod logs;
 
 pub use api::RuntimeApi;
 pub use backend::{

@@ -41,6 +41,20 @@ pub const RUNTIME_HOST_PREFIX: &str = "fakecloud-runtime-";
 /// (6 MB + 100 bytes of envelope, as Lambda reports it).
 pub const MAX_SYNC_RESPONSE_BYTES: usize = 6_291_556;
 
+/// The largest response a streamed invocation may send (200 MB).
+pub const MAX_STREAM_RESPONSE_BYTES: usize = 200 * 1024 * 1024;
+
+/// What [`Sandbox::abandon`] took back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Abandoned {
+    /// The event was still waiting for the runtime: it never saw it.
+    Queued,
+    /// The runtime had taken the event.
+    InFlight,
+    /// Neither (already answered, or another invocation's).
+    Nothing,
+}
+
 const API_PREFIX: &str = "/2018-06-01/runtime";
 const EXTENSION_PREFIX: &str = "/2020-01-01/extension";
 const EXTENSION_NAME_HEADER: &str = "lambda-extension-name";
@@ -110,8 +124,9 @@ pub enum InvocationOutcome {
     Error(Vec<u8>),
     /// The runtime failed to initialize (`/init/error`).
     InitError(Vec<u8>),
-    /// The buffered response exceeded [`InvocationEvent::max_response_bytes`].
-    ResponseTooLarge,
+    /// The response exceeded [`InvocationEvent::max_response_bytes`] (the
+    /// limit it exceeded).
+    ResponseTooLarge(usize),
 }
 
 /// A Runtime API request the runtime got wrong, with Lambda's answer.
@@ -197,6 +212,8 @@ pub struct SandboxInfo {
 
 /// An extension registered through the Extensions API (`2020-01-01`).
 struct Extension {
+    /// `Lambda-Extension-Name`: its file name in `/opt/extensions`.
+    name: String,
     invoke: bool,
     shutdown: bool,
     /// Events waiting for its next `/event/next`.
@@ -205,11 +222,13 @@ struct Extension {
     waiting: bool,
 }
 
-#[derive(Default)]
 struct State {
     /// Extension processes started with the runtime; events wait until
-    /// that many have registered.
-    expected_extensions: usize,
+    /// that many have registered. `None` while the launcher has not yet
+    /// reported how many it started.
+    expected_extensions: Option<usize>,
+    /// The runtime is waiting in `/invocation/next`.
+    runtime_waiting: bool,
     extensions: HashMap<String, Extension>,
     /// An event has been handed to the runtime (initialization is over).
     delivered_any: bool,
@@ -235,12 +254,29 @@ pub struct Sandbox {
     event_ready: Notify,
 }
 
-/// A dispatched invocation: the runtime's reports, plus whether the sandbox
-/// had already initialized when the event was queued (an event queued on an
-/// initialized sandbox that dies before taking it never ran).
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            expected_extensions: Some(0),
+            runtime_waiting: false,
+            extensions: HashMap::new(),
+            delivered_any: false,
+            initialized: false,
+            init_error: None,
+            queued: None,
+            current: None,
+            closed: false,
+        }
+    }
+}
+
+/// A dispatched invocation: the runtime's reports, plus whether it is the
+/// environment's first event (which waits on its init, and whose failure to
+/// start is an init failure rather than a reason to run elsewhere).
 pub struct Dispatched {
     pub signals: mpsc::UnboundedReceiver<RuntimeSignal>,
-    pub warm: bool,
+    /// No event had been handed to this environment before.
+    pub first: bool,
 }
 
 impl Sandbox {
@@ -253,11 +289,125 @@ impl Sandbox {
         }
     }
 
-    /// Declare how many extension processes start with the runtime: the
+    /// Declare how many extension processes started with the runtime: the
     /// first event waits until they have all registered and finished their
     /// init (asked for their first event), as on Lambda.
     pub fn expect_extensions(&self, count: usize) {
-        self.state.lock().expected_extensions = count;
+        self.state.lock().expected_extensions = Some(count);
+        self.event_ready.notify_waiters();
+    }
+
+    /// The instance's launcher will report how many extensions it started
+    /// ([`Self::expect_extensions`]); until then no event is delivered.
+    pub fn await_extension_count(&self) {
+        self.state.lock().expected_extensions = None;
+    }
+
+    /// Wait until every expected extension has registered (the launcher
+    /// then starts the runtime). `false` if the environment failed or went
+    /// away first.
+    pub async fn wait_registered(&self) -> bool {
+        loop {
+            let notified = self.event_ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let st = self.state.lock();
+                if st.closed || st.init_error.is_some() {
+                    return false;
+                }
+                if st
+                    .expected_extensions
+                    .is_some_and(|n| st.extensions.len() >= n)
+                {
+                    return true;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    /// Whether an event has ever been handed to this environment's runtime.
+    pub fn has_served(&self) -> bool {
+        self.state.lock().delivered_any
+    }
+
+    /// Wait until the environment is done with its last event: the runtime
+    /// is back in `/invocation/next` and every extension in `/event/next`
+    /// with nothing left to handle (Lambda's invoke phase ends then):
+    /// `true`. `false` once the environment failed or went away instead.
+    pub async fn wait_idle(&self) -> bool {
+        loop {
+            let notified = self.event_ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let st = self.state.lock();
+                let idle = st.runtime_waiting
+                    && st.current.is_none()
+                    && st
+                        .extensions
+                        .values()
+                        .all(|e| e.waiting && e.queue.is_empty());
+                if st.closed || st.init_error.is_some() {
+                    return false;
+                }
+                if idle {
+                    return true;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    /// An extension process ended (`code` is its exit status, `None` when
+    /// it dropped its `/event/next` without one known), or could not be
+    /// launched: the environment fails as Lambda fails it, the event
+    /// waiting on init or in flight getting the error.
+    pub fn extension_exited(&self, name: &str, code: Option<i32>) {
+        let (error_type, detail) = match code {
+            Some(126 | 127) => (
+                "Extension.LaunchError",
+                format!(
+                    "could not launch extension {name} (exit status {})",
+                    code.unwrap_or(0)
+                ),
+            ),
+            Some(code) => (
+                "Extension.Crash",
+                format!("extension {name} exited with error: exit status {code}"),
+            ),
+            None => ("Extension.Crash", format!("extension {name} exited")),
+        };
+        let payload = serde_json::json!({
+            "errorType": error_type,
+            "errorMessage": format!("Error: {detail}"),
+        })
+        .to_string()
+        .into_bytes();
+        self.fail(payload);
+    }
+
+    /// Fail the environment with `payload`: the queued or in-flight event
+    /// gets it, and so does every later one (the environment is reset).
+    fn fail(&self, payload: Vec<u8>) {
+        let mut st = self.state.lock();
+        if st.closed {
+            return;
+        }
+        if let Some(q) = st.queued.take() {
+            let _ = q.tx.send(RuntimeSignal::Done(InvocationOutcome::InitError(
+                payload.clone(),
+            )));
+        }
+        if let Some(c) = st.current.take() {
+            let _ = c.tx.send(RuntimeSignal::Done(InvocationOutcome::InitError(
+                payload.clone(),
+            )));
+        }
+        st.init_error.get_or_insert(payload);
+        drop(st);
+        self.event_ready.notify_waiters();
     }
 
     pub fn token(&self) -> &str {
@@ -277,24 +427,25 @@ impl Sandbox {
     pub fn dispatch(&self, event: InvocationEvent) -> Dispatched {
         let (tx, signals) = mpsc::unbounded_channel();
         let mut st = self.state.lock();
-        let warm = st.initialized;
+        let first = !st.delivered_any;
         if st.closed {
             // Nothing will ever take it; the caller sees the channel close.
-            return Dispatched { signals, warm };
+            return Dispatched { signals, first };
         }
         if let Some(payload) = st.init_error.clone() {
             let _ = tx.send(RuntimeSignal::Done(InvocationOutcome::InitError(payload)));
-            return Dispatched { signals, warm };
+            return Dispatched { signals, first };
         }
         st.queued = Some(Queued { event, tx });
         drop(st);
         self.event_ready.notify_waiters();
-        Dispatched { signals, warm }
+        Dispatched { signals, first }
     }
 
-    /// Forget the invocation `request_id` (it timed out, or its caller went
-    /// away): a late answer from the runtime is refused as an unknown ID.
-    pub fn abandon(&self, request_id: &str) {
+    /// Forget the invocation `request_id` (it timed out, or its environment
+    /// is being reset): a late answer from the runtime is refused as an
+    /// unknown ID.
+    pub fn abandon(&self, request_id: &str) -> Abandoned {
         let mut st = self.state.lock();
         if st
             .queued
@@ -302,6 +453,7 @@ impl Sandbox {
             .is_some_and(|q| q.event.request_id == request_id)
         {
             st.queued = None;
+            return Abandoned::Queued;
         }
         if st
             .current
@@ -309,7 +461,9 @@ impl Sandbox {
             .is_some_and(|c| c.request_id == request_id)
         {
             st.current = None;
+            return Abandoned::InFlight;
         }
+        Abandoned::Nothing
     }
 
     fn close(&self) {
@@ -330,7 +484,19 @@ impl Sandbox {
                 return Err(ApiError::InvalidStateTransition("InitError to Ready"));
             }
             st.initialized = true;
+            st.runtime_waiting = true;
         }
+        self.event_ready.notify_waiters();
+        // The runtime stops waiting when it takes an event, or its request
+        // goes away.
+        struct Waiting<'a>(&'a Sandbox);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.state.lock().runtime_waiting = false;
+                self.0.event_ready.notify_waiters();
+            }
+        }
+        let _waiting = Waiting(self);
         loop {
             let notified = self.event_ready.notified();
             tokio::pin!(notified);
@@ -373,7 +539,7 @@ impl Sandbox {
 
     /// `POST /extension/register`: a new extension, for the given events.
     /// Returns its identifier.
-    pub fn register_extension(&self, events: &[String]) -> Result<String, ApiError> {
+    pub fn register_extension(&self, name: &str, events: &[String]) -> Result<String, ApiError> {
         let mut st = self.state.lock();
         if st.closed {
             return Err(ApiError::Gone);
@@ -387,18 +553,50 @@ impl Sandbox {
         st.extensions.insert(
             id.clone(),
             Extension {
+                name: name.to_string(),
                 invoke: events.iter().any(|e| e == "INVOKE"),
                 shutdown: events.iter().any(|e| e == "SHUTDOWN"),
                 queue: VecDeque::new(),
                 waiting: false,
             },
         );
+        drop(st);
+        self.event_ready.notify_waiters();
         Ok(id)
     }
 
     /// `GET /extension/event/next`: the extension is done with what it was
     /// sent; wait for its next event.
     pub async fn extension_next(&self, id: &str) -> Result<serde_json::Value, ApiError> {
+        // An extension that drops its `/event/next` while waiting is gone
+        // (its process ended): that fails the environment.
+        struct Pending<'a> {
+            sandbox: &'a Sandbox,
+            id: &'a str,
+            armed: bool,
+        }
+        impl Drop for Pending<'_> {
+            fn drop(&mut self) {
+                if !self.armed {
+                    return;
+                }
+                let name = {
+                    let st = self.sandbox.state.lock();
+                    if st.closed {
+                        return;
+                    }
+                    st.extensions.get(self.id).map(|e| e.name.clone())
+                };
+                if let Some(name) = name {
+                    self.sandbox.extension_exited(&name, None);
+                }
+            }
+        }
+        let mut pending = Pending {
+            sandbox: self,
+            id,
+            armed: true,
+        };
         loop {
             let notified = self.event_ready.notified();
             tokio::pin!(notified);
@@ -414,6 +612,7 @@ impl Sandbox {
                     .ok_or(ApiError::UnknownExtension)?;
                 if let Some(event) = ext.queue.pop_front() {
                     ext.waiting = false;
+                    pending.armed = false;
                     return Ok(event);
                 }
                 if !ext.waiting {
@@ -437,25 +636,15 @@ impl Sandbox {
         error_type: Option<&str>,
         body: &[u8],
     ) -> Result<(), ApiError> {
-        let mut st = self.state.lock();
+        let st = self.state.lock();
         if st.closed {
             return Err(ApiError::Gone);
         }
         if !st.extensions.contains_key(id) {
             return Err(ApiError::UnknownExtension);
         }
-        let payload = error_payload(error_type, body);
-        if let Some(q) = st.queued.take() {
-            let _ = q.tx.send(RuntimeSignal::Done(InvocationOutcome::InitError(
-                payload.clone(),
-            )));
-        }
-        if let Some(c) = st.current.take() {
-            let _ = c.tx.send(RuntimeSignal::Done(InvocationOutcome::InitError(
-                payload.clone(),
-            )));
-        }
-        st.init_error.get_or_insert(payload);
+        drop(st);
+        self.fail(error_payload(error_type, body));
         Ok(())
     }
 
@@ -612,7 +801,8 @@ pub struct NextEvent {
 /// Every expected extension has registered, and every registered one is
 /// waiting in `/event/next` with nothing left to do.
 fn extensions_ready(st: &State) -> bool {
-    st.extensions.len() >= st.expected_extensions
+    st.expected_extensions
+        .is_some_and(|n| st.extensions.len() >= n)
         && st
             .extensions
             .values()
@@ -652,7 +842,7 @@ impl ResponseWriter<'_> {
             self.finished = true;
             let _ = self
                 .sandbox
-                .complete(&self.request_id, InvocationOutcome::ResponseTooLarge);
+                .complete(&self.request_id, InvocationOutcome::ResponseTooLarge(limit));
             return Err(ApiError::PayloadTooLarge(limit));
         }
         let _ = self.tx.send(RuntimeSignal::Chunk(data));
@@ -839,9 +1029,9 @@ async fn serve_extension(sandbox: &Sandbox, rest: &str, req: axum::extract::Requ
             if method != Method::POST {
                 return method_not_allowed();
             }
-            if header_str(req.headers(), EXTENSION_NAME_HEADER).is_none() {
+            let Some(name) = header_str(req.headers(), EXTENSION_NAME_HEADER) else {
                 return ApiError::MissingExtensionName.into_response();
-            }
+            };
             let body = req.into_body().collect().await.map(|b| b.to_bytes());
             let events: Vec<String> = body
                 .ok()
@@ -854,7 +1044,7 @@ async fn serve_extension(sandbox: &Sandbox, rest: &str, req: axum::extract::Requ
                     })
                 })
                 .unwrap_or_default();
-            match sandbox.register_extension(&events) {
+            match sandbox.register_extension(&name, &events) {
                 Ok(id) => {
                     let body = serde_json::json!({
                         "functionName": sandbox.info.function_name,
@@ -1086,6 +1276,9 @@ pub enum InProcessReply {
     },
     /// Never answer (a hung handler).
     Hang,
+    /// Answer with this body, then never ask for another event (a runtime
+    /// wedged between events).
+    ResponseThenStall(Vec<u8>),
 }
 
 /// Run a runtime loop in this process against `sandbox`, answering each
@@ -1125,6 +1318,14 @@ where
                     let _ = sandbox.post_error(&id, error_type.as_deref(), &body);
                 }
                 InProcessReply::Hang => std::future::pending::<()>().await,
+                InProcessReply::ResponseThenStall(body) => {
+                    if let Ok(mut w) = sandbox.begin_response(&id) {
+                        if w.chunk(Bytes::from(body)).is_ok() {
+                            let _ = w.finish(None);
+                        }
+                    }
+                    std::future::pending::<()>().await
+                }
             }
         }
     })
@@ -1215,7 +1416,7 @@ mod tests {
         let sandbox = api.register();
         let host = format!("{}:4566", sandbox.host());
         let mut dispatched = sandbox.dispatch(event("req-1"));
-        assert!(!dispatched.warm);
+        assert!(dispatched.first);
 
         let (status, headers, body) = body_of(
             api.serve(request(
@@ -1273,12 +1474,15 @@ mod tests {
         );
         assert_eq!(
             signals(&mut dispatched.signals),
-            vec!["delivered".to_string(), "done:ResponseTooLarge".to_string()]
+            vec![
+                "delivered".to_string(),
+                "done:ResponseTooLarge(16)".to_string()
+            ]
         );
 
         // The next event, answered within the cap.
         let mut dispatched = sandbox.dispatch(event("req-2"));
-        assert!(dispatched.warm);
+        assert!(!dispatched.first);
         let next = sandbox.next().await.unwrap();
         assert_eq!(next.event.request_id, "req-2");
         let (status, _, body) = body_of(
@@ -1632,7 +1836,7 @@ mod tests {
             Err(ApiError::UnknownExtension)
         );
         assert!(matches!(
-            sandbox.register_extension(&["INVOKE".into()]),
+            sandbox.register_extension("late", &["INVOKE".into()]),
             Err(ApiError::InvalidStateTransition(_))
         ));
     }
@@ -1643,7 +1847,7 @@ mod tests {
         let api = RuntimeApi::new();
         let sandbox = api.register();
         sandbox.expect_extensions(1);
-        let id = sandbox.register_extension(&[]).unwrap();
+        let id = sandbox.register_extension("ext", &[]).unwrap();
         let mut d = sandbox.dispatch(event("req-z"));
         sandbox
             .extension_error(&id, Some("Extension.ConfigInvalid"), b"")

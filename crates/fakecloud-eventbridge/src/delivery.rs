@@ -996,6 +996,7 @@ mod tests {
                     id: "c0".to_string(),
                 },
                 exit,
+                launcher: false,
             })
         }
         async fn terminate(&self, _handle: &fakecloud_lambda::runtime::BackendHandle) {}

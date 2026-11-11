@@ -38,6 +38,8 @@ bytes = { workspace = true }
 # spec.rs builds k8s Pod objects; the client bootstrap, lifecycle, and
 # reaping all live in fakecloud-k8s now.
 k8s-openapi = { workspace = true }
+kube = { workspace = true }
+tar = "0.4"
 
 [dev-dependencies]
 bytes = { workspace = true }

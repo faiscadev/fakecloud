@@ -57,9 +57,11 @@ pub struct PodSpecContext<'a> {
     pub runtime_api_ip: &'a str,
     /// Port of `self_url`.
     pub self_port: u16,
-    /// Extensions the attached layers put in `/opt/extensions`; when any,
-    /// the entrypoint is wrapped to start them beside the runtime.
-    pub extensions: usize,
+    /// The function's entrypoint and command, run through the extension
+    /// launcher (see [`crate::runtime::extensions`]). `None` for an image
+    /// whose command could not be read: it then runs as is, without its
+    /// extensions.
+    pub launch_command: Option<Vec<String>>,
 }
 
 /// Resource cap for the `/tmp` `emptyDir` (`medium: Memory`) — sized
@@ -83,17 +85,7 @@ pub fn build_pod_spec(
 ) -> Result<Pod, String> {
     let is_image = func.package_type == "Image";
 
-    let main_image = if is_image {
-        let raw = func
-            .image_uri
-            .as_deref()
-            .ok_or_else(|| "PackageType=Image function has no ImageUri".to_string())?;
-        fakecloud_core::ecr_uri::translate_to_local_at(raw, ctx.ecr_host, ctx.ecr_port)
-            .unwrap_or_else(|| raw.to_string())
-    } else {
-        runtime_to_image(&func.runtime)
-            .ok_or_else(|| format!("unsupported runtime: {}", func.runtime))?
-    };
+    let main_image = main_image(func, ctx.ecr_host, ctx.ecr_port)?;
 
     let pod_name = pod_name_for(&func.function_name, deploy_id);
 
@@ -148,7 +140,7 @@ pub fn build_pod_spec(
     // Shared volumes — init container writes /var/task, /opt, layers;
     // main container reads them. `/tmp` is sized from ephemeral_storage.
     let tmp_mib = ephemeral_storage_mib(func.ephemeral_storage_size);
-    let volumes = vec![
+    let mut volumes = vec![
         Volume {
             name: "fakecloud-task".into(),
             empty_dir: Some(EmptyDirVolumeSource::default()),
@@ -169,7 +161,7 @@ pub fn build_pod_spec(
         },
     ];
 
-    let common_mounts = vec![
+    let mut common_mounts = vec![
         VolumeMount {
             name: "fakecloud-task".into(),
             mount_path: "/var/task".into(),
@@ -186,6 +178,25 @@ pub fn build_pod_spec(
             ..VolumeMount::default()
         },
     ];
+
+    // An image keeps its own `/opt` (its extensions live there) unless
+    // layers are attached; a zip function's comes from its layers.
+    if is_image && func.layers.is_empty() {
+        volumes.retain(|v| v.name != "fakecloud-opt");
+        common_mounts.retain(|m| m.name != "fakecloud-opt");
+    }
+    if ctx.launch_command.is_some() {
+        volumes.push(Volume {
+            name: "fakecloud-launcher".into(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Volume::default()
+        });
+        common_mounts.push(VolumeMount {
+            name: "fakecloud-launcher".into(),
+            mount_path: crate::runtime::extensions::LAUNCHER_DIR.into(),
+            ..VolumeMount::default()
+        });
+    }
 
     // Init container: busybox + wget. Downloads code zip + layers tar
     // and unpacks them into the shared emptyDir volumes. For
@@ -211,7 +222,15 @@ pub fn build_pod_spec(
             .to_string()
     };
 
-    let init_env = vec![
+    let init_script = if ctx.launch_command.is_some() {
+        format!(
+            "{init_script}; printf '%s' \"$FAKECLOUD_LAUNCHER\" > {path}; chmod 755 {path}",
+            path = crate::runtime::extensions::LAUNCHER_PATH
+        )
+    } else {
+        init_script
+    };
+    let mut init_env = vec![
         EnvVar {
             name: "FAKECLOUD_SELF_URL".into(),
             value: Some(ctx.self_url.into()),
@@ -251,6 +270,13 @@ pub fn build_pod_spec(
         },
     ];
 
+    if ctx.launch_command.is_some() {
+        init_env.push(EnvVar {
+            name: "FAKECLOUD_LAUNCHER".into(),
+            value: Some(crate::runtime::extensions::LAUNCHER_SCRIPT.into()),
+            value_from: None,
+        });
+    }
     let init_container = Container {
         name: "fakecloud-init".into(),
         // busybox ships `wget`, `unzip`, `tar` — covers everything the
@@ -274,17 +300,32 @@ pub fn build_pod_spec(
         resources: Some(memory_resources(func.memory_size)),
         ..Container::default()
     };
-    if !is_image {
-        main_container.command = (ctx.extensions > 0).then(|| {
-            vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                crate::runtime::extensions::LAUNCHER_SCRIPT.to_string(),
-                "sh".to_string(),
-                crate::runtime::extensions::BASE_IMAGE_ENTRYPOINT.to_string(),
-            ]
-        });
-        main_container.args = Some(vec![func.handler.clone()]);
+    main_container.working_dir =
+        crate::runtime::extensions::image_working_directory(func.image_config.as_ref());
+    match &ctx.launch_command {
+        // The launcher starts the extensions, then runs the function.
+        Some(command) => {
+            main_container.command =
+                Some(vec![crate::runtime::extensions::LAUNCHER_PATH.to_string()]);
+            main_container.args = Some(command.clone());
+        }
+        // An image run as is: `ImageConfig` still overrides its command.
+        None => {
+            let list = |key: &str| {
+                func.image_config
+                    .as_ref()
+                    .and_then(|c| c.get(key))
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|v| !v.is_empty())
+            };
+            main_container.command = list("EntryPoint");
+            main_container.args = list("Command");
+        }
     }
 
     let pull_secrets = ctx.pull_secret.map(|name| {
@@ -314,6 +355,24 @@ pub fn build_pod_spec(
         }),
         ..Pod::default()
     })
+}
+
+/// The image a function's main container runs: its base image (zip) or
+/// its `ImageUri`, AWS private-ECR URIs translated to fakecloud's registry.
+pub fn main_image(func: &LambdaFunction, ecr_host: &str, ecr_port: u16) -> Result<String, String> {
+    if func.package_type == "Image" {
+        let raw = func
+            .image_uri
+            .as_deref()
+            .ok_or_else(|| "PackageType=Image function has no ImageUri".to_string())?;
+        Ok(
+            fakecloud_core::ecr_uri::translate_to_local_at(raw, ecr_host, ecr_port)
+                .unwrap_or_else(|| raw.to_string()),
+        )
+    } else {
+        runtime_to_image(&func.runtime)
+            .ok_or_else(|| format!("unsupported runtime: {}", func.runtime))
+    }
 }
 
 /// The Secret carrying one instance's execution-role credentials, named
@@ -416,7 +475,10 @@ mod tests {
             runtime_api_host: "fakecloud-runtime-abc123",
             runtime_api_ip: "10.96.0.15",
             self_port: 4566,
-            extensions: 0,
+            launch_command: Some(vec![
+                "/lambda-entrypoint.sh".to_string(),
+                "lambda_function.lambda_handler".to_string(),
+            ]),
         }
     }
 
@@ -534,7 +596,7 @@ mod tests {
         let f = zip_function("my-fn");
         let pod = build_pod_spec(&f, "d", &ctx()).unwrap();
         let args = pod.spec.unwrap().containers[0].args.clone().unwrap();
-        assert_eq!(args, vec!["lambda_function.lambda_handler"]);
+        assert_eq!(args.last().unwrap(), "lambda_function.lambda_handler");
     }
 
     #[test]
@@ -553,19 +615,35 @@ mod tests {
     }
 
     #[test]
-    fn layer_extensions_wrap_the_entrypoint() {
+    fn the_function_runs_through_the_extension_launcher() {
         let f = zip_function("my-fn");
-        let mut c = ctx();
-        c.extensions = 2;
-        let pod = build_pod_spec(&f, "d", &c).unwrap();
-        let main = &pod.spec.unwrap().containers[0];
-        let command = main.command.clone().unwrap();
-        assert_eq!(command[0], "/bin/sh");
-        assert_eq!(command.last().unwrap(), "/lambda-entrypoint.sh");
+        let pod = build_pod_spec(&f, "d", &ctx()).unwrap();
+        let spec = pod.spec.unwrap();
+        let main = &spec.containers[0];
+        assert_eq!(main.command.clone().unwrap(), vec!["/var/fakecloud/launch"]);
         assert_eq!(
             main.args.clone().unwrap(),
-            vec!["lambda_function.lambda_handler"]
+            vec!["/lambda-entrypoint.sh", "lambda_function.lambda_handler"]
         );
+        let mounted = |c: &Container| {
+            c.volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|m| m.mount_path == "/var/fakecloud")
+        };
+        assert!(mounted(main));
+        let init = &spec.init_containers.unwrap()[0];
+        assert!(mounted(init));
+        let script = &init.command.as_ref().unwrap()[2];
+        assert!(script.contains("> /var/fakecloud/launch"), "{script}");
+        assert!(init
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|e| e.name == "FAKECLOUD_LAUNCHER"
+                && e.value.as_deref() == Some(crate::runtime::extensions::LAUNCHER_SCRIPT)));
     }
 
     #[test]

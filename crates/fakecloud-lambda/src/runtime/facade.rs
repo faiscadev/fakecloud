@@ -18,8 +18,8 @@ use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 
 use super::api::{
-    new_trace_id, Dispatched, InvocationEvent, InvocationOutcome, RuntimeApi, RuntimeSignal,
-    Sandbox, MAX_SYNC_RESPONSE_BYTES,
+    new_trace_id, Abandoned, Dispatched, InvocationEvent, InvocationOutcome, RuntimeApi,
+    RuntimeSignal, Sandbox, MAX_SYNC_RESPONSE_BYTES,
 };
 use super::backend::{
     BackendHandle, InstanceExit, LambdaBackend, RuntimeApiAddress, RuntimeError, WarmInstance,
@@ -51,6 +51,9 @@ pub(crate) struct WarmEntry {
     /// busy instance finishes its current invocation and is retired once
     /// free.
     retiring: AtomicBool,
+    /// Its invocation has answered and the instance is finishing the invoke
+    /// phase (the runtime and extensions getting back to their next call).
+    finishing: AtomicBool,
     /// Held for the duration of a single invocation against this
     /// instance. Lambda hands an execution environment exactly one event
     /// at a time; acquiring this lock before dispatching guarantees one
@@ -243,13 +246,39 @@ fn deploy_id_from(code_sha256: &str, launch_config: &str, layers: &[Vec<u8>]) ->
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
-/// How long a runtime may take to initialize (from process start to its first
-/// `/invocation/next`) before the invocation waiting on it times out: Lambda's
-/// 10-second init limit, or the function's timeout when that is longer (an
-/// init that overruns the limit is retried within the invocation, bounded by
-/// the function timeout).
-fn init_budget(timeout: Duration) -> Duration {
-    timeout.max(Duration::from_secs(10))
+/// Lambda's init limit: how long a runtime may take from process start to its
+/// first `/invocation/next` before the init is redone within the invocation.
+const INIT_LIMIT: Duration = Duration::from_secs(10);
+
+/// How long a new invocation waits for an instance finishing its invoke
+/// phase before starting a fresh one.
+const FINISH_GRACE: Duration = Duration::from_millis(250);
+
+/// `SHUTDOWN` reasons, as Lambda sends them to extensions.
+pub(crate) const SHUTDOWN_SPINDOWN: &str = "spindown";
+pub(crate) const SHUTDOWN_TIMEOUT: &str = "timeout";
+pub(crate) const SHUTDOWN_FAILURE: &str = "failure";
+
+/// When an event dispatched at `dispatched_at` must be answered by, given
+/// when (if yet) the runtime took it. An environment that has served events
+/// is idle and ready when it is handed one (its slot stays busy through the
+/// whole invoke phase), so it has the function timeout. A first event waits
+/// on Lambda's 10-second init limit; an init that overruns it is redone
+/// within the invocation, so the invocation is then bounded by the function
+/// timeout from the end of the init limit, init and handler together.
+fn answer_deadline(
+    first: bool,
+    dispatched_at: tokio::time::Instant,
+    delivered_at: Option<tokio::time::Instant>,
+    timeout: Duration,
+) -> tokio::time::Instant {
+    let suppressed_init_deadline = dispatched_at + INIT_LIMIT + timeout;
+    match delivered_at {
+        None if !first => dispatched_at + timeout,
+        None => suppressed_init_deadline,
+        Some(at) if !first || at <= dispatched_at + INIT_LIMIT => at + timeout,
+        Some(_) => suppressed_init_deadline,
+    }
 }
 
 /// The error object of an invocation that ran past the function timeout.
@@ -283,11 +312,12 @@ fn exit_payload(request_id: &str, exit: &InstanceExit) -> Vec<u8> {
         .into_bytes()
 }
 
-/// The error object of a buffered response over the synchronous limit.
-fn response_too_large_payload() -> Vec<u8> {
+/// The error object of a response over its limit (6 MB buffered, 200 MB
+/// streamed).
+fn response_too_large_payload(limit: usize) -> Vec<u8> {
     serde_json::json!({
         "errorMessage": format!(
-            "Response payload size exceeded maximum allowed payload size ({MAX_SYNC_RESPONSE_BYTES} bytes)."
+            "Response payload size exceeded maximum allowed payload size ({limit} bytes)."
         ),
         "errorType": "Function.ResponseSizeTooLarge",
     })
@@ -325,14 +355,16 @@ pub enum RunOutcome {
 
 /// What waiting on a dispatched event came to.
 enum Awaited {
-    /// The instance went away before its runtime took the event, so the
-    /// function never saw it and the invocation can run elsewhere.
+    /// The instance (one that had served events) went away before its
+    /// runtime took the event, so the function never saw it and the
+    /// invocation can run elsewhere.
     NotDelivered,
-    /// The invocation ended. `reset` means the execution environment is no
-    /// longer usable (timeout, exit, failed init), as Lambda resets it.
+    /// The invocation ended. `reset` is set when the execution environment
+    /// is no longer usable (timeout, exit, failed init), as Lambda resets
+    /// it, with the `SHUTDOWN` reason its extensions get.
     Finished {
         outcome: RunOutcome,
-        reset: bool,
+        reset: Option<&'static str>,
         /// From the runtime taking the event to its answer.
         duration: Duration,
         /// For the event that ended the runtime's initialization: how long
@@ -361,17 +393,22 @@ async fn await_outcome(
     timeout_secs: i64,
     on_chunk: &mut (dyn FnMut(bytes::Bytes) + Send),
 ) -> Awaited {
-    let Dispatched { mut signals, warm } = dispatched;
+    let Dispatched { mut signals, first } = dispatched;
     let timeout = Duration::from_secs(timeout_secs.max(1) as u64);
-    let mut deadline = tokio::time::Instant::now() + init_budget(timeout);
-    let mut delivered_at: Option<Instant> = None;
+    let dispatched_at = tokio::time::Instant::now();
+    let mut delivered: Option<tokio::time::Instant> = None;
     let mut exit = entry.instance.exit.clone();
     let mut exited: Option<InstanceExit> = None;
     let mut exit_watched = true;
-    let elapsed = |at: Option<Instant>| at.map(|t| t.elapsed()).unwrap_or_default();
+    let elapsed = |at: Option<tokio::time::Instant>| at.map(|t| t.elapsed()).unwrap_or_default();
     let launched_at = entry.launched_at;
-    let init_duration = |at: Option<Instant>| {
-        (!warm).then(|| at.map_or_else(|| launched_at.elapsed(), |t| t - launched_at))
+    let init_duration = |at: Option<tokio::time::Instant>| {
+        first.then(|| {
+            at.map_or_else(
+                || launched_at.elapsed(),
+                |t| t.into_std().saturating_duration_since(launched_at),
+            )
+        })
     };
     loop {
         // Once the process is known to be gone, only drain what the runtime
@@ -379,6 +416,7 @@ async fn await_outcome(
         let signal = if exited.is_some() {
             signals.try_recv().ok()
         } else {
+            let deadline = answer_deadline(first, dispatched_at, delivered, timeout);
             let mut timed_out = false;
             let mut closed = false;
             let signal = tokio::select! {
@@ -407,8 +445,12 @@ async fn await_outcome(
                 exited = Some(exit.borrow().unwrap_or_default());
             }
             if timed_out {
-                entry.sandbox.abandon(request_id);
-                if delivered_at.is_none() {
+                // The runtime took the event at the deadline: its
+                // `Delivered` is waiting in the channel.
+                if entry.sandbox.abandon(request_id) == Abandoned::Nothing && delivered.is_none() {
+                    continue;
+                }
+                if delivered.is_none() {
                     tracing::warn!(
                         sandbox = %entry.sandbox.host(),
                         "Lambda runtime never asked the Runtime API for an event; \
@@ -417,47 +459,51 @@ async fn await_outcome(
                 }
                 return Awaited::Finished {
                     outcome: RunOutcome::Error(timeout_payload(request_id, timeout_secs)),
-                    reset: true,
-                    duration: elapsed(delivered_at),
-                    init_duration: init_duration(delivered_at),
+                    reset: Some(SHUTDOWN_TIMEOUT),
+                    duration: elapsed(delivered),
+                    init_duration: init_duration(delivered),
                 };
             }
             signal
         };
         let Some(signal) = signal else {
             let exit = exited.unwrap_or_default();
-            if delivered_at.is_none() && warm {
+            // An environment that served events and went away before taking
+            // this one never ran it: it can run elsewhere. One that never
+            // got as far as its first event failed its init.
+            if delivered.is_none() && !first {
                 return Awaited::NotDelivered;
             }
             entry.sandbox.abandon(request_id);
             return Awaited::Finished {
                 outcome: RunOutcome::Error(exit_payload(request_id, &exit)),
-                reset: true,
-                duration: elapsed(delivered_at),
-                init_duration: init_duration(delivered_at),
+                reset: Some(SHUTDOWN_FAILURE),
+                duration: elapsed(delivered),
+                init_duration: init_duration(delivered),
             };
         };
         match signal {
             RuntimeSignal::Delivered { .. } => {
-                delivered_at = Some(Instant::now());
-                deadline = tokio::time::Instant::now() + timeout;
+                delivered = Some(tokio::time::Instant::now());
             }
             RuntimeSignal::Chunk(chunk) => on_chunk(chunk),
             RuntimeSignal::Done(outcome) => {
-                let duration = elapsed(delivered_at);
+                let duration = elapsed(delivered);
                 let (outcome, reset) = match outcome {
-                    InvocationOutcome::Response => (RunOutcome::Success, false),
-                    InvocationOutcome::Error(payload) => (RunOutcome::Error(payload), false),
-                    InvocationOutcome::InitError(payload) => (RunOutcome::Error(payload), true),
-                    InvocationOutcome::ResponseTooLarge => {
-                        (RunOutcome::Error(response_too_large_payload()), false)
+                    InvocationOutcome::Response => (RunOutcome::Success, None),
+                    InvocationOutcome::Error(payload) => (RunOutcome::Error(payload), None),
+                    InvocationOutcome::InitError(payload) => {
+                        (RunOutcome::Error(payload), Some(SHUTDOWN_FAILURE))
+                    }
+                    InvocationOutcome::ResponseTooLarge(limit) => {
+                        (RunOutcome::Error(response_too_large_payload(limit)), None)
                     }
                 };
                 return Awaited::Finished {
                     outcome,
                     reset,
                     duration,
-                    init_duration: init_duration(delivered_at),
+                    init_duration: init_duration(delivered),
                 };
             }
         }
@@ -467,7 +513,8 @@ async fn await_outcome(
 /// The log of one invocation as `LogType=Tail` returns it: the platform's
 /// `START` / `END` / `REPORT` lines around what the function printed.
 fn invocation_log(
-    func: &LambdaFunction,
+    version: &str,
+    memory_size: i64,
     request_id: &str,
     duration: Duration,
     init_duration: Option<Duration>,
@@ -476,20 +523,321 @@ fn invocation_log(
     let ms = duration.as_secs_f64() * 1000.0;
     let billed = (ms.ceil() as u64).max(1);
     let mut report = format!(
-        "REPORT RequestId: {request_id}\tDuration: {ms:.2} ms\tBilled Duration: {billed} ms\tMemory Size: {} MB\t",
-        func.memory_size
+        "REPORT RequestId: {request_id}\tDuration: {ms:.2} ms\tBilled Duration: {billed} ms\tMemory Size: {memory_size} MB\t",
     );
     if let Some(init) = init_duration {
         let init_ms = init.as_secs_f64() * 1000.0;
         report.push_str(&format!("Init Duration: {init_ms:.2} ms\t"));
     }
-    let mut out = format!("START RequestId: {request_id} Version: {}\n", func.version);
+    let mut out = format!("START RequestId: {request_id} Version: {version}\n");
     out.push_str(function_output);
     if !function_output.is_empty() && !function_output.ends_with('\n') {
         out.push('\n');
     }
     out.push_str(&format!("END RequestId: {request_id}\n{report}\n"));
     out
+}
+
+/// Every function's pool of warm instances, by [`pool_key`].
+type Pools = RwLock<HashMap<String, Vec<Arc<WarmEntry>>>>;
+
+/// The parts of the runtime that tear instances down, shared with detached
+/// invocations so they can reset the instance they ran on.
+#[derive(Clone)]
+struct Teardown {
+    backend: Arc<dyn LambdaBackend>,
+    runtime_api: Arc<RuntimeApi>,
+    instances: Arc<Pools>,
+    credential_issuer: Arc<OnceLock<Arc<dyn SessionCredentialIssuer>>>,
+}
+
+impl Teardown {
+    /// Tear down one instance and revoke the credentials it was given.
+    /// Extensions registered for `SHUTDOWN` get it with `reason` and a
+    /// moment to finish first (Lambda allows up to 2s).
+    async fn retire(&self, entry: &WarmEntry, reason: &str) {
+        entry
+            .sandbox
+            .shutdown_extensions(reason, EXTENSION_SHUTDOWN_GRACE)
+            .await;
+        self.runtime_api.unregister(&entry.sandbox);
+        self.backend.terminate(&entry.instance.handle).await;
+        if let (Some(issuer), Some(creds)) =
+            (self.credential_issuer.get(), entry.credentials.as_ref())
+        {
+            issuer.revoke(creds);
+        }
+    }
+
+    /// Remove one specific instance from a function's pool and tear it down
+    /// (it is gone, stuck, or was reset).
+    async fn evict(&self, key: &str, target: &Arc<WarmEntry>, reason: &str) {
+        target.retiring.store(true, Ordering::Release);
+        let removed = {
+            let mut map = self.instances.write();
+            match map.get_mut(key) {
+                Some(pool) => {
+                    let removed = pool
+                        .iter()
+                        .position(|e| Arc::ptr_eq(e, target))
+                        .map(|pos| pool.remove(pos));
+                    if pool.is_empty() {
+                        map.remove(key);
+                    }
+                    removed
+                }
+                None => None,
+            }
+        };
+        if let Some(entry) = removed {
+            tracing::info!(
+                pool = %key,
+                handle = ?entry.instance.handle,
+                reason,
+                "resetting Lambda runtime instance"
+            );
+            self.retire(&entry, reason).await;
+        }
+    }
+}
+
+/// What a detached invocation reports to its caller.
+enum Progress {
+    Chunk(bytes::Bytes),
+    /// The instance went away (or was stuck) before its runtime took the
+    /// event; it has been evicted and the event can run elsewhere.
+    NotDelivered,
+    Finished {
+        outcome: RunOutcome,
+        logs: Option<String>,
+    },
+}
+
+/// The log tail an invocation asked for (`LogType=Tail`).
+struct LogRequest {
+    /// The backend's log position before the event was dispatched.
+    cursor: Option<String>,
+    version: String,
+    memory_size: i64,
+}
+
+/// One dispatched invocation, followed to its end in a task of its own.
+struct FollowedInvocation {
+    /// Holds the instance for the invocation's whole life.
+    slot: Slot,
+    dispatched: Dispatched,
+    request_id: String,
+    timeout_secs: i64,
+    log: Option<LogRequest>,
+    key: String,
+    teardown: Teardown,
+    tx: tokio::sync::mpsc::UnboundedSender<Progress>,
+}
+
+/// Follow an invocation whatever happens to its caller: forward the
+/// response, enforce the deadline, and reset the instance when Lambda would.
+/// The instance stays reserved until the runtime has answered or the
+/// instance is reset, so no other invocation lands on a runtime still busy
+/// with this event.
+async fn follow_invocation(inv: FollowedInvocation) {
+    let FollowedInvocation {
+        slot,
+        dispatched,
+        request_id,
+        timeout_secs,
+        log,
+        key,
+        teardown,
+        tx,
+    } = inv;
+    let entry = slot.entry.clone();
+    let chunks = tx.clone();
+    let awaited = await_outcome(
+        &entry,
+        dispatched,
+        &request_id,
+        timeout_secs,
+        &mut |chunk| {
+            let _ = chunks.send(Progress::Chunk(chunk));
+        },
+    )
+    .await;
+    match awaited {
+        Awaited::NotDelivered => {
+            drop(slot);
+            teardown.evict(&key, &entry, SHUTDOWN_FAILURE).await;
+            let _ = tx.send(Progress::NotDelivered);
+        }
+        Awaited::Finished {
+            outcome,
+            reset,
+            duration,
+            init_duration,
+        } => {
+            *entry.last_used.write() = Instant::now();
+            // Read the log tail while the instance is still alive.
+            let logs = match log {
+                Some(log) => {
+                    let output = teardown
+                        .backend
+                        .instance_logs(&entry.instance.handle, log.cursor.as_deref())
+                        .await
+                        .unwrap_or_default();
+                    Some(invocation_log(
+                        &log.version,
+                        log.memory_size,
+                        &request_id,
+                        duration,
+                        init_duration,
+                        &output,
+                    ))
+                }
+                None => None,
+            };
+            // The caller hears back as soon as the response is in; the
+            // instance stays reserved through the rest of the invoke phase.
+            if reset.is_some() {
+                entry.retiring.store(true, Ordering::Release);
+            } else {
+                entry.finishing.store(true, Ordering::Release);
+            }
+            let _ = tx.send(Progress::Finished { outcome, logs });
+            let reset = match reset {
+                Some(reason) => Some(reason),
+                // Lambda's invoke phase ends when the runtime and every
+                // extension have asked for their next event; work they do
+                // after the response still counts against the timeout.
+                None => {
+                    let remaining =
+                        Duration::from_secs(timeout_secs.max(1) as u64).saturating_sub(duration);
+                    let mut exit = entry.instance.exit.clone();
+                    tokio::select! {
+                        idle = entry.sandbox.wait_idle() => (!idle).then_some(SHUTDOWN_FAILURE),
+                        Ok(_) = exit.wait_for(Option::is_some) => Some(SHUTDOWN_FAILURE),
+                        () = tokio::time::sleep(remaining) => Some(SHUTDOWN_TIMEOUT),
+                    }
+                }
+            };
+            if let Some(reason) = reset {
+                // Torn down while still reserved, so nothing lands on it.
+                teardown.evict(&key, &entry, reason).await;
+            }
+            entry.finishing.store(false, Ordering::Release);
+            drop(slot);
+        }
+    }
+}
+
+/// Follow an instance's extension launcher through the extension init
+/// phase: learn how many extensions it started, let the runtime start once
+/// they have all registered, and fail the init with Lambda's `Extension.*`
+/// error when one cannot be launched or exits. Bounded by the init budget;
+/// a launcher that never reports leaves the first event to time out.
+async fn monitor_launcher(teardown: Teardown, entry: std::sync::Weak<WarmEntry>, budget: Duration) {
+    use super::extensions::{exited_extensions, EXITED_FILE, GO_FILE, LAUNCHED_FILE};
+    let deadline = tokio::time::Instant::now() + budget;
+    let poll = Duration::from_millis(50);
+    let read = |path: &'static str| {
+        let teardown = teardown.clone();
+        let entry = entry.clone();
+        async move {
+            let entry = entry.upgrade()?;
+            let bytes = teardown
+                .backend
+                .read_instance_file(&entry.instance.handle, path)
+                .await?;
+            Some(String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+    let count = loop {
+        if let Some(n) = read(LAUNCHED_FILE)
+            .await
+            .and_then(|t| t.trim().parse::<usize>().ok())
+        {
+            break n;
+        }
+        let gone = entry
+            .upgrade()
+            .is_none_or(|e| e.instance.exit.borrow().is_some());
+        if gone || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(poll).await;
+    };
+    let Some(sandbox) = entry.upgrade().map(|e| e.sandbox.clone()) else {
+        return;
+    };
+    sandbox.expect_extensions(count);
+    if count == 0 {
+        return;
+    }
+    let mut reported = 0;
+    let mut released = false;
+    loop {
+        if !released {
+            let registered = tokio::time::timeout(poll, sandbox.wait_registered()).await;
+            match registered {
+                Ok(true) => {
+                    released = match entry.upgrade() {
+                        Some(e) => {
+                            teardown
+                                .backend
+                                .write_instance_file(&e.instance.handle, GO_FILE, b"")
+                                .await
+                        }
+                        None => return,
+                    };
+                }
+                Ok(false) => return,
+                Err(_) => {}
+            }
+        }
+        // An extension that ends during init fails it.
+        if let Some(exited) = read(EXITED_FILE).await {
+            let exited = exited_extensions(&exited);
+            for (name, code) in exited.iter().skip(reported) {
+                sandbox.extension_exited(name, Some(*code));
+            }
+            reported = exited.len();
+        }
+        if sandbox.has_served() || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        if released {
+            tokio::time::sleep(poll).await;
+        }
+    }
+}
+
+/// Retire an instance whose runtime exits while it is idle (killed, crashed,
+/// Pod deleted), so no event is sent to it; one that is busy is handled by
+/// its invocation. Stops watching once the instance is gone.
+async fn retire_on_exit(teardown: Teardown, key: String, entry: std::sync::Weak<WarmEntry>) {
+    let Some(mut exit) = entry.upgrade().map(|e| e.instance.exit.clone()) else {
+        return;
+    };
+    loop {
+        // Holding the watch must not keep a retired instance's watcher (and
+        // the backend's poll behind it) alive: check in now and then.
+        match tokio::time::timeout(Duration::from_secs(30), exit.wait_for(Option::is_some)).await {
+            Ok(Ok(_)) => break,
+            Ok(Err(_)) => return,
+            Err(_) => {
+                if entry
+                    .upgrade()
+                    .is_none_or(|e| e.retiring.load(Ordering::Acquire))
+                {
+                    return;
+                }
+            }
+        }
+    }
+    drop(exit);
+    let Some(entry) = entry.upgrade() else { return };
+    let Ok(_free) = entry.busy.clone().try_lock_owned() else {
+        return;
+    };
+    teardown.evict(&key, &entry, SHUTDOWN_FAILURE).await;
 }
 
 /// Warm instances taken out of the pool by
@@ -513,7 +861,7 @@ pub struct LambdaRuntime {
     /// Per-function pool of warm instances. Each instance serves one
     /// invocation at a time (its `busy` lock); the pool grows on demand
     /// up to `max_concurrency`, and the idle reaper trims it.
-    instances: RwLock<HashMap<String, Vec<Arc<WarmEntry>>>>,
+    instances: Arc<Pools>,
     /// Serializes runtime startup per function to prevent duplicate
     /// instances racing into the pool when several cold invokes arrive
     /// together.
@@ -522,7 +870,7 @@ pub struct LambdaRuntime {
     max_concurrency: usize,
     /// Mints the execution-role credentials each instance is started with.
     /// Unset (no credentials exported) until the server wires IAM in.
-    credential_issuer: OnceLock<Arc<dyn SessionCredentialIssuer>>,
+    credential_issuer: Arc<OnceLock<Arc<dyn SessionCredentialIssuer>>>,
     /// Where asynchronous (`Event`) invocations record their outcome
     /// (`OnSuccess`/`OnFailure` destinations, dead-letter queues). Held
     /// weakly: the destinations bus reaches Lambda again through the
@@ -543,10 +891,10 @@ impl LambdaRuntime {
         Self {
             backend,
             runtime_api: RuntimeApi::new(),
-            instances: RwLock::new(HashMap::new()),
+            instances: Arc::new(RwLock::new(HashMap::new())),
             starting: RwLock::new(HashMap::new()),
             max_concurrency,
-            credential_issuer: OnceLock::new(),
+            credential_issuer: Arc::new(OnceLock::new()),
             async_destinations: OnceLock::new(),
         }
     }
@@ -589,23 +937,20 @@ impl LambdaRuntime {
         self.runtime_api.clone()
     }
 
-    /// Tear down one instance and revoke the credentials it was given.
-    async fn retire(&self, entry: &WarmEntry) {
-        // Extensions registered for `SHUTDOWN` get it, and a moment to
-        // finish, before the environment goes (Lambda allows up to 2s).
-        entry
-            .sandbox
-            .shutdown_extensions("spindown", EXTENSION_SHUTDOWN_GRACE)
-            .await;
-        self.runtime_api.unregister(&entry.sandbox);
-        self.backend.terminate(&entry.instance.handle).await;
-        self.revoke(entry.credentials.as_ref());
+    /// What a detached invocation needs to reset its instance.
+    fn teardown(&self) -> Teardown {
+        Teardown {
+            backend: self.backend.clone(),
+            runtime_api: self.runtime_api.clone(),
+            instances: self.instances.clone(),
+            credential_issuer: self.credential_issuer.clone(),
+        }
     }
 
-    fn revoke(&self, credentials: Option<&SessionCredentials>) {
-        if let (Some(issuer), Some(creds)) = (self.credential_issuer.get(), credentials) {
-            issuer.revoke(creds);
-        }
+    /// Tear down one instance (it is being spun down) and revoke the
+    /// credentials it was given.
+    async fn retire(&self, entry: &WarmEntry) {
+        self.teardown().retire(entry, SHUTDOWN_SPINDOWN).await;
     }
 
     /// Mark every pooled instance matching `pred` as retiring so it takes no
@@ -808,7 +1153,9 @@ impl LambdaRuntime {
     /// Invoke a Lambda function and hand each piece of the response body to
     /// `on_chunk` as the runtime sends it: a streaming handler's writes keep
     /// their boundaries, a buffered handler's result arrives whole. The
-    /// outcome tells a completed response from a function error.
+    /// outcome tells a completed response from a function error. A response
+    /// past Lambda's 200 MB streaming limit is cut off there and ends with
+    /// `Function.ResponseSizeTooLarge`.
     pub async fn invoke_streaming(
         &self,
         func: &LambdaFunction,
@@ -817,20 +1164,34 @@ impl LambdaRuntime {
         ctx: &InvocationContext,
         on_chunk: &mut (dyn FnMut(bytes::Bytes) + Send),
     ) -> Result<RunOutcome, RuntimeError> {
-        self.run(func, payload, layers, ctx, None, false, on_chunk)
-            .await
-            .map(|(outcome, _)| outcome)
+        self.run(
+            func,
+            payload,
+            layers,
+            ctx,
+            Some(super::api::MAX_STREAM_RESPONSE_BYTES),
+            false,
+            on_chunk,
+        )
+        .await
+        .map(|(outcome, _)| outcome)
     }
 
     /// Run one invocation on a warm (or freshly launched) instance.
     ///
     /// The event is queued on the instance's Runtime API sandbox; its runtime
     /// takes it with `/invocation/next` and answers through `/response` or
-    /// `/error`. An instance found gone before its runtime took the event is
-    /// evicted and the invocation retried on a fresh one (up to four times):
-    /// the function provably never saw it. Timeouts, runtime exits and
-    /// failed inits end the invocation with Lambda's error object and reset
-    /// the execution environment.
+    /// `/error`. An instance found gone (or stuck) before its runtime took
+    /// the event is evicted and the invocation retried on a fresh one (up to
+    /// four times): the function provably never saw it. Timeouts, runtime
+    /// exits and failed inits end the invocation with Lambda's error object
+    /// and reset the execution environment.
+    ///
+    /// The invocation itself runs in a task of its own that holds the
+    /// instance until the runtime answers or the function timeout resets it,
+    /// so a caller that stops waiting (a dropped connection, a caller-side
+    /// timeout) never frees an instance that is still running its event or
+    /// lets the timeout go unenforced.
     #[allow(clippy::too_many_arguments)]
     async fn run(
         &self,
@@ -854,6 +1215,7 @@ impl LambdaRuntime {
         } else {
             bytes::Bytes::copy_from_slice(payload)
         };
+        let key = pool_key(func);
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
@@ -864,9 +1226,9 @@ impl LambdaRuntime {
             // earlier events. A runtime that died during its init is not
             // skipped: that is this invocation's failure to report.
             let gone = entry.instance.exit.borrow().is_some();
-            if gone && entry.sandbox.is_initialized() {
+            if gone && entry.sandbox.has_served() {
                 drop(slot);
-                self.evict_entry(&pool_key(func), &entry).await;
+                self.evict_entry(&key, &entry, SHUTDOWN_FAILURE).await;
                 if attempt < MAX_INVOKE_ATTEMPTS {
                     tracing::warn!(
                         function = %func.function_name,
@@ -880,6 +1242,11 @@ impl LambdaRuntime {
                 )));
             }
 
+            let log_cursor = if capture_logs {
+                self.backend.log_cursor(&entry.instance.handle).await
+            } else {
+                None
+            };
             let event = InvocationEvent {
                 request_id: request_id.clone(),
                 payload: payload.clone(),
@@ -894,53 +1261,43 @@ impl LambdaRuntime {
                 max_response_bytes,
             };
             let dispatched = entry.sandbox.dispatch(event);
-            match await_outcome(&entry, dispatched, &request_id, func.timeout, on_chunk).await {
-                Awaited::NotDelivered => {
-                    drop(slot);
-                    self.evict_entry(&pool_key(func), &entry).await;
-                    if attempt < MAX_INVOKE_ATTEMPTS {
-                        tracing::warn!(
-                            function = %func.function_name,
-                            "Lambda instance went away before taking the event; retrying with a cold start"
-                        );
-                        continue;
-                    }
-                    return Err(RuntimeError::InvocationFailed(format!(
-                        "no live instance for {} after {attempt} attempts",
-                        func.function_name
-                    )));
-                }
-                Awaited::Finished {
-                    outcome,
-                    reset,
-                    duration,
-                    init_duration,
-                } => {
-                    *entry.last_used.write() = Instant::now();
-                    // Read the log tail while the instance is still alive.
-                    let logs = if capture_logs {
-                        let output = self
-                            .backend
-                            .instance_logs(&entry.instance.handle)
-                            .await
-                            .unwrap_or_default();
-                        Some(invocation_log(
-                            func,
-                            &request_id,
-                            duration,
-                            init_duration,
-                            &output,
+            let (tx, mut progress) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(follow_invocation(FollowedInvocation {
+                slot,
+                dispatched,
+                request_id: request_id.clone(),
+                timeout_secs: func.timeout,
+                log: capture_logs.then(|| LogRequest {
+                    cursor: log_cursor,
+                    version: func.version.clone(),
+                    memory_size: func.memory_size,
+                }),
+                key: key.clone(),
+                teardown: self.teardown(),
+                tx,
+            }));
+            loop {
+                match progress.recv().await {
+                    Some(Progress::Chunk(chunk)) => on_chunk(chunk),
+                    Some(Progress::Finished { outcome, logs }) => return Ok((outcome, logs)),
+                    Some(Progress::NotDelivered) => break,
+                    None => {
+                        return Err(RuntimeError::InvocationFailed(
+                            "the invocation ended without an outcome".into(),
                         ))
-                    } else {
-                        None
-                    };
-                    if reset {
-                        drop(slot);
-                        self.evict_entry(&pool_key(func), &entry).await;
                     }
-                    return Ok((outcome, logs));
                 }
             }
+            if attempt >= MAX_INVOKE_ATTEMPTS {
+                return Err(RuntimeError::InvocationFailed(format!(
+                    "no live instance for {} after {attempt} attempts",
+                    func.function_name
+                )));
+            }
+            tracing::warn!(
+                function = %func.function_name,
+                "Lambda instance went away before taking the event; retrying with a cold start"
+            );
         }
     }
 
@@ -997,6 +1354,14 @@ impl LambdaRuntime {
             let current_len = self.instances.read().get(&key).map_or(0, |pool| {
                 pool.iter().filter(|e| is_current(e, &deploy_id)).count()
             });
+
+            // An instance that just answered is usually back in its next
+            // call within moments (its runtime's round trip to the Runtime
+            // API): give it that long before starting a cold one, so
+            // back-to-back invocations reuse the warm environment.
+            if let Some(slot) = self.wait_for_finishing(&key, &deploy_id).await {
+                return Ok(slot);
+            }
 
             // (2) Room to grow: launch a fresh instance and reserve it.
             if current_len < self.max_concurrency {
@@ -1087,6 +1452,7 @@ impl LambdaRuntime {
             deploy_id,
             credentials: pending.credentials.clone(),
             retiring: AtomicBool::new(false),
+            finishing: AtomicBool::new(false),
             busy: Arc::new(tokio::sync::Mutex::new(())),
         });
         let guard = entry
@@ -1102,9 +1468,56 @@ impl LambdaRuntime {
         // Pooled: the entry owns the credentials now and revokes them on
         // retirement.
         pending.disarm();
+        let teardown = self.teardown();
+        if entry.instance.launcher {
+            let budget = INIT_LIMIT + Duration::from_secs(func.timeout.max(1) as u64);
+            tokio::spawn(monitor_launcher(
+                teardown.clone(),
+                Arc::downgrade(&entry),
+                budget,
+            ));
+        }
+        tokio::spawn(retire_on_exit(
+            teardown,
+            key.to_string(),
+            Arc::downgrade(&entry),
+        ));
         Ok(Slot {
             entry,
             _guard: guard,
+        })
+    }
+
+    /// Wait briefly ([`FINISH_GRACE`]) for an instance of the pool that is
+    /// finishing its invoke phase to become free, and reserve it.
+    async fn wait_for_finishing(&self, key: &str, deploy_id: &str) -> Option<Slot> {
+        let finishing: Vec<Arc<WarmEntry>> = self
+            .instances
+            .read()
+            .get(key)?
+            .iter()
+            .filter(|e| is_current(e, deploy_id) && e.finishing.load(Ordering::Acquire))
+            .cloned()
+            .collect();
+        if finishing.is_empty() {
+            return None;
+        }
+        let waiters = finishing.into_iter().map(|entry| {
+            Box::pin(async move {
+                let guard = entry.busy.clone().lock_owned().await;
+                Slot {
+                    entry,
+                    _guard: guard,
+                }
+            })
+        });
+        let slot = tokio::time::timeout(FINISH_GRACE, futures_util::future::select_all(waiters))
+            .await
+            .ok()?
+            .0;
+        (is_current(&slot.entry, deploy_id) && self.in_pool(key, &slot.entry)).then(|| {
+            *slot.entry.last_used.write() = Instant::now();
+            slot
         })
     }
 
@@ -1138,31 +1551,8 @@ impl LambdaRuntime {
 
     /// Remove one specific instance from a function's pool and terminate
     /// it. Used when an invocation finds the instance unreachable.
-    async fn evict_entry(&self, key: &str, target: &Arc<WarmEntry>) {
-        let removed = {
-            let mut map = self.instances.write();
-            match map.get_mut(key) {
-                Some(pool) => {
-                    let removed = pool
-                        .iter()
-                        .position(|e| Arc::ptr_eq(e, target))
-                        .map(|pos| pool.remove(pos));
-                    if pool.is_empty() {
-                        map.remove(key);
-                    }
-                    removed
-                }
-                None => None,
-            }
-        };
-        if let Some(entry) = removed {
-            tracing::info!(
-                pool = %key,
-                handle = ?entry.instance.handle,
-                "evicting unreachable Lambda runtime instance"
-            );
-            self.retire(&entry).await;
-        }
+    async fn evict_entry(&self, key: &str, target: &Arc<WarmEntry>, reason: &'static str) {
+        self.teardown().evict(key, target, reason).await;
     }
 
     /// Tear down every *free* instance in a pool that can no longer take an
@@ -1461,6 +1851,19 @@ mod tests {
 
     type Reply = Arc<dyn Fn(&InvocationEvent) -> InProcessReply + Send + Sync>;
 
+    /// The extension a fake instance runs.
+    #[derive(Clone, Copy)]
+    enum Ext {
+        None,
+        /// Registered for `SHUTDOWN`.
+        Shutdown,
+        /// Registered for `INVOKE`; works this long after each event
+        /// before asking for the next.
+        WorksAfterInvoke(Duration),
+        /// Exits with this status during init.
+        FailsInit(i32),
+    }
+
     /// Backend double: every launched instance runs an in-process runtime
     /// against its Runtime API sandbox, holding each event for `delay` and
     /// answering with `reply`. Records launches/terminates, the peak number
@@ -1478,6 +1881,10 @@ mod tests {
         peak: Arc<AtomicUsize>,
         events: Arc<StdMutex<Vec<InvocationEvent>>>,
         exits: StdMutex<Vec<watch::Sender<Option<InstanceExit>>>>,
+        /// The extension each instance runs, if any; it records the events
+        /// it receives.
+        extension: Ext,
+        extension_events: Arc<StdMutex<Vec<serde_json::Value>>>,
     }
 
     impl FakeBackend {
@@ -1500,6 +1907,8 @@ mod tests {
                 peak: Arc::new(AtomicUsize::new(0)),
                 events: Arc::new(StdMutex::new(Vec::new())),
                 exits: StdMutex::new(Vec::new()),
+                extension: Ext::None,
+                extension_events: Arc::new(StdMutex::new(Vec::new())),
             })
         }
 
@@ -1540,6 +1949,31 @@ mod tests {
                     .dying_launches
                     .compare_exchange(pending, pending - 1, SeqCst, SeqCst)
                     .is_ok();
+            match self.extension {
+                Ext::None => {}
+                Ext::FailsInit(code) => {
+                    runtime_api.sandbox.expect_extensions(1);
+                    runtime_api.sandbox.extension_exited("bad-ext", Some(code));
+                }
+                ext => {
+                    let sandbox = runtime_api.sandbox.clone();
+                    sandbox.expect_extensions(1);
+                    let events = match ext {
+                        Ext::Shutdown => vec!["SHUTDOWN".to_string()],
+                        _ => vec!["INVOKE".to_string()],
+                    };
+                    let id = sandbox.register_extension("ext", &events).unwrap();
+                    let seen = self.extension_events.clone();
+                    tokio::spawn(async move {
+                        while let Ok(event) = sandbox.extension_next(&id).await {
+                            seen.lock().unwrap().push(event);
+                            if let Ext::WorksAfterInvoke(d) = ext {
+                                tokio::time::sleep(d).await;
+                            }
+                        }
+                    });
+                }
+            }
             if dying {
                 let _ = tx.send(Some(InstanceExit::from_container_code(3, false)));
             } else {
@@ -1566,6 +2000,7 @@ mod tests {
                     id: format!("c{n}"),
                 },
                 exit,
+                launcher: false,
             })
         }
         async fn terminate(&self, _handle: &BackendHandle) {
@@ -1630,6 +2065,16 @@ mod tests {
             "policy": null
         }))
         .expect("build test LambdaFunction")
+    }
+
+    /// Wait (bounded) for `cond`: a reset environment is torn down after its
+    /// caller has heard back.
+    async fn wait_for(cond: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !cond() {
+            assert!(std::time::Instant::now() < deadline, "condition never held");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     fn error_body(payload: &[u8]) -> serde_json::Value {
@@ -1749,7 +2194,7 @@ mod tests {
             "RequestId: req-1 Error: Runtime exited with error: exit status 3"
         );
         assert_eq!(backend.launches.load(SeqCst), 1);
-        assert_eq!(backend.terminates.load(SeqCst), 1);
+        wait_for(|| backend.terminates.load(SeqCst) == 1).await;
 
         // The next invocation gets a fresh environment.
         let out = rt.invoke(&func, b"{}", &[]).await.unwrap();
@@ -1855,7 +2300,7 @@ mod tests {
             body["errorMessage"],
             "RequestId: req-t Error: Task timed out after 1.00 seconds"
         );
-        assert_eq!(backend.terminates.load(SeqCst), 1);
+        wait_for(|| backend.terminates.load(SeqCst) == 1).await;
         assert!(rt.instances.read().get(&key("slow")).is_none());
     }
 
@@ -1877,6 +2322,15 @@ mod tests {
             .await
             .unwrap();
         rt.invoke(&func, b"", &[]).await.unwrap();
+        rt.invoke_streaming(
+            &func,
+            b"{}",
+            &[],
+            &InvocationContext::default(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
         let events = backend.events.lock().unwrap();
         assert_eq!(events[1].payload.as_ref(), b"{}", "no payload is `{{}}`");
         assert_eq!(events[0].request_id, "req-c");
@@ -1894,6 +2348,15 @@ mod tests {
         );
         assert_eq!(events[0].payload.as_ref(), b"{\"a\":1}");
         assert_eq!(events[0].timeout, Duration::from_secs(5));
+        assert_eq!(
+            events[0].max_response_bytes,
+            Some(super::MAX_SYNC_RESPONSE_BYTES)
+        );
+        assert_eq!(
+            events[2].max_response_bytes,
+            Some(crate::runtime::api::MAX_STREAM_RESPONSE_BYTES),
+            "a streamed response is capped at 200 MB"
+        );
         // Defaults: a fresh request ID and trace, the function's own ARN.
         assert_ne!(events[1].request_id, "req-c");
         assert_eq!(events[1].invoked_function_arn, arn("ctx"));
@@ -1998,6 +2461,7 @@ mod tests {
             instance: WarmInstance {
                 handle: BackendHandle::Container { id: id.to_string() },
                 exit,
+                launcher: false,
             },
             sandbox: rt.runtime_api.register(),
             launched_at: std::time::Instant::now(),
@@ -2005,6 +2469,7 @@ mod tests {
             deploy_id: "d".to_string(),
             credentials: None,
             retiring: std::sync::atomic::AtomicBool::new(false),
+            finishing: std::sync::atomic::AtomicBool::new(false),
             busy: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -2418,6 +2883,170 @@ mod tests {
             super::deploy_id_for(&plain, &[], true),
             super::deploy_id_for(&tagged, &[], true)
         );
+    }
+
+    /// A caller that stops waiting (dropped connection, caller-side timeout)
+    /// does not free the instance while its runtime still runs the event,
+    /// and the function timeout is still enforced: the instance is reset at
+    /// the deadline and its extensions get `SHUTDOWN` with reason `timeout`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_invocation_keeps_its_instance_until_the_timeout() {
+        let mut backend = FakeBackend::replying(
+            Duration::ZERO,
+            Arc::new(|e| {
+                if e.payload.as_ref() == b"hang" {
+                    InProcessReply::Hang
+                } else {
+                    InProcessReply::Response(b"ok".to_vec())
+                }
+            }),
+        );
+        Arc::get_mut(&mut backend).unwrap().extension = Ext::Shutdown;
+        let rt = runtime_with(backend.clone(), 2);
+        let mut func = test_func("cancel", "sha-A");
+        func.timeout = 1;
+
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(300), rt.invoke(&func, b"hang", &[])).await;
+        assert!(cancelled.is_err(), "the caller gave up");
+        // The next invocation does not land on the instance still running
+        // the abandoned event: it gets an instance of its own.
+        let out = rt.invoke(&func, b"{}", &[]).await.unwrap();
+        assert_eq!(out.payload, b"ok");
+        assert_eq!(backend.launches.load(SeqCst), 2);
+
+        // The abandoned event's timeout resets its instance.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while backend.terminates.load(SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timeout never enforced"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let events = backend.extension_events.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["eventType"], "SHUTDOWN");
+        assert_eq!(events[0]["shutdownReason"], "timeout");
+    }
+
+    /// Lambda's invoke phase ends when the runtime and every extension have
+    /// asked for their next event: an extension still working after the
+    /// response keeps the instance reserved (the next event waits for it,
+    /// on the same instance) without the instance being reset.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_response_extension_work_holds_the_instance_without_resetting_it() {
+        let mut backend = FakeBackend::new(Duration::ZERO);
+        Arc::get_mut(&mut backend).unwrap().extension =
+            Ext::WorksAfterInvoke(Duration::from_millis(400));
+        let rt = runtime_with(backend.clone(), 1);
+        let func = test_func("postwork", "sha-A");
+        let started = std::time::Instant::now();
+        rt.invoke(&func, b"{}", &[]).await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "the response does not wait for the extension"
+        );
+        rt.invoke(&func, b"{}", &[]).await.unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(400),
+            "the second event waited for the extension"
+        );
+        assert_eq!(backend.launches.load(SeqCst), 1);
+        assert_eq!(backend.terminates.load(SeqCst), 0);
+        assert_eq!(backend.extension_events.lock().unwrap().len(), 2);
+    }
+
+    /// A runtime that answers and never asks for another event holds its
+    /// instance until the invocation's timeout resets it; the next event
+    /// then runs on a fresh instance.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_runtime_that_stalls_after_answering_is_reset_at_the_timeout() {
+        let backend = FakeBackend::replying(
+            Duration::ZERO,
+            Arc::new(|_| InProcessReply::ResponseThenStall(b"ok".to_vec())),
+        );
+        let rt = runtime_with(backend.clone(), 1);
+        let mut func = test_func("stall", "sha-A");
+        func.timeout = 1;
+        let out = rt.invoke(&func, b"{}", &[]).await.unwrap();
+        assert_eq!(out.payload, b"ok");
+        let out = rt.invoke(&func, b"{}", &[]).await.unwrap();
+        assert_eq!(out.payload, b"ok");
+        assert_eq!(out.function_error, None);
+        assert_eq!(backend.launches.load(SeqCst), 2);
+        assert_eq!(backend.terminates.load(SeqCst), 1);
+        assert_eq!(backend.handled(), 2, "each event ran once");
+    }
+
+    /// An extension that cannot be launched, or exits during init, fails
+    /// the init with Lambda's `Extension.*` error instead of leaving the
+    /// event waiting.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failing_extension_fails_the_init() {
+        for (code, error_type) in [(1, "Extension.Crash"), (127, "Extension.LaunchError")] {
+            let mut backend = FakeBackend::new(Duration::ZERO);
+            Arc::get_mut(&mut backend).unwrap().extension = Ext::FailsInit(code);
+            let rt = runtime_with(backend.clone(), 1);
+            let func = test_func("badext", "sha-A");
+            let started = std::time::Instant::now();
+            let out = rt.invoke(&func, b"{}", &[]).await.unwrap();
+            assert!(started.elapsed() < Duration::from_secs(3));
+            assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
+            assert_eq!(out.error_type().as_deref(), Some(error_type));
+            assert!(out.error_message().unwrap().contains("bad-ext"));
+            wait_for(|| backend.terminates.load(SeqCst) == 1).await;
+        }
+    }
+
+    /// Lambda's init limit: a cold invocation whose runtime takes the event
+    /// within 10s has the full function timeout from then; one whose init
+    /// overruns it is bounded by the function timeout from the end of the
+    /// init limit, init and handler together. A warm runtime has the
+    /// pickup limit, then the timeout.
+    #[test]
+    fn deadlines_follow_the_init_limit() {
+        let t0 = tokio::time::Instant::now();
+        let timeout = Duration::from_secs(3);
+        let d = |served: bool, delivered: Option<u64>| {
+            super::answer_deadline(
+                !served,
+                t0,
+                delivered.map(|s| t0 + Duration::from_secs(s)),
+                timeout,
+            ) - t0
+        };
+        assert_eq!(d(false, None), Duration::from_secs(13));
+        assert_eq!(d(false, Some(2)), Duration::from_secs(5));
+        assert_eq!(d(false, Some(10)), Duration::from_secs(13));
+        assert_eq!(d(false, Some(12)), Duration::from_secs(13));
+        // An environment that served events is idle and ready.
+        assert_eq!(d(true, None), Duration::from_secs(3));
+        assert_eq!(d(true, Some(1)), Duration::from_secs(4));
+    }
+
+    /// `SHUTDOWN` carries why the environment goes: `spindown` for a normal
+    /// teardown, `failure` when the runtime exited.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_reasons_follow_why_the_environment_goes() {
+        let mut backend = FakeBackend::new(Duration::ZERO);
+        Arc::get_mut(&mut backend).unwrap().extension = Ext::Shutdown;
+        let rt = runtime_with(backend.clone(), 1);
+        let func = test_func("reasons", "sha-A");
+        rt.invoke(&func, b"{}", &[]).await.unwrap();
+        rt.stop_container(&arn("reasons")).await;
+        rt.invoke(&func, b"{}", &[]).await.unwrap();
+        backend.kill(1, 1);
+        // The dead warm instance is reset before the event runs elsewhere.
+        rt.invoke(&func, b"{}", &[]).await.unwrap();
+        let reasons: Vec<String> = backend
+            .extension_events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e["shutdownReason"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(reasons, vec!["spindown", "failure"]);
     }
 
     #[test]
