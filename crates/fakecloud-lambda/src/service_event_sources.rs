@@ -347,13 +347,15 @@ impl LambdaService {
 /// The function ARN an event source mapping invokes. `FunctionName` may be a
 /// name, a partial ARN or an ARN, optionally qualified by a version or an
 /// alias; the function (and that qualifier) must exist in the mapping's
-/// account, else `ResourceNotFoundException`, as on AWS. Shared by
+/// account, else `ResourceNotFoundException`, and an ARN must name the
+/// request's region, as on AWS. Shared by
 /// `CreateEventSourceMapping` and `UpdateEventSourceMapping`.
 pub(crate) fn mapping_function_arn(
     state: &crate::state::LambdaState,
     region: &str,
     function_name: &str,
 ) -> Result<String, AwsServiceError> {
+    crate::event_source::check_function_region(function_name, region)?;
     let name = crate::service::normalize_function_name(function_name);
     let qualifier = crate::service::qualifier_from_function_ref(function_name);
     let account = crate::service::function_ref_scope(function_name)

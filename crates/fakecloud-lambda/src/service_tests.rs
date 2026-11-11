@@ -6486,3 +6486,38 @@ async fn update_event_source_mapping_resolves_function_name_like_create() {
         .expect("foreign function refused");
     assert_eq!(err.code(), "ResourceNotFoundException");
 }
+
+#[tokio::test]
+async fn update_event_source_mapping_refuses_a_function_of_another_region() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "esm-r").await;
+    let resp = svc
+        .handle(make_request(
+            Method::POST,
+            "/2015-03-31/event-source-mappings",
+            &json!({
+                "FunctionName": "esm-r",
+                "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:q",
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let uuid = body["UUID"].as_str().unwrap().to_string();
+    let err = svc
+        .handle(make_request(
+            Method::PUT,
+            &format!("/2015-03-31/event-source-mappings/{uuid}"),
+            &json!({"FunctionName": "arn:aws:lambda:us-west-2:123456789012:function:esm-r"})
+                .to_string(),
+        ))
+        .await
+        .err()
+        .expect("another region's function refused");
+    assert_eq!(err.code(), "InvalidParameterValueException");
+    assert_eq!(
+        err.message(),
+        "Functions from 'us-west-2' are not reachable in this region ('us-east-1')"
+    );
+}

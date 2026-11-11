@@ -1042,10 +1042,12 @@ mod tests {
     }
 
     /// Before aliases had a policy of their own, `AddPermission` on an alias
-    /// wrote into a version's policy and CloudFormation into the function's.
-    /// Loading such state moves those statements (the ones whose `Resource`
-    /// is the alias ARN) onto the alias, once; state saved since keeps a
-    /// verbatim function document even when it names the alias.
+    /// wrote into the policy of a version it pointed to (any of a weighted
+    /// alias's versions). Loading such state moves those statements (the ones
+    /// whose `Resource` is the alias ARN) onto the alias, once. A legacy
+    /// CloudFormation statement (unqualified, on the function) stays where
+    /// its stack looks for it, and state saved since keeps a verbatim
+    /// function document even when it names the alias.
     #[test]
     fn alias_permissions_saved_before_alias_policies_move_onto_the_alias() {
         let account = "111111111111";
@@ -1063,16 +1065,22 @@ mod tests {
         let mut f = function("f", region, account);
         f.policy = Some(doc(vec![
             statement("fn", &fn_arn),
-            statement("cfn", &alias_arn),
+            statement("cfn", &fn_arn),
         ]));
         let mut v1 = f.clone();
         v1.policy = Some(doc(vec![statement("api", &alias_arn)]));
+        let mut v2 = f.clone();
+        v2.policy = Some(doc(vec![
+            statement("v2", &format!("{fn_arn}:2")),
+            statement("weighted", &alias_arn),
+        ]));
         legacy.functions.insert("f".into(), f);
-        legacy
+        let versions = legacy
             .function_version_snapshots
             .entry("f".into())
-            .or_default()
-            .insert("1".into(), v1);
+            .or_default();
+        versions.insert("1".into(), v1);
+        versions.insert("2".into(), v2);
         legacy.aliases.insert(
             "f:live".into(),
             FunctionAlias {
@@ -1113,11 +1121,15 @@ mod tests {
                 .map(|st| st["Sid"].as_str().unwrap().to_string())
                 .collect()
         };
-        assert_eq!(sids(&s.functions["f"].policy), vec!["fn"]);
+        assert_eq!(sids(&s.functions["f"].policy), vec!["fn", "cfn"]);
         assert!(sids(&s.function_version_snapshots["f"]["1"].policy).is_empty());
+        assert_eq!(
+            sids(&s.function_version_snapshots["f"]["2"].policy),
+            vec!["v2"]
+        );
         let mut alias_sids = sids(&s.aliases["f:live"].policy);
         alias_sids.sort();
-        assert_eq!(alias_sids, vec!["api", "cfn"]);
+        assert_eq!(alias_sids, vec!["api", "weighted"]);
         assert!(s.alias_policies_migrated);
 
         // Saved again, a function document naming the alias stays put.

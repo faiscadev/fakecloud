@@ -168,8 +168,16 @@ pub fn validate_create(
     let function_name = body["FunctionName"]
         .as_str()
         .ok_or_else(|| invalid_parameter("FunctionName is required".to_string()))?;
-    // An event source mapping invokes a function of its own region; a
-    // function ARN from another region is refused like on AWS.
+    check_function_region(function_name, region)?;
+    filter_patterns(body)
+}
+
+/// An event source mapping invokes a function of its own region; a function
+/// ARN from another region is refused like on AWS (create and update).
+pub(crate) fn check_function_region(
+    function_name: &str,
+    region: &str,
+) -> Result<(), AwsServiceError> {
     if let Some(function_region) = crate::service::function_ref_scope(function_name).1 {
         if function_region != region {
             return Err(invalid_parameter(format!(
@@ -177,7 +185,7 @@ pub fn validate_create(
             )));
         }
     }
-    filter_patterns(body)
+    Ok(())
 }
 
 /// `FilterCriteria.Filters[].Pattern`, strictly: a missing or non-string

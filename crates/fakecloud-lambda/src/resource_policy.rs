@@ -133,10 +133,13 @@ pub fn policy_view<'a>(
 
 /// Move permissions granted on an alias out of the policies they were kept
 /// in before aliases had a policy of their own: `AddPermission` with an
-/// alias qualifier used to write the statement into the policy of a version
-/// the alias pointed to, and CloudFormation's `AWS::Lambda::Permission` on an
-/// alias into the function's policy. A statement belongs to an alias when its
-/// `Resource` is the alias ARN. Runs once per state: state saved since
+/// alias qualifier wrote the statement (its `Resource` the alias ARN) into
+/// the policy of a version the alias pointed to. Statements whose `Resource`
+/// is the alias ARN are moved from the function, its versions and
+/// `$LATEST.PUBLISHED`. CloudFormation's `AWS::Lambda::Permission` on an
+/// alias used to write an unqualified statement into the function's policy
+/// under the physical id `<function>|<sid>`; those stay where the stack's
+/// delete and update look for them. Runs once per state: state saved since
 /// (where `PutResourcePolicy` may store any document verbatim) is left alone.
 pub fn migrate_alias_policies(state: &mut LambdaState) {
     if std::mem::replace(&mut state.alias_policies_migrated, true) {
