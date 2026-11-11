@@ -94,6 +94,10 @@ impl ResourceProvisioner {
                     secret_binary: None,
                     stages: vec!["AWSCURRENT".to_string()],
                     created_at: now,
+                    kms_key_ids: fakecloud_secretsmanager::value::sealed_kms_key_ids(
+                        self.kms_hook.as_deref(),
+                        kms_key_id.as_deref(),
+                    ),
                 },
             );
             current_version_id = Some(version_id);
@@ -159,39 +163,71 @@ impl ResourceProvisioner {
 
         let mut accounts = self.secretsmanager_state.write();
         let state = accounts.regional_mut(&self.account_id, &self.region);
-        let secret = state
+        let stored_secret = state
             .secret_key(arn)
             .and_then(|key| state.secrets.get_mut(&key))
             .ok_or_else(|| format!("Secret {arn} not yet provisioned"))?;
+        let kms_err =
+            |e: fakecloud_core::service::AwsServiceError| format!("{}: {}", e.code(), e.message());
+        // The update is applied to a copy and stored only once every KMS
+        // call has succeeded: a key KMS refuses fails the update with the
+        // secret as it was, as UpdateSecret does.
+        let mut secret = stored_secret.clone();
 
         if let Some(desc) = props.get("Description").and_then(|v| v.as_str()) {
             secret.description = Some(desc.to_string());
         }
+        // A changed key re-encrypts the staged versions under it, exactly
+        // like UpdateSecret with a new KmsKeyId.
         if let Some(kms) = props.get("KmsKeyId").and_then(|v| v.as_str()) {
-            secret.kms_key_id = Some(kms.to_string());
+            if secret.kms_key_id.as_deref() != Some(kms) {
+                fakecloud_secretsmanager::change_secret_kms_key(
+                    self.kms_hook.as_deref(),
+                    &self.account_id,
+                    &self.region,
+                    &mut secret,
+                    kms,
+                )
+                .map_err(kms_err)?;
+            }
         }
 
         // A changed SecretString stages a new AWSCURRENT version. GenerateSecretString
         // is generate-once (only honoured at create), matching CloudFormation.
         if let Some(secret_string) = props.get("SecretString").and_then(|v| v.as_str()) {
-            let current_is_same = secret
+            let current_plaintext = match secret
                 .current_version_id
                 .as_ref()
                 .and_then(|vid| secret.versions.get(vid))
-                .and_then(|v| {
-                    let stored = v.secret_string.clone()?;
-                    Some(fakecloud_secretsmanager::value::plaintext_secret_string(
-                        self.kms_hook.as_deref(),
-                        &self.account_id,
-                        &secret.arn,
-                        &v.version_id,
-                        stored,
-                    ))
-                })
-                .as_deref()
-                == Some(secret_string);
-            if !current_is_same {
+            {
+                Some(v) => match v.secret_string.clone() {
+                    Some(stored) => Some(
+                        fakecloud_secretsmanager::value::plaintext_secret_string(
+                            self.kms_hook.as_deref(),
+                            &self.account_id,
+                            &secret.arn,
+                            &v.version_id,
+                            stored,
+                        )
+                        .map_err(kms_err)?,
+                    ),
+                    None => None,
+                },
+                None => None,
+            };
+            if current_plaintext.as_deref() != Some(secret_string) {
                 let now = Utc::now();
+                let version_id = Uuid::new_v4().to_string();
+                let sealed = fakecloud_secretsmanager::value::seal_secret_string(
+                    self.kms_hook.as_deref(),
+                    &self.account_id,
+                    &self.region,
+                    &secret.arn,
+                    &version_id,
+                    secret.kms_key_id.as_deref(),
+                    secret_string.to_string(),
+                )
+                .map_err(kms_err)?;
                 // Demote the outgoing AWSCURRENT to AWSPREVIOUS, enforcing the
                 // single-AWSPREVIOUS invariant AWS keeps per secret.
                 if let Some(old_vid) = secret.current_version_id.clone() {
@@ -207,17 +243,10 @@ impl ResourceProvisioner {
                         }
                     }
                 }
-                let version_id = Uuid::new_v4().to_string();
-                let sealed = fakecloud_secretsmanager::value::seal_secret_string(
+                let kms_key_ids = fakecloud_secretsmanager::value::sealed_kms_key_ids(
                     self.kms_hook.as_deref(),
-                    &self.account_id,
-                    &self.region,
-                    &secret.arn,
-                    &version_id,
                     secret.kms_key_id.as_deref(),
-                    secret_string.to_string(),
-                )
-                .map_err(|e| format!("{}: {}", e.code(), e.message()))?;
+                );
                 secret.versions.insert(
                     version_id.clone(),
                     SecretVersion {
@@ -226,6 +255,7 @@ impl ResourceProvisioner {
                         secret_binary: None,
                         stages: vec!["AWSCURRENT".to_string()],
                         created_at: now,
+                        kms_key_ids,
                     },
                 );
                 secret.current_version_id = Some(version_id);
@@ -233,6 +263,8 @@ impl ResourceProvisioner {
             }
         }
 
+        *stored_secret = secret;
+        let secret = stored_secret;
         let name = secret.name.clone();
         Ok(ProvisionResult::new(arn.clone())
             .with("Id", arn.clone())
@@ -408,6 +440,7 @@ impl ResourceProvisioner {
                     secret_binary: None,
                     stages: vec!["AWSCURRENT".to_string()],
                     created_at: now,
+                    kms_key_ids: Vec::new(),
                 },
             );
             secret.current_version_id = Some(version_id);
@@ -417,15 +450,20 @@ impl ResourceProvisioner {
             if let Some(version) = secret.versions.get_mut(&version_id) {
                 // The stored value is encrypted: read its plaintext, patch it,
                 // and store it encrypted again.
-                let plaintext = version.secret_string.clone().map(|stored| {
-                    fakecloud_secretsmanager::value::plaintext_secret_string(
-                        self.kms_hook.as_deref(),
-                        &self.account_id,
-                        &secret_arn,
-                        &version_id,
-                        stored,
-                    )
-                });
+                let plaintext = version
+                    .secret_string
+                    .clone()
+                    .map(|stored| {
+                        fakecloud_secretsmanager::value::plaintext_secret_string(
+                            self.kms_hook.as_deref(),
+                            &self.account_id,
+                            &secret_arn,
+                            &version_id,
+                            stored,
+                        )
+                    })
+                    .transpose()
+                    .map_err(|e| format!("{}: {}", e.code(), e.message()))?;
                 let mut existing: serde_json::Value = plaintext
                     .as_deref()
                     .and_then(|s| serde_json::from_str(s).ok())
@@ -453,6 +491,12 @@ impl ResourceProvisioner {
                     )
                     .map_err(|e| format!("{}: {}", e.code(), e.message()))?,
                 );
+                if version.kms_key_ids.is_empty() {
+                    version.kms_key_ids = fakecloud_secretsmanager::value::sealed_kms_key_ids(
+                        self.kms_hook.as_deref(),
+                        kms_key_id.as_deref(),
+                    );
+                }
             }
         }
         secret.last_changed_at = now;

@@ -12048,7 +12048,8 @@ mod tests {
                 &secret.arn,
                 &current.version_id,
                 stored,
-            ),
+            )
+            .unwrap(),
             "new"
         );
         assert_eq!(secret.description.as_deref(), Some("updated"));
@@ -12058,6 +12059,115 @@ mod tests {
             .filter(|v| v.stages.iter().any(|s| s == "AWSPREVIOUS"))
             .count();
         assert_eq!(previous_count, 1, "exactly one AWSPREVIOUS version");
+    }
+
+    #[test]
+    fn update_stack_secretsmanager_kms_key_validates_and_re_encrypts() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::SecretsManager::Secret",
+                "S",
+                serde_json::json!({"Name": "db-cred", "SecretString": "v1"}),
+            ))
+            .expect("secret provisions");
+        let key = prov
+            .create_resource(&make_resource("AWS::KMS::Key", "K", serde_json::json!({})))
+            .expect("key provisions")
+            .physical_id;
+        let current = |prov: &ResourceProvisioner| {
+            let sm = prov.secretsmanager_state.read();
+            let acct = sm.regional("123456789012", "us-east-1").unwrap();
+            let secret = acct
+                .secrets
+                .get(&acct.secret_key(&created.physical_id).unwrap())
+                .unwrap()
+                .clone();
+            let version = secret
+                .versions
+                .get(secret.current_version_id.as_ref().unwrap())
+                .unwrap()
+                .clone();
+            (secret, version)
+        };
+
+        // A key KMS cannot find fails the update and changes nothing, as
+        // UpdateSecret refuses it.
+        let err = prov
+            .update_resource(
+                &created,
+                &make_resource(
+                    "AWS::SecretsManager::Secret",
+                    "S",
+                    serde_json::json!({
+                        "Name": "db-cred",
+                        "SecretString": "v1",
+                        "Description": "changed",
+                        "KmsKeyId": "alias/fc-does-not-exist",
+                    }),
+                ),
+            )
+            .expect_err("a missing key is refused");
+        assert!(err.starts_with("InvalidParameterException"), "{err}");
+        let (secret, version) = current(&prov);
+        assert_eq!(secret.kms_key_id, None);
+        assert_eq!(secret.description, None);
+        assert_eq!(version.kms_key_ids, ["DefaultEncryptionKey".to_string()]);
+
+        // A usable key re-encrypts the current version under it, keeping its
+        // id and value.
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::SecretsManager::Secret",
+                "S",
+                serde_json::json!({"Name": "db-cred", "SecretString": "v1", "KmsKeyId": key}),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("AWS::SecretsManager::Secret is updatable");
+        let (secret, rekeyed) = current(&prov);
+        assert_eq!(secret.kms_key_id.as_deref(), Some(key.as_str()));
+        assert_eq!(rekeyed.version_id, version.version_id);
+        assert_eq!(
+            rekeyed.kms_key_ids,
+            ["DefaultEncryptionKey".to_string(), key.clone()]
+        );
+        assert_ne!(rekeyed.secret_string, version.secret_string);
+        assert_eq!(
+            fakecloud_secretsmanager::value::plaintext_secret_string(
+                prov.kms_hook.as_deref(),
+                "123456789012",
+                &secret.arn,
+                &rekeyed.version_id,
+                rekeyed.secret_string.clone().unwrap(),
+            )
+            .unwrap(),
+            "v1"
+        );
+
+        // Sealed under the new key: once it is disabled the value no longer
+        // opens, and reading it is an error, never an empty value.
+        {
+            let mut kms = prov.kms_state.write();
+            let k = kms
+                .get_mut("123456789012")
+                .unwrap()
+                .keys
+                .get_mut(&key)
+                .unwrap();
+            k.enabled = false;
+            k.key_state = "Disabled".to_string();
+        }
+        let err = fakecloud_secretsmanager::value::plaintext_secret_string(
+            prov.kms_hook.as_deref(),
+            "123456789012",
+            &secret.arn,
+            &rekeyed.version_id,
+            rekeyed.secret_string.clone().unwrap(),
+        )
+        .expect_err("a disabled key does not open the value");
+        assert_eq!(err.code(), "DecryptionFailure");
     }
 
     #[test]

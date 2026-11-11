@@ -159,18 +159,34 @@ pub fn read_secret_value(
             )
         })
         .transpose()?;
+    let secret_binary = value
+        .secret_binary
+        .map(|stored| {
+            decrypt_secret_binary(
+                kms_hook,
+                &owner_account,
+                &value.arn,
+                &value.version_id,
+                stored,
+                caller_arn,
+            )
+        })
+        .transpose()?;
     Ok(SecretValue {
         secret_string,
+        secret_binary,
         ..value
     })
 }
 
 /// Decrypt a stored `SecretString`. A secret written while a KMS hook was
 /// wired is stored as ciphertext, under its `KmsKeyId` or, with none, the
-/// AWS-managed `aws/secretsmanager` key; anything else (no hook, or a value
-/// that is not a ciphertext, such as one stored before KMS was wired or
-/// before secrets without a key were encrypted) is returned as stored. A
-/// KMS refusal fails the read.
+/// AWS-managed `aws/secretsmanager` key. A value that is not a ciphertext of
+/// this account (no hook, or one stored in plaintext before KMS was wired or
+/// before secrets without a key were encrypted) is returned as stored; a
+/// ciphertext that does not open (refused, disabled or deleted key, or
+/// sealed for another secret version) fails the read, never reads as its
+/// ciphertext.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn decrypt_secret_string(
     kms_hook: Option<&dyn KmsHook>,
@@ -181,41 +197,78 @@ pub(crate) fn decrypt_secret_string(
     stored: String,
     caller_arn: Option<&str>,
 ) -> Result<String, AwsServiceError> {
-    let Some(hook) = kms_hook else {
+    match open_stored(
+        kms_hook, account_id, secret_arn, version_id, &stored, caller_arn,
+    )? {
+        Some(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
+        None => Ok(stored),
+    }
+}
+
+/// [`decrypt_secret_string`] for a `SecretBinary`, stored as the
+/// ciphertext's text when sealed.
+pub(crate) fn decrypt_secret_binary(
+    kms_hook: Option<&dyn KmsHook>,
+    account_id: &str,
+    secret_arn: &str,
+    version_id: &str,
+    stored: Vec<u8>,
+    caller_arn: Option<&str>,
+) -> Result<Vec<u8>, AwsServiceError> {
+    let Ok(text) = std::str::from_utf8(&stored) else {
         return Ok(stored);
     };
-    match hook.decrypt(
+    match open_stored(
+        kms_hook, account_id, secret_arn, version_id, text, caller_arn,
+    )? {
+        Some(bytes) => Ok(bytes),
+        None => Ok(stored),
+    }
+}
+
+/// The plaintext of a stored value that is a ciphertext of this account;
+/// `None` when it is not one (a plaintext value from before encryption).
+fn open_stored(
+    kms_hook: Option<&dyn KmsHook>,
+    account_id: &str,
+    secret_arn: &str,
+    version_id: &str,
+    stored: &str,
+    caller_arn: Option<&str>,
+) -> Result<Option<Vec<u8>>, AwsServiceError> {
+    let Some(hook) = kms_hook else {
+        return Ok(None);
+    };
+    if !hook.is_ciphertext(account_id, stored) {
+        return Ok(None);
+    }
+    hook.decrypt(
         account_id,
-        &stored,
+        stored,
         fakecloud_core::delivery::KmsCaller::via_for("secretsmanager.amazonaws.com", caller_arn),
         secret_encryption_context(secret_arn, version_id),
-    ) {
-        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
-        Err(err) if err.kind == fakecloud_core::delivery::KmsErrorKind::InvalidCiphertext => {
-            Ok(stored)
-        }
-        Err(err) => Err(secrets_manager_kms_error(&err, true)),
-    }
+    )
+    .map(Some)
+    .map_err(|err| secrets_manager_kms_error(&err, true))
 }
 
 /// The plaintext of a secret version's stored `SecretString`, decrypted for a
 /// service that reads it for a resource (CodeBuild resolving a build's
-/// environment), with that resource's role: an identity of the account. A
-/// value KMS refuses reads as empty, as the resource would get nothing.
+/// environment, an SSM `/aws/reference/secretsmanager/` parameter), with that
+/// resource's role: an identity of the account. A value KMS refuses is
+/// Secrets Manager's error (`DecryptionFailure`, `AccessDeniedException`,
+/// ...), which the reading service reports in its own terms; it never reads
+/// as empty or as its ciphertext.
 pub fn plaintext_secret_string(
     kms_hook: Option<&dyn KmsHook>,
     account_id: &str,
     secret_arn: &str,
     version_id: &str,
     stored: String,
-) -> String {
+) -> Result<String, AwsServiceError> {
     decrypt_secret_string(
         kms_hook, account_id, secret_arn, version_id, None, stored, None,
     )
-    .unwrap_or_else(|err| {
-        tracing::warn!(secret_arn, error = %err.message(), "secret value not readable");
-        String::new()
-    })
 }
 
 /// Seal `plaintext` as version `version_id` of secret `secret_arn` (in
@@ -246,6 +299,16 @@ pub fn seal_secret_string(
     .map(|sealed| sealed.unwrap_or(plaintext))
 }
 
+/// The `KmsKeyIds` a version sealed by [`seal_secret_string`] under
+/// `kms_key_id` reports; none when no KMS hook is wired (stored as is).
+pub fn sealed_kms_key_ids(kms_hook: Option<&dyn KmsHook>, kms_key_id: Option<&str>) -> Vec<String> {
+    if kms_hook.is_some() {
+        vec![crate::service::kms_key_label(kms_key_id)]
+    } else {
+        Vec::new()
+    }
+}
+
 /// The encryption context Secrets Manager binds a secret version to (Secrets
 /// Manager user guide, "Encryption context").
 pub(crate) fn secret_encryption_context(
@@ -264,8 +327,9 @@ pub(crate) fn secret_encryption_context(
 /// allowed", and a missing key 400 `InvalidParameterException` "The
 /// operation failed because of an invalid KMS key: <KMS message>". A key
 /// KMS will not use (disabled, pending deletion, wrong usage) is the
-/// declared `EncryptionFailure` (writes) / `DecryptionFailure` (reads), with
-/// KMS's message (not recorded).
+/// declared `EncryptionFailure` (writes, KMS's message; not recorded) /
+/// `DecryptionFailure` (reads, recorded: KMS's message after "Secrets
+/// Manager can't decrypt the secret value: ").
 pub(crate) fn secrets_manager_kms_error(
     err: &fakecloud_core::delivery::KmsError,
     decrypting: bool,
@@ -290,13 +354,27 @@ pub(crate) fn secrets_manager_kms_error(
             "InternalServiceError",
             err.relayed_message(),
         ),
+        // A ciphertext KMS cannot open reports nothing of its own; the
+        // declared error's documented text names the failure.
+        KmsErrorKind::InvalidCiphertext => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "DecryptionFailure",
+            "Secrets Manager can't decrypt the protected secret text using the provided KMS key.",
+        ),
+        // Recorded (GetSecretValue under a disabled key, see
+        // `fakecloud-codebuild/tests/fixtures/env-var-resolution-direct-reads.txt`):
+        // "Secrets Manager can't decrypt the secret value: <KMS message>".
+        _ if decrypting => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "DecryptionFailure",
+            format!(
+                "Secrets Manager can't decrypt the secret value: {}",
+                err.relayed_message()
+            ),
+        ),
         _ => AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            if decrypting {
-                "DecryptionFailure"
-            } else {
-                "EncryptionFailure"
-            },
+            "EncryptionFailure",
             err.relayed_message(),
         ),
     }

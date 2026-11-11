@@ -11,14 +11,14 @@ use super::*;
 pub(crate) fn check_secret_version_idempotency(
     versions: &BTreeMap<String, SecretVersion>,
     version_id: &str,
-    existing_plaintext: Option<String>,
+    existing_plaintext: (Option<String>, Option<Vec<u8>>),
     secret_string: &Option<String>,
     secret_binary: &Option<Vec<u8>>,
 ) -> VersionIdempotency {
-    let Some(existing) = versions.get(version_id) else {
+    if !versions.contains_key(version_id) {
         return VersionIdempotency::NotFound;
-    };
-    if &existing_plaintext == secret_string && &existing.secret_binary == secret_binary {
+    }
+    if &existing_plaintext.0 == secret_string && &existing_plaintext.1 == secret_binary {
         VersionIdempotency::Match
     } else {
         VersionIdempotency::Conflict

@@ -78,9 +78,6 @@ pub async fn check_and_rotate(
                 None => continue,
             };
 
-            secret.last_rotated_at = Some(now);
-            secret.last_changed_at = now;
-
             // Get current value to clone into pending version
             let current_value = secret
                 .current_version_id
@@ -88,26 +85,49 @@ pub async fn check_and_rotate(
                 .and_then(|vid| secret.versions.get(vid))
                 .cloned();
 
+            // The value is re-sealed for the new version first: a value KMS
+            // will not open or seal (its key disabled or gone) fails this
+            // rotation, which leaves the secret untouched and is retried on
+            // the next schedule check.
+            let resealed = match current_value.as_ref().map(|cv| {
+                crate::service::reseal_version(
+                    kms_hook,
+                    fakecloud_aws::arn::account_of(&due.arn).unwrap_or_default(),
+                    &due.arn,
+                    cv,
+                    fakecloud_aws::arn::region_of(&due.arn).unwrap_or_default(),
+                    &due.arn,
+                    &version_id,
+                    secret.kms_key_id.as_deref(),
+                )
+            }) {
+                Some(Err(err)) => {
+                    tracing::warn!(
+                        secret_arn = %due.arn,
+                        error = %err.message(),
+                        "scheduled rotation failed: the secret's value could not be re-encrypted"
+                    );
+                    continue;
+                }
+                Some(Ok(values)) => Some(values),
+                None => None,
+            };
+
+            secret.last_rotated_at = Some(now);
+            secret.last_changed_at = now;
+
             let mut version_created = false;
 
-            if let Some(cv) = current_value {
+            if let (Some(_cv), Some(values)) = (current_value, resealed) {
                 if due.lambda_arn.is_some() {
                     // With Lambda: create AWSPENDING version
                     let version = SecretVersion {
                         version_id: version_id.clone(),
-                        secret_string: crate::service::reseal_secret_string(
-                            kms_hook,
-                            fakecloud_aws::arn::account_of(&due.arn).unwrap_or_default(),
-                            fakecloud_aws::arn::region_of(&due.arn).unwrap_or_default(),
-                            &due.arn,
-                            &cv.version_id,
-                            &version_id,
-                            secret.kms_key_id.as_deref(),
-                            cv.secret_string.clone(),
-                        ),
-                        secret_binary: cv.secret_binary.clone(),
+                        secret_string: values.secret_string.clone(),
+                        secret_binary: values.secret_binary.clone(),
                         stages: vec!["AWSPENDING".to_string()],
                         created_at: now,
+                        kms_key_ids: values.kms_key_ids.clone(),
                     };
                     secret.versions.insert(version_id.clone(), version);
                 } else {
@@ -118,19 +138,11 @@ pub async fn check_and_rotate(
                     }
                     let version = SecretVersion {
                         version_id: version_id.clone(),
-                        secret_string: crate::service::reseal_secret_string(
-                            kms_hook,
-                            fakecloud_aws::arn::account_of(&due.arn).unwrap_or_default(),
-                            fakecloud_aws::arn::region_of(&due.arn).unwrap_or_default(),
-                            &due.arn,
-                            &cv.version_id,
-                            &version_id,
-                            secret.kms_key_id.as_deref(),
-                            cv.secret_string.clone(),
-                        ),
-                        secret_binary: cv.secret_binary.clone(),
+                        secret_string: values.secret_string.clone(),
+                        secret_binary: values.secret_binary.clone(),
                         stages: vec!["AWSCURRENT".to_string()],
                         created_at: now,
+                        kms_key_ids: values.kms_key_ids.clone(),
                     };
                     secret.versions.insert(version_id.clone(), version);
                     secret.current_version_id = Some(version_id.clone());
@@ -279,6 +291,7 @@ mod tests {
                 secret_binary: None,
                 stages: vec!["AWSCURRENT".to_string()],
                 created_at: now,
+                kms_key_ids: Vec::new(),
             },
         );
 

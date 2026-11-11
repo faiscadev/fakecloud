@@ -1111,7 +1111,11 @@ impl SsmService {
             &secret.arn,
             current_vid,
             version.secret_string.clone().unwrap_or_default(),
-        );
+        )
+        .unwrap_or_else(|err| {
+            tracing::warn!(secret = %secret.arn, error = %err.message(), "secret value not readable");
+            String::new()
+        });
 
         let arn =
             Arn::regional("ssm", region, account_id, &format!("parameter{raw_name}")).to_string();

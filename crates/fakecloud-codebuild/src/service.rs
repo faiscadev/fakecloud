@@ -1151,7 +1151,11 @@ fn resolve_env_value(
                 &secret.arn,
                 vid,
                 stored,
-            );
+            )
+            .unwrap_or_else(|err| {
+                tracing::warn!(secret = %secret.arn, error = %err.message(), "secret value not readable");
+                String::new()
+            });
             match json_key {
                 Some(key) => serde_json::from_str::<Value>(&raw)
                     .ok()
@@ -3797,6 +3801,7 @@ mod tests {
                     secret_binary: None,
                     stages: vec!["AWSCURRENT".to_string()],
                     created_at: Utc::now(),
+                    kms_key_ids: Vec::new(),
                 },
             );
             st.secrets.insert(

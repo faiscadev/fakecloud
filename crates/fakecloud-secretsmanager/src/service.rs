@@ -142,50 +142,63 @@ impl SecretsManagerService {
         self
     }
 
+    /// Seal a new version's values (see [`seal_values`]) for the caller.
     #[allow(clippy::too_many_arguments)]
-    fn maybe_encrypt_secret_string(
+    fn seal(
         &self,
         req: &AwsRequest,
-        account_id: &str,
-        region: &str,
         secret_arn: &str,
         version_id: &str,
         kms_key_id: Option<&str>,
-        plaintext: Option<String>,
-    ) -> Result<Option<String>, AwsServiceError> {
-        encrypt_secret_string(
+        secret_string: Option<String>,
+        secret_binary: Option<Vec<u8>>,
+    ) -> Result<SealedValues, AwsServiceError> {
+        seal_values(
             self.kms_hook.as_deref(),
-            account_id,
-            region,
+            &req.account_id,
+            &req.region,
             secret_arn,
             version_id,
             kms_key_id,
-            plaintext,
+            secret_string,
+            secret_binary,
             req.principal.as_ref().map(|p| p.arn.as_str()),
         )
     }
 
-    fn maybe_decrypt_secret_string(
+    /// The plaintext values of a stored version, opened for the caller.
+    fn open(
         &self,
         req: &AwsRequest,
         secret_arn: &str,
-        version_id: &str,
-        kms_key_id: Option<&str>,
-        stored: Option<&str>,
-    ) -> Result<Option<String>, AwsServiceError> {
-        stored
-            .map(|stored| {
-                crate::value::decrypt_secret_string(
-                    self.kms_hook.as_deref(),
-                    &req.account_id,
-                    secret_arn,
-                    version_id,
-                    kms_key_id,
-                    stored.to_string(),
-                    req.principal.as_ref().map(|p| p.arn.as_str()),
-                )
-            })
-            .transpose()
+        version: &SecretVersion,
+    ) -> Result<(Option<String>, Option<Vec<u8>>), AwsServiceError> {
+        open_values(
+            self.kms_hook.as_deref(),
+            &req.account_id,
+            secret_arn,
+            version,
+            req.principal.as_ref().map(|p| p.arn.as_str()),
+        )
+    }
+
+    /// The staged versions re-encrypted under `new_key`, as `UpdateSecret`
+    /// does when it changes a secret's `KmsKeyId` (see
+    /// [`rekey_staged_versions`]).
+    fn rekey_versions(
+        &self,
+        req: &AwsRequest,
+        secret: &Secret,
+        new_key: Option<&str>,
+    ) -> Result<Vec<(String, SealedValues)>, AwsServiceError> {
+        rekey_staged_versions(
+            self.kms_hook.as_deref(),
+            &req.account_id,
+            &req.region,
+            secret,
+            new_key,
+            req.principal.as_ref().map(|p| p.arn.as_str()),
+        )
     }
 
     /// Persist current state as a snapshot. Held across the
@@ -236,14 +249,8 @@ impl SecretsManagerService {
         if let Some(existing) = state.secrets.get(&input.name) {
             if let Some(ref token) = input.client_request_token {
                 let existing_plaintext = match existing.versions.get(token) {
-                    Some(v) => self.maybe_decrypt_secret_string(
-                        req,
-                        &existing.arn,
-                        &v.version_id,
-                        existing.kms_key_id.as_deref(),
-                        v.secret_string.as_deref(),
-                    )?,
-                    None => None,
+                    Some(v) => self.open(req, &existing.arn, v)?,
+                    None => (None, None),
                 };
                 match check_secret_version_idempotency(
                     &existing.versions,
@@ -295,21 +302,21 @@ impl SecretsManagerService {
                 .client_request_token
                 .clone()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let stored_string = self.maybe_encrypt_secret_string(
+            let values = self.seal(
                 req,
-                &req.account_id,
-                &req.region,
                 &arn,
                 &vid,
                 input.kms_key_id.as_deref(),
                 input.secret_string,
+                input.secret_binary,
             )?;
             let version = SecretVersion {
                 version_id: vid.clone(),
-                secret_string: stored_string,
-                secret_binary: input.secret_binary,
+                secret_string: values.secret_string,
+                secret_binary: values.secret_binary,
                 stages: vec!["AWSCURRENT".to_string()],
                 created_at: now,
+                kms_key_ids: values.kms_key_ids,
             };
             let mut versions = std::collections::BTreeMap::new();
             versions.insert(vid.clone(), version);
@@ -479,14 +486,8 @@ impl SecretsManagerService {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let existing_plaintext = match secret.versions.get(&version_id) {
-            Some(v) => self.maybe_decrypt_secret_string(
-                req,
-                &secret.arn,
-                &v.version_id,
-                secret.kms_key_id.as_deref(),
-                v.secret_string.as_deref(),
-            )?,
-            None => None,
+            Some(v) => self.open(req, &secret.arn, v)?,
+            None => (None, None),
         };
         match check_secret_version_idempotency(
             &secret.versions,
@@ -521,14 +522,13 @@ impl SecretsManagerService {
         // call with the secret as it was.
         let kms_key_for_enc = secret.kms_key_id.clone();
         let arn_for_enc = secret.arn.clone();
-        let stored_secret_string = self.maybe_encrypt_secret_string(
+        let values = self.seal(
             req,
-            &req.account_id,
-            &req.region,
             &arn_for_enc,
             &version_id,
             kms_key_for_enc.as_deref(),
             secret_string,
+            secret_binary,
         )?;
 
         let mut version_stages: Vec<String> = body["VersionStages"]
@@ -572,10 +572,11 @@ impl SecretsManagerService {
 
         let version = SecretVersion {
             version_id: version_id.clone(),
-            secret_string: stored_secret_string,
-            secret_binary,
+            secret_string: values.secret_string,
+            secret_binary: values.secret_binary,
             stages: version_stages.clone(),
             created_at: now,
+            kms_key_ids: values.kms_key_ids,
         };
 
         secret.versions.insert(version_id.clone(), version);
@@ -626,10 +627,13 @@ impl SecretsManagerService {
         }
 
         // A new value is sealed under the key the secret has once updated.
-        let new_kms_key_id = body["KmsKeyId"]
-            .as_str()
-            .map(str::to_string)
-            .or_else(|| secret.kms_key_id.clone());
+        // An empty KmsKeyId names the AWS-managed `aws/secretsmanager` key.
+        let key_change = body["KmsKeyId"].as_str().map(str::to_string);
+        let new_kms_key_id = match key_change.as_deref() {
+            Some("") => None,
+            Some(k) => Some(k.to_string()),
+            None => secret.kms_key_id.clone(),
+        };
 
         // If SecretString or SecretBinary is provided, create a new version
         let secret_string = body["SecretString"].as_str().map(|s| s.to_string());
@@ -647,14 +651,8 @@ impl SecretsManagerService {
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
             let existing_plaintext = match secret.versions.get(&vid) {
-                Some(v) => self.maybe_decrypt_secret_string(
-                    req,
-                    &secret.arn,
-                    &v.version_id,
-                    secret.kms_key_id.as_deref(),
-                    v.secret_string.as_deref(),
-                )?,
-                None => None,
+                Some(v) => self.open(req, &secret.arn, v)?,
+                None => (None, None),
             };
             match check_secret_version_idempotency(
                 &secret.versions,
@@ -683,17 +681,19 @@ impl SecretsManagerService {
                 VersionIdempotency::NotFound => {}
             }
 
-            // Seal the value before changing anything: a KMS refusal fails
-            // the call with the secret as it was.
-            let secret_string = self.maybe_encrypt_secret_string(
+            // Seal the value, and the existing versions under a changed
+            // key, before changing anything: a KMS refusal fails the call
+            // with the secret as it was.
+            let values = self.seal(
                 req,
-                &req.account_id,
-                &req.region,
                 &secret.arn,
                 &vid,
                 new_kms_key_id.as_deref(),
                 secret_string,
+                secret_binary,
             )?;
+            let rekeyed = self.rekey_versions(req, secret, key_change.as_deref())?;
+            apply_rekeyed(secret, rekeyed);
             if let Some(desc) = body["Description"].as_str() {
                 secret.description = Some(desc.to_string());
             }
@@ -709,10 +709,11 @@ impl SecretsManagerService {
 
             let version = SecretVersion {
                 version_id: vid.clone(),
-                secret_string,
-                secret_binary,
+                secret_string: values.secret_string,
+                secret_binary: values.secret_binary,
                 stages: vec!["AWSCURRENT".to_string()],
                 created_at: now,
+                kms_key_ids: values.kms_key_ids,
             };
             secret.versions.insert(vid.clone(), version);
             secret.current_version_id = Some(vid.clone());
@@ -723,6 +724,10 @@ impl SecretsManagerService {
             secret.versions.retain(|_, v| !v.stages.is_empty());
             Some(vid)
         } else {
+            // A new key re-encrypts the staged versions under it (recorded:
+            // a key KMS refuses fails the call and changes nothing).
+            let rekeyed = self.rekey_versions(req, secret, key_change.as_deref())?;
+            apply_rekeyed(secret, rekeyed);
             if let Some(desc) = body["Description"].as_str() {
                 secret.description = Some(desc.to_string());
             }
@@ -1204,11 +1209,16 @@ impl SecretsManagerService {
             .skip(start_idx)
             .take(max_results)
             .map(|v| {
-                json!({
+                let mut entry = json!({
                     "VersionId": v.version_id,
                     "VersionStages": v.stages,
                     "CreatedDate": v.created_at.timestamp_millis() as f64 / 1000.0,
-                })
+                });
+                // The keys the version has been encrypted under (recorded).
+                if !v.kms_key_ids.is_empty() {
+                    entry["KmsKeyIds"] = json!(v.kms_key_ids);
+                }
+                entry
             })
             .collect();
 
@@ -1424,6 +1434,56 @@ impl SecretsManagerService {
             ));
         }
 
+        // RotateImmediately defaults to true. When false, Secrets Manager
+        // saves the rotation configuration and schedules the next rotation
+        // for the upcoming window WITHOUT rotating the value now (and
+        // without invoking the rotation Lambda). LastRotatedDate is only
+        // set when a rotation actually happens.
+        let rotate_immediately = body["RotateImmediately"].as_bool().unwrap_or(true);
+
+        let version_id = body["ClientRequestToken"]
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        let lambda_arn = body["RotationLambdaARN"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| secret.rotation_lambda_arn.clone());
+        let has_lambda = lambda_arn.is_some();
+        let current = secret
+            .current_version_id
+            .clone()
+            .and_then(|vid| secret.versions.get(&vid).map(|v| (vid, v.clone())));
+
+        // Rotation behavior:
+        // - RotateImmediately (default): a full rotation. With a Lambda, the
+        //   Lambda runs all four steps; without one, the value is rotated
+        //   in-place (new AWSCURRENT, old -> AWSPREVIOUS).
+        // - RotateImmediately=false: the value is NOT rotated now. But when a
+        //   rotation Lambda is configured, AWS still validates the rotation
+        //   configuration by running ONLY the testSecret step (matching real
+        //   Secrets Manager). LastRotatedDate is only set on an actual rotation.
+        //
+        // Both the in-place rotation and the testSecret AWSPENDING copy carry
+        // the current value re-sealed for the new version. That KMS work runs
+        // before anything changes: a value KMS will not open or seal fails
+        // the call with the secret (rotation configuration included) as it
+        // was.
+        let resealed = match &current {
+            Some((_, cv)) if rotate_immediately != has_lambda => Some(reseal_version(
+                self.kms_hook.as_deref(),
+                &req.account_id,
+                &secret.arn,
+                cv,
+                &req.region,
+                &secret.arn,
+                &version_id,
+                secret.kms_key_id.as_deref(),
+            )?),
+            _ => None,
+        };
+
         // Set rotation config
         if let Some(lambda_arn) = body["RotationLambdaARN"].as_str() {
             secret.rotation_lambda_arn = Some(lambda_arn.to_string());
@@ -1448,135 +1508,77 @@ impl SecretsManagerService {
         let now = Utc::now();
         secret.last_changed_at = now;
 
-        // RotateImmediately defaults to true. When false, Secrets Manager
-        // saves the rotation configuration and schedules the next rotation
-        // for the upcoming window WITHOUT rotating the value now (and
-        // without invoking the rotation Lambda). LastRotatedDate is only
-        // set when a rotation actually happens.
-        let rotate_immediately = body["RotateImmediately"].as_bool().unwrap_or(true);
-
-        let version_id = body["ClientRequestToken"]
-            .as_str()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-        let has_lambda =
-            body["RotationLambdaARN"].as_str().is_some() || secret.rotation_lambda_arn.is_some();
-        let lambda_arn = secret.rotation_lambda_arn.clone();
-
-        // Rotation behavior:
-        // - RotateImmediately (default): a full rotation. With a Lambda, the
-        //   Lambda runs all four steps; without one, the value is rotated
-        //   in-place (new AWSCURRENT, old -> AWSPREVIOUS).
-        // - RotateImmediately=false: the value is NOT rotated now. But when a
-        //   rotation Lambda is configured, AWS still validates the rotation
-        //   configuration by running ONLY the testSecret step (matching real
-        //   Secrets Manager). LastRotatedDate is only set on an actual rotation.
         let mut invocation = None;
-        if rotate_immediately {
-            if let Some(current_vid) = secret.current_version_id.clone() {
-                let current_value = secret.versions.get(&current_vid).cloned();
-
-                if let Some(cv) = current_value {
-                    if has_lambda {
-                        // With Lambda: do NOT pre-create the AWSPENDING version. The
-                        // rotation Lambda is responsible for putting the new value via
-                        // PutSecretValue with VersionStages=[AWSPENDING] during the
-                        // createSecret step (matching real AWS Secrets Manager behavior).
-
-                        // Schedule Lambda invocation (full rotation steps).
-                        if let Some(ref arn) = lambda_arn {
-                            invocation = Some(RotationInvocation {
-                                lambda_arn: arn.clone(),
-                                secret_id: secret.arn.clone(),
-                                client_request_token: version_id.clone(),
-                                steps: vec![
-                                    "createSecret",
-                                    "setSecret",
-                                    "testSecret",
-                                    "finishSecret",
-                                ],
-                                cleanup_pending: None,
-                            });
-                        }
-                    } else {
-                        // Without Lambda: simple rotation - new version becomes AWSCURRENT.
-                        // Move old version to AWSPREVIOUS (kept unique across versions).
-                        demote_current_to_previous(&mut secret.versions, &current_vid);
-                        let version = SecretVersion {
-                            version_id: version_id.clone(),
-                            secret_string: reseal_secret_string(
-                                self.kms_hook.as_deref(),
-                                &req.account_id,
-                                &req.region,
-                                &secret.arn,
-                                &cv.version_id,
-                                &version_id,
-                                secret.kms_key_id.as_deref(),
-                                cv.secret_string.clone(),
-                            ),
-                            secret_binary: cv.secret_binary.clone(),
-                            stages: vec!["AWSCURRENT".to_string()],
-                            created_at: now,
-                        };
-                        secret.versions.insert(version_id.clone(), version);
-                        secret.current_version_id = Some(version_id.clone());
-                        // Prune deprecated versions (no staging labels) so they
-                        // don't leak, matching PutSecretValue / UpdateSecret.
-                        secret.versions.retain(|_, v| !v.stages.is_empty());
-                        // The value has now actually rotated (synchronously), so
-                        // this is the point where LastRotatedDate is stamped. The
-                        // Lambda path does not claim completion here because the
-                        // rotation runs asynchronously and may not succeed.
-                        secret.last_rotated_at = Some(now);
-                    }
-                }
+        match (current, lambda_arn, resealed) {
+            (Some(_), Some(arn), _) if rotate_immediately => {
+                // With Lambda: do NOT pre-create the AWSPENDING version. The
+                // rotation Lambda is responsible for putting the new value via
+                // PutSecretValue with VersionStages=[AWSPENDING] during the
+                // createSecret step (matching real AWS Secrets Manager behavior).
+                invocation = Some(RotationInvocation {
+                    lambda_arn: arn,
+                    secret_id: secret.arn.clone(),
+                    client_request_token: version_id.clone(),
+                    steps: vec!["createSecret", "setSecret", "testSecret", "finishSecret"],
+                    cleanup_pending: None,
+                });
             }
-        } else if has_lambda {
-            // RotateImmediately=false with a Lambda: AWS validates the rotation
-            // configuration by running only the testSecret step. The current
-            // value is NOT rotated and LastRotatedDate is left untouched, but
-            // the Lambda's testSecret step needs an AWSPENDING version to read.
-            // Mirror AWS by staging a temporary AWSPENDING copy of the current
-            // value (keyed by the rotation token) and removing it once the test
-            // completes.
-            if let (Some(arn), Some(current_vid)) =
-                (lambda_arn.as_ref(), secret.current_version_id.clone())
-            {
-                if let Some(cv) = secret.versions.get(&current_vid).cloned() {
-                    secret.versions.insert(
-                        version_id.clone(),
-                        SecretVersion {
-                            version_id: version_id.clone(),
-                            secret_string: reseal_secret_string(
-                                self.kms_hook.as_deref(),
-                                &req.account_id,
-                                &req.region,
-                                &secret.arn,
-                                &cv.version_id,
-                                &version_id,
-                                secret.kms_key_id.as_deref(),
-                                cv.secret_string.clone(),
-                            ),
-                            secret_binary: cv.secret_binary.clone(),
-                            stages: vec!["AWSPENDING".to_string()],
-                            created_at: now,
-                        },
-                    );
-                    invocation = Some(RotationInvocation {
-                        lambda_arn: arn.clone(),
-                        secret_id: secret.arn.clone(),
-                        client_request_token: version_id.clone(),
-                        steps: vec!["testSecret"],
-                        cleanup_pending: Some(PendingCleanup {
-                            account_id: req.account_id.clone(),
-                            region: req.region.clone(),
-                            secret_name: secret.name.clone(),
-                            version_id: version_id.clone(),
-                        }),
-                    });
-                }
+            (Some((current_vid, _)), None, Some(values)) => {
+                // Without Lambda: simple rotation - new version becomes AWSCURRENT.
+                // Move old version to AWSPREVIOUS (kept unique across versions).
+                demote_current_to_previous(&mut secret.versions, &current_vid);
+                let version = SecretVersion {
+                    version_id: version_id.clone(),
+                    secret_string: values.secret_string,
+                    secret_binary: values.secret_binary,
+                    stages: vec!["AWSCURRENT".to_string()],
+                    created_at: now,
+                    kms_key_ids: values.kms_key_ids,
+                };
+                secret.versions.insert(version_id.clone(), version);
+                secret.current_version_id = Some(version_id.clone());
+                // Prune deprecated versions (no staging labels) so they
+                // don't leak, matching PutSecretValue / UpdateSecret.
+                secret.versions.retain(|_, v| !v.stages.is_empty());
+                // The value has now actually rotated (synchronously), so
+                // this is the point where LastRotatedDate is stamped. The
+                // Lambda path does not claim completion here because the
+                // rotation runs asynchronously and may not succeed.
+                secret.last_rotated_at = Some(now);
             }
+            (Some(_), Some(arn), Some(values)) => {
+                // RotateImmediately=false with a Lambda: AWS validates the
+                // rotation configuration by running only the testSecret step.
+                // The current value is NOT rotated and LastRotatedDate is left
+                // untouched, but the Lambda's testSecret step needs an
+                // AWSPENDING version to read. Mirror AWS by staging a
+                // temporary AWSPENDING copy of the current value (keyed by the
+                // rotation token) and removing it once the test completes.
+                secret.versions.insert(
+                    version_id.clone(),
+                    SecretVersion {
+                        version_id: version_id.clone(),
+                        secret_string: values.secret_string,
+                        secret_binary: values.secret_binary,
+                        stages: vec!["AWSPENDING".to_string()],
+                        created_at: now,
+                        kms_key_ids: values.kms_key_ids,
+                    },
+                );
+                invocation = Some(RotationInvocation {
+                    lambda_arn: arn,
+                    secret_id: secret.arn.clone(),
+                    client_request_token: version_id.clone(),
+                    steps: vec!["testSecret"],
+                    cleanup_pending: Some(PendingCleanup {
+                        account_id: req.account_id.clone(),
+                        region: req.region.clone(),
+                        secret_name: secret.name.clone(),
+                        version_id: version_id.clone(),
+                    }),
+                });
+            }
+            _ => {}
         }
 
         let response = json!({
@@ -1786,26 +1788,21 @@ impl SecretsManagerService {
                                     "VersionStages": version.stages,
                                     "CreatedDate": version.created_at.timestamp_millis() as f64 / 1000.0,
                                 });
-                                if let Some(ref s) = version.secret_string {
-                                    // Decrypt the same way GetSecretValue does;
-                                    // pushing the raw stored value leaked
-                                    // ciphertext when a KMS hook + KmsKeyId were
-                                    // configured (bug-audit 2026-06-20, 1.10).
-                                    let plaintext = self
-                                        .maybe_decrypt_secret_string(
-                                            req,
-                                            &secret.arn,
-                                            &version.version_id,
-                                            secret.kms_key_id.as_deref(),
-                                            Some(s.as_str()),
-                                        )?
-                                        .unwrap_or_else(|| s.clone());
-                                    entry["SecretString"] = json!(plaintext);
+                                // Decrypted the same way GetSecretValue does;
+                                // a secret KMS will not decrypt is one of the
+                                // batch's Errors, not the batch's failure.
+                                match self.open(req, &secret.arn, version) {
+                                    Ok((string, binary)) => {
+                                        if let Some(s) = string {
+                                            entry["SecretString"] = json!(s);
+                                        }
+                                        if let Some(b) = binary {
+                                            entry["SecretBinary"] = json!(base64_encode(&b));
+                                        }
+                                        secret_values.push(entry);
+                                    }
+                                    Err(err) => errors.push(batch_error_entry(sid, &err)),
                                 }
-                                if let Some(ref b) = version.secret_binary {
-                                    entry["SecretBinary"] = json!(base64_encode(b));
-                                }
-                                secret_values.push(entry);
                             } else {
                                 errors.push(json!({
                                     "SecretId": sid,
@@ -1889,24 +1886,20 @@ impl SecretsManagerService {
                             "VersionStages": version.stages,
                             "CreatedDate": version.created_at.timestamp_millis() as f64 / 1000.0,
                         });
-                        if let Some(ref s) = version.secret_string {
-                            // Decrypt like GetSecretValue; the raw stored value
-                            // is ciphertext under a configured KMS hook (1.10).
-                            let plaintext = self
-                                .maybe_decrypt_secret_string(
-                                    req,
-                                    &secret.arn,
-                                    &version.version_id,
-                                    secret.kms_key_id.as_deref(),
-                                    Some(s.as_str()),
-                                )?
-                                .unwrap_or_else(|| s.clone());
-                            entry["SecretString"] = json!(plaintext);
+                        // Decrypted like GetSecretValue; a secret KMS will
+                        // not decrypt is one of the batch's Errors.
+                        match self.open(req, &secret.arn, version) {
+                            Ok((string, binary)) => {
+                                if let Some(s) = string {
+                                    entry["SecretString"] = json!(s);
+                                }
+                                if let Some(b) = binary {
+                                    entry["SecretBinary"] = json!(base64_encode(&b));
+                                }
+                                secret_values.push(entry);
+                            }
+                            Err(err) => errors.push(batch_error_entry(&secret.name, &err)),
                         }
-                        if let Some(ref b) = version.secret_binary {
-                            entry["SecretBinary"] = json!(base64_encode(b));
-                        }
-                        secret_values.push(entry);
                     } else {
                         no_value_found = true;
                     }
@@ -2697,61 +2690,173 @@ pub(crate) fn resource_policy_allows(
 #[path = "service_tests.rs"]
 mod tests;
 
-/// Encrypt a `SecretString` for storage with the secret's KMS key, when a KMS
-/// hook is wired and the secret has a key; otherwise stored as is. Secrets
-/// Manager binds each version to `{SecretARN, SecretVersionId}` (its
-/// documented encryption context). A KMS refusal fails the write, as on AWS
-/// (see [`crate::value::secrets_manager_kms_error`]).
-/// The stored value of version `from_version` re-sealed for a new version
-/// `to_version` of the same secret: each version's ciphertext is bound to its
-/// own `SecretVersionId`, so a copy (rotation staging the current value as
-/// the new version) is decrypted and encrypted again. A value KMS will not
-/// re-seal is kept as stored (the failure is logged).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn reseal_secret_string(
+/// A `BatchGetSecretValue` `Errors` entry for a secret the batch could not
+/// return.
+fn batch_error_entry(secret_id: &str, err: &AwsServiceError) -> Value {
+    json!({
+        "SecretId": secret_id,
+        "ErrorCode": err.code(),
+        "Message": err.message(),
+    })
+}
+
+/// The staged versions (`AWSCURRENT`, `AWSPENDING`, `AWSPREVIOUS`) of
+/// `secret` re-encrypted under `new_key` (`""` for the AWS-managed key), as
+/// `UpdateSecret` does when it changes a secret's `KmsKeyId`. Recorded: the
+/// version keeps its id and value, its `KmsKeyIds` gains the new key, and a
+/// key KMS refuses fails the call before anything changes. With no version
+/// to re-encrypt (a secret without a value yet, or one already under the
+/// key) the new key is still checked for Secrets Manager's use, so a key KMS
+/// would refuse is refused now, as `CreateSecret` refuses it, rather than at
+/// the first value. Nothing is checked when `new_key` is `None` (no change)
+/// or no KMS hook is wired.
+pub(crate) fn rekey_staged_versions(
     kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
     account_id: &str,
     region: &str,
-    secret_arn: &str,
-    from_version: &str,
-    to_version: &str,
-    kms_key_id: Option<&str>,
-    stored: Option<String>,
-) -> Option<String> {
-    let stored = stored?;
-    if kms_hook.is_none() {
-        return Some(stored);
-    }
-    let resealed = crate::value::decrypt_secret_string(
-        kms_hook,
-        account_id,
-        secret_arn,
-        from_version,
-        kms_key_id,
-        stored.clone(),
-        None,
-    )
-    .and_then(|plaintext| {
-        encrypt_secret_string(
+    secret: &Secret,
+    new_key: Option<&str>,
+    caller_arn: Option<&str>,
+) -> Result<Vec<(String, SealedValues)>, AwsServiceError> {
+    let (Some(new_key), Some(hook)) = (new_key, kms_hook) else {
+        return Ok(Vec::new());
+    };
+    let label = kms_key_label(Some(new_key));
+    let mut rekeyed = Vec::new();
+    for version in secret.versions.values() {
+        if !holds_aws_stage(version) || version.kms_key_ids.last() == Some(&label) {
+            continue;
+        }
+        let (string, binary) = open_values(kms_hook, account_id, &secret.arn, version, caller_arn)?;
+        let values = seal_values(
             kms_hook,
             account_id,
             region,
-            secret_arn,
-            to_version,
-            kms_key_id,
-            Some(plaintext),
-            None,
+            &secret.arn,
+            &version.version_id,
+            Some(new_key),
+            string,
+            binary,
+            caller_arn,
+        )?;
+        rekeyed.push((version.version_id.clone(), values));
+    }
+    if rekeyed.is_empty() {
+        let key = Some(new_key)
+            .filter(|k| !k.is_empty())
+            .unwrap_or("aws/secretsmanager");
+        hook.authorize_key_use(
+            account_id,
+            region,
+            key,
+            fakecloud_core::delivery::KmsCaller::via_for(
+                "secretsmanager.amazonaws.com",
+                caller_arn,
+            ),
+            &["kms:GenerateDataKey"],
+            &[("SecretARN".to_string(), secret.arn.clone())].into(),
         )
-    });
-    match resealed {
-        Ok(value) => value,
-        Err(err) => {
-            tracing::warn!(secret_arn, error = %err.message(), "could not re-seal a secret version");
-            Some(stored)
+        .map_err(|err| crate::value::secrets_manager_kms_error(&err, false))?;
+    }
+    Ok(rekeyed)
+}
+
+/// Change `secret`'s `KmsKeyId` to `new_key` (`""` for the AWS-managed
+/// `aws/secretsmanager` key) the way `UpdateSecret` with only a `KmsKeyId`
+/// does, for a service changing it for a resource (CloudFormation updating
+/// `AWS::SecretsManager::Secret`): the staged versions are re-encrypted
+/// under it (see [`rekey_staged_versions`]) and a key KMS refuses fails
+/// with the secret unchanged.
+pub fn change_secret_kms_key(
+    kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
+    account_id: &str,
+    region: &str,
+    secret: &mut Secret,
+    new_key: &str,
+) -> Result<(), AwsServiceError> {
+    let rekeyed = rekey_staged_versions(kms_hook, account_id, region, secret, Some(new_key), None)?;
+    apply_rekeyed(secret, rekeyed);
+    secret.kms_key_id = Some(new_key).filter(|k| !k.is_empty()).map(str::to_string);
+    Ok(())
+}
+
+/// Store versions re-encrypted by [`rekey_staged_versions`].
+fn apply_rekeyed(secret: &mut Secret, rekeyed: Vec<(String, SealedValues)>) {
+    for (version_id, values) in rekeyed {
+        if let Some(version) = secret.versions.get_mut(&version_id) {
+            version.secret_string = values.secret_string;
+            version.secret_binary = values.secret_binary;
+            let mut ids = std::mem::take(&mut version.kms_key_ids);
+            for id in values.kms_key_ids {
+                if ids.last() != Some(&id) {
+                    ids.push(id);
+                }
+            }
+            version.kms_key_ids = ids;
         }
     }
 }
 
+/// What `ListSecretVersionIds` reports for a version encrypted under
+/// `kms_key_id` (`KmsKeyIds`): the key as the secret names it, or
+/// `DefaultEncryptionKey` for the AWS-managed `aws/secretsmanager` key
+/// (recorded).
+pub(crate) fn kms_key_label(kms_key_id: Option<&str>) -> String {
+    kms_key_id
+        .filter(|k| !k.is_empty())
+        .unwrap_or("DefaultEncryptionKey")
+        .to_string()
+}
+
+/// A version's values as stored: each sealed under the secret's KMS key
+/// (when a KMS hook is wired), and the keys they were sealed under.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SealedValues {
+    pub secret_string: Option<String>,
+    pub secret_binary: Option<Vec<u8>>,
+    pub kms_key_ids: Vec<String>,
+}
+
+/// Encrypt `plaintext` for version `version_id` of `secret_arn` under
+/// `kms_key_id` (the region's AWS-managed `aws/secretsmanager` key when none
+/// is set, created on first use), bound to `{SecretARN, SecretVersionId}`,
+/// Secrets Manager's documented encryption context. `None` when no KMS hook
+/// is wired. A KMS refusal fails the write, as on AWS (see
+/// [`crate::value::secrets_manager_kms_error`]).
+#[allow(clippy::too_many_arguments)]
+fn encrypt_secret_bytes(
+    kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
+    account_id: &str,
+    region: &str,
+    secret_arn: &str,
+    version_id: &str,
+    kms_key_id: Option<&str>,
+    plaintext: &[u8],
+    caller_arn: Option<&str>,
+) -> Result<Option<String>, AwsServiceError> {
+    let Some(hook) = kms_hook else {
+        return Ok(None);
+    };
+    let key = kms_key_id
+        .filter(|k| !k.is_empty())
+        .unwrap_or("aws/secretsmanager");
+    hook.encrypt(
+        account_id,
+        region,
+        key,
+        plaintext,
+        fakecloud_core::delivery::KmsCaller::via_for("secretsmanager.amazonaws.com", caller_arn),
+        crate::value::secret_encryption_context(secret_arn, version_id),
+    )
+    .map(Some)
+    .map_err(|err| {
+        tracing::warn!(secret_arn = %secret_arn, error = %err, "KMS encrypt failed for secret");
+        crate::value::secrets_manager_kms_error(&err, false)
+    })
+}
+
+/// Seal a `SecretString` (see [`encrypt_secret_bytes`]); stored as is when
+/// no KMS hook is wired.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encrypt_secret_string(
     kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
@@ -2766,27 +2871,133 @@ pub(crate) fn encrypt_secret_string(
     let Some(pt) = plaintext else {
         return Ok(None);
     };
-    let Some(hook) = kms_hook else {
-        return Ok(Some(pt));
-    };
-    // A secret with no KmsKeyId is encrypted under the region's AWS-managed
-    // `aws/secretsmanager` key, which exists from that first use.
-    let key = kms_key_id
-        .filter(|k| !k.is_empty())
-        .unwrap_or("aws/secretsmanager");
-    hook.encrypt(
+    Ok(Some(
+        encrypt_secret_bytes(
+            kms_hook,
+            account_id,
+            region,
+            secret_arn,
+            version_id,
+            kms_key_id,
+            pt.as_bytes(),
+            caller_arn,
+        )?
+        .unwrap_or(pt),
+    ))
+}
+
+/// Seal a version's `SecretString` and `SecretBinary` (AWS encrypts both),
+/// recording the key they were sealed under. A sealed `SecretBinary` is
+/// stored as its ciphertext's text.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn seal_values(
+    kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
+    account_id: &str,
+    region: &str,
+    secret_arn: &str,
+    version_id: &str,
+    kms_key_id: Option<&str>,
+    secret_string: Option<String>,
+    secret_binary: Option<Vec<u8>>,
+    caller_arn: Option<&str>,
+) -> Result<SealedValues, AwsServiceError> {
+    let sealed = kms_hook.is_some() && (secret_string.is_some() || secret_binary.is_some());
+    let secret_string = encrypt_secret_string(
+        kms_hook,
         account_id,
         region,
-        key,
-        pt.as_bytes(),
-        fakecloud_core::delivery::KmsCaller::via_for("secretsmanager.amazonaws.com", caller_arn),
-        crate::value::secret_encryption_context(secret_arn, version_id),
-    )
-    .map(Some)
-    .map_err(|err| {
-        tracing::warn!(secret_arn = %secret_arn, error = %err, "KMS encrypt failed for secret");
-        crate::value::secrets_manager_kms_error(&err, false)
+        secret_arn,
+        version_id,
+        kms_key_id,
+        secret_string,
+        caller_arn,
+    )?;
+    let secret_binary = match secret_binary {
+        Some(bytes) => Some(
+            match encrypt_secret_bytes(
+                kms_hook, account_id, region, secret_arn, version_id, kms_key_id, &bytes,
+                caller_arn,
+            )? {
+                Some(ciphertext) => ciphertext.into_bytes(),
+                None => bytes,
+            },
+        ),
+        None => None,
+    };
+    Ok(SealedValues {
+        secret_string,
+        secret_binary,
+        kms_key_ids: if sealed {
+            vec![kms_key_label(kms_key_id)]
+        } else {
+            Vec::new()
+        },
     })
+}
+
+/// The plaintext values of a stored version (see
+/// [`crate::value::decrypt_secret_string`]): a ciphertext that does not open
+/// fails, a value stored before encryption reads as stored.
+pub(crate) fn open_values(
+    kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
+    account_id: &str,
+    secret_arn: &str,
+    version: &SecretVersion,
+    caller_arn: Option<&str>,
+) -> Result<(Option<String>, Option<Vec<u8>>), AwsServiceError> {
+    let string = version
+        .secret_string
+        .clone()
+        .map(|stored| {
+            crate::value::decrypt_secret_string(
+                kms_hook,
+                account_id,
+                secret_arn,
+                &version.version_id,
+                None,
+                stored,
+                caller_arn,
+            )
+        })
+        .transpose()?;
+    let binary = version
+        .secret_binary
+        .clone()
+        .map(|stored| {
+            crate::value::decrypt_secret_binary(
+                kms_hook,
+                account_id,
+                secret_arn,
+                &version.version_id,
+                stored,
+                caller_arn,
+            )
+        })
+        .transpose()?;
+    Ok((string, binary))
+}
+
+/// Version `from` of `from_arn` re-sealed as version `to_version` of
+/// `to_arn` under `to_key` in `to_region`: each ciphertext is bound to its
+/// secret and version, so a copy (rotation staging the current value as a new
+/// version, a replica in another region) is decrypted and encrypted again.
+/// A value KMS will not open or seal fails the copy, never copies the
+/// ciphertext.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reseal_version(
+    kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
+    account_id: &str,
+    from_arn: &str,
+    from: &SecretVersion,
+    to_region: &str,
+    to_arn: &str,
+    to_version: &str,
+    to_key: Option<&str>,
+) -> Result<SealedValues, AwsServiceError> {
+    let (string, binary) = open_values(kms_hook, account_id, from_arn, from, None)?;
+    seal_values(
+        kms_hook, account_id, to_region, to_arn, to_version, to_key, string, binary, None,
+    )
 }
 
 /// Bring every replicated secret's replicas in line with their primary (see
@@ -2812,6 +3023,16 @@ pub fn sync_all_replicas(
     }
 }
 
+/// Whether `version` holds one of the staging labels Secrets Manager manages
+/// itself (`AWSCURRENT`, `AWSPENDING`, `AWSPREVIOUS`): the versions a
+/// `KmsKeyId` change re-encrypts and a replica must hold.
+fn holds_aws_stage(version: &SecretVersion) -> bool {
+    version
+        .stages
+        .iter()
+        .any(|s| matches!(s.as_str(), "AWSCURRENT" | "AWSPENDING" | "AWSPREVIOUS"))
+}
+
 /// Bring every replica of the primary secret `name` in (`account`,
 /// `region`) in line with it: create missing replicas, refresh existing
 /// ones (values, staging labels, description, tags, resource policy,
@@ -2835,6 +3056,7 @@ pub fn sync_replicas(
         return;
     };
     let mut failures: Vec<(String, String)> = Vec::new();
+    let mut synced: Vec<String> = Vec::new();
     for replica_region in &primary.replica_regions {
         let setting = primary
             .replica_settings
@@ -2859,52 +3081,80 @@ pub fn sync_replicas(
         replica.replica_regions = Vec::new();
         replica.replica_settings = BTreeMap::new();
         replica.kms_key_id = setting.kms_key_id.clone();
+        let existing_versions = existing.map(|s| s.versions.clone()).unwrap_or_default();
         if let Some(existing) = existing {
             replica.created_at = existing.created_at;
             replica.last_accessed_at = existing.last_accessed_at;
         }
+        // Each version is re-sealed for the replica, under the replica's key
+        // in its region; the primary's ciphertext is never copied. A version
+        // holding AWSCURRENT, AWSPENDING or AWSPREVIOUS must replicate: one
+        // KMS will not re-seal fails the replica (its status is `Failed`).
+        // Those are the versions a KmsKeyId change re-encrypts; a version
+        // holding only other labels stays under the key it was sealed with,
+        // so once that key is refused it no longer opens in the primary
+        // either. Such a version keeps the copy the replica already holds
+        // (sealed under the replica's key when it could still be opened), or
+        // is left out of a replica that never held it, instead of failing
+        // the replica over a value nobody can read.
+        let mut resealed = Ok(());
+        let mut unopenable: Vec<String> = Vec::new();
         for version in replica.versions.values_mut() {
-            // A version KMS will not re-seal for the replica (its key is
-            // refused or gone) keeps what it holds; the failure is logged.
-            let Some(stored) = version.secret_string.clone() else {
-                continue;
-            };
-            let resealed = crate::value::decrypt_secret_string(
+            match reseal_version(
                 kms_hook,
                 account,
                 &primary.arn,
-                &version.version_id,
-                primary.kms_key_id.as_deref(),
-                stored,
-                None,
-            )
-            .and_then(|plaintext| {
-                encrypt_secret_string(
-                    kms_hook,
-                    account,
-                    replica_region,
-                    &replica_arn,
-                    &version.version_id,
-                    setting.kms_key_id.as_deref(),
-                    Some(plaintext),
-                    None,
-                )
-            });
-            match resealed {
-                Ok(value) => version.secret_string = value,
-                Err(err) => tracing::warn!(
-                    secret_arn = %replica_arn,
-                    error = %err.message(),
-                    "could not re-encrypt a secret version for its replica"
-                ),
+                &version.clone(),
+                replica_region,
+                &replica_arn,
+                &version.version_id.clone(),
+                setting.kms_key_id.as_deref(),
+            ) {
+                Ok(values) => {
+                    version.secret_string = values.secret_string;
+                    version.secret_binary = values.secret_binary;
+                    version.kms_key_ids = values.kms_key_ids;
+                }
+                Err(err) if holds_aws_stage(version) => {
+                    resealed = Err(err);
+                    break;
+                }
+                Err(_) => match existing_versions.get(&version.version_id) {
+                    Some(held) => {
+                        version.secret_string = held.secret_string.clone();
+                        version.secret_binary = held.secret_binary.clone();
+                        version.kms_key_ids = held.kms_key_ids.clone();
+                    }
+                    None => unopenable.push(version.version_id.clone()),
+                },
             }
         }
+        for version_id in unopenable {
+            replica.versions.remove(&version_id);
+        }
+        if let Err(err) = resealed {
+            failures.push((
+                replica_region.clone(),
+                format!("Replication failed: {}", err.message()),
+            ));
+            continue;
+        }
         target.secrets.insert(name.to_string(), replica);
+        synced.push(replica_region.clone());
     }
     if let Some(primary) = accounts
         .regional_get_mut(account, region)
         .and_then(|s| s.secrets.get_mut(name))
     {
+        // A replica that failed before and now holds the primary's value is
+        // in sync again.
+        for replica_region in synced {
+            if let Some(setting) = primary.replica_settings.get_mut(&replica_region) {
+                if !setting.is_in_sync() {
+                    *setting = ReplicaSetting::in_sync(setting.kms_key_id.clone());
+                }
+            }
+        }
         for (replica_region, message) in failures {
             if let Some(setting) = primary.replica_settings.get_mut(&replica_region) {
                 setting.status = "Failed".to_string();

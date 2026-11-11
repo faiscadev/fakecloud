@@ -83,6 +83,13 @@ pub struct SecretVersion {
     pub secret_binary: Option<Vec<u8>>,
     pub stages: Vec<String>,
     pub created_at: DateTime<Utc>,
+    /// The KMS keys the version's value has been encrypted under, as
+    /// `ListSecretVersionIds` reports them (`KmsKeyIds`): the secret's
+    /// `KmsKeyId` as given, or `DefaultEncryptionKey` for the AWS-managed
+    /// key, a new entry each time `UpdateSecret` re-encrypts it under
+    /// another key (recorded). Empty for a value stored unencrypted.
+    #[serde(default)]
+    pub kms_key_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
