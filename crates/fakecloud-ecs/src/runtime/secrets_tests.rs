@@ -79,7 +79,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let hook: Arc<dyn fakecloud_core::delivery::KmsHook> = Arc::new(PrefixKmsHook);
+        Self::with_hook(Arc::new(PrefixKmsHook))
+    }
+
+    fn with_hook(hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
         let sm_state: SharedSecretsManagerState = Arc::new(RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new(ACCOUNT, REGION, ""),
         ));
@@ -447,6 +450,67 @@ async fn missing_ssm_parameter_fails_with_the_agent_reason() {
         "ResourceInitializationError: unable to pull secrets or registry auth: execution \
          resource retrieval failed: unable to retrieve secrets from ssm: fetching secret data \
          from SSM Parameter Store: invalid parameters: /nope"
+    );
+}
+
+/// Seals like [`PrefixKmsHook`], but its key is disabled: nothing it sealed
+/// opens again.
+struct DisabledKeyKms;
+impl fakecloud_core::delivery::KmsHook for DisabledKeyKms {
+    fn encrypt(
+        &self,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        plaintext: &[u8],
+        caller: fakecloud_core::delivery::KmsCaller<'_>,
+        ctx: HashMap<String, String>,
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
+        fakecloud_core::delivery::KmsHook::encrypt(
+            &PrefixKmsHook,
+            account_id,
+            region,
+            key_id,
+            plaintext,
+            caller,
+            ctx,
+        )
+    }
+    fn decrypt(
+        &self,
+        _account_id: &str,
+        _ciphertext: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
+        _ctx: HashMap<String, String>,
+    ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+        Err(fakecloud_core::delivery::KmsError::new(
+            fakecloud_core::delivery::KmsErrorKind::Disabled,
+            "key is disabled",
+        ))
+    }
+    fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+        stored.starts_with("ENC:")
+    }
+}
+
+/// A SecureString KMS will not decrypt is, through `GetParameters`, one of
+/// the `InvalidParameters` like a missing name (recorded in
+/// `fakecloud-codebuild/tests/fixtures/env-var-resolution-direct-reads.txt`),
+/// so the agent fails the task with the same reason.
+#[tokio::test]
+async fn undecryptable_ssm_parameter_fails_like_a_missing_one() {
+    let f = Fixture::with_hook(Arc::new(DisabledKeyKms));
+    f.ssm_call(
+        "PutParameter",
+        ACCOUNT,
+        json!({"Name": "/app/db-password", "Value": "s3cret", "Type": "SecureString"}),
+    )
+    .await;
+    assert_eq!(
+        f.resolve("/app/db-password").unwrap_err(),
+        "ResourceInitializationError: unable to pull secrets or registry auth: execution \
+         resource retrieval failed: unable to retrieve secrets from ssm: fetching secret data \
+         from SSM Parameter Store: invalid parameters: /app/db-password"
     );
 }
 

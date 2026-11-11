@@ -2717,7 +2717,10 @@ pub struct ParameterValue {
 /// parameter in another region), where a parameter owned by another account
 /// is readable only when a resource policy on it (the sharing
 /// `PutResourcePolicy` creates) allows the caller `ssm:GetParameters`. A
-/// missing parameter, version or label is `ParameterNotFound`.
+/// missing parameter, version or label is `ParameterNotFound`, and so is a
+/// `SecureString` KMS will not decrypt: `GetParameters` lists it under
+/// `InvalidParameters` like a missing name (recorded in
+/// `fakecloud-codebuild/tests/fixtures/env-var-resolution-direct-reads.txt`).
 pub fn read_parameter_value(
     state: &crate::state::SharedSsmState,
     kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
@@ -2822,7 +2825,11 @@ pub fn read_parameter_value(
     // A service reading a parameter for a resource (ECS, Lambda) acts with
     // that resource's role, an identity of the account.
     let value_text =
-        decrypt_parameter_value(kms_hook, &owner_account, &param_arn, &value.value, None)?;
+        decrypt_parameter_value(kms_hook, &owner_account, &param_arn, &value.value, None)
+            .map_err(|err| {
+                tracing::warn!(parameter = %param_arn, error = %err.message(), "SecureString not decryptable");
+                param_not_found(name)
+            })?;
     Ok(ParameterValue {
         value: value_text,
         ..value
