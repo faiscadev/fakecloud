@@ -1240,8 +1240,18 @@ async fn main() {
                 lambda_durable.clone(),
             )) as Arc<dyn fakecloud_core::delivery::LambdaDelivery>
         });
+    // CloudWatch state must be constructed before the SNS / EventBridge /
+    // Logs deliveries so they can publish their AWS/* metrics (SNS delivery
+    // failures, EventBridge failed invocations, Logs metric filters) into it.
+    let cloudwatch_state: fakecloud_cloudwatch::SharedCloudWatchState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new()),
+    );
     let delivery_for_sns = {
-        let mut bus = DeliveryBus::new().with_sqs(sqs_delivery.clone());
+        let mut bus = DeliveryBus::new()
+            .with_sqs(sqs_delivery.clone())
+            .with_cloudwatch_metrics(Arc::new(fakecloud_cloudwatch::CloudwatchDeliveryImpl::new(
+                cloudwatch_state.clone(),
+            )));
         if let Some(ref ld) = lambda_delivery {
             bus = bus.with_lambda(ld.clone());
         }
@@ -1384,6 +1394,9 @@ async fn main() {
     let delivery_for_eb = {
         let mut bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
+            .with_cloudwatch_metrics(Arc::new(fakecloud_cloudwatch::CloudwatchDeliveryImpl::new(
+                cloudwatch_state.clone(),
+            )))
             .with_sns(sns_delivery.clone())
             .with_kinesis(kinesis_delivery_for_eb.clone())
             .with_stepfunctions(sfn_delivery_for_eb);
@@ -1430,11 +1443,6 @@ async fn main() {
         }
         Arc::new(bus)
     };
-    // CloudWatch state must be constructed before logs delivery so
-    // CloudWatch Logs metric filters can publish data points into it.
-    let cloudwatch_state: fakecloud_cloudwatch::SharedCloudWatchState = Arc::new(
-        parking_lot::RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new()),
-    );
     // Step 4: Logs delivery (subscription filters can push to SQS, Lambda, and Kinesis;
     // metric filters publish CloudWatch metric data points)
     let kinesis_delivery = fakecloud_kinesis::delivery::KinesisDeliveryImpl::with_dirty_flag(
@@ -6545,6 +6553,7 @@ async fn main() {
         .with_logs(logs_state.clone())
         .with_s3(s3_delivery_for_codebuild)
         .with_secret_stores(ssm_state_for_codebuild, secretsmanager_state_for_codebuild)
+        .with_kms_hook(kms_hook_for_services.clone())
         .with_backend_autodetect();
     if let Some(store) = codebuild_snapshot_store {
         codebuild_service = codebuild_service.with_snapshot_store(store);

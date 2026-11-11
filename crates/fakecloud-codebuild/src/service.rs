@@ -116,6 +116,9 @@ pub struct CodeBuildService {
     ssm_state: Option<SharedSsmState>,
     /// Secrets Manager state for resolving `SECRETS_MANAGER`-typed env vars.
     secrets_state: Option<SharedSecretsManagerState>,
+    /// Decrypts `SecureString` parameters and secret values a build's
+    /// environment names.
+    kms_hook: Option<Arc<dyn fakecloud_core::delivery::KmsHook>>,
 }
 
 impl CodeBuildService {
@@ -130,6 +133,7 @@ impl CodeBuildService {
             running: Arc::new(Mutex::new(HashMap::new())),
             ssm_state: None,
             secrets_state: None,
+            kms_hook: None,
         }
     }
 
@@ -173,6 +177,11 @@ impl CodeBuildService {
 
     /// Wire SSM + Secrets Manager so `PARAMETER_STORE` / `SECRETS_MANAGER`
     /// build environment variables resolve into the container (like AWS).
+    pub fn with_kms_hook(mut self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
+        self.kms_hook = Some(hook);
+        self
+    }
+
     pub fn with_secret_stores(
         mut self,
         ssm: SharedSsmState,
@@ -1056,6 +1065,7 @@ fn settle_command_execution(record: &mut Value) -> bool {
 fn resolve_env_value(
     ssm: Option<&SharedSsmState>,
     secrets: Option<&SharedSecretsManagerState>,
+    kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
     account: &str,
     region: &str,
     ty: &str,
@@ -1083,10 +1093,20 @@ fn resolve_env_value(
                 return String::new();
             };
             let name = value.trim_start_matches('/');
+            // A SecureString is stored encrypted; the build gets its
+            // plaintext.
             st.parameters
                 .get(&format!("/{name}"))
                 .or_else(|| st.parameters.get(name))
-                .map(|p| p.value.clone())
+                .map(|p| {
+                    if p.param_type == "SecureString" {
+                        fakecloud_ssm::plaintext_parameter_value(
+                            kms_hook, account, &p.arn, &p.value,
+                        )
+                    } else {
+                        p.value.clone()
+                    }
+                })
                 .unwrap_or_default()
         }
         "SECRETS_MANAGER" => {
@@ -1116,13 +1136,22 @@ fn resolve_env_value(
             let Some(vid) = secret.current_version_id.as_ref() else {
                 return String::new();
             };
-            let Some(raw) = secret
+            let Some(stored) = secret
                 .versions
                 .get(vid)
                 .and_then(|v| v.secret_string.clone())
             else {
                 return String::new();
             };
+            // Secret values are stored encrypted; the build gets the
+            // plaintext.
+            let raw = fakecloud_secretsmanager::value::plaintext_secret_string(
+                kms_hook,
+                account,
+                &secret.arn,
+                vid,
+                stored,
+            );
             match json_key {
                 Some(key) => serde_json::from_str::<Value>(&raw)
                     .ok()
@@ -1396,6 +1425,7 @@ impl CodeBuildService {
                 let resolved = resolve_env_value(
                     self.ssm_state.as_ref(),
                     self.secrets_state.as_ref(),
+                    self.kms_hook.as_deref(),
                     account,
                     region,
                     ty,
@@ -3803,6 +3833,7 @@ mod tests {
         resolve_env_value(
             None,
             Some(state),
+            None,
             "000000000000",
             "us-east-1",
             "SECRETS_MANAGER",

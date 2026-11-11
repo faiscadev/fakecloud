@@ -390,6 +390,8 @@ fn put_delivered_object_guarded<G>(
                 chosen.bucket_key_enabled == Some(true),
                 &body,
                 key_id.as_deref(),
+                // The producing service writes with its own access.
+                None,
             )
             .map_err(|e| format!("failed to encrypt object {key} for bucket {bucket}: {e}"))?;
             // The object records the key's ARN, as S3 does (the
@@ -1593,6 +1595,7 @@ mod tests {
     impl fakecloud_core::delivery::SqsDelivery for SqsRecorder {
         fn deliver_to_queue(
             &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
             queue_arn: &str,
             message_body: &str,
             _attributes: &std::collections::HashMap<String, String>,
@@ -1684,6 +1687,7 @@ mod tests {
         impl fakecloud_core::delivery::SqsDelivery for NotificationLockProbe {
             fn deliver_to_queue(
                 &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
                 queue_arn: &str,
                 message_body: &str,
                 _attributes: &std::collections::HashMap<String, String>,

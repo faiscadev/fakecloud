@@ -1755,6 +1755,7 @@ fn make_service_with_sqs_recorder() -> (
     impl SqsDelivery for RecordingSqsDelivery {
         fn deliver_to_queue(
             &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
             queue_arn: &str,
             message_body: &str,
             _attributes: &HashMap<String, String>,

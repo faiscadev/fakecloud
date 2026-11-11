@@ -20,6 +20,7 @@ impl SqsService {
         queue_arn: &str,
         kms_key_id: Option<&str>,
         plaintext: &str,
+        caller_arn: Option<&str>,
     ) -> Result<String, AwsServiceError> {
         let Some(hook) = &self.kms_hook else {
             return Ok(plaintext.to_string());
@@ -36,7 +37,7 @@ impl SqsService {
             region,
             key,
             plaintext.as_bytes(),
-            fakecloud_core::delivery::KmsCaller::via("sqs.amazonaws.com"),
+            fakecloud_core::delivery::KmsCaller::via_for("sqs.amazonaws.com", caller_arn),
             ctx,
         )
         .map_err(|err| {
@@ -74,6 +75,7 @@ impl SqsService {
         account_id: &str,
         queue_arn: &str,
         ciphertext: &str,
+        caller_arn: Option<&str>,
     ) -> Result<String, AwsServiceError> {
         let Some(hook) = &self.kms_hook else {
             return Ok(ciphertext.to_string());
@@ -86,7 +88,7 @@ impl SqsService {
         match hook.decrypt(
             account_id,
             ciphertext,
-            fakecloud_core::delivery::KmsCaller::via("sqs.amazonaws.com"),
+            fakecloud_core::delivery::KmsCaller::via_for("sqs.amazonaws.com", caller_arn),
             ctx,
         ) {
             Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
@@ -272,6 +274,7 @@ impl SqsService {
                 &queue.arn,
                 kms_key_id.as_deref(),
                 &message_body,
+                req.principal.as_ref().map(|p| p.arn.as_str()),
             )?;
             let msg = SqsMessage {
                 message_id: uuid::Uuid::new_v4().to_string(),
@@ -461,6 +464,7 @@ impl SqsService {
                 max_messages,
                 visibility_timeout,
                 receive_request_attempt_id.as_deref(),
+                req.principal.as_ref().map(|p| p.arn.as_str()),
             )?;
 
             if !result.is_empty() || deadline.is_none() {
@@ -488,6 +492,7 @@ impl SqsService {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn try_receive_messages(
         &self,
         account_id: &str,
@@ -496,6 +501,7 @@ impl SqsService {
         max_messages: usize,
         req_visibility_timeout: Option<i64>,
         receive_request_attempt_id: Option<&str>,
+        caller_arn: Option<&str>,
     ) -> Result<Vec<SqsMessage>, AwsServiceError> {
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(account_id, region);
@@ -537,6 +543,7 @@ impl SqsService {
                                     account_id,
                                     msg.sealing_queue(&queue_arn),
                                     &msg.body,
+                                    caller_arn,
                                 )?;
                             }
                         }
@@ -741,6 +748,7 @@ impl SqsService {
                     account_id,
                     msg.sealing_queue(&queue_arn),
                     &msg.body,
+                    caller_arn,
                 ) {
                     Ok(plaintext) => plaintext_bodies.push(plaintext),
                     Err(e) => {
@@ -1268,6 +1276,7 @@ impl SqsService {
                         &queue_arn,
                         kms_key_id.as_deref(),
                         body.unwrap(),
+                        req.principal.as_ref().map(|p| p.arn.as_str()),
                     )?;
                     stored_overrides.push(Some(stored));
                 } else {

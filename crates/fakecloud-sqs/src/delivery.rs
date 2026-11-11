@@ -5,7 +5,9 @@ use std::sync::Arc;
 use base64::Engine;
 use chrono::Utc;
 
-use fakecloud_core::delivery::{SqsDelivery, SqsDeliveryError, SqsMessageAttribute};
+use fakecloud_core::delivery::{
+    DeliverySender, SqsDelivery, SqsDeliveryError, SqsMessageAttribute,
+};
 
 use crate::state::{MessageAttribute, SharedSqsState, SqsMessage};
 
@@ -52,6 +54,27 @@ impl SqsDeliveryImpl {
     }
 }
 
+/// How SQS calls KMS for a message from `sender`: a service principal
+/// (SNS, S3, EventBridge) acts itself through SQS, so the key policy must
+/// name it; an identity of the account uses the key through SQS.
+fn kms_caller(sender: DeliverySender<'_>) -> fakecloud_core::delivery::KmsCaller<'_> {
+    match sender {
+        DeliverySender::Service {
+            principal,
+            source_arn,
+            source_account,
+        } => fakecloud_core::delivery::KmsCaller::Service {
+            service_principal: principal,
+            source_arn,
+            source_account,
+            via_service: Some("sqs.amazonaws.com"),
+        },
+        DeliverySender::Identity { arn } => {
+            fakecloud_core::delivery::KmsCaller::via_for("sqs.amazonaws.com", arn)
+        }
+    }
+}
+
 impl SqsDelivery for SqsDeliveryImpl {
     fn queue_arn_for_url(&self, region: &str, queue_url: &str) -> Option<String> {
         let mut segments = queue_url.trim_end_matches('/').rsplit('/');
@@ -77,17 +100,64 @@ impl SqsDelivery for SqsDeliveryImpl {
         found.next().is_none().then_some(only)
     }
 
+    fn check_sender(
+        &self,
+        sender: DeliverySender<'_>,
+        queue_arn: &str,
+    ) -> Result<(), SqsDeliveryError> {
+        let Some(hook) = &self.kms_hook else {
+            return Ok(());
+        };
+        let (Some(account), Some(region)) = (
+            fakecloud_aws::arn::account_of(queue_arn),
+            fakecloud_aws::arn::region_of(queue_arn),
+        ) else {
+            return Ok(());
+        };
+        let key = {
+            let accounts = self.state.read();
+            accounts
+                .regional(account, region)
+                .and_then(|s| s.queues.values().find(|q| q.arn == queue_arn))
+                .and_then(|q| q.attributes.get("KmsMasterKeyId").cloned())
+                .filter(|k| !k.is_empty())
+        };
+        let Some(key) = key else {
+            return Ok(());
+        };
+        let ctx = HashMap::from([("aws:sqs:arn".to_string(), queue_arn.to_string())]);
+        hook.authorize_key_use(
+            account,
+            region,
+            &key,
+            kms_caller(sender),
+            &["kms:GenerateDataKey"],
+            &ctx,
+        )
+        .map(|_| ())
+        .map_err(SqsDeliveryError::Kms)
+    }
+
     fn deliver_to_queue(
         &self,
+        sender: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         _attributes: &HashMap<String, String>,
     ) {
-        self.deliver_to_queue_with_attrs(queue_arn, message_body, &HashMap::new(), None, None);
+        self.deliver_to_queue_with_attrs(
+            sender,
+            queue_arn,
+            message_body,
+            &HashMap::new(),
+            None,
+            None,
+        );
     }
 
     fn deliver_to_queue_with_attrs(
         &self,
+        sender: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         message_attributes: &HashMap<String, SqsMessageAttribute>,
@@ -95,6 +165,7 @@ impl SqsDelivery for SqsDeliveryImpl {
         message_dedup_id: Option<&str>,
     ) {
         if let Err(err) = self.try_deliver_to_queue_with_attrs(
+            sender,
             queue_arn,
             message_body,
             message_attributes,
@@ -107,6 +178,7 @@ impl SqsDelivery for SqsDeliveryImpl {
 
     fn try_deliver_to_queue_with_attrs(
         &self,
+        sender: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         message_attributes: &HashMap<String, SqsMessageAttribute>,
@@ -223,14 +295,10 @@ impl SqsDelivery for SqsDeliveryImpl {
                     &region,
                     key,
                     message_body.as_bytes(),
-                    fakecloud_core::delivery::KmsCaller::via("sqs.amazonaws.com"),
+                    kms_caller(sender),
                     ctx,
                 )
-                .map_err(|e| {
-                    SqsDeliveryError::InvalidParameter(format!(
-                        "SQS SSE-KMS encrypt failed for {queue_arn_owned}: {e}"
-                    ))
-                })?
+                .map_err(SqsDeliveryError::Kms)?
             }
             _ => message_body.to_string(),
         };
@@ -370,6 +438,46 @@ mod tests {
         }
     }
 
+    /// SNS (and the other service-principal producers) cannot deliver into
+    /// a queue under the AWS-managed `aws/sqs` key, whose policy admits only
+    /// callers of the account; an identity of the account can. The dry-run
+    /// check S3 validates destinations with agrees.
+    #[test]
+    fn service_principals_cannot_use_an_aws_sqs_queue() {
+        let mut queue = make_queue("managed", false, false);
+        queue
+            .attributes
+            .insert("KmsMasterKeyId".to_string(), "alias/aws/sqs".to_string());
+        let arn = queue.arn.clone();
+        let state = make_state_with_queue(queue);
+        let (_kms, hook) = fakecloud_kms::test_support::kms_hook(ACCOUNT);
+        let delivery = SqsDeliveryImpl::new(state).with_kms_hook(hook);
+        let topic = format!("arn:aws:sns:{REGION}:{ACCOUNT}:t");
+        let sns = DeliverySender::Service {
+            principal: "sns.amazonaws.com",
+            source_arn: &topic,
+            source_account: ACCOUNT,
+        };
+        let err = delivery
+            .try_deliver_to_queue_with_attrs(sns, &arn, "x", &HashMap::new(), None, None)
+            .unwrap_err();
+        assert!(
+            matches!(&err, SqsDeliveryError::Kms(e)
+                if e.kind == fakecloud_core::delivery::KmsErrorKind::AccessDenied
+                    && e.message.starts_with("Service: sns.amazonaws.com is not authorized to perform: kms:GenerateDataKey")),
+            "{err}"
+        );
+        assert!(matches!(
+            delivery.check_sender(sns, &arn),
+            Err(SqsDeliveryError::Kms(_))
+        ));
+        let account = DeliverySender::Identity { arn: None };
+        delivery
+            .try_deliver_to_queue_with_attrs(account, &arn, "x", &HashMap::new(), None, None)
+            .unwrap();
+        delivery.check_sender(account, &arn).unwrap();
+    }
+
     fn make_state_with_queue(queue: SqsQueue) -> SharedSqsState {
         let mut multi: MultiRegionState<SqsState> =
             MultiRegionState::new(ACCOUNT, REGION, ENDPOINT);
@@ -458,7 +566,14 @@ mod tests {
         }
         let delivery = SqsDeliveryImpl::new(state.clone());
         delivery
-            .try_deliver_to_queue_with_attrs(&west_arn, "hello-west", &HashMap::new(), None, None)
+            .try_deliver_to_queue_with_attrs(
+                fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+                &west_arn,
+                "hello-west",
+                &HashMap::new(),
+                None,
+                None,
+            )
             .unwrap();
         let guard = state.read();
         let w = guard.regional(ACCOUNT, "eu-west-1").unwrap();
@@ -470,6 +585,7 @@ mod tests {
         // A queue ARN of a region with no such queue is QueueNotFound.
         let err = delivery
             .try_deliver_to_queue_with_attrs(
+                fakecloud_core::delivery::DeliverySender::Identity { arn: None },
                 &Arn::regional("sqs", "ap-south-1", ACCOUNT, "orders").to_string(),
                 "x",
                 &HashMap::new(),
@@ -487,7 +603,12 @@ mod tests {
         let url = queue.queue_url.clone();
         let state = make_state_with_queue(queue);
         let delivery = SqsDeliveryImpl::new(state.clone());
-        delivery.deliver_to_queue(&arn, "hello", &HashMap::new());
+        delivery.deliver_to_queue(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            &arn,
+            "hello",
+            &HashMap::new(),
+        );
         let guard = state.read();
         let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert_eq!(q.messages.len(), 1);
@@ -504,7 +625,14 @@ mod tests {
         let url = queue.queue_url.clone();
         let state = make_state_with_queue(queue);
         let delivery = SqsDeliveryImpl::new(state.clone());
-        delivery.deliver_to_queue_with_attrs(&arn, "body", &HashMap::new(), Some("g1"), None);
+        delivery.deliver_to_queue_with_attrs(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            &arn,
+            "body",
+            &HashMap::new(),
+            Some("g1"),
+            None,
+        );
         let guard = state.read();
         let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert!(q.messages.is_empty());
@@ -517,7 +645,14 @@ mod tests {
         let url = queue.queue_url.clone();
         let state = make_state_with_queue(queue);
         let delivery = SqsDeliveryImpl::new(state.clone());
-        delivery.deliver_to_queue_with_attrs(&arn, "body", &HashMap::new(), Some("g1"), None);
+        delivery.deliver_to_queue_with_attrs(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            &arn,
+            "body",
+            &HashMap::new(),
+            Some("g1"),
+            None,
+        );
         let guard = state.read();
         let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert_eq!(q.messages.len(), 1);
@@ -531,8 +666,22 @@ mod tests {
         let url = queue.queue_url.clone();
         let state = make_state_with_queue(queue);
         let delivery = SqsDeliveryImpl::new(state.clone());
-        delivery.deliver_to_queue_with_attrs(&arn, "first", &HashMap::new(), Some("g1"), None);
-        delivery.deliver_to_queue_with_attrs(&arn, "second", &HashMap::new(), Some("g1"), None);
+        delivery.deliver_to_queue_with_attrs(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            &arn,
+            "first",
+            &HashMap::new(),
+            Some("g1"),
+            None,
+        );
+        delivery.deliver_to_queue_with_attrs(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            &arn,
+            "second",
+            &HashMap::new(),
+            Some("g1"),
+            None,
+        );
         let guard = state.read();
         let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert_eq!(q.messages.len(), 2);
@@ -559,7 +708,14 @@ mod tests {
         let state = make_state_with_queue(queue);
         let delivery = SqsDeliveryImpl::new(state.clone());
         let err = delivery
-            .try_deliver_to_queue_with_attrs(&arn, "body", &HashMap::new(), Some("g1"), None)
+            .try_deliver_to_queue_with_attrs(
+                fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+                &arn,
+                "body",
+                &HashMap::new(),
+                Some("g1"),
+                None,
+            )
             .expect_err("should reject FIFO send without dedup id");
         assert!(matches!(err, SqsDeliveryError::InvalidParameter(_)));
     }
@@ -572,6 +728,7 @@ mod tests {
         let state = make_state_with_queue(queue);
         let delivery = SqsDeliveryImpl::new(state.clone());
         delivery.deliver_to_queue_with_attrs(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
             &arn,
             "body",
             &HashMap::new(),
@@ -602,7 +759,14 @@ mod tests {
                 binary_value: None,
             },
         );
-        delivery.deliver_to_queue_with_attrs(&arn, "body", &attrs, None, None);
+        delivery.deliver_to_queue_with_attrs(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            &arn,
+            "body",
+            &attrs,
+            None,
+            None,
+        );
         let guard = state.read();
         let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         let msg = q.messages.front().unwrap();
@@ -628,7 +792,14 @@ mod tests {
                 binary_value: Some(encoded),
             },
         );
-        delivery.deliver_to_queue_with_attrs(&arn, "body", &attrs, None, None);
+        delivery.deliver_to_queue_with_attrs(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            &arn,
+            "body",
+            &attrs,
+            None,
+            None,
+        );
         let guard = state.read();
         let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         let msg = q.messages.front().unwrap();
@@ -676,7 +847,12 @@ mod tests {
         let arn = queue.arn.clone();
         let state = make_state_with_queue(queue);
         let delivery = SqsDeliveryImpl::new(state.clone()).with_kms_hook(Arc::new(StubKmsHook));
-        delivery.deliver_to_queue(&arn, "secret-body", &HashMap::new());
+        delivery.deliver_to_queue(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            &arn,
+            "secret-body",
+            &HashMap::new(),
+        );
         let guard = state.read();
         let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert_eq!(q.messages.len(), 1);
@@ -690,7 +866,12 @@ mod tests {
         let arn = queue.arn.clone();
         let state = make_state_with_queue(queue);
         let delivery = SqsDeliveryImpl::new(state.clone()).with_kms_hook(Arc::new(StubKmsHook));
-        delivery.deliver_to_queue(&arn, "plain-body", &HashMap::new());
+        delivery.deliver_to_queue(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            &arn,
+            "plain-body",
+            &HashMap::new(),
+        );
         let guard = state.read();
         let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert_eq!(q.messages[0].body, "plain-body");
@@ -711,7 +892,12 @@ mod tests {
 
         let dirty = Arc::new(AtomicBool::new(false));
         let delivery = SqsDeliveryImpl::new(state.clone()).with_dirty_flag(dirty.clone());
-        delivery.deliver_to_queue(&arn, "fanned-out", &HashMap::new());
+        delivery.deliver_to_queue(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            &arn,
+            "fanned-out",
+            &HashMap::new(),
+        );
         assert!(
             dirty.load(Ordering::Acquire),
             "delivery must mark state dirty for the flusher"
@@ -748,6 +934,7 @@ mod tests {
         let state = make_state_with_queue(queue);
         let delivery = SqsDeliveryImpl::new(state.clone());
         delivery.deliver_to_queue(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
             &Arn::new("sqs", REGION, ACCOUNT, "missing").to_string(),
             "body",
             &HashMap::new(),

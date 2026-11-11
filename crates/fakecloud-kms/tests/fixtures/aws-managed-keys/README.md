@@ -56,5 +56,16 @@ a missing alias. Every resource created for the recording (two queues, two
 topics, one bucket) was deleted afterwards and its absence confirmed; the
 parameters, secrets and tables were refused and never created.
 
+`service-principal-deliveries.txt` records what the producers observe when
+they deliver to an SQS queue encrypted with `alias/aws/sqs` whose queue
+policy allows them: an SNS subscription and an EventBridge rule target
+deliver nothing (the topic's `AWS/SNS` `NumberOfNotificationsFailed` and the
+rule's `AWS/Events` `FailedInvocations` count it a few minutes later), and
+S3 refuses the notification configuration with 400 `InvalidArgument`
+"Unable to validate the following destination configurations"
+(`ArgumentName1` the queue ARN, `ArgumentValue1` "The message to the SSE
+queue could not be encrypted using KMS"). The queue, topic, subscription,
+rule and bucket were deleted afterwards and their absence confirmed.
+
 `../aws-managed-key-refusals.txt` holds the key-management refusals recorded
 against `alias/aws/lambda`'s key.

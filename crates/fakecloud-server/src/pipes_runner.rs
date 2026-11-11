@@ -27,6 +27,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Pipes sends to SQS with the pipe's execution role, an identity of the
+/// account (fakecloud does not mint a session for it).
+const PIPE_SENDER: fakecloud_core::delivery::DeliverySender<'static> =
+    fakecloud_core::delivery::DeliverySender::Identity { arn: None };
+
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -732,7 +737,10 @@ impl PipesRunner {
         });
         let body = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
         if dlq_arn.contains(":sqs:") {
-            self.delivery.send_to_sqs(dlq_arn, &body, &HashMap::new());
+            // Pipes acts with the pipe's execution role, an identity of the
+            // account.
+            self.delivery
+                .send_to_sqs(PIPE_SENDER, dlq_arn, &body, &HashMap::new());
         } else if dlq_arn.contains(":sns:") {
             self.delivery.publish_to_sns(dlq_arn, &body, None);
         }
@@ -895,6 +903,7 @@ impl PipesRunner {
                 let body = event_to_payload(event);
                 if group_id.is_some() || dedup_id.is_some() {
                     self.delivery.send_to_sqs_with_attrs(
+                        PIPE_SENDER,
                         target_arn,
                         &body,
                         &HashMap::new(),
@@ -903,7 +912,7 @@ impl PipesRunner {
                     );
                 } else {
                     self.delivery
-                        .send_to_sqs(target_arn, &body, &HashMap::new());
+                        .send_to_sqs(PIPE_SENDER, target_arn, &body, &HashMap::new());
                 }
             }
             true

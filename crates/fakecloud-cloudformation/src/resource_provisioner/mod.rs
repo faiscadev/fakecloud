@@ -12037,7 +12037,20 @@ mod tests {
             .as_ref()
             .and_then(|vid| secret.versions.get(vid))
             .unwrap();
-        assert_eq!(current.secret_string.as_deref(), Some("new"));
+        // Stored encrypted (under aws/secretsmanager), as CreateSecret /
+        // PutSecretValue store it; its plaintext is the new value.
+        let stored = current.secret_string.clone().unwrap();
+        assert_ne!(stored, "new");
+        assert_eq!(
+            fakecloud_secretsmanager::value::plaintext_secret_string(
+                prov.kms_hook.as_deref(),
+                "123456789012",
+                &secret.arn,
+                &current.version_id,
+                stored,
+            ),
+            "new"
+        );
         assert_eq!(secret.description.as_deref(), Some("updated"));
         let previous_count = secret
             .versions

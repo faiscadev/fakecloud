@@ -37,7 +37,16 @@ pub fn deliver_target(bus: &Arc<DeliveryBus>, schedule: &Schedule) -> Result<(),
         // policy. Use the schedule ARN + fire timestamp so the same
         // schedule can fire repeatedly without being deduplicated.
         let dedup_id = fifo_dedup_id(arn, &schedule.arn);
-        return bus.try_send_to_sqs_with_attrs(arn, body, &attrs, group_id, dedup_id.as_deref());
+        // Scheduler sends with the schedule's execution role, an identity of
+        // the account.
+        return bus.try_send_to_sqs_with_attrs(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            arn,
+            body,
+            &attrs,
+            group_id,
+            dedup_id.as_deref(),
+        );
     }
 
     if arn.contains(":sns:") {
@@ -434,6 +443,7 @@ pub fn route_to_dlq(
     // schedule's DLQ messages fall in its own ordered stream.
     let group_id = dedup_id.as_ref().map(|_| schedule.name.clone());
     if let Err(err) = bus.try_send_to_sqs_with_attrs(
+        fakecloud_core::delivery::DeliverySender::Identity { arn: None },
         &dlq_arn,
         body,
         &attrs,
@@ -535,10 +545,18 @@ mod tests {
     }
 
     impl fakecloud_core::delivery::SqsDelivery for Recorder {
-        fn deliver_to_queue(&self, _arn: &str, _body: &str, _attrs: &HashMap<String, String>) {}
+        fn deliver_to_queue(
+            &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
+            _arn: &str,
+            _body: &str,
+            _attrs: &HashMap<String, String>,
+        ) {
+        }
 
         fn try_deliver_to_queue_with_attrs(
             &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
             queue_arn: &str,
             message_body: &str,
             message_attributes: &HashMap<String, SqsMessageAttribute>,

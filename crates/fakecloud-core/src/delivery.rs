@@ -77,6 +77,11 @@ pub enum SqsDeliveryError {
     /// The target could not take the delivery right now (e.g. a service's
     /// delivery not wired yet at startup).
     TargetUnavailable(String),
+    /// The queue is encrypted and KMS refused to encrypt the message for the
+    /// sender (e.g. an AWS service principal delivering into a queue under
+    /// the AWS-managed `aws/sqs` key, whose policy admits only callers of
+    /// the account).
+    Kms(KmsError),
 }
 
 impl std::fmt::Display for SqsDeliveryError {
@@ -87,16 +92,43 @@ impl std::fmt::Display for SqsDeliveryError {
             Self::InvalidParameter(msg) => write!(f, "invalid parameter: {msg}"),
             Self::AccessDenied(msg) => write!(f, "access denied: {msg}"),
             Self::TargetUnavailable(msg) => write!(f, "target unavailable: {msg}"),
+            Self::Kms(err) => write!(f, "KMS refused the delivery: {err}"),
         }
     }
 }
 
 impl std::error::Error for SqsDeliveryError {}
 
+/// Who sends a message into an SQS queue through the delivery bus, which
+/// decides how SQS calls KMS for an encrypted queue.
+///
+/// AWS services deliver in one of two ways. SNS (topic subscriptions), S3
+/// (event notifications) and EventBridge (rule targets) send as their own
+/// service principal, so the queue's key policy must name that principal
+/// for SQS to encrypt the message; the AWS-managed `aws/sqs` key's policy
+/// admits only callers of the account, so these deliveries fail (recorded).
+/// Scheduler, Pipes, Step Functions, API Gateway and Lambda destinations
+/// send with an IAM role of the account (or the caller's identity), which
+/// `aws/sqs` admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliverySender<'a> {
+    /// An AWS service principal (`sns.amazonaws.com`) acting for its
+    /// resource `source_arn` owned by `source_account`.
+    Service {
+        principal: &'a str,
+        source_arn: &'a str,
+        source_account: &'a str,
+    },
+    /// An IAM identity of the queue's account: the role a service acts as,
+    /// or the caller, named by ARN when known.
+    Identity { arn: Option<&'a str> },
+}
+
 /// Trait for delivering messages to SQS queues.
 pub trait SqsDelivery: Send + Sync {
     fn deliver_to_queue(
         &self,
+        sender: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         attributes: &HashMap<String, String>,
@@ -105,6 +137,7 @@ pub trait SqsDelivery: Send + Sync {
     /// Deliver with message attributes and FIFO fields
     fn deliver_to_queue_with_attrs(
         &self,
+        sender: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         message_attributes: &HashMap<String, SqsMessageAttribute>,
@@ -113,7 +146,21 @@ pub trait SqsDelivery: Send + Sync {
     ) {
         // Default implementation: fall back to simple delivery
         let _ = (message_attributes, message_group_id, message_dedup_id);
-        self.deliver_to_queue(queue_arn, message_body, &HashMap::new());
+        self.deliver_to_queue(sender, queue_arn, message_body, &HashMap::new());
+    }
+
+    /// Whether the queue would take a message from `sender` as far as its
+    /// encryption goes, without delivering one: the check a producer makes
+    /// when it validates a destination (S3 sends a test event when a bucket
+    /// notification configuration names the queue). A queue that does not
+    /// exist (or is not encrypted) passes.
+    fn check_sender(
+        &self,
+        sender: DeliverySender<'_>,
+        queue_arn: &str,
+    ) -> Result<(), SqsDeliveryError> {
+        let _ = (sender, queue_arn);
+        Ok(())
     }
 
     /// The stored ARN of the queue a QueueUrl (`<endpoint>/<account>/<name>`)
@@ -132,8 +179,10 @@ pub trait SqsDelivery: Send + Sync {
     /// fire-and-forget semantics of `deliver_to_queue`); the real SQS
     /// impl overrides this to actually look up the queue and report
     /// `QueueNotFound` so the caller can route to a DLQ.
+    #[allow(clippy::too_many_arguments)]
     fn try_deliver_to_queue_with_attrs(
         &self,
+        sender: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         message_attributes: &HashMap<String, SqsMessageAttribute>,
@@ -141,6 +190,7 @@ pub trait SqsDelivery: Send + Sync {
         message_dedup_id: Option<&str>,
     ) -> Result<(), SqsDeliveryError> {
         self.deliver_to_queue_with_attrs(
+            sender,
             queue_arn,
             message_body,
             message_attributes,
@@ -590,7 +640,13 @@ pub enum KmsKeyUnusable {
 pub enum KmsCaller<'a> {
     /// The service identified by `service_principal` (`s3.amazonaws.com`)
     /// acting for a caller of its API in the request's account.
-    OnBehalfOf { service_principal: &'a str },
+    OnBehalfOf {
+        service_principal: &'a str,
+        /// The ARN of the caller the service acts for (an IAM user or
+        /// assumed role of the account), whom KMS names in a refusal.
+        /// `None` when the service knows no identity (the account itself).
+        caller_arn: Option<&'a str>,
+    },
     /// The service principal itself (`ses.us-east-1.amazonaws.com`) acting
     /// for its resource `source_arn` owned by `source_account` (the
     /// `aws:SourceArn` / `aws:SourceAccount` of the request).
@@ -598,20 +654,37 @@ pub enum KmsCaller<'a> {
         service_principal: &'a str,
         source_arn: &'a str,
         source_account: &'a str,
+        /// The service that makes the KMS call on the principal's behalf,
+        /// when it is not the principal's own (SQS encrypting a message SNS
+        /// delivers: `sqs.amazonaws.com`); it sets `kms:ViaService`.
+        via_service: Option<&'a str>,
     },
 }
 
 impl<'a> KmsCaller<'a> {
-    /// A service calling KMS on behalf of its caller (see
-    /// [`KmsCaller::OnBehalfOf`]).
+    /// A service calling KMS on behalf of the account, with no known caller
+    /// identity (see [`KmsCaller::OnBehalfOf`]).
     pub fn via(service_principal: &'a str) -> Self {
-        KmsCaller::OnBehalfOf { service_principal }
+        KmsCaller::OnBehalfOf {
+            service_principal,
+            caller_arn: None,
+        }
+    }
+
+    /// A service calling KMS on behalf of the caller `caller_arn` of its API.
+    pub fn via_for(service_principal: &'a str, caller_arn: Option<&'a str>) -> Self {
+        KmsCaller::OnBehalfOf {
+            service_principal,
+            caller_arn,
+        }
     }
 
     /// The service principal the call is recorded under.
     pub fn service_principal(&self) -> &'a str {
         match self {
-            KmsCaller::OnBehalfOf { service_principal }
+            KmsCaller::OnBehalfOf {
+                service_principal, ..
+            }
             | KmsCaller::Service {
                 service_principal, ..
             } => service_principal,
@@ -1358,21 +1431,36 @@ impl DeliveryBus {
             .queue_arn_for_url(region, queue_url)
     }
 
+    /// Whether the queue `queue_arn` would take a message from `sender` (see
+    /// [`SqsDelivery::check_sender`]). Passes when no SQS is wired.
+    pub fn check_sqs_sender(
+        &self,
+        sender: DeliverySender<'_>,
+        queue_arn: &str,
+    ) -> Result<(), SqsDeliveryError> {
+        match self.sqs_sender {
+            Some(ref s) => s.check_sender(sender, queue_arn),
+            None => Ok(()),
+        }
+    }
+
     /// Send a message to an SQS queue identified by ARN.
     pub fn send_to_sqs(
         &self,
+        from: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         attributes: &HashMap<String, String>,
     ) {
         if let Some(ref sender) = self.sqs_sender {
-            sender.deliver_to_queue(queue_arn, message_body, attributes);
+            sender.deliver_to_queue(from, queue_arn, message_body, attributes);
         }
     }
 
     /// Send a message to an SQS queue with message attributes and FIFO fields.
     pub fn send_to_sqs_with_attrs(
         &self,
+        from: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         message_attributes: &HashMap<String, SqsMessageAttribute>,
@@ -1381,6 +1469,7 @@ impl DeliveryBus {
     ) {
         if let Some(ref sender) = self.sqs_sender {
             sender.deliver_to_queue_with_attrs(
+                from,
                 queue_arn,
                 message_body,
                 message_attributes,
@@ -1396,6 +1485,7 @@ impl DeliveryBus {
     /// matching the "target unreachable" semantics Scheduler relies on.
     pub fn try_send_to_sqs_with_attrs(
         &self,
+        from: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         message_attributes: &HashMap<String, SqsMessageAttribute>,
@@ -1404,6 +1494,7 @@ impl DeliveryBus {
     ) -> Result<(), SqsDeliveryError> {
         match self.sqs_sender {
             Some(ref sender) => sender.try_deliver_to_queue_with_attrs(
+                from,
                 queue_arn,
                 message_body,
                 message_attributes,
@@ -1532,6 +1623,7 @@ mod tests {
     impl SqsDelivery for MockSqs {
         fn deliver_to_queue(
             &self,
+            _sender: DeliverySender<'_>,
             _queue_arn: &str,
             _message_body: &str,
             _attributes: &HashMap<String, String>,
@@ -1597,7 +1689,12 @@ mod tests {
     fn delivery_bus_new_has_no_senders() {
         let bus = DeliveryBus::new();
         // Calling methods without senders should be no-ops
-        bus.send_to_sqs("arn:queue", "body", &HashMap::new());
+        bus.send_to_sqs(
+            DeliverySender::Identity { arn: None },
+            "arn:queue",
+            "body",
+            &HashMap::new(),
+        );
         bus.publish_to_sns("arn:topic", "msg", None);
         let _ = bus.put_event_to_eventbridge(&test_event("src", "default"));
         bus.send_to_kinesis("arn:stream", "data", "pk");
@@ -1608,7 +1705,12 @@ mod tests {
     #[test]
     fn delivery_bus_default_is_same_as_new() {
         let bus = DeliveryBus::default();
-        bus.send_to_sqs("arn:q", "b", &HashMap::new());
+        bus.send_to_sqs(
+            DeliverySender::Identity { arn: None },
+            "arn:q",
+            "b",
+            &HashMap::new(),
+        );
     }
 
     #[test]
@@ -1618,10 +1720,20 @@ mod tests {
         });
         let bus = DeliveryBus::new().with_sqs(mock.clone());
 
-        bus.send_to_sqs("arn:queue", "msg", &HashMap::new());
+        bus.send_to_sqs(
+            DeliverySender::Identity { arn: None },
+            "arn:queue",
+            "msg",
+            &HashMap::new(),
+        );
         assert_eq!(mock.call_count.load(Ordering::SeqCst), 1);
 
-        bus.send_to_sqs("arn:queue2", "msg2", &HashMap::new());
+        bus.send_to_sqs(
+            DeliverySender::Identity { arn: None },
+            "arn:queue2",
+            "msg2",
+            &HashMap::new(),
+        );
         assert_eq!(mock.call_count.load(Ordering::SeqCst), 2);
     }
 
@@ -1641,7 +1753,14 @@ mod tests {
                 binary_value: None,
             },
         );
-        bus.send_to_sqs_with_attrs("arn:q", "body", &attrs, Some("group"), Some("dedup"));
+        bus.send_to_sqs_with_attrs(
+            DeliverySender::Identity { arn: None },
+            "arn:q",
+            "body",
+            &attrs,
+            Some("group"),
+            Some("dedup"),
+        );
         assert_eq!(mock.call_count.load(Ordering::SeqCst), 1);
     }
 
@@ -1714,7 +1833,12 @@ mod tests {
             .with_kinesis(kin.clone())
             .with_stepfunctions(sfn.clone());
 
-        bus.send_to_sqs("q", "m", &HashMap::new());
+        bus.send_to_sqs(
+            DeliverySender::Identity { arn: None },
+            "q",
+            "m",
+            &HashMap::new(),
+        );
         bus.publish_to_sns("t", "m", None);
         let _ = bus.put_event_to_eventbridge(&test_event("s", "b"));
         bus.send_to_kinesis("s", "d", "k");

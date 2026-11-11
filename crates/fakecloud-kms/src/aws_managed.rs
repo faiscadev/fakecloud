@@ -170,6 +170,9 @@ pub(crate) enum KeyCaller<'a> {
         region: &'a str,
         source_arn: &'a str,
         source_account: &'a str,
+        /// The service calling KMS for the principal (SQS for a message SNS
+        /// delivers), which sets `kms:ViaService`.
+        via_service: Option<&'a str>,
     },
 }
 
@@ -221,7 +224,11 @@ pub(crate) fn policy_allows(
             region,
             source_arn,
             source_account,
+            via_service: via,
         } => {
+            if let Some(via) = via {
+                keys.insert("kms:ViaService".to_string(), vec![via_service(via, region)]);
+            }
             let internal = InternalCaller::Service {
                 service: service_principal.to_string(),
                 source_arn: source_arn.to_string(),
@@ -541,6 +548,7 @@ mod tests {
             region: "us-east-1",
             source_arn: &rule,
             source_account: ACCOUNT,
+            via_service: None,
         };
         let full = ctx(&[
             ("aws:ses:source-account", ACCOUNT),
@@ -570,6 +578,7 @@ mod tests {
             region: "us-east-1",
             source_arn: &rule,
             source_account: ACCOUNT,
+            via_service: None,
         };
         assert!(!policy_allows(
             &policy("ses"),

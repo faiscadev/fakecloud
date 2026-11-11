@@ -95,7 +95,16 @@ pub async fn check_and_rotate(
                     // With Lambda: create AWSPENDING version
                     let version = SecretVersion {
                         version_id: version_id.clone(),
-                        secret_string: cv.secret_string.clone(),
+                        secret_string: crate::service::reseal_secret_string(
+                            kms_hook,
+                            fakecloud_aws::arn::account_of(&due.arn).unwrap_or_default(),
+                            fakecloud_aws::arn::region_of(&due.arn).unwrap_or_default(),
+                            &due.arn,
+                            &cv.version_id,
+                            &version_id,
+                            secret.kms_key_id.as_deref(),
+                            cv.secret_string.clone(),
+                        ),
                         secret_binary: cv.secret_binary.clone(),
                         stages: vec!["AWSPENDING".to_string()],
                         created_at: now,
@@ -109,7 +118,16 @@ pub async fn check_and_rotate(
                     }
                     let version = SecretVersion {
                         version_id: version_id.clone(),
-                        secret_string: cv.secret_string.clone(),
+                        secret_string: crate::service::reseal_secret_string(
+                            kms_hook,
+                            fakecloud_aws::arn::account_of(&due.arn).unwrap_or_default(),
+                            fakecloud_aws::arn::region_of(&due.arn).unwrap_or_default(),
+                            &due.arn,
+                            &cv.version_id,
+                            &version_id,
+                            secret.kms_key_id.as_deref(),
+                            cv.secret_string.clone(),
+                        ),
                         secret_binary: cv.secret_binary.clone(),
                         stages: vec!["AWSCURRENT".to_string()],
                         created_at: now,

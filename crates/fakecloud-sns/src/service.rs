@@ -93,6 +93,7 @@ impl SnsService {
         topic_arn: &str,
         kms_key_id: Option<&str>,
         message: &str,
+        caller_arn: Option<&str>,
     ) -> Result<(), AwsServiceError> {
         let Some(hook) = &self.kms_hook else {
             return Ok(());
@@ -105,7 +106,7 @@ impl SnsService {
         ctx.insert("aws:sns:topicArn".to_string(), topic_arn.to_string());
         // The key (or alias) lives in the topic's region.
         let region = fakecloud_aws::arn::region_of(topic_arn).unwrap_or(&self.region);
-        let sns = fakecloud_core::delivery::KmsCaller::via("sns.amazonaws.com");
+        let sns = fakecloud_core::delivery::KmsCaller::via_for("sns.amazonaws.com", caller_arn);
         let envelope = hook
             .encrypt(
                 account_id,

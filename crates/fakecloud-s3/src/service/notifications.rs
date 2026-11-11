@@ -568,7 +568,19 @@ pub(crate) fn deliver_notification_batch(
             );
             match target.target_type {
                 NotificationTargetType::Sqs => {
-                    delivery.send_to_sqs(&target.arn, &message, &std::collections::HashMap::new());
+                    // S3 delivers as its service principal, for the bucket:
+                    // an encrypted queue's key policy must name
+                    // `s3.amazonaws.com`.
+                    delivery.send_to_sqs(
+                        fakecloud_core::delivery::DeliverySender::Service {
+                            principal: "s3.amazonaws.com",
+                            source_arn: &bucket_arn[0],
+                            source_account: &owner_account,
+                        },
+                        &target.arn,
+                        &message,
+                        &std::collections::HashMap::new(),
+                    );
                 }
                 NotificationTargetType::Sns => {
                     delivery.publish_to_sns(&target.arn, &message, Some("Amazon S3 Notification"));

@@ -478,6 +478,7 @@ mod tests {
     impl fakecloud_core::delivery::SqsDelivery for TestRecorder {
         fn deliver_to_queue(
             &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
             arn: &str,
             body: &str,
             _attrs: &std::collections::HashMap<String, String>,
@@ -490,6 +491,7 @@ mod tests {
 
         fn deliver_to_queue_with_attrs(
             &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
             arn: &str,
             body: &str,
             _attrs: &std::collections::HashMap<

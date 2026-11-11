@@ -773,3 +773,375 @@ async fn ses_s3_action_seals_mail_under_aws_ses() {
         .unwrap();
     assert!(String::from_utf8_lossy(&mail).contains("Hello under aws/ses"));
 }
+
+/// Sum of an `AWS/<service>` metric's data points with `dimension = value`.
+async fn metric_sum(
+    cw: &aws_sdk_cloudwatch::Client,
+    namespace: &str,
+    metric: &str,
+    dimension: &str,
+    value: &str,
+) -> f64 {
+    let now = std::time::SystemTime::now();
+    let out = cw
+        .get_metric_statistics()
+        .namespace(namespace)
+        .metric_name(metric)
+        .dimensions(
+            aws_sdk_cloudwatch::types::Dimension::builder()
+                .name(dimension)
+                .value(value)
+                .build(),
+        )
+        .start_time(aws_sdk_cloudwatch::primitives::DateTime::from(
+            now - std::time::Duration::from_secs(3600),
+        ))
+        .end_time(aws_sdk_cloudwatch::primitives::DateTime::from(
+            now + std::time::Duration::from_secs(60),
+        ))
+        .period(60)
+        .statistics(aws_sdk_cloudwatch::types::Statistic::Sum)
+        .send()
+        .await
+        .unwrap();
+    out.datapoints().iter().filter_map(|d| d.sum()).sum()
+}
+
+async fn queue_bodies(sqs: &aws_sdk_sqs::Client, url: &str) -> Vec<String> {
+    let mut bodies = Vec::new();
+    for _ in 0..3 {
+        let got = sqs
+            .receive_message()
+            .queue_url(url)
+            .max_number_of_messages(10)
+            .send()
+            .await
+            .unwrap();
+        bodies.extend(
+            got.messages()
+                .iter()
+                .filter_map(|m| m.body().map(str::to_string)),
+        );
+    }
+    bodies
+}
+
+/// Recorded (service-principal-deliveries.txt): SNS, EventBridge and S3
+/// deliver to SQS as their service principal, which the AWS-managed
+/// `aws/sqs` key's policy does not admit. SNS delivers nothing and counts
+/// `NumberOfNotificationsFailed`, EventBridge delivers nothing and counts
+/// `FailedInvocations`, S3 refuses the notification configuration. A
+/// customer key whose policy grants those principals keeps working, and the
+/// account itself still sends to the `aws/sqs` queue.
+#[tokio::test]
+async fn service_principal_deliveries_need_a_key_that_admits_them() {
+    let server = TestServer::start().await;
+    let cfg = server.aws_config().await;
+    let kms = server.kms_client().await;
+    let sqs = aws_sdk_sqs::Client::new(&cfg);
+    let sns = aws_sdk_sns::Client::new(&cfg);
+    let events = aws_sdk_eventbridge::Client::new(&cfg);
+    let s3 = server.s3_client().await;
+    let cw = aws_sdk_cloudwatch::Client::new(&cfg);
+
+    let granting = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:root"}, "Action": "kms:*", "Resource": "*"},
+            {"Effect": "Allow",
+             "Principal": {"Service": ["sns.amazonaws.com", "events.amazonaws.com", "s3.amazonaws.com"]},
+             "Action": ["kms:GenerateDataKey", "kms:Decrypt"], "Resource": "*"}
+        ]
+    });
+    let key = kms
+        .create_key()
+        .policy(granting.to_string())
+        .send()
+        .await
+        .unwrap()
+        .key_metadata
+        .unwrap();
+    let mut queues = Vec::new();
+    for (name, key_id) in [("managed", "alias/aws/sqs"), ("granting", key.key_id())] {
+        let url = sqs
+            .create_queue()
+            .queue_name(name)
+            .attributes(
+                aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId,
+                key_id,
+            )
+            .send()
+            .await
+            .unwrap()
+            .queue_url
+            .unwrap();
+        queues.push((url, format!("arn:aws:sqs:us-east-1:123456789012:{name}")));
+    }
+    let (managed_url, managed_arn) = queues[0].clone();
+    let (granting_url, granting_arn) = queues[1].clone();
+
+    // SNS.
+    let topic = sns
+        .create_topic()
+        .name("t")
+        .send()
+        .await
+        .unwrap()
+        .topic_arn
+        .unwrap();
+    for arn in [&managed_arn, &granting_arn] {
+        sns.subscribe()
+            .topic_arn(&topic)
+            .protocol("sqs")
+            .endpoint(arn)
+            .attributes("RawMessageDelivery", "true")
+            .send()
+            .await
+            .unwrap();
+    }
+    sns.publish()
+        .topic_arn(&topic)
+        .message("from-sns")
+        .send()
+        .await
+        .unwrap();
+
+    // EventBridge.
+    events
+        .put_rule()
+        .name("r")
+        .event_pattern(r#"{"source":["fc.test"]}"#)
+        .send()
+        .await
+        .unwrap();
+    events
+        .put_targets()
+        .rule("r")
+        .targets(
+            aws_sdk_eventbridge::types::Target::builder()
+                .id("m")
+                .arn(&managed_arn)
+                .build()
+                .unwrap(),
+        )
+        .targets(
+            aws_sdk_eventbridge::types::Target::builder()
+                .id("g")
+                .arn(&granting_arn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    events
+        .put_events()
+        .entries(
+            aws_sdk_eventbridge::types::PutEventsRequestEntry::builder()
+                .source("fc.test")
+                .detail_type("t")
+                .detail("{}")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // S3: the aws/sqs queue fails validation, the granting one is accepted.
+    s3.create_bucket().bucket("notify").send().await.unwrap();
+    let config = |arn: &str| {
+        aws_sdk_s3::types::NotificationConfiguration::builder()
+            .queue_configurations(
+                aws_sdk_s3::types::QueueConfiguration::builder()
+                    .queue_arn(arn)
+                    .events(aws_sdk_s3::types::Event::S3ObjectCreated)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+    };
+    let err = s3
+        .put_bucket_notification_configuration()
+        .bucket("notify")
+        .notification_configuration(config(&managed_arn))
+        .send()
+        .await
+        .expect_err("aws/sqs queue refused as a destination");
+    assert_eq!(err.code(), Some("InvalidArgument"), "{err:?}");
+    assert_eq!(
+        err.message(),
+        Some("Unable to validate the following destination configurations")
+    );
+    let raw =
+        String::from_utf8_lossy(err.raw_response().unwrap().body().bytes().unwrap()).to_string();
+    assert!(
+        raw.contains(&format!("<ArgumentName1>{managed_arn}</ArgumentName1>")),
+        "{raw}"
+    );
+    assert!(
+        raw.contains("<ArgumentValue1>The message to the SSE queue could not be encrypted using KMS</ArgumentValue1>"),
+        "{raw}"
+    );
+    s3.put_bucket_notification_configuration()
+        .bucket("notify")
+        .notification_configuration(config(&granting_arn))
+        .send()
+        .await
+        .expect("a key that grants S3 validates");
+    s3.put_object()
+        .bucket("notify")
+        .key("k")
+        .body(ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(queue_bodies(&sqs, &managed_url).await.is_empty());
+    let granted = queue_bodies(&sqs, &granting_url).await;
+    assert!(granted.iter().any(|b| b == "from-sns"), "{granted:?}");
+    assert!(
+        granted.iter().any(|b| b.contains("\"source\":\"fc.test\"")),
+        "{granted:?}"
+    );
+    assert!(
+        granted.iter().any(|b| b.contains("ObjectCreated:Put")),
+        "{granted:?}"
+    );
+
+    assert_eq!(
+        metric_sum(
+            &cw,
+            "AWS/SNS",
+            "NumberOfNotificationsFailed",
+            "TopicName",
+            "t"
+        )
+        .await,
+        1.0
+    );
+    assert_eq!(
+        metric_sum(&cw, "AWS/Events", "FailedInvocations", "RuleName", "r").await,
+        1.0
+    );
+
+    // The account itself uses the aws/sqs queue through SQS.
+    sqs.send_message()
+        .queue_url(&managed_url)
+        .message_body("direct")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(queue_bodies(&sqs, &managed_url).await, ["direct"]);
+}
+
+/// A service using a key on a caller's behalf names that caller in KMS's
+/// refusal: an IAM user's SendMessage to a queue under another service's
+/// AWS-managed key is refused for `user/<name>`, not the account root.
+#[tokio::test]
+async fn kms_refusals_name_the_calling_principal() {
+    let server = TestServer::start().await;
+    let iam = aws_sdk_iam::Client::new(&server.aws_config().await);
+    iam.create_user().user_name("alice").send().await.unwrap();
+    let key = iam
+        .create_access_key()
+        .user_name("alice")
+        .send()
+        .await
+        .unwrap()
+        .access_key
+        .unwrap();
+    let cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(aws_credential_types::Credentials::new(
+            key.access_key_id(),
+            key.secret_access_key(),
+            None,
+            None,
+            "alice",
+        ))
+        .load()
+        .await;
+    let kms = aws_sdk_kms::Client::new(&cfg);
+    let s3_key = key_arn(&kms, "alias/aws/s3").await;
+    let sqs = aws_sdk_sqs::Client::new(&cfg);
+    let url = sqs
+        .create_queue()
+        .queue_name("under-s3-key")
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId,
+            "alias/aws/s3",
+        )
+        .send()
+        .await
+        .unwrap()
+        .queue_url
+        .unwrap();
+    let err = sqs
+        .send_message()
+        .queue_url(&url)
+        .message_body("x")
+        .send()
+        .await
+        .expect_err("refused by aws/s3's policy");
+    assert_relayed(
+        err.message().unwrap_or_default(),
+        &format!("User: arn:aws:iam::123456789012:user/alice is not authorized to perform: kms:GenerateDataKey on resource: {s3_key} because no resource-based policy allows the kms:GenerateDataKey action"),
+        "AccessDeniedException",
+    );
+}
+
+/// Secrets Manager encrypts every secret: one created without `KmsKeyId`
+/// under the region's AWS-managed `aws/secretsmanager` key (created on that
+/// first use), and `GetSecretValue` decrypts it through Secrets Manager.
+#[tokio::test]
+async fn secrets_without_a_key_are_sealed_under_aws_secretsmanager() {
+    let server = TestServer::start().await;
+    let secrets = server.secretsmanager_client().await;
+    let kms = server.kms_client().await;
+    let created = secrets
+        .create_secret()
+        .name("plain")
+        .secret_string("hunter2")
+        .send()
+        .await
+        .unwrap();
+    let described = secrets
+        .describe_secret()
+        .secret_id("plain")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        described.kms_key_id(),
+        None,
+        "the default key is not reported"
+    );
+    let got = secrets
+        .get_secret_value()
+        .secret_id("plain")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.secret_string(), Some("hunter2"));
+
+    let managed = key_arn(&kms, "alias/aws/secretsmanager").await;
+    let usage: serde_json::Value =
+        reqwest::get(format!("{}/_fakecloud/kms/usage", server.endpoint()))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    let records = usage["records"].as_array().unwrap();
+    for op in ["GenerateDataKey", "Decrypt"] {
+        assert!(
+            records.iter().any(|r| r["operation"] == op
+                && r["keyArn"] == managed.as_str()
+                && r["servicePrincipal"] == "secretsmanager.amazonaws.com"
+                && r["encryptionContext"]["SecretARN"] == created.arn().unwrap()),
+            "{op}: {records:?}"
+        );
+    }
+}

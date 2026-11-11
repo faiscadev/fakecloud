@@ -706,6 +706,7 @@ impl S3Service {
             bucket_key,
             plaintext,
             Some(key),
+            req.principal.as_ref().map(|p| p.arn.as_str()),
         )
         .map_err(|err| {
             tracing::warn!(bucket = %bucket, error = %err, "SSE-KMS encrypt failed");
@@ -754,7 +755,10 @@ impl S3Service {
         hook.decrypt(
             key_account,
             envelope,
-            fakecloud_core::delivery::KmsCaller::via("s3.amazonaws.com"),
+            fakecloud_core::delivery::KmsCaller::via_for(
+                "s3.amazonaws.com",
+                req.principal.as_ref().map(|p| p.arn.as_str()),
+            ),
             ctx,
         )
         .map(bytes::Bytes::from)

@@ -84,6 +84,7 @@ pub fn seal(
             service_principal: &principal,
             source_arn: &rule_arn,
             source_account: account_id,
+            via_service: None,
         },
         context.clone(),
     )?;

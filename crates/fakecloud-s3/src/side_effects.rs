@@ -157,6 +157,7 @@ pub(crate) fn kms_encrypt(
     bucket_key: bool,
     plaintext: &[u8],
     kms_key_id: Option<&str>,
+    caller_arn: Option<&str>,
 ) -> Result<Bytes, fakecloud_core::delivery::KmsError> {
     let Some(hook) = hook else {
         return Ok(Bytes::copy_from_slice(plaintext));
@@ -168,7 +169,7 @@ pub(crate) fn kms_encrypt(
         region,
         key,
         plaintext,
-        fakecloud_core::delivery::KmsCaller::via("s3.amazonaws.com"),
+        fakecloud_core::delivery::KmsCaller::via_for("s3.amazonaws.com", caller_arn),
         s3_encryption_context(bucket, object_key, bucket_key),
     )
     .map(|envelope| Bytes::from(envelope.into_bytes()))
@@ -177,6 +178,7 @@ pub(crate) fn kms_encrypt(
 /// Decrypt an SSE-KMS envelope stored in `bucket` (see [`kms_encrypt`]).
 /// Bytes that are not an envelope (no hook wired, or a pre-hook body) are
 /// returned unchanged.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn kms_decrypt(
     hook: Option<&Arc<dyn KmsHook>>,
     account_id: &str,
@@ -185,6 +187,7 @@ pub(crate) fn kms_decrypt(
     bucket_key: bool,
     stored: &[u8],
     kms_key_id: Option<&str>,
+    caller_arn: Option<&str>,
 ) -> Result<Bytes, fakecloud_core::delivery::KmsError> {
     let Some(hook) = hook else {
         return Ok(Bytes::copy_from_slice(stored));
@@ -197,7 +200,7 @@ pub(crate) fn kms_decrypt(
     hook.decrypt(
         key_account,
         envelope,
-        fakecloud_core::delivery::KmsCaller::via("s3.amazonaws.com"),
+        fakecloud_core::delivery::KmsCaller::via_for("s3.amazonaws.com", caller_arn),
         s3_encryption_context(bucket, object_key, bucket_key),
     )
     .map(Bytes::from)

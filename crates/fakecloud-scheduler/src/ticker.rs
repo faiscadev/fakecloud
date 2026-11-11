@@ -487,10 +487,18 @@ mod tests {
         calls: Mutex<Vec<(String, String)>>,
     }
     impl SqsDelivery for Recorder {
-        fn deliver_to_queue(&self, _arn: &str, _body: &str, _a: &HashMap<String, String>) {}
+        fn deliver_to_queue(
+            &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
+            _arn: &str,
+            _body: &str,
+            _a: &HashMap<String, String>,
+        ) {
+        }
 
         fn try_deliver_to_queue_with_attrs(
             &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
             queue_arn: &str,
             message_body: &str,
             _attrs: &HashMap<String, SqsMessageAttribute>,
@@ -613,9 +621,17 @@ mod tests {
             calls: Mutex<Vec<(String, HashMap<String, SqsMessageAttribute>)>>,
         }
         impl SqsDelivery for FailingRecorder {
-            fn deliver_to_queue(&self, _a: &str, _b: &str, _c: &HashMap<String, String>) {}
+            fn deliver_to_queue(
+                &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
+                _a: &str,
+                _b: &str,
+                _c: &HashMap<String, String>,
+            ) {
+            }
             fn try_deliver_to_queue_with_attrs(
                 &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
                 queue_arn: &str,
                 _body: &str,
                 attrs: &HashMap<String, SqsMessageAttribute>,
@@ -680,9 +696,17 @@ mod tests {
             calls: Mutex<Vec<String>>,
         }
         impl SqsDelivery for Failing {
-            fn deliver_to_queue(&self, _: &str, _: &str, _: &HashMap<String, String>) {}
+            fn deliver_to_queue(
+                &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
+                _: &str,
+                _: &str,
+                _: &HashMap<String, String>,
+            ) {
+            }
             fn try_deliver_to_queue_with_attrs(
                 &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
                 queue_arn: &str,
                 _body: &str,
                 _attrs: &HashMap<String, SqsMessageAttribute>,
@@ -888,9 +912,17 @@ mod tests {
             fail_first_n: i64,
         }
         impl SqsDelivery for FlakyN {
-            fn deliver_to_queue(&self, _: &str, _: &str, _: &HashMap<String, String>) {}
+            fn deliver_to_queue(
+                &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
+                _: &str,
+                _: &str,
+                _: &HashMap<String, String>,
+            ) {
+            }
             fn try_deliver_to_queue_with_attrs(
                 &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
                 queue_arn: &str,
                 _body: &str,
                 _attrs: &HashMap<String, SqsMessageAttribute>,

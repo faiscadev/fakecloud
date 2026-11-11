@@ -696,7 +696,14 @@ fn send_record(
     let body = record.to_string();
     let function_arn = unqualified_arn(&func.function_arn);
     if dest.contains(":sqs:") {
-        bus.send_to_sqs(dest, &body, &HashMap::new());
+        // Lambda sends destination records with the function's execution
+        // role, an identity of the account.
+        bus.send_to_sqs(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            dest,
+            &body,
+            &HashMap::new(),
+        );
     } else if dest.contains(":sns:") {
         bus.publish_to_sns(dest, &body, None);
     } else if dest.contains(":lambda:") {
@@ -800,7 +807,16 @@ fn send_to_dead_letter(
         ),
     ]);
     if dlq.contains(":sqs:") {
-        bus.send_to_sqs_with_attrs(dlq, &body, &attributes, None, None);
+        // The dead-letter queue is written with the function's execution
+        // role, an identity of the account.
+        bus.send_to_sqs_with_attrs(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            dlq,
+            &body,
+            &attributes,
+            None,
+            None,
+        );
     } else if dlq.contains(":sns:") {
         bus.publish_to_sns_with_attributes(dlq, &body, None, &attributes);
     }

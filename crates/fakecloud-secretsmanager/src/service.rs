@@ -142,8 +142,10 @@ impl SecretsManagerService {
         self
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn maybe_encrypt_secret_string(
         &self,
+        req: &AwsRequest,
         account_id: &str,
         region: &str,
         secret_arn: &str,
@@ -159,12 +161,13 @@ impl SecretsManagerService {
             version_id,
             kms_key_id,
             plaintext,
+            req.principal.as_ref().map(|p| p.arn.as_str()),
         )
     }
 
     fn maybe_decrypt_secret_string(
         &self,
-        account_id: &str,
+        req: &AwsRequest,
         secret_arn: &str,
         version_id: &str,
         kms_key_id: Option<&str>,
@@ -174,11 +177,12 @@ impl SecretsManagerService {
             .map(|stored| {
                 crate::value::decrypt_secret_string(
                     self.kms_hook.as_deref(),
-                    account_id,
+                    &req.account_id,
                     secret_arn,
                     version_id,
                     kms_key_id,
                     stored.to_string(),
+                    req.principal.as_ref().map(|p| p.arn.as_str()),
                 )
             })
             .transpose()
@@ -233,7 +237,7 @@ impl SecretsManagerService {
             if let Some(ref token) = input.client_request_token {
                 let existing_plaintext = match existing.versions.get(token) {
                     Some(v) => self.maybe_decrypt_secret_string(
-                        &req.account_id,
+                        req,
                         &existing.arn,
                         &v.version_id,
                         existing.kms_key_id.as_deref(),
@@ -292,6 +296,7 @@ impl SecretsManagerService {
                 .clone()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let stored_string = self.maybe_encrypt_secret_string(
+                req,
                 &req.account_id,
                 &req.region,
                 &arn,
@@ -399,6 +404,7 @@ impl SecretsManagerService {
             &secret_id,
             body["VersionId"].as_str(),
             body["VersionStage"].as_str(),
+            req.principal.as_ref().map(|p| p.arn.as_str()),
         )?;
 
         let mut response = json!({
@@ -474,7 +480,7 @@ impl SecretsManagerService {
 
         let existing_plaintext = match secret.versions.get(&version_id) {
             Some(v) => self.maybe_decrypt_secret_string(
-                &req.account_id,
+                req,
                 &secret.arn,
                 &v.version_id,
                 secret.kms_key_id.as_deref(),
@@ -516,6 +522,7 @@ impl SecretsManagerService {
         let kms_key_for_enc = secret.kms_key_id.clone();
         let arn_for_enc = secret.arn.clone();
         let stored_secret_string = self.maybe_encrypt_secret_string(
+            req,
             &req.account_id,
             &req.region,
             &arn_for_enc,
@@ -641,7 +648,7 @@ impl SecretsManagerService {
 
             let existing_plaintext = match secret.versions.get(&vid) {
                 Some(v) => self.maybe_decrypt_secret_string(
-                    &req.account_id,
+                    req,
                     &secret.arn,
                     &v.version_id,
                     secret.kms_key_id.as_deref(),
@@ -679,6 +686,7 @@ impl SecretsManagerService {
             // Seal the value before changing anything: a KMS refusal fails
             // the call with the secret as it was.
             let secret_string = self.maybe_encrypt_secret_string(
+                req,
                 &req.account_id,
                 &req.region,
                 &secret.arn,
@@ -1497,7 +1505,16 @@ impl SecretsManagerService {
                         demote_current_to_previous(&mut secret.versions, &current_vid);
                         let version = SecretVersion {
                             version_id: version_id.clone(),
-                            secret_string: cv.secret_string.clone(),
+                            secret_string: reseal_secret_string(
+                                self.kms_hook.as_deref(),
+                                &req.account_id,
+                                &req.region,
+                                &secret.arn,
+                                &cv.version_id,
+                                &version_id,
+                                secret.kms_key_id.as_deref(),
+                                cv.secret_string.clone(),
+                            ),
                             secret_binary: cv.secret_binary.clone(),
                             stages: vec!["AWSCURRENT".to_string()],
                             created_at: now,
@@ -1531,7 +1548,16 @@ impl SecretsManagerService {
                         version_id.clone(),
                         SecretVersion {
                             version_id: version_id.clone(),
-                            secret_string: cv.secret_string.clone(),
+                            secret_string: reseal_secret_string(
+                                self.kms_hook.as_deref(),
+                                &req.account_id,
+                                &req.region,
+                                &secret.arn,
+                                &cv.version_id,
+                                &version_id,
+                                secret.kms_key_id.as_deref(),
+                                cv.secret_string.clone(),
+                            ),
                             secret_binary: cv.secret_binary.clone(),
                             stages: vec!["AWSPENDING".to_string()],
                             created_at: now,
@@ -1767,7 +1793,7 @@ impl SecretsManagerService {
                                     // configured (bug-audit 2026-06-20, 1.10).
                                     let plaintext = self
                                         .maybe_decrypt_secret_string(
-                                            &req.account_id,
+                                            req,
                                             &secret.arn,
                                             &version.version_id,
                                             secret.kms_key_id.as_deref(),
@@ -1868,7 +1894,7 @@ impl SecretsManagerService {
                             // is ciphertext under a configured KMS hook (1.10).
                             let plaintext = self
                                 .maybe_decrypt_secret_string(
-                                    &req.account_id,
+                                    req,
                                     &secret.arn,
                                     &version.version_id,
                                     secret.kms_key_id.as_deref(),
@@ -2676,6 +2702,57 @@ mod tests;
 /// Manager binds each version to `{SecretARN, SecretVersionId}` (its
 /// documented encryption context). A KMS refusal fails the write, as on AWS
 /// (see [`crate::value::secrets_manager_kms_error`]).
+/// The stored value of version `from_version` re-sealed for a new version
+/// `to_version` of the same secret: each version's ciphertext is bound to its
+/// own `SecretVersionId`, so a copy (rotation staging the current value as
+/// the new version) is decrypted and encrypted again. A value KMS will not
+/// re-seal is kept as stored (the failure is logged).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reseal_secret_string(
+    kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
+    account_id: &str,
+    region: &str,
+    secret_arn: &str,
+    from_version: &str,
+    to_version: &str,
+    kms_key_id: Option<&str>,
+    stored: Option<String>,
+) -> Option<String> {
+    let stored = stored?;
+    if kms_hook.is_none() {
+        return Some(stored);
+    }
+    let resealed = crate::value::decrypt_secret_string(
+        kms_hook,
+        account_id,
+        secret_arn,
+        from_version,
+        kms_key_id,
+        stored.clone(),
+        None,
+    )
+    .and_then(|plaintext| {
+        encrypt_secret_string(
+            kms_hook,
+            account_id,
+            region,
+            secret_arn,
+            to_version,
+            kms_key_id,
+            Some(plaintext),
+            None,
+        )
+    });
+    match resealed {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(secret_arn, error = %err.message(), "could not re-seal a secret version");
+            Some(stored)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn encrypt_secret_string(
     kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
     account_id: &str,
@@ -2684,24 +2761,25 @@ pub(crate) fn encrypt_secret_string(
     version_id: &str,
     kms_key_id: Option<&str>,
     plaintext: Option<String>,
+    caller_arn: Option<&str>,
 ) -> Result<Option<String>, AwsServiceError> {
     let Some(pt) = plaintext else {
         return Ok(None);
     };
-    let (Some(hook), Some(key)) = (kms_hook, kms_key_id) else {
+    let Some(hook) = kms_hook else {
         return Ok(Some(pt));
     };
-    let key = if key.is_empty() {
-        "aws/secretsmanager"
-    } else {
-        key
-    };
+    // A secret with no KmsKeyId is encrypted under the region's AWS-managed
+    // `aws/secretsmanager` key, which exists from that first use.
+    let key = kms_key_id
+        .filter(|k| !k.is_empty())
+        .unwrap_or("aws/secretsmanager");
     hook.encrypt(
         account_id,
         region,
         key,
         pt.as_bytes(),
-        fakecloud_core::delivery::KmsCaller::via("secretsmanager.amazonaws.com"),
+        fakecloud_core::delivery::KmsCaller::via_for("secretsmanager.amazonaws.com", caller_arn),
         crate::value::secret_encryption_context(secret_arn, version_id),
     )
     .map(Some)
@@ -2798,6 +2876,7 @@ pub fn sync_replicas(
                 &version.version_id,
                 primary.kms_key_id.as_deref(),
                 stored,
+                None,
             )
             .and_then(|plaintext| {
                 encrypt_secret_string(
@@ -2808,6 +2887,7 @@ pub fn sync_replicas(
                     &version.version_id,
                     setting.kms_key_id.as_deref(),
                     Some(plaintext),
+                    None,
                 )
             });
             match resealed {

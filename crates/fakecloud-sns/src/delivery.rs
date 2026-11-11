@@ -383,6 +383,7 @@ mod tests {
         impl SqsDelivery for Recorder {
             fn deliver_to_queue(
                 &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
                 queue_arn: &str,
                 message_body: &str,
                 _attrs: &HashMap<String, String>,
@@ -395,6 +396,7 @@ mod tests {
 
             fn deliver_to_queue_with_attrs(
                 &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
                 queue_arn: &str,
                 message_body: &str,
                 _attrs: &HashMap<String, fakecloud_core::delivery::SqsMessageAttribute>,
@@ -439,11 +441,18 @@ mod tests {
             bodies: Mutex<Vec<String>>,
         }
         impl SqsDelivery for Recorder {
-            fn deliver_to_queue(&self, _: &str, body: &str, _: &HashMap<String, String>) {
+            fn deliver_to_queue(
+                &self,
+                _: fakecloud_core::delivery::DeliverySender<'_>,
+                _: &str,
+                body: &str,
+                _: &HashMap<String, String>,
+            ) {
                 self.bodies.lock().unwrap().push(body.to_string());
             }
             fn deliver_to_queue_with_attrs(
                 &self,
+                _: fakecloud_core::delivery::DeliverySender<'_>,
                 _: &str,
                 body: &str,
                 _: &HashMap<String, SqsMessageAttribute>,
@@ -514,6 +523,7 @@ mod tests {
         impl SqsDelivery for Recorder {
             fn deliver_to_queue(
                 &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
                 _queue_arn: &str,
                 _message_body: &str,
                 _attrs: &HashMap<String, String>,
@@ -523,6 +533,7 @@ mod tests {
 
             fn deliver_to_queue_with_attrs(
                 &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
                 _queue_arn: &str,
                 _message_body: &str,
                 _attrs: &HashMap<String, fakecloud_core::delivery::SqsMessageAttribute>,
@@ -566,6 +577,7 @@ mod tests {
         impl SqsDelivery for Recorder {
             fn deliver_to_queue(
                 &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
                 _queue_arn: &str,
                 _message_body: &str,
                 _attrs: &HashMap<String, String>,
@@ -575,6 +587,7 @@ mod tests {
 
             fn deliver_to_queue_with_attrs(
                 &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
                 _queue_arn: &str,
                 _message_body: &str,
                 _attrs: &HashMap<String, fakecloud_core::delivery::SqsMessageAttribute>,

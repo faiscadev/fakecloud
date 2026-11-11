@@ -103,6 +103,7 @@ impl ObjectReader {
                 kms.bucket_key,
                 &stored,
                 kms.key_id.as_deref(),
+                None,
             )
             .map_err(|reason| ObjectReadError::Kms {
                 location: self.location,

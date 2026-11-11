@@ -337,7 +337,13 @@ mod tests {
     }
 
     impl SqsDelivery for Recorder {
-        fn deliver_to_queue(&self, arn: &str, body: &str, _: &HashMap<String, String>) {
+        fn deliver_to_queue(
+            &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
+            arn: &str,
+            body: &str,
+            _: &HashMap<String, String>,
+        ) {
             self.sqs
                 .lock()
                 .unwrap()
@@ -345,6 +351,7 @@ mod tests {
         }
         fn deliver_to_queue_with_attrs(
             &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
             arn: &str,
             body: &str,
             _: &HashMap<String, fakecloud_core::delivery::SqsMessageAttribute>,

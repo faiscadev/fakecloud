@@ -496,23 +496,18 @@ impl EventBridgeService {
         };
 
         if target_arn.contains(":sqs:") {
-            let group_id = target
-                .sqs_parameters
-                .as_ref()
-                .and_then(|p| p["MessageGroupId"].as_str())
-                .map(|s| s.to_string());
-            if group_id.is_some() {
-                self.delivery.send_to_sqs_with_attrs(
-                    target_arn,
-                    &body_str,
-                    &HashMap::new(),
-                    group_id.as_deref(),
-                    None,
-                );
-            } else {
-                self.delivery
-                    .send_to_sqs(target_arn, &body_str, &HashMap::new());
-            }
+            // Replay does not track the rule that matched; the replay names
+            // the delivery.
+            let replay_arn = event_json["replay-name"].as_str().unwrap_or_default();
+            crate::service::helpers::deliver_to_sqs_target(
+                &self.delivery,
+                target,
+                &body_str,
+                replay_arn,
+                None,
+                account_id,
+                region,
+            );
         } else if target_arn.contains(":sns:") {
             self.delivery
                 .publish_to_sns(target_arn, &body_str, Some(&event.detail_type));

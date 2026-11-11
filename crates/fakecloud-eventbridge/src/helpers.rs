@@ -1015,6 +1015,71 @@ pub(crate) struct EventDispatchContext<'a> {
     pub(crate) region: &'a str,
 }
 
+/// Deliver an event to an SQS target. EventBridge sends as its service
+/// principal for the rule (`source_arn`, the rule's ARN), so a queue whose
+/// key policy does not name `events.amazonaws.com` (one under the
+/// AWS-managed `aws/sqs` key) refuses the message; the failure is counted in
+/// the rule's `AWS/Events` `FailedInvocations` metric (recorded: nothing
+/// arrives, `Invocations` and `FailedInvocations` both count it).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn deliver_to_sqs_target(
+    delivery: &fakecloud_core::delivery::DeliveryBus,
+    target: &crate::state::EventTarget,
+    body: &str,
+    source_arn: &str,
+    rule_arn: Option<&str>,
+    account_id: &str,
+    region: &str,
+) {
+    let group_id = target
+        .sqs_parameters
+        .as_ref()
+        .and_then(|p| p["MessageGroupId"].as_str())
+        .map(|s| s.to_string());
+    let sender = fakecloud_core::delivery::DeliverySender::Service {
+        principal: "events.amazonaws.com",
+        source_arn,
+        source_account: account_id,
+    };
+    let result = delivery.try_send_to_sqs_with_attrs(
+        sender,
+        &target.arn,
+        body,
+        &HashMap::new(),
+        group_id.as_deref(),
+        None,
+    );
+    if let Err(err) = result {
+        tracing::warn!(target = %target.arn, %err, "EventBridge SQS target invocation failed");
+        let Some(rule_arn) = rule_arn else {
+            return;
+        };
+        // `rule/<name>` on the default bus, `rule/<bus>/<name>` on another;
+        // AWS dimensions a custom bus's rule metrics by both.
+        let resource = rule_arn.split_once(":rule/").map_or("", |(_, r)| r);
+        let mut dimensions = std::collections::BTreeMap::new();
+        match resource.split_once('/') {
+            Some((bus, name)) => {
+                dimensions.insert("EventBusName".to_string(), bus.to_string());
+                dimensions.insert("RuleName".to_string(), name.to_string());
+            }
+            None => {
+                dimensions.insert("RuleName".to_string(), resource.to_string());
+            }
+        }
+        delivery.put_cloudwatch_metric(
+            account_id,
+            region,
+            "AWS/Events",
+            "FailedInvocations",
+            1.0,
+            Some("Count"),
+            dimensions,
+            chrono::Utc::now().timestamp_millis(),
+        );
+    }
+}
+
 /// Single-target dispatch shared by direct PutEvents and cross-service
 /// put_event_in_account so both honour the same target shape (SQS/SNS/
 /// Lambda/Logs/Kinesis/StepFunctions/ApiDestination/HTTP) and the same
@@ -1042,22 +1107,15 @@ pub(crate) fn dispatch_event_target(
     };
 
     if arn.contains(":sqs:") {
-        let group_id = target
-            .sqs_parameters
-            .as_ref()
-            .and_then(|p| p["MessageGroupId"].as_str())
-            .map(|s| s.to_string());
-        if group_id.is_some() {
-            ctx.delivery.send_to_sqs_with_attrs(
-                arn,
-                &body_str,
-                &HashMap::new(),
-                group_id.as_deref(),
-                None,
-            );
-        } else {
-            ctx.delivery.send_to_sqs(arn, &body_str, &HashMap::new());
-        }
+        deliver_to_sqs_target(
+            ctx.delivery,
+            target,
+            &body_str,
+            rule_arn.unwrap_or_default(),
+            rule_arn,
+            ctx.account_id,
+            ctx.region,
+        );
     } else if arn.contains(":sns:") {
         ctx.delivery
             .publish_to_sns(arn, &body_str, Some(detail_type));

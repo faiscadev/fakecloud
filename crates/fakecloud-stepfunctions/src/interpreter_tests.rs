@@ -2110,6 +2110,7 @@ struct RecordingSqs {
 impl fakecloud_core::delivery::SqsDelivery for RecordingSqs {
     fn deliver_to_queue(
         &self,
+        _sender: fakecloud_core::delivery::DeliverySender<'_>,
         queue_arn: &str,
         _message_body: &str,
         _attributes: &std::collections::HashMap<String, String>,

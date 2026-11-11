@@ -3688,7 +3688,7 @@ async fn read_secret_value_resolves_names_in_the_caller_region_and_arns_in_their
     )
     .await;
     let read = |region: &str, id: &str| {
-        crate::value::read_secret_value(&state, None, "123456789012", region, id, None, None)
+        crate::value::read_secret_value(&state, None, "123456789012", region, id, None, None, None)
     };
     assert_eq!(
         read("us-east-1", "app").unwrap().secret_string.as_deref(),
@@ -4105,4 +4105,112 @@ async fn rotation_runs_every_step_when_each_succeeds() {
     };
     run_rotation_steps(&bus, &inv).await;
     assert_eq!(lambda.steps.lock().len(), 4);
+}
+
+/// A service over real KMS state, and that state.
+fn with_real_kms() -> (
+    SecretsManagerService,
+    fakecloud_kms::SharedKmsState,
+    SharedSecretsManagerState,
+) {
+    let state = make_state();
+    let (kms, hook) = fakecloud_kms::test_support::kms_hook("123456789012");
+    (
+        SecretsManagerService::new(state.clone()).with_kms_hook(hook),
+        kms,
+        state,
+    )
+}
+
+async fn secret_value(svc: &SecretsManagerService, id: &str) -> Value {
+    let req = make_request(
+        "GetSecretValue",
+        &serde_json::json!({ "SecretId": id }).to_string(),
+    );
+    serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap()
+}
+
+/// A secret created without `KmsKeyId` is stored encrypted under the
+/// region's AWS-managed `aws/secretsmanager` key, created on that first use,
+/// and reads back as its plaintext; `DescribeSecret` reports no key.
+#[tokio::test]
+async fn secrets_without_a_key_use_aws_secretsmanager() {
+    let (svc, kms, state) = with_real_kms();
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name":"plain","SecretString":"hunter2"}"#,
+    ))
+    .await
+    .unwrap();
+    let stored = {
+        let accounts = state.read();
+        let s = &accounts.default_regional().unwrap().secrets["plain"];
+        s.versions[s.current_version_id.as_ref().unwrap()]
+            .secret_string
+            .clone()
+            .unwrap()
+    };
+    assert_ne!(stored, "hunter2");
+    assert!(kms
+        .read()
+        .get("123456789012")
+        .unwrap()
+        .alias("us-east-1", "alias/aws/secretsmanager")
+        .is_some());
+    assert_eq!(secret_value(&svc, "plain").await["SecretString"], "hunter2");
+    let req = make_request("DescribeSecret", r#"{"SecretId":"plain"}"#);
+    let described: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
+    assert!(described.get("KmsKeyId").is_none(), "{described}");
+}
+
+/// Secrets stored in plaintext by an older fakecloud (no key, or before the
+/// hook existed) still read back.
+#[tokio::test]
+async fn plaintext_secrets_from_old_snapshots_still_read() {
+    let (svc, _kms, state) = with_real_kms();
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name":"old","SecretString":"placeholder"}"#,
+    ))
+    .await
+    .unwrap();
+    {
+        let mut accounts = state.write();
+        let s = accounts
+            .default_regional_mut()
+            .secrets
+            .get_mut("old")
+            .unwrap();
+        let vid = s.current_version_id.clone().unwrap();
+        s.versions.get_mut(&vid).unwrap().secret_string = Some("from-old-snapshot".to_string());
+    }
+    assert_eq!(
+        secret_value(&svc, "old").await["SecretString"],
+        "from-old-snapshot"
+    );
+}
+
+/// Rotation stages the current value as a new version; each version's
+/// ciphertext is bound to its own version id, so the copy is re-sealed and
+/// still reads back.
+#[tokio::test]
+async fn rotated_versions_are_resealed() {
+    let (svc, _kms, _state) = with_real_kms();
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name":"rot","SecretString":"value-1"}"#,
+    ))
+    .await
+    .unwrap();
+    let before = secret_value(&svc, "rot").await;
+    svc.handle(make_request(
+        "RotateSecret",
+        r#"{"SecretId":"rot","RotationRules":{"AutomaticallyAfterDays":30}}"#,
+    ))
+    .await
+    .unwrap();
+    let after = secret_value(&svc, "rot").await;
+    assert_ne!(after["VersionId"], before["VersionId"]);
+    assert_eq!(after["SecretString"], "value-1");
 }

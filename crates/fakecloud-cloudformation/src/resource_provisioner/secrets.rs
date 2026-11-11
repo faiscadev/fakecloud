@@ -75,11 +75,22 @@ impl ResourceProvisioner {
             };
         if let Some(secret_string) = initial_string {
             let version_id = Uuid::new_v4().to_string();
+            // Stored encrypted, as CreateSecret stores it.
+            let sealed = fakecloud_secretsmanager::value::seal_secret_string(
+                self.kms_hook.as_deref(),
+                &self.account_id,
+                &self.region,
+                &arn,
+                &version_id,
+                kms_key_id.as_deref(),
+                secret_string,
+            )
+            .map_err(|e| format!("{}: {}", e.code(), e.message()))?;
             versions.insert(
                 version_id.clone(),
                 SecretVersion {
                     version_id: version_id.clone(),
-                    secret_string: Some(secret_string),
+                    secret_string: Some(sealed),
                     secret_binary: None,
                     stages: vec!["AWSCURRENT".to_string()],
                     created_at: now,
@@ -167,7 +178,17 @@ impl ResourceProvisioner {
                 .current_version_id
                 .as_ref()
                 .and_then(|vid| secret.versions.get(vid))
-                .and_then(|v| v.secret_string.as_deref())
+                .and_then(|v| {
+                    let stored = v.secret_string.clone()?;
+                    Some(fakecloud_secretsmanager::value::plaintext_secret_string(
+                        self.kms_hook.as_deref(),
+                        &self.account_id,
+                        &secret.arn,
+                        &v.version_id,
+                        stored,
+                    ))
+                })
+                .as_deref()
                 == Some(secret_string);
             if !current_is_same {
                 let now = Utc::now();
@@ -187,11 +208,21 @@ impl ResourceProvisioner {
                     }
                 }
                 let version_id = Uuid::new_v4().to_string();
+                let sealed = fakecloud_secretsmanager::value::seal_secret_string(
+                    self.kms_hook.as_deref(),
+                    &self.account_id,
+                    &self.region,
+                    &secret.arn,
+                    &version_id,
+                    secret.kms_key_id.as_deref(),
+                    secret_string.to_string(),
+                )
+                .map_err(|e| format!("{}: {}", e.code(), e.message()))?;
                 secret.versions.insert(
                     version_id.clone(),
                     SecretVersion {
                         version_id: version_id.clone(),
-                        secret_string: Some(secret_string.to_string()),
+                        secret_string: Some(sealed),
                         secret_binary: None,
                         stages: vec!["AWSCURRENT".to_string()],
                         created_at: now,
@@ -382,9 +413,20 @@ impl ResourceProvisioner {
             secret.current_version_id = Some(version_id);
         }
         if let Some(version_id) = secret.current_version_id.clone() {
+            let kms_key_id = secret.kms_key_id.clone();
             if let Some(version) = secret.versions.get_mut(&version_id) {
-                let mut existing: serde_json::Value = version
-                    .secret_string
+                // The stored value is encrypted: read its plaintext, patch it,
+                // and store it encrypted again.
+                let plaintext = version.secret_string.clone().map(|stored| {
+                    fakecloud_secretsmanager::value::plaintext_secret_string(
+                        self.kms_hook.as_deref(),
+                        &self.account_id,
+                        &secret_arn,
+                        &version_id,
+                        stored,
+                    )
+                });
+                let mut existing: serde_json::Value = plaintext
                     .as_deref()
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_else(|| serde_json::json!({}));
@@ -399,7 +441,18 @@ impl ResourceProvisioner {
                     obj.entry("dbInstanceIdentifier".to_string())
                         .or_insert(serde_json::json!(target_id));
                 }
-                version.secret_string = Some(existing.to_string());
+                version.secret_string = Some(
+                    fakecloud_secretsmanager::value::seal_secret_string(
+                        self.kms_hook.as_deref(),
+                        &self.account_id,
+                        &self.region,
+                        &secret_arn,
+                        &version_id,
+                        kms_key_id.as_deref(),
+                        existing.to_string(),
+                    )
+                    .map_err(|e| format!("{}: {}", e.code(), e.message()))?,
+                );
             }
         }
         secret.last_changed_at = now;

@@ -37,6 +37,11 @@ pub struct SecretValue {
 /// `version_id` / `version_stage` select the version; with neither,
 /// the `AWSCURRENT` version is read. A cross-account read needs the secret's
 /// resource policy to allow the caller. Marks the secret as accessed.
+///
+/// `caller_arn` is the identity reading it (an IAM user or assumed role),
+/// whom KMS names if the secret's key refuses Secrets Manager; `None` when
+/// the reader acts as the account (a service resolving a secret for a task).
+#[allow(clippy::too_many_arguments)]
 pub fn read_secret_value(
     state: &SharedSecretsManagerState,
     kms_hook: Option<&dyn KmsHook>,
@@ -45,6 +50,7 @@ pub fn read_secret_value(
     secret_id: &str,
     version_id: Option<&str>,
     version_stage: Option<&str>,
+    caller_arn: Option<&str>,
 ) -> Result<SecretValue, AwsServiceError> {
     let owner_account = secret_owner_account(secret_id, caller_account);
     let owner_region = if fakecloud_aws::arn::arn_resource(secret_id, "secretsmanager").is_some() {
@@ -149,6 +155,7 @@ pub fn read_secret_value(
                 &value.version_id,
                 kms_key_id.as_deref(),
                 stored,
+                caller_arn,
             )
         })
         .transpose()?;
@@ -158,25 +165,29 @@ pub fn read_secret_value(
     })
 }
 
-/// Decrypt a stored `SecretString`. A secret written with a KMS key while a
-/// KMS hook was wired is stored as ciphertext; anything else (no key, no
-/// hook, or a value that is not a ciphertext, such as one stored before KMS
-/// was wired) is returned as stored. A KMS refusal fails the read.
+/// Decrypt a stored `SecretString`. A secret written while a KMS hook was
+/// wired is stored as ciphertext, under its `KmsKeyId` or, with none, the
+/// AWS-managed `aws/secretsmanager` key; anything else (no hook, or a value
+/// that is not a ciphertext, such as one stored before KMS was wired or
+/// before secrets without a key were encrypted) is returned as stored. A
+/// KMS refusal fails the read.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn decrypt_secret_string(
     kms_hook: Option<&dyn KmsHook>,
     account_id: &str,
     secret_arn: &str,
     version_id: &str,
-    kms_key_id: Option<&str>,
+    _kms_key_id: Option<&str>,
     stored: String,
+    caller_arn: Option<&str>,
 ) -> Result<String, AwsServiceError> {
-    let (Some(hook), Some(_)) = (kms_hook, kms_key_id) else {
+    let Some(hook) = kms_hook else {
         return Ok(stored);
     };
     match hook.decrypt(
         account_id,
         &stored,
-        fakecloud_core::delivery::KmsCaller::via("secretsmanager.amazonaws.com"),
+        fakecloud_core::delivery::KmsCaller::via_for("secretsmanager.amazonaws.com", caller_arn),
         secret_encryption_context(secret_arn, version_id),
     ) {
         Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
@@ -185,6 +196,54 @@ pub(crate) fn decrypt_secret_string(
         }
         Err(err) => Err(secrets_manager_kms_error(&err, true)),
     }
+}
+
+/// The plaintext of a secret version's stored `SecretString`, decrypted for a
+/// service that reads it for a resource (CodeBuild resolving a build's
+/// environment), with that resource's role: an identity of the account. A
+/// value KMS refuses reads as empty, as the resource would get nothing.
+pub fn plaintext_secret_string(
+    kms_hook: Option<&dyn KmsHook>,
+    account_id: &str,
+    secret_arn: &str,
+    version_id: &str,
+    stored: String,
+) -> String {
+    decrypt_secret_string(
+        kms_hook, account_id, secret_arn, version_id, None, stored, None,
+    )
+    .unwrap_or_else(|err| {
+        tracing::warn!(secret_arn, error = %err.message(), "secret value not readable");
+        String::new()
+    })
+}
+
+/// Seal `plaintext` as version `version_id` of secret `secret_arn` (in
+/// `account_id` and `region`) for a service writing it for a resource
+/// (CloudFormation provisioning `AWS::SecretsManager::Secret`), as
+/// `CreateSecret` / `PutSecretValue` store it: under `kms_key_id`, or the
+/// AWS-managed `aws/secretsmanager` key when none is set. Returned as is
+/// when no KMS hook is wired.
+pub fn seal_secret_string(
+    kms_hook: Option<&dyn KmsHook>,
+    account_id: &str,
+    region: &str,
+    secret_arn: &str,
+    version_id: &str,
+    kms_key_id: Option<&str>,
+    plaintext: String,
+) -> Result<String, AwsServiceError> {
+    crate::service::encrypt_secret_string(
+        kms_hook,
+        account_id,
+        region,
+        secret_arn,
+        version_id,
+        kms_key_id,
+        Some(plaintext.clone()),
+        None,
+    )
+    .map(|sealed| sealed.unwrap_or(plaintext))
 }
 
 /// The encryption context Secrets Manager binds a secret version to (Secrets

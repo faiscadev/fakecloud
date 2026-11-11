@@ -698,7 +698,14 @@ fn dispatch_aws_service_integration(
 ) -> Result<AwsResponse, AwsServiceError> {
     if arn_resource(integration_uri, "sqs").is_some() {
         let message = String::from_utf8_lossy(&req.body);
-        delivery.send_to_sqs(integration_uri, &message, &std::collections::HashMap::new());
+        // An AWS service integration acts with the integration's IAM role,
+        // an identity of the account (which fakecloud does not record).
+        delivery.send_to_sqs(
+            fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+            integration_uri,
+            &message,
+            &std::collections::HashMap::new(),
+        );
         return Ok(AwsResponse::ok_json(json!({
             "statusCode": 200,
             "body": json!({"MessageId": uuid::Uuid::new_v4().to_string()}).to_string()

@@ -489,27 +489,42 @@ fn authorize(
     encryption_context: &HashMap<String, String>,
 ) -> Result<(), KmsError> {
     let region = parse_kms_arn(&key.arn).map_or("us-east-1", |(r, _, _)| r);
-    let caller = match caller {
-        KmsCaller::OnBehalfOf { service_principal } => {
+    let partition = fakecloud_aws::arn::partition_for(region);
+    let root = format!("arn:{partition}:iam::{account_id}:root");
+    let (caller, who) = match caller {
+        KmsCaller::OnBehalfOf {
+            service_principal,
+            caller_arn,
+        } => {
             if key.key_manager != "AWS" {
                 return Ok(());
             }
-            crate::aws_managed::KeyCaller::ViaService {
-                service_principal,
-                region,
-                account: account_id,
-            }
+            (
+                crate::aws_managed::KeyCaller::ViaService {
+                    service_principal,
+                    region,
+                    account: account_id,
+                },
+                // KMS names the identity the service acted for (its
+                // forwarded credentials).
+                format!("User: {}", caller_arn.unwrap_or(&root)),
+            )
         }
         KmsCaller::Service {
             service_principal,
             source_arn,
             source_account,
-        } => crate::aws_managed::KeyCaller::Service {
-            service_principal,
-            region,
-            source_arn,
-            source_account,
-        },
+            via_service,
+        } => (
+            crate::aws_managed::KeyCaller::Service {
+                service_principal,
+                region,
+                source_arn,
+                source_account,
+                via_service,
+            },
+            format!("Service: {service_principal}"),
+        ),
     };
     let context = encryption_context
         .iter()
@@ -518,18 +533,6 @@ fn authorize(
     if crate::aws_managed::policy_allows(&key.policy, &key.arn, &caller, action, &context, &[]) {
         return Ok(());
     }
-    // KMS names the identity the service acted for: the caller of the
-    // service (its forwarded credentials; the hook knows only the account)
-    // or the service principal.
-    let who = match caller {
-        crate::aws_managed::KeyCaller::Service {
-            service_principal, ..
-        } => format!("Service: {service_principal}"),
-        _ => format!(
-            "User: arn:{}:iam::{account_id}:root",
-            fakecloud_aws::arn::partition_for(region)
-        ),
-    };
     Err(KmsError::new(
         KmsErrorKind::AccessDenied,
         format!(
@@ -1544,6 +1547,7 @@ mod tests {
             service_principal: "ses.amazonaws.com",
             source_arn: rule,
             source_account: acct,
+            via_service: None,
         };
         let ctx: HashMap<String, String> = [
             ("aws:ses:source-account".to_string(), acct.to_string()),
