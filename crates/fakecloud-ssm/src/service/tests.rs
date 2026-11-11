@@ -3475,6 +3475,10 @@ fn put_parameter_secure_string_hard_fails_when_kms_rejects() {
 
     struct AlwaysFailKms;
     impl KmsHook for AlwaysFailKms {
+        fn is_ciphertext(&self, _account_id: &str, _stored: &str) -> bool {
+            true
+        }
+
         fn encrypt(
             &self,
             _account_id: &str,
@@ -3534,6 +3538,10 @@ fn put_parameter_validates_tier_policy_before_kms() {
 
     struct AlwaysFailKms;
     impl KmsHook for AlwaysFailKms {
+        fn is_ciphertext(&self, _account_id: &str, _stored: &str) -> bool {
+            true
+        }
+
         fn encrypt(
             &self,
             _account_id: &str,

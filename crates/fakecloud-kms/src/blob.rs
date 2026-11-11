@@ -107,6 +107,13 @@ pub struct Decoded {
     pub plaintext: Vec<u8>,
 }
 
+/// Whether `blob` has the shape of a fakecloud KMS blob (version header and
+/// room for the fixed fields), whether or not it opens.
+pub fn is_envelope(blob: &[u8]) -> bool {
+    blob.len() >= VERSION_HEADER.len() + 8 + 12 + 4 + 16
+        && blob[..VERSION_HEADER.len()] == VERSION_HEADER
+}
+
 /// Decode an AWS-shaped fakecloud KMS blob back to its plaintext.
 /// Returns `None` if the bytes don't carry the version header or fail
 /// any structural check (including AEAD verification under the supplied

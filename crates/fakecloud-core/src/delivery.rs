@@ -99,6 +99,26 @@ impl std::fmt::Display for SqsDeliveryError {
 
 impl std::error::Error for SqsDeliveryError {}
 
+impl SqsDeliveryError {
+    /// The message a service that relays SQS's failure reports (an
+    /// EventBridge dead-letter message's `ERROR_MESSAGE`): for a KMS
+    /// refusal, KMS's relayed message wrapped in SQS's own AWS SDK service
+    /// suffix (recorded).
+    pub fn relayed_message(&self) -> String {
+        match self {
+            Self::Kms(err) => {
+                let (status, code) = err.kind.sqs_code();
+                format!(
+                    "{} (Service: AmazonSQS; Status Code: {status}; Error Code: {code}; Request ID: {}; Proxy: null)",
+                    err.relayed_message(),
+                    uuid::Uuid::new_v4()
+                )
+            }
+            other => other.to_string(),
+        }
+    }
+}
+
 /// Who sends a message into an SQS queue through the delivery bus, which
 /// decides how SQS calls KMS for an encrypted queue.
 ///
@@ -745,6 +765,23 @@ impl KmsErrorKind {
             _ => 400,
         }
     }
+
+    /// The awsQuery error code and HTTP status SQS answers a send or receive
+    /// with when KMS fails this way for an encrypted queue (`KmsAccessDenied`
+    /// etc., declared by SendMessage / SendMessageBatch / ReceiveMessage). A
+    /// ciphertext KMS cannot open is the key's invalid state.
+    pub fn sqs_code(self) -> (u16, &'static str) {
+        match self {
+            KmsErrorKind::AccessDenied => (400, "KMS.AccessDeniedException"),
+            KmsErrorKind::Disabled => (400, "KMS.DisabledException"),
+            KmsErrorKind::InvalidKeyUsage => (400, "KMS.InvalidKeyUsageException"),
+            KmsErrorKind::InvalidState | KmsErrorKind::InvalidCiphertext => {
+                (400, "KMS.InvalidStateException")
+            }
+            KmsErrorKind::NotFound => (400, "KMS.NotFoundException"),
+            KmsErrorKind::Internal => (500, "KMS.InternalFailureException"),
+        }
+    }
 }
 
 impl KmsError {
@@ -939,6 +976,15 @@ pub trait KmsHook: Send + Sync {
     ) -> Result<String, KmsKeyUnusable> {
         Ok(key_id.to_string())
     }
+
+    /// Whether `stored` is a ciphertext KMS sealed for `account_id` (a
+    /// well-formed envelope), as opposed to a value a service stored in
+    /// plaintext before it encrypted at rest. A consumer that fails to
+    /// decrypt a ciphertext reports the KMS failure; only a value that is
+    /// not one reads as plaintext. Every hook must answer for its own
+    /// envelope format: a hook that said no to its own ciphertexts would
+    /// hand them out as plaintext.
+    fn is_ciphertext(&self, account_id: &str, stored: &str) -> bool;
 
     /// The ARN of the AWS-managed key for `service` (the key behind
     /// `alias/aws/<service>`) in `account_id` and `region`, minted on first

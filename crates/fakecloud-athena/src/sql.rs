@@ -939,6 +939,10 @@ mod tests {
     struct DenyingKms;
 
     impl fakecloud_core::delivery::KmsHook for DenyingKms {
+        fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+            stored.starts_with("envelope-under-")
+        }
+
         fn encrypt(
             &self,
             _account_id: &str,

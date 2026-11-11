@@ -43,6 +43,9 @@ impl fakecloud_core::delivery::KmsHook for PrefixKmsHook {
                 )
             })
     }
+    fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+        stored.starts_with("ENC:")
+    }
 }
 
 fn request(service: &str, action: &str, account: &str, region: &str, body: Value) -> AwsRequest {

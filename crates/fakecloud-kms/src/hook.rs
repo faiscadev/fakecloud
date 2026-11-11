@@ -523,9 +523,12 @@ fn authorize(
                 source_account,
                 via_service,
             },
-            format!("Service: {service_principal}"),
+            // Recorded (EventBridge delivering to an `aws/sqs` queue): KMS
+            // names a service principal without the key.
+            format!("User: {service_principal}"),
         ),
     };
+    let service_caller = matches!(caller, crate::aws_managed::KeyCaller::Service { .. });
     let context = encryption_context
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
@@ -533,13 +536,28 @@ fn authorize(
     if crate::aws_managed::policy_allows(&key.policy, &key.arn, &caller, action, &context, &[]) {
         return Ok(());
     }
-    Err(KmsError::new(
-        KmsErrorKind::AccessDenied,
+    let message = if service_caller {
+        format!(
+            "{who} is not authorized to perform: {action} on this resource because the resource does not exist in this Region, no resource-based policies allow access, or a resource-based policy explicitly denies access"
+        )
+    } else {
         format!(
             "{who} is not authorized to perform: {action} on resource: {} because no resource-based policy allows the {action} action",
             key.arn
-        ),
-    ))
+        )
+    };
+    Err(KmsError::new(KmsErrorKind::AccessDenied, message))
+}
+
+/// Whether `stored` is a ciphertext KMS sealed: an AWS-shaped blob or the
+/// legacy textual envelope. Whether it opens (its key, its context) is
+/// decided by decrypting it; this only tells a ciphertext from a value a
+/// service stored in plaintext.
+fn is_kms_ciphertext(stored: &str) -> bool {
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(stored) else {
+        return false;
+    };
+    crate::blob::is_envelope(&bytes) || bytes.starts_with(b"fakecloud-kms:")
 }
 
 /// The cross-service trait form of the hook, for callers that hold KMS state
@@ -596,6 +614,10 @@ impl fakecloud_core::delivery::KmsHook for KmsServiceHook {
         encryption_context: HashMap<String, String>,
     ) -> Result<Vec<u8>, KmsError> {
         KmsServiceHook::decrypt(self, account_id, ciphertext_b64, caller, encryption_context)
+    }
+
+    fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+        is_kms_ciphertext(stored)
     }
 
     fn authorize_key_use(

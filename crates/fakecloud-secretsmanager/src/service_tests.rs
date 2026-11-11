@@ -2662,6 +2662,9 @@ impl fakecloud_core::delivery::KmsHook for PrefixKmsHook {
             .as_bytes()
             .to_vec())
     }
+    fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+        stored.starts_with("ENC:")
+    }
 }
 
 #[tokio::test]

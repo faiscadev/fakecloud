@@ -1384,6 +1384,10 @@ fn failed_export_reports_failure_on_describe() {
 struct EnvelopeKms;
 
 impl fakecloud_core::delivery::KmsHook for EnvelopeKms {
+    fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+        stored.starts_with("enc:")
+    }
+
     fn encrypt(
         &self,
         _account_id: &str,
@@ -1555,6 +1559,10 @@ fn export_objects_take_the_requested_encryption() {
 struct DenyingKms;
 
 impl fakecloud_core::delivery::KmsHook for DenyingKms {
+    fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+        stored.starts_with("envelope-under-")
+    }
+
     fn encrypt(
         &self,
         _account_id: &str,
@@ -9189,6 +9197,10 @@ fn a_search_schema_element_missing_a_member_is_rejected() {
 struct CountingKmsHook(std::sync::atomic::AtomicUsize, SharedDynamoDbState);
 
 impl fakecloud_core::delivery::KmsHook for CountingKmsHook {
+    fn is_ciphertext(&self, _account_id: &str, _stored: &str) -> bool {
+        true
+    }
+
     fn encrypt(
         &self,
         _: &str,

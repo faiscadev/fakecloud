@@ -141,6 +141,10 @@ mod tests {
     }
 
     impl KmsHook for RecordingKms {
+        fn is_ciphertext(&self, _account_id: &str, _stored: &str) -> bool {
+            true
+        }
+
         fn encrypt(
             &self,
             _account_id: &str,

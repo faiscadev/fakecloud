@@ -12047,6 +12047,10 @@ fn delete_objects_replicates_delete_markers() {
 struct ReadableKms;
 
 impl fakecloud_core::delivery::KmsHook for ReadableKms {
+    fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+        stored.starts_with("enc:")
+    }
+
     fn encrypt(
         &self,
         _account_id: &str,

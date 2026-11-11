@@ -216,6 +216,10 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
             .decrypt(account_id, ciphertext_b64, caller, encryption_context)
     }
 
+    fn is_ciphertext(&self, account_id: &str, stored: &str) -> bool {
+        fakecloud_core::delivery::KmsHook::is_ciphertext(&self.inner, account_id, stored)
+    }
+
     fn authorize_key_use(
         &self,
         account_id: &str,

@@ -812,6 +812,10 @@ mod tests {
 
     struct StubKmsHook;
     impl fakecloud_core::delivery::KmsHook for StubKmsHook {
+        fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+            stored.starts_with("ENC:")
+        }
+
         fn encrypt(
             &self,
             _account_id: &str,

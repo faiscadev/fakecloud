@@ -1440,6 +1440,10 @@ mod tests {
     struct StubKms(Option<fakecloud_core::delivery::KmsKeyUnusable>);
 
     impl fakecloud_core::delivery::KmsHook for StubKms {
+        fn is_ciphertext(&self, _account_id: &str, _stored: &str) -> bool {
+            true
+        }
+
         fn encrypt(
             &self,
             _: &str,

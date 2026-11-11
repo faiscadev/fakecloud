@@ -1254,6 +1254,10 @@ mod tests {
     }
 
     impl fakecloud_core::delivery::KmsHook for RecordingKms {
+        fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+            stored.starts_with("envelope:")
+        }
+
         fn encrypt(
             &self,
             _account_id: &str,
