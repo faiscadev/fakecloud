@@ -728,14 +728,15 @@ async fn follow_invocation(inv: FollowedInvocation) {
     }
 }
 
-/// Follow an instance's extension launcher through the extension init
-/// phase: learn how many extensions it started, let the runtime start once
-/// they have all registered, and fail the init with Lambda's `Extension.*`
-/// error when one cannot be launched or exits. Bounded by the init budget;
-/// a launcher that never reports leaves the first event to time out.
+/// Follow an instance's extension launcher for the instance's whole life:
+/// learn how many extensions it started (a launcher that never reports, an
+/// unwritable bookkeeping directory say, fails the init loudly), let the
+/// runtime start once they have all registered, and fail the environment
+/// with Lambda's `Extension.*` error when one cannot be launched or exits,
+/// during init or during an invocation.
 async fn monitor_launcher(teardown: Teardown, entry: std::sync::Weak<WarmEntry>, budget: Duration) {
     use super::extensions::{exited_extensions, EXITED_FILE, GO_FILE, LAUNCHED_FILE};
-    let deadline = tokio::time::Instant::now() + budget;
+    let started = tokio::time::Instant::now();
     let poll = Duration::from_millis(50);
     let read = |path: &'static str| {
         let teardown = teardown.clone();
@@ -749,6 +750,9 @@ async fn monitor_launcher(teardown: Teardown, entry: std::sync::Weak<WarmEntry>,
             Some(String::from_utf8_lossy(&bytes).into_owned())
         }
     };
+    let Some(sandbox) = entry.upgrade().map(|e| e.sandbox.clone()) else {
+        return;
+    };
     let count = loop {
         if let Some(n) = read(LAUNCHED_FILE)
             .await
@@ -759,13 +763,19 @@ async fn monitor_launcher(teardown: Teardown, entry: std::sync::Weak<WarmEntry>,
         let gone = entry
             .upgrade()
             .is_none_or(|e| e.instance.exit.borrow().is_some());
-        if gone || tokio::time::Instant::now() >= deadline {
+        if gone || sandbox.is_closed_or_failed() {
+            return;
+        }
+        if started.elapsed() >= INIT_LIMIT {
+            tracing::warn!(
+                sandbox = %sandbox.host(),
+                "the extension launcher never reported the extensions it started"
+            );
+            sandbox
+                .launcher_failed("the extension launcher did not report the extensions it started");
             return;
         }
         tokio::time::sleep(poll).await;
-    };
-    let Some(sandbox) = entry.upgrade().map(|e| e.sandbox.clone()) else {
-        return;
     };
     sandbox.expect_extensions(count);
     if count == 0 {
@@ -774,25 +784,32 @@ async fn monitor_launcher(teardown: Teardown, entry: std::sync::Weak<WarmEntry>,
     let mut reported = 0;
     let mut released = false;
     loop {
+        let Some(live) = entry.upgrade() else { return };
+        if sandbox.is_closed_or_failed() || live.instance.exit.borrow().is_some() {
+            return;
+        }
         if !released {
-            let registered = tokio::time::timeout(poll, sandbox.wait_registered()).await;
-            match registered {
+            match tokio::time::timeout(poll, sandbox.wait_registered()).await {
                 Ok(true) => {
-                    released = match entry.upgrade() {
-                        Some(e) => {
-                            teardown
-                                .backend
-                                .write_instance_file(&e.instance.handle, GO_FILE, b"")
-                                .await
-                        }
-                        None => return,
-                    };
+                    released = teardown
+                        .backend
+                        .write_instance_file(&live.instance.handle, GO_FILE, b"")
+                        .await;
                 }
                 Ok(false) => return,
                 Err(_) => {}
             }
+            if !released && started.elapsed() >= budget {
+                // The first event times out on its own.
+                return;
+            }
         }
-        // An extension that ends during init fails it.
+        // Extensions that ended, for the instance's whole life: during
+        // init, while an invocation runs, and between invocations (the
+        // next one then fails with the crash and the instance is reset).
+        // An idle environment is read less often: an extension waiting in
+        // `/event/next` that dies is also noticed by its dropped request.
+        let idle = released && sandbox.is_idle();
         if let Some(exited) = read(EXITED_FILE).await {
             let exited = exited_extensions(&exited);
             for (name, code) in exited.iter().skip(reported) {
@@ -800,14 +817,26 @@ async fn monitor_launcher(teardown: Teardown, entry: std::sync::Weak<WarmEntry>,
             }
             reported = exited.len();
         }
-        if sandbox.has_served() || tokio::time::Instant::now() >= deadline {
-            return;
-        }
-        if released {
-            tokio::time::sleep(poll).await;
+        drop(live);
+        if released && idle {
+            // Cut short when an invocation starts, so a crash during it is
+            // seen at the busy rate.
+            let until_busy = async {
+                while sandbox.is_idle() {
+                    tokio::time::sleep(poll).await;
+                }
+            };
+            let _ = tokio::time::timeout(IDLE_EXTENSION_POLL, until_busy).await;
+        } else if released {
+            tokio::time::sleep(BUSY_EXTENSION_POLL).await;
         }
     }
 }
+
+/// How often the launcher's exit record is read while an instance works,
+/// and between invocations.
+const BUSY_EXTENSION_POLL: Duration = Duration::from_millis(250);
+const IDLE_EXTENSION_POLL: Duration = Duration::from_secs(2);
 
 /// Retire an instance whose runtime exits while it is idle (killed, crashed,
 /// Pod deleted), so no event is sent to it; one that is busy is handled by
@@ -1885,6 +1914,10 @@ mod tests {
         /// it receives.
         extension: Ext,
         extension_events: Arc<StdMutex<Vec<serde_json::Value>>>,
+        /// Run "the launcher": the facade then reads its bookkeeping files
+        /// from `files`.
+        launcher: bool,
+        files: Arc<StdMutex<std::collections::HashMap<String, Vec<u8>>>>,
     }
 
     impl FakeBackend {
@@ -1909,6 +1942,8 @@ mod tests {
                 exits: StdMutex::new(Vec::new()),
                 extension: Ext::None,
                 extension_events: Arc::new(StdMutex::new(Vec::new())),
+                launcher: false,
+                files: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             })
         }
 
@@ -1949,6 +1984,9 @@ mod tests {
                     .dying_launches
                     .compare_exchange(pending, pending - 1, SeqCst, SeqCst)
                     .is_ok();
+            if self.launcher {
+                runtime_api.sandbox.await_extension_count();
+            }
             match self.extension {
                 Ext::None => {}
                 Ext::FailsInit(code) => {
@@ -1957,7 +1995,9 @@ mod tests {
                 }
                 ext => {
                     let sandbox = runtime_api.sandbox.clone();
-                    sandbox.expect_extensions(1);
+                    if !self.launcher {
+                        sandbox.expect_extensions(1);
+                    }
                     let events = match ext {
                         Ext::Shutdown => vec!["SHUTDOWN".to_string()],
                         _ => vec!["INVOKE".to_string()],
@@ -2000,11 +2040,26 @@ mod tests {
                     id: format!("c{n}"),
                 },
                 exit,
-                launcher: false,
+                launcher: self.launcher,
             })
         }
         async fn terminate(&self, _handle: &BackendHandle) {
             self.terminates.fetch_add(1, SeqCst);
+        }
+        async fn read_instance_file(&self, _handle: &BackendHandle, path: &str) -> Option<Vec<u8>> {
+            self.files.lock().unwrap().get(path).cloned()
+        }
+        async fn write_instance_file(
+            &self,
+            _handle: &BackendHandle,
+            path: &str,
+            contents: &[u8],
+        ) -> bool {
+            self.files
+                .lock()
+                .unwrap()
+                .insert(path.to_string(), contents.to_vec());
+            true
         }
     }
 
@@ -3047,6 +3102,103 @@ mod tests {
             .map(|e| e["shutdownReason"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(reasons, vec!["spindown", "failure"]);
+    }
+
+    /// A launcher that never reports what it started (its bookkeeping
+    /// directory unwritable, say) fails the init loudly with
+    /// `Extension.LaunchError` instead of leaving the event queued.
+    #[tokio::test(start_paused = true)]
+    async fn a_launcher_that_never_reports_fails_the_init() {
+        let mut backend = FakeBackend::new(Duration::ZERO);
+        Arc::get_mut(&mut backend).unwrap().launcher = true;
+        let rt = runtime_with(backend.clone(), 1);
+        let mut func = test_func("silent-launcher", "sha-A");
+        func.timeout = 60;
+        let out = rt.invoke(&func, b"{}", &[]).await.unwrap();
+        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
+        assert_eq!(out.error_type().as_deref(), Some("Extension.LaunchError"));
+    }
+
+    /// An extension that dies while an invocation runs fails it with
+    /// `Extension.Crash` at once, not after the whole timeout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_extension_dying_mid_invocation_fails_it() {
+        let mut backend = FakeBackend::replying(Duration::ZERO, Arc::new(|_| InProcessReply::Hang));
+        {
+            let b = Arc::get_mut(&mut backend).unwrap();
+            b.launcher = true;
+            b.extension = Ext::WorksAfterInvoke(Duration::from_secs(60));
+        }
+        backend.files.lock().unwrap().insert(
+            crate::runtime::extensions::LAUNCHED_FILE.to_string(),
+            b"1\n".to_vec(),
+        );
+        let rt = runtime_with(backend.clone(), 1);
+        let mut func = test_func("ext-dies", "sha-A");
+        func.timeout = 60;
+        let call = {
+            let rt = rt.clone();
+            let func = func.clone();
+            tokio::spawn(async move { rt.invoke(&func, b"{}", &[]).await })
+        };
+        wait_for(|| backend.handled() == 1).await;
+        backend.files.lock().unwrap().insert(
+            crate::runtime::extensions::EXITED_FILE.to_string(),
+            b"exit 2 ext\n".to_vec(),
+        );
+        let started = std::time::Instant::now();
+        let out = call.await.unwrap().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(out.error_type().as_deref(), Some("Extension.Crash"));
+        assert!(out.error_message().unwrap().contains("ext"));
+        wait_for(|| backend.terminates.load(SeqCst) == 1).await;
+    }
+
+    /// An extension that exits after the instance has served (while it is
+    /// idle between invocations) is still noticed: the next invocation fails
+    /// with `Extension.Crash` and the instance is reset, so the one after
+    /// runs on a fresh instance.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_extension_exiting_between_invocations_fails_the_next() {
+        use crate::runtime::extensions::{EXITED_FILE, LAUNCHED_FILE};
+        let mut backend = FakeBackend::new(Duration::ZERO);
+        {
+            let b = Arc::get_mut(&mut backend).unwrap();
+            b.launcher = true;
+            b.extension = Ext::WorksAfterInvoke(Duration::ZERO);
+        }
+        backend
+            .files
+            .lock()
+            .unwrap()
+            .insert(LAUNCHED_FILE.to_string(), b"1\n".to_vec());
+        let rt = runtime_with(backend.clone(), 1);
+        let func = test_func("ext-dies-idle", "sha-A");
+        let first = rt.invoke(&func, b"{}", &[]).await.unwrap();
+        assert!(first.function_error.is_none(), "{first:?}");
+
+        backend
+            .files
+            .lock()
+            .unwrap()
+            .insert(EXITED_FILE.to_string(), b"exit 2 ext\n".to_vec());
+        let pool = key("ext-dies-idle");
+        wait_for(|| {
+            rt.instances
+                .read()
+                .get(&pool)
+                .is_some_and(|p| p.iter().any(|e| e.sandbox.is_closed_or_failed()))
+        })
+        .await;
+        let second = rt.invoke(&func, b"{}", &[]).await.unwrap();
+        assert_eq!(second.error_type().as_deref(), Some("Extension.Crash"));
+        assert!(second.error_message().unwrap().contains("ext"));
+        wait_for(|| backend.terminates.load(SeqCst) == 1).await;
+
+        backend.files.lock().unwrap().remove(EXITED_FILE);
+        let third = rt.invoke(&func, b"{}", &[]).await.unwrap();
+        assert!(third.function_error.is_none(), "{third:?}");
+        assert_eq!(backend.launches.load(SeqCst), 2);
     }
 
     #[test]

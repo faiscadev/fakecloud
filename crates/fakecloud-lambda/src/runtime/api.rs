@@ -254,6 +254,18 @@ pub struct Sandbox {
     event_ready: Notify,
 }
 
+impl State {
+    fn is_idle(&self) -> bool {
+        self.queued.is_none()
+            && self.current.is_none()
+            && self.runtime_waiting
+            && self
+                .extensions
+                .values()
+                .all(|e| e.waiting && e.queue.is_empty())
+    }
+}
+
 impl Default for State {
     fn default() -> Self {
         Self {
@@ -327,6 +339,13 @@ impl Sandbox {
         }
     }
 
+    /// Whether the environment is between invocations: nothing queued, the
+    /// runtime back in `/invocation/next` and every extension in
+    /// `/event/next` with nothing left to handle.
+    pub fn is_idle(&self) -> bool {
+        self.state.lock().is_idle()
+    }
+
     /// Whether an event has ever been handed to this environment's runtime.
     pub fn has_served(&self) -> bool {
         self.state.lock().delivered_any
@@ -343,16 +362,10 @@ impl Sandbox {
             notified.as_mut().enable();
             {
                 let st = self.state.lock();
-                let idle = st.runtime_waiting
-                    && st.current.is_none()
-                    && st
-                        .extensions
-                        .values()
-                        .all(|e| e.waiting && e.queue.is_empty());
                 if st.closed || st.init_error.is_some() {
                     return false;
                 }
-                if idle {
+                if st.is_idle() {
                     return true;
                 }
             }
@@ -381,6 +394,25 @@ impl Sandbox {
         };
         let payload = serde_json::json!({
             "errorType": error_type,
+            "errorMessage": format!("Error: {detail}"),
+        })
+        .to_string()
+        .into_bytes();
+        self.fail(payload);
+    }
+
+    /// Whether the sandbox was torn down, or its environment failed (it is
+    /// reset before it takes another event).
+    pub fn is_closed_or_failed(&self) -> bool {
+        let st = self.state.lock();
+        st.closed || st.init_error.is_some()
+    }
+
+    /// The extension launcher failed to report (or start): the init fails
+    /// with `Extension.LaunchError`.
+    pub fn launcher_failed(&self, detail: &str) {
+        let payload = serde_json::json!({
+            "errorType": "Extension.LaunchError",
             "errorMessage": format!("Error: {detail}"),
         })
         .to_string()
