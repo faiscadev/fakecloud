@@ -242,6 +242,16 @@ struct State {
     current: Option<InFlight>,
     /// The sandbox was unregistered.
     closed: bool,
+    /// `SHUTDOWN` was sent: the environment is being torn down, and an
+    /// extension ending now is doing what it was told, not crashing.
+    shutting_down: bool,
+    /// An [`ExitMonitor`] is reading the launcher's exit record, so an
+    /// extension whose `/event/next` drops is reported by it, with its exit
+    /// status.
+    exit_monitor: bool,
+    /// Extensions whose `/event/next` dropped while monitored, not yet
+    /// taken by the monitor.
+    dropped: Vec<String>,
 }
 
 /// The Runtime API state of one execution environment.
@@ -252,6 +262,42 @@ pub struct Sandbox {
     /// Woken (all waiters) on every state change a waiting `/next` cares
     /// about.
     event_ready: Notify,
+    /// Wakes the [`ExitMonitor`] when an extension's `/event/next` drops.
+    exit_hint: Notify,
+}
+
+/// Held by whatever reads an instance's extension exit record (the
+/// launcher's `extensions.exited`): while it is held, an extension whose
+/// `/event/next` connection drops (its process ended) is handed to the
+/// holder ([`Self::take_dropped`], woken through [`Self::dropped`]) to report
+/// with its exit status, instead of failing the environment at once with
+/// none. Dropping it reports any still pending without one.
+pub struct ExitMonitor(Arc<Sandbox>);
+
+impl ExitMonitor {
+    /// Wait until an extension's `/event/next` drops (returns at once if one
+    /// dropped since the last call).
+    pub async fn dropped(&self) {
+        self.0.exit_hint.notified().await;
+    }
+
+    /// The extensions whose `/event/next` dropped since the last call.
+    pub fn take_dropped(&self) -> Vec<String> {
+        std::mem::take(&mut self.0.state.lock().dropped)
+    }
+}
+
+impl Drop for ExitMonitor {
+    fn drop(&mut self) {
+        let pending = {
+            let mut st = self.0.state.lock();
+            st.exit_monitor = false;
+            std::mem::take(&mut st.dropped)
+        };
+        for name in pending {
+            self.0.extension_exited(&name, None);
+        }
+    }
 }
 
 impl State {
@@ -278,6 +324,9 @@ impl Default for State {
             queued: None,
             current: None,
             closed: false,
+            shutting_down: false,
+            exit_monitor: false,
+            dropped: Vec::new(),
         }
     }
 }
@@ -298,7 +347,15 @@ impl Sandbox {
             info,
             state: Mutex::new(State::default()),
             event_ready: Notify::new(),
+            exit_hint: Notify::new(),
         }
+    }
+
+    /// Start reading this environment's extension exit record: see
+    /// [`ExitMonitor`].
+    pub fn monitor_exits(self: &Arc<Self>) -> ExitMonitor {
+        self.state.lock().exit_monitor = true;
+        ExitMonitor(self.clone())
     }
 
     /// Declare how many extension processes started with the runtime: the
@@ -377,7 +434,18 @@ impl Sandbox {
     /// it dropped its `/event/next` without one known), or could not be
     /// launched: the environment fails as Lambda fails it, the event
     /// waiting on init or in flight getting the error.
+    /// Once `SHUTDOWN` was sent the environment is going away and an
+    /// extension ending is expected, so nothing fails.
     pub fn extension_exited(&self, name: &str, code: Option<i32>) {
+        if self.state.lock().shutting_down {
+            tracing::debug!(
+                sandbox = %self.host(),
+                extension = name,
+                ?code,
+                "extension ended during shutdown"
+            );
+            return;
+        }
         let (error_type, detail) = match code {
             Some(126 | 127) => (
                 "Extension.LaunchError",
@@ -613,15 +681,27 @@ impl Sandbox {
                     return;
                 }
                 let name = {
-                    let st = self.sandbox.state.lock();
-                    if st.closed {
+                    let mut st = self.sandbox.state.lock();
+                    if st.closed || st.shutting_down {
                         return;
                     }
-                    st.extensions.get(self.id).map(|e| e.name.clone())
+                    let Some(ext) = st.extensions.get_mut(self.id) else {
+                        return;
+                    };
+                    // No longer waiting: the environment is not idle.
+                    ext.waiting = false;
+                    let name = ext.name.clone();
+                    if st.exit_monitor {
+                        // The exit record will say how it ended.
+                        st.dropped.push(name);
+                        drop(st);
+                        self.sandbox.exit_hint.notify_one();
+                        self.sandbox.event_ready.notify_waiters();
+                        return;
+                    }
+                    name
                 };
-                if let Some(name) = name {
-                    self.sandbox.extension_exited(&name, None);
-                }
+                self.sandbox.extension_exited(&name, None);
             }
         }
         let mut pending = Pending {
@@ -696,6 +776,7 @@ impl Sandbox {
         });
         let targets: Vec<String> = {
             let mut st = self.state.lock();
+            st.shutting_down = true;
             st.extensions
                 .iter_mut()
                 .filter(|(_, e)| e.shutdown)
@@ -1906,5 +1987,84 @@ mod tests {
         }
         let last = signals(&mut d.signals).pop().unwrap();
         assert!(last.contains("Runtime.TruncatedResponse"), "{last}");
+    }
+
+    /// An extension parked in `/event/next` whose request drops.
+    async fn drop_extension_next(sandbox: &Arc<Sandbox>, id: &str) {
+        let waiting = tokio::spawn({
+            let sandbox = sandbox.clone();
+            let id = id.to_string();
+            async move { sandbox.extension_next(&id).await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        waiting.abort();
+        let _ = waiting.await;
+    }
+
+    /// An extension that ends once it has handled `SHUTDOWN` (exit status 0
+    /// in the launcher's record, its request dropped) is doing what it was
+    /// told while the environment is torn down, not crashing.
+    #[tokio::test]
+    async fn an_extension_ending_after_shutdown_is_not_a_crash() {
+        let api = RuntimeApi::new();
+        let sandbox = api.register();
+        sandbox.expect_extensions(1);
+        let id = sandbox
+            .register_extension("ext", &["SHUTDOWN".into()])
+            .unwrap();
+        let next = tokio::spawn({
+            let sandbox = sandbox.clone();
+            let id = id.clone();
+            async move { sandbox.extension_next(&id).await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let grace = sandbox.shutdown_extensions("spindown", Duration::from_millis(100));
+        let (_, event) = tokio::join!(grace, next);
+        assert_eq!(event.unwrap().unwrap()["eventType"], "SHUTDOWN");
+        drop_extension_next(&sandbox, &id).await;
+        sandbox.extension_exited("ext", Some(0));
+        assert!(!sandbox.is_closed_or_failed());
+    }
+
+    /// With an exit monitor attached, an extension's dropped `/event/next`
+    /// is left to the monitor (which reads the exit status) instead of
+    /// failing the environment at once with none; a monitor that goes away
+    /// still fails it for anything left pending.
+    #[tokio::test]
+    async fn a_dropped_extension_request_is_left_to_the_exit_monitor() {
+        let api = RuntimeApi::new();
+        let sandbox = api.register();
+        sandbox.expect_extensions(1);
+        let id = sandbox.register_extension("ext", &[]).unwrap();
+        let monitor = sandbox.monitor_exits();
+        drop_extension_next(&sandbox, &id).await;
+        tokio::time::timeout(Duration::from_secs(1), monitor.dropped())
+            .await
+            .expect("the monitor is woken");
+        assert!(!sandbox.is_closed_or_failed());
+        assert_eq!(monitor.take_dropped(), vec!["ext".to_string()]);
+        assert!(!sandbox.is_idle(), "a dropped extension is not waiting");
+        // The monitor reports the exit status it read.
+        sandbox.extension_exited("ext", Some(2));
+        assert!(sandbox.is_closed_or_failed());
+        let mut d = sandbox.dispatch(event("req-c"));
+        let last = signals(&mut d.signals).pop().unwrap();
+        assert!(last.contains("exit status 2"), "{last}");
+
+        let sandbox = api.register();
+        sandbox.expect_extensions(1);
+        let id = sandbox.register_extension("ext", &[]).unwrap();
+        let monitor = sandbox.monitor_exits();
+        drop_extension_next(&sandbox, &id).await;
+        assert!(!sandbox.is_closed_or_failed());
+        drop(monitor);
+        assert!(sandbox.is_closed_or_failed());
+
+        // Unmonitored, the drop fails the environment at once.
+        let sandbox = api.register();
+        sandbox.expect_extensions(1);
+        let id = sandbox.register_extension("ext", &[]).unwrap();
+        drop_extension_next(&sandbox, &id).await;
+        assert!(sandbox.is_closed_or_failed());
     }
 }
