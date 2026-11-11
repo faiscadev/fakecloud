@@ -158,6 +158,7 @@ mod tests {
             created_at: Utc::now() - Duration::seconds(age_seconds),
             sequence_number: None,
             sealed_for_queue: None,
+            seal_recorded: true,
         }
     }
 

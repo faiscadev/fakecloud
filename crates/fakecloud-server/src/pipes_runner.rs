@@ -417,23 +417,35 @@ impl PipesRunner {
                 .map(String::as_str)
                 == Some("true");
 
+        // The pipe reads the queue with ReceiveMessage, and on AWS a body KMS
+        // will not open fails that ReceiveMessage: nothing is received, so
+        // no message of the poll is hidden, forwarded or counted. Every body
+        // is opened before any message is marked in flight.
         let mut out = Vec::new();
-        for msg in queue.messages.iter_mut() {
+        let mut picked = Vec::new();
+        for (index, msg) in queue.messages.iter().enumerate() {
             if out.len() >= limit {
                 break;
             }
-            if let Some(vis) = msg.visible_at {
-                if vis > now {
-                    continue;
-                }
+            if msg.visible_at.is_some_and(|vis| vis > now) {
+                continue;
             }
-            msg.visible_at = Some(visible_at);
-            let body =
-                self.decrypt_body(&msg.body, msg.sealing_queue(source_arn), &acct, encrypted);
+            let Some(body) = self.decrypt_body(
+                &msg.body,
+                msg.sealing_queue(source_arn),
+                &acct,
+                msg.body_is_sealed(encrypted),
+            ) else {
+                return Vec::new();
+            };
+            picked.push(index);
             out.push((
                 msg.message_id.clone(),
                 sqs_source_event(msg, &body, source_arn, &region),
             ));
+        }
+        for index in picked {
+            queue.messages[index].visible_at = Some(visible_at);
         }
         // Hiding messages for the visibility window is a durable mutation of SQS
         // state; mark it so the poll flushes it and a restart doesn't re-pull an
@@ -444,14 +456,21 @@ impl PipesRunner {
         out
     }
 
-    /// Decrypt an at-rest SQS body when the queue is encrypted and the body
-    /// is a fakecloud KMS envelope. Falls back to the raw body otherwise.
-    fn decrypt_body(&self, body: &str, source_arn: &str, account: &str, encrypted: bool) -> String {
-        if !encrypted || !looks_like_fakecloud_envelope(body) {
-            return body.to_string();
+    /// Decrypt an at-rest SQS body when it is sealed (see
+    /// [`fakecloud_sqs::SqsMessage::body_is_sealed`]) and a fakecloud KMS
+    /// envelope; the raw body otherwise. `None` when KMS will not open it.
+    fn decrypt_body(
+        &self,
+        body: &str,
+        source_arn: &str,
+        account: &str,
+        sealed: bool,
+    ) -> Option<String> {
+        if !sealed || !looks_like_fakecloud_envelope(body) {
+            return Some(body.to_string());
         }
         let Some(hook) = self.kms_hook.as_ref() else {
-            return body.to_string();
+            return Some(body.to_string());
         };
         let mut ctx = HashMap::new();
         ctx.insert("aws:sqs:arn".to_string(), source_arn.to_string());
@@ -461,10 +480,10 @@ impl PipesRunner {
             fakecloud_core::delivery::KmsCaller::via("sqs.amazonaws.com"),
             ctx,
         ) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
             Err(err) => {
-                tracing::warn!(%source_arn, %err, "pipes: KMS decrypt failed; forwarding opaque body");
-                body.to_string()
+                tracing::warn!(%source_arn, %err, "pipes: KMS decrypt failed; message left in the queue");
+                None
             }
         }
     }
@@ -1574,6 +1593,7 @@ mod tests {
                 created_at: Utc::now(),
                 sequence_number: None,
                 sealed_for_queue: None,
+                seal_recorded: true,
             }]),
             inflight: Vec::new(),
             attributes: attrs,
@@ -1654,6 +1674,114 @@ mod tests {
             snapshot_calls.load(Ordering::SeqCst) >= 1,
             "consuming SQS messages must persist SQS state through the hook"
         );
+    }
+
+    /// On AWS a body KMS will not open fails the pipe's ReceiveMessage:
+    /// nothing is received, so no message of the poll (sealed or not) is
+    /// hidden or forwarded.
+    #[test]
+    fn a_body_kms_refuses_fails_the_whole_pick() {
+        use fakecloud_core::multi_account::MultiAccountState;
+        use fakecloud_sqs::{SqsMessage, SqsQueue, SqsState};
+        use parking_lot::RwLock;
+        use std::collections::{BTreeMap, VecDeque};
+
+        struct DisabledKeyKms;
+        impl KmsHook for DisabledKeyKms {
+            fn encrypt(
+                &self,
+                _account_id: &str,
+                _region: &str,
+                _key_id: &str,
+                _plaintext: &[u8],
+                _caller: fakecloud_core::delivery::KmsCaller<'_>,
+                _ctx: HashMap<String, String>,
+            ) -> Result<String, fakecloud_core::delivery::KmsError> {
+                unreachable!()
+            }
+            fn decrypt(
+                &self,
+                _account_id: &str,
+                _ciphertext_b64: &str,
+                _caller: fakecloud_core::delivery::KmsCaller<'_>,
+                _ctx: HashMap<String, String>,
+            ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+                Err(fakecloud_core::delivery::KmsError::new(
+                    fakecloud_core::delivery::KmsErrorKind::Disabled,
+                    "key is disabled",
+                ))
+            }
+            fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+                looks_like_fakecloud_envelope(stored)
+            }
+        }
+
+        const ACCOUNT: &str = "123456789012";
+        const REGION: &str = "us-east-1";
+        let queue_arn = format!("arn:aws:sqs:{REGION}:{ACCOUNT}:pipe-src");
+        let message = |id: &str, body: &str, sealed: bool| SqsMessage {
+            message_id: id.to_string(),
+            receipt_handle: None,
+            md5_of_body: String::new(),
+            body: body.to_string(),
+            sent_timestamp: 0,
+            attributes: BTreeMap::new(),
+            message_attributes: BTreeMap::new(),
+            visible_at: None,
+            receive_count: 0,
+            first_received_at: None,
+            message_group_id: None,
+            message_dedup_id: None,
+            created_at: Utc::now(),
+            sequence_number: None,
+            sealed_for_queue: sealed.then(|| queue_arn.clone()),
+            seal_recorded: true,
+        };
+        let queue = SqsQueue {
+            queue_name: "pipe-src".to_string(),
+            queue_url: format!("http://localhost:4566/{ACCOUNT}/pipe-src"),
+            arn: queue_arn.clone(),
+            created_at: Utc::now(),
+            messages: VecDeque::from(vec![
+                message("plain", "hello", false),
+                message("sealed", "fakecloud-kms:sealed", true),
+            ]),
+            inflight: Vec::new(),
+            attributes: BTreeMap::from([("KmsMasterKeyId".to_string(), "alias/app".to_string())]),
+            is_fifo: false,
+            dedup_cache: BTreeMap::new(),
+            redrive_policy: None,
+            tags: BTreeMap::new(),
+            next_sequence_number: 0,
+            permission_labels: Vec::new(),
+            receipt_handle_map: BTreeMap::new(),
+            receive_attempt_cache: BTreeMap::new(),
+        };
+        let mut sqs: fakecloud_core::multi_account::MultiRegionState<SqsState> =
+            MultiAccountState::new(ACCOUNT, REGION, "http://localhost:4566");
+        sqs.default_regional_mut()
+            .queues
+            .insert(queue.queue_url.clone(), queue);
+        let sqs_state = Arc::new(RwLock::new(sqs));
+        let runner = PipesRunner::new(
+            Arc::new(RwLock::new(fakecloud_pipes::PipesAccounts::new())),
+            sqs_state.clone(),
+            Arc::new(DeliveryBus::new()),
+        )
+        .with_kms_hook(Arc::new(DisabledKeyKms));
+
+        assert!(runner.pick_messages(&queue_arn, 10, Utc::now()).is_empty());
+        let sqs = sqs_state.read();
+        let queue = sqs
+            .regional(ACCOUNT, REGION)
+            .unwrap()
+            .queues
+            .values()
+            .next()
+            .unwrap();
+        for msg in &queue.messages {
+            assert_eq!(msg.visible_at, None, "{} is not in flight", msg.message_id);
+        }
     }
 
     #[test]

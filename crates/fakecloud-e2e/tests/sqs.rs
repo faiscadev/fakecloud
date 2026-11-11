@@ -1311,11 +1311,32 @@ async fn sqs_introspection_messages() {
     let server = TestServer::start().await;
     let client = server.sqs_client().await;
 
-    // A default queue: SSE-SQS seals the body at rest, and introspection
-    // still shows the plaintext.
+    // An SSE-KMS queue seals the body at rest, and introspection still
+    // shows the plaintext.
     let queue = client
         .create_queue()
         .queue_name("intro-queue")
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId,
+            "alias/aws/sqs",
+        )
+        .send()
+        .await
+        .unwrap();
+    // A default (SSE-SQS) queue uses SQS-owned keys, not KMS: nothing is
+    // stored as a KMS ciphertext.
+    let plain_url = client
+        .create_queue()
+        .queue_name("intro-default")
+        .send()
+        .await
+        .unwrap()
+        .queue_url
+        .unwrap();
+    client
+        .send_message()
+        .queue_url(&plain_url)
+        .message_body("default queue body")
         .send()
         .await
         .unwrap();
@@ -1352,6 +1373,14 @@ async fn sqs_introspection_messages() {
     assert_eq!(messages[0]["inFlight"], false);
     assert!(!messages[0]["messageId"].as_str().unwrap().is_empty());
     assert!(!messages[0]["createdAt"].as_str().unwrap().is_empty());
+
+    let default = queues
+        .iter()
+        .find(|q| q["queueName"] == "intro-default")
+        .expect("expected intro-default in response");
+    let messages = default["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["body"], "default queue body");
+    assert_eq!(messages[0]["storedBody"], "default queue body");
 }
 
 #[tokio::test]

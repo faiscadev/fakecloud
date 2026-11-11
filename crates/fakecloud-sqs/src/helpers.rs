@@ -409,6 +409,7 @@ pub(crate) fn process_batch_send_entry(
         created_at: cfg.now,
         sequence_number: sequence_number.clone(),
         sealed_for_queue,
+        seal_recorded: true,
     };
     let message_id = msg.message_id.clone();
 
@@ -1467,21 +1468,14 @@ pub(crate) fn missing_param(name: &str) -> AwsServiceError {
 /// A ciphertext KMS cannot open is reported as the key's invalid state; a
 /// KMS-side failure as 500 `KMS.InternalFailureException`.
 pub(crate) fn kms_error(err: &fakecloud_core::delivery::KmsError) -> AwsServiceError {
-    use fakecloud_core::delivery::KmsErrorKind;
-    let code = match err.kind {
-        KmsErrorKind::AccessDenied => "KMS.AccessDeniedException",
-        KmsErrorKind::Disabled => "KMS.DisabledException",
-        KmsErrorKind::InvalidKeyUsage => "KMS.InvalidKeyUsageException",
-        KmsErrorKind::InvalidState | KmsErrorKind::InvalidCiphertext => "KMS.InvalidStateException",
-        KmsErrorKind::NotFound => "KMS.NotFoundException",
-        KmsErrorKind::Internal => {
-            return AwsServiceError::aws_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "KMS.InternalFailureException",
-                err.relayed_message(),
-            );
-        }
-    };
+    let (status, code) = err.kind.sqs_code();
+    if status != 400 {
+        return AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            code,
+            err.relayed_message(),
+        );
+    }
     AwsServiceError::aws_error_with_headers(
         StatusCode::BAD_REQUEST,
         code,

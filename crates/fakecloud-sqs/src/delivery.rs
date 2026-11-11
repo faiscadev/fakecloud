@@ -328,6 +328,7 @@ impl SqsDelivery for SqsDeliveryImpl {
             created_at: now,
             sequence_number,
             sealed_for_queue,
+            seal_recorded: true,
         };
         queue.messages.push_back(msg);
         drop(accounts);
@@ -464,7 +465,7 @@ mod tests {
         assert!(
             matches!(&err, SqsDeliveryError::Kms(e)
                 if e.kind == fakecloud_core::delivery::KmsErrorKind::AccessDenied
-                    && e.message.starts_with("Service: sns.amazonaws.com is not authorized to perform: kms:GenerateDataKey")),
+                    && e.message.starts_with("User: sns.amazonaws.com is not authorized to perform: kms:GenerateDataKey on this resource because")),
             "{err}"
         );
         assert!(matches!(

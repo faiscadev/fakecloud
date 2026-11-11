@@ -33,7 +33,7 @@ Query protocol. Form-encoded body, `Action` parameter, XML responses.
 
 ## Cross-service delivery
 
-- **SQS -> Lambda** — Event source mapping polls and invokes
+- **SQS -> Lambda** — Event source mapping polls and invokes. A poll that meets a message body KMS will not open (its queue's key disabled or refusing) receives nothing, as the ReceiveMessage it stands for fails on AWS: no message is invoked, put in flight or counted toward `maxReceiveCount`, and the message stays in the queue until KMS opens it again (EventBridge Pipes SQS sources likewise).
 
 ## Source
 

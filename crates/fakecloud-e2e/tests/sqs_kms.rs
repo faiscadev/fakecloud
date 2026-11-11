@@ -241,11 +241,12 @@ async fn sqs_unencrypted_queue_does_not_record_kms_usage() {
 }
 
 /// SQS-managed SSE (`SqsManagedSseEnabled=true`, the post-May-2023
-/// default) must encrypt the body at rest under `alias/aws/sqs` and
-/// decrypt it on Receive — same audit trail as customer-managed
-/// SSE-KMS, but using the AWS-managed key.
+/// default) encrypts with SQS-owned keys, never with KMS (recorded in
+/// `fakecloud-kms/tests/fixtures/aws-managed-keys`: such a queue reports no
+/// `KmsMasterKeyId` and service principals deliver to it freely). The body
+/// round-trips and no KMS call is made for it.
 #[tokio::test]
-async fn sqs_managed_sse_round_trips_through_alias_aws_sqs() {
+async fn sqs_managed_sse_round_trips_without_calling_kms() {
     let server = TestServer::start().await;
     let sqs = server.sqs_client().await;
     let http = reqwest::Client::new();
@@ -267,14 +268,10 @@ async fn sqs_managed_sse_round_trips_through_alias_aws_sqs() {
         .await
         .unwrap();
 
-    // Stored body is an opaque ciphertext (no plaintext leak); `body` is
-    // the plaintext.
+    // No KMS envelope at rest: SQS-owned keys are not KMS keys.
     let (body, stored_body) = introspected_body(&server, "sse-managed").await;
-    assert_ne!(
-        stored_body, "managed-sse-payload",
-        "SqsManagedSseEnabled must encrypt the body at rest, got plaintext"
-    );
     assert_eq!(body, "managed-sse-payload");
+    assert_eq!(stored_body, body);
 
     // Receive must surface the original plaintext.
     let got = sqs
@@ -292,8 +289,6 @@ async fn sqs_managed_sse_round_trips_through_alias_aws_sqs() {
         "ReceiveMessage must return decrypted plaintext under SSE-SQS"
     );
 
-    // Audit trail records the managed alias as the key behind both
-    // GenerateDataKey (send) and Decrypt (receive).
     let usage: serde_json::Value = http
         .get(format!("{}/_fakecloud/kms/usage", server.endpoint()))
         .send()
@@ -303,21 +298,10 @@ async fn sqs_managed_sse_round_trips_through_alias_aws_sqs() {
         .await
         .unwrap();
     let records = usage["records"].as_array().expect("records array");
-    let sqs_records: Vec<&serde_json::Value> = records
-        .iter()
-        .filter(|r| r["servicePrincipal"].as_str() == Some("sqs.amazonaws.com"))
-        .collect();
     assert!(
-        sqs_records
+        !records
             .iter()
-            .any(|r| r["operation"].as_str() == Some("GenerateDataKey")
-                && r["keyArn"].as_str().is_some_and(|a| a.contains("kms:"))),
-        "expected GenerateDataKey via alias/aws/sqs, got: {sqs_records:?}"
-    );
-    assert!(
-        sqs_records
-            .iter()
-            .any(|r| r["operation"].as_str() == Some("Decrypt")),
-        "expected paired Decrypt for SSE-SQS receive, got: {sqs_records:?}"
+            .any(|r| r["servicePrincipal"].as_str() == Some("sqs.amazonaws.com")),
+        "SSE-SQS must not call KMS, got: {records:?}"
     );
 }
