@@ -313,6 +313,10 @@ pub(crate) struct AsyncInvocation {
     /// The invocation's request ID (the 202 response's), which its
     /// destination record and dead-letter message carry.
     pub request_id: String,
+    /// What the runtime is told about the invocation: the ARN the caller
+    /// invoked through, its trace header and client context (the request ID
+    /// is always `request_id`).
+    pub context: crate::runtime::InvocationContext,
     /// Held until processing finishes (the reserved-concurrency counter).
     pub guard: Option<Box<dyn Send>>,
     /// Told why, if Lambda discards the event without having run the
@@ -340,6 +344,7 @@ pub(crate) fn spawn(inv: AsyncInvocation) {
             payload,
             executed_version,
             request_id,
+            context,
             guard,
             on_unrunnable,
         } = inv;
@@ -350,6 +355,7 @@ pub(crate) fn spawn(inv: AsyncInvocation) {
             let runtime = runtime.clone();
             let payload = &payload;
             let request_id = &request_id;
+            let context = &context;
             let current = resolve();
             let queued_arn = func.function_arn.clone();
             let slot = guard.lock().ok().and_then(|mut g| g.take());
@@ -369,7 +375,7 @@ pub(crate) fn spawn(inv: AsyncInvocation) {
                 // invocation's request ID, as on Lambda.
                 let ctx = crate::runtime::InvocationContext {
                     request_id: Some(request_id.to_string()),
-                    ..Default::default()
+                    ..context.clone()
                 };
                 let result = runtime
                     .invoke_with(&func, payload, &layer_zips, &ctx)
@@ -438,7 +444,7 @@ pub fn queue_async_invocation_observed(
     payload: &[u8],
     on_unrunnable: Option<fakecloud_core::delivery::AsyncUnrunnableHook>,
 ) -> Result<(), String> {
-    let (func, layer_zips, settings, executed_version) = {
+    let (func, layer_zips, settings, executed_version, invoked_arn) = {
         let accounts = state.read();
         let (account, region, name) = crate::function_location(
             function_arn,
@@ -447,8 +453,8 @@ pub fn queue_async_invocation_observed(
         );
         let (func, layer_zips) = crate::resolve_invocable(&accounts, function_arn, account, region)
             .ok_or_else(|| format!("Function not found: {function_arn}"))?;
-        // Cross-service invokes run the function's current code ($LATEST);
-        // a qualifier on the ARN still selects its event invoke config.
+        // A qualifier on the ARN selects the version that runs (see
+        // `resolve_invocable`) and its event invoke config.
         let settings = resolve_settings(
             &accounts,
             account,
@@ -456,7 +462,18 @@ pub fn queue_async_invocation_observed(
             name,
             arn_qualifier(function_arn),
         );
-        (func, layer_zips, settings, "$LATEST".to_string())
+        let invoked_arn = crate::state::invoked_function_arn(
+            function_arn,
+            accounts.default_account_id(),
+            accounts.region(),
+        );
+        (
+            func,
+            layer_zips,
+            settings,
+            "$LATEST".to_string(),
+            invoked_arn,
+        )
     };
     if func.code_zip.is_none() && func.package_type != "Image" {
         return Err(format!(
@@ -490,6 +507,10 @@ pub fn queue_async_invocation_observed(
         payload: payload.to_vec(),
         executed_version,
         request_id: uuid::Uuid::new_v4().to_string(),
+        context: crate::runtime::InvocationContext {
+            invoked_function_arn: Some(invoked_arn),
+            ..Default::default()
+        },
         guard: None,
         on_unrunnable,
     });

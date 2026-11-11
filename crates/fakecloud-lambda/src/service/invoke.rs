@@ -264,6 +264,7 @@ impl LambdaService {
                         payload: payload.to_vec(),
                         executed_version: executed_version.clone(),
                         request_id: request_id.to_string(),
+                        context: ctx.clone(),
                         guard: Some(Box::new(_concurrency_guard)),
                         on_unrunnable: None,
                     });

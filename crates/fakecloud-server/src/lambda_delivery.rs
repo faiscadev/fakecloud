@@ -60,7 +60,7 @@ impl LambdaDelivery for LambdaDeliveryImpl {
     > {
         // The function lives in the account and region its ARN names; a bare
         // name (no ARN) means the default account in the server's region.
-        let (account_id, region, function_name, resolved) = {
+        let (account_id, region, function_name, resolved, invoked_arn) = {
             let accounts = self.lambda_state.read();
             let (account, region, name) = fakecloud_lambda::function_location(
                 function_arn,
@@ -69,11 +69,17 @@ impl LambdaDelivery for LambdaDeliveryImpl {
             );
             let resolved =
                 fakecloud_lambda::resolve_invocable(&accounts, function_arn, account, region);
+            let invoked_arn = fakecloud_lambda::invoked_function_arn(
+                function_arn,
+                accounts.default_account_id(),
+                accounts.region(),
+            );
             (
                 account.to_string(),
                 region.to_string(),
                 name.to_string(),
                 resolved,
+                invoked_arn,
             )
         };
         let (func, layer_zips) = match resolved {
@@ -115,9 +121,16 @@ impl LambdaDelivery for LambdaDeliveryImpl {
                     "Function {function_name} has no deployment package"
                 ));
             }
+            // The runtime sees the ARN the integration invoked through
+            // (an event source mapping's or target's, alias included).
+            let ctx = fakecloud_lambda::runtime::InvocationContext {
+                invoked_function_arn: Some(invoked_arn),
+                ..Default::default()
+            };
             runtime
-                .invoke(&func, payload.as_bytes(), &layer_zips)
+                .invoke_with(&func, payload.as_bytes(), &layer_zips, &ctx)
                 .await
+                .map(|(output, _)| output)
                 .map_err(|e| format!("Lambda invocation failed: {e}"))
         })
     }
