@@ -785,6 +785,123 @@ async fn durable_function_behind_an_sqs_event_source_mapping() {
     assert_eq!(done.version(), Some(version.as_str()));
 }
 
+/// The first durable execution of `function`, once one exists.
+async fn first_execution(client: &aws_sdk_lambda::Client, function: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let listed = client
+            .list_durable_executions_by_function()
+            .function_name(function)
+            .send()
+            .await
+            .unwrap();
+        if let Some(e) = listed.durable_executions().first() {
+            return e.durable_execution_arn().to_string();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no durable execution of {function} started"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Asynchronous integrations (SNS, EventBridge) delivering to a durable
+/// function's qualified ARN start a durable execution, as an `Event`
+/// invoke does, rather than running the handler as a plain function.
+#[tokio::test]
+async fn async_integrations_start_durable_executions() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    create_durable_function(&client, "durable-sns").await;
+    create_durable_function(&client, "durable-events").await;
+    let qualified =
+        |name: &str| format!("arn:aws:lambda:us-east-1:123456789012:function:{name}:$LATEST");
+
+    let sns = server.sns_client().await;
+    let topic = sns
+        .create_topic()
+        .name("durable-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+    sns.subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("lambda")
+        .endpoint(qualified("durable-sns"))
+        .send()
+        .await
+        .unwrap();
+    sns.publish()
+        .topic_arn(&topic_arn)
+        .message("{\"n\":3}")
+        .send()
+        .await
+        .unwrap();
+
+    let events = server.eventbridge_client().await;
+    events
+        .put_rule()
+        .name("durable-rule")
+        .event_pattern(r#"{"source":["app.orders"]}"#)
+        .send()
+        .await
+        .unwrap();
+    events
+        .put_targets()
+        .rule("durable-rule")
+        .targets(
+            aws_sdk_eventbridge::types::Target::builder()
+                .id("durable")
+                .arn(qualified("durable-events"))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    events
+        .put_events()
+        .entries(
+            aws_sdk_eventbridge::types::PutEventsRequestEntry::builder()
+                .source("app.orders")
+                .detail_type("OrderPlaced")
+                .detail(r#"{"order":1}"#)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let sns_exec = first_execution(&client, "durable-sns").await;
+    let events_exec = first_execution(&client, "durable-events").await;
+    for arn in [&sns_exec, &events_exec] {
+        assert_eq!(
+            wait_until_done(&client, arn).await,
+            ExecutionStatus::Succeeded,
+            "{arn}"
+        );
+    }
+    let input = |arn: String| {
+        let client = client.clone();
+        async move {
+            let done = client
+                .get_durable_execution()
+                .durable_execution_arn(&arn)
+                .send()
+                .await
+                .unwrap();
+            serde_json::from_str::<serde_json::Value>(done.input_payload().unwrap()).unwrap()
+        }
+    };
+    assert_eq!(
+        input(sns_exec).await["Records"][0]["Sns"]["Message"],
+        "{\"n\":3}"
+    );
+    assert_eq!(input(events_exec).await["source"], "app.orders");
+}
+
 /// A raw Lambda REST call (the vendored SDK predates `DurableConfig.KMSKeyArn`
 /// and the KMS errors of the durable operations): status, JSON body, and
 /// error code.

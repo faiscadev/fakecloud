@@ -361,6 +361,16 @@ pub trait LambdaDelivery: Send + Sync {
         drop(on_unrunnable);
         self.invoke_lambda_async(function_arn, payload)
     }
+
+    /// When `function_arn` names a durable function, start a durable
+    /// execution for an asynchronous delivery of `payload` without waiting
+    /// for it (what [`Self::invoke_lambda_async`] does for such a function),
+    /// for integrations that queue other functions themselves. `None` for a
+    /// function that is not durable.
+    fn start_durable_async(&self, function_arn: &str, payload: &str) -> Option<Result<(), String>> {
+        let _ = (function_arn, payload);
+        None
+    }
 }
 
 /// Trait for putting records to Kinesis Data Streams.
@@ -1249,6 +1259,18 @@ impl DeliveryBus {
         self.lambda_invoker.as_ref().map(|invoker| {
             invoker.invoke_lambda_async_observed(function_arn, payload, on_unrunnable)
         })
+    }
+
+    /// [`LambdaDelivery::start_durable_async`]. `None` when no Lambda
+    /// invoker is wired or the function is not durable.
+    pub fn start_durable_lambda_async(
+        &self,
+        function_arn: &str,
+        payload: &str,
+    ) -> Option<Result<(), String>> {
+        self.lambda_invoker
+            .as_ref()?
+            .start_durable_async(function_arn, payload)
     }
 
     /// Put a record to a Kinesis stream identified by ARN.

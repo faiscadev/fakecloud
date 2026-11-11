@@ -124,6 +124,13 @@ impl LambdaDelivery for LambdaDeliveryImpl {
 
     fn invoke_lambda_async(&self, function_arn: &str, payload: &str) -> Result<(), String> {
         self.record_invocation(function_arn, payload);
+        // A durable function runs as a durable execution, started without
+        // waiting, as an `Event` invoke does.
+        if let Some(started) =
+            fakecloud_lambda::start_durable_for_async_delivery(&self.durable, function_arn, payload)
+        {
+            return started;
+        }
         fakecloud_lambda::queue_async_invocation(
             &self.lambda_state,
             self.runtime.clone(),
@@ -139,6 +146,13 @@ impl LambdaDelivery for LambdaDeliveryImpl {
         on_unrunnable: fakecloud_core::delivery::AsyncUnrunnableHook,
     ) -> Result<(), String> {
         self.record_invocation(function_arn, payload);
+        // A durable execution always runs once started, so the hook (for
+        // events Lambda discards unrun) never applies to it.
+        if let Some(started) =
+            fakecloud_lambda::start_durable_for_async_delivery(&self.durable, function_arn, payload)
+        {
+            return started;
+        }
         fakecloud_lambda::queue_async_invocation_observed(
             &self.lambda_state,
             self.runtime.clone(),
@@ -146,5 +160,9 @@ impl LambdaDelivery for LambdaDeliveryImpl {
             payload.as_bytes(),
             Some(on_unrunnable),
         )
+    }
+
+    fn start_durable_async(&self, function_arn: &str, payload: &str) -> Option<Result<(), String>> {
+        fakecloud_lambda::start_durable_for_async_delivery(&self.durable, function_arn, payload)
     }
 }

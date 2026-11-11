@@ -754,11 +754,24 @@ pub(crate) fn record_lambda_invocation(
 
 /// Queue an asynchronous Lambda invocation for a rule target.
 pub(crate) fn invoke_lambda_async(
+    delivery: &fakecloud_core::delivery::DeliveryBus,
     container_runtime: &Option<Arc<ContainerRuntime>>,
     lambda_state: &Option<SharedLambdaState>,
     function_arn: &str,
     payload: &str,
 ) {
+    // A durable function runs as a durable execution, started without
+    // waiting, as an `Event` invoke of it does.
+    if let Some(started) = delivery.start_durable_lambda_async(function_arn, payload) {
+        if let Err(e) = started {
+            tracing::warn!(
+                function_arn = %function_arn,
+                error = %e,
+                "EventBridge Lambda target could not be invoked"
+            );
+        }
+        return;
+    }
     let lambda_state = match lambda_state {
         Some(ls) => ls.clone(),
         None => {
@@ -1068,6 +1081,7 @@ pub(crate) fn dispatch_event_target(
             record_lambda_invocation(ls, arn, ctx.account_id, ctx.region, &body_str, now);
         }
         invoke_lambda_async(
+            ctx.delivery,
             ctx.container_runtime,
             &ctx.lambda_state.cloned(),
             arn,

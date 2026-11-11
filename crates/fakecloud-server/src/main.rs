@@ -1380,13 +1380,19 @@ async fn main() {
             .with_registry(sfn_registry_handle.clone()),
         )
     };
-    let delivery_for_eb = Arc::new(
-        DeliveryBus::new()
+    let delivery_for_eb = {
+        let mut bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
             .with_sns(sns_delivery.clone())
             .with_kinesis(kinesis_delivery_for_eb.clone())
-            .with_stepfunctions(sfn_delivery_for_eb),
-    );
+            .with_stepfunctions(sfn_delivery_for_eb);
+        // Rule targets queue plain functions themselves; the invoker starts
+        // durable functions' executions.
+        if let Some(ref ld) = lambda_delivery {
+            bus = bus.with_lambda(ld.clone());
+        }
+        Arc::new(bus)
+    };
     // Everything a rule target needs beyond the bus (Lambda state + container
     // runtime, Logs state + persist hook). PutEvents, the rule scheduler and
     // the single shared cross-service EventBridge delivery all take this one

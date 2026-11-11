@@ -704,17 +704,16 @@ impl LambdaService {
     }
 }
 
-/// A cross-service delivery (event source mapping, SNS, EventBridge, ...)
-/// of `payload` to `function_ref`: when the function is durable, start an
-/// execution and wait for it to end, answering what a synchronous `Invoke`
-/// would (the result, or the error envelope flagged as a function error). `None` for a function that is
-/// not durable or does not exist, which the regular delivery handles.
-pub async fn invoke_for_delivery(
+/// Start a durable execution of `function_ref` for a cross-service delivery
+/// of `payload`, returning `(account, region, execution ARN)`. `None` for a
+/// function that is not durable or does not exist, which the regular
+/// delivery handles.
+fn start_for_delivery(
     hub: &DurableHub,
     function_ref: &str,
     payload: &str,
-) -> Option<Result<fakecloud_core::delivery::LambdaInvocationOutput, String>> {
-    let (account, region, arn) = {
+) -> Option<Result<(String, String, String), String>> {
+    let started = {
         let mut accounts = hub.state().write();
         let (account, region, name) = crate::state::function_location(
             function_ref,
@@ -751,6 +750,24 @@ pub async fn invoke_for_delivery(
     };
     hub.request_persist();
     hub.kick();
+    Some(Ok(started))
+}
+
+/// A synchronous cross-service delivery (event source mapping, ...) of
+/// `payload` to `function_ref`: when the function is durable, start an
+/// execution and wait for it to end, answering what a synchronous `Invoke`
+/// would (the result, or the error envelope flagged as a function error).
+/// `None` for a function that is not durable or does not exist, which the
+/// regular delivery handles.
+pub async fn invoke_for_delivery(
+    hub: &DurableHub,
+    function_ref: &str,
+    payload: &str,
+) -> Option<Result<fakecloud_core::delivery::LambdaInvocationOutput, String>> {
+    let (account, region, arn) = match start_for_delivery(hub, function_ref, payload)? {
+        Ok(started) => started,
+        Err(e) => return Some(Err(e)),
+    };
     Some(match hub.wait_for_end(&account, &region, &arn).await {
         Some(exec) => {
             let (payload, failed) = runner::sync_response_body(&exec);
@@ -761,6 +778,20 @@ pub async fn invoke_for_delivery(
         }
         None => Err(unavailable_message(&arn)),
     })
+}
+
+/// An asynchronous cross-service delivery (SNS, S3 notifications,
+/// EventBridge, Scheduler, ...) of `payload` to `function_ref`: when the
+/// function is durable, start an execution and return, as an `Event`
+/// `Invoke` does; the execution's own retries and timeout govern it from
+/// there. `None` for a function that is not durable or does not exist,
+/// which the regular asynchronous queue handles.
+pub fn start_async_for_delivery(
+    hub: &DurableHub,
+    function_ref: &str,
+    payload: &str,
+) -> Option<Result<(), String>> {
+    Some(start_for_delivery(hub, function_ref, payload)?.map(|_| ()))
 }
 
 /// `DurableExecutionName`: `^[a-zA-Z0-9-_]+$`, 1 to 64 characters.
@@ -1188,6 +1219,33 @@ mod tests {
         assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
         let payload: Value = serde_json::from_slice(&out.payload).unwrap();
         assert!(payload.get("errorMessage").is_some(), "{payload}");
+    }
+
+    #[tokio::test]
+    async fn an_async_delivery_starts_an_execution_without_waiting() {
+        let (hub, first) = seeded(None);
+        assert_eq!(
+            start_async_for_delivery(&hub, "plain-missing:$LATEST", "{}"),
+            None
+        );
+        assert_eq!(
+            start_async_for_delivery(&hub, "f", "{}"),
+            Some(Err(
+                "You cannot invoke a durable function using an unqualified ARN.".to_string()
+            ))
+        );
+        assert_eq!(
+            start_async_for_delivery(&hub, "f:$LATEST", "{\"b\":2}"),
+            Some(Ok(()))
+        );
+        let accounts = hub.state().read();
+        let execs = &accounts
+            .regional(ACCOUNT, "us-east-1")
+            .unwrap()
+            .durable_executions;
+        let started: Vec<_> = execs.keys().filter(|a| **a != first).collect();
+        assert_eq!(started.len(), 1, "{execs:?}");
+        assert_eq!(execs[started[0]].input_payload, "{\"b\":2}");
     }
 
     #[tokio::test]
