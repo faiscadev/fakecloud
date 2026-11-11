@@ -39,8 +39,7 @@ impl<'q> PolicyQualifier<'q> {
         match qualifier {
             None | Some("") | Some("$LATEST") => Self::Function,
             Some(q)
-                if q == crate::state::LATEST_PUBLISHED
-                    || q.bytes().all(|b| b.is_ascii_digit()) =>
+                if q == crate::state::LATEST_PUBLISHED || q.bytes().all(|b| b.is_ascii_digit()) =>
             {
                 Self::Version(q)
             }

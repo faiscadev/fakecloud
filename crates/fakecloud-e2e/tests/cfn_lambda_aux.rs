@@ -510,16 +510,28 @@ async fn an_event_source_mapping_to_a_missing_queue_fails_the_stack() {
         .unwrap()
         .stacks()[0]
         .clone();
-    assert_eq!(stack.stack_status().unwrap().as_str(), "CREATE_FAILED");
-    let reason = stack.stack_status_reason().unwrap_or_default();
+    assert_eq!(stack.stack_status().unwrap().as_str(), "ROLLBACK_COMPLETE");
+    let events = cfn
+        .describe_stack_events()
+        .stack_name("cfn-missing-source")
+        .send()
+        .await
+        .unwrap();
+    let reason = events
+        .stack_events()
+        .iter()
+        .find(|e| {
+            e.logical_resource_id() == Some("Esm")
+                && e.resource_status().map(|s| s.as_str()) == Some("CREATE_FAILED")
+        })
+        .and_then(|e| e.resource_status_reason())
+        .unwrap_or_default();
     assert!(
-        reason.contains("Esm")
-            && reason.contains(
-                "Resource handler returned message: \"Error occurred while ReceiveMessage. \
+        reason.contains(
+            "Resource handler returned message: \"Error occurred while ReceiveMessage. \
                  SQS Error Code: AWS.SimpleQueueService.NonExistentQueue. SQS Error Message: \
                  The specified queue does not exist. (Service: Lambda, Status Code: 400"
-            )
-            && reason.contains("HandlerErrorCode: InvalidRequest"),
+        ) && reason.contains("HandlerErrorCode: InvalidRequest"),
         "{reason}"
     );
     // The function the stack created first was rolled back, and no mapping
