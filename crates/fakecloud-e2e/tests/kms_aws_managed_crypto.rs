@@ -1145,3 +1145,673 @@ async fn secrets_without_a_key_are_sealed_under_aws_secretsmanager() {
         );
     }
 }
+
+/// A customer managed key the account can use, for tests that then disable it.
+async fn account_key(kms: &aws_sdk_kms::Client) -> String {
+    kms.create_key()
+        .send()
+        .await
+        .unwrap()
+        .key_metadata
+        .unwrap()
+        .key_id()
+        .to_string()
+}
+
+#[tokio::test]
+async fn secret_ciphertexts_that_do_not_open_fail_instead_of_leaking() {
+    let server = TestServer::start().await;
+    let secrets = server.secretsmanager_client().await;
+    let kms = server.kms_client().await;
+    let key = account_key(&kms).await;
+    secrets
+        .create_secret()
+        .name("s")
+        .kms_key_id(&key)
+        .secret_string("hunter2")
+        .send()
+        .await
+        .unwrap();
+    secrets
+        .create_secret()
+        .name("b")
+        .kms_key_id(&key)
+        .secret_binary(aws_sdk_secretsmanager::primitives::Blob::new(vec![
+            0u8, 1, 2, 255,
+        ]))
+        .send()
+        .await
+        .unwrap();
+    secrets
+        .create_secret()
+        .name("ok")
+        .secret_string("fine")
+        .send()
+        .await
+        .unwrap();
+    kms.disable_key().key_id(&key).send().await.unwrap();
+
+    // Reads fail with Secrets Manager's error, never return the ciphertext.
+    for name in ["s", "b"] {
+        let err = secrets
+            .get_secret_value()
+            .secret_id(name)
+            .send()
+            .await
+            .expect_err("a disabled key must fail the read");
+        assert_eq!(
+            aws_sdk_secretsmanager::error::ProvideErrorMetadata::code(&err),
+            Some("DecryptionFailure"),
+            "{err:?}"
+        );
+        // Recorded in fakecloud-codebuild/tests/fixtures/env-var-resolution-direct-reads.txt.
+        let message = aws_sdk_secretsmanager::error::ProvideErrorMetadata::message(&err).unwrap();
+        assert!(
+            message.starts_with(&format!(
+                "Secrets Manager can't decrypt the secret value: arn:aws:kms:us-east-1:123456789012:key/{key} is disabled. (Service: AWSKMS; Status Code: 400; Error Code: DisabledException; Request ID: "
+            )),
+            "{message}"
+        );
+    }
+
+    // One secret KMS will not decrypt is one of the batch's errors.
+    let batch = secrets
+        .batch_get_secret_value()
+        .secret_id_list("ok")
+        .secret_id_list("s")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.secret_values().len(), 1);
+    assert_eq!(batch.secret_values()[0].secret_string(), Some("fine"));
+    assert_eq!(batch.errors().len(), 1);
+    assert_eq!(batch.errors()[0].secret_id(), Some("s"));
+    assert_eq!(batch.errors()[0].error_code(), Some("DecryptionFailure"));
+
+    // Rotation cannot re-seal the value: it fails and leaves the secret,
+    // its rotation configuration included.
+    let before = secrets
+        .list_secret_version_ids()
+        .secret_id("s")
+        .send()
+        .await
+        .unwrap();
+    let described_before = secrets
+        .describe_secret()
+        .secret_id("s")
+        .send()
+        .await
+        .unwrap();
+    let err = secrets
+        .rotate_secret()
+        .secret_id("s")
+        .rotation_rules(
+            aws_sdk_secretsmanager::types::RotationRulesType::builder()
+                .automatically_after_days(7)
+                .build(),
+        )
+        .send()
+        .await
+        .expect_err("rotation under a disabled key must fail");
+    assert_eq!(
+        aws_sdk_secretsmanager::error::ProvideErrorMetadata::code(&err),
+        Some("DecryptionFailure"),
+        "{err:?}"
+    );
+    let after = secrets
+        .list_secret_version_ids()
+        .secret_id("s")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(before.versions().len(), after.versions().len());
+    let described_after = secrets
+        .describe_secret()
+        .secret_id("s")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(described_after.rotation_enabled(), None);
+    assert_eq!(described_after.rotation_rules(), None);
+    assert_eq!(
+        described_after.rotation_enabled(),
+        described_before.rotation_enabled()
+    );
+    assert_eq!(
+        described_after.last_changed_date(),
+        described_before.last_changed_date()
+    );
+
+    // A replica KMS cannot seal for is Failed, holding nothing.
+    let replicated = secrets
+        .replicate_secret_to_regions()
+        .secret_id("s")
+        .add_replica_regions(
+            aws_sdk_secretsmanager::types::ReplicaRegionType::builder()
+                .region("us-west-2")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let status = &replicated.replication_status()[0];
+    assert_eq!(
+        status.status(),
+        Some(&aws_sdk_secretsmanager::types::StatusType::Failed),
+        "{status:?}"
+    );
+    let west = aws_sdk_secretsmanager::Client::new(&server.aws_config_in("us-west-2").await);
+    assert!(west.get_secret_value().secret_id("s").send().await.is_err());
+
+    // Once the key is back, both values read as stored.
+    kms.enable_key().key_id(&key).send().await.unwrap();
+    let got = secrets
+        .get_secret_value()
+        .secret_id("s")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.secret_string(), Some("hunter2"));
+    let got = secrets
+        .get_secret_value()
+        .secret_id("b")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        got.secret_binary().map(|b| b.as_ref().to_vec()),
+        Some(vec![0u8, 1, 2, 255])
+    );
+}
+
+#[tokio::test]
+async fn secret_binary_is_sealed_under_the_secret_key() {
+    let server = TestServer::start().await;
+    let secrets = server.secretsmanager_client().await;
+    let created = secrets
+        .create_secret()
+        .name("bin")
+        .secret_binary(aws_sdk_secretsmanager::primitives::Blob::new(
+            b"raw".to_vec(),
+        ))
+        .send()
+        .await
+        .unwrap();
+    let usage: serde_json::Value =
+        reqwest::get(format!("{}/_fakecloud/kms/usage", server.endpoint()))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    assert!(
+        usage["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["operation"] == "GenerateDataKey"
+                && r["encryptionContext"]["SecretARN"] == created.arn().unwrap()),
+        "{usage}"
+    );
+    let versions = secrets
+        .list_secret_version_ids()
+        .secret_id("bin")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        versions.versions()[0].kms_key_ids(),
+        ["DefaultEncryptionKey".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn update_secret_kms_key_validates_and_re_encrypts() {
+    // Recorded in fixtures/aws-managed-keys/secrets-eventbridge-dlq-sse-sqs.txt.
+    let server = TestServer::start().await;
+    let secrets = server.secretsmanager_client().await;
+    let kms = server.kms_client().await;
+    secrets
+        .create_secret()
+        .name("s")
+        .secret_string("v1")
+        .send()
+        .await
+        .unwrap();
+
+    let err = secrets
+        .update_secret()
+        .secret_id("s")
+        .kms_key_id("alias/aws/s3")
+        .send()
+        .await
+        .expect_err("another service's AWS-managed key");
+    assert_eq!(
+        aws_sdk_secretsmanager::error::ProvideErrorMetadata::code(&err),
+        Some("AccessDeniedException")
+    );
+    assert_eq!(
+        aws_sdk_secretsmanager::error::ProvideErrorMetadata::message(&err),
+        Some("Access to KMS is not allowed")
+    );
+    let err = secrets
+        .update_secret()
+        .secret_id("s")
+        .kms_key_id("alias/fc-does-not-exist")
+        .send()
+        .await
+        .expect_err("a missing key");
+    assert_eq!(
+        aws_sdk_secretsmanager::error::ProvideErrorMetadata::code(&err),
+        Some("InvalidParameterException")
+    );
+    assert!(aws_sdk_secretsmanager::error::ProvideErrorMetadata::message(&err)
+        .unwrap()
+        .starts_with("The operation failed because of an invalid KMS key: Alias arn:aws:kms:us-east-1:123456789012:alias/fc-does-not-exist is not found. (Service: AWSKMS; Status Code: 400; Error Code: NotFoundException;"));
+    let described = secrets
+        .describe_secret()
+        .secret_id("s")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        described.kms_key_id(),
+        None,
+        "a refused update changes nothing"
+    );
+
+    let updated = secrets
+        .update_secret()
+        .secret_id("s")
+        .kms_key_id("alias/aws/secretsmanager")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.version_id(), None);
+    let described = secrets
+        .describe_secret()
+        .secret_id("s")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(described.kms_key_id(), Some("alias/aws/secretsmanager"));
+    let versions = secrets
+        .list_secret_version_ids()
+        .secret_id("s")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(versions.versions().len(), 1);
+    assert_eq!(
+        versions.versions()[0].kms_key_ids(),
+        [
+            "DefaultEncryptionKey".to_string(),
+            "alias/aws/secretsmanager".to_string()
+        ]
+    );
+
+    // The value is now sealed under the new key: disabling it fails reads.
+    let key = account_key(&kms).await;
+    secrets
+        .update_secret()
+        .secret_id("s")
+        .kms_key_id(&key)
+        .send()
+        .await
+        .unwrap();
+    let got = secrets
+        .get_secret_value()
+        .secret_id("s")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.secret_string(), Some("v1"));
+    kms.disable_key().key_id(&key).send().await.unwrap();
+    assert!(secrets
+        .get_secret_value()
+        .secret_id("s")
+        .send()
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn encrypted_messages_stay_readable_in_a_plain_dead_letter_queue() {
+    let server = TestServer::start().await;
+    let sqs = aws_sdk_sqs::Client::new(&server.aws_config().await);
+    let kms = server.kms_client().await;
+    let key = account_key(&kms).await;
+    let dlq = sqs
+        .create_queue()
+        .queue_name("dlq")
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::SqsManagedSseEnabled,
+            "false",
+        )
+        .send()
+        .await
+        .unwrap()
+        .queue_url
+        .unwrap();
+    let src = sqs
+        .create_queue()
+        .queue_name("src")
+        .attributes(aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId, &key)
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::RedrivePolicy,
+            r#"{"deadLetterTargetArn":"arn:aws:sqs:us-east-1:123456789012:dlq","maxReceiveCount":"1"}"#,
+        )
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::VisibilityTimeout,
+            "0",
+        )
+        .send()
+        .await
+        .unwrap()
+        .queue_url
+        .unwrap();
+    sqs.send_message()
+        .queue_url(&src)
+        .message_body("secret body")
+        .send()
+        .await
+        .unwrap();
+    // The first receive takes it; the second moves it to the DLQ.
+    for _ in 0..2 {
+        sqs.receive_message().queue_url(&src).send().await.unwrap();
+    }
+    let got = sqs.receive_message().queue_url(&dlq).send().await.unwrap();
+    assert_eq!(got.messages().len(), 1);
+    assert_eq!(got.messages()[0].body(), Some("secret body"));
+}
+
+#[tokio::test]
+async fn eventbridge_sends_events_kms_refuses_to_the_target_dead_letter_queue() {
+    // Recorded in fixtures/aws-managed-keys/secrets-eventbridge-dlq-sse-sqs.txt.
+    let server = TestServer::start().await;
+    let cfg = server.aws_config().await;
+    let sqs = aws_sdk_sqs::Client::new(&cfg);
+    let events = aws_sdk_eventbridge::Client::new(&cfg);
+    let policy = |name: &str| {
+        serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Principal": {"Service": "events.amazonaws.com"},
+                "Action": "sqs:SendMessage",
+                "Resource": format!("arn:aws:sqs:us-east-1:123456789012:{name}")}]
+        })
+        .to_string()
+    };
+    let dlq = sqs
+        .create_queue()
+        .queue_name("dlq")
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::Policy,
+            policy("dlq"),
+        )
+        .send()
+        .await
+        .unwrap()
+        .queue_url
+        .unwrap();
+    sqs.create_queue()
+        .queue_name("target")
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::Policy,
+            policy("target"),
+        )
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId,
+            "alias/aws/sqs",
+        )
+        .send()
+        .await
+        .unwrap();
+    let rule_arn = events
+        .put_rule()
+        .name("r")
+        .event_pattern(r#"{"source":["fc.test"]}"#)
+        .send()
+        .await
+        .unwrap()
+        .rule_arn
+        .unwrap();
+    events
+        .put_targets()
+        .rule("r")
+        .targets(
+            aws_sdk_eventbridge::types::Target::builder()
+                .id("t")
+                .arn("arn:aws:sqs:us-east-1:123456789012:target")
+                .dead_letter_config(
+                    aws_sdk_eventbridge::types::DeadLetterConfig::builder()
+                        .arn("arn:aws:sqs:us-east-1:123456789012:dlq")
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let archive_arn = events
+        .create_archive()
+        .archive_name("a")
+        .event_source_arn("arn:aws:events:us-east-1:123456789012:event-bus/default")
+        .send()
+        .await
+        .unwrap()
+        .archive_arn
+        .unwrap();
+    let put = events
+        .put_events()
+        .entries(
+            aws_sdk_eventbridge::types::PutEventsRequestEntry::builder()
+                .source("fc.test")
+                .detail_type("t")
+                .detail(r#"{"k":"v"}"#)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let event_id = put.entries()[0].event_id().unwrap().to_string();
+
+    let mut messages = Vec::new();
+    for _ in 0..50 {
+        messages = sqs
+            .receive_message()
+            .queue_url(&dlq)
+            .message_attribute_names("All")
+            .send()
+            .await
+            .unwrap()
+            .messages
+            .unwrap_or_default();
+        if !messages.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(messages.len(), 1);
+    let msg = &messages[0];
+    let body: serde_json::Value = serde_json::from_str(msg.body().unwrap()).unwrap();
+    assert_eq!(body["id"], event_id.as_str());
+    assert_eq!(body["detail"]["k"], "v");
+    let attr = |name: &str| {
+        msg.message_attributes()
+            .and_then(|a| a.get(name))
+            .and_then(|v| v.string_value())
+            .unwrap_or_else(|| panic!("{name} missing: {msg:?}"))
+            .to_string()
+    };
+    assert_eq!(attr("ERROR_CODE"), "NO_PERMISSIONS");
+    assert_eq!(attr("RULE_ARN"), rule_arn);
+    assert_eq!(
+        attr("TARGET_ARN"),
+        "arn:aws:sqs:us-east-1:123456789012:target"
+    );
+    let message = attr("ERROR_MESSAGE");
+    assert!(
+        message.starts_with("User: events.amazonaws.com is not authorized to perform: kms:GenerateDataKey on this resource because the resource does not exist in this Region, no resource-based policies allow access, or a resource-based policy explicitly denies access (Service: AWSKMS; Status Code: 400; Error Code: AccessDeniedException; Request ID: "),
+        "{message}"
+    );
+    assert!(
+        message.contains("; Proxy: null) (Service: AmazonSQS; Status Code: 400; Error Code: KMS.AccessDeniedException; Request ID: "),
+        "{message}"
+    );
+
+    // A replayed event is delivered through the rule that matches it, so
+    // its dead-letter message names that rule too.
+    sqs.delete_message()
+        .queue_url(&dlq)
+        .receipt_handle(msg.receipt_handle().unwrap())
+        .send()
+        .await
+        .unwrap();
+    events
+        .start_replay()
+        .replay_name("rp")
+        .event_source_arn(&archive_arn)
+        .destination(
+            aws_sdk_eventbridge::types::ReplayDestination::builder()
+                .arn("arn:aws:events:us-east-1:123456789012:event-bus/default")
+                .build()
+                .unwrap(),
+        )
+        .event_start_time(aws_sdk_eventbridge::primitives::DateTime::from_secs(0))
+        .event_end_time(aws_sdk_eventbridge::primitives::DateTime::from_secs(
+            chrono::Utc::now().timestamp() + 3600,
+        ))
+        .send()
+        .await
+        .unwrap();
+    let mut replayed = Vec::new();
+    for _ in 0..50 {
+        replayed = sqs
+            .receive_message()
+            .queue_url(&dlq)
+            .message_attribute_names("All")
+            .send()
+            .await
+            .unwrap()
+            .messages
+            .unwrap_or_default();
+        if !replayed.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(replayed.len(), 1);
+    let replayed_attr = |name: &str| {
+        replayed[0]
+            .message_attributes()
+            .and_then(|a| a.get(name))
+            .and_then(|v| v.string_value())
+            .unwrap_or_else(|| panic!("{name} missing: {:?}", replayed[0]))
+            .to_string()
+    };
+    assert_eq!(replayed_attr("ERROR_CODE"), "NO_PERMISSIONS");
+    assert_eq!(replayed_attr("RULE_ARN"), rule_arn);
+    let body: serde_json::Value = serde_json::from_str(replayed[0].body().unwrap()).unwrap();
+    assert_eq!(body["id"], event_id.as_str());
+}
+
+#[tokio::test]
+async fn sse_sqs_queues_never_call_kms() {
+    // Recorded: an SNS topic feeds a default (SSE-SQS) queue, which reports
+    // no KMS key.
+    let server = TestServer::start().await;
+    let cfg = server.aws_config().await;
+    let sqs = aws_sdk_sqs::Client::new(&cfg);
+    let sns = aws_sdk_sns::Client::new(&cfg);
+    let kms = server.kms_client().await;
+    let url = sqs
+        .create_queue()
+        .queue_name("q")
+        .send()
+        .await
+        .unwrap()
+        .queue_url
+        .unwrap();
+    let attrs = sqs
+        .get_queue_attributes()
+        .queue_url(&url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::All)
+        .send()
+        .await
+        .unwrap();
+    let attrs = attrs.attributes().unwrap();
+    assert_eq!(
+        attrs
+            .get(&aws_sdk_sqs::types::QueueAttributeName::SqsManagedSseEnabled)
+            .map(String::as_str),
+        Some("true")
+    );
+    assert!(!attrs.contains_key(&aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId));
+    let topic = sns
+        .create_topic()
+        .name("t")
+        .send()
+        .await
+        .unwrap()
+        .topic_arn
+        .unwrap();
+    sns.subscribe()
+        .topic_arn(&topic)
+        .protocol("sqs")
+        .endpoint("arn:aws:sqs:us-east-1:123456789012:q")
+        .attributes("RawMessageDelivery", "true")
+        .send()
+        .await
+        .unwrap();
+    sns.publish()
+        .topic_arn(&topic)
+        .message("to-sse-sqs")
+        .send()
+        .await
+        .unwrap();
+    sqs.send_message()
+        .queue_url(&url)
+        .message_body("direct")
+        .send()
+        .await
+        .unwrap();
+    // A body that is a KMS ciphertext the sender made is delivered as sent.
+    let key = account_key(&kms).await;
+    let blob = kms
+        .encrypt()
+        .key_id(&key)
+        .plaintext(Blob::new(b"app-sealed".to_vec()))
+        .send()
+        .await
+        .unwrap()
+        .ciphertext_blob
+        .unwrap();
+    let app_sealed = base64::engine::general_purpose::STANDARD.encode(blob.as_ref());
+    sqs.send_message()
+        .queue_url(&url)
+        .message_body(&app_sealed)
+        .send()
+        .await
+        .unwrap();
+    let mut bodies = queue_bodies(&sqs, &url).await;
+    bodies.sort();
+    let mut expected = vec![
+        "direct".to_string(),
+        "to-sse-sqs".to_string(),
+        app_sealed.clone(),
+    ];
+    expected.sort();
+    assert_eq!(bodies, expected);
+
+    // KMS was never called: no aws/sqs key exists (it is created on first
+    // use, and is not one of the aliases listed before then).
+    let aliases = kms.list_aliases().send().await.unwrap();
+    assert!(
+        !aliases
+            .aliases()
+            .iter()
+            .any(|a| a.alias_name() == Some("alias/aws/sqs")),
+        "{aliases:?}"
+    );
+}
