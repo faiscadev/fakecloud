@@ -1,10 +1,11 @@
-//! HTTP header bindings for the hand-routed restXml path (S3).
+//! HTTP header bindings for the REST protocols (restXml and restJson1).
 //!
-//! S3 keeps its curated URL table, so the model-driven builder never binds
-//! its `@httpHeader` / `@httpPrefixHeaders` members. Without them every
-//! header-driven behaviour (ACL grants, SSE, conditional writes, checksums,
-//! object metadata) goes unexercised. This module binds them the way an AWS
-//! SDK serializes them:
+//! Both protocols share the Smithy HTTP binding rules for `@httpHeader` /
+//! `@httpPrefixHeaders` members, so the model-driven request builder binds
+//! them here, the way an AWS SDK serializes them. Without them every
+//! header-driven behaviour (S3 ACL grants, SSE, conditional writes,
+//! checksums, object metadata; Lambda invocation type, log type, client
+//! context) goes unexercised.
 //!
 //! - Values follow the HTTP binding rules: timestamps are `http-date` unless
 //!   `@timestampFormat` says otherwise, lists are comma-joined (items that

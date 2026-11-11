@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
+use crate::extras::check_len;
 use crate::state::{CapacityProvider, SharedLambdaState};
 
 fn validation(msg: impl Into<String>) -> AwsServiceError {
@@ -17,16 +18,6 @@ fn validation(msg: impl Into<String>) -> AwsServiceError {
         "InvalidParameterValueException",
         msg,
     )
-}
-
-fn check_len(field: &str, v: &str, min: usize, max: usize) -> Result<(), AwsServiceError> {
-    if v.len() < min || v.len() > max {
-        return Err(validation(format!(
-            "{field} length must be in [{min},{max}], got {}",
-            v.len()
-        )));
-    }
-    Ok(())
 }
 
 fn arn_for_capacity_provider(region: &str, account: &str, name: &str) -> String {
@@ -131,7 +122,7 @@ pub(crate) fn get_capacity_provider(
     name: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
     check_len("CapacityProviderName", name, 1, 140)?;
-    let name = crate::capacity::capacity_provider_name_from_label(name)?;
+    let name = crate::capacity::capacity_provider_name_from_label(name, &req.region)?;
     let accts = state.read();
     let empty = crate::state::LambdaState::new(&req.account_id, &req.region);
     let s = accts
@@ -205,7 +196,7 @@ pub fn update_capacity_provider_in(
 ) -> Result<CapacityProvider, AwsServiceError> {
     check_len("CapacityProviderName", name, 1, 140)?;
     let label = name;
-    let name = crate::capacity::capacity_provider_name_from_label(label)?;
+    let name = crate::capacity::capacity_provider_name_from_label(label, region)?;
     let mut accts = state.write();
     let s = accts.regional_mut(account, region);
     let cp = s
@@ -254,7 +245,7 @@ pub fn delete_capacity_provider_in(
 ) -> Result<CapacityProvider, AwsServiceError> {
     check_len("CapacityProviderName", name, 1, 140)?;
     let label = name;
-    let name = crate::capacity::capacity_provider_name_from_label(label)?;
+    let name = crate::capacity::capacity_provider_name_from_label(label, region)?;
     let mut accts = state.write();
     let arn = accts
         .regional(account, region)
@@ -290,7 +281,7 @@ pub(crate) fn list_function_versions_by_capacity_provider(
 ) -> Result<AwsResponse, AwsServiceError> {
     check_len("CapacityProviderName", name, 1, 140)?;
     let label = name;
-    let name = crate::capacity::capacity_provider_name_from_label(label)?;
+    let name = crate::capacity::capacity_provider_name_from_label(label, &req.region)?;
     // `MaxItems` (1..50) is range-checked by the dispatcher.
     let max_items = req
         .query_params
@@ -447,5 +438,51 @@ mod tests {
             .capacity_providers["cp1"];
         assert_eq!(cp.permissions_config["RoleArn"], "new");
         assert!(cp.last_modified > prev_mod);
+    }
+
+    #[test]
+    fn capacity_provider_arn_is_aws_shaped_and_addresses_the_provider() {
+        let s = shared();
+        let body = json!({
+            "CapacityProviderName": "cp1",
+            "VpcConfig": {},
+            "PermissionsConfig": {}
+        });
+        create_capacity_provider(&s, &req(), &body).unwrap();
+        let arn = s
+            .read()
+            .regional("123456789012", "us-east-1")
+            .unwrap()
+            .capacity_providers["cp1"]
+            .arn
+            .clone();
+        assert_eq!(
+            arn,
+            "arn:aws:lambda:us-east-1:123456789012:capacity-provider:cp1"
+        );
+        // `CapacityProviderName` also takes the provider's ARN.
+        let got = get_capacity_provider(&s, &req(), &arn).unwrap();
+        assert_eq!(got.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn restored_slash_form_capacity_provider_arn_reads_back_in_aws_form() {
+        let legacy = json!({
+            "name": "cp1",
+            "arn": "arn:aws:lambda:us-east-1:123456789012:capacity-provider/cp1",
+            "state": "Active",
+            "vpc_config": {},
+            "permissions_config": {},
+            "instance_requirements": null,
+            "scaling_config": null,
+            "kms_key_arn": null,
+            "tags": {},
+            "last_modified": "2026-01-01T00:00:00Z"
+        });
+        let cp: CapacityProvider = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            cp.arn,
+            "arn:aws:lambda:us-east-1:123456789012:capacity-provider:cp1"
+        );
     }
 }

@@ -196,70 +196,28 @@ pub(super) fn probe_rest(
     variant: &TestVariant,
     model: Option<&ServiceModel>,
 ) -> Result<(u16, String), String> {
-    let (method, url, headers, body) = match model {
-        Some(model) if !SERVICES_WITH_HARDCODED_REST.contains(&service_name) => {
-            let op = model.operations.iter().find(|o| o.name == operation_name);
-            match op.and_then(|op| build_http_request_from_model(op, model, &variant.input)) {
-                Some((m, path_and_query, hdrs, body)) => {
-                    let url = format!("{}{}", endpoint, path_and_query);
-                    (m, url, hdrs, body)
-                }
-                None => legacy_rest_request(endpoint, service_name, operation_name, variant),
-            }
+    let op = model.and_then(|m| {
+        m.operations
+            .iter()
+            .find(|o| o.name == operation_name)
+            .map(|op| (m, op))
+    });
+    let (method, url, headers, body) = match op.and_then(|(m, op)| {
+        let input = with_omitted_label_sentinels(service_name, op, m, &variant.input);
+        build_http_request_from_model(op, m, &input)
+    }) {
+        Some((m, path_and_query, hdrs, body)) => {
+            (m, format!("{}{}", endpoint, path_and_query), hdrs, body)
         }
-        _ => legacy_rest_request(endpoint, service_name, operation_name, variant),
-    };
-
-    // For services with a hand-curated route table (Lambda / S3) we
-    // still want to honour the Smithy model's `@httpQuery` traits so
-    // negative/boundary variants targeting query members reach the
-    // server. The legacy builder only knows the path; bolt the query
-    // string on here when the model is available.
-    let url = if let Some(model) = model {
-        if SERVICES_WITH_HARDCODED_REST.contains(&service_name) {
-            append_http_query_from_model(&url, model, operation_name, &variant.input)
-        } else {
-            url
-        }
-    } else {
-        url
-    };
-
-    // The hand-curated table only knows the path. For a restXml service (S3)
-    // the body still has to be the model's XML serialization, not the JSON the
-    // generators produce, or every body-carrying op is rejected as malformed
-    // before its handler runs; and the `@httpHeader` / `@httpPrefixHeaders`
-    // members still have to reach the wire, with integrity headers computed
-    // over that body.
-    let (headers, body) = match model {
-        Some(model)
-            if SERVICES_WITH_HARDCODED_REST.contains(&service_name) && model.is_rest_xml() =>
-        {
-            match model.operations.iter().find(|o| o.name == operation_name) {
-                Some(op) => {
-                    let (xml_body, content_type) =
-                        super::rest_xml::rest_xml_body(op, model, &variant.input);
-                    let mut headers = headers;
-                    headers.extend(super::rest_headers::bind_headers(
-                        op,
-                        model,
-                        &variant.input,
-                        xml_body.as_deref().unwrap_or_default(),
-                    ));
-                    if let Some(ct) = content_type {
-                        if !headers
-                            .iter()
-                            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-                        {
-                            headers.push(("Content-Type".to_string(), ct.to_string()));
-                        }
-                    }
-                    (headers, xml_body)
-                }
-                None => (headers, body),
-            }
-        }
-        _ => (headers, body),
+        // No model, or an operation without `@http` metadata: there is no
+        // route to build, so send the input to the service root and let the
+        // classifier judge whatever comes back.
+        None => (
+            reqwest::Method::POST,
+            format!("{}/", endpoint),
+            Vec::new(),
+            Some(serde_json::to_vec(&variant.input).unwrap_or_else(|_| b"{}".to_vec())),
+        ),
     };
 
     let mut req = client
@@ -271,8 +229,8 @@ pub(super) fn probe_rest(
     }
 
     // Trust the builder to decide whether to emit a body: both
-    // `build_http_request_from_model` and `legacy_rest_request` only return
-    // `Some(body)` when a body is appropriate for this op + method (including
+    // `build_http_request_from_model` only returns `Some(body)` when a body
+    // is appropriate for this op + method (including
     // DELETE/GET with an explicit `@httpPayload` member, a case AWS models do
     // use — e.g. `DeleteObjects` via POST-with-payload, plus streaming
     // ingest-style APIs with payloads on non-POST methods).

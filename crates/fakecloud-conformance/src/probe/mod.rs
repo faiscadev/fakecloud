@@ -157,6 +157,11 @@ pub fn probe_variant_with_model(
                 }
                 shape_id.rsplit('#').next().unwrap_or(shape_id).to_string()
             })
+            .chain(
+                operation_common_errors(service_name, operation_name)
+                    .iter()
+                    .map(|c| c.to_string()),
+            )
             .collect()
     });
 
@@ -255,11 +260,6 @@ pub fn probe_variant_with_model(
         }
     }
 }
-
-/// REST services with a hand-curated `rest_request_config` table. These keep
-/// their hardcoded entries; everything else falls back to the generic
-/// `@http`-trait-driven request builder.
-const SERVICES_WITH_HARDCODED_REST: &[&str] = &["lambda", "s3"];
 
 /// `(method, url, headers, body)` tuple produced by the REST request builders.
 type RestRequestParts = (
@@ -612,6 +612,21 @@ mod tests {
     }
 
     #[test]
+    fn absent_payload_member_is_no_body() {
+        let op = op_with_http("X", "POST", "/foo", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape("#Input", vec![member("Body", "#String", payload_traits())]),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let (_, _, _, body) =
+            build_http_request_from_model(&op, &model, &serde_json::json!({})).unwrap();
+        assert!(body.is_none(), "an omitted payload must not become `{{}}`");
+    }
+
+    #[test]
     fn delete_without_payload_has_no_body() {
         let op = op_with_http("X", "DELETE", "/foo/{Id}", "#Input");
         let model = model_with(
@@ -669,63 +684,6 @@ mod tests {
         let (_, url, _, _) =
             build_http_request_from_model(&op, &model, &serde_json::json!({"Id": "q1"})).unwrap();
         assert_eq!(url, "/2013-04-01/queryloggingconfig/q1");
-    }
-
-    #[test]
-    fn legacy_lambda_empty_or_omitted_label_uses_the_sentinel() {
-        use super::rest_request::legacy_substitute_identifiers;
-        let path = "/2015-03-31/functions/test-conformance-function";
-        for input in [
-            serde_json::json!({}),
-            serde_json::json!({"FunctionName": ""}),
-        ] {
-            assert_eq!(
-                legacy_substitute_identifiers(path, "lambda", &input),
-                "/2015-03-31/functions/INVALID_OMITTED_LABEL",
-                "{input}"
-            );
-        }
-        assert_eq!(
-            legacy_substitute_identifiers(
-                path,
-                "lambda",
-                &serde_json::json!({"FunctionName": "f1"})
-            ),
-            "/2015-03-31/functions/f1"
-        );
-    }
-
-    #[test]
-    fn legacy_s3_empty_key_is_not_replaced_by_a_real_key() {
-        use super::rest_request::legacy_substitute_identifiers;
-        // The S3 sentinel is a well-formed object key, so an empty `Key`
-        // keeps its literal (empty) form rather than naming a real object.
-        assert_eq!(
-            legacy_substitute_identifiers(
-                "/test-conformance-bucket/test-key",
-                "s3",
-                &serde_json::json!({"Bucket": "b", "Key": ""})
-            ),
-            "/b/"
-        );
-    }
-
-    #[test]
-    fn legacy_lambda_layer_sentinel_violates_the_layer_name_pattern() {
-        use super::rest_request::legacy_substitute_identifiers;
-        // Layer ops can't 4xx on a well-formed-but-unknown name (Publish
-        // creates it, Delete is idempotent), so the sentinel must break the
-        // `[a-zA-Z0-9-_]+` pattern instead.
-        let out = legacy_substitute_identifiers(
-            "/2018-10-31/layers/test-layer/versions",
-            "lambda",
-            &serde_json::json!({}),
-        );
-        let name = out.split('/').nth(3).unwrap();
-        assert!(!name.is_empty());
-        assert!(!name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
     }
 
     #[test]
@@ -928,6 +886,121 @@ mod tests {
                 "{code} must not pass for a service without it in its list"
             );
         }
+    }
+
+    #[test]
+    fn s3_operation_specific_codes_pass_only_on_their_operations() {
+        // Each S3 code recorded for one family of operations is accepted on
+        // exactly those operations. Accepting it service-wide would let a
+        // regression (bodies dropped -> MissingRequestBodyError on every
+        // operation) still score 100%.
+        let scoped: &[(&str, &[&str])] = &[
+            (
+                "PreconditionFailed",
+                &[
+                    "AbortMultipartUpload",
+                    "CompleteMultipartUpload",
+                    "CopyObject",
+                    "DeleteObject",
+                    "DeleteObjectAnnotation",
+                    "GetObject",
+                    "HeadObject",
+                    "PutObject",
+                    "PutObjectAnnotation",
+                    "RenameObject",
+                    "UploadPartCopy",
+                ],
+            ),
+            (
+                "InvalidRange",
+                &["GetObject", "HeadObject", "UploadPartCopy"],
+            ),
+            ("InvalidPart", &["CompleteMultipartUpload"]),
+            (
+                "MissingRequestBodyError",
+                &[
+                    "PutBucketEncryption",
+                    "PutBucketTagging",
+                    "PutObjectTagging",
+                    "PutBucketRequestPayment",
+                    "PutObjectLockConfiguration",
+                    "CreateBucketMetadataConfiguration",
+                    "CreateBucketMetadataTableConfiguration",
+                    "UpdateBucketMetadataInventoryTableConfiguration",
+                    "UpdateBucketMetadataJournalTableConfiguration",
+                ],
+            ),
+            (
+                "NoSuchConfiguration",
+                &[
+                    "GetBucketAnalyticsConfiguration",
+                    "DeleteBucketAnalyticsConfiguration",
+                    "GetBucketInventoryConfiguration",
+                    "DeleteBucketInventoryConfiguration",
+                    "GetBucketMetricsConfiguration",
+                    "DeleteBucketMetricsConfiguration",
+                    "GetBucketIntelligentTieringConfiguration",
+                    "DeleteBucketIntelligentTieringConfiguration",
+                ],
+            ),
+            (
+                "ReplicationConfigurationNotFoundError",
+                &["GetBucketReplication"],
+            ),
+            ("NoSuchWebsiteConfiguration", &["GetBucketWebsite"]),
+            (
+                "InvalidBucketAclWithBlockPublicAccessError",
+                &["CreateBucket"],
+            ),
+            ("InvalidExpression", &["SelectObjectContent"]),
+            ("InvalidCompressionFormat", &["SelectObjectContent"]),
+        ];
+        let model = crate::smithy::parse_model(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../aws-models/s3.json"
+        )))
+        .unwrap();
+        for (code, ops) in scoped {
+            assert!(
+                !service_common_errors("s3").contains(code),
+                "{code} must not be accepted on every S3 operation"
+            );
+            for op in &model.operations {
+                let allowed = operation_common_errors("s3", &op.name).contains(code);
+                assert_eq!(
+                    allowed,
+                    ops.contains(&op.name.as_str()),
+                    "{code} on {}",
+                    op.name
+                );
+            }
+            // Every listed operation is a real S3 operation.
+            for op in *ops {
+                assert!(
+                    model.operations.iter().any(|o| o.name == *op),
+                    "{op} is not in the S3 model"
+                );
+            }
+        }
+        // Scoped to S3: the same operation name elsewhere gets nothing.
+        assert!(operation_common_errors("s3control", "GetObject").is_empty());
+
+        // The runner folds the scoped codes into the op's declared list, so
+        // the classifier passes the code on its operation and rejects it on
+        // any other.
+        let body = "<Error><Code>MissingRequestBodyError</Code><Message>m</Message></Error>";
+        let declared_for = |op: &str| -> Vec<String> {
+            operation_common_errors("s3", op)
+                .iter()
+                .map(|c| c.to_string())
+                .collect()
+        };
+        let on = declared_for("PutBucketEncryption");
+        let result = classify_response("v1", 400, body, &Expectation::Success, 0, Some(&on), "s3");
+        assert_eq!(result.status, ProbeStatus::Pass);
+        let off = declared_for("GetObject");
+        let result = classify_response("v1", 400, body, &Expectation::Success, 0, Some(&off), "s3");
+        assert!(matches!(result.status, ProbeStatus::UnexpectedResult(_)));
     }
 
     #[test]
@@ -1217,6 +1290,128 @@ mod tests {
         assert!(!is_aws_query_compatible_service("kms"));
         assert!(is_aws_query_compatible_service("sqs"));
         assert!(matches!(service_protocol("iam"), Protocol::Query));
+    }
+
+    fn real_model(file: &str) -> ServiceModel {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../aws-models")
+            .join(file);
+        crate::smithy::parse_model(&path).expect("parse model")
+    }
+
+    fn model_op<'a>(model: &'a ServiceModel, name: &str) -> &'a Operation {
+        model.operations.iter().find(|o| o.name == name).unwrap()
+    }
+
+    #[test]
+    fn s3_routes_from_the_model_with_seeded_identifiers() {
+        let model = real_model("s3.json");
+        // GetObjectRetention was sent as `GET /{bucket}` (ListObjects) by the
+        // old hand table; the model route carries its sub-resource.
+        let op = model_op(&model, "GetObjectRetention");
+        let input = serde_json::json!({"Bucket": "test-conformance-bucket", "Key": "dir/test-key"});
+        let input = with_omitted_label_sentinels("s3", op, &model, &input);
+        let (method, url, _, _) = build_http_request_from_model(op, &model, &input).unwrap();
+        assert_eq!(method, reqwest::Method::GET);
+        // Greedy `{Key+}` keeps its `/`; a sub-resource key carries no value.
+        assert_eq!(url, "/test-conformance-bucket/dir/test-key?retention");
+        let op = model_op(&model, "PutBucketTagging");
+        let (_, url, _, _) = build_http_request_from_model(
+            op,
+            &model,
+            &serde_json::json!({"Bucket": "test-conformance-bucket", "Tagging": {"TagSet": []}}),
+        )
+        .unwrap();
+        assert_eq!(url, "/test-conformance-bucket?tagging");
+    }
+
+    #[test]
+    fn s3_omitted_key_is_one_byte_past_the_limit() {
+        let model = real_model("s3.json");
+        let op = model_op(&model, "PutObject");
+        for input in [
+            serde_json::json!({"Bucket": "b"}),
+            serde_json::json!({"Bucket": "b", "Key": ""}),
+        ] {
+            let filled = with_omitted_label_sentinels("s3", op, &model, &input);
+            assert_eq!(filled["Key"].as_str().unwrap().len(), 1025);
+        }
+        // A key the variant set is left alone, and so is any other service.
+        let kept = with_omitted_label_sentinels("s3", op, &model, &serde_json::json!({"Key": "k"}));
+        assert_eq!(kept["Key"], "k");
+        let lambda = real_model("lambda.json");
+        let invoke = model_op(&lambda, "Invoke");
+        let untouched =
+            with_omitted_label_sentinels("lambda", invoke, &lambda, &serde_json::json!({}));
+        assert_eq!(untouched, serde_json::json!({}));
+    }
+
+    #[test]
+    fn lambda_invoke_binds_its_headers_and_keeps_them_out_of_the_body() {
+        let model = real_model("lambda.json");
+        let op = model_op(&model, "Invoke");
+        let input = serde_json::json!({
+            "FunctionName": "f",
+            "InvocationType": "Event",
+            "LogType": "Tail",
+            "ClientContext": "e30=",
+            "Payload": "{}",
+        });
+        let (method, url, headers, body) =
+            build_http_request_from_model(op, &model, &input).unwrap();
+        assert_eq!(method, reqwest::Method::POST);
+        assert_eq!(url, "/2015-03-31/functions/f/invocations");
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("X-Amz-Invocation-Type"), Some("Event"));
+        assert_eq!(get("X-Amz-Log-Type"), Some("Tail"));
+        assert_eq!(get("X-Amz-Client-Context"), Some("e30="));
+        // The `@httpPayload` is the body, alone.
+        assert_eq!(body.as_deref(), Some(&b"{}"[..]));
+    }
+
+    #[test]
+    fn rest_json_header_timestamps_and_lists_use_the_http_binding_rules() {
+        // restJson1 header members go through the shared binder: an
+        // http-date timestamp and a comma-joined list, not the raw JSON value
+        // (the old path sent the timestamp verbatim and dropped lists).
+        let op = op_with_http("Op", "POST", "/x", "t#In");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape(
+                    "t#In",
+                    vec![
+                        member("When", "t#Ts", header_traits("X-When")),
+                        member("Items", "t#L", header_traits("X-Items")),
+                    ],
+                ),
+                Shape {
+                    shape_id: "t#Ts".to_string(),
+                    shape_type: ShapeType::Timestamp,
+                    traits: ShapeTraits::default(),
+                },
+                Shape {
+                    shape_id: "t#L".to_string(),
+                    shape_type: ShapeType::List {
+                        member_target: "smithy.api#String".to_string(),
+                    },
+                    traits: ShapeTraits::default(),
+                },
+            ],
+        );
+        let input = serde_json::json!({"When": "2024-01-01T00:00:00Z", "Items": ["a", "b"]});
+        let (_, _, headers, body) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert!(headers.contains(&(
+            "X-When".to_string(),
+            "Mon, 01 Jan 2024 00:00:00 GMT".to_string()
+        )));
+        assert!(headers.contains(&("X-Items".to_string(), "a, b".to_string())));
+        assert_eq!(body.as_deref(), Some(&b"{}"[..]));
     }
 }
 

@@ -1,6 +1,6 @@
 {
-  "variants_passed": 258545,
-  "total_variants": 258545,
+  "variants_passed": 258530,
+  "total_variants": 258530,
   "per_service": {
     "ce": {
       "passed": 1781,
@@ -359,8 +359,8 @@
       "total": 491
     },
     "s3": {
-      "passed": 4061,
-      "total": 4061
+      "passed": 4046,
+      "total": 4046
     },
     "states": {
       "passed": 1292,

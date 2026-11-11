@@ -47,10 +47,14 @@ impl LambdaService {
                 "Alias name must be 1..128 chars",
             ));
         }
+        // `FunctionVersion` is required, `@length(1, 1024)`; `Description`
+        // is `@length(0, 256)`.
         let version = body["FunctionVersion"]
             .as_str()
-            .unwrap_or("$LATEST")
+            .ok_or_else(|| null_member("functionVersion"))?
             .to_string();
+        check_len("FunctionVersion", &version, 1, 1024)?;
+        check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
         if !state.functions.contains_key(function_name) {

@@ -114,6 +114,161 @@ fn split_uri_template(uri: &str) -> (&str, Vec<&str>) {
     }
 }
 
+/// The Smithy namespace of the S3 model.
+const S3_NAMESPACE: &str = "com.amazonaws.s3";
+
+/// The query key or header name a member is bound to, if either.
+fn query_or_header_binding(
+    model: &ServiceModel,
+    member: &crate::smithy::Member,
+) -> Option<(&'static str, String)> {
+    let target = model.shapes.get(&member.target).map(|s| &s.traits);
+    let query = member
+        .traits
+        .http_query
+        .clone()
+        .or_else(|| target.and_then(|t| t.http_query.clone()));
+    if let Some(q) = query {
+        return Some(("query", q));
+    }
+    member
+        .traits
+        .http_header
+        .clone()
+        .or_else(|| target.and_then(|t| t.http_header.clone()))
+        .map(|h| ("header", h.to_ascii_lowercase()))
+}
+
+/// The constant query literals of a URI template that select the operation.
+/// `x-id=<Operation>` is left out: it is a routing hint SDKs add for logging,
+/// which S3 does not use to pick the operation (a `DELETE /{Bucket}/{Key+}`
+/// is DeleteObject or AbortMultipartUpload by its `uploadId`, whatever
+/// `x-id` says).
+fn selecting_literals(uri: &str) -> (&str, Vec<&str>) {
+    let (path, mut literals) = split_uri_template(uri);
+    literals.retain(|q| !q.starts_with("x-id="));
+    (path, literals)
+}
+
+/// Whether omitting the required `@httpQuery` / `@httpHeader` member
+/// `omitted` turns the request into another modeled operation's request.
+///
+/// The request without it has the same method, path and selecting query
+/// literals as another operation, every other required query/header member
+/// it still carries is one that operation binds too, and it carries every
+/// query/header member that operation requires, so the server can only
+/// answer as that operation (the `empty_label_collapses_to_other_op`
+/// rule, for query and header members). Recorded against S3: CopyObject
+/// without `x-amz-copy-source` is PutObject, ListParts without `uploadId` is
+/// GetObject, AbortMultipartUpload without it is DeleteObject (204), and
+/// `GET /{Bucket}?analytics` without `id` is ListBucketAnalyticsConfigurations
+/// (200). The ListParts and AbortMultipartUpload recordings are also what
+/// shows `x-id` is not a selecting literal: their requests carried
+/// `x-id=ListParts` / `x-id=AbortMultipartUpload` and S3 still answered as
+/// GetObject / DeleteObject. GetObjectAnnotation without `annotationName` is
+/// the same case, from the model rather than a recording of its own (S3
+/// annotations could not be recorded): its route
+/// `GET /{Bucket}/{Key+}?annotation&x-id=GetObjectAnnotation` and
+/// ListObjectAnnotations' `GET /{Bucket}/{Key+}?annotation&x-id=ListObjectAnnotations`
+/// differ only in `x-id`, ListObjectAnnotations requires nothing beyond the
+/// bucket and key the request still carries, and `annotationName` is the one
+/// member that tells the two reads apart (GetObjectAnnotation's reference:
+/// "The name of the annotation to retrieve"). So the request without it is a
+/// ListObjectAnnotations request, which S3 answers with the object's
+/// annotation list, not an error. UploadPart without `uploadId` still carries `partNumber`, which
+/// PutObject does not bind, so it stays a real negative (S3: 400
+/// InvalidArgument "This operation does not accept partNumber without
+/// uploadId").
+fn omission_collapses_to_other_op(
+    model: &ServiceModel,
+    input_shape_id: &str,
+    http_method: Option<&str>,
+    http_uri: Option<&str>,
+    omitted: &crate::smithy::Member,
+) -> bool {
+    let (Some(method), Some(uri)) = (http_method, http_uri) else {
+        return false;
+    };
+    if query_or_header_binding(model, omitted).is_none() {
+        return false;
+    }
+    let remaining: Vec<(&'static str, String)> = super::get_members(model, input_shape_id)
+        .iter()
+        .filter(|m| m.required && m.name != omitted.name)
+        .filter_map(|m| query_or_header_binding(model, m))
+        .collect();
+    let own = selecting_literals(uri);
+    model.operations.iter().any(|op| {
+        let (Some(op_method), Some(op_uri)) = (op.http_method.as_deref(), op.http_uri.as_deref())
+        else {
+            return false;
+        };
+        if !op_method.eq_ignore_ascii_case(method)
+            || op.input_shape.as_deref() == Some(input_shape_id)
+            || selecting_literals(op_uri) != own
+        {
+            return false;
+        }
+        let members = op
+            .input_shape
+            .as_deref()
+            .map(|id| super::get_members(model, id))
+            .unwrap_or_default();
+        let bound: Vec<(&'static str, String)> = members
+            .iter()
+            .filter_map(|m| query_or_header_binding(model, m))
+            .collect();
+        // ...and the request still carries everything that operation
+        // requires (UploadPart without `uploadId` is not UploadPartCopy,
+        // which needs `x-amz-copy-source`).
+        let satisfied = members
+            .iter()
+            .filter(|m| m.required)
+            .filter_map(|m| query_or_header_binding(model, m))
+            .all(|b| remaining.contains(&b));
+        satisfied && remaining.iter().all(|b| bound.contains(b))
+    })
+}
+
+/// What a `negative_invalid_enum_<member>` variant expects, or `None` when
+/// the variant cannot be judged.
+///
+/// Most services reject a value outside a member's enum. S3 does not for
+/// every header; each entry below was recorded against real S3 (us-east-1,
+/// 2026-11-09, raw signed requests with `__INVALID_ENUM_VALUE__`):
+///
+/// - `RequestPayer` (`x-amz-request-payer`): ignored. PutObject, GetObject,
+///   HeadObject, ListObjectsV2, DeleteObject and GetObjectTagging all
+///   answered 2xx, as without the header. S3 only acts on `requester`.
+/// - CreateSession's `SessionMode` (`x-amz-create-session-mode`): ignored;
+///   the request answered 200.
+///
+/// Such a variant still runs: it expects the operation's normal success
+/// path, so it checks that the handler ignores the value rather than
+/// failing on it.
+///
+/// WriteGetObjectResponse's members are the `x-amz-fwd-header-*` response
+/// headers an S3 Object Lambda function hands back for the original GetObject
+/// caller. That call needs an Object Lambda access point's request route and
+/// token, so it cannot be recorded, and the API reference documents the
+/// headers as pass-through with no validation; its invalid-enum variants are
+/// not generated.
+fn invalid_enum_expectation(
+    model: &ServiceModel,
+    member: &str,
+    http_uri: Option<&str>,
+) -> Option<Expectation> {
+    if model.service_name != S3_NAMESPACE {
+        return Some(Expectation::AnyError);
+    }
+    match (member, http_uri) {
+        (_, Some("/WriteGetObjectResponse")) => None,
+        ("RequestPayer", _) => Some(Expectation::Success),
+        ("SessionMode", Some("/{Bucket}?session")) => Some(Expectation::Success),
+        _ => Some(Expectation::AnyError),
+    }
+}
+
 pub fn generate(
     model: &ServiceModel,
     input_shape_id: &str,
@@ -138,7 +293,15 @@ pub fn generate(
     // Omit each required field one at a time
     let required_members: Vec<_> = members.iter().filter(|m| m.required).collect();
     for omit_member in &required_members {
-        if !omission_is_wire_observable(model, &omit_member.target) {
+        if !omission_is_wire_observable(model, &omit_member.target)
+            || omission_collapses_to_other_op(
+                model,
+                input_shape_id,
+                http_method,
+                http_uri,
+                omit_member,
+            )
+        {
             continue;
         }
         let mut obj = serde_json::Map::new();
@@ -305,7 +468,12 @@ pub fn generate(
                 enum_values: Some(_)
             } | ShapeType::Enum { .. }
         );
-        if has_enum {
+        let enum_expectation = if has_enum {
+            invalid_enum_expectation(model, &member.name, http_uri)
+        } else {
+            None
+        };
+        if let Some(expectation) = enum_expectation {
             let mut input = build_required_input(model, input_shape_id, overrides);
             if let Value::Object(ref mut obj) = input {
                 obj.insert(
@@ -317,7 +485,7 @@ pub fn generate(
                 name: format!("negative_invalid_enum_{}", member.name),
                 strategy: Strategy::Negative,
                 input,
-                expectation: Expectation::AnyError,
+                expectation,
                 expected_output: None,
                 followup: None,
             });
@@ -508,5 +676,90 @@ mod tests {
             got.contains(&"negative_too_short_Id".to_string()),
             "{got:?}"
         );
+    }
+
+    fn real_model(file: &str) -> ServiceModel {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../aws-models")
+            .join(file);
+        crate::smithy::parse_model(&path).expect("parse model")
+    }
+
+    fn variants_for(model: &ServiceModel, op_name: &str) -> Vec<TestVariant> {
+        let op = model.operations.iter().find(|o| o.name == op_name).unwrap();
+        generate(
+            model,
+            op.input_shape.as_deref().unwrap(),
+            &HashMap::new(),
+            op.http_method.as_deref(),
+            op.http_uri.as_deref(),
+        )
+    }
+
+    fn variant_names(vs: &[TestVariant]) -> Vec<&str> {
+        vs.iter().map(|v| v.name.as_str()).collect()
+    }
+
+    #[test]
+    fn omissions_that_are_another_operation_are_not_generated() {
+        let s3 = real_model("s3.json");
+        // The request without the member IS another operation's request.
+        for (op, member) in [
+            ("CopyObject", "negative_omit_CopySource"),
+            ("UploadPartCopy", "negative_omit_CopySource"),
+            ("ListParts", "negative_omit_UploadId"),
+            ("AbortMultipartUpload", "negative_omit_UploadId"),
+            ("GetBucketAnalyticsConfiguration", "negative_omit_Id"),
+            ("GetObjectAnnotation", "negative_omit_AnnotationName"),
+        ] {
+            assert!(
+                !variant_names(&variants_for(&s3, op)).contains(&member),
+                "{op} still emits {member}"
+            );
+        }
+        // UploadPart without uploadId still carries partNumber, which no
+        // other operation binds: a real negative (400 InvalidArgument).
+        let up = variants_for(&s3, "UploadPart");
+        assert!(variant_names(&up).contains(&"negative_omit_UploadId"));
+        assert!(variant_names(&up).contains(&"negative_omit_PartNumber"));
+        // A delete without its id has no List twin.
+        assert!(
+            variant_names(&variants_for(&s3, "DeleteBucketAnalyticsConfiguration"))
+                .contains(&"negative_omit_Id")
+        );
+    }
+
+    #[test]
+    fn s3_headers_it_ignores_expect_the_success_path() {
+        let s3 = real_model("s3.json");
+        let get = variants_for(&s3, "GetObject");
+        let rp = get
+            .iter()
+            .find(|v| v.name == "negative_invalid_enum_RequestPayer")
+            .unwrap();
+        assert!(matches!(rp.expectation, Expectation::Success));
+        let cm = get
+            .iter()
+            .find(|v| v.name == "negative_invalid_enum_ChecksumMode")
+            .unwrap();
+        assert!(matches!(cm.expectation, Expectation::AnyError));
+        let session = variants_for(&s3, "CreateSession");
+        let sm = session
+            .iter()
+            .find(|v| v.name == "negative_invalid_enum_SessionMode")
+            .unwrap();
+        assert!(matches!(sm.expectation, Expectation::Success));
+        // WriteGetObjectResponse's forwarded headers are not judged.
+        assert!(!variant_names(&variants_for(&s3, "WriteGetObjectResponse"))
+            .iter()
+            .any(|n| n.starts_with("negative_invalid_enum_")));
+        // Other services keep the strict expectation.
+        let lambda = real_model("lambda.json");
+        let inv = variants_for(&lambda, "Invoke");
+        let it = inv
+            .iter()
+            .find(|v| v.name == "negative_invalid_enum_InvocationType")
+            .unwrap();
+        assert!(matches!(it.expectation, Expectation::AnyError));
     }
 }

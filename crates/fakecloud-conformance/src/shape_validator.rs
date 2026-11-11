@@ -142,6 +142,16 @@ pub fn echo_check(
         _ => None,
     };
     match received {
+        // An empty structure carries no member values, so reading it back
+        // as null / absent loses nothing. Services do normalize it that way:
+        // Lambda CreateFunctionUrlConfig with `Cors: {}` reads back
+        // `"Cors": null` from GetFunctionUrlConfig (recorded against
+        // us-east-1, 2026-11-09), while a non-empty Cors echoes.
+        Some(serde_json::Value::Null) | None
+            if sent.as_object().is_some_and(serde_json::Map::is_empty) =>
+        {
+            None
+        }
         Some(serde_json::Value::Null) | None => Some(ShapeViolation::RoundTripFieldNotEchoed {
             field: field.to_string(),
             sent: sent.clone(),
@@ -1305,6 +1315,18 @@ mod tests {
         // Scalars compare by value, key case tolerant.
         assert!(echo_check("Name", &json!("a"), &json!({"Name": "b"}), None, None).is_some());
         assert!(echo_check("Name", &json!("a"), &json!({"name": "a"}), None, None).is_none());
+        // An empty structure read back as null / absent lost nothing; a
+        // non-empty one must come back.
+        assert!(echo_check("Cors", &json!({}), &json!({"Cors": null}), None, None).is_none());
+        assert!(echo_check("Cors", &json!({}), &json!({}), None, None).is_none());
+        assert!(echo_check(
+            "Cors",
+            &json!({"AllowOrigins": ["*"]}),
+            &json!({"Cors": null}),
+            None,
+            None
+        )
+        .is_some());
     }
 
     #[test]

@@ -11,6 +11,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
+use crate::extras::check_optional_len;
 use crate::runtime::ContainerRuntime;
 use crate::state::{function_arn, qualified_function_arn};
 use crate::state::{
@@ -24,28 +25,6 @@ fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
         "InvalidParameterValueException",
         msg,
     )
-}
-
-fn check_len(field: &str, v: &str, min: usize, max: usize) -> Result<(), AwsServiceError> {
-    if v.len() < min || v.len() > max {
-        return Err(invalid_param(format!(
-            "{field} length must be in [{min},{max}], got {}",
-            v.len()
-        )));
-    }
-    Ok(())
-}
-
-fn check_optional_len(
-    field: &str,
-    v: Option<&str>,
-    min: usize,
-    max: usize,
-) -> Result<(), AwsServiceError> {
-    if let Some(s) = v {
-        check_len(field, s, min, max)?;
-    }
-    Ok(())
 }
 
 fn check_optional_int_range(
@@ -141,6 +120,73 @@ fn check_optional_enum(
     Ok(())
 }
 
+/// The `@httpHeader` members of Invoke / InvokeWithResponseStream, checked
+/// against their Smithy constraints the way Lambda's input validation does:
+/// `X-Amz-Invocation-Type` and `X-Amz-Log-Type` are closed enums,
+/// `X-Amz-Tenant-Id` is `@length(1, 256)` and `X-Amz-Durable-Execution-Name`
+/// `@length(1, 64)`.
+fn validate_invoke_headers(action: &str, req: &AwsRequest) -> Result<(), AwsServiceError> {
+    use crate::extras::{check_len, constraint_violation};
+    let header = |name: &str| req.headers.get(name).and_then(|v| v.to_str().ok());
+    let invocation_types: &[&str] = if action == "Invoke" {
+        &["Event", "RequestResponse", "DryRun"]
+    } else {
+        &["RequestResponse", "DryRun"]
+    };
+    if let Some(v) = header("x-amz-invocation-type") {
+        if !invocation_types.contains(&v) {
+            return Err(constraint_violation(
+                v,
+                "invocationType",
+                &format!(
+                    "Member must satisfy enum value set: [{}]",
+                    invocation_types.join(", ")
+                ),
+            ));
+        }
+    }
+    if let Some(v) = header("x-amz-log-type") {
+        if v != "None" && v != "Tail" {
+            return Err(constraint_violation(
+                v,
+                "logType",
+                "Member must satisfy enum value set: [None, Tail]",
+            ));
+        }
+    }
+    if let Some(v) = header("x-amz-tenant-id") {
+        check_len("TenantId", v, 1, 256)?;
+    }
+    if let Some(v) = header("x-amz-durable-execution-name") {
+        check_len("DurableExecutionName", v, 1, 64)?;
+    }
+    Ok(())
+}
+
+/// Smithy `CapacityProviderArn`: `@length(1, 140)` and the
+/// `...:lambda:<region>:<account>:capacity-provider:<name>` `@pattern` (the
+/// form `CreateCapacityProvider` issues). `own_region` is the request's
+/// region, accepted as the ARN region like every ARN fakecloud mints; the
+/// pattern is the one `CreateFunction` checks through
+/// [`crate::capacity::parse_capacity_provider_arn`].
+pub(crate) fn validate_capacity_provider_arn(
+    arn: &str,
+    own_region: &str,
+) -> Result<(), AwsServiceError> {
+    crate::extras::check_len("CapacityProviderArn", arn, 1, 140)?;
+    if crate::capacity::parse_capacity_provider_arn(arn, own_region).is_some() {
+        Ok(())
+    } else {
+        Err(crate::extras::constraint_violation(
+            arn,
+            "capacityProviderArn",
+            "Member must satisfy regular expression pattern: arn:aws[a-zA-Z-]*:lambda:\
+             (eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}:\\d{12}:capacity-provider:\
+             [a-zA-Z0-9-_]+",
+        ))
+    }
+}
+
 fn prevalidate_lambda(action: &str, req: &AwsRequest) -> Result<(), AwsServiceError> {
     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
     match action {
@@ -169,7 +215,25 @@ fn prevalidate_lambda(action: &str, req: &AwsRequest) -> Result<(), AwsServiceEr
             check_optional_len("S3Key", body["S3Key"].as_str(), 1, 1024)?;
             check_optional_len("S3ObjectVersion", body["S3ObjectVersion"].as_str(), 1, 1024)?;
         }
+        "Invoke" | "InvokeWithResponseStream" => validate_invoke_headers(action, req)?,
+        // `InvokeArgs` is the required `@httpPayload`. Recorded against
+        // Lambda (us-east-1, 2026-11-09): an empty body is refused with this
+        // ValidationException, while `{}` is accepted (202).
+        "InvokeAsync" if req.body.is_empty() => {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "1 validation error detected: Value at 'invokeArgs' failed to satisfy \
+                 constraint: Member must not be null",
+            ));
+        }
         "UpdateFunctionConfiguration" => {
+            if let Some(arn) = body["CapacityProviderConfig"]
+                ["LambdaManagedInstancesCapacityProviderConfig"]["CapacityProviderArn"]
+                .as_str()
+            {
+                validate_capacity_provider_arn(arn, &req.region)?;
+            }
             check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
             check_optional_len("Handler", body["Handler"].as_str(), 0, 128)?;
             check_optional_int_range("MemorySize", body["MemorySize"].as_i64(), 128, 32768)?;
@@ -775,7 +839,7 @@ struct CreateFunctionInput {
 }
 
 impl CreateFunctionInput {
-    fn from_body(body: &Value) -> Result<Self, AwsServiceError> {
+    fn from_body(body: &Value, own_region: &str) -> Result<Self, AwsServiceError> {
         let function_name = body["FunctionName"]
             .as_str()
             .ok_or_else(|| {
@@ -895,7 +959,7 @@ impl CreateFunctionInput {
         } else {
             None
         };
-        let capacity_provider_config = crate::capacity::parse_config(body)?;
+        let capacity_provider_config = crate::capacity::parse_config(body, own_region)?;
         // A Lambda Managed Instances function defaults to the smallest size
         // it can run with (2048 MB, 1 vCPU) instead of 128 MB.
         let default_memory = if capacity_provider_config.is_some() {

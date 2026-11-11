@@ -1004,6 +1004,19 @@ impl S3Service {
             current_etag.as_deref(),
         )?;
 
+        // Every listed part must exist before the list's order is judged:
+        // S3 answers a list of unknown parts that is also out of order with
+        // InvalidPart, not InvalidPartOrder (recorded).
+        for part in &submitted_parts {
+            if !upload.parts.contains_key(&part.part_number) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidPart",
+                    "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not have matched the part's entity tag.",
+                ));
+            }
+        }
+
         // Validate parts are in ascending order
         for window in submitted_parts.windows(2) {
             if window[0].part_number >= window[1].part_number {
@@ -1016,17 +1029,6 @@ impl S3Service {
         }
 
         let sorted_parts = submitted_parts;
-
-        // Validate all specified parts exist in the upload
-        for part in &sorted_parts {
-            if !upload.parts.contains_key(&part.part_number) {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidPart",
-                    "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not have matched the part's entity tag.",
-                ));
-            }
-        }
 
         // Validate minimum part size: all non-last parts must be >= 5MB
         const MIN_PART_SIZE: usize = 5 * 1024 * 1024; // 5MB

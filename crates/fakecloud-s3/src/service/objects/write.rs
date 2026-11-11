@@ -901,6 +901,20 @@ impl S3Service {
             }]
         });
 
+        // Annotations follow the annotation directive: COPY (the default)
+        // carries every annotation of the source version over, EXCLUDE starts
+        // the copy without any.
+        let copies_annotations = req
+            .headers
+            .get("x-amz-object-annotation-directive")
+            .and_then(|v| v.to_str().ok())
+            .is_none_or(|v| v != "EXCLUDE");
+        let dest_annotations = if copies_annotations {
+            src_obj.annotations.clone()
+        } else {
+            Default::default()
+        };
+
         let dest_obj = S3Object {
             key: dest_key.to_string(),
             // Copy is an independent object — never inherit the source's
@@ -942,6 +956,7 @@ impl S3Service {
             lock_mode: explicit_lock.mode,
             lock_retain_until: explicit_lock.retain_until,
             lock_legal_hold: explicit_lock.legal_hold,
+            annotations: dest_annotations.clone(),
             ..Default::default()
         };
 
@@ -969,6 +984,19 @@ impl S3Service {
         .map_err(crate::service::persistence_error)?;
         drop(accts);
         let version_id = committed.version_id.clone();
+        // The object's sidecar never carries annotations; each copied one is
+        // stored on its own under the version the copy was committed as.
+        for annotation in dest_annotations.values() {
+            self.store
+                .put_annotation(
+                    dest_bucket,
+                    dest_key,
+                    version_id.as_deref(),
+                    &crate::persistence::annotation_record(annotation),
+                    &annotation.payload,
+                )
+                .map_err(crate::service::persistence_error)?;
+        }
 
         let mut response_headers = HeaderMap::new();
         if let Some(vid) = &version_id {

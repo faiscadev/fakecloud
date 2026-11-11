@@ -549,6 +549,97 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
     }
 }
 
+/// Error codes AWS documents for one operation that its Smithy `errors:` list
+/// leaves out. Unlike [`service_common_errors`], each code here is accepted
+/// only on the operations whose request can actually produce it, so a handler
+/// that wrongly answers some other operation with it (a dropped body turning
+/// into MissingRequestBodyError everywhere, say) still fails the probe. The
+/// codes are added to the operation's declared list by the probe runner.
+pub(super) fn operation_common_errors(
+    service_name: &str,
+    operation_name: &str,
+) -> &'static [&'static str] {
+    // The probe addresses a seeded bucket and object, so its S3 variants reach
+    // the codes S3 returns for that state. Each was recorded against real S3
+    // (us-east-1, 2026-11-09) for the same request shape and appears in the
+    // Error Responses reference
+    // (https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html).
+    match (service_name, operation_name) {
+        // A generated If-Match / If-Unmodified-Since (or its copy-source,
+        // rename-source, upload-initiated-time, last-modified-time or
+        // annotation equivalent) that the seeded object fails: 412. Exactly
+        // the operations whose input carries such a conditional header; the
+        // ones that can also fail in another way get their own arm below.
+        (
+            "s3",
+            "AbortMultipartUpload"
+            | "CopyObject"
+            | "DeleteObject"
+            | "DeleteObjectAnnotation"
+            | "PutObject"
+            | "PutObjectAnnotation"
+            | "RenameObject",
+        ) => &["PreconditionFailed"],
+        // UploadPartCopy carries both the copy-source conditionals and a
+        // copy-source byte range.
+        ("s3", "UploadPartCopy") => &["PreconditionFailed", "InvalidRange"],
+        // CompleteMultipartUpload naming parts the seeded upload does not
+        // have (or with a mismatched ETag) is InvalidPart, besides the 412 of
+        // its If-Match / If-None-Match.
+        ("s3", "CompleteMultipartUpload") => &["PreconditionFailed", "InvalidPart"],
+        // A generated Range past the seeded object's end: 416.
+        ("s3", "GetObject" | "HeadObject") => &["PreconditionFailed", "InvalidRange"],
+        // A configuration PUT/POST that arrives with no body. S3 answers an
+        // empty body on these with MissingRequestBodyError (recorded with an
+        // empty body, and a matching CRC32 where the operation requires a
+        // checksum), and the payload member is optional in the model for
+        // PutObjectLockConfiguration, so its "omit payload" variants send none.
+        (
+            "s3",
+            "PutBucketEncryption"
+            | "PutBucketTagging"
+            | "PutObjectTagging"
+            | "PutBucketRequestPayment"
+            | "PutObjectLockConfiguration"
+            | "CreateBucketMetadataConfiguration"
+            | "CreateBucketMetadataTableConfiguration"
+            | "UpdateBucketMetadataInventoryTableConfiguration"
+            | "UpdateBucketMetadataJournalTableConfiguration",
+        ) => &["MissingRequestBodyError"],
+        // An analytics / inventory / metrics / intelligent-tiering
+        // configuration id the bucket lacks (Get/Delete with a generated id).
+        (
+            "s3",
+            "GetBucketAnalyticsConfiguration"
+            | "DeleteBucketAnalyticsConfiguration"
+            | "GetBucketInventoryConfiguration"
+            | "DeleteBucketInventoryConfiguration"
+            | "GetBucketMetricsConfiguration"
+            | "DeleteBucketMetricsConfiguration"
+            | "GetBucketIntelligentTieringConfiguration"
+            | "DeleteBucketIntelligentTieringConfiguration",
+        ) => &["NoSuchConfiguration"],
+        // GetBucketReplication / GetBucketWebsite on a bucket without that
+        // configuration.
+        ("s3", "GetBucketReplication") => &["ReplicationConfigurationNotFoundError"],
+        ("s3", "GetBucketWebsite") => &["NoSuchWebsiteConfiguration"],
+        // A new bucket starts with every Block Public Access flag on, so
+        // CreateBucket with a public canned ACL (`public-read`,
+        // `authenticated-read`, ...) and ACLs enabled is refused with this
+        // code. Only CreateBucket creates a bucket and its ACL together.
+        ("s3", "CreateBucket") => &["InvalidBucketAclWithBlockPublicAccessError"],
+        // SelectObjectContent on a generated SQL expression and compression
+        // type. S3 Select is closed to new accounts, which get 405
+        // MethodNotAllowed instead, so these could not be recorded; both are
+        // in the API reference's "List of SELECT Object Content Error Codes"
+        // (`InvalidExpression`: "The SQL expression is invalid",
+        // `InvalidCompressionFormat`: "The file is not in a supported
+        // compression format").
+        ("s3", "SelectObjectContent") => &["InvalidExpression", "InvalidCompressionFormat"],
+        _ => &[],
+    }
+}
+
 /// Strict per-op error matcher.
 ///
 /// `declared` is the operation's directly-declared error wire codes — already
