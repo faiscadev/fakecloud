@@ -164,6 +164,35 @@ impl TestServer {
         }
     }
 
+    /// Send SIGTERM and wait up to `max_wait` for the server to exit on its
+    /// own; returns how long it took, or `None` when it had to be killed.
+    /// [`TestServer::restart`] starts it again afterwards.
+    #[cfg(unix)]
+    pub fn terminate(&mut self, max_wait: Duration) -> Option<Duration> {
+        let mut child = self.child.take()?;
+        let pid = child.id();
+        let started = std::time::Instant::now();
+        // SAFETY: delivering SIGTERM to a known child PID is well-defined.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+        let exited = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break Some(started.elapsed()),
+                Ok(None) if started.elapsed() < max_wait => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                _ => break None,
+            }
+        };
+        if exited.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        sweep_instance_containers(&self.container_cli, pid);
+        exited
+    }
+
     pub async fn restart(&mut self) {
         self.stop_for_restart();
         let bin = find_binary();

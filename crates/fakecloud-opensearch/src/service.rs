@@ -17,6 +17,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
+use crate::backing;
+use crate::runtime::OpenSearchRuntime;
 use crate::state::{
     domain_arn, Application, Connection, DirectQueryDataSource, Domain, Migration, Package,
     SharedOpenSearchState, VpcEndpoint,
@@ -424,12 +426,83 @@ pub struct OpenSearchService {
     /// EC2 state: `VPCOptions` subnets and security groups resolve there
     /// (`VPCId`, `AvailabilityZones`). `None` in memory-only unit tests.
     ec2_state: Option<fakecloud_ec2::SharedEc2State>,
+    /// The backing-container runtime. `None` without Docker/Podman (or with
+    /// the backend disabled): domains are then control-plane only, settling
+    /// on the first describe as before.
+    runtime: Option<Arc<OpenSearchRuntime>>,
 }
 
 impl OpenSearchService {
     pub fn with_ec2_state(mut self, ec2_state: fakecloud_ec2::SharedEc2State) -> Self {
         self.ec2_state = Some(ec2_state);
         self
+    }
+
+    /// Back domains with real search cluster containers.
+    pub fn with_runtime(mut self, runtime: Arc<OpenSearchRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// Converge a domain's backing cluster in the background (never on the
+    /// request path: an image pull and a JVM boot take far longer than a
+    /// client waits).
+    fn spawn_converge(&self, account: &str, name: &str) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        tokio::spawn(crate::backing::converge_domain(
+            self.state.clone(),
+            runtime,
+            account.to_string(),
+            name.to_string(),
+            self.snapshot_hook(),
+        ));
+    }
+
+    /// Re-drive the backing clusters of persisted domains after a restart.
+    ///
+    /// Every persisted endpoint binding is dropped first: its port belonged
+    /// to the previous process's container. With a runtime, each domain that
+    /// has an image goes back to `Processing` and is converged again in a
+    /// fresh container on its persisted data volume, so its indices survive.
+    /// (The startup reaper has already removed the previous process's
+    /// containers.) Without a runtime, the domains are control-plane only.
+    pub async fn recover_persisted_containers(&self) {
+        let runtime_present = self.runtime.is_some();
+        let mut pending: Vec<(String, String)> = Vec::new();
+        let mut changed = false;
+        {
+            let mut accounts = self.state.write();
+            for (account, st) in accounts.iter_mut() {
+                for (name, d) in st.domains.iter_mut() {
+                    let stale = d.data_plane.take().is_some();
+                    changed |= stale || d.processing.is_some();
+                    d.processing = None;
+                    let status = if d.created {
+                        crate::backing::MODIFYING
+                    } else {
+                        crate::backing::CREATING
+                    };
+                    if crate::backing::begin(runtime_present, d, status) {
+                        changed = true;
+                        pending.push((account.to_string(), name.clone()));
+                    }
+                }
+            }
+        }
+        if changed {
+            self.save_snapshot().await;
+        }
+        if !pending.is_empty() {
+            tracing::info!(
+                count = pending.len(),
+                "recovering backing clusters for persisted search domains"
+            );
+        }
+        for (account, name) in pending {
+            self.spawn_converge(&account, &name);
+        }
     }
 
     /// Resolve requested `VPCOptions` into `VPCDerivedInfo` (see
@@ -454,6 +527,7 @@ impl OpenSearchService {
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             ec2_state: None,
+            runtime: None,
         }
     }
 
@@ -1137,11 +1211,7 @@ impl OpenSearchService {
             // ---- Upgrade ----
             "UpgradeDomain" | "UpgradeElasticsearchDomain" => self.upgrade_domain(api, req),
             "GetUpgradeHistory" => Ok(ok(json!({"UpgradeHistories": []}))),
-            "GetUpgradeStatus" => Ok(ok(json!({
-                "UpgradeStep": "PRE_UPGRADE_CHECK",
-                "StepStatus": "SUCCEEDED",
-                "UpgradeName": "upgrade"
-            }))),
+            "GetUpgradeStatus" => Ok(ok(self.upgrade_status(l, req))),
             // ---- Software update ----
             "StartServiceSoftwareUpdate" | "StartElasticsearchServiceSoftwareUpdate" => {
                 self.service_software_update(req, "IN_PROGRESS")
@@ -1223,7 +1293,7 @@ impl OpenSearchService {
         };
 
         let tags = parse_tag_list(b.get("TagList"));
-        let d = Domain {
+        let mut d = Domain {
             name: name.clone(),
             domain_id,
             arn: arn.clone(),
@@ -1243,14 +1313,25 @@ impl OpenSearchService {
             last_change: None,
             last_dry_run: None,
             dry_runs: Vec::new(),
+            data_plane: None,
+            processing: None,
+            data_plane_error: None,
+            change_pending: false,
         };
+        // With a container runtime the domain reports `Processing` until a real
+        // cluster answers health (converged in the background below).
+        let converge = backing::begin(self.runtime.is_some(), &mut d, backing::CREATING);
         // A domain's tags live on the domain itself (`d.tags`); `AddTags` /
         // `RemoveTags` / `ListTags` all operate there via `apply_tag_target`.
         // Do NOT also copy them into the side `st.tags` map: that map takes
         // precedence in `ListTags`, so a duplicate there would shadow later
         // `AddTags` updates and resurrect `RemoveTags`-deleted tags.
         let out = domain_status(&d, api, /*created=*/ false, /*processing=*/ true);
-        st.domains.insert(name, d);
+        st.domains.insert(name.clone(), d);
+        drop(accounts);
+        if converge {
+            self.spawn_converge(&req.account_id, &name);
+        }
         Ok(ok(json!({ status_key(api): out })))
     }
 
@@ -1267,8 +1348,11 @@ impl OpenSearchService {
             .domains
             .get_mut(&name)
             .ok_or_else(|| not_found_domain(&name))?;
-        // Settle creation on first describe.
-        d.created = true;
+        // Settle creation on first describe -- once the backing cluster (if
+        // any) has finished coming up.
+        if d.processing.as_deref() != Some(backing::CREATING) {
+            d.created = true;
+        }
         let out = domain_status(d, api, true, false);
         Ok(ok(json!({ status_key(api): out })))
     }
@@ -1287,6 +1371,9 @@ impl OpenSearchService {
             .remove(&name)
             .ok_or_else(|| not_found_domain(&name))?;
         st.tags.remove(&d.arn);
+        if let Some(rt) = &self.runtime {
+            backing::spawn_teardown(rt, &d);
+        }
         d.deleted = true;
         let out = domain_status(&d, api, true, true);
         Ok(ok(json!({ status_key(api): out })))
@@ -1390,6 +1477,8 @@ impl OpenSearchService {
             .get_mut(&name)
             .ok_or_else(|| not_found_domain(&name))?;
         let mut out = json!({});
+        let mut restart = false;
+        let mut check_gone = false;
         if !dry_run {
             let mut properties = Vec::new();
             if let Some(obj) = b.as_object() {
@@ -1412,6 +1501,17 @@ impl OpenSearchService {
             }
             if let Some(v) = vpc_options {
                 d.config.insert("VPCOptions".into(), v);
+            }
+            // A change to the container's spec (node settings, engine
+            // version) replaces the backing cluster on the same data volume,
+            // the way AWS applies it with a blue/green deployment.
+            if backing::begin_change(self.runtime.as_deref(), d, backing::MODIFYING) {
+                restart = true;
+                d.change_pending = true;
+            } else if self.runtime.is_some() && d.data_plane.is_some() {
+                // The spec is unchanged, but a cluster that crashed is brought
+                // back by a configuration change (and only then).
+                check_gone = true;
             }
             d.last_change = Some(crate::state::ConfigChange {
                 change_id: uuid::Uuid::new_v4().to_string(),
@@ -1437,6 +1537,20 @@ impl OpenSearchService {
             }
         }
         out["DomainConfig"] = domain_config(d, api);
+        drop(accounts);
+        if restart {
+            self.spawn_converge(&req.account_id, &name);
+        } else if check_gone {
+            if let Some(runtime) = self.runtime.clone() {
+                tokio::spawn(backing::recover_if_gone(
+                    self.state.clone(),
+                    runtime,
+                    req.account_id.clone(),
+                    name.clone(),
+                    self.snapshot_hook(),
+                ));
+            }
+        }
         Ok(ok(out))
     }
 
@@ -2889,12 +3003,16 @@ impl OpenSearchService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let dom = label(l.domain.as_deref())?;
         self.require_domain(&dom, &req.account_id)?;
-        let last_change = {
+        let (last_change, processing, change_pending) = {
             let accounts = self.state.read();
-            accounts
+            let d = accounts
                 .get(&req.account_id)
-                .and_then(|st| st.domains.get(&dom))
-                .and_then(|d| d.last_change.clone())
+                .and_then(|st| st.domains.get(&dom));
+            (
+                d.and_then(|d| d.last_change.clone()),
+                d.and_then(|d| d.processing.clone()),
+                d.is_some_and(|d| d.change_pending),
+            )
         };
         let Some(change) = last_change else {
             return Ok(ok(json!({ "ChangeProgressStatus": {
@@ -2906,19 +3024,37 @@ impl OpenSearchService {
                 "ChangeProgressStages": [],
             }})));
         };
-        // Config changes apply synchronously here, so the latest change is
-        // always complete; no advisory validation ever fails, so the
-        // accepted-warning list is echoed with an empty failure list.
+        // A change is in progress while the replacement cluster it started
+        // boots; a bring-up the change didn't start (a create, a restart's
+        // recovery) leaves the last change complete, as otherwise config
+        // changes apply synchronously. No advisory
+        // validation ever fails, so the accepted-warning list is echoed with
+        // an empty failure list.
+        let applying = change_pending
+            && matches!(
+                processing.as_deref(),
+                Some(backing::MODIFYING | backing::UPGRADING)
+            );
+        let (status, config_status, pending, completed) = if applying {
+            (
+                "PROCESSING",
+                "ApplyingChanges",
+                change.properties,
+                Vec::new(),
+            )
+        } else {
+            ("COMPLETED", "Completed", Vec::new(), change.properties)
+        };
         Ok(ok(json!({ "ChangeProgressStatus": {
             "ChangeId": change.change_id,
             "StartTime": change.start_time.timestamp(),
-            "Status": "COMPLETED",
-            "PendingProperties": [],
-            "CompletedProperties": change.properties,
+            "Status": status,
+            "PendingProperties": pending,
+            "CompletedProperties": completed,
             "TotalNumberOfStages": 0,
             "ChangeProgressStages": [],
             "LastUpdatedTime": change.start_time.timestamp(),
-            "ConfigChangeStatus": "Completed",
+            "ConfigChangeStatus": config_status,
             "InitiatedBy": "CUSTOMER",
             "ValidationFailures": [],
             "AcceptedWarnings": change.accepted_warnings,
@@ -3008,6 +3144,32 @@ impl OpenSearchService {
     // Upgrade / software update / maintenance
     // ===================================================================
 
+    /// `GetUpgradeStatus`: an upgrade whose replacement cluster is still
+    /// booting is `IN_PROGRESS` in its `UPGRADE` step; otherwise the last
+    /// upgrade (or check) succeeded.
+    fn upgrade_status(&self, l: &Labels, req: &AwsRequest) -> Value {
+        let upgrading = l.domain.as_deref().is_some_and(|dom| {
+            self.state
+                .read()
+                .get(&req.account_id)
+                .and_then(|st| st.domains.get(dom))
+                .is_some_and(|d| d.processing.as_deref() == Some(backing::UPGRADING))
+        });
+        if upgrading {
+            json!({
+                "UpgradeStep": "UPGRADE",
+                "StepStatus": "IN_PROGRESS",
+                "UpgradeName": "upgrade"
+            })
+        } else {
+            json!({
+                "UpgradeStep": "PRE_UPGRADE_CHECK",
+                "StepStatus": "SUCCEEDED",
+                "UpgradeName": "upgrade"
+            })
+        }
+    }
+
     fn upgrade_domain(&self, api: Api, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         let dom = req_str(&b, "DomainName")?;
@@ -3032,10 +3194,21 @@ impl OpenSearchService {
         // target in canonical prefixed form. Both APIs then reflect it: the
         // 2021 view via `EngineVersion`, the 2015 view via `ElasticsearchVersion`
         // (prefix stripped).
+        let mut restart = false;
         if !check_only {
             if let Some(t) = target.as_deref() {
                 d.engine_version = canonical_engine_version(api, t);
+                // The new engine runs in a new container on the same data
+                // volume, so the indices carry over.
+                restart = backing::begin_change(self.runtime.as_deref(), d, backing::UPGRADING);
+                if restart {
+                    d.change_pending = true;
+                }
             }
+        }
+        drop(accounts);
+        if restart {
+            self.spawn_converge(&req.account_id, &dom);
         }
         let response_target = target
             .map(Value::from)
@@ -3269,10 +3442,19 @@ fn domain_status(d: &Domain, api: Api, created: bool, processing: bool) -> Value
     m.insert("DomainId".into(), json!(d.domain_id));
     m.insert("DomainName".into(), json!(d.name));
     m.insert("ARN".into(), json!(d.arn));
-    m.insert("Created".into(), json!(created || d.created));
+    m.insert(
+        "Created".into(),
+        json!((created || d.created) && d.processing.as_deref() != Some(backing::CREATING)),
+    );
     m.insert("Deleted".into(), json!(d.deleted));
-    m.insert("Processing".into(), json!(processing && !d.deleted));
-    m.insert("UpgradeProcessing".into(), json!(false));
+    m.insert(
+        "Processing".into(),
+        json!((processing || d.processing.is_some()) && !d.deleted),
+    );
+    m.insert(
+        "UpgradeProcessing".into(),
+        json!(d.processing.as_deref() == Some(backing::UPGRADING) && !d.deleted),
+    );
     if !d.deleted {
         // VPC domains expose their endpoint through the `Endpoints` map under
         // the `vpc` key and omit the top-level `Endpoint` (which AWS reserves
@@ -3335,7 +3517,14 @@ fn domain_status(d: &Domain, api: Api, created: bool, processing: bool) -> Value
                 .unwrap_or("NOT_ELIGIBLE"),
         ),
     );
-    m.insert("DomainProcessingStatus".into(), json!("Active"));
+    m.insert(
+        "DomainProcessingStatus".into(),
+        json!(if d.deleted {
+            "Deleting"
+        } else {
+            d.processing.as_deref().unwrap_or("Active")
+        }),
+    );
     Value::Object(m)
 }
 

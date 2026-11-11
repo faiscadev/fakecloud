@@ -30,6 +30,7 @@ tracing = { workspace = true }
 zip = { workspace = true }
 tempfile = { workspace = true }
 percent-encoding = { workspace = true }
+regex = { workspace = true }
 crc32fast = { workspace = true }
 bytes = { workspace = true }
 # spec.rs builds k8s Pod objects; the client bootstrap, lifecycle, and

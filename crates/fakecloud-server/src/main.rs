@@ -109,6 +109,57 @@ async fn cloudfront_viewer_middleware(
     dp.serve(req, next).await
 }
 
+async fn opensearch_dataplane_middleware(
+    axum::extract::State(dp): axum::extract::State<
+        Option<std::sync::Arc<fakecloud_opensearch::dataplane::OpenSearchDataPlane>>,
+    >,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use fakecloud_opensearch::dataplane::Route;
+    let Some(dp) = dp else {
+        return next.run(req).await;
+    };
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().host().map(str::to_string));
+    let route = host.as_deref().map(|h| dp.route(h));
+    let base = match route {
+        None | Some(Route::NotADomain) => return next.run(req).await,
+        Some(Route::Unavailable) => {
+            return http_bytes_response(fakecloud_opensearch::dataplane::unavailable(
+                "The domain's search cluster is not running.",
+            ))
+        }
+        Some(Route::Cluster(base)) => base,
+    };
+    let (parts, body) = req.into_parts();
+    let max_body = fakecloud_core::dispatch::max_request_body_bytes();
+    let Ok(body) = axum::body::to_bytes(body, max_body).await else {
+        return axum::http::Response::builder()
+            .status(axum::http::StatusCode::PAYLOAD_TOO_LARGE)
+            .body(axum::body::Body::empty())
+            .expect("static response");
+    };
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    let resp = dp
+        .forward(&base, parts.method, &path_and_query, &parts.headers, body)
+        .await;
+    http_bytes_response(resp)
+}
+
+fn http_bytes_response(resp: axum::http::Response<bytes::Bytes>) -> axum::response::Response {
+    let (parts, body) = resp.into_parts();
+    axum::response::Response::from_parts(parts, axum::body::Body::from(body))
+}
+
 /// Record types the `--dns` resolver (and this introspection endpoint) answer:
 /// the types `fakecloud_route53::dnssec::encode_rdata` has an explicit encoding
 /// arm for (it has a raw-bytes catch-all, but only these produce meaningful
@@ -1131,6 +1182,19 @@ async fn main() {
     } else {
         degraded_runtimes.push("MQ (control-plane-only brokers, no connectable broker data plane)");
     }
+    // OpenSearch / Elasticsearch domain backing-cluster runtime
+    // (Docker/Podman). Constructed here so the degraded-runtimes banner
+    // reports it; attached to the OpenSearchService further down.
+    let opensearch_runtime = fakecloud_opensearch::OpenSearchRuntime::new().map(Arc::new);
+    if let Some(ref rt) = opensearch_runtime {
+        tracing::info!(
+            cli = rt.cli_name(),
+            "OpenSearch domain clusters enabled via container runtime"
+        );
+    } else {
+        degraded_runtimes
+            .push("OpenSearch (control-plane-only domains, no search cluster data plane)");
+    }
     // Amazon MSK (Kafka) backing-broker runtime (Docker/Podman). Constructed
     // here so the degraded-runtimes banner reports it; attached to the
     // KafkaService further down where the service is built.
@@ -1162,12 +1226,16 @@ async fn main() {
             .with_kms_hook(kms_hook_for_services.clone())
             .with_dirty_flag(sqs_delivery_dirty.clone()),
     );
+    // Durable executions, shared by `Invoke` and cross-service deliveries
+    // (event source mappings, SNS, EventBridge, ...) of durable functions.
+    let lambda_durable = fakecloud_lambda::DurableHub::new(lambda_state.clone());
     // Lambda delivery (SNS can invoke Lambda functions via container runtime)
     let lambda_delivery: Option<Arc<dyn fakecloud_core::delivery::LambdaDelivery>> =
         container_runtime.as_ref().map(|rt| {
             Arc::new(lambda_delivery::LambdaDeliveryImpl::new(
                 lambda_state.clone(),
                 rt.clone(),
+                lambda_durable.clone(),
             )) as Arc<dyn fakecloud_core::delivery::LambdaDelivery>
         });
     let delivery_for_sns = {
@@ -1747,6 +1815,7 @@ async fn main() {
             elasticache_runtime: elasticache_runtime.clone(),
             mq_runtime: mq_runtime.clone(),
             kafka_runtime: kafka_runtime.clone(),
+            opensearch_runtime: opensearch_runtime.clone(),
         },
     );
     if let Some(store) = cloudformation_snapshot_store {
@@ -2167,6 +2236,8 @@ async fn main() {
     let dynamodb_state_for_register = dynamodb_state.clone();
     let delivery_for_dynamodb_register = delivery_for_dynamodb;
     let mut lambda_service = LambdaService::new(lambda_state.clone())
+        .with_durable_hub(lambda_durable.clone())
+        .with_kms_hook(kms_hook_for_services.clone())
         .with_ec2_state(ec2_state.clone())
         .with_quota_provider(Some(quota_provider.clone()));
     lambda_service = lambda_service.with_role_trust_validator(
@@ -2264,6 +2335,8 @@ async fn main() {
     if let Some(h) = lambda_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("lambda", h);
     }
+    // Durable executions restored from the snapshot resume here.
+    lambda_service.start_durable_scheduler();
     registry.register(Arc::new(lambda_service));
     // SecretsManager delivery bus (rotation Lambda invocation)
     let delivery_for_secretsmanager = {
@@ -6787,6 +6860,13 @@ async fn main() {
     if let Some(store) = opensearch_snapshot_store {
         opensearch_service = opensearch_service.with_snapshot_store(store);
     }
+    // Domains are backed by REAL single-node OpenSearch / Elasticsearch
+    // containers when a container runtime is available; persisted domains
+    // re-attach (or respawn on their data volume) in the background.
+    if let Some(ref rt) = opensearch_runtime {
+        opensearch_service = opensearch_service.with_runtime(rt.clone());
+    }
+    opensearch_service.recover_persisted_containers().await;
     if let Some(h) = opensearch_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("es", h);
     }
@@ -7427,6 +7507,7 @@ async fn main() {
                 mwaa: mwaa_state.clone(),
                 neptune: neptune_state.clone(),
                 opensearch: opensearch_state.clone(),
+                opensearch_runtime: opensearch_runtime.clone(),
                 pinpoint: pinpoint_state.clone(),
                 pipes: pipes_state.clone(),
                 ram: ram_state.clone(),
@@ -12810,6 +12891,13 @@ async fn main() {
             cloudfront_dataplane,
             cloudfront_viewer_middleware,
         ))
+        // Search domain endpoints: a request whose `Host` is a domain's
+        // AWS-format endpoint is proxied to its backing cluster; everything
+        // else falls through.
+        .layer(axum::middleware::from_fn_with_state(
+            fakecloud_opensearch::dataplane::OpenSearchDataPlane::new(opensearch_state.clone()),
+            opensearch_dataplane_middleware,
+        ))
         // Outermost: ECS task containers reach the agent's link-local
         // credentials address (`169.254.170.2:80`), which their network
         // namespace NATs to this listener; those requests
@@ -12842,14 +12930,40 @@ async fn main() {
     firehose_engine
         .start()
         .expect("Firehose engine starts once after stores and snapshots load");
-    let serve_result = axum::serve(
+    let shutdown_started = Arc::new(tokio::sync::Notify::new());
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await;
-    // Axum has finished active requests. Close internal admission and drain
-    // before runtime cleanup can emit late logs or release S3 dependencies.
+    .with_graceful_shutdown({
+        let shutdown_started = shutdown_started.clone();
+        async move {
+            shutdown_signal().await;
+            shutdown_started.notify_one();
+        }
+    });
+    // Graceful shutdown waits for in-flight requests, but only for
+    // SHUTDOWN_GRACE: some requests legitimately stay open far longer (a
+    // synchronous durable Invoke waits for its whole execution, up to a
+    // year, and so do API Gateway proxies and Cognito triggers onto durable
+    // functions). Durable executions are persisted and resume after a
+    // restart, so dropping their waiting callers loses nothing.
+    let serve_result = tokio::select! {
+        result = std::future::IntoFuture::into_future(serve) => result,
+        () = async {
+            shutdown_started.notified().await;
+            tokio::time::sleep(runtime::SHUTDOWN_GRACE).await;
+        } => {
+            tracing::warn!(
+                grace_secs = runtime::SHUTDOWN_GRACE.as_secs(),
+                "requests still in flight after the shutdown grace period; dropping them"
+            );
+            Ok(())
+        }
+    };
+    // Active requests have finished (or been dropped after the grace
+    // period). Close internal admission and drain before runtime cleanup can
+    // emit late logs or release S3 dependencies.
     let report = firehose_engine.shutdown().await;
     kinesis_lambda_firehose_poller
         .sync_firehose_checkpoints()
@@ -12881,6 +12995,9 @@ async fn main() {
         rt.stop_all().await;
     }
     if let Some(rt) = kafka_runtime {
+        rt.stop_all().await;
+    }
+    if let Some(rt) = opensearch_runtime {
         rt.stop_all().await;
     }
     if let Some(rt) = ec2_runtime {

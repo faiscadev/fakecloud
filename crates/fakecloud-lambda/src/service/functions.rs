@@ -6,6 +6,15 @@ impl LambdaService {
     pub(crate) fn create_function(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         let mut input = CreateFunctionInput::from_body(&body, &req.region)?;
+        if let Some(cfg) = &input.durable_config {
+            crate::durable::config::check_configured_key(
+                self.durable.kms().as_deref(),
+                &req.account_id,
+                &req.region,
+                &function_arn(&req.region, &req.account_id, &input.function_name),
+                cfg,
+            )?;
+        }
         if let Some(cfg) = input.vpc_config.take() {
             input.vpc_config = Some(self.resolve_vpc_config(&req.account_id, &req.region, cfg)?);
         }
@@ -467,7 +476,14 @@ impl LambdaService {
             tokio::spawn(async move { rt.terminate_instances(pool).await });
         }
 
-        Ok(AwsResponse::json(StatusCode::NO_CONTENT, ""))
+        // A durable function is deleted asynchronously (it reports
+        // `Deleting` while its executions wind down): 202, not 204.
+        let status = if removed.durable_config.is_some() {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::NO_CONTENT
+        };
+        Ok(AwsResponse::json(status, ""))
     }
 
     pub(crate) fn list_functions(

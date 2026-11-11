@@ -5725,3 +5725,48 @@ async fn capacity_provider_arn_input_takes_the_issued_form() {
         "InvalidParameterValueException"
     );
 }
+
+/// A mapping named `function:qualifier` targets that version or alias (an
+/// event source of a durable function must name one); an unknown qualifier
+/// is refused.
+#[tokio::test]
+async fn event_source_mapping_keeps_a_qualified_function_name() {
+    let state = make_state();
+    let svc = LambdaService::new(state);
+    seed_function(&svc, "esm-q").await;
+    let publish = make_request(Method::POST, "/2015-03-31/functions/esm-q/versions", "{}");
+    assert!(svc.handle(publish).await.unwrap().status.is_success());
+    for (name, suffix) in [("esm-q:1", ":1"), ("esm-q:$LATEST", ":$LATEST")] {
+        let body = json!({
+            "FunctionName": name,
+            "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:q",
+        });
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/2015-03-31/event-source-mappings",
+                &body.to_string(),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            body["FunctionArn"],
+            format!("arn:aws:lambda:us-east-1:123456789012:function:esm-q{suffix}")
+        );
+    }
+    let body = json!({
+        "FunctionName": "esm-q:7",
+        "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:q",
+    });
+    let err = svc
+        .handle(make_request(
+            Method::POST,
+            "/2015-03-31/event-source-mappings",
+            &body.to_string(),
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "ResourceNotFoundException");
+}

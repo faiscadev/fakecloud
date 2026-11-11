@@ -1,0 +1,64 @@
+{
+  "Version" : "2012-10-17",
+  "Id" : "auto-awslambda-3",
+  "Statement" : [ {
+    "Sid" : "Allow access through AWS Lambda for all principals in the account that are authorized to use AWS Lambda",
+    "Effect" : "Allow",
+    "Principal" : {
+      "AWS" : "*"
+    },
+    "Action" : [ "kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:CreateGrant", "kms:DescribeKey" ],
+    "Resource" : "*",
+    "Condition" : {
+      "StringEquals" : {
+        "kms:ViaService" : "lambda.us-east-1.amazonaws.com",
+        "kms:CallerAccount" : "454591548454"
+      }
+    }
+  }, {
+    "Sid" : "Allow all principals in the account to decrypt ciphertexts for Lambda functions in the account",
+    "Effect" : "Allow",
+    "Principal" : {
+      "AWS" : "*"
+    },
+    "Action" : "kms:Decrypt",
+    "Resource" : "*",
+    "Condition" : {
+      "StringEquals" : {
+        "kms:CallerAccount" : "454591548454"
+      },
+      "ArnLike" : {
+        "kms:EncryptionContext:aws:lambda:FunctionArn" : "arn:*:lambda:us-east-1:454591548454:function:*"
+      }
+    }
+  }, {
+    "Sid" : "Allow Lambda service access",
+    "Effect" : "Allow",
+    "Principal" : {
+      "Service" : [ "lambda.amazonaws.com", "lambda.us-east-1.amazonaws.com" ]
+    },
+    "Action" : "kms:GenerateDataKey",
+    "Resource" : "*",
+    "Condition" : {
+      "ArnLike" : {
+        "kms:EncryptionContext:aws:lambda:FunctionArn" : "arn:*:lambda:us-east-1:454591548454:function:*"
+      }
+    }
+  }, {
+    "Sid" : "Allow Lambda to directly describe the key and list its grants",
+    "Effect" : "Allow",
+    "Principal" : {
+      "Service" : [ "lambda.amazonaws.com", "lambda.us-east-1.amazonaws.com" ]
+    },
+    "Action" : [ "kms:Describe*", "kms:Get*", "kms:List*" ],
+    "Resource" : "*"
+  }, {
+    "Sid" : "Allow direct access to key metadata to the account",
+    "Effect" : "Allow",
+    "Principal" : {
+      "AWS" : "arn:aws:iam::454591548454:root"
+    },
+    "Action" : [ "kms:Describe*", "kms:Get*", "kms:List*", "kms:RevokeGrant" ],
+    "Resource" : "*"
+  } ]
+}
