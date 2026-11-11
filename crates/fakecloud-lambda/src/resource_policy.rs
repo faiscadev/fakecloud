@@ -131,6 +131,83 @@ pub fn policy_view<'a>(
     })
 }
 
+/// Move permissions granted on an alias out of the policies they were kept
+/// in before aliases had a policy of their own: `AddPermission` with an
+/// alias qualifier used to write the statement into the policy of a version
+/// the alias pointed to, and CloudFormation's `AWS::Lambda::Permission` on an
+/// alias into the function's policy. A statement belongs to an alias when its
+/// `Resource` is the alias ARN. Runs once per state: state saved since
+/// (where `PutResourcePolicy` may store any document verbatim) is left alone.
+pub fn migrate_alias_policies(state: &mut LambdaState) {
+    if std::mem::replace(&mut state.alias_policies_migrated, true) {
+        return;
+    }
+    let alias_keys: Vec<String> = state.aliases.keys().cloned().collect();
+    for key in alias_keys {
+        let Some((function_name, _)) = key.split_once(':') else {
+            continue;
+        };
+        let alias_arn = state.aliases[&key].alias_arn.clone();
+        let mut moved: Vec<serde_json::Value> = Vec::new();
+        let mut take = |policy: &mut Option<String>, revision_id: &mut String| {
+            let Some(mut doc) = policy
+                .as_deref()
+                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+            else {
+                return;
+            };
+            let Some(statements) = doc.get_mut("Statement").and_then(|s| s.as_array_mut()) else {
+                return;
+            };
+            let before = statements.len();
+            let (alias_owned, kept): (Vec<_>, Vec<_>) = std::mem::take(statements)
+                .into_iter()
+                .partition(|st| st.get("Resource").and_then(|r| r.as_str()) == Some(&alias_arn));
+            *statements = kept;
+            if statements.len() != before {
+                moved.extend(alias_owned);
+                *policy = Some(doc.to_string());
+                *revision_id = uuid::Uuid::new_v4().to_string();
+            }
+        };
+        if let Some(f) = state.functions.get_mut(function_name) {
+            take(&mut f.policy, &mut f.revision_id);
+        }
+        if let Some(versions) = state.function_version_snapshots.get_mut(function_name) {
+            for v in versions.values_mut() {
+                take(&mut v.policy, &mut v.revision_id);
+            }
+        }
+        if let Some(v) = state.latest_published.get_mut(function_name) {
+            take(&mut v.policy, &mut v.revision_id);
+        }
+        if moved.is_empty() {
+            continue;
+        }
+        let alias = state
+            .aliases
+            .get_mut(&key)
+            .expect("alias key collected above");
+        let mut doc = alias
+            .policy
+            .as_deref()
+            .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+            .unwrap_or_else(|| serde_json::json!({"Version": "2012-10-17", "Statement": []}));
+        if !doc.get("Statement").is_some_and(|s| s.is_array()) {
+            doc["Statement"] = serde_json::json!([]);
+        }
+        let statements = doc["Statement"].as_array_mut().expect("array set above");
+        for st in moved {
+            let sid = st.get("Sid").cloned();
+            if sid.is_none() || !statements.iter().any(|e| e.get("Sid") == sid.as_ref()) {
+                statements.push(st);
+            }
+        }
+        alias.policy = Some(doc.to_string());
+        alias.revision_id = uuid::Uuid::new_v4().to_string();
+    }
+}
+
 /// Concrete [`ResourcePolicyProvider`] backed by the in-memory
 /// [`crate::state::LambdaState`]. Server bootstrap clone-shares it via
 /// [`fakecloud_core::auth::MultiResourcePolicyProvider`] alongside the
