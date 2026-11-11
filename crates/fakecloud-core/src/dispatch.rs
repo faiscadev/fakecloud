@@ -1979,12 +1979,26 @@ fn unresolved_credential_response(
             "The security token included in the request is expired",
         )
     } else {
+        invalid_token_error(&envelope)
+    };
+    build_error_response(StatusCode::FORBIDDEN, code, message, request_id, envelope)
+}
+
+/// The code and message for an access key that resolves to no identity.
+/// Lambda answers `UnrecognizedClientException` with a trailing period
+/// (recorded in us-east-1); the other services keep `InvalidClientTokenId`.
+fn invalid_token_error(envelope: &ErrorEnvelope) -> (&'static str, &'static str) {
+    if envelope.lambda_body {
+        (
+            "UnrecognizedClientException",
+            "The security token included in the request is invalid.",
+        )
+    } else {
         (
             "InvalidClientTokenId",
             "The security token included in the request is invalid",
         )
-    };
-    build_error_response(StatusCode::FORBIDDEN, code, message, request_id, envelope)
+    }
 }
 
 fn anonymous_s3_bucket(uri: &http::Uri, config: &DispatchConfig) -> Option<String> {
@@ -3041,6 +3055,27 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["__type"], "NotFoundException");
+    }
+
+    #[test]
+    fn lambda_refuses_an_unknown_access_key_as_unrecognized_client() {
+        let lambda = protocol::DetectedRequest {
+            service: "lambda".to_string(),
+            action: String::new(),
+            protocol: AwsProtocol::RestJson,
+        };
+        let envelope = ErrorEnvelope::for_request(&lambda, &http::HeaderMap::new());
+        assert_eq!(
+            invalid_token_error(&envelope),
+            (
+                "UnrecognizedClientException",
+                "The security token included in the request is invalid."
+            )
+        );
+        assert_eq!(
+            invalid_token_error(&ErrorEnvelope::from(AwsProtocol::Query)).0,
+            "InvalidClientTokenId"
+        );
     }
 
     fn rest_detected(service: &str) -> protocol::DetectedRequest {
