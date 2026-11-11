@@ -220,6 +220,9 @@ struct Extension {
     queue: VecDeque<serde_json::Value>,
     /// It is in `/event/next`, done with everything it was sent.
     waiting: bool,
+    /// It was handed an event and has not asked for the next one yet (still
+    /// working on it). A long poll that merely ended does not set this.
+    handling: bool,
 }
 
 struct State {
@@ -350,12 +353,20 @@ impl Sandbox {
         self.state.lock().is_idle()
     }
 
-    /// Whether an invocation is in flight: queued, being handled, or the
-    /// runtime not yet back in `/invocation/next`. An extension that only
-    /// stopped polling between invocations does not count.
+    /// Whether the environment is working: an invocation queued or being
+    /// handled, the runtime not yet back in `/invocation/next`, or an
+    /// extension still on an event it was sent (the invoke phase after the
+    /// response). An extension whose long poll only ended between
+    /// invocations does not count.
     pub fn has_work(&self) -> bool {
         let st = self.state.lock();
-        st.queued.is_some() || st.current.is_some() || !st.runtime_waiting
+        st.queued.is_some()
+            || st.current.is_some()
+            || !st.runtime_waiting
+            || st
+                .extensions
+                .values()
+                .any(|e| e.handling || !e.queue.is_empty())
     }
 
     /// Whether an event has ever been handed to this environment's runtime.
@@ -615,6 +626,7 @@ impl Sandbox {
                 shutdown: events.iter().any(|e| e == "SHUTDOWN"),
                 queue: VecDeque::new(),
                 waiting: false,
+                handling: false,
             },
         );
         drop(st);
@@ -681,9 +693,11 @@ impl Sandbox {
                     .ok_or(ApiError::UnknownExtension)?;
                 if let Some(event) = ext.queue.pop_front() {
                     ext.waiting = false;
+                    ext.handling = true;
                     pending.armed = false;
                     return Ok(event);
                 }
+                ext.handling = false;
                 if !ext.waiting {
                     ext.waiting = true;
                     drop(st);
@@ -2033,5 +2047,19 @@ mod tests {
             Some(RuntimeSignal::Delivered { .. })
         ));
         assert!(!sandbox.is_closed_or_failed());
+
+        // After the response the extension is still on its INVOKE: that is
+        // invoke-phase work, not an idle environment.
+        sandbox.post_error("req-a", None, b"{}").unwrap();
+        let _runtime_again = tokio::spawn({
+            let sandbox = sandbox.clone();
+            async move { sandbox.next().await.map(|n| n.event.request_id) }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(sandbox.has_work(), "an extension on its event is work");
+        // Once it asks for the next event the environment has no work, and a
+        // long poll that then ends does not make it work again.
+        drop_extension_next(&sandbox, &id).await;
+        assert!(!sandbox.has_work(), "a dropped long poll is not work");
     }
 }
