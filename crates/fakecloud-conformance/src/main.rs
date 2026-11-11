@@ -85,7 +85,7 @@ enum CliCommand {
     Audit,
     /// Check that each crate's vendored `model.json` still matches `aws-models/`
     VendoredModels,
-    /// Check conformance results (fails on any failing variant or a service below its baseline)
+    /// Check conformance results (fails on any failing variant or any drift from the baseline)
     Check {
         /// Path to conformance-baseline.json
         #[arg(long, default_value = "conformance-baseline.json")]
@@ -1750,7 +1750,7 @@ fn cmd_check(
     }
 
     if regressions.is_empty() {
-        println!("\nConformance check PASSED (every variant passes, no regressions)");
+        println!("\nConformance check PASSED (every variant passes, results match the baseline exactly)");
         println!(
             "  baseline: {}/{} ({:.1}%)",
             baseline.variants_passed,

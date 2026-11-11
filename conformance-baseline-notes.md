@@ -1,10 +1,13 @@
 # Conformance baseline notes
 
-`conformance-baseline.json` is the floor a PR must clear in CI. Every
+`conformance-baseline.json` is the exact conformance state CI checks. Every
 service is pinned at its full observed pass count — currently
 257,522 / 257,522 variants across all 107 services. CI fails any PR with a
-failing variant, and any PR that drops a service below its baseline pass
-count (no flake margin).
+failing variant and any PR whose results drift from the baseline in either
+direction: a service below its pass count, a service above it, a changed
+variant total, or a service missing from either side. A gain the baseline
+does not record would leave every surface that quotes the counts stale, so
+it is a failure too.
 
 ## Bumping baselines
 
@@ -15,9 +18,12 @@ implementation closes a real gap, run:
 cargo run -p fakecloud-conformance -- run --services <service>
 ```
 
-If pass count is higher than baseline and the fix is real (not gaming),
-update the per-service entry in `conformance-baseline.json` to the new
-exact count and commit alongside the change that lifted it.
+If the pass count or the variant total moved and the change is real (not
+gaming), update the per-service entry in `conformance-baseline.json` to the
+new exact counts (or run `cargo run -p fakecloud-conformance --
+update-baseline`), sync the surfaces `scripts/check-doc-counts.sh` checks,
+and commit alongside the change that moved them.
+`FAKECLOUD_CONFORMANCE_FLAKE_MARGIN` relaxes drops only, never gains.
 
 ## Past flake notes
 
