@@ -867,8 +867,19 @@ async fn monitor_launcher(teardown: Teardown, entry: std::sync::Weak<WarmEntry>,
                 }
             };
             let _ = tokio::time::timeout(IDLE_EXTENSION_POLL, until_busy).await;
-        } else if released {
+        } else if released && sandbox.has_work() {
             tokio::time::sleep(BUSY_EXTENSION_POLL).await;
+        } else if released {
+            // No invocation in flight but an extension is not in
+            // `/event/next` (its long poll ended and it has not asked again):
+            // read at the idle rate rather than the busy one, cut short when
+            // an invocation arrives.
+            let until_work = async {
+                while !sandbox.has_work() {
+                    tokio::time::sleep(poll).await;
+                }
+            };
+            let _ = tokio::time::timeout(IDLE_EXTENSION_POLL, until_work).await;
         }
     }
 }
@@ -3387,8 +3398,16 @@ mod tests {
         })
         .await;
         backend.extension_tasks.lock().unwrap()[0].abort();
+        let reads_before = backend.reads.load(SeqCst);
         // Well past several busy-rate reads of the record.
         tokio::time::sleep(Duration::from_millis(1500)).await;
+        // With no invocation in flight the record is read at the idle rate,
+        // not every 250 ms, while the extension is not polling.
+        let reads = backend.reads.load(SeqCst) - reads_before;
+        assert!(
+            reads <= 2,
+            "{reads} record reads in 1.5 s with no invocation"
+        );
         let instances = rt.instances.read();
         let pool = instances.get(&pool).expect("the instance is still pooled");
         assert_eq!(pool.len(), 1);

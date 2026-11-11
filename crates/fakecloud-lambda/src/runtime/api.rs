@@ -350,6 +350,14 @@ impl Sandbox {
         self.state.lock().is_idle()
     }
 
+    /// Whether an invocation is in flight: queued, being handled, or the
+    /// runtime not yet back in `/invocation/next`. An extension that only
+    /// stopped polling between invocations does not count.
+    pub fn has_work(&self) -> bool {
+        let st = self.state.lock();
+        st.queued.is_some() || st.current.is_some() || !st.runtime_waiting
+    }
+
     /// Whether an event has ever been handed to this environment's runtime.
     pub fn has_served(&self) -> bool {
         self.state.lock().delivered_any
@@ -635,6 +643,12 @@ impl Sandbox {
                     return;
                 }
                 let mut st = self.sandbox.state.lock();
+                // Once SHUTDOWN is out (or the environment is gone) a request
+                // ending is the extension finishing up: leave it counted as
+                // waiting so shutdown is not held for the full grace.
+                if st.closed || st.shutting_down {
+                    return;
+                }
                 if let Some(ext) = st.extensions.get_mut(self.id) {
                     ext.waiting = false;
                     tracing::debug!(
