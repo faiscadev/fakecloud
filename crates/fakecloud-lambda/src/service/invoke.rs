@@ -62,13 +62,6 @@ impl LambdaService {
         request_id: &str,
         ctx: &crate::runtime::InvocationContext,
     ) -> Result<AwsResponse, AwsServiceError> {
-        // An unknown alias must 404 like GetFunction does, not silently fall
-        // through to $LATEST. resolve_qualifier_to_version returns None for both
-        // "$LATEST" and a non-existent alias, conflating "run live" with "not
-        // found" -- so a typo'd alias quietly invoked prod $LATEST. Reject an
-        // alias qualifier that doesn't exist here (bug-audit 2026-06-20, 1.9).
-        // Numeric versions keep the existing lenient fallback (a missing version
-        // snapshot is legacy state, handled below).
         // An unqualified invoke of a Lambda Managed Instances function runs
         // its `$LATEST.PUBLISHED` version rather than the unpublished
         // `$LATEST`.
@@ -79,90 +72,26 @@ impl LambdaService {
                 .and_then(|s| crate::service::default_invoke_qualifier(s, function_name))
         };
         let qualifier = qualifier.or(default_qualifier);
-        if let Some(q) = qualifier {
-            if q != "$LATEST" {
-                let accounts = self.state.read();
-                let empty = LambdaState::new(account_id, "");
-                let state = accounts.regional(account_id, region).unwrap_or(&empty);
-                let exists = if q == crate::state::LATEST_PUBLISHED {
-                    state.latest_published.contains_key(function_name)
-                } else if q.chars().all(|c| c.is_ascii_digit()) {
-                    // A version that was never published (or was deleted)
-                    // does not exist: it never runs `$LATEST` instead.
-                    crate::state::version_exists(state, function_name, q)
-                } else {
-                    state.aliases.contains_key(&format!("{function_name}:{q}"))
-                };
-                if !exists {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::NOT_FOUND,
-                        "ResourceNotFoundException",
-                        format!(
-                            "Function not found: {}",
-                            qualified_function_arn(region, &state.account_id, function_name, q)
-                        ),
-                    ));
-                }
-            }
-        }
-        // Resolve qualifier (alias / numeric version / $LATEST) to a
-        // concrete version string. Aliases with a
-        // `RoutingConfig.AdditionalVersionWeights` map do a weighted
-        // pick across `function_version` + the additional versions,
-        // mirroring AWS canary routing. The resolved version is
-        // surfaced via `x-amz-executed-version` so callers can verify
-        // which version actually ran; a numbered version runs its
-        // `function_version_snapshots` entry (below).
-        let resolved_version: Option<String> = {
+        // The version that runs, picked once: an alias's (a weighted alias's
+        // routing config picks between its versions, surfaced through
+        // `x-amz-executed-version`), the number named, `$LATEST.PUBLISHED`,
+        // or `$LATEST`. A numbered version runs the immutable snapshot
+        // PublishVersion stored, so an alias pinned to v1 runs the v1 code
+        // even after $LATEST is mutated. An unknown alias or version is not
+        // found: it never runs `$LATEST` instead.
+        let (func, layer_zips, executed_version, alias) = {
             let accounts = self.state.read();
-            let empty = LambdaState::new(account_id, "");
+            let empty = LambdaState::new(account_id, region);
             let state = accounts.regional(account_id, region).unwrap_or(&empty);
-            resolve_qualifier_to_version(state, function_name, qualifier)
-        };
-        // The version that runs: an alias's (routing config applied), the
-        // number named, or `$LATEST`.
-        let executed_version = resolved_version
-            .clone()
-            .unwrap_or_else(|| "$LATEST".to_string());
-        let (func, layer_zips) = {
-            let accounts = self.state.read();
-            let empty = LambdaState::new(account_id, "");
-            let state = accounts.regional(account_id, region).unwrap_or(&empty);
-            // A numbered version runs the immutable snapshot PublishVersion
-            // stored, so an alias pinned to v1 runs the v1 code even after
-            // $LATEST is mutated. A version that is gone is not found; it
-            // never runs `$LATEST` instead.
-            let not_found = |arn: String| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFoundException",
-                    format!("Function not found: {arn}"),
-                )
-            };
-            let func = match resolved_version.as_deref().filter(|v| *v != "$LATEST") {
-                Some(v) => state
-                    .functions
-                    .get(function_name)
-                    .and_then(|_| state.version_snapshot(function_name, v))
-                    .cloned()
-                    .ok_or_else(|| {
-                        not_found(qualified_function_arn(
-                            region,
-                            &state.account_id,
-                            function_name,
-                            qualifier.unwrap_or(v),
-                        ))
-                    })?,
-                None => state.functions.get(function_name).cloned().ok_or_else(|| {
-                    not_found(function_arn(region, &state.account_id, function_name))
-                })?,
-            };
+            let resolved = resolve_invoke(state, function_name, qualifier)
+                .ok_or_else(|| invoke_not_found(region, account_id, function_name, qualifier))?;
+            let func = resolved.func.clone();
             // Resolve attached layer ARNs to ZIP bytes under the same read
             // lock. Layers may live in sibling accounts (cross-account
             // attach is legal in AWS); an unresolvable layer is skipped with
             // a warning and invoke proceeds without it.
             let layer_zips = crate::state::attached_layer_zips(&accounts, &func);
-            (func, layer_zips)
+            (func, layer_zips, resolved.executed_version, resolved.alias)
         };
 
         // Reserved-concurrency gate runs before code-zip / DryRun
@@ -248,19 +177,14 @@ impl LambdaService {
                         func: func.clone(),
                         resolve: super::async_invoke::invoked_version_resolver(
                             self.state.clone(),
-                            super::async_invoke::InvokedVersion {
-                                account_id: account_id.to_string(),
-                                region: region.to_string(),
-                                function_name: function_name.to_string(),
-                                alias: qualifier
-                                    .filter(|q| {
-                                        *q != "$LATEST"
-                                            && *q != crate::state::LATEST_PUBLISHED
-                                            && !q.chars().all(|c| c.is_ascii_digit())
-                                    })
-                                    .map(str::to_string),
-                                executed_version: executed_version.clone(),
-                            },
+                            super::async_invoke::InvokedVersion::new(
+                                account_id,
+                                region,
+                                function_name,
+                                alias.clone(),
+                                &executed_version,
+                                &func,
+                            ),
                         ),
                         payload: payload.to_vec(),
                         executed_version: executed_version.clone(),

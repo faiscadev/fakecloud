@@ -800,48 +800,22 @@ pub fn resolve_invocable_target(
 ) -> Option<InvocableTarget> {
     let (account, region, name) = function_location(function_ref, default_account, default_region);
     let state = accounts.regional(account, region)?;
-    let live = state.functions.get(name)?;
-    let qualifier = function_ref_qualifier(function_ref);
-    let target = |alias: Option<&str>, executed_version: &str, func: &LambdaFunction| {
-        Some(InvocableTarget {
-            account_id: account.to_string(),
-            region: region.to_string(),
-            function_name: name.to_string(),
-            alias: alias.map(str::to_string),
-            executed_version: executed_version.to_string(),
-            func: func.clone(),
-        })
-    };
-    // A version or alias runs that version's code and configuration, as a
-    // synchronous Invoke of it does (an alias's routing config picks the
-    // version).
-    if let Some(q) = qualifier.filter(|q| *q != "$LATEST" && *q != LATEST_PUBLISHED) {
-        let version = crate::service::resolve_qualifier_to_version(state, name, Some(q))?;
-        let alias = (!q.chars().all(|c| c.is_ascii_digit())).then_some(q);
-        if version == "$LATEST" {
-            return target(alias, "$LATEST", live);
-        }
-        return target(alias, &version, state.version_snapshot(name, &version)?);
-    }
-    let wants_latest_published = match qualifier {
-        Some(q) => q == LATEST_PUBLISHED,
-        None => live.capacity_provider_config.is_some(),
-    };
-    if wants_latest_published {
-        match state.latest_published.get(name) {
-            Some(snapshot) => return target(None, LATEST_PUBLISHED, snapshot),
-            // An explicit `$LATEST.PUBLISHED` that was never published does
-            // not exist.
-            None if qualifier.is_some() => return None,
-            None => {}
-        }
-    }
-    target(None, "$LATEST", live)
-}
-
-/// Whether `function_name` has the published version `version` (a number).
-pub(crate) fn version_exists(state: &LambdaState, function_name: &str, version: &str) -> bool {
-    state.version_snapshot(function_name, version).is_some()
+    // Resolved exactly as a synchronous Invoke of the same reference is: an
+    // unqualified reference to a Lambda Managed Instances function runs its
+    // `$LATEST.PUBLISHED`, and a version or alias runs that version's code
+    // and configuration (an alias's routing config picks the version; an
+    // alias at `$LATEST` runs the live function).
+    let qualifier = function_ref_qualifier(function_ref)
+        .or_else(|| crate::service::default_invoke_qualifier(state, name));
+    let resolved = crate::service::resolve_invoke(state, name, qualifier)?;
+    Some(InvocableTarget {
+        account_id: account.to_string(),
+        region: region.to_string(),
+        function_name: name.to_string(),
+        alias: resolved.alias,
+        executed_version: resolved.executed_version,
+        func: resolved.func.clone(),
+    })
 }
 
 /// The region a Lambda ARN names, `None` for anything else.
@@ -1353,6 +1327,7 @@ mod tests {
             description: String::new(),
             revision_id: String::new(),
             routing_config: None,
+            policy: None,
         };
         state.aliases.insert("f:live".into(), alias("live", "1"));
         state

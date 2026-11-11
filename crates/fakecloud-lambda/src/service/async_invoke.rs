@@ -264,14 +264,43 @@ pub(crate) struct InvokedVersion {
     pub function_name: String,
     /// The alias the call named, if it named one.
     pub alias: Option<String>,
-    /// The version the call resolved to (`$LATEST` or a number).
+    /// The version the call resolved to (`$LATEST`, `$LATEST.PUBLISHED` or a
+    /// number).
     pub executed_version: String,
+    /// The `$LATEST.PUBLISHED` snapshot the event was queued for. Unlike a
+    /// number, `$LATEST.PUBLISHED` names whatever was published last, so a
+    /// publish between attempts would otherwise run newer code than the
+    /// event was accepted for.
+    pub published: Option<LambdaFunction>,
+}
+
+impl InvokedVersion {
+    /// What an invocation resolved to `executed_version` (running `func`)
+    /// queued, pinning a `$LATEST.PUBLISHED` snapshot.
+    pub(crate) fn new(
+        account_id: &str,
+        region: &str,
+        function_name: &str,
+        alias: Option<String>,
+        executed_version: &str,
+        func: &LambdaFunction,
+    ) -> Self {
+        Self {
+            account_id: account_id.to_string(),
+            region: region.to_string(),
+            function_name: function_name.to_string(),
+            alias,
+            executed_version: executed_version.to_string(),
+            published: (executed_version == crate::state::LATEST_PUBLISHED).then(|| func.clone()),
+        }
+    }
 }
 
 /// The function an `Invoke`-queued event runs on each attempt: the version
-/// the call resolved to, while it still exists. Once the function, that
-/// version, or the alias the call named is gone, the event is dropped
-/// rather than run on other code.
+/// the call resolved to, while it still exists (a `$LATEST.PUBLISHED` event
+/// runs the snapshot it was queued for while the function has one). Once the
+/// function, that version, or the alias the call named is gone, the event is
+/// dropped rather than run on other code.
 pub(crate) fn invoked_version_resolver(
     state: crate::SharedLambdaState,
     target: InvokedVersion,
@@ -293,6 +322,10 @@ fn resolve_invoked(state: &LambdaState, target: &InvokedVersion) -> Option<Lambd
     }
     if target.executed_version == "$LATEST" {
         return Some(live.clone());
+    }
+    if let Some(published) = &target.published {
+        state.latest_published.get(name)?;
+        return Some(published.clone());
     }
     state
         .version_snapshot(name, &target.executed_version)
@@ -493,13 +526,14 @@ pub fn queue_async_invocation_observed(
     // other code.
     let resolve = invoked_version_resolver(
         state.clone(),
-        InvokedVersion {
-            account_id,
-            region,
-            function_name,
+        InvokedVersion::new(
+            &account_id,
+            &region,
+            &function_name,
             alias,
-            executed_version: executed_version.clone(),
-        },
+            &executed_version,
+            &func,
+        ),
     );
     spawn(AsyncInvocation {
         bus: runtime.async_destinations(),
@@ -911,6 +945,7 @@ mod tests {
             function_name: "f".into(),
             alias: alias.map(str::to_string),
             executed_version: version.into(),
+            published: None,
         };
         assert_eq!(
             resolve_invoked(&state, &target(None, "1"))
@@ -927,13 +962,31 @@ mod tests {
         // A Lambda Managed Instances function's $LATEST.PUBLISHED.
         let mut published = test_func();
         published.description = "published".into();
-        state.latest_published.insert("f".into(), published);
+        state.latest_published.insert("f".into(), published.clone());
+        let queued = InvokedVersion::new(
+            "123456789012",
+            "us-east-1",
+            "f",
+            None,
+            crate::state::LATEST_PUBLISHED,
+            &published,
+        );
         assert_eq!(
-            resolve_invoked(&state, &target(None, crate::state::LATEST_PUBLISHED))
-                .unwrap()
-                .description,
+            resolve_invoked(&state, &queued).unwrap().description,
             "published"
         );
+        // A publish between attempts does not change the code a retry runs.
+        let mut republished = test_func();
+        republished.description = "republished".into();
+        state.latest_published.insert("f".into(), republished);
+        assert_eq!(
+            resolve_invoked(&state, &queued).unwrap().description,
+            "published"
+        );
+        // Once the function has no $LATEST.PUBLISHED, the event is dropped.
+        let gone = state.latest_published.remove("f");
+        assert!(resolve_invoked(&state, &queued).is_none());
+        state.latest_published.insert("f".into(), gone.unwrap());
         // The alias the call named is gone.
         assert!(resolve_invoked(&state, &target(Some("live"), "1")).is_none());
         // The version is gone.

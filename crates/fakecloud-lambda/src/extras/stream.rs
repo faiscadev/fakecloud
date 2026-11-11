@@ -26,71 +26,36 @@ impl LambdaService {
         // — qualifier, version snapshots, attached layers, code-zip
         // presence — but without the InvocationType branch (streaming
         // is always synchronous).
-        let default_qualifier = {
-            let accounts = self.state.read();
-            accounts
-                .regional(account_id, &req.region)
-                .and_then(|s| crate::service::default_invoke_qualifier(s, function_name))
-        };
-        let qualifier = req
-            .query_params
-            .get("Qualifier")
-            .map(String::as_str)
-            .or(default_qualifier);
-
-        let resolved_version: Option<String> = {
+        // `?Qualifier=` wins; otherwise a qualifier embedded in the function
+        // reference in the path (`name:alias`, a qualified ARN), as on Invoke.
+        let requested_qualifier: Option<String> =
+            req.query_params.get("Qualifier").cloned().or_else(|| {
+                req.path_segments
+                    .get(2)
+                    .and_then(|raw| crate::service::qualifier_from_function_ref(raw))
+            });
+        let (func, layer_zips, executed_version) = {
             let accounts = self.state.read();
             let empty = LambdaState::new(account_id, &req.region);
             let state = accounts.regional(account_id, &req.region).unwrap_or(&empty);
-            crate::service::resolve_qualifier_to_version(state, function_name, qualifier)
-        };
-        let executed_version = resolved_version
-            .clone()
-            .unwrap_or_else(|| "$LATEST".to_string());
-
-        let (func, layer_zips) = {
-            let accounts = self.state.read();
-            let empty = LambdaState::new(account_id, &req.region);
-            let state = accounts.regional(account_id, &req.region).unwrap_or(&empty);
-            // An unknown alias or version is not found, as on Invoke: it
-            // never runs `$LATEST` instead.
-            let func = match (
-                qualifier.filter(|q| *q != "$LATEST"),
-                resolved_version.as_deref(),
-            ) {
-                (Some(q), resolved) => resolved
-                    .and_then(|v| {
-                        if v == "$LATEST" {
-                            state.functions.get(function_name)
-                        } else {
-                            state.version_snapshot(function_name, v)
-                        }
-                    })
-                    .filter(|_| state.functions.contains_key(function_name))
-                    .cloned()
-                    .ok_or_else(|| {
-                        AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "ResourceNotFoundException",
-                            format!(
-                                "Function not found: {}:{q}",
-                                function_arn(&req.region, &state.account_id, function_name)
-                            ),
-                        )
-                    })?,
-                (None, _) => state.functions.get(function_name).cloned().ok_or_else(|| {
-                    AwsServiceError::aws_error(
-                        StatusCode::NOT_FOUND,
-                        "ResourceNotFoundException",
-                        format!(
-                            "Function not found: {}",
-                            function_arn(&req.region, &state.account_id, function_name)
-                        ),
+            let qualifier = requested_qualifier
+                .as_deref()
+                .or_else(|| crate::service::default_invoke_qualifier(state, function_name));
+            // Resolved exactly as Invoke resolves it: an unknown alias or
+            // version is not found (it never runs `$LATEST` instead), and an
+            // alias at `$LATEST` runs the live function.
+            let resolved = crate::service::resolve_invoke(state, function_name, qualifier)
+                .ok_or_else(|| {
+                    crate::service::invoke_not_found(
+                        &req.region,
+                        account_id,
+                        function_name,
+                        qualifier,
                     )
-                })?,
-            };
+                })?;
+            let func = resolved.func.clone();
             let zips = crate::state::attached_layer_zips(&accounts, &func);
-            (func, zips)
+            (func, zips, resolved.executed_version)
         };
 
         if func.code_zip.is_none() && func.package_type != "Image" {
@@ -123,7 +88,7 @@ impl LambdaService {
             request_id: Some(req.request_id.clone()),
             invoked_function_arn: Some(crate::service::invoke::invoked_function_arn(
                 &func.function_arn,
-                req.query_params.get("Qualifier").map(String::as_str),
+                requested_qualifier.as_deref(),
             )),
             trace_id: crate::service::invoke::trace_header(req),
             client_context: crate::service::invoke::client_context(req),
