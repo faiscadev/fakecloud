@@ -926,12 +926,13 @@ async fn lambda_raw(
     let status = resp.status().as_u16();
     let header_code = resp
         .headers()
-        .get("x-amz-error-code")
+        .get("x-amzn-errortype")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     let text = resp.text().await.unwrap();
     let body: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
-    let code = header_code.or_else(|| body["__type"].as_str().map(str::to_string));
+    // Lambda names the error only in `x-amzn-ErrorType`, as on AWS.
+    let code = header_code;
     (status, body, code)
 }
 
@@ -980,8 +981,11 @@ async fn durable_config_validation_and_customer_managed_key() {
         (400, Some("InvalidParameterValueException"))
     );
     assert_eq!(
-        body["message"],
-        "You cannot create a function with a durable configuration without an executionTimeout"
+        body,
+        serde_json::json!({
+            "Type": "User",
+            "message": "You cannot create a function with a durable configuration without an executionTimeout"
+        })
     );
     let (status, _, code) = create(
         "durable-bad-retention",

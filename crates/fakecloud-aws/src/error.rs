@@ -88,6 +88,146 @@ pub fn json_error_response_with_fields(
     )
 }
 
+/// Lambda's modeled errors whose message member is `message`; every other
+/// modeled Lambda error names it `Message`. Matches `aws-models/lambda.json`
+/// (checked by a unit test).
+const LAMBDA_LOWERCASE_MESSAGE_ERRORS: &[&str] = &[
+    "AliasLimitExceededException",
+    "CapacityProviderLimitExceededException",
+    "CodeArtifactUserDeletedException",
+    "CodeArtifactUserFailedException",
+    "CodeArtifactUserPendingException",
+    "CodeStorageExceededException",
+    "FunctionVersionsPerCapacityProviderLimitExceededException",
+    "InvalidParameterValueException",
+    "InvalidRequestContentException",
+    "ModeNotSupportedException",
+    "PolicyLengthExceededException",
+    "PreconditionFailedException",
+    "ProvisionedConcurrencyConfigNotFoundException",
+    "RequestTooLargeException",
+    "ResourceConflictException",
+    "ResourceNotReadyException",
+    "SerializedRequestEntityTooLargeException",
+    "TooManyRequestsException",
+    "UnsupportedMediaTypeException",
+];
+
+/// Lambda's modeled errors whose message member is `Message`. Matches
+/// `aws-models/lambda.json`.
+const LAMBDA_MODELED_ERRORS_WITH_CAPITAL_MESSAGE: &[&str] = &[
+    "CallbackTimeoutException",
+    "CodeSigningConfigNotFoundException",
+    "CodeVerificationFailedException",
+    "DurableExecutionAlreadyStartedException",
+    "EC2AccessDeniedException",
+    "EC2ThrottledException",
+    "EC2UnexpectedException",
+    "EFSIOException",
+    "EFSMountConnectivityException",
+    "EFSMountFailureException",
+    "EFSMountTimeoutException",
+    "ENILimitReachedException",
+    "ENINotReadyException",
+    "InvalidCodeSignatureException",
+    "InvalidRuntimeException",
+    "InvalidSecurityGroupIDException",
+    "InvalidSubnetIDException",
+    "InvalidZipFileException",
+    "KMSAccessDeniedException",
+    "KMSDisabledException",
+    "KMSInvalidStateException",
+    "KMSNotFoundException",
+    "NoPublishedVersionException",
+    "PublicPolicyException",
+    "RecursiveInvocationException",
+    "ResourceInUseException",
+    "ResourceNotFoundException",
+    "S3FilesMountConnectivityException",
+    "S3FilesMountFailureException",
+    "S3FilesMountTimeoutException",
+    "ServiceException",
+    "ServiceQuotaExceededException",
+    "SnapStartException",
+    "SnapStartNotReadyException",
+    "SnapStartRegenerationFailureException",
+    "SnapStartTimeoutException",
+    "SubnetIPAddressLimitReachedException",
+];
+
+/// Modeled Lambda errors that AWS sends without a `Type` member, though the
+/// model declares one: every recording of them is `{"Message": ...}` alone
+/// (`tests/fixtures/durable/aws-round3-kms-*.jsonl` in fakecloud-lambda).
+const LAMBDA_ERRORS_WITHOUT_TYPE: &[&str] = &["KMSDisabledException", "KMSInvalidStateException"];
+
+/// Modeled Lambda errors that AWS sends with `"Type": null` on every recorded
+/// path (`DurableExecutionAlreadyStartedException`, aws-round1/2). Other
+/// paths that send `null` for an error usually typed `User` (an undecodable
+/// callback id's `InvalidParameterValueException`) set it at the raise site
+/// with a `Type` extra field.
+const LAMBDA_ERRORS_WITH_NULL_TYPE: &[&str] = &["DurableExecutionAlreadyStartedException"];
+
+/// Errors outside Lambda's model that AWS sends as `{"Message": ...}`
+/// (`AccessDeniedException`, recorded in aws-round3/4); the rest
+/// (`ValidationException`, `UnrecognizedClientException`, ...) are
+/// `{"message": ...}`.
+const LAMBDA_UNMODELED_CAPITAL_MESSAGE_ERRORS: &[&str] = &["AccessDeniedException"];
+
+/// The body of a Lambda error, as recorded against Lambda (us-east-1). A
+/// modeled error carries its members by their Smithy names: `Message` or
+/// `message` as the shape names it, and `Type` (`User`; `Service` for
+/// `ServiceException`; `null` or absent for the errors listed above), e.g.
+/// `{"Type":"User","Message":"Function not found: ..."}`,
+/// `{"Type":"User","message":"Invalid marker value: ..."}`. An error outside
+/// Lambda's model is `{"message": ...}` (`ValidationException`,
+/// `UnrecognizedClientException`), or `{"Message": ...}` for
+/// `AccessDeniedException`. The code itself travels in `x-amzn-ErrorType`.
+/// `extra_fields` are added as further members after these and replace them
+/// on a clash (`Reason`, `EC2ErrorCode`, a raise site's `"Type": null`).
+pub fn lambda_json_error_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    extra_fields: &[(String, String)],
+) -> (StatusCode, String, Bytes) {
+    let mut body = serde_json::Map::new();
+    let lowercase = LAMBDA_LOWERCASE_MESSAGE_ERRORS.contains(&code);
+    if lowercase || LAMBDA_MODELED_ERRORS_WITH_CAPITAL_MESSAGE.contains(&code) {
+        if LAMBDA_ERRORS_WITH_NULL_TYPE.contains(&code) {
+            body.insert("Type".to_string(), serde_json::Value::Null);
+        } else if !LAMBDA_ERRORS_WITHOUT_TYPE.contains(&code) {
+            let kind = if code == "ServiceException" {
+                "Service"
+            } else {
+                "User"
+            };
+            body.insert("Type".to_string(), serde_json::json!(kind));
+        }
+        let member = if lowercase { "message" } else { "Message" };
+        body.insert(member.to_string(), serde_json::json!(message));
+    } else if LAMBDA_UNMODELED_CAPITAL_MESSAGE_ERRORS.contains(&code) {
+        body.insert("Message".to_string(), serde_json::json!(message));
+    } else {
+        body.insert("message".to_string(), serde_json::json!(message));
+    }
+    for (key, value) in extra_fields {
+        let parsed = serde_json::from_str(value)
+            .unwrap_or_else(|_| serde_json::Value::String(value.clone()));
+        body.insert(key.clone(), parsed);
+    }
+    (
+        status,
+        "application/json".to_string(),
+        Bytes::from(serde_json::Value::Object(body).to_string()),
+    )
+}
+
+/// Whether a REST-JSON service's errors use Lambda's body shape
+/// ([`lambda_json_error_response`]).
+pub fn uses_lambda_error_body(service: &str) -> bool {
+    service == "lambda"
+}
+
 /// XML namespace of the CloudFront API (`2020-05-31`).
 pub const CLOUDFRONT_XMLNS: &str = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
 
@@ -349,5 +489,129 @@ mod tests {
         let (_, _, body) = xml_error_response(StatusCode::BAD_REQUEST, "E", "a<b>c", "req-1");
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("a&lt;b&gt;c"));
+    }
+
+    /// Lambda's error bodies follow `aws-models/lambda.json`: every modeled
+    /// error is listed with the message member its shape names.
+    #[test]
+    fn lambda_error_tables_match_the_model() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../aws-models/lambda.json");
+        let model: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut lower = Vec::new();
+        let mut upper = Vec::new();
+        for (id, shape) in model["shapes"].as_object().unwrap() {
+            if shape["traits"].get("smithy.api#error").is_none() {
+                continue;
+            }
+            let name = id.rsplit('#').next().unwrap().to_string();
+            let members = shape["members"].as_object().unwrap();
+            assert!(members.contains_key("Type"), "{name}");
+            if members.contains_key("message") {
+                lower.push(name);
+            } else {
+                assert!(members.contains_key("Message"), "{name}");
+                upper.push(name);
+            }
+        }
+        lower.sort();
+        upper.sort();
+        assert_eq!(LAMBDA_LOWERCASE_MESSAGE_ERRORS, lower.as_slice());
+        assert_eq!(LAMBDA_MODELED_ERRORS_WITH_CAPITAL_MESSAGE, upper.as_slice());
+    }
+
+    #[test]
+    fn lambda_error_bodies_match_the_recordings() {
+        let body = |code: &str, message: &str| -> serde_json::Value {
+            let (_, content_type, bytes) =
+                lambda_json_error_response(StatusCode::BAD_REQUEST, code, message, &[]);
+            assert_eq!(content_type, "application/json");
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        assert_eq!(
+            body("ResourceNotFoundException", "Function not found: f"),
+            serde_json::json!({"Type": "User", "Message": "Function not found: f"})
+        );
+        assert_eq!(
+            body(
+                "InvalidParameterValueException",
+                "Invalid marker value: garbage"
+            ),
+            serde_json::json!({"Type": "User", "message": "Invalid marker value: garbage"})
+        );
+        assert_eq!(
+            body("ValidationException", "1 validation error detected"),
+            serde_json::json!({"message": "1 validation error detected"})
+        );
+        assert_eq!(
+            body("ServiceException", "boom")["Type"],
+            serde_json::json!("Service")
+        );
+    }
+
+    /// Every Lambda error response recorded against AWS in fakecloud-lambda's
+    /// fixtures is reproduced byte-for-byte in meaning (same JSON members and
+    /// values) from its `x-amzn-ErrorType` code and message. The undecodable
+    /// callback id answers carry their `"Type": null` from the raise site.
+    #[test]
+    fn lambda_error_bodies_reproduce_every_recording() {
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../fakecloud-lambda/tests/fixtures"
+        );
+        let mut files = Vec::new();
+        let mut stack = vec![std::path::PathBuf::from(dir)];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "jsonl") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut checked = 0;
+        for file in files {
+            for line in std::fs::read_to_string(&file).unwrap().lines() {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                let (Some(status), Some(code), Some(body)) = (
+                    record["status"].as_u64(),
+                    record["headers"]["x-amzn-errortype"].as_str(),
+                    record["body"].as_str(),
+                ) else {
+                    continue;
+                };
+                if status < 400 {
+                    continue;
+                }
+                let code = code.split(':').next().unwrap();
+                let recorded: serde_json::Value = serde_json::from_str(body).unwrap();
+                let message = recorded
+                    .get("Message")
+                    .or_else(|| recorded.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap();
+                let label = record["label"].as_str().unwrap_or_default();
+                let extra: Vec<(String, String)> =
+                    if label.starts_with("callback-") && label.ends_with("-unknown") {
+                        vec![("Type".to_string(), "null".to_string())]
+                    } else {
+                        Vec::new()
+                    };
+                let (_, _, ours) = lambda_json_error_response(
+                    StatusCode::from_u16(status as u16).unwrap(),
+                    code,
+                    message,
+                    &extra,
+                );
+                let ours: serde_json::Value = serde_json::from_slice(&ours).unwrap();
+                assert_eq!(ours, recorded, "{label} in {}", file.display());
+                checked += 1;
+            }
+        }
+        assert!(checked >= 70, "only {checked} recorded errors found");
     }
 }

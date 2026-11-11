@@ -331,8 +331,17 @@ fn callback_call(
     action: CallbackAction,
 ) -> Result<AwsResponse, AwsServiceError> {
     validate_callback_id(callback_id)?;
-    let arn = callback_execution_arn(callback_id)
-        .ok_or_else(|| invalid_parameter("Invalid callback id"))?;
+    // A callback id that does not decode is refused with `"Type": null`,
+    // where the API's other parameter errors carry `"Type": "User"`
+    // (aws-round1 `callback-*-unknown`).
+    let arn = callback_execution_arn(callback_id).ok_or_else(|| {
+        AwsServiceError::aws_error_with_fields(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValueException",
+            "Invalid callback id",
+            vec![("Type".to_string(), "null".to_string())],
+        )
+    })?;
     let accepted = {
         let mut accounts = hub.state().write();
         let exec = accounts
