@@ -8993,13 +8993,20 @@ async fn main() {
                                 let info = |msg: &fakecloud_sqs::SqsMessage, in_flight| {
                                     types::SqsMessageInfo {
                                         message_id: msg.message_id.clone(),
-                                        body: fakecloud_sqs::plaintext_body(&msg.body, |ct| {
-                                            let ctx = std::collections::HashMap::from([(
-                                                "aws:sqs:arn".to_string(),
-                                                msg.sealing_queue(&queue.arn).to_string(),
-                                            )]);
-                                            kms.inner.peek_plaintext(account_id, ct, &ctx)
-                                        }),
+                                        // Decrypted exactly when ReceiveMessage
+                                        // would: a body the queue sealed.
+                                        body: fakecloud_sqs::plaintext_body(
+                                            msg,
+                                            &queue.arn,
+                                            &queue.attributes,
+                                            |ct, sealing_queue| {
+                                                let ctx = std::collections::HashMap::from([(
+                                                    "aws:sqs:arn".to_string(),
+                                                    sealing_queue.to_string(),
+                                                )]);
+                                                kms.inner.peek_plaintext(account_id, ct, &ctx)
+                                            },
+                                        ),
                                         stored_body: msg.body.clone(),
                                         receive_count: msg.receive_count as u64,
                                         in_flight,

@@ -26,17 +26,28 @@ pub(crate) fn looks_like_fakecloud_envelope(body: &str) -> bool {
     }
 }
 
-/// The plaintext of a stored message body, for introspection. An SSE body
-/// (one that passes the same envelope check ReceiveMessage applies) is
-/// unsealed by `unseal`; anything else, or an envelope `unseal` cannot open,
-/// is returned as stored.
-pub fn plaintext_body(stored: &str, unseal: impl FnOnce(&str) -> Option<Vec<u8>>) -> String {
-    if !looks_like_fakecloud_envelope(stored) {
-        return stored.to_string();
+/// The plaintext of `msg`'s stored body, for introspection, held by the
+/// queue `holder_arn` with `holder_attributes`. A body ReceiveMessage would
+/// decrypt (sealed, see [`crate::SqsMessage::body_is_sealed`], and an
+/// envelope) is unsealed by `unseal(ciphertext, sealing_queue_arn)`;
+/// anything else (a plaintext body, even one that happens to look like a
+/// KMS ciphertext), or an envelope `unseal` cannot open, is returned as
+/// stored.
+pub fn plaintext_body(
+    msg: &crate::SqsMessage,
+    holder_arn: &str,
+    holder_attributes: &BTreeMap<String, String>,
+    unseal: impl FnOnce(&str, &str) -> Option<Vec<u8>>,
+) -> String {
+    let stored = &msg.body;
+    if !msg.body_is_sealed(crate::state::queue_encrypts_at_rest(holder_attributes))
+        || !looks_like_fakecloud_envelope(stored)
+    {
+        return stored.clone();
     }
-    unseal(stored)
+    unseal(stored, msg.sealing_queue(holder_arn))
         .map(|p| String::from_utf8_lossy(&p).into_owned())
-        .unwrap_or_else(|| stored.to_string())
+        .unwrap_or_else(|| stored.clone())
 }
 
 /// Validate DelaySeconds (0–900), VisibilityTimeout (0–43200), and
@@ -1782,23 +1793,70 @@ mod envelope_tests {
         assert!(looks_like_fakecloud_envelope(&b64));
     }
 
-    /// Only envelope-shaped bodies reach `unseal`; one it cannot open, and
-    /// every plain body, read back as stored.
+    /// Only a sealed, envelope-shaped body reaches `unseal` (with the queue
+    /// that sealed it), as ReceiveMessage decrypts; one it cannot open, a
+    /// plain body, and an envelope-looking body sent in plaintext read back
+    /// as stored.
     #[test]
-    fn plaintext_body_unseals_only_envelopes() {
+    fn plaintext_body_unseals_only_sealed_envelopes() {
+        use std::collections::BTreeMap;
         let mut blob = vec![0x01, 0x02, 0x02, 0x00];
         blob.extend_from_slice(&[0u8; 32]);
         let sealed = base64::engine::general_purpose::STANDARD.encode(&blob);
+        let message = |body: &str, sealed_for: Option<&str>| crate::SqsMessage {
+            message_id: "m".to_string(),
+            receipt_handle: None,
+            md5_of_body: String::new(),
+            body: body.to_string(),
+            sent_timestamp: 0,
+            attributes: BTreeMap::new(),
+            message_attributes: BTreeMap::new(),
+            visible_at: None,
+            receive_count: 0,
+            first_received_at: None,
+            message_group_id: None,
+            message_dedup_id: None,
+            created_at: chrono::Utc::now(),
+            sequence_number: None,
+            sealed_for_queue: sealed_for.map(str::to_string),
+            seal_recorded: true,
+        };
+        let plain_queue = BTreeMap::new();
+        let src = "arn:aws:sqs:us-east-1:123456789012:src";
+        // Sealed by `src`, now held by a plain dead-letter queue.
         assert_eq!(
-            plaintext_body(&sealed, |ct| {
-                assert_eq!(ct, sealed);
-                Some(b"hello".to_vec())
-            }),
+            plaintext_body(
+                &message(&sealed, Some(src)),
+                "dlq",
+                &plain_queue,
+                |ct, q| {
+                    assert_eq!((ct, q), (sealed.as_str(), src));
+                    Some(b"hello".to_vec())
+                }
+            ),
             "hello"
         );
-        assert_eq!(plaintext_body(&sealed, |_| None), sealed);
         assert_eq!(
-            plaintext_body("plain", |_| panic!("plain body must not be unsealed")),
+            plaintext_body(&message(&sealed, Some(src)), "dlq", &plain_queue, |_, _| {
+                None
+            }),
+            sealed
+        );
+        // Sent in plaintext into an encrypted queue: shown as sent.
+        let encrypted = BTreeMap::from([("KmsMasterKeyId".to_string(), "alias/app".to_string())]);
+        assert_eq!(
+            plaintext_body(&message(&sealed, None), src, &encrypted, |_, _| panic!(
+                "a plaintext body must not be unsealed"
+            )),
+            sealed
+        );
+        assert_eq!(
+            plaintext_body(
+                &message("plain", Some(src)),
+                src,
+                &encrypted,
+                |_, _| panic!("plain body must not be unsealed")
+            ),
             "plain"
         );
     }
