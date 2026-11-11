@@ -173,7 +173,9 @@ impl KmsServiceHook {
         caller: KmsCaller<'_>,
         encryption_context: HashMap<String, String>,
     ) -> Result<String, KmsError> {
-        let (key_arn, _) = self.resolve_or_provision(account_id, region, key_id)?;
+        let (key_arn, _) = self
+            .resolve_or_provision(account_id, region, key_id)
+            .map_err(|err| missing_key_refusal(err, caller, &format!("kms:{operation}")))?;
         let key_short = key_id_from_arn(&key_arn).to_string();
         let ciphertext_b64 = {
             let mas = self.state.read();
@@ -272,7 +274,15 @@ impl KmsServiceHook {
         actions: &[&str],
         encryption_context: &HashMap<String, String>,
     ) -> Result<String, KmsError> {
-        let (key_arn, _) = self.resolve_or_provision(account_id, region, key_id)?;
+        let (key_arn, _) = self
+            .resolve_or_provision(account_id, region, key_id)
+            .map_err(|err| {
+                missing_key_refusal(
+                    err,
+                    caller,
+                    actions.first().copied().unwrap_or("kms:Decrypt"),
+                )
+            })?;
         let mas = self.state.read();
         let key = mas
             .get(account_id)
@@ -547,6 +557,27 @@ fn authorize(
         )
     };
     Err(KmsError::new(KmsErrorKind::AccessDenied, message))
+}
+
+/// A key reference that resolves to nothing, as KMS answers it for `caller`.
+/// An AWS service principal acting for its own resource is not told the key
+/// is missing: KMS refuses it exactly as it refuses a key whose policy does
+/// not name it (recorded: EventBridge delivering to a queue whose
+/// `KmsMasterKeyId` is a missing alias, `eventbridge-sqs-target-failures.json`
+/// in the `aws-managed-keys` fixtures). A caller of the account learns the
+/// key is missing (`NotFoundException`).
+pub fn missing_key_refusal(err: KmsError, caller: KmsCaller<'_>, action: &str) -> KmsError {
+    match caller {
+        KmsCaller::Service {
+            service_principal, ..
+        } if err.kind == KmsErrorKind::NotFound => KmsError::new(
+            KmsErrorKind::AccessDenied,
+            format!(
+                "User: {service_principal} is not authorized to perform: {action} on this resource because the resource does not exist in this Region, no resource-based policies allow access, or a resource-based policy explicitly denies access"
+            ),
+        ),
+        _ => err,
+    }
 }
 
 /// Whether `stored` is a ciphertext KMS sealed: an AWS-shaped blob or the
@@ -892,6 +923,63 @@ mod tests {
             hook.peek_plaintext("999999999999", &ct, &HashMap::new()),
             None
         );
+    }
+
+    /// A service principal acting for its resource is refused a missing key
+    /// as it is refused a key whose policy does not name it (recorded,
+    /// `eventbridge-sqs-target-failures.json`); a caller of the account is
+    /// told the key is missing.
+    #[test]
+    fn a_missing_key_refuses_a_service_principal_as_access_denied() {
+        let acct = "123456789012";
+        let state: SharedKmsState = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(acct, "us-east-1", ""),
+        ));
+        let hook = KmsServiceHook::new(state, SharedKmsUsageState::default());
+        let events = KmsCaller::Service {
+            service_principal: "events.amazonaws.com",
+            source_arn: "arn:aws:events:us-east-1:123456789012:rule/r",
+            source_account: acct,
+            via_service: Some("sqs.amazonaws.com"),
+        };
+        let err = hook
+            .encrypt(
+                acct,
+                "us-east-1",
+                "alias/fc-does-not-exist",
+                b"x",
+                events,
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, KmsErrorKind::AccessDenied);
+        assert_eq!(
+            err.message,
+            "User: events.amazonaws.com is not authorized to perform: kms:GenerateDataKey on this resource because the resource does not exist in this Region, no resource-based policies allow access, or a resource-based policy explicitly denies access"
+        );
+        let err = hook
+            .authorize_key_use(
+                acct,
+                "us-east-1",
+                "alias/fc-does-not-exist",
+                events,
+                &["kms:GenerateDataKey"],
+                &HashMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, KmsErrorKind::AccessDenied);
+
+        let err = hook
+            .encrypt(
+                acct,
+                "us-east-1",
+                "alias/fc-does-not-exist",
+                b"x",
+                KmsCaller::via("sqs.amazonaws.com"),
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, KmsErrorKind::NotFound);
     }
 
     /// The policy fakecloud used to give AWS-managed keys before their AWS

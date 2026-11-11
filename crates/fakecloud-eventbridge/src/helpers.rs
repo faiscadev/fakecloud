@@ -1054,9 +1054,23 @@ pub(crate) fn deliver_to_sqs_target(
         group_id.as_deref(),
         None,
     );
+    let dimensions = rule_arn.map(rule_metric_dimensions);
+    // Recorded (`eventbridge-sqs-target-failures.json`): every invocation of
+    // the target counts in `Invocations`, a failed one too.
+    if let Some(dimensions) = dimensions.clone() {
+        delivery.put_cloudwatch_metric(
+            account_id,
+            region,
+            "AWS/Events",
+            "Invocations",
+            1.0,
+            Some("Count"),
+            dimensions,
+            chrono::Utc::now().timestamp_millis(),
+        );
+    }
     if let Err(err) = result {
         tracing::warn!(target = %target.arn, %err, "EventBridge SQS target invocation failed");
-        let dimensions = rule_arn.map(rule_metric_dimensions);
         if let Some(dimensions) = dimensions.clone() {
             delivery.put_cloudwatch_metric(
                 account_id,
@@ -1116,10 +1130,15 @@ fn rule_metric_dimensions(rule_arn: &str) -> std::collections::BTreeMap<String, 
 }
 
 /// The dead-letter `ERROR_CODE` for an SQS target EventBridge could not
-/// deliver to. Recorded: a KMS key policy refusing `events.amazonaws.com` is
-/// `NO_PERMISSIONS`. The others follow EventBridge's documented codes (a
-/// missing queue `NO_RESOURCE`, a refused message `INVALID_PARAMETER`, any
-/// other client-side failure `SDK_CLIENT_ERROR`).
+/// deliver to. Recorded (`eventbridge-sqs-target-failures.json`): KMS
+/// refusing `events.amazonaws.com` is `NO_PERMISSIONS`, whether the key
+/// policy does not name it, the key is pending deletion or the key is
+/// missing (KMS answers all three AccessDenied to a service principal), and
+/// a missing queue is `NO_RESOURCE`. Not recorded (no failure of these kinds
+/// could be provoked without a key whose policy names
+/// `events.amazonaws.com`): a refused message `INVALID_PARAMETER`, and any
+/// other KMS failure (a disabled key the policy admits) or client-side
+/// failure `SDK_CLIENT_ERROR`, EventBridge's documented codes.
 fn sqs_failure_code(err: &fakecloud_core::delivery::SqsDeliveryError) -> &'static str {
     use fakecloud_core::delivery::{KmsErrorKind, SqsDeliveryError};
     match err {

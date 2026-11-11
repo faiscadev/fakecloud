@@ -1815,3 +1815,172 @@ async fn sse_sqs_queues_never_call_kms() {
         "{aliases:?}"
     );
 }
+
+/// The recorded EventBridge SQS-target failures
+/// (fixtures/aws-managed-keys/eventbridge-sqs-target-failures.json): a queue
+/// under a key pending deletion and one under a missing alias both refuse
+/// `events.amazonaws.com` as AccessDenied (`NO_PERMISSIONS`), and a missing
+/// queue is `NO_RESOURCE` with SQS's NonExistentQueue message. Each counts
+/// in `Invocations`, `FailedInvocations` and `InvocationsSentToDlq`.
+#[tokio::test]
+async fn eventbridge_sqs_target_failures_match_the_recording() {
+    let server = TestServer::start().await;
+    let cfg = server.aws_config().await;
+    let sqs = aws_sdk_sqs::Client::new(&cfg);
+    let events = aws_sdk_eventbridge::Client::new(&cfg);
+    let kms = server.kms_client().await;
+    let cw = aws_sdk_cloudwatch::Client::new(&cfg);
+    let policy = |name: &str| {
+        serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Principal": {"Service": "events.amazonaws.com"},
+                "Action": "sqs:SendMessage",
+                "Resource": format!("arn:aws:sqs:us-east-1:123456789012:{name}")}]
+        })
+        .to_string()
+    };
+    let pending_key = account_key(&kms).await;
+    kms.schedule_key_deletion()
+        .key_id(&pending_key)
+        .pending_window_in_days(7)
+        .send()
+        .await
+        .unwrap();
+    let dlq = sqs
+        .create_queue()
+        .queue_name("dlq")
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::Policy,
+            policy("dlq"),
+        )
+        .send()
+        .await
+        .unwrap()
+        .queue_url
+        .unwrap();
+    for (name, key) in [
+        ("pending", pending_key.as_str()),
+        ("nokey", "alias/fc-does-not-exist"),
+    ] {
+        sqs.create_queue()
+            .queue_name(name)
+            .attributes(aws_sdk_sqs::types::QueueAttributeName::Policy, policy(name))
+            .attributes(aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId, key)
+            .send()
+            .await
+            .unwrap();
+    }
+    for name in ["pending", "nokey", "missing"] {
+        events
+            .put_rule()
+            .name(name)
+            .event_pattern(format!(r#"{{"source":["fc.rec.{name}"]}}"#))
+            .send()
+            .await
+            .unwrap();
+        events
+            .put_targets()
+            .rule(name)
+            .targets(
+                aws_sdk_eventbridge::types::Target::builder()
+                    .id("t")
+                    .arn(format!("arn:aws:sqs:us-east-1:123456789012:{name}"))
+                    .dead_letter_config(
+                        aws_sdk_eventbridge::types::DeadLetterConfig::builder()
+                            .arn("arn:aws:sqs:us-east-1:123456789012:dlq")
+                            .build(),
+                    )
+                    .build()
+                    .unwrap(),
+            )
+            .send()
+            .await
+            .unwrap();
+        events
+            .put_events()
+            .entries(
+                aws_sdk_eventbridge::types::PutEventsRequestEntry::builder()
+                    .source(format!("fc.rec.{name}"))
+                    .detail_type("t")
+                    .detail(format!(r#"{{"k":"{name}"}}"#))
+                    .build(),
+            )
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let mut messages = Vec::new();
+    for _ in 0..50 {
+        let got = sqs
+            .receive_message()
+            .queue_url(&dlq)
+            .max_number_of_messages(10)
+            .message_attribute_names("All")
+            .send()
+            .await
+            .unwrap()
+            .messages
+            .unwrap_or_default();
+        messages.extend(got);
+        if messages.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(messages.len(), 3);
+    let refused = "User: events.amazonaws.com is not authorized to perform: kms:GenerateDataKey on this resource because the resource does not exist in this Region, no resource-based policies allow access, or a resource-based policy explicitly denies access (Service: AWSKMS; Status Code: 400; Error Code: AccessDeniedException; Request ID: ";
+    for msg in &messages {
+        let body: serde_json::Value = serde_json::from_str(msg.body().unwrap()).unwrap();
+        let name = body["detail"]["k"].as_str().unwrap().to_string();
+        let attr = |key: &str| {
+            msg.message_attributes()
+                .and_then(|a| a.get(key))
+                .and_then(|v| v.string_value())
+                .unwrap_or_else(|| panic!("{key} missing: {msg:?}"))
+                .to_string()
+        };
+        assert_eq!(
+            attr("RULE_ARN"),
+            format!("arn:aws:events:us-east-1:123456789012:rule/{name}")
+        );
+        assert_eq!(
+            attr("TARGET_ARN"),
+            format!("arn:aws:sqs:us-east-1:123456789012:{name}")
+        );
+        let message = attr("ERROR_MESSAGE");
+        if name == "missing" {
+            assert_eq!(attr("ERROR_CODE"), "NO_RESOURCE");
+            assert!(
+                message.starts_with("The specified queue does not exist or you do not have access to it. (Service: AmazonSQS; Status Code: 400; Error Code: AWS.SimpleQueueService.NonExistentQueue; Request ID: ")
+                    && message.ends_with("; Proxy: null)"),
+                "{message}"
+            );
+        } else {
+            assert_eq!(attr("ERROR_CODE"), "NO_PERMISSIONS", "{name}");
+            assert!(message.starts_with(refused), "{name}: {message}");
+            assert!(
+                message.contains("; Proxy: null) (Service: AmazonSQS; Status Code: 400; Error Code: KMS.AccessDeniedException; Request ID: "),
+                "{name}: {message}"
+            );
+        }
+        for metric in ["Invocations", "FailedInvocations", "InvocationsSentToDlq"] {
+            assert_eq!(
+                metric_sum(&cw, "AWS/Events", metric, "RuleName", &name).await,
+                1.0,
+                "{name} {metric}"
+            );
+        }
+        assert_eq!(
+            metric_sum(
+                &cw,
+                "AWS/Events",
+                "InvocationsFailedToBeSentToDlq",
+                "RuleName",
+                &name
+            )
+            .await,
+            0.0
+        );
+    }
+}

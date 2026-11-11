@@ -192,8 +192,14 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
         encryption_context: std::collections::HashMap<String, String>,
     ) -> Result<String, fakecloud_core::delivery::KmsError> {
         // Resolve first (minting and persisting an AWS-managed key on first
-        // use), then encrypt under the resolved key.
-        let key_arn = self.resolve_and_persist_typed(account_id, region, key_id)?;
+        // use), then encrypt under the resolved key. A missing key is
+        // answered to the caller as KMS answers it (see
+        // `missing_key_refusal`).
+        let key_arn = self
+            .resolve_and_persist_typed(account_id, region, key_id)
+            .map_err(|err| {
+                fakecloud_kms::hook::missing_key_refusal(err, caller, &format!("kms:{operation}"))
+            })?;
         self.inner.encrypt_with_operation(
             operation,
             account_id,
@@ -229,7 +235,18 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
         actions: &[&str],
         encryption_context: &std::collections::HashMap<String, String>,
     ) -> Result<String, fakecloud_core::delivery::KmsError> {
-        let key_arn = self.resolve_and_persist_typed(account_id, region, key_id)?;
+        // Resolved here to persist a minted AWS-managed key; a missing key
+        // is answered to the caller as KMS answers it (see
+        // `missing_key_refusal`).
+        let key_arn = self
+            .resolve_and_persist_typed(account_id, region, key_id)
+            .map_err(|err| {
+                fakecloud_kms::hook::missing_key_refusal(
+                    err,
+                    caller,
+                    actions.first().copied().unwrap_or("kms:Decrypt"),
+                )
+            })?;
         self.inner.authorize_key_use(
             account_id,
             region,

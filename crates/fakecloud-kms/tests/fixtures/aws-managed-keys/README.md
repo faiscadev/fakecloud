@@ -84,3 +84,19 @@ queue with `ERROR_CODE` `NO_PERMISSIONS`, an `ERROR_MESSAGE` naming
 and `TARGET_ARN`), and an SNS topic delivering to an SSE-SQS queue (it
 arrives; the queue reports no `KmsMasterKeyId`). Every resource was deleted
 afterwards and its absence confirmed.
+
+`eventbridge-sqs-target-failures.json` records three EventBridge rules on the
+default bus, each with an SQS target and a `DeadLetterConfig` to a plain
+queue (queue policies allowing `events.amazonaws.com`), after one matching
+`PutEvents`: the dead-letter message (body, `ERROR_CODE`, `ERROR_MESSAGE`,
+`RULE_ARN`, `TARGET_ARN`) and the rule's `AWS/Events` sums. A queue whose
+`KmsMasterKeyId` is a customer key pending deletion (key policy naming the
+account root only) and one whose `KmsMasterKeyId` is a missing alias both
+give `NO_PERMISSIONS` with KMS's AccessDenied for the service principal (KMS
+does not tell a service principal the key is missing or pending deletion); a
+missing target queue gives `NO_RESOURCE` with SQS's `NonExistentQueue`
+message. Each counts one `Invocations`, `FailedInvocations` and
+`InvocationsSentToDlq`. Not recorded: `INVALID_PARAMETER`, and a KMS failure
+other than AccessDenied (it needs a key whose policy admits
+`events.amazonaws.com`). The rules, targets and queues were deleted
+afterwards and their absence confirmed.

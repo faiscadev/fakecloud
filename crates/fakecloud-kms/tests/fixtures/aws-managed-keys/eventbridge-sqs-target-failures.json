@@ -1,0 +1,110 @@
+{
+  "pending": {
+    "target": "queue KmsMasterKeyId = a customer key pending deletion (key policy: account root only)",
+    "dlqMessage": {
+      "body": {
+        "source": "fc.rec.pending",
+        "detail-type": "t",
+        "detail": {
+          "k": "pending"
+        }
+      },
+      "messageAttributes": {
+        "ERROR_CODE": {
+          "DataType": "String",
+          "StringValue": "NO_PERMISSIONS"
+        },
+        "ERROR_MESSAGE": {
+          "DataType": "String",
+          "StringValue": "User: events.amazonaws.com is not authorized to perform: kms:GenerateDataKey on this resource because the resource does not exist in this Region, no resource-based policies allow access, or a resource-based policy explicitly denies access (Service: AWSKMS; Status Code: 400; Error Code: AccessDeniedException; Request ID: dd2d2b62-efb0-4a2b-89c1-3288ee0d9460; Proxy: null) (Service: AmazonSQS; Status Code: 400; Error Code: KMS.AccessDeniedException; Request ID: 4c1fc535-3a6f-59a1-8737-a65be34012a9; Proxy: null)"
+        },
+        "RULE_ARN": {
+          "DataType": "String",
+          "StringValue": "arn:aws:events:us-east-1:123456789012:rule/fc-eb-rec-pending"
+        },
+        "TARGET_ARN": {
+          "DataType": "String",
+          "StringValue": "arn:aws:sqs:us-east-1:123456789012:fc-eb-rec-pending"
+        }
+      }
+    },
+    "ruleMetrics": {
+      "Invocations": 1.0,
+      "FailedInvocations": 1.0,
+      "InvocationsSentToDlq": 1.0,
+      "InvocationsFailedToBeSentToDlq": null
+    }
+  },
+  "nokey": {
+    "target": "queue KmsMasterKeyId = alias/fc-does-not-exist",
+    "dlqMessage": {
+      "body": {
+        "source": "fc.rec.nokey",
+        "detail-type": "t",
+        "detail": {
+          "k": "nokey"
+        }
+      },
+      "messageAttributes": {
+        "ERROR_CODE": {
+          "DataType": "String",
+          "StringValue": "NO_PERMISSIONS"
+        },
+        "ERROR_MESSAGE": {
+          "DataType": "String",
+          "StringValue": "User: events.amazonaws.com is not authorized to perform: kms:GenerateDataKey on this resource because the resource does not exist in this Region, no resource-based policies allow access, or a resource-based policy explicitly denies access (Service: AWSKMS; Status Code: 400; Error Code: AccessDeniedException; Request ID: 07d77648-1d73-4e12-a35f-45812e9469ee; Proxy: null) (Service: AmazonSQS; Status Code: 400; Error Code: KMS.AccessDeniedException; Request ID: 953d0a7b-2cfd-5dae-bf00-6915f5cc9b2a; Proxy: null)"
+        },
+        "RULE_ARN": {
+          "DataType": "String",
+          "StringValue": "arn:aws:events:us-east-1:123456789012:rule/fc-eb-rec-nokey"
+        },
+        "TARGET_ARN": {
+          "DataType": "String",
+          "StringValue": "arn:aws:sqs:us-east-1:123456789012:fc-eb-rec-nokey"
+        }
+      }
+    },
+    "ruleMetrics": {
+      "Invocations": 1.0,
+      "FailedInvocations": 1.0,
+      "InvocationsSentToDlq": 1.0,
+      "InvocationsFailedToBeSentToDlq": null
+    }
+  },
+  "missing": {
+    "target": "target queue does not exist",
+    "dlqMessage": {
+      "body": {
+        "source": "fc.rec.missing",
+        "detail-type": "t",
+        "detail": {
+          "k": "missing"
+        }
+      },
+      "messageAttributes": {
+        "ERROR_CODE": {
+          "DataType": "String",
+          "StringValue": "NO_RESOURCE"
+        },
+        "ERROR_MESSAGE": {
+          "DataType": "String",
+          "StringValue": "The specified queue does not exist or you do not have access to it. (Service: AmazonSQS; Status Code: 400; Error Code: AWS.SimpleQueueService.NonExistentQueue; Request ID: ad67f129-9f65-57af-8039-92474656cd15; Proxy: null)"
+        },
+        "RULE_ARN": {
+          "DataType": "String",
+          "StringValue": "arn:aws:events:us-east-1:123456789012:rule/fc-eb-rec-missing"
+        },
+        "TARGET_ARN": {
+          "DataType": "String",
+          "StringValue": "arn:aws:sqs:us-east-1:123456789012:fc-eb-rec-missing"
+        }
+      }
+    },
+    "ruleMetrics": {
+      "Invocations": 1.0,
+      "FailedInvocations": 1.0,
+      "InvocationsSentToDlq": 1.0,
+      "InvocationsFailedToBeSentToDlq": null
+    }
+  }
+}

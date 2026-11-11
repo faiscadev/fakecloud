@@ -101,11 +101,17 @@ impl std::error::Error for SqsDeliveryError {}
 
 impl SqsDeliveryError {
     /// The message a service that relays SQS's failure reports (an
-    /// EventBridge dead-letter message's `ERROR_MESSAGE`): for a KMS
-    /// refusal, KMS's relayed message wrapped in SQS's own AWS SDK service
-    /// suffix (recorded).
+    /// EventBridge dead-letter message's `ERROR_MESSAGE`), recorded in the
+    /// `aws-managed-keys` fixtures (`eventbridge-sqs-target-failures.json`):
+    /// for a KMS refusal, KMS's relayed message wrapped in SQS's own AWS SDK
+    /// service suffix; for a missing queue, SQS's `NonExistentQueue`. The
+    /// other variants are not recorded and report their description.
     pub fn relayed_message(&self) -> String {
         match self {
+            Self::QueueNotFound(_) => format!(
+                "The specified queue does not exist or you do not have access to it. (Service: AmazonSQS; Status Code: 400; Error Code: AWS.SimpleQueueService.NonExistentQueue; Request ID: {}; Proxy: null)",
+                uuid::Uuid::new_v4()
+            ),
             Self::Kms(err) => {
                 let (status, code) = err.kind.sqs_code();
                 format!(
