@@ -1668,18 +1668,22 @@ async fn lambda_accepts_every_newly_modeled_runtime() {
 
 /// Durable-execution callback ids are base64 tokens (`CallbackId` `@pattern`
 /// `^[A-Za-z0-9+/]+={0,2}$`); an id outside it is rejected for all three
-/// callback operations, while a well-formed one is accepted.
+/// callback operations, and a well-formed one the service never minted is
+/// `Invalid callback id` (recorded from AWS).
 #[tokio::test]
 async fn durable_execution_callback_id_must_match_its_pattern() {
     let server = TestServer::start().await;
     let client = server.lambda_client().await;
 
-    client
+    let e = client
         .send_durable_execution_callback_success()
         .callback_id("Y2Itb2s=")
         .send()
         .await
-        .expect("well-formed callback id");
+        .expect_err("a callback id nobody minted");
+    let e = e.into_service_error();
+    assert!(e.is_invalid_parameter_value_exception(), "{e:?}");
+    assert_eq!(e.meta().message(), Some("Invalid callback id"));
 
     let e = client
         .send_durable_execution_callback_success()

@@ -523,16 +523,75 @@ fn ensure_aws_managed_key(
     (arn, minted)
 }
 
-/// Mint an AWS-managed key protecting `alias` (`aws/<service>`) in `region`.
-fn mint_aws_managed_key(
-    state: &mut KmsState,
-    region: &str,
-    alias: &str,
-    service_principal: &str,
-) -> String {
-    let key_id = uuid::Uuid::new_v4().to_string();
-    let arn = kms_key_arn(region, &state.account_id, &key_id);
-    let policy = serde_json::json!({
+/// The key policy AWS gives the `aws/lambda` AWS-managed key (recorded from
+/// AWS): account principals use it through Lambda, and the Lambda service
+/// principal may only derive data keys for the account's functions, so the
+/// key cannot protect durable execution data (Lambda also needs
+/// `kms:Decrypt`).
+fn aws_lambda_key_policy(account: &str, region: &str) -> String {
+    let partition = fakecloud_aws::arn::partition_for(region);
+    let functions = format!("arn:*:lambda:{region}:{account}:function:*");
+    let services = serde_json::json!([
+        "lambda.amazonaws.com",
+        format!("lambda.{region}.amazonaws.com")
+    ]);
+    serde_json::json!({
+        "Version": "2012-10-17",
+        "Id": "auto-awslambda-3",
+        "Statement": [
+            {
+                "Sid": "Allow access through AWS Lambda for all principals in the account that are authorized to use AWS Lambda",
+                "Effect": "Allow",
+                "Principal": {"AWS": "*"},
+                "Action": ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:CreateGrant", "kms:DescribeKey"],
+                "Resource": "*",
+                "Condition": {"StringEquals": {
+                    "kms:ViaService": format!("lambda.{region}.amazonaws.com"),
+                    "kms:CallerAccount": account,
+                }}
+            },
+            {
+                "Sid": "Allow all principals in the account to decrypt ciphertexts for Lambda functions in the account",
+                "Effect": "Allow",
+                "Principal": {"AWS": "*"},
+                "Action": "kms:Decrypt",
+                "Resource": "*",
+                "Condition": {
+                    "StringEquals": {"kms:CallerAccount": account},
+                    "ArnLike": {"kms:EncryptionContext:aws:lambda:FunctionArn": functions}
+                }
+            },
+            {
+                "Sid": "Allow Lambda service access",
+                "Effect": "Allow",
+                "Principal": {"Service": services},
+                "Action": "kms:GenerateDataKey",
+                "Resource": "*",
+                "Condition": {"ArnLike": {"kms:EncryptionContext:aws:lambda:FunctionArn": functions}}
+            },
+            {
+                "Sid": "Allow Lambda to directly describe the key and list its grants",
+                "Effect": "Allow",
+                "Principal": {"Service": services},
+                "Action": ["kms:Describe*", "kms:Get*", "kms:List*"],
+                "Resource": "*"
+            },
+            {
+                "Sid": "Allow direct access to key metadata to the account",
+                "Effect": "Allow",
+                "Principal": {"AWS": format!("arn:{partition}:iam::{account}:root")},
+                "Action": ["kms:Describe*", "kms:Get*", "kms:List*", "kms:RevokeGrant"],
+                "Resource": "*"
+            }
+        ]
+    })
+    .to_string()
+}
+
+/// The key policy fakecloud gives AWS-managed keys of services without a
+/// recorded one (and gave `aws/lambda` keys before its policy was recorded).
+fn generic_managed_key_policy(service_principal: &str) -> serde_json::Value {
+    serde_json::json!({
         "Version": "2012-10-17",
         "Statement": [{
             "Sid": "Allow access through service",
@@ -542,7 +601,59 @@ fn mint_aws_managed_key(
             "Resource": "*"
         }]
     })
-    .to_string();
+}
+
+/// Give `aws/lambda` AWS-managed keys minted before its key policy was
+/// recorded the recorded policy. AWS refuses `PutKeyPolicy` (and every other
+/// key-management operation) on AWS-managed keys, so their policy can never
+/// differ from AWS's; any other policy found (the generic one fakecloud
+/// generated, or one set through its `PutKeyPolicy` before that refused
+/// AWS-managed keys) is replaced.
+pub(crate) fn migrate_aws_lambda_key_policies(state: &mut KmsState) {
+    // Both the recorded slots and the `alias/aws/lambda` aliases: snapshots
+    // from before the slots were recorded reach the key only by its alias.
+    let mut slots: std::collections::BTreeSet<(String, String)> = state
+        .aws_managed_keys
+        .iter()
+        .filter_map(|(slot, id)| {
+            let (region, name) = slot.split_once('/')?;
+            (name == "alias/aws/lambda").then(|| (region.to_string(), id.clone()))
+        })
+        .collect();
+    for (region, aliases) in &state.aliases {
+        if let Some(alias) = aliases.get("alias/aws/lambda") {
+            slots.insert((region.clone(), alias.target_key_id.clone()));
+        }
+    }
+    for (region, key_id) in slots {
+        let account = state.account_id.clone();
+        let Some(key) = state.keys.get_mut(&key_id) else {
+            continue;
+        };
+        if key.key_manager != "AWS" {
+            continue;
+        }
+        let recorded = aws_lambda_key_policy(&account, &region);
+        if key.policy != recorded {
+            key.policy = recorded;
+        }
+    }
+}
+
+/// Mint an AWS-managed key protecting `alias` (`aws/<service>`) in `region`.
+fn mint_aws_managed_key(
+    state: &mut KmsState,
+    region: &str,
+    alias: &str,
+    service_principal: &str,
+) -> String {
+    let key_id = uuid::Uuid::new_v4().to_string();
+    let arn = kms_key_arn(region, &state.account_id, &key_id);
+    let policy = if alias == "aws/lambda" {
+        aws_lambda_key_policy(&state.account_id, region)
+    } else {
+        generic_managed_key_policy(service_principal).to_string()
+    };
     let key = KmsKey {
         key_id: key_id.clone(),
         arn: arn.clone(),
@@ -620,6 +731,104 @@ mod tests {
         assert_eq!(usage.read().records().len(), recorded);
         assert_eq!(hook.peek_plaintext(acct, "plain text body"), None);
         assert_eq!(hook.peek_plaintext("999999999999", &ct), None);
+    }
+
+    /// A snapshot from before `aws_managed_keys` was recorded reaches its
+    /// `aws/lambda` key only through the alias; loading it migrates the
+    /// key's policy too.
+    #[test]
+    fn old_aws_lambda_keys_reached_only_by_alias_are_migrated() {
+        let mut state = KmsState::new("123456789012", "us-east-1");
+        let arn = ensure_aws_managed_key(
+            &mut state,
+            "us-east-1",
+            "aws/lambda",
+            "lambda.amazonaws.com",
+        )
+        .0;
+        let id = key_id_from_arn(&arn).to_string();
+        state.keys.get_mut(&id).unwrap().policy =
+            generic_managed_key_policy("lambda.amazonaws.com").to_string();
+        let mut snapshot = serde_json::to_value(&state).unwrap();
+        snapshot.as_object_mut().unwrap().remove("aws_managed_keys");
+        let loaded: KmsState = serde_json::from_value(snapshot).unwrap();
+        assert!(loaded.aws_managed_keys.is_empty());
+        assert_eq!(
+            loaded.keys[&id].policy,
+            aws_lambda_key_policy("123456789012", "us-east-1")
+        );
+    }
+
+    /// The recorded `aws/lambda` key policy names the account root in the
+    /// partition of the key's region.
+    #[test]
+    fn the_aws_lambda_key_policy_uses_the_region_partition() {
+        for (region, partition) in [("cn-north-1", "aws-cn"), ("us-gov-west-1", "aws-us-gov")] {
+            let mut state = KmsState::new("123456789012", region);
+            let arn =
+                ensure_aws_managed_key(&mut state, region, "aws/lambda", "lambda.amazonaws.com").0;
+            let policy: serde_json::Value =
+                serde_json::from_str(&state.keys[key_id_from_arn(&arn)].policy).unwrap();
+            let root = policy["Statement"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|st| st["Sid"] == "Allow direct access to key metadata to the account")
+                .unwrap();
+            assert_eq!(
+                root["Principal"]["AWS"],
+                format!("arn:{partition}:iam::123456789012:root")
+            );
+            assert_eq!(
+                policy["Statement"][0]["Condition"]["StringEquals"]["kms:ViaService"],
+                format!("lambda.{region}.amazonaws.com")
+            );
+        }
+    }
+
+    /// Snapshots from before the `aws/lambda` policy was recorded hold the
+    /// generic generated policy (or one an older fakecloud let PutKeyPolicy
+    /// set); loading one gives every `aws/lambda` key the recorded policy and
+    /// leaves other AWS-managed keys alone.
+    #[test]
+    fn old_aws_lambda_key_policies_are_migrated_on_load() {
+        let mut state = KmsState::new("123456789012", "us-east-1");
+        let old = ensure_aws_managed_key(
+            &mut state,
+            "us-east-1",
+            "aws/lambda",
+            "lambda.amazonaws.com",
+        )
+        .0;
+        let changed = ensure_aws_managed_key(
+            &mut state,
+            "eu-west-1",
+            "aws/lambda",
+            "lambda.amazonaws.com",
+        )
+        .0;
+        let other =
+            ensure_aws_managed_key(&mut state, "us-east-1", "aws/sqs", "sqs.amazonaws.com").0;
+        let generic = generic_managed_key_policy("lambda.amazonaws.com").to_string();
+        let custom = r#"{"Version":"2012-10-17","Statement":[]}"#.to_string();
+        state.keys.get_mut(key_id_from_arn(&old)).unwrap().policy = generic;
+        state
+            .keys
+            .get_mut(key_id_from_arn(&changed))
+            .unwrap()
+            .policy = custom;
+        let sqs_policy = state.keys[key_id_from_arn(&other)].policy.clone();
+        let loaded: KmsState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(
+            loaded.keys[key_id_from_arn(&old)].policy,
+            aws_lambda_key_policy("123456789012", "us-east-1")
+        );
+        assert_eq!(
+            loaded.keys[key_id_from_arn(&changed)].policy,
+            aws_lambda_key_policy("123456789012", "eu-west-1")
+        );
+        assert_eq!(loaded.keys[key_id_from_arn(&other)].policy, sqs_policy);
     }
 
     #[test]

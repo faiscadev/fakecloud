@@ -424,6 +424,21 @@ pub trait SmsDispatcher: Send + Sync {
     fn send_sms(&self, account_id: &str, region: &str, phone_number: &str, message: &str);
 }
 
+/// Why an AWS service principal cannot use a KMS key
+/// ([`KmsHook::check_service_key_use`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KmsKeyUnusable {
+    /// No key with that id, ARN or alias exists.
+    NotFound,
+    /// The key is disabled.
+    Disabled,
+    /// The key is in another non-usable state (`PendingDeletion`, ...).
+    InvalidState(String),
+    /// The key policy of the (resolved) key, whose ARN this carries, does
+    /// not allow the service principal.
+    AccessDenied(String),
+}
+
 /// Cross-service KMS hook: services that accept a `KmsKeyId` (Secrets
 /// Manager, SSM `SecureString`, S3 SSE-KMS, SQS / SNS / DynamoDB
 /// encrypted resources) call this so that real KMS calls happen, the
@@ -463,6 +478,27 @@ pub trait KmsHook: Send + Sync {
         _service_principal: &str,
     ) -> Result<String, String> {
         Err("key resolution is not supported by this hook".to_string())
+    }
+
+    /// Whether the AWS service `service_principal`, acting for its resource
+    /// `source_arn` (owned by `account_id`), may use `key_id` for every one
+    /// of `actions` (e.g. `kms:GenerateDataKey`, `kms:Decrypt`) with
+    /// `encryption_context`: the key must exist, be `Enabled`, and its key
+    /// policy must allow the service principal. Returns the key ARN.
+    ///
+    /// Hooks that cannot evaluate key state or policies accept the key.
+    #[allow(clippy::too_many_arguments)]
+    fn check_service_key_use(
+        &self,
+        _account_id: &str,
+        _region: &str,
+        key_id: &str,
+        _service_principal: &str,
+        _source_arn: &str,
+        _actions: &[&str],
+        _encryption_context: &std::collections::HashMap<String, String>,
+    ) -> Result<String, KmsKeyUnusable> {
+        Ok(key_id.to_string())
     }
 
     /// The ARN of the AWS-managed key for `service` (the key behind

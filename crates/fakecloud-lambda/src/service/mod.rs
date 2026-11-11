@@ -888,9 +888,13 @@ impl CreateFunctionInput {
         let image_config = body["ImageConfig"]
             .is_object()
             .then(|| body["ImageConfig"].clone());
-        let durable_config = body["DurableConfig"]
-            .is_object()
-            .then(|| body["DurableConfig"].clone());
+        let durable_config = if body["DurableConfig"].is_object() {
+            Some(crate::durable::config::validate_create(
+                &body["DurableConfig"],
+            )?)
+        } else {
+            None
+        };
         let capacity_provider_config = crate::capacity::parse_config(body)?;
         // A Lambda Managed Instances function defaults to the smallest size
         // it can run with (2048 MB, 1 vCPU) instead of 128 MB.
@@ -1298,6 +1302,9 @@ pub struct LambdaService {
     /// organization (`aws:PrincipalOrgID`). Without one no caller belongs
     /// to an organization, so such grants admit nobody.
     pub(crate) org_resolver: Option<Arc<dyn fakecloud_core::auth::ScpResolver>>,
+    /// Durable executions: starts, re-invokes and times out executions of
+    /// functions with a `DurableConfig`.
+    pub(crate) durable: crate::durable::DurableHub,
 }
 
 mod functions;
@@ -1309,6 +1316,7 @@ pub use publish::{check_latest_published, publish_latest_published};
 impl LambdaService {
     pub fn new(state: SharedLambdaState) -> Self {
         Self {
+            durable: crate::durable::DurableHub::new(state.clone()),
             state,
             runtime: None,
             snapshot_store: None,
@@ -1390,14 +1398,40 @@ impl LambdaService {
         self
     }
 
+    /// Attach KMS, which checks the customer managed keys of durable
+    /// functions.
+    pub fn with_kms_hook(self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
+        self.durable.set_kms(hook);
+        self
+    }
+
     pub fn with_runtime(mut self, runtime: Arc<ContainerRuntime>) -> Self {
+        self.durable.set_runtime(runtime.clone());
         self.runtime = Some(runtime);
         self
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
+        self.durable.set_persist(self.snapshot_hook());
         self
+    }
+
+    /// Share a durable execution hub with other invokers of this Lambda
+    /// state (cross-service deliveries), instead of the service's own.
+    pub fn with_durable_hub(mut self, hub: crate::durable::DurableHub) -> Self {
+        if let Some(rt) = &self.runtime {
+            hub.set_runtime(rt.clone());
+        }
+        self.durable = hub;
+        self.durable.set_persist(self.snapshot_hook());
+        self
+    }
+
+    /// Start the durable execution scheduler, resuming executions restored
+    /// from a snapshot. Also started on the first durable invoke.
+    pub fn start_durable_scheduler(&self) {
+        self.durable.ensure_started();
     }
 
     pub fn with_delivery_bus(mut self, bus: Arc<fakecloud_core::delivery::DeliveryBus>) -> Self {
@@ -1790,16 +1824,25 @@ impl AwsService for LambdaService {
                     .get("Qualifier")
                     .map(String::as_str)
                     .or(arn_embedded_qualifier.as_deref());
-                self.invoke(
-                    resource_name.as_deref().unwrap_or(""),
-                    &req.body,
-                    &invoke_account,
-                    req.region.as_str(),
-                    invocation_type,
-                    qualifier,
-                    log_tail,
-                )
-                .await
+                let name = resource_name.as_deref().unwrap_or("");
+                match self
+                    .invoke_durable(&req, name, &invoke_account, qualifier, invocation_type)
+                    .await
+                {
+                    Some(durable) => durable,
+                    None => {
+                        self.invoke(
+                            name,
+                            &req.body,
+                            &invoke_account,
+                            req.region.as_str(),
+                            invocation_type,
+                            qualifier,
+                            log_tail,
+                        )
+                        .await
+                    }
+                }
             }
             "InvokeAsync" => {
                 // `InvokeAsync` is deprecated. AWS returns 202 with a
@@ -1921,54 +1964,56 @@ impl AwsService for LambdaService {
                     resource_name.as_deref().unwrap_or(""),
                 )
             }
-            "GetDurableExecution" => crate::workflows::get_durable_execution(
-                &self.state,
+            "GetDurableExecution" => crate::durable::api::get_durable_execution(
+                &self.durable,
                 &req,
                 resource_name.as_deref().unwrap_or(""),
             ),
-            "GetDurableExecutionHistory" => crate::workflows::get_durable_execution_history(
-                &self.state,
+            "GetDurableExecutionHistory" => crate::durable::api::get_durable_execution_history(
+                &self.durable,
                 &req,
                 resource_name.as_deref().unwrap_or(""),
             ),
-            "GetDurableExecutionState" => crate::workflows::get_durable_execution_state(
+            "GetDurableExecutionState" => crate::durable::api::get_durable_execution_state(
                 &self.state,
                 &req,
                 resource_name.as_deref().unwrap_or(""),
             ),
             "ListDurableExecutionsByFunction" => {
-                crate::workflows::list_durable_executions_by_function(
+                crate::durable::api::list_durable_executions_by_function(
                     &self.state,
                     &req,
                     resource_name.as_deref().unwrap_or(""),
                 )
             }
-            "CheckpointDurableExecution" => crate::workflows::checkpoint_durable_execution(
-                &self.state,
+            "CheckpointDurableExecution" => crate::durable::api::checkpoint_durable_execution(
+                &self.durable,
                 &req,
                 resource_name.as_deref().unwrap_or(""),
                 &req.json_body(),
             ),
-            "StopDurableExecution" => crate::workflows::stop_durable_execution(
-                &self.state,
+            "StopDurableExecution" => crate::durable::api::stop_durable_execution(
+                &self.durable,
                 &req,
                 resource_name.as_deref().unwrap_or(""),
             ),
-            "SendDurableExecutionCallbackSuccess" => crate::workflows::send_callback_success(
-                &self.state,
+            "SendDurableExecutionCallbackSuccess" => crate::durable::api::send_callback_success(
+                &self.durable,
                 &req,
                 resource_name.as_deref().unwrap_or(""),
             ),
-            "SendDurableExecutionCallbackFailure" => crate::workflows::send_callback_failure(
-                &self.state,
+            "SendDurableExecutionCallbackFailure" => crate::durable::api::send_callback_failure(
+                &self.durable,
                 &req,
                 resource_name.as_deref().unwrap_or(""),
             ),
-            "SendDurableExecutionCallbackHeartbeat" => crate::workflows::send_callback_heartbeat(
-                &self.state,
-                &req,
-                resource_name.as_deref().unwrap_or(""),
-            ),
+            "SendDurableExecutionCallbackHeartbeat" => {
+                crate::durable::api::send_callback_heartbeat(
+                    &self.durable,
+                    &req,
+                    resource_name.as_deref().unwrap_or(""),
+                )
+            }
             other => {
                 self.handle_extra(other, resource_name.as_deref(), &req)
                     .await

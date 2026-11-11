@@ -9,6 +9,13 @@ use std::sync::Arc;
 
 use tokio::net::TcpListener;
 
+/// How long graceful shutdown waits for in-flight requests after the
+/// shutdown signal before dropping them and moving on to the drains and
+/// container cleanup. Half of `docker stop`'s default 10 s before SIGKILL,
+/// so the drains and container cleanup that follow still fit in it; ordinary
+/// API requests finish well within it.
+pub(crate) const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(crate) async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()

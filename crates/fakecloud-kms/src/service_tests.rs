@@ -4438,3 +4438,115 @@ fn key_usage_source_counts_customer_keys_per_region() {
         Some(0.0)
     );
 }
+
+/// AWS refuses key management on AWS-managed keys to every caller
+/// (recorded against `alias/aws/lambda`'s key: 400 AccessDeniedException
+/// naming the action and the key), whatever the IAM mode. Reads and
+/// customer managed keys are unaffected.
+#[tokio::test]
+async fn aws_managed_keys_refuse_key_management() {
+    let svc = make_service();
+    let aliases = body_json(
+        svc.list_aliases(&make_request("ListAliases", json!({})))
+            .unwrap(),
+    );
+    let target = aliases["Aliases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["AliasName"] == "alias/aws/lambda")
+        .unwrap()["TargetKeyId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let arn = format!("arn:aws:kms:us-east-1:123456789012:key/{target}");
+    let policy_before = body_json(
+        svc.handle(make_request("GetKeyPolicy", json!({"KeyId": target})))
+            .await
+            .unwrap(),
+    )["Policy"]
+        .clone();
+    for (action, body) in [
+        (
+            "PutKeyPolicy",
+            json!({"KeyId": target, "PolicyName": "default", "Policy": "{}"}),
+        ),
+        (
+            "ScheduleKeyDeletion",
+            json!({"KeyId": target, "PendingWindowInDays": 30}),
+        ),
+        ("CancelKeyDeletion", json!({"KeyId": target})),
+        ("DisableKey", json!({"KeyId": arn})),
+        ("EnableKey", json!({"KeyId": target})),
+        ("EnableKeyRotation", json!({"KeyId": target})),
+        ("DisableKeyRotation", json!({"KeyId": target})),
+        ("RotateKeyOnDemand", json!({"KeyId": target})),
+        (
+            "TagResource",
+            json!({"KeyId": target, "Tags": [{"TagKey": "a", "TagValue": "b"}]}),
+        ),
+        ("UntagResource", json!({"KeyId": target, "TagKeys": ["a"]})),
+        (
+            "UpdateKeyDescription",
+            json!({"KeyId": target, "Description": "x"}),
+        ),
+        (
+            "CreateGrant",
+            json!({"KeyId": target, "GranteePrincipal": "arn:aws:iam::123456789012:root", "Operations": ["Decrypt"]}),
+        ),
+        ("DeleteImportedKeyMaterial", json!({"KeyId": target})),
+        (
+            "ImportKeyMaterial",
+            json!({"KeyId": target, "ImportToken": "YWJjZA==", "EncryptedKeyMaterial": "YWJjZA==", "ExpirationModel": "KEY_MATERIAL_DOES_NOT_EXPIRE"}),
+        ),
+        (
+            "ReplicateKey",
+            json!({"KeyId": target, "ReplicaRegion": "us-west-2"}),
+        ),
+        (
+            "UpdatePrimaryRegion",
+            json!({"KeyId": target, "PrimaryRegion": "us-west-2"}),
+        ),
+        (
+            "CreateAlias",
+            json!({"AliasName": "alias/mine", "TargetKeyId": target}),
+        ),
+    ] {
+        let err = svc.handle(make_request(action, body)).await.err().unwrap();
+        assert_eq!(
+            (err.status(), err.code(), err.message()),
+            (
+                StatusCode::BAD_REQUEST,
+                "AccessDeniedException",
+                format!("User: arn:aws:iam::123456789012:root is not authorized to perform: kms:{action} on resource: {arn} because no resource-based policy allows the kms:{action} action")
+            ),
+            "{action}"
+        );
+    }
+    let after = body_json(
+        svc.handle(make_request("DescribeKey", json!({"KeyId": target})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(after["KeyMetadata"]["KeyState"], "Enabled");
+    let policy_after = body_json(
+        svc.handle(make_request("GetKeyPolicy", json!({"KeyId": target})))
+            .await
+            .unwrap(),
+    )["Policy"]
+        .clone();
+    assert_eq!(policy_before, policy_after);
+    // A customer managed key is managed as before.
+    let mine = body_json(
+        svc.handle(make_request("CreateKey", json!({})))
+            .await
+            .unwrap(),
+    )["KeyMetadata"]["KeyId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(svc
+        .handle(make_request("DisableKey", json!({"KeyId": mine})))
+        .await
+        .is_ok());
+}
