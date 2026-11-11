@@ -575,33 +575,263 @@ pub enum KmsKeyUnusable {
     AccessDenied(String),
 }
 
+/// Who a cross-service KMS call is made as, which decides what the key
+/// policy sees.
+///
+/// AWS services use KMS in one of two ways, and key policies are written for
+/// each: most (S3 SSE-KMS, SQS, SNS, DynamoDB, Secrets Manager, SSM) call KMS
+/// *on behalf of* the caller of their own API, with the caller's identity,
+/// and KMS adds `kms:ViaService = <service>.<region>.amazonaws.com` (the
+/// AWS-managed `aws/<service>` keys only allow that); a few (SES writing
+/// received mail to S3, Lambda for durable executions) call KMS *as their
+/// service principal*, which a key policy must name in a `"Service"`
+/// principal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KmsCaller<'a> {
+    /// The service identified by `service_principal` (`s3.amazonaws.com`)
+    /// acting for a caller of its API in the request's account.
+    OnBehalfOf { service_principal: &'a str },
+    /// The service principal itself (`ses.us-east-1.amazonaws.com`) acting
+    /// for its resource `source_arn` owned by `source_account` (the
+    /// `aws:SourceArn` / `aws:SourceAccount` of the request).
+    Service {
+        service_principal: &'a str,
+        source_arn: &'a str,
+        source_account: &'a str,
+    },
+}
+
+impl<'a> KmsCaller<'a> {
+    /// A service calling KMS on behalf of its caller (see
+    /// [`KmsCaller::OnBehalfOf`]).
+    pub fn via(service_principal: &'a str) -> Self {
+        KmsCaller::OnBehalfOf { service_principal }
+    }
+
+    /// The service principal the call is recorded under.
+    pub fn service_principal(&self) -> &'a str {
+        match self {
+            KmsCaller::OnBehalfOf { service_principal }
+            | KmsCaller::Service {
+                service_principal, ..
+            } => service_principal,
+        }
+    }
+}
+
+/// Why a cross-service KMS call failed, as KMS reports it: the KMS error
+/// code ([`KmsErrorKind::code`]) and KMS's message. Each consuming service
+/// maps it onto the error its own API declares (SQS `KMS.AccessDeniedException`,
+/// SNS `KMSAccessDenied`, S3 `AccessDenied`, ...).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KmsError {
+    pub kind: KmsErrorKind,
+    pub message: String,
+}
+
+/// The KMS failure classes a consuming service distinguishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KmsErrorKind {
+    /// No key with that id, ARN or alias (`NotFoundException`).
+    NotFound,
+    /// The key is disabled (`DisabledException`).
+    Disabled,
+    /// The key is in a state that cannot be used, such as `PendingDeletion`
+    /// (`KMSInvalidStateException`).
+    InvalidState,
+    /// The key policy does not allow the call (`AccessDeniedException`).
+    AccessDenied,
+    /// The key's usage or spec does not allow the operation
+    /// (`InvalidKeyUsageException`).
+    InvalidKeyUsage,
+    /// The ciphertext is malformed, was sealed under another key or another
+    /// encryption context (`InvalidCiphertextException`).
+    InvalidCiphertext,
+    /// No KMS is wired, or KMS failed internally (`KMSInternalException`).
+    Internal,
+}
+
+impl KmsErrorKind {
+    /// The KMS error code (`__type`) of this failure.
+    pub fn code(self) -> &'static str {
+        match self {
+            KmsErrorKind::NotFound => "NotFoundException",
+            KmsErrorKind::Disabled => "DisabledException",
+            KmsErrorKind::InvalidState => "KMSInvalidStateException",
+            KmsErrorKind::AccessDenied => "AccessDeniedException",
+            KmsErrorKind::InvalidKeyUsage => "InvalidKeyUsageException",
+            KmsErrorKind::InvalidCiphertext => "InvalidCiphertextException",
+            KmsErrorKind::Internal => "KMSInternalException",
+        }
+    }
+
+    /// The HTTP status KMS answers this failure with.
+    pub fn status(self) -> u16 {
+        match self {
+            KmsErrorKind::Internal => 500,
+            _ => 400,
+        }
+    }
+}
+
+impl KmsError {
+    pub fn new(kind: KmsErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// KMS's `NotFoundException` for a key reference (key id, key ARN, alias
+    /// name or alias ARN) that resolves to nothing; see
+    /// [`kms_not_found_message`].
+    pub fn not_found(account_id: &str, region: &str, key_ref: &str) -> Self {
+        Self::new(
+            KmsErrorKind::NotFound,
+            kms_not_found_message(account_id, region, key_ref),
+        )
+    }
+
+    /// No KMS hook is wired.
+    pub fn not_configured() -> Self {
+        Self::new(KmsErrorKind::Internal, "KMS hook not configured")
+    }
+
+    /// KMS's message with the suffix the AWS service SDKs append when a
+    /// service relays a KMS failure in its own error (recorded from SQS
+    /// `SendMessage`, SNS `Publish`, SSM `PutParameter`):
+    /// `<message> (Service: AWSKMS; Status Code: 400; Error Code:
+    /// AccessDeniedException; Request ID: <id>; Proxy: null)`.
+    pub fn relayed_message(&self) -> String {
+        format!(
+            "{} (Service: AWSKMS; Status Code: {}; Error Code: {}; Request ID: {}; Proxy: null)",
+            self.message,
+            self.kind.status(),
+            self.kind.code(),
+            uuid::Uuid::new_v4()
+        )
+    }
+}
+
+/// KMS's `NotFoundException` message for a key reference that resolves to
+/// nothing (recorded through SQS, SNS, S3, SSM, Secrets Manager and the KMS
+/// API): an alias is named by its ARN ("Alias arn:...:alias/x is not
+/// found."), a key by its key ARN ("Key 'arn:...:key/<id>' does not
+/// exist"). A reference with no region or account takes `region` and
+/// `account_id`.
+pub fn kms_not_found_message(account_id: &str, region: &str, key_ref: &str) -> String {
+    let parsed = fakecloud_aws::arn::arn_resource(key_ref, "kms").and_then(|rest| {
+        let (r, after) = rest.split_once(':')?;
+        let (a, res) = after.split_once(':')?;
+        Some((r, a, res))
+    });
+    let (ref_region, ref_account, resource) = parsed.unwrap_or((region, account_id, key_ref));
+    let ref_region = if ref_region.is_empty() {
+        region
+    } else {
+        ref_region
+    };
+    let account = if ref_account.is_empty() {
+        account_id
+    } else {
+        ref_account
+    };
+    if resource.starts_with("alias/") {
+        format!(
+            "Alias {} is not found.",
+            fakecloud_aws::arn::Arn::regional("kms", ref_region, account, resource)
+        )
+    } else {
+        let id = resource.strip_prefix("key/").unwrap_or(resource);
+        format!(
+            "Key '{}' does not exist",
+            fakecloud_aws::arn::Arn::regional("kms", ref_region, account, &format!("key/{id}"))
+        )
+    }
+}
+
+impl std::fmt::Display for KmsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.kind.code(), self.message)
+    }
+}
+
+impl std::error::Error for KmsError {}
+
 /// Cross-service KMS hook: services that accept a `KmsKeyId` (Secrets
 /// Manager, SSM `SecureString`, S3 SSE-KMS, SQS / SNS / DynamoDB
-/// encrypted resources) call this so that real KMS calls happen, the
-/// invocation is recorded for introspection, and the returned blob is
-/// decryptable by the public KMS API.
+/// encrypted resources, SES receipt rules) call this so that real KMS
+/// calls happen, the invocation is recorded for introspection, and the
+/// returned blob is decryptable by the public KMS API.
 ///
 /// Encryption context is the AWS-defined per-service map (e.g.
-/// `{aws:secretsmanager:secretArn: <arn>}` for Secrets Manager) and is
-/// recorded with the call so test code can assert it.
+/// `{SecretARN: <arn>, SecretVersionId: <id>}` for Secrets Manager). It is
+/// bound into the ciphertext as KMS binds it, so decrypting needs the same
+/// context, and it is recorded with the call so test code can assert it.
 pub trait KmsHook: Send + Sync {
+    /// Encrypt `plaintext` under `key_id` (the service's data-key
+    /// derivation, authorized as `kms:GenerateDataKey`).
     fn encrypt(
         &self,
         account_id: &str,
         region: &str,
         key_id: &str,
         plaintext: &[u8],
-        service_principal: &str,
+        caller: KmsCaller<'_>,
         encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<String, String>;
+    ) -> Result<String, KmsError>;
 
+    /// [`KmsHook::encrypt`] authorized and recorded as the KMS `operation`
+    /// the service really calls (`GenerateDataKey`, or `Encrypt` for SSM
+    /// parameter values). Hooks that do not distinguish operations encrypt.
+    #[allow(clippy::too_many_arguments)]
+    fn encrypt_with_operation(
+        &self,
+        _operation: &str,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        plaintext: &[u8],
+        caller: KmsCaller<'_>,
+        encryption_context: std::collections::HashMap<String, String>,
+    ) -> Result<String, KmsError> {
+        self.encrypt(
+            account_id,
+            region,
+            key_id,
+            plaintext,
+            caller,
+            encryption_context,
+        )
+    }
+
+    /// Decrypt a ciphertext a service sealed with [`KmsHook::encrypt`]
+    /// (authorized as `kms:Decrypt`).
     fn decrypt(
         &self,
         account_id: &str,
         ciphertext_b64: &str,
-        service_principal: &str,
+        caller: KmsCaller<'_>,
         encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<Vec<u8>, String>;
+    ) -> Result<Vec<u8>, KmsError>;
+
+    /// Whether `caller` may use `key_id` for every one of `actions`
+    /// (`kms:CreateGrant`, ...) with `encryption_context`, as a service
+    /// checks a key when a resource is configured with it (DynamoDB
+    /// `CreateTable` creates a grant). Resolves `key_id` and returns the
+    /// key ARN. Hooks that cannot evaluate keys accept it.
+    #[allow(clippy::too_many_arguments)]
+    fn authorize_key_use(
+        &self,
+        _account_id: &str,
+        _region: &str,
+        key_id: &str,
+        _caller: KmsCaller<'_>,
+        _actions: &[&str],
+        _encryption_context: &std::collections::HashMap<String, String>,
+    ) -> Result<String, KmsError> {
+        Ok(key_id.to_string())
+    }
 
     /// Resolve `key_id` (key id, key ARN, alias name or alias ARN) to the
     /// key's ARN, provisioning the AWS-managed `aws/<service>` key on first
@@ -816,19 +1046,19 @@ impl DeliveryBus {
         region: &str,
         key_id: &str,
         plaintext: &[u8],
-        service_principal: &str,
+        caller: KmsCaller<'_>,
         encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, KmsError> {
         match self.kms_hook {
             Some(ref h) => h.encrypt(
                 account_id,
                 region,
                 key_id,
                 plaintext,
-                service_principal,
+                caller,
                 encryption_context,
             ),
-            None => Err("KMS hook not configured".to_string()),
+            None => Err(KmsError::not_configured()),
         }
     }
 
@@ -838,17 +1068,12 @@ impl DeliveryBus {
         &self,
         account_id: &str,
         ciphertext_b64: &str,
-        service_principal: &str,
+        caller: KmsCaller<'_>,
         encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, KmsError> {
         match self.kms_hook {
-            Some(ref h) => h.decrypt(
-                account_id,
-                ciphertext_b64,
-                service_principal,
-                encryption_context,
-            ),
-            None => Err("KMS hook not configured".to_string()),
+            Some(ref h) => h.decrypt(account_id, ciphertext_b64, caller, encryption_context),
+            None => Err(KmsError::not_configured()),
         }
     }
 

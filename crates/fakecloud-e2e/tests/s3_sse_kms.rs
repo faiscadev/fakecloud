@@ -1,6 +1,6 @@
 //! S3 SSE-KMS end-to-end:
 //! - PutObject with `ServerSideEncryption=aws:kms` triggers
-//!   `kms:GenerateDataKey` with the bucket-arn encryption context
+//!   `kms:GenerateDataKey` with the object-ARN encryption context
 //! - GetObject decrypts via `kms:Decrypt` and returns the original bytes
 //! - Both calls land in `/_fakecloud/kms/usage`
 //! - Range reads against an SSE-KMS object slice plaintext, not ciphertext
@@ -58,14 +58,16 @@ async fn s3_put_get_sse_kms_round_trip() {
     assert!(
         s3_records.iter().any(|r| {
             r["operation"].as_str() == Some("GenerateDataKey")
-                && r["encryptionContext"]["aws:s3:arn"].as_str() == Some("arn:aws:s3:::encrypted")
+                && r["encryptionContext"]["aws:s3:arn"].as_str()
+                    == Some("arn:aws:s3:::encrypted/note.txt")
         }),
         "expected GenerateDataKey bound to bucket arn, got: {s3_records:?}"
     );
     assert!(
         s3_records.iter().any(|r| {
             r["operation"].as_str() == Some("Decrypt")
-                && r["encryptionContext"]["aws:s3:arn"].as_str() == Some("arn:aws:s3:::encrypted")
+                && r["encryptionContext"]["aws:s3:arn"].as_str()
+                    == Some("arn:aws:s3:::encrypted/note.txt")
         }),
         "expected Decrypt bound to bucket arn, got: {s3_records:?}"
     );

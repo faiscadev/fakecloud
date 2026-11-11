@@ -2948,9 +2948,9 @@ pub(crate) mod tests {
             _region: &str,
             key_id: &str,
             _plaintext: &[u8],
-            _service_principal: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _encryption_context: std::collections::HashMap<String, String>,
-        ) -> Result<String, String> {
+        ) -> Result<String, fakecloud_core::delivery::KmsError> {
             Ok(format!("envelope-under-{key_id}"))
         }
 
@@ -2958,10 +2958,13 @@ pub(crate) mod tests {
             &self,
             _account_id: &str,
             _ciphertext_b64: &str,
-            _service_principal: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _encryption_context: std::collections::HashMap<String, String>,
-        ) -> Result<Vec<u8>, String> {
-            Err("kms key is disabled".to_string())
+        ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::Disabled,
+                "kms key is disabled",
+            ))
         }
     }
 

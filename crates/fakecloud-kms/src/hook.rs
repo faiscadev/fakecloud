@@ -25,6 +25,8 @@ use parking_lot::RwLock;
 
 use base64::Engine;
 
+use fakecloud_core::delivery::{KmsCaller, KmsError, KmsErrorKind};
+
 use crate::state::{kms_alias_arn, kms_key_arn, parse_kms_arn, KmsKey, KmsState, SharedKmsState};
 
 /// One recorded KMS hook call. Returned by the introspection endpoint
@@ -68,39 +70,65 @@ pub struct KmsServiceHook {
     usage: SharedKmsUsageState,
 }
 
-#[derive(Debug)]
-pub enum KmsHookError {
-    /// Caller supplied a key id / alias / ARN that doesn't resolve to
-    /// an existing key (and isn't an AWS-managed alias we auto-create).
-    KeyNotFound(String),
-    /// Ciphertext envelope is malformed or signed by a key that no
-    /// longer exists.
-    InvalidCiphertext(String),
-    /// The key resolves but is disabled / pending deletion, so it can't
-    /// be used for a cryptographic operation (mirrors real KMS, which
-    /// fails Decrypt with `DisabledException` / `KMSInvalidStateException`).
-    KeyDisabled(String),
-    /// The key is an AWS-managed key whose (AWS-written, unchangeable) key
-    /// policy does not let the calling service use it: an `aws/<service>`
-    /// key works only through its own service. Carries the key ARN.
-    AccessDenied(String),
-}
+/// Why a hook call failed; see [`fakecloud_core::delivery::KmsError`].
+pub type KmsHookError = KmsError;
 
-impl std::fmt::Display for KmsHookError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::KeyNotFound(k) => write!(f, "kms key not found: {k}"),
-            Self::InvalidCiphertext(msg) => write!(f, "invalid ciphertext: {msg}"),
-            Self::KeyDisabled(k) => write!(f, "kms key is disabled: {k}"),
-            Self::AccessDenied(k) => write!(
-                f,
-                "access denied: the key policy of the AWS-managed key {k} does not allow this service to use it"
-            ),
-        }
+pub use fakecloud_core::delivery::kms_not_found_message as not_found_message;
+
+/// KMS's refusal of a key that is not `Enabled` (recorded through Lambda):
+/// `DisabledException` "<key ARN> is disabled.", `KMSInvalidStateException`
+/// "<key ARN> is pending deletion." (or "is <state>.").
+fn require_enabled(key: &KmsKey) -> Result<(), KmsError> {
+    match key.key_state.as_str() {
+        "Enabled" => Ok(()),
+        "Disabled" => Err(KmsError::new(
+            KmsErrorKind::Disabled,
+            format!("{} is disabled.", key.arn),
+        )),
+        "PendingDeletion" => Err(KmsError::new(
+            KmsErrorKind::InvalidState,
+            format!("{} is pending deletion.", key.arn),
+        )),
+        other => Err(KmsError::new(
+            KmsErrorKind::InvalidState,
+            format!("{} is {other}.", key.arn),
+        )),
     }
 }
 
-impl std::error::Error for KmsHookError {}
+/// A service can only envelope-encrypt under a symmetric encryption key.
+/// (The message follows KMS's form for a key whose usage does not allow the
+/// operation; not recorded through a service.)
+fn require_symmetric_encryption_key(key: &KmsKey, operation: &str) -> Result<(), KmsError> {
+    if key.key_usage != "ENCRYPT_DECRYPT" || key.key_spec != "SYMMETRIC_DEFAULT" {
+        return Err(KmsError::new(
+            KmsErrorKind::InvalidKeyUsage,
+            format!(
+                "{} key usage is {} which is not valid for {operation}.",
+                key.arn, key.key_usage
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The AEAD bytes an encryption context binds into a ciphertext: the same
+/// canonical form the KMS API binds, so a ciphertext a service sealed opens
+/// with `Decrypt` given that service's context, and with nothing else.
+fn context_aad(encryption_context: &HashMap<String, String>) -> Vec<u8> {
+    if encryption_context.is_empty() {
+        return Vec::new();
+    }
+    let sorted: BTreeMap<&str, &str> = encryption_context
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    serde_json::to_vec(&sorted).unwrap_or_default()
+}
+
+fn invalid_ciphertext() -> KmsError {
+    KmsError::new(KmsErrorKind::InvalidCiphertext, "")
+}
 
 impl KmsServiceHook {
     pub fn new(state: SharedKmsState, usage: SharedKmsUsageState) -> Self {
@@ -108,52 +136,81 @@ impl KmsServiceHook {
     }
 
     /// Encrypt `plaintext` under `key_id` (raw id, ARN, alias, or
-    /// `aws/<service>` AWS-managed alias). Records the call as a
-    /// `GenerateDataKey`-shaped usage record and returns the base64
-    /// ciphertext envelope.
+    /// `aws/<service>` AWS-managed alias), authorized as the service's data
+    /// key derivation (`kms:GenerateDataKey`). Records the call and returns
+    /// the base64 ciphertext envelope, bound to `encryption_context`.
     pub fn encrypt(
         &self,
         account_id: &str,
         region: &str,
         key_id: &str,
         plaintext: &[u8],
-        service_principal: &str,
+        caller: KmsCaller<'_>,
         encryption_context: HashMap<String, String>,
-    ) -> Result<String, KmsHookError> {
+    ) -> Result<String, KmsError> {
+        self.encrypt_with_operation(
+            "GenerateDataKey",
+            account_id,
+            region,
+            key_id,
+            plaintext,
+            caller,
+            encryption_context,
+        )
+    }
+
+    /// [`Self::encrypt`] authorized and recorded as `operation`
+    /// (`GenerateDataKey`, or `Encrypt` for SSM, which encrypts parameter
+    /// values with `kms:Encrypt`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn encrypt_with_operation(
+        &self,
+        operation: &str,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        plaintext: &[u8],
+        caller: KmsCaller<'_>,
+        encryption_context: HashMap<String, String>,
+    ) -> Result<String, KmsError> {
         let (key_arn, _) = self.resolve_or_provision(account_id, region, key_id)?;
         let key_short = key_id_from_arn(&key_arn).to_string();
-        // Services encrypt by deriving a data key under the KMS key.
-        {
+        let ciphertext_b64 = {
             let mas = self.state.read();
-            if let Some(key) = mas.get(account_id).and_then(|s| s.keys.get(&key_short)) {
-                authorize_via_service(
-                    key,
-                    account_id,
-                    service_principal,
-                    "kms:GenerateDataKey",
-                    &encryption_context,
-                )?;
-            }
-        }
-
-        // Default to the AWS-shaped binary blob (AES-256-GCM under the
-        // per-account master key persisted in `KmsState`). The legacy
-        // `fakecloud-kms:<key>:<b64>` textual envelope is still accepted on
-        // the decrypt side for back-compat with older snapshots and
-        // external callers.
-        let master_key_bytes = {
-            let mas = self.state.read();
-            mas.get(account_id)
-                .map(|s| s.master_key_bytes.clone())
-                .ok_or_else(|| KmsHookError::KeyNotFound(key_short.clone()))?
+            let state = mas.get(account_id).ok_or_else(|| {
+                KmsError::new(
+                    KmsErrorKind::NotFound,
+                    not_found_message(account_id, region, key_id),
+                )
+            })?;
+            let key = state.keys.get(&key_short).ok_or_else(|| {
+                KmsError::new(
+                    KmsErrorKind::NotFound,
+                    not_found_message(account_id, region, key_id),
+                )
+            })?;
+            authorize(
+                key,
+                account_id,
+                caller,
+                &format!("kms:{operation}"),
+                &encryption_context,
+            )?;
+            require_enabled(key)?;
+            require_symmetric_encryption_key(key, operation)?;
+            let blob = crate::blob::encode_with_context(
+                &state.master_key_bytes,
+                &key_short,
+                plaintext,
+                &context_aad(&encryption_context),
+            );
+            base64::engine::general_purpose::STANDARD.encode(&blob)
         };
-        let blob = crate::blob::encode(&master_key_bytes, &key_short, plaintext);
-        let ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
 
         self.usage.write().push(KmsUsageRecord {
             timestamp: Utc::now(),
-            operation: "GenerateDataKey".to_string(),
-            service_principal: service_principal.to_string(),
+            operation: operation.to_string(),
+            service_principal: caller.service_principal().to_string(),
             account_id: account_id.to_string(),
             key_arn,
             encryption_context,
@@ -162,46 +219,39 @@ impl KmsServiceHook {
         Ok(ciphertext_b64)
     }
 
-    /// Decrypt a previously-`encrypt`-produced base64 ciphertext.
-    /// Records the call as a `Decrypt`-shaped usage record.
+    /// Decrypt a ciphertext a service sealed with [`Self::encrypt`] (or the
+    /// KMS API), which only opens with the encryption context it was sealed
+    /// with. Records the call as a `Decrypt`.
     pub fn decrypt(
         &self,
         account_id: &str,
         ciphertext_b64: &str,
-        service_principal: &str,
+        caller: KmsCaller<'_>,
         encryption_context: HashMap<String, String>,
-    ) -> Result<Vec<u8>, KmsHookError> {
-        let (key_short, plaintext) = self.open_envelope(account_id, ciphertext_b64)?;
+    ) -> Result<Vec<u8>, KmsError> {
+        let (key_short, plaintext) =
+            self.open_envelope(account_id, ciphertext_b64, &encryption_context)?;
 
         let key_arn = {
             let mas = self.state.read();
-            let state = mas
+            // The key a ciphertext names but KMS no longer has: KMS cannot
+            // recover the plaintext.
+            let key = mas
                 .get(account_id)
-                .ok_or_else(|| KmsHookError::KeyNotFound(key_short.clone()))?;
-            let key = state
-                .keys
-                .get(&key_short)
-                .ok_or_else(|| KmsHookError::KeyNotFound(key_short.clone()))?;
-            // A disabled / pending-deletion key can't decrypt — real KMS
+                .and_then(|s| s.keys.get(&key_short))
+                .ok_or_else(invalid_ciphertext)?;
+            authorize(key, account_id, caller, "kms:Decrypt", &encryption_context)?;
+            // A disabled / pending-deletion key can't decrypt: real KMS
             // rejects the operation, and SSE-KMS consumers (SQS/SNS/...) must
             // surface that rather than returning stale ciphertext as plaintext.
-            if !key.enabled {
-                return Err(KmsHookError::KeyDisabled(key_short.clone()));
-            }
-            authorize_via_service(
-                key,
-                account_id,
-                service_principal,
-                "kms:Decrypt",
-                &encryption_context,
-            )?;
+            require_enabled(key)?;
             key.arn.clone()
         };
 
         self.usage.write().push(KmsUsageRecord {
             timestamp: Utc::now(),
             operation: "Decrypt".to_string(),
-            service_principal: service_principal.to_string(),
+            service_principal: caller.service_principal().to_string(),
             account_id: account_id.to_string(),
             key_arn,
             encryption_context,
@@ -210,49 +260,101 @@ impl KmsServiceHook {
         Ok(plaintext)
     }
 
-    /// The plaintext inside a ciphertext envelope, read without the KMS
-    /// key-state check or a usage record. For introspection only: tests
-    /// inspecting stored SSE data see what was encrypted even after the key
-    /// was disabled, and the read does not show up in `/_fakecloud/kms/usage`.
-    /// `None` when `ciphertext_b64` is not an envelope this account sealed.
-    pub fn peek_plaintext(&self, account_id: &str, ciphertext_b64: &str) -> Option<Vec<u8>> {
-        self.open_envelope(account_id, ciphertext_b64)
+    /// Whether `caller` may use `key_id` for every one of `actions` (see
+    /// [`fakecloud_core::delivery::KmsHook::authorize_key_use`]); the key
+    /// must also be enabled. Returns the key ARN.
+    pub fn authorize_key_use(
+        &self,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        caller: KmsCaller<'_>,
+        actions: &[&str],
+        encryption_context: &HashMap<String, String>,
+    ) -> Result<String, KmsError> {
+        let (key_arn, _) = self.resolve_or_provision(account_id, region, key_id)?;
+        let mas = self.state.read();
+        let key = mas
+            .get(account_id)
+            .and_then(|s| s.keys.get(key_id_from_arn(&key_arn)))
+            .ok_or_else(|| {
+                KmsError::new(
+                    KmsErrorKind::NotFound,
+                    not_found_message(account_id, region, key_id),
+                )
+            })?;
+        for action in actions {
+            authorize(key, account_id, caller, action, encryption_context)?;
+        }
+        require_enabled(key)?;
+        Ok(key_arn)
+    }
+
+    /// The plaintext inside a ciphertext envelope sealed with
+    /// `encryption_context`, read without the KMS key-state check or a usage
+    /// record. For introspection only: tests inspecting stored SSE data see
+    /// what was encrypted even after the key was disabled, and the read does
+    /// not show up in `/_fakecloud/kms/usage`. `None` when `ciphertext_b64`
+    /// is not an envelope this account sealed with that context.
+    pub fn peek_plaintext(
+        &self,
+        account_id: &str,
+        ciphertext_b64: &str,
+        encryption_context: &HashMap<String, String>,
+    ) -> Option<Vec<u8>> {
+        self.open_envelope(account_id, ciphertext_b64, encryption_context)
             .ok()
             .map(|(_, plaintext)| plaintext)
     }
 
-    /// Unseal a ciphertext envelope into its key id and plaintext.
+    /// Unseal a ciphertext envelope sealed with `encryption_context` into
+    /// its key id and plaintext. A snapshot from before the hook bound
+    /// contexts (see [`KmsState::legacy_context_free_ciphertexts`]) also
+    /// opens the context-free ciphertexts it may hold.
     fn open_envelope(
         &self,
         account_id: &str,
         ciphertext_b64: &str,
-    ) -> Result<(String, Vec<u8>), KmsHookError> {
+        encryption_context: &HashMap<String, String>,
+    ) -> Result<(String, Vec<u8>), KmsError> {
         let envelope_bytes = base64::engine::general_purpose::STANDARD
             .decode(ciphertext_b64)
-            .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
+            .map_err(|_| invalid_ciphertext())?;
 
         // Try AWS-shaped binary blob first using the account's master key;
         // older textual envelopes fall through to the legacy parser below.
-        let master_key_bytes = {
+        let (master_key_bytes, legacy) = {
             let mas = self.state.read();
-            mas.get(account_id)
-                .map(|s| s.master_key_bytes.clone())
-                .unwrap_or_default()
+            mas.get(account_id).map_or((Vec::new(), false), |s| {
+                (
+                    s.master_key_bytes.clone(),
+                    s.legacy_context_free_ciphertexts,
+                )
+            })
         };
-        if let Some(decoded) = crate::blob::decode(&master_key_bytes, &envelope_bytes) {
+        let aad = context_aad(encryption_context);
+        if let Some(decoded) =
+            crate::blob::decode_with_context(&master_key_bytes, &envelope_bytes, &aad)
+        {
             return Ok((decoded.key_id, decoded.plaintext));
         }
-        let envelope = String::from_utf8(envelope_bytes)
-            .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
+        if legacy && !aad.is_empty() {
+            if let Some(decoded) = crate::blob::decode(&master_key_bytes, &envelope_bytes) {
+                return Ok((decoded.key_id, decoded.plaintext));
+            }
+        }
+        if crate::blob::decode(&master_key_bytes, &envelope_bytes).is_some() {
+            // Sealed by this account under another (or no) context.
+            return Err(invalid_ciphertext());
+        }
+        let envelope = String::from_utf8(envelope_bytes).map_err(|_| invalid_ciphertext())?;
         let rest = envelope
             .strip_prefix("fakecloud-kms:")
-            .ok_or_else(|| KmsHookError::InvalidCiphertext("unrecognized envelope".into()))?;
-        let (key_short, plaintext_b64) = rest
-            .split_once(':')
-            .ok_or_else(|| KmsHookError::InvalidCiphertext("missing key separator".into()))?;
+            .ok_or_else(invalid_ciphertext)?;
+        let (key_short, plaintext_b64) = rest.split_once(':').ok_or_else(invalid_ciphertext)?;
         let plaintext = base64::engine::general_purpose::STANDARD
             .decode(plaintext_b64)
-            .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
+            .map_err(|_| invalid_ciphertext())?;
         Ok((key_short.to_string(), plaintext))
     }
 
@@ -264,7 +366,7 @@ impl KmsServiceHook {
         region: &str,
         key_id: &str,
         _service_principal: &str,
-    ) -> Result<String, KmsHookError> {
+    ) -> Result<String, KmsError> {
         self.resolve_or_provision(account_id, region, key_id)
             .map(|(arn, _)| arn)
     }
@@ -277,22 +379,24 @@ impl KmsServiceHook {
         region: &str,
         key_id: &str,
         _service_principal: &str,
-    ) -> Result<(String, bool), KmsHookError> {
+    ) -> Result<(String, bool), KmsError> {
         self.resolve_or_provision(account_id, region, key_id)
     }
 
     /// The ARN of the AWS-managed key for `service` (`alias/aws/<service>`)
     /// in `account_id` and `region`, minted on first use; the flag is `true`
     /// when this call minted it. It is the key `alias/aws/<service>`
-    /// resolves to in `region` (see [`Self::aws_managed_key`]).
+    /// resolves to in `region` (see [`Self::aws_managed_key`]). `None` when
+    /// AWS has no AWS-managed key for `service`.
     pub fn aws_managed_key_arn_tracked(
         &self,
         account_id: &str,
         region: &str,
         service: &str,
         _service_principal: &str,
-    ) -> (String, bool) {
-        self.aws_managed_key(account_id, region, &format!("aws/{service}"))
+    ) -> Option<(String, bool)> {
+        crate::aws_managed::is_aws_managed_service(service)
+            .then(|| self.aws_managed_key(account_id, region, &format!("aws/{service}")))
     }
 
     /// Resolve `key_id` to its key ARN; the flag is `true` when an
@@ -303,7 +407,7 @@ impl KmsServiceHook {
         account_id: &str,
         region: &str,
         key_id: &str,
-    ) -> Result<(String, bool), KmsHookError> {
+    ) -> Result<(String, bool), KmsError> {
         // Pre-flight read to see if the key resolves cleanly.
         {
             let mas = self.state.read();
@@ -314,12 +418,18 @@ impl KmsServiceHook {
             }
         }
 
-        // AWS-managed aliases (`aws/<service>`) auto-provision on
-        // first use, in the region the reference names. Customer-supplied
-        // aliases / IDs that don't resolve are an error.
+        // An AWS-managed alias (`aws/<service>`) of a service AWS has one
+        // for exists from its first use, in the region the reference names.
+        // Any other alias or id that doesn't resolve is an error.
         let alias = normalize_alias(key_id);
-        if !alias.starts_with("aws/") {
-            return Err(KmsHookError::KeyNotFound(key_id.to_string()));
+        let managed = alias
+            .strip_prefix("aws/")
+            .is_some_and(crate::aws_managed::is_aws_managed_service);
+        if !managed || !names_an_alias(key_id) {
+            return Err(KmsError::new(
+                KmsErrorKind::NotFound,
+                not_found_message(account_id, region, key_id),
+            ));
         }
         let alias_region = parse_kms_arn(key_id).map_or(region, |(r, _, _)| r);
         Ok(self.aws_managed_key(account_id, alias_region, &alias))
@@ -347,41 +457,86 @@ impl KmsServiceHook {
     }
 }
 
-/// Authorize a fakecloud service's use of `key` through the KMS hook. The
-/// hook is how a service such as S3 or SQS calls KMS on its caller's behalf,
-/// so the request is evaluated as AWS evaluates it: made in `account_id` (the
-/// `kms:CallerAccount`) through the service named by `service_principal` (the
-/// `kms:ViaService`, that service's endpoint in the key's region). Only
-/// AWS-managed keys are checked here: their policy is AWS's (see
-/// [`crate::aws_managed`]) and grants cryptographic use only through the
-/// owning service, so S3 uses `aws/s3` but SQS cannot. Customer keys are
-/// governed by policies the caller wrote and checked where the service
-/// validates its key configuration (`KmsHook::check_service_key_use`).
-fn authorize_via_service(
+/// Whether `key_ref` names an alias (`alias/...`, an alias ARN, or the bare
+/// `aws/<service>` form services use for their default key).
+fn names_an_alias(key_ref: &str) -> bool {
+    match strip_kms_arn_prefix(key_ref) {
+        Some(resource) => resource.starts_with("alias/"),
+        None => key_ref.starts_with("alias/") || key_ref.starts_with("aws/"),
+    }
+}
+
+/// Authorize a fakecloud service's use of `key` through the KMS hook, as
+/// AWS evaluates the call.
+///
+/// - [`KmsCaller::OnBehalfOf`]: the service calls KMS for a caller of its
+///   API in `account_id`, so the key policy sees `kms:CallerAccount` and
+///   `kms:ViaService` (that service's endpoint in the key's region). Only
+///   AWS-managed keys are checked: their policy is AWS's (see
+///   [`crate::aws_managed`]) and grants cryptographic use only through the
+///   owning service, so S3 uses `aws/s3` but SQS cannot. A customer key's
+///   policy is evaluated with the calling identity, which the hook does not
+///   carry; under IAM enforcement that identity was already authorized for
+///   the service call itself.
+/// - [`KmsCaller::Service`]: the service principal acts itself, and only a
+///   key policy statement naming it can allow that, so every key's policy
+///   is checked (a customer key's default policy grants only the account).
+fn authorize(
     key: &KmsKey,
     account_id: &str,
-    service_principal: &str,
+    caller: KmsCaller<'_>,
     action: &str,
     encryption_context: &HashMap<String, String>,
-) -> Result<(), KmsHookError> {
-    if key.key_manager != "AWS" {
-        return Ok(());
-    }
+) -> Result<(), KmsError> {
     let region = parse_kms_arn(&key.arn).map_or("us-east-1", |(r, _, _)| r);
+    let caller = match caller {
+        KmsCaller::OnBehalfOf { service_principal } => {
+            if key.key_manager != "AWS" {
+                return Ok(());
+            }
+            crate::aws_managed::KeyCaller::ViaService {
+                service_principal,
+                region,
+                account: account_id,
+            }
+        }
+        KmsCaller::Service {
+            service_principal,
+            source_arn,
+            source_account,
+        } => crate::aws_managed::KeyCaller::Service {
+            service_principal,
+            region,
+            source_arn,
+            source_account,
+        },
+    };
     let context = encryption_context
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let caller = crate::aws_managed::KeyCaller::ViaService {
-        service_principal,
-        region,
-        account: account_id,
-    };
     if crate::aws_managed::policy_allows(&key.policy, &key.arn, &caller, action, &context, &[]) {
-        Ok(())
-    } else {
-        Err(KmsHookError::AccessDenied(key.arn.clone()))
+        return Ok(());
     }
+    // KMS names the identity the service acted for: the caller of the
+    // service (its forwarded credentials; the hook knows only the account)
+    // or the service principal.
+    let who = match caller {
+        crate::aws_managed::KeyCaller::Service {
+            service_principal, ..
+        } => format!("Service: {service_principal}"),
+        _ => format!(
+            "User: arn:{}:iam::{account_id}:root",
+            fakecloud_aws::arn::partition_for(region)
+        ),
+    };
+    Err(KmsError::new(
+        KmsErrorKind::AccessDenied,
+        format!(
+            "{who} is not authorized to perform: {action} on resource: {} because no resource-based policy allows the {action} action",
+            key.arn
+        ),
+    ))
 }
 
 /// The cross-service trait form of the hook, for callers that hold KMS state
@@ -394,36 +549,70 @@ impl fakecloud_core::delivery::KmsHook for KmsServiceHook {
         region: &str,
         key_id: &str,
         plaintext: &[u8],
-        service_principal: &str,
+        caller: KmsCaller<'_>,
         encryption_context: HashMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, KmsError> {
         KmsServiceHook::encrypt(
             self,
             account_id,
             region,
             key_id,
             plaintext,
-            service_principal,
+            caller,
             encryption_context,
         )
-        .map_err(|e| e.to_string())
+    }
+
+    fn encrypt_with_operation(
+        &self,
+        operation: &str,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        plaintext: &[u8],
+        caller: KmsCaller<'_>,
+        encryption_context: HashMap<String, String>,
+    ) -> Result<String, KmsError> {
+        KmsServiceHook::encrypt_with_operation(
+            self,
+            operation,
+            account_id,
+            region,
+            key_id,
+            plaintext,
+            caller,
+            encryption_context,
+        )
     }
 
     fn decrypt(
         &self,
         account_id: &str,
         ciphertext_b64: &str,
-        service_principal: &str,
+        caller: KmsCaller<'_>,
         encryption_context: HashMap<String, String>,
-    ) -> Result<Vec<u8>, String> {
-        KmsServiceHook::decrypt(
+    ) -> Result<Vec<u8>, KmsError> {
+        KmsServiceHook::decrypt(self, account_id, ciphertext_b64, caller, encryption_context)
+    }
+
+    fn authorize_key_use(
+        &self,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        caller: KmsCaller<'_>,
+        actions: &[&str],
+        encryption_context: &HashMap<String, String>,
+    ) -> Result<String, KmsError> {
+        KmsServiceHook::authorize_key_use(
             self,
             account_id,
-            ciphertext_b64,
-            service_principal,
+            region,
+            key_id,
+            caller,
+            actions,
             encryption_context,
         )
-        .map_err(|e| e.to_string())
     }
 
     fn resolve_key_arn(
@@ -444,9 +633,9 @@ impl fakecloud_core::delivery::KmsHook for KmsServiceHook {
         service: &str,
         service_principal: &str,
     ) -> Result<String, String> {
-        Ok(self
-            .aws_managed_key_arn_tracked(account_id, region, service, service_principal)
-            .0)
+        self.aws_managed_key_arn_tracked(account_id, region, service, service_principal)
+            .map(|(arn, _)| arn)
+            .ok_or_else(|| format!("AWS has no AWS-managed KMS key for {service}"))
     }
 }
 
@@ -479,45 +668,6 @@ fn normalize_alias(key_id: &str) -> String {
     key_id.strip_prefix("alias/").unwrap_or(key_id).to_string()
 }
 
-/// Canonical AWS-managed service aliases (`alias/aws/<service>`). Real
-/// AWS pre-creates these in every account/region, so `aws kms list-aliases`
-/// returns them on a brand-new account and `data.aws_kms_alias` resolves
-/// them. The Terraform acceptance tests for several services
-/// (e.g. `aws_dynamodb_table` encryption) read `alias/aws/<service>` via
-/// that data source, so they must be listable even before any KMS use.
-pub const DEFAULT_AWS_MANAGED_ALIASES: &[&str] = &[
-    "aws/dynamodb",
-    "aws/s3",
-    "aws/sqs",
-    "aws/sns",
-    "aws/secretsmanager",
-    "aws/ssm",
-    "aws/rds",
-    "aws/lambda",
-    "aws/kinesis",
-    "aws/logs",
-    "aws/ebs",
-    "aws/glue",
-    "aws/elasticache",
-    "aws/backup",
-    "aws/es",
-    "aws/redshift",
-    "aws/xray",
-    "aws/elasticfilesystem",
-    "aws/cloudtrail",
-    "aws/sagemaker",
-];
-
-/// Idempotently provision every [`DEFAULT_AWS_MANAGED_ALIASES`] entry that
-/// isn't already present in `region`, so `ListAliases` mirrors real AWS.
-/// Provisioning a missing alias also mints its backing AWS-managed key,
-/// matching the auto-provision-on-first-use path in [`resolve_or_provision`].
-pub fn ensure_default_managed_aliases(state: &mut KmsState, region: &str) {
-    for alias in DEFAULT_AWS_MANAGED_ALIASES {
-        ensure_aws_managed_key(state, region, alias);
-    }
-}
-
 /// The ARN of the AWS-managed key behind `alias_full` (`alias/aws/<service>`)
 /// in `region`, if one exists: the key recorded for the region, else the key
 /// the region's alias targets.
@@ -535,7 +685,11 @@ fn existing_aws_managed_key(state: &KmsState, region: &str, alias_full: &str) ->
 /// when the region has none; the flag is `true` when this call minted it.
 /// Afterwards the region's `alias/aws/<service>` alias targets the key and
 /// [`KmsState::aws_managed_keys`] records it for the region.
-fn ensure_aws_managed_key(state: &mut KmsState, region: &str, alias: &str) -> (String, bool) {
+pub(crate) fn ensure_aws_managed_key(
+    state: &mut KmsState,
+    region: &str,
+    alias: &str,
+) -> (String, bool) {
     let alias_full = format!("alias/{alias}");
     let (arn, minted) = match existing_aws_managed_key(state, region, &alias_full) {
         Some(arn) => (arn, false),
@@ -600,13 +754,17 @@ pub(crate) fn migrate_aws_managed_key_policies(state: &mut KmsState) {
         if key.key_manager != "AWS" {
             continue;
         }
-        let recorded = crate::aws_managed::key_policy(&service, &account, &region);
-        if key.policy != recorded {
-            key.policy = recorded;
+        // A key fakecloud minted for a name AWS has no AWS-managed key for
+        // (`aws/logs`, ...) keeps what it has: it was never AWS's.
+        if let Some(recorded) = crate::aws_managed::key_policy(&service, &account, &region) {
+            if key.policy != recorded {
+                key.policy = recorded;
+            }
         }
-        let description = crate::aws_managed::key_description(&service);
-        if key.description != description {
-            key.description = description;
+        if let Some(description) = crate::aws_managed::key_description(&service) {
+            if key.description != description {
+                key.description = description;
+            }
         }
     }
 }
@@ -616,12 +774,17 @@ fn mint_aws_managed_key(state: &mut KmsState, region: &str, alias: &str) -> Stri
     let key_id = uuid::Uuid::new_v4().to_string();
     let arn = kms_key_arn(region, &state.account_id, &key_id);
     let service = alias.strip_prefix("aws/").unwrap_or(alias);
-    let policy = crate::aws_managed::key_policy(service, &state.account_id, region);
+    // Callers mint only catalog services (see `resolve_or_provision`); the
+    // fallbacks keep a key minted for any other name well-formed.
+    let policy = crate::aws_managed::key_policy(service, &state.account_id, region)
+        .unwrap_or_else(|| r#"{"Version":"2012-10-17","Statement":[]}"#.to_string());
     let key = KmsKey {
         key_id: key_id.clone(),
         arn: arn.clone(),
         creation_date: Utc::now().timestamp() as f64,
-        description: crate::aws_managed::key_description(service),
+        description: crate::aws_managed::key_description(service).unwrap_or_else(|| {
+            format!("Default key that protects my {service} data when no other key is defined")
+        }),
         enabled: true,
         key_usage: "ENCRYPT_DECRYPT".to_string(),
         key_spec: "SYMMETRIC_DEFAULT".to_string(),
@@ -674,24 +837,36 @@ mod tests {
                 "us-east-1",
                 "alias/aws/sqs",
                 b"hello",
-                "sqs.amazonaws.com",
+                KmsCaller::via("sqs.amazonaws.com"),
                 HashMap::new(),
             )
             .unwrap();
         let recorded = usage.read().records().len();
         for key in state.write().get_or_create(acct).keys.values_mut() {
             key.enabled = false;
+            key.key_state = "Disabled".to_string();
         }
         assert!(hook
-            .decrypt(acct, &ct, "sqs.amazonaws.com", HashMap::new())
+            .decrypt(
+                acct,
+                &ct,
+                KmsCaller::via("sqs.amazonaws.com"),
+                HashMap::new()
+            )
             .is_err());
         assert_eq!(
-            hook.peek_plaintext(acct, &ct).as_deref(),
+            hook.peek_plaintext(acct, &ct, &HashMap::new()).as_deref(),
             Some(&b"hello"[..])
         );
         assert_eq!(usage.read().records().len(), recorded);
-        assert_eq!(hook.peek_plaintext(acct, "plain text body"), None);
-        assert_eq!(hook.peek_plaintext("999999999999", &ct), None);
+        assert_eq!(
+            hook.peek_plaintext(acct, "plain text body", &HashMap::new()),
+            None
+        );
+        assert_eq!(
+            hook.peek_plaintext("999999999999", &ct, &HashMap::new()),
+            None
+        );
     }
 
     /// The policy fakecloud used to give AWS-managed keys before their AWS
@@ -713,7 +888,7 @@ mod tests {
         assert!(loaded.aws_managed_keys.is_empty());
         assert_eq!(
             loaded.keys[&id].policy,
-            crate::aws_managed::key_policy("lambda", "123456789012", "us-east-1")
+            crate::aws_managed::key_policy("lambda", "123456789012", "us-east-1").unwrap()
         );
     }
 
@@ -782,19 +957,19 @@ mod tests {
         let acct = "123456789012";
         assert_eq!(
             policy(&old),
-            crate::aws_managed::key_policy("lambda", acct, "us-east-1")
+            crate::aws_managed::key_policy("lambda", acct, "us-east-1").unwrap()
         );
         assert_eq!(
             policy(&changed),
-            crate::aws_managed::key_policy("lambda", acct, "eu-west-1")
+            crate::aws_managed::key_policy("lambda", acct, "eu-west-1").unwrap()
         );
         assert_eq!(
             policy(&sqs),
-            crate::aws_managed::key_policy("sqs", acct, "us-east-1")
+            crate::aws_managed::key_policy("sqs", acct, "us-east-1").unwrap()
         );
         assert_eq!(
             policy(&s3),
-            crate::aws_managed::key_policy("s3", acct, "us-east-1")
+            crate::aws_managed::key_policy("s3", acct, "us-east-1").unwrap()
         );
         assert_eq!(
             loaded.keys[key_id_from_arn(&s3)].description,
@@ -818,31 +993,44 @@ mod tests {
                 "us-east-1",
                 "alias/aws/s3",
                 b"object",
-                "s3.amazonaws.com",
+                KmsCaller::via("s3.amazonaws.com"),
                 HashMap::new(),
             )
             .unwrap();
         assert_eq!(
-            hook.decrypt(acct, &ct, "s3.amazonaws.com", HashMap::new())
-                .unwrap(),
+            hook.decrypt(
+                acct,
+                &ct,
+                KmsCaller::via("s3.amazonaws.com"),
+                HashMap::new()
+            )
+            .unwrap(),
             b"object"
         );
         let err = hook
-            .decrypt(acct, &ct, "sqs.amazonaws.com", HashMap::new())
+            .decrypt(
+                acct,
+                &ct,
+                KmsCaller::via("sqs.amazonaws.com"),
+                HashMap::new(),
+            )
             .unwrap_err();
-        assert!(matches!(err, KmsHookError::AccessDenied(_)), "{err}");
+        assert_eq!(err.kind, KmsErrorKind::AccessDenied, "{err}");
         let err = hook
             .encrypt(
                 acct,
                 "us-east-1",
                 "alias/aws/s3",
                 b"msg",
-                "sqs.amazonaws.com",
+                KmsCaller::via("sqs.amazonaws.com"),
                 HashMap::new(),
             )
             .unwrap_err();
         assert!(
-            matches!(err, KmsHookError::AccessDenied(ref k) if k.starts_with("arn:aws:kms:us-east-1:123456789012:key/")),
+            err.kind == KmsErrorKind::AccessDenied
+                && err
+                    .message
+                    .contains("on resource: arn:aws:kms:us-east-1:123456789012:key/"),
             "{err}"
         );
         // Secrets Manager derives data keys through any region's endpoint.
@@ -851,7 +1039,7 @@ mod tests {
             "eu-west-1",
             "alias/aws/secretsmanager",
             b"secret",
-            "secretsmanager.amazonaws.com",
+            KmsCaller::via("secretsmanager.amazonaws.com"),
             HashMap::new(),
         )
         .unwrap();
@@ -869,12 +1057,17 @@ mod tests {
                 "us-east-1",
                 &customer,
                 b"x",
-                "sqs.amazonaws.com",
+                KmsCaller::via("sqs.amazonaws.com"),
                 HashMap::new(),
             )
             .unwrap();
-        hook.decrypt(acct, &ct, "sns.amazonaws.com", HashMap::new())
-            .unwrap();
+        hook.decrypt(
+            acct,
+            &ct,
+            KmsCaller::via("sns.amazonaws.com"),
+            HashMap::new(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1116,34 +1309,286 @@ mod tests {
         assert_eq!(resolve("alias/mine", "us-west-2"), "alias/mine");
     }
 
-    /// A managed alias pre-listed by ListAliases (in the listing region) is
-    /// the key that region's services report; other regions mint their own.
+    /// A region's AWS-managed key, once created, is the key that region's
+    /// services report; other regions get their own. A name AWS has no
+    /// AWS-managed key for is not created (recorded: `alias/aws/logs`).
     #[test]
-    fn pre_listed_managed_alias_serves_its_own_region_only() {
+    fn aws_managed_keys_exist_per_region_and_only_for_catalog_services() {
         use fakecloud_core::delivery::aws_managed_kms_key_arn;
         let acct = "123456789012";
         let (state, hook) = crate::test_support::kms_hook(acct);
-        {
-            let mut accounts = state.write();
-            ensure_default_managed_aliases(accounts.get_or_create(acct), "eu-west-1");
-        }
-        let listed = {
-            let accounts = state.read();
-            let s = accounts.get(acct).unwrap();
-            s.keys[s
-                .alias_target("eu-west-1", "alias/aws/elasticfilesystem")
-                .unwrap()]
-            .arn
-            .clone()
-        };
         let h = Some(hook.as_ref());
+        let west = aws_managed_kms_key_arn(h, acct, "eu-west-1", "elasticfilesystem").unwrap();
         assert_eq!(
             aws_managed_kms_key_arn(h, acct, "eu-west-1", "elasticfilesystem").as_deref(),
-            Some(listed.as_str())
+            Some(west.as_str())
         );
         let east = aws_managed_kms_key_arn(h, acct, "us-east-1", "elasticfilesystem").unwrap();
-        assert_ne!(east, listed);
+        assert_ne!(east, west);
         assert!(east.starts_with("arn:aws:kms:us-east-1:"));
+        assert_eq!(aws_managed_kms_key_arn(h, acct, "us-east-1", "logs"), None);
+        let err = KmsServiceHook::new(state.clone(), Default::default())
+            .encrypt(
+                acct,
+                "us-east-1",
+                "alias/aws/logs",
+                b"x",
+                KmsCaller::via("logs.amazonaws.com"),
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            (err.kind, err.message.as_str()),
+            (
+                KmsErrorKind::NotFound,
+                "Alias arn:aws:kms:us-east-1:123456789012:alias/aws/logs is not found."
+            )
+        );
+        assert!(state
+            .read()
+            .get(acct)
+            .unwrap()
+            .alias("us-east-1", "alias/aws/logs")
+            .is_none());
+    }
+
+    /// KMS's not-found messages name an alias by its ARN and a key by its
+    /// key ARN (recorded through SQS, SNS, S3, SSM and Secrets Manager).
+    #[test]
+    fn not_found_messages_follow_kms() {
+        let acct = "123456789012";
+        assert_eq!(
+            not_found_message(acct, "us-east-1", "alias/fc-does-not-exist"),
+            "Alias arn:aws:kms:us-east-1:123456789012:alias/fc-does-not-exist is not found."
+        );
+        assert_eq!(
+            not_found_message(
+                acct,
+                "us-east-1",
+                "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+            ),
+            "Key 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000' does not exist"
+        );
+        assert_eq!(
+            not_found_message(acct, "eu-west-1", "1234abcd-12ab-34cd-56ef-1234567890ab"),
+            "Key 'arn:aws:kms:eu-west-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab' does not exist"
+        );
+    }
+
+    /// Hook ciphertexts bind the service's encryption context as KMS
+    /// ciphertexts do: another or a missing context does not open them, and
+    /// the public KMS `Decrypt` opens them with the same context.
+    #[test]
+    fn hook_ciphertexts_bind_the_encryption_context() {
+        let acct = "123456789012";
+        let (state, _) = crate::test_support::kms_hook(acct);
+        let hook = KmsServiceHook::new(state.clone(), Default::default());
+        let queue = "arn:aws:sqs:us-east-1:123456789012:q";
+        let ctx: HashMap<String, String> = [("aws:sqs:arn".to_string(), queue.to_string())].into();
+        let ct = hook
+            .encrypt(
+                acct,
+                "us-east-1",
+                "alias/aws/sqs",
+                b"body",
+                KmsCaller::via("sqs.amazonaws.com"),
+                ctx.clone(),
+            )
+            .unwrap();
+        let sqs = KmsCaller::via("sqs.amazonaws.com");
+        assert_eq!(hook.decrypt(acct, &ct, sqs, ctx.clone()).unwrap(), b"body");
+        for other in [
+            HashMap::new(),
+            [("aws:sqs:arn".to_string(), format!("{queue}2"))].into(),
+        ] {
+            let err = hook.decrypt(acct, &ct, sqs, other).unwrap_err();
+            assert_eq!(err.kind, KmsErrorKind::InvalidCiphertext);
+        }
+        assert_eq!(hook.peek_plaintext(acct, &ct, &HashMap::new()), None);
+        assert_eq!(
+            hook.peek_plaintext(acct, &ct, &ctx).as_deref(),
+            Some(&b"body"[..])
+        );
+    }
+
+    /// A snapshot from before contexts were bound may hold context-free
+    /// service ciphertexts; they keep decrypting with the service's context.
+    /// State created since does not accept them.
+    #[test]
+    fn context_free_ciphertexts_from_old_snapshots_still_decrypt() {
+        let acct = "123456789012";
+        let mut fresh = KmsState::new(acct, "us-east-1");
+        let arn = ensure_aws_managed_key(&mut fresh, "us-east-1", "aws/sqs").0;
+        let key_id = key_id_from_arn(&arn).to_string();
+        // What the hook sealed before it bound contexts.
+        let old = base64::engine::general_purpose::STANDARD.encode(crate::blob::encode(
+            &fresh.master_key_bytes,
+            &key_id,
+            b"old body",
+        ));
+        let ctx: HashMap<String, String> = [(
+            "aws:sqs:arn".to_string(),
+            "arn:aws:sqs:us-east-1:123456789012:q".to_string(),
+        )]
+        .into();
+        let sqs = KmsCaller::via("sqs.amazonaws.com");
+
+        let mut snapshot = serde_json::to_value(&fresh).unwrap();
+        snapshot
+            .as_object_mut()
+            .unwrap()
+            .remove("legacy_context_free_ciphertexts");
+        let loaded: KmsState = serde_json::from_value(snapshot).unwrap();
+        assert!(loaded.legacy_context_free_ciphertexts);
+        let shared: SharedKmsState = Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(acct, "us-east-1", ""),
+        ));
+        *shared.write().get_or_create(acct) = loaded;
+        let hook = KmsServiceHook::new(shared.clone(), Default::default());
+        assert_eq!(
+            hook.decrypt(acct, &old, sqs, ctx.clone()).unwrap(),
+            b"old body"
+        );
+        // And it survives another save and load.
+        let again: KmsState =
+            serde_json::from_str(&serde_json::to_string(shared.read().get(acct).unwrap()).unwrap())
+                .unwrap();
+        assert!(again.legacy_context_free_ciphertexts);
+
+        let current: SharedKmsState = Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(acct, "us-east-1", ""),
+        ));
+        *current.write().get_or_create(acct) =
+            serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+        let hook = KmsServiceHook::new(current, Default::default());
+        let err = hook.decrypt(acct, &old, sqs, ctx).unwrap_err();
+        assert_eq!(err.kind, KmsErrorKind::InvalidCiphertext);
+    }
+
+    /// The hook refuses keys that cannot encrypt, with KMS's errors.
+    #[test]
+    fn hook_reports_unusable_keys() {
+        let acct = "123456789012";
+        let (state, _) = crate::test_support::kms_hook(acct);
+        let hook = KmsServiceHook::new(state.clone(), Default::default());
+        let arn = {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(acct);
+            let arn = mint_aws_managed_key(s, "us-east-1", "custom");
+            s.keys.get_mut(key_id_from_arn(&arn)).unwrap().key_manager = "CUSTOMER".into();
+            arn
+        };
+        let set_state = |key_state: &str, usage: &str| {
+            let mut accounts = state.write();
+            let key = accounts
+                .get_or_create(acct)
+                .keys
+                .get_mut(key_id_from_arn(&arn))
+                .unwrap();
+            key.key_state = key_state.to_string();
+            key.enabled = key_state == "Enabled";
+            key.key_usage = usage.to_string();
+        };
+        let encrypt = || {
+            hook.encrypt(
+                acct,
+                "us-east-1",
+                &arn,
+                b"x",
+                KmsCaller::via("sqs.amazonaws.com"),
+                HashMap::new(),
+            )
+        };
+        set_state("Disabled", "ENCRYPT_DECRYPT");
+        let err = encrypt().unwrap_err();
+        assert_eq!(
+            (err.kind, err.message),
+            (KmsErrorKind::Disabled, format!("{arn} is disabled."))
+        );
+        set_state("PendingDeletion", "ENCRYPT_DECRYPT");
+        let err = encrypt().unwrap_err();
+        assert_eq!(
+            (err.kind, err.message),
+            (
+                KmsErrorKind::InvalidState,
+                format!("{arn} is pending deletion.")
+            )
+        );
+        set_state("Enabled", "SIGN_VERIFY");
+        assert_eq!(encrypt().unwrap_err().kind, KmsErrorKind::InvalidKeyUsage);
+        set_state("Enabled", "ENCRYPT_DECRYPT");
+        encrypt().unwrap();
+        let err = hook
+            .encrypt(
+                acct,
+                "us-east-1",
+                "alias/fc-does-not-exist",
+                b"x",
+                KmsCaller::via("sqs.amazonaws.com"),
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, KmsErrorKind::NotFound);
+    }
+
+    /// A service acting as its own principal (SES) needs a key policy
+    /// statement naming it: `aws/ses` has one, a customer key's default
+    /// policy does not.
+    #[test]
+    fn service_principal_callers_need_a_key_policy_grant() {
+        let acct = "123456789012";
+        let (state, _) = crate::test_support::kms_hook(acct);
+        let hook = KmsServiceHook::new(state.clone(), Default::default());
+        let rule = "arn:aws:ses:us-east-1:123456789012:receipt-rule-set/s:receipt-rule/r";
+        let ses = KmsCaller::Service {
+            service_principal: "ses.amazonaws.com",
+            source_arn: rule,
+            source_account: acct,
+        };
+        let ctx: HashMap<String, String> = [
+            ("aws:ses:source-account".to_string(), acct.to_string()),
+            ("aws:ses:rule-name".to_string(), "r".to_string()),
+            ("aws:ses:message-id".to_string(), "m".to_string()),
+        ]
+        .into();
+        hook.encrypt(
+            acct,
+            "us-east-1",
+            "alias/aws/ses",
+            b"mail",
+            ses,
+            ctx.clone(),
+        )
+        .unwrap();
+        let customer = {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(acct);
+            let arn = mint_aws_managed_key(s, "us-east-1", "custom");
+            let key = s.keys.get_mut(key_id_from_arn(&arn)).unwrap();
+            key.key_manager = "CUSTOMER".into();
+            key.policy = format!(
+                r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{acct}:root"}},"Action":"kms:*","Resource":"*"}}]}}"#
+            );
+            arn
+        };
+        let err = hook
+            .encrypt(acct, "us-east-1", &customer, b"mail", ses, ctx.clone())
+            .unwrap_err();
+        assert_eq!(err.kind, KmsErrorKind::AccessDenied);
+        // SES's documented customer key policy statement admits it.
+        {
+            let mut accounts = state.write();
+            let key = accounts
+                .get_or_create(acct)
+                .keys
+                .get_mut(key_id_from_arn(&customer))
+                .unwrap();
+            key.policy = format!(
+                r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"Service":"ses.amazonaws.com"}},"Action":["kms:Encrypt","kms:GenerateDataKey*"],"Resource":"*","Condition":{{"StringEquals":{{"aws:SourceAccount":"{acct}"}},"ArnLike":{{"aws:SourceArn":"arn:aws:ses:*"}}}}}}]}}"#
+            );
+        }
+        hook.encrypt(acct, "us-east-1", &customer, b"mail", ses, ctx)
+            .unwrap();
     }
 
     #[test]

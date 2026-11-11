@@ -139,15 +139,19 @@ pub fn read_secret_value(
         (value, secret.kms_key_id.clone())
     };
 
-    let secret_string = value.secret_string.map(|stored| {
-        decrypt_secret_string(
-            kms_hook,
-            &owner_account,
-            &value.arn,
-            kms_key_id.as_deref(),
-            stored,
-        )
-    });
+    let secret_string = value
+        .secret_string
+        .map(|stored| {
+            decrypt_secret_string(
+                kms_hook,
+                &owner_account,
+                &value.arn,
+                &value.version_id,
+                kms_key_id.as_deref(),
+                stored,
+            )
+        })
+        .transpose()?;
     Ok(SecretValue {
         secret_string,
         ..value
@@ -156,25 +160,85 @@ pub fn read_secret_value(
 
 /// Decrypt a stored `SecretString`. A secret written with a KMS key while a
 /// KMS hook was wired is stored as ciphertext; anything else (no key, no
-/// hook, or a value that does not decrypt, such as one stored before KMS was
-/// wired) is returned as stored.
+/// hook, or a value that is not a ciphertext, such as one stored before KMS
+/// was wired) is returned as stored. A KMS refusal fails the read.
 pub(crate) fn decrypt_secret_string(
     kms_hook: Option<&dyn KmsHook>,
     account_id: &str,
     secret_arn: &str,
+    version_id: &str,
     kms_key_id: Option<&str>,
     stored: String,
-) -> String {
+) -> Result<String, AwsServiceError> {
     let (Some(hook), Some(_)) = (kms_hook, kms_key_id) else {
-        return stored;
+        return Ok(stored);
     };
-    let mut ctx = HashMap::new();
-    ctx.insert(
-        "aws:secretsmanager:secretArn".to_string(),
-        secret_arn.to_string(),
-    );
-    match hook.decrypt(account_id, &stored, "secretsmanager.amazonaws.com", ctx) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-        Err(_) => stored,
+    match hook.decrypt(
+        account_id,
+        &stored,
+        fakecloud_core::delivery::KmsCaller::via("secretsmanager.amazonaws.com"),
+        secret_encryption_context(secret_arn, version_id),
+    ) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
+        Err(err) if err.kind == fakecloud_core::delivery::KmsErrorKind::InvalidCiphertext => {
+            Ok(stored)
+        }
+        Err(err) => Err(secrets_manager_kms_error(&err, true)),
+    }
+}
+
+/// The encryption context Secrets Manager binds a secret version to (Secrets
+/// Manager user guide, "Encryption context").
+pub(crate) fn secret_encryption_context(
+    secret_arn: &str,
+    version_id: &str,
+) -> HashMap<String, String> {
+    [
+        ("SecretARN".to_string(), secret_arn.to_string()),
+        ("SecretVersionId".to_string(), version_id.to_string()),
+    ]
+    .into()
+}
+
+/// Secrets Manager's error for a failed KMS call. Recorded (CreateSecret):
+/// a key policy refusal is 400 `AccessDeniedException` "Access to KMS is not
+/// allowed", and a missing key 400 `InvalidParameterException` "The
+/// operation failed because of an invalid KMS key: <KMS message>". A key
+/// KMS will not use (disabled, pending deletion, wrong usage) is the
+/// declared `EncryptionFailure` (writes) / `DecryptionFailure` (reads), with
+/// KMS's message (not recorded).
+pub(crate) fn secrets_manager_kms_error(
+    err: &fakecloud_core::delivery::KmsError,
+    decrypting: bool,
+) -> AwsServiceError {
+    use fakecloud_core::delivery::KmsErrorKind;
+    match err.kind {
+        KmsErrorKind::AccessDenied => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "AccessDeniedException",
+            "Access to KMS is not allowed",
+        ),
+        KmsErrorKind::NotFound if !decrypting => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterException",
+            format!(
+                "The operation failed because of an invalid KMS key: {}",
+                err.relayed_message()
+            ),
+        ),
+        KmsErrorKind::Internal => AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalServiceError",
+            err.relayed_message(),
+        ),
+        _ => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            if decrypting {
+                "DecryptionFailure"
+            } else {
+                "EncryptionFailure"
+            },
+            err.relayed_message(),
+        ),
     }
 }

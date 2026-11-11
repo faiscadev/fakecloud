@@ -1,11 +1,12 @@
-//! AWS-managed keys (`alias/aws/<service>`): their key policies and the
-//! authorization those policies drive.
+//! AWS-managed keys (`alias/aws/<service>`): which exist, their key
+//! policies, and the authorization those policies drive.
 //!
 //! AWS writes the key policy of every AWS-managed key and nobody can change
 //! it (`PutKeyPolicy` is refused, see `KmsService::aws_managed_key_refusal`).
-//! The recorded policies (`tests/fixtures/aws-managed-keys/*.json`) grant the
-//! cryptographic operations only to principals of the owning account calling
-//! *through* the owning service:
+//! The policies (one per AWS-managed key, recorded from a real account and vendored in
+//! `data/aws_managed_keys.json` by `scripts/gen-kms-aws-managed-keys.py`)
+//! grant the cryptographic operations only to principals of the owning
+//! account calling *through* the owning service:
 //!
 //! ```json
 //! "Condition": {"StringEquals": {
@@ -20,15 +21,59 @@
 //! works. fakecloud evaluates the key's own policy for both paths with the IAM
 //! policy evaluator: a direct API call carries no `kms:ViaService`, and an
 //! internal service call through the KMS hook carries the `kms:ViaService` of
-//! the service that makes it (see [`via_service`]).
+//! the service that makes it (see [`via_service`]), or is made as the service
+//! principal itself (SES).
+//!
+//! Only the services in the catalog have an AWS-managed key: AWS answers
+//! `NotFoundException` ("Alias ... is not found.") for `alias/aws/logs` or
+//! any other name. A catalog key exists from the first time it is used,
+//! directly or by its service (AWS creates it then; it is free and owned by
+//! AWS), and the [`predefined`] aliases are listed by `ListAliases` before
+//! that, without a target key.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
-use fakecloud_core::auth::{Principal, PrincipalType};
+use fakecloud_core::auth::{InternalCaller, Principal, PrincipalType};
 use fakecloud_iam::evaluator::{
     evaluate_resource_policy_only, EvalRequest, PolicyDocument, RequestContext,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
+
+/// One catalog entry: the recorded key description and the key policy text
+/// exactly as `GetKeyPolicy` returned it.
+#[derive(serde::Deserialize)]
+struct CatalogKey {
+    description: String,
+    policy: String,
+}
+
+#[derive(serde::Deserialize)]
+struct Catalog {
+    recorded_region: String,
+    recorded_account: String,
+    predefined: Vec<String>,
+    keys: BTreeMap<String, CatalogKey>,
+}
+
+fn catalog() -> &'static Catalog {
+    static CATALOG: OnceLock<Catalog> = OnceLock::new();
+    CATALOG.get_or_init(|| {
+        serde_json::from_str(include_str!("../data/aws_managed_keys.json"))
+            .expect("vendored AWS-managed key catalog is valid JSON")
+    })
+}
+
+/// Whether AWS has an AWS-managed key for `service` (`alias/aws/<service>`).
+pub fn is_aws_managed_service(service: &str) -> bool {
+    catalog().keys.contains_key(service)
+}
+
+/// The services whose `alias/aws/<service>` alias every account lists before
+/// the service first uses it (without a `TargetKeyId`).
+pub fn predefined() -> impl Iterator<Item = &'static str> {
+    catalog().predefined.iter().map(String::as_str)
+}
 
 /// The `kms:ViaService` value of a request a service (identified by its
 /// service principal, `s3.amazonaws.com`) makes to KMS in `region` on a
@@ -46,257 +91,34 @@ pub fn via_service(service_principal: &str, region: &str) -> String {
     )
 }
 
-/// The endpoint prefix of the service an `aws/<service>` key belongs to: the
-/// one in its policy's `kms:ViaService`. Recorded: `aws/ebs` is used through
-/// EC2 (`ec2.<region>.amazonaws.com`).
-fn endpoint_prefix(service: &str) -> &str {
-    match service {
-        "ebs" => "ec2",
-        other => other,
-    }
-}
-
-/// The description AWS gives the AWS-managed key behind `alias/aws/<service>`
-/// (recorded for the services in the fixtures; other services keep the
-/// generic form).
-pub(crate) fn key_description(service: &str) -> String {
-    let recorded = match service {
-        "acm" => Some("my ACM private keys"),
-        "ebs" => Some("my EBS volumes"),
-        "lambda" => Some("my Lambda functions"),
-        "s3" => Some("my S3 objects"),
-        "secretsmanager" => Some("my Secrets Manager data"),
-        _ => None,
-    };
-    match recorded {
-        Some(what) => format!("Default key that protects {what} when no other key is defined"),
-        None => {
-            format!("Default master key that protects aws/{service} when no other key is defined")
-        }
-    }
-}
-
-/// The name a policy `Sid` uses for a service ("Allow access through <name>
-/// for all principals in the account that are authorized to use <name>").
-/// Recorded for S3, EBS, AWS Lambda and AWS Secrets Manager; the others are
-/// the service's short product name.
-fn display_name(service: &str) -> String {
-    let name = match service {
-        "s3" => "S3",
-        "ebs" => "EBS",
-        "lambda" => "AWS Lambda",
-        "secretsmanager" => "AWS Secrets Manager",
-        "dynamodb" => "Amazon DynamoDB",
-        "sqs" => "Amazon SQS",
-        "sns" => "Amazon SNS",
-        "ssm" => "AWS Systems Manager",
-        "rds" => "Amazon RDS",
-        "kinesis" => "Amazon Kinesis",
-        "logs" => "Amazon CloudWatch Logs",
-        "glue" => "AWS Glue",
-        "elasticache" => "Amazon ElastiCache",
-        "backup" => "AWS Backup",
-        "es" => "Amazon OpenSearch Service",
-        "redshift" => "Amazon Redshift",
-        "xray" => "AWS X-Ray",
-        "elasticfilesystem" => "Amazon EFS",
-        "cloudtrail" => "AWS CloudTrail",
-        "sagemaker" => "Amazon SageMaker",
-        other => return other.to_string(),
-    };
-    name.to_string()
+/// The description AWS gives the AWS-managed key behind `alias/aws/<service>`.
+pub(crate) fn key_description(service: &str) -> Option<String> {
+    catalog().keys.get(service).map(|k| k.description.clone())
 }
 
 /// The key policy of the AWS-managed key behind `alias/aws/<service>` in
-/// `account` and `region`. ACM, EBS, Lambda, S3 and Secrets Manager are the
-/// policies recorded from AWS; every other service gets the recorded EBS /
-/// Lambda template (cryptographic use through the service, metadata access
-/// for the account) with its own name and `kms:ViaService`.
-pub(crate) fn key_policy(service: &str, account: &str, region: &str) -> String {
+/// `account` and `region`: AWS's recorded text with the account, region and
+/// partition substituted (and the partition's DNS suffix in the
+/// `kms:ViaService` endpoints).
+pub(crate) fn key_policy(service: &str, account: &str, region: &str) -> Option<String> {
+    let cat = catalog();
+    let text = &cat.keys.get(service)?.policy;
     let partition = fakecloud_aws::arn::partition_for(region);
-    let root = format!("arn:{partition}:iam::{account}:root");
-    let via = via_service(endpoint_prefix(service), region);
-    let through_service = |actions: Value| {
-        let name = display_name(service);
-        json!({
-            "Sid": format!("Allow access through {name} for all principals in the account that are authorized to use {name}"),
-            "Effect": "Allow",
-            "Principal": {"AWS": "*"},
-            "Action": actions,
-            "Resource": "*",
-            "Condition": {"StringEquals": {
-                "kms:CallerAccount": account,
-                "kms:ViaService": via,
-            }}
-        })
-    };
-    let metadata = |actions: Value| {
-        json!({
-            "Sid": "Allow direct access to key metadata to the account",
-            "Effect": "Allow",
-            "Principal": {"AWS": root},
-            "Action": actions,
-            "Resource": "*"
-        })
-    };
-    let full_metadata = json!(["kms:Describe*", "kms:Get*", "kms:List*", "kms:RevokeGrant"]);
-    let policy = match service {
-        "lambda" => lambda_policy(account, region, &root, &via, full_metadata),
-        "acm" => acm_policy(account, &via),
-        "s3" => json!({
-            "Version": "2012-10-17",
-            "Id": "auto-s3-2",
-            "Statement": [
-                through_service(json!(["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"])),
-                metadata(json!(["kms:Describe*", "kms:Get*", "kms:List*"])),
-            ]
-        }),
-        "secretsmanager" => {
-            let name = display_name(service);
-            let suffix = fakecloud_aws::endpoint::dns_suffix_for_region(region);
-            json!({
-                "Version": "2012-10-17",
-                "Id": "auto-secretsmanager-2",
-                "Statement": [
-                    through_service(json!(["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:CreateGrant", "kms:DescribeKey"])),
-                    {
-                        "Sid": format!("Allow access through {name} for all principals in the account that are authorized to use {name}"),
-                        "Effect": "Allow",
-                        "Principal": {"AWS": "*"},
-                        "Action": "kms:GenerateDataKey*",
-                        "Resource": "*",
-                        "Condition": {
-                            "StringEquals": {"kms:CallerAccount": account},
-                            "StringLike": {"kms:ViaService": format!("secretsmanager.*.{suffix}")}
-                        }
-                    },
-                    metadata(full_metadata),
-                ]
-            })
-        }
-        // `ebs` is recorded with exactly this template (`auto-ebs-2`).
-        _ => json!({
-            "Version": "2012-10-17",
-            "Id": format!("auto-{service}-2"),
-            "Statement": [
-                through_service(json!(["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:CreateGrant", "kms:DescribeKey"])),
-                metadata(full_metadata),
-            ]
-        }),
-    };
-    policy.to_string()
-}
-
-/// The recorded `aws/lambda` key policy: account principals use it through
-/// Lambda, may decrypt their functions' ciphertexts directly, and the Lambda
-/// service principal may only derive data keys for the account's functions.
-fn lambda_policy(account: &str, region: &str, root: &str, via: &str, metadata: Value) -> Value {
-    let functions = format!("arn:*:lambda:{region}:{account}:function:*");
-    let services = json!([
-        format!("lambda.{region}.amazonaws.com"),
-        "lambda.amazonaws.com"
-    ]);
-    json!({
-        "Version": "2012-10-17",
-        "Id": "auto-awslambda-3",
-        "Statement": [
-            {
-                "Sid": "Allow access through AWS Lambda for all principals in the account that are authorized to use AWS Lambda",
-                "Effect": "Allow",
-                "Principal": {"AWS": "*"},
-                "Action": ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:CreateGrant", "kms:DescribeKey"],
-                "Resource": "*",
-                "Condition": {"StringEquals": {
-                    "kms:ViaService": via,
-                    "kms:CallerAccount": account,
-                }}
-            },
-            {
-                "Sid": "Allow all principals in the account to decrypt ciphertexts for Lambda functions in the account",
-                "Effect": "Allow",
-                "Principal": {"AWS": "*"},
-                "Action": "kms:Decrypt",
-                "Resource": "*",
-                "Condition": {
-                    "StringEquals": {"kms:CallerAccount": account},
-                    "ArnLike": {"kms:EncryptionContext:aws:lambda:FunctionArn": functions}
-                }
-            },
-            {
-                "Sid": "Allow Lambda service access",
-                "Effect": "Allow",
-                "Principal": {"Service": services},
-                "Action": "kms:GenerateDataKey",
-                "Resource": "*",
-                "Condition": {"ArnLike": {"kms:EncryptionContext:aws:lambda:FunctionArn": functions}}
-            },
-            {
-                "Sid": "Allow Lambda to directly describe the key and list its grants",
-                "Effect": "Allow",
-                "Principal": {"Service": services},
-                "Action": ["kms:Describe*", "kms:Get*", "kms:List*"],
-                "Resource": "*"
-            },
-            {
-                "Sid": "Allow direct access to key metadata to the account",
-                "Effect": "Allow",
-                "Principal": {"AWS": root},
-                "Action": metadata,
-                "Resource": "*"
+    let suffix = fakecloud_aws::endpoint::dns_suffix_for_region(region);
+    let lines: Vec<String> = text
+        .split('\n')
+        .map(|line| {
+            let mut line = line
+                .replace(&cat.recorded_account, account)
+                .replace(&cat.recorded_region, region)
+                .replace("\"arn:aws:", &format!("\"arn:{partition}:"));
+            if line.contains("\"kms:ViaService\"") && suffix != "amazonaws.com" {
+                line = line.replace(".amazonaws.com\"", &format!(".{suffix}\""));
             }
-        ]
-    })
-}
-
-/// The recorded `aws/acm` key policy: ACM only creates grants and decrypts
-/// through itself, and re-encryption to another key is denied.
-fn acm_policy(account: &str, via: &str) -> Value {
-    let grant = |sid: &str, operations: Value| {
-        json!({
-            "Sid": sid,
-            "Effect": "Allow",
-            "Principal": {"AWS": "*"},
-            "Action": "kms:CreateGrant",
-            "Resource": "*",
-            "Condition": {
-                "StringEquals": {"kms:ViaService": via, "kms:CallerAccount": account},
-                "ForAllValues:StringEquals": {"kms:GrantOperations": operations},
-                "Bool": {"kms:GrantIsForAWSResource": "true"}
-            }
+            line
         })
-    };
-    json!({
-        "Version": "2012-10-17",
-        "Id": "auto-acm-4",
-        "Statement": [
-            grant("Allow creation of decryption grants", json!("Decrypt")),
-            grant("Allow creation of encryption grant", json!(["Encrypt", "ReEncryptFrom", "ReEncryptTo"])),
-            {
-                "Sid": "Allowed operations for the key owner",
-                "Effect": "Allow",
-                "Principal": {"AWS": "*"},
-                "Action": ["kms:DescribeKey", "kms:ListGrants", "kms:RevokeGrant", "kms:GetKeyPolicy"],
-                "Resource": "*",
-                "Condition": {"StringEquals": {"kms:CallerAccount": account}}
-            },
-            {
-                "Sid": "Deny re-encryption to any other key",
-                "Effect": "Deny",
-                "Principal": {"AWS": "*"},
-                "Action": "kms:ReEncrypt*",
-                "Resource": "*",
-                "Condition": {"Bool": {"kms:ReEncryptOnSameKey": "false"}}
-            },
-            {
-                "Sid": "Allow decrypt",
-                "Effect": "Allow",
-                "Principal": {"AWS": "*"},
-                "Action": "kms:Decrypt",
-                "Resource": "*",
-                "Condition": {"StringEquals": {"kms:ViaService": via, "kms:CallerAccount": account}}
-            }
-        ]
-    })
+        .collect();
+    Some(lines.join("\n"))
 }
 
 /// The `aws/<service>` an AWS-managed alias names (`alias/aws/s3` -> `s3`).
@@ -336,6 +158,19 @@ pub(crate) enum KeyCaller<'a> {
         region: &'a str,
         account: &'a str,
     },
+    /// A service principal acting itself (SES writing received mail to S3)
+    /// for its resource `source_arn` owned by `source_account`. Only a
+    /// `"Service"` principal statement can match it. AWS-managed key
+    /// policies name SES by its regional principal
+    /// (`ses.us-east-1.amazonaws.com`) while SES documents customer key
+    /// policies with the global one (`ses.amazonaws.com`); the service's own
+    /// call satisfies either, so both forms are tried.
+    Service {
+        service_principal: &'a str,
+        region: &'a str,
+        source_arn: &'a str,
+        source_account: &'a str,
+    },
 }
 
 /// The principal of a request that carries no resolved identity: the
@@ -352,9 +187,9 @@ pub(crate) fn account_root(account: &str, region: &str) -> Principal {
     }
 }
 
-/// Whether the key policy `policy` of the AWS-managed key `key_arn` lets
-/// `caller` perform `action` (`kms:Encrypt`, ...) with `encryption_context`.
-/// `extra` carries operation-specific keys (`kms:ReEncryptOnSameKey`).
+/// Whether the key policy `policy` of the key `key_arn` lets `caller`
+/// perform `action` (`kms:Encrypt`, ...) with `encryption_context`. `extra`
+/// carries operation-specific keys (`kms:ReEncryptOnSameKey`).
 pub(crate) fn policy_allows(
     policy: &str,
     key_arn: &str,
@@ -364,8 +199,11 @@ pub(crate) fn policy_allows(
     extra: &[(&str, &str)],
 ) -> bool {
     let mut keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let (principal, account) = match caller {
-        KeyCaller::Direct { principal, account } => ((*principal).clone(), *account),
+    let principals: Vec<Principal> = match caller {
+        KeyCaller::Direct { principal, account } => {
+            keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
+            vec![(*principal).clone()]
+        }
         KeyCaller::ViaService {
             service_principal,
             region,
@@ -375,10 +213,46 @@ pub(crate) fn policy_allows(
                 "kms:ViaService".to_string(),
                 vec![via_service(service_principal, region)],
             );
-            (account_root(account, region), *account)
+            keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
+            vec![account_root(account, region)]
+        }
+        KeyCaller::Service {
+            service_principal,
+            region,
+            source_arn,
+            source_account,
+        } => {
+            let internal = InternalCaller::Service {
+                service: service_principal.to_string(),
+                source_arn: source_arn.to_string(),
+                source_account: source_account.to_string(),
+            };
+            keys.extend(internal.condition_keys());
+            let name = service_principal.split('.').next().unwrap_or_default();
+            let suffix = fakecloud_aws::endpoint::dns_suffix_for_region(region);
+            let mut forms = vec![service_principal.to_string()];
+            for alt in [
+                format!("{name}.{region}.amazonaws.com"),
+                format!("{name}.amazonaws.com"),
+                format!("{name}.{region}.{suffix}"),
+            ] {
+                if !forms.contains(&alt) {
+                    forms.push(alt);
+                }
+            }
+            forms
+                .into_iter()
+                .map(|service| {
+                    InternalCaller::Service {
+                        service,
+                        source_arn: source_arn.to_string(),
+                        source_account: source_account.to_string(),
+                    }
+                    .principal()
+                })
+                .collect()
         }
     };
-    keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
     for (k, v) in encryption_context {
         keys.insert(format!("kms:EncryptionContext:{k}"), vec![v.clone()]);
     }
@@ -389,16 +263,19 @@ pub(crate) fn policy_allows(
     for (k, v) in extra {
         keys.insert((*k).to_string(), vec![(*v).to_string()]);
     }
-    let request = EvalRequest {
-        principal: &principal,
-        action: action.to_string(),
-        resource: key_arn.to_string(),
-        context: RequestContext {
-            service_keys: keys,
-            ..Default::default()
-        },
-    };
-    evaluate_resource_policy_only(&PolicyDocument::parse(policy), &request).is_allow()
+    let document = PolicyDocument::parse(policy);
+    principals.iter().any(|principal| {
+        let request = EvalRequest {
+            principal,
+            action: action.to_string(),
+            resource: key_arn.to_string(),
+            context: RequestContext {
+                service_keys: keys.clone(),
+                ..Default::default()
+            },
+        };
+        evaluate_resource_policy_only(&document, &request).is_allow()
+    })
 }
 
 #[cfg(test)]
@@ -406,44 +283,67 @@ mod tests {
     use super::*;
 
     const ACCOUNT: &str = "123456789012";
-    const RECORDED: &[&str] = &["acm", "ebs", "lambda", "s3", "secretsmanager"];
 
-    fn fixture(service: &str) -> Value {
-        let path = format!(
-            "{}/tests/fixtures/aws-managed-keys/{service}.json",
+    fn fixtures() -> Vec<(String, Value)> {
+        let dir = format!(
+            "{}/tests/fixtures/aws-managed-keys",
             env!("CARGO_MANIFEST_DIR")
         );
-        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-    }
-
-    /// Statement order matters (it is what GetKeyPolicy returns); key order
-    /// inside JSON objects and the order of a Service principal list do not.
-    fn normalize(mut v: Value) -> Value {
-        for st in v["Statement"].as_array_mut().unwrap() {
-            if let Some(list) = st["Principal"]["Service"].as_array_mut() {
-                list.sort_by_key(|s| s.as_str().unwrap_or_default().to_string());
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let rec: Value = match std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+            {
+                Some(v) => v,
+                None => continue,
+            };
+            if let Some(alias) = rec["alias"].as_str() {
+                out.push((alias.trim_start_matches("alias/aws/").to_string(), rec));
             }
         }
-        v
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// The vendored catalog reproduces every recording byte for byte.
+    #[test]
+    fn catalog_matches_every_recording() {
+        let recorded = fixtures();
+        assert_eq!(recorded.len(), 26);
+        for (service, rec) in &recorded {
+            assert_eq!(
+                key_policy(service, ACCOUNT, "us-east-1").as_deref(),
+                rec["get_key_policy"]["Policy"].as_str(),
+                "aws/{service}"
+            );
+            assert_eq!(
+                key_description(service).as_deref(),
+                rec["describe_key"]["Description"].as_str(),
+                "aws/{service}"
+            );
+        }
+        assert_eq!(catalog().keys.len(), recorded.len());
+        // Recorded: no AWS-managed key exists for these.
+        for absent in ["logs", "cloudtrail", "sagemaker", "nosuchservice"] {
+            assert!(!is_aws_managed_service(absent), "{absent}");
+        }
+        assert!(predefined().all(is_aws_managed_service));
     }
 
     #[test]
-    fn recorded_policies_match_the_fixtures() {
-        for service in RECORDED {
-            let recorded = fixture(service);
-            let ours: Value =
-                serde_json::from_str(&key_policy(service, ACCOUNT, "us-east-1")).unwrap();
-            assert_eq!(
-                normalize(ours),
-                normalize(recorded["policy"].clone()),
-                "aws/{service}"
-            );
-            assert_eq!(
-                key_description(service),
-                recorded["describe_key"]["Description"],
-                "aws/{service}"
-            );
-        }
+    fn policies_take_the_account_region_and_partition() {
+        let p = key_policy("s3", "111122223333", "cn-north-1").unwrap();
+        assert!(
+            p.contains("\"kms:ViaService\" : \"s3.cn-north-1.amazonaws.com.cn\""),
+            "{p}"
+        );
+        assert!(p.contains("\"arn:aws-cn:iam::111122223333:root\""), "{p}");
+        assert!(!p.contains(ACCOUNT) && !p.contains("us-east-1"), "{p}");
+        let p = key_policy("dynamodb", "111122223333", "eu-west-1").unwrap();
+        assert!(p.contains("\"dynamodb.*.amazonaws.com\""), "{p}");
+        assert_eq!(key_policy("logs", ACCOUNT, "us-east-1"), None);
     }
 
     #[test]
@@ -462,28 +362,35 @@ mod tests {
         format!("arn:aws:kms:us-east-1:{ACCOUNT}:key/{service}")
     }
 
-    fn direct_allows(service: &str, action: &str, ctx: &[(&str, &str)]) -> bool {
-        let principal = account_root(ACCOUNT, "us-east-1");
-        let ctx = ctx
+    fn policy(service: &str) -> String {
+        key_policy(service, ACCOUNT, "us-east-1").unwrap()
+    }
+
+    fn ctx(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+            .collect()
+    }
+
+    fn direct_allows(service: &str, action: &str, c: &[(&str, &str)]) -> bool {
+        let principal = account_root(ACCOUNT, "us-east-1");
         policy_allows(
-            &key_policy(service, ACCOUNT, "us-east-1"),
+            &policy(service),
             &arn(service),
             &KeyCaller::Direct {
                 principal: &principal,
                 account: ACCOUNT,
             },
             action,
-            &ctx,
+            &ctx(c),
             &[],
         )
     }
 
     fn via_allows(service: &str, via: &str, account: &str, action: &str) -> bool {
         policy_allows(
-            &key_policy(service, ACCOUNT, "us-east-1"),
+            &policy(service),
             &arn(service),
             &KeyCaller::ViaService {
                 service_principal: via,
@@ -500,19 +407,23 @@ mod tests {
     /// metadata stays readable.
     #[test]
     fn direct_crypto_is_refused_and_metadata_allowed() {
-        for service in ["s3", "secretsmanager", "ebs", "lambda", "sqs", "dynamodb"] {
+        for (service, _) in fixtures() {
             for action in [
                 "kms:Encrypt",
-                "kms:Decrypt",
                 "kms:GenerateDataKey",
                 "kms:GenerateDataKeyWithoutPlaintext",
-                "kms:ReEncryptFrom",
                 "kms:ReEncryptTo",
             ] {
-                assert!(!direct_allows(service, action, &[]), "{service} {action}");
+                assert!(!direct_allows(&service, action, &[]), "{service} {action}");
             }
-            assert!(direct_allows(service, "kms:DescribeKey", &[]), "{service}");
-            assert!(direct_allows(service, "kms:GetKeyPolicy", &[]), "{service}");
+            assert!(direct_allows(&service, "kms:DescribeKey", &[]), "{service}");
+            // SES lets the account decrypt (and re-encrypt from) the mail it
+            // sealed; every other key refuses a direct Decrypt.
+            assert_eq!(
+                direct_allows(&service, "kms:Decrypt", &[]),
+                service == "ses",
+                "{service}"
+            );
         }
     }
 
@@ -521,9 +432,9 @@ mod tests {
     #[test]
     fn lambda_key_decrypts_function_ciphertexts_directly() {
         let fn_arn = format!("arn:aws:lambda:us-east-1:{ACCOUNT}:function:f");
-        let ctx = [("aws:lambda:FunctionArn", fn_arn.as_str())];
-        assert!(direct_allows("lambda", "kms:Decrypt", &ctx));
-        assert!(!direct_allows("lambda", "kms:Encrypt", &ctx));
+        let c = [("aws:lambda:FunctionArn", fn_arn.as_str())];
+        assert!(direct_allows("lambda", "kms:Decrypt", &c));
+        assert!(!direct_allows("lambda", "kms:Encrypt", &c));
         let other = [(
             "aws:lambda:FunctionArn",
             "arn:aws:lambda:us-east-1:999999999999:function:f",
@@ -555,6 +466,18 @@ mod tests {
             "kms:GenerateDataKey"
         ));
         assert!(via_allows(
+            "dynamodb",
+            "dynamodb.amazonaws.com",
+            ACCOUNT,
+            "kms:CreateGrant"
+        ));
+        assert!(via_allows(
+            "ssm",
+            "ssm.amazonaws.com",
+            ACCOUNT,
+            "kms:Encrypt"
+        ));
+        assert!(via_allows(
             "secretsmanager",
             "secretsmanager.amazonaws.com",
             ACCOUNT,
@@ -572,6 +495,19 @@ mod tests {
             "999999999999",
             "kms:Decrypt"
         ));
+        // SNS's key never lets SNS encrypt directly, only derive data keys.
+        assert!(!via_allows(
+            "sns",
+            "sns.amazonaws.com",
+            ACCOUNT,
+            "kms:Encrypt"
+        ));
+        assert!(via_allows(
+            "sns",
+            "sns.amazonaws.com",
+            ACCOUNT,
+            "kms:GenerateDataKey"
+        ));
         // ACM only decrypts through itself; it never encrypts directly.
         assert!(via_allows(
             "acm",
@@ -584,6 +520,64 @@ mod tests {
             "acm.amazonaws.com",
             ACCOUNT,
             "kms:Encrypt"
+        ));
+        // SES's key is used by SES as a service principal, never via SES.
+        assert!(!via_allows(
+            "ses",
+            "ses.amazonaws.com",
+            ACCOUNT,
+            "kms:GenerateDataKey"
+        ));
+    }
+
+    /// SES seals received mail under `aws/ses` as its regional service
+    /// principal, with the source account, rule name and message id in the
+    /// encryption context (all three required by the recorded policy).
+    #[test]
+    fn ses_seals_mail_as_its_service_principal() {
+        let rule = format!("arn:aws:ses:us-east-1:{ACCOUNT}:receipt-rule-set/s:receipt-rule/r");
+        let caller = KeyCaller::Service {
+            service_principal: "ses.amazonaws.com",
+            region: "us-east-1",
+            source_arn: &rule,
+            source_account: ACCOUNT,
+        };
+        let full = ctx(&[
+            ("aws:ses:source-account", ACCOUNT),
+            ("aws:ses:rule-name", "r"),
+            ("aws:ses:message-id", "m"),
+        ]);
+        let allows = |c: &BTreeMap<String, String>| {
+            policy_allows(
+                &policy("ses"),
+                &arn("ses"),
+                &caller,
+                "kms:GenerateDataKey",
+                c,
+                &[],
+            )
+        };
+        assert!(allows(&full));
+        let mut missing = full.clone();
+        missing.remove("aws:ses:message-id");
+        assert!(!allows(&missing));
+        let mut other = full.clone();
+        other.insert("aws:ses:source-account".into(), "999999999999".into());
+        assert!(!allows(&other));
+        // Another service principal is not SES.
+        let sns = KeyCaller::Service {
+            service_principal: "sns.amazonaws.com",
+            region: "us-east-1",
+            source_arn: &rule,
+            source_account: ACCOUNT,
+        };
+        assert!(!policy_allows(
+            &policy("ses"),
+            &arn("ses"),
+            &sns,
+            "kms:GenerateDataKey",
+            &full,
+            &[]
         ));
     }
 }

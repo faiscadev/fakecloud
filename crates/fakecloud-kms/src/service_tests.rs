@@ -1,4 +1,5 @@
 use super::*;
+use fakecloud_core::delivery::KmsCaller;
 use parking_lot::RwLock;
 use serde_json::json;
 use std::collections::HashMap;
@@ -3355,37 +3356,111 @@ fn asymmetric_decrypt_wrong_algorithm_is_rejected() {
     assert_eq!(decrypted, b"asymmetric hello");
 }
 
-#[test]
-fn list_aliases_includes_aws_managed_service_aliases() {
-    // Real AWS pre-creates `alias/aws/<service>` in every account/region, so
-    // ListAliases returns them even before any KMS operation has run — and
-    // `data.aws_kms_alias` (used by several service acceptance tests) relies
-    // on that. A fresh service with no user aliases must still list them.
+/// Recorded (list-aliases-before.json / unmaterialized.txt): every account
+/// lists the predefined AWS-managed aliases before their service first uses
+/// them, with no `TargetKeyId`; an alias of another AWS service
+/// (`alias/aws/sns`) is not listed until its key exists. Using the alias
+/// directly (DescribeKey, Encrypt) creates the key, which the alias then
+/// targets; a name AWS has no AWS-managed key for stays not found.
+#[tokio::test]
+async fn aws_managed_aliases_exist_from_first_use() {
     let svc = make_service();
-    let resp = svc
-        .list_aliases(&make_request("ListAliases", json!({})))
-        .unwrap();
-    let body = body_json(resp);
-    let names: Vec<&str> = body["Aliases"]
-        .as_array()
-        .unwrap()
+    let list = |svc: &KmsService| {
+        body_json(
+            svc.list_aliases(&make_request("ListAliases", json!({})))
+                .unwrap(),
+        )["Aliases"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let aliases = list(&svc);
+    let names: Vec<&str> = aliases
         .iter()
         .filter_map(|a| a["AliasName"].as_str())
         .collect();
-    for expected in ["alias/aws/dynamodb", "alias/aws/s3", "alias/aws/sqs"] {
-        assert!(
-            names.contains(&expected),
-            "ListAliases should include {expected}, got {names:?}"
-        );
+    assert_eq!(
+        names,
+        [
+            "alias/aws/dynamodb",
+            "alias/aws/ebs",
+            "alias/aws/elasticfilesystem",
+            "alias/aws/es",
+            "alias/aws/glue",
+            "alias/aws/kinesisvideo",
+            "alias/aws/rds",
+            "alias/aws/redshift",
+            "alias/aws/s3",
+            "alias/aws/ssm",
+            "alias/aws/xray",
+        ]
+    );
+    for alias in &aliases {
+        let mut fields: Vec<_> = alias.as_object().unwrap().keys().collect();
+        fields.sort();
+        assert_eq!(fields, ["AliasArn", "AliasName"], "{alias}");
     }
-    // Every managed alias must point at a key that actually resolves.
-    let ddb = body["Aliases"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["AliasName"] == "alias/aws/dynamodb")
+    assert!(svc
+        .state
+        .read()
+        .get("123456789012")
+        .is_none_or(|s| s.keys.is_empty()));
+
+    // Encrypt on a listed alias creates its key, then refuses the call.
+    let err = svc
+        .handle(make_request(
+            "Encrypt",
+            json!({"KeyId": "alias/aws/dynamodb", "Plaintext": "aGVsbG8="}),
+        ))
+        .await
+        .err()
         .unwrap();
-    assert!(ddb["TargetKeyId"].as_str().is_some_and(|t| !t.is_empty()));
+    assert_eq!(err.code(), "AccessDeniedException");
+    // DescribeKey on an unlisted alias of an AWS service creates it too.
+    let sns = body_json(
+        svc.handle(make_request(
+            "DescribeKey",
+            json!({"KeyId": "alias/aws/sns"}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert_eq!(sns["KeyMetadata"]["KeyManager"], "AWS");
+    assert_eq!(
+        sns["KeyMetadata"]["Description"],
+        "Default key that protects my SNS data when no other key is defined"
+    );
+    let aliases = list(&svc);
+    let target = |name: &str| {
+        aliases
+            .iter()
+            .find(|a| a["AliasName"] == name)
+            .and_then(|a| a["TargetKeyId"].as_str())
+            .map(str::to_string)
+    };
+    assert!(target("alias/aws/dynamodb").is_some());
+    assert_eq!(
+        target("alias/aws/sns").as_deref(),
+        sns["KeyMetadata"]["KeyId"].as_str()
+    );
+    assert_eq!(target("alias/aws/rds"), None);
+
+    for name in ["alias/aws/logs", "alias/aws/nosuchservice"] {
+        for (action, body) in [
+            ("DescribeKey", json!({"KeyId": name})),
+            ("Encrypt", json!({"KeyId": name, "Plaintext": "aGVsbG8="})),
+        ] {
+            let err = svc.handle(make_request(action, body)).await.err().unwrap();
+            assert_eq!(
+                (err.code(), err.message()),
+                (
+                    "NotFoundException",
+                    format!("Alias arn:aws:kms:us-east-1:123456789012:{name} is not found.")
+                ),
+                "{action} {name}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -4450,19 +4525,7 @@ fn key_usage_source_counts_customer_keys_per_region() {
 #[tokio::test]
 async fn aws_managed_keys_refuse_key_management() {
     let svc = make_service();
-    let aliases = body_json(
-        svc.list_aliases(&make_request("ListAliases", json!({})))
-            .unwrap(),
-    );
-    let target = aliases["Aliases"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["AliasName"] == "alias/aws/lambda")
-        .unwrap()["TargetKeyId"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let target = aws_managed_target(&svc, "lambda").await;
     let arn = format!("arn:aws:kms:us-east-1:123456789012:key/{target}");
     let policy_before = body_json(
         svc.handle(make_request("GetKeyPolicy", json!({"KeyId": target})))
@@ -4556,17 +4619,18 @@ async fn aws_managed_keys_refuse_key_management() {
 }
 
 /// The key id the `alias/aws/<service>` alias of `svc` targets in us-east-1.
-fn aws_managed_target(svc: &KmsService, service: &str) -> String {
-    let aliases = body_json(
-        svc.list_aliases(&make_request("ListAliases", json!({})))
-            .unwrap(),
+/// The key id behind `alias/aws/<service>` in us-east-1: DescribeKey on
+/// the alias creates the key on first use, as AWS does.
+async fn aws_managed_target(svc: &KmsService, service: &str) -> String {
+    let described = body_json(
+        svc.handle(make_request(
+            "DescribeKey",
+            json!({"KeyId": format!("alias/aws/{service}")}),
+        ))
+        .await
+        .unwrap(),
     );
-    aliases["Aliases"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["AliasName"] == format!("alias/aws/{service}"))
-        .unwrap()["TargetKeyId"]
+    described["KeyMetadata"]["KeyId"]
         .as_str()
         .unwrap()
         .to_string()
@@ -4594,7 +4658,7 @@ async fn aws_managed_keys_refuse_direct_crypto() {
     let svc = make_service();
     let root = "arn:aws:iam::123456789012:root";
     for service in ["s3", "secretsmanager", "ebs", "sqs", "lambda"] {
-        let target = aws_managed_target(&svc, service);
+        let target = aws_managed_target(&svc, service).await;
         let arn = format!("arn:aws:kms:us-east-1:123456789012:key/{target}");
         let alias = format!("alias/aws/{service}");
         for (action, body) in [
@@ -4639,11 +4703,11 @@ async fn aws_managed_key_ciphertexts_stay_with_their_service() {
             "us-east-1",
             "alias/aws/s3",
             b"object",
-            "s3.amazonaws.com",
+            KmsCaller::via("s3.amazonaws.com"),
             HashMap::new(),
         )
         .unwrap();
-    let target = aws_managed_target(&svc, "s3");
+    let target = aws_managed_target(&svc, "s3").await;
     let s3_arn = format!("arn:aws:kms:us-east-1:123456789012:key/{target}");
     let root = "arn:aws:iam::123456789012:root";
     let err = svc
@@ -4698,16 +4762,20 @@ async fn aws_managed_key_ciphertexts_stay_with_their_service() {
 async fn aws_lambda_key_decrypts_function_ciphertexts_directly() {
     let svc = make_service();
     let function = "arn:aws:lambda:us-east-1:123456789012:function:f";
-    let target = aws_managed_target(&svc, "lambda");
-    // A ciphertext Lambda sealed under the key, bound to the function.
-    let ct = {
-        let accounts = svc.state.read();
-        let state = accounts.get("123456789012").unwrap();
-        let aad =
-            canonical_encryption_context(&json!({"aws:lambda:FunctionArn": function})).unwrap();
-        let blob = crate::blob::encode_with_context(&state.master_key_bytes, &target, b"env", &aad);
-        base64::engine::general_purpose::STANDARD.encode(blob)
-    };
+    let target = aws_managed_target(&svc, "lambda").await;
+    // Lambda seals a value for the function through the KMS hook, bound to
+    // the function's ARN as its encryption context.
+    let hook = crate::hook::KmsServiceHook::new(svc.state.clone(), Default::default());
+    let ct = hook
+        .encrypt(
+            "123456789012",
+            "us-east-1",
+            "alias/aws/lambda",
+            b"env",
+            KmsCaller::via("lambda.amazonaws.com"),
+            [("aws:lambda:FunctionArn".to_string(), function.to_string())].into(),
+        )
+        .unwrap();
     let out = body_json(
         svc.handle(make_request(
             "Decrypt",
@@ -4752,7 +4820,7 @@ async fn aws_lambda_key_decrypts_function_ciphertexts_directly() {
 async fn aws_managed_key_policies_are_the_recorded_ones() {
     let svc = make_service();
     for service in ["s3", "secretsmanager", "ebs", "lambda", "dynamodb"] {
-        let target = aws_managed_target(&svc, service);
+        let target = aws_managed_target(&svc, service).await;
         let policy = body_json(
             svc.handle(make_request(
                 "GetKeyPolicy",
@@ -4766,14 +4834,18 @@ async fn aws_managed_key_policies_are_the_recorded_ones() {
             .to_string();
         assert_eq!(
             policy,
-            crate::aws_managed::key_policy(service, "123456789012", "us-east-1")
+            crate::aws_managed::key_policy(service, "123456789012", "us-east-1").unwrap()
         );
-        let doc: Value = serde_json::from_str(&policy).unwrap();
-        let via = if service == "ebs" { "ec2" } else { service };
-        assert_eq!(
-            doc["Statement"][0]["Condition"]["StringEquals"]["kms:ViaService"],
-            format!("{via}.us-east-1.amazonaws.com"),
-            "{service}"
+        let via = match service {
+            "ebs" => "\"ec2.us-east-1.amazonaws.com\"",
+            "dynamodb" => "\"dynamodb.*.amazonaws.com\"",
+            "secretsmanager" => "\"secretsmanager.us-east-1.amazonaws.com\"",
+            "s3" => "\"s3.us-east-1.amazonaws.com\"",
+            _ => "\"lambda.us-east-1.amazonaws.com\"",
+        };
+        assert!(
+            policy.contains(&format!("\"kms:ViaService\" : {via}")),
+            "{service}: {policy}"
         );
     }
 }

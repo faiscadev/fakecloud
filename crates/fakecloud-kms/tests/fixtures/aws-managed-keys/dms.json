@@ -1,0 +1,25 @@
+{
+  "alias": "alias/aws/dms",
+  "describe_key": {
+    "AWSAccountId": "123456789012",
+    "KeyId": "d59ab7dc-ac6e-4b21-bc3b-cbc61394e722",
+    "Arn": "arn:aws:kms:us-east-1:123456789012:key/d59ab7dc-ac6e-4b21-bc3b-cbc61394e722",
+    "CreationDate": "2026-11-11T03:57:40.239000-03:00",
+    "Enabled": true,
+    "Description": "Default key that protects my DMS replication instance volumes when no other key is defined",
+    "KeyUsage": "ENCRYPT_DECRYPT",
+    "KeyState": "Enabled",
+    "Origin": "AWS_KMS",
+    "KeyManager": "AWS",
+    "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+    "KeySpec": "SYMMETRIC_DEFAULT",
+    "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+    ],
+    "MultiRegion": false
+  },
+  "get_key_policy": {
+    "PolicyName": "default",
+    "Policy": "{\n  \"Version\" : \"2012-10-17\",\n  \"Id\" : \"auto-dms-1\",\n  \"Statement\" : [ {\n    \"Sid\" : \"Allow access through DMS for all principals in the account that are authorized to use DMS\",\n    \"Effect\" : \"Allow\",\n    \"Principal\" : {\n      \"AWS\" : \"*\"\n    },\n    \"Action\" : [ \"kms:Encrypt\", \"kms:Decrypt\", \"kms:ReEncrypt*\", \"kms:GenerateDataKey*\", \"kms:CreateGrant\", \"kms:ListGrants\", \"kms:DescribeKey\" ],\n    \"Resource\" : \"*\",\n    \"Condition\" : {\n      \"StringEquals\" : {\n        \"kms:ViaService\" : \"dms.us-east-1.amazonaws.com\",\n        \"kms:CallerAccount\" : \"123456789012\"\n      }\n    }\n  }, {\n    \"Sid\" : \"Allow direct access to key metadata to the account\",\n    \"Effect\" : \"Allow\",\n    \"Principal\" : {\n      \"AWS\" : \"arn:aws:iam::123456789012:root\"\n    },\n    \"Action\" : [ \"kms:Describe*\", \"kms:Get*\", \"kms:List*\", \"kms:RevokeGrant\" ],\n    \"Resource\" : \"*\"\n  } ]\n}"
+  }
+}

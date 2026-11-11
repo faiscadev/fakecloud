@@ -1,0 +1,20 @@
+== encrypt alias/aws/dynamodb (listed, no TargetKeyId)
+
+An error occurred (AccessDeniedException) when calling the Encrypt operation: User: arn:aws:iam::123456789012:user/admin is not authorized to perform: kms:Encrypt on resource: arn:aws:kms:us-east-1:123456789012:key/e889f10a-f0c3-4b96-acae-9e54fdeb5d48 because no resource-based policy allows the kms:Encrypt action. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/e631t4hxudsx7o17i6gvf3alw for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: e631t4hxudsx7o17i6gvf3alw
+[exit 254]
+== generate-data-key alias/aws/rds (listed, no TargetKeyId)
+
+An error occurred (AccessDeniedException) when calling the GenerateDataKey operation: User: arn:aws:iam::123456789012:user/admin is not authorized to perform: kms:GenerateDataKey on resource: arn:aws:kms:us-east-1:123456789012:key/52052fb2-ea66-4f42-a905-1d75768b7b9d because no resource-based policy allows the kms:GenerateDataKey action. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/ah7ssgntt4qydmfsrxtn5w7l1 for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: ah7ssgntt4qydmfsrxtn5w7l1
+[exit 254]
+== encrypt alias/aws/sns (not listed)
+
+An error occurred (AccessDeniedException) when calling the Encrypt operation: User: arn:aws:iam::123456789012:user/admin is not authorized to perform: kms:Encrypt on resource: arn:aws:kms:us-east-1:123456789012:key/e6723d34-19ac-4646-8e3e-7086ed44f6c4 because no resource-based policy allows the kms:Encrypt action. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/anaecyncil369yftvcyzqrwgk for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: anaecyncil369yftvcyzqrwgk
+[exit 254]
+== encrypt alias/aws/nosuchservice (not listed)
+
+An error occurred (NotFoundException) when calling the Encrypt operation: Alias arn:aws:kms:us-east-1:123456789012:alias/aws/nosuchservice is not found.
+[exit 254]
+== encrypt alias/nosuch (customer alias that does not exist)
+
+An error occurred (NotFoundException) when calling the Encrypt operation: Alias arn:aws:kms:us-east-1:123456789012:alias/nosuch is not found.
+[exit 254]

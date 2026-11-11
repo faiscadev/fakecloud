@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -147,14 +147,16 @@ impl SecretsManagerService {
         account_id: &str,
         region: &str,
         secret_arn: &str,
+        version_id: &str,
         kms_key_id: Option<&str>,
         plaintext: Option<String>,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, AwsServiceError> {
         encrypt_secret_string(
             self.kms_hook.as_deref(),
             account_id,
             region,
             secret_arn,
+            version_id,
             kms_key_id,
             plaintext,
         )
@@ -164,18 +166,22 @@ impl SecretsManagerService {
         &self,
         account_id: &str,
         secret_arn: &str,
+        version_id: &str,
         kms_key_id: Option<&str>,
         stored: Option<&str>,
-    ) -> Option<String> {
-        stored.map(|stored| {
-            crate::value::decrypt_secret_string(
-                self.kms_hook.as_deref(),
-                account_id,
-                secret_arn,
-                kms_key_id,
-                stored.to_string(),
-            )
-        })
+    ) -> Result<Option<String>, AwsServiceError> {
+        stored
+            .map(|stored| {
+                crate::value::decrypt_secret_string(
+                    self.kms_hook.as_deref(),
+                    account_id,
+                    secret_arn,
+                    version_id,
+                    kms_key_id,
+                    stored.to_string(),
+                )
+            })
+            .transpose()
     }
 
     /// Persist current state as a snapshot. Held across the
@@ -225,14 +231,16 @@ impl SecretsManagerService {
 
         if let Some(existing) = state.secrets.get(&input.name) {
             if let Some(ref token) = input.client_request_token {
-                let existing_plaintext = existing.versions.get(token).and_then(|v| {
-                    self.maybe_decrypt_secret_string(
+                let existing_plaintext = match existing.versions.get(token) {
+                    Some(v) => self.maybe_decrypt_secret_string(
                         &req.account_id,
                         &existing.arn,
+                        &v.version_id,
                         existing.kms_key_id.as_deref(),
                         v.secret_string.as_deref(),
-                    )
-                });
+                    )?,
+                    None => None,
+                };
                 match check_secret_version_idempotency(
                     &existing.versions,
                     token,
@@ -287,9 +295,10 @@ impl SecretsManagerService {
                 &req.account_id,
                 &req.region,
                 &arn,
+                &vid,
                 input.kms_key_id.as_deref(),
                 input.secret_string,
-            );
+            )?;
             let version = SecretVersion {
                 version_id: vid.clone(),
                 secret_string: stored_string,
@@ -463,14 +472,16 @@ impl SecretsManagerService {
             .map(|s| s.to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let existing_plaintext = secret.versions.get(&version_id).and_then(|v| {
-            self.maybe_decrypt_secret_string(
+        let existing_plaintext = match secret.versions.get(&version_id) {
+            Some(v) => self.maybe_decrypt_secret_string(
                 &req.account_id,
                 &secret.arn,
+                &v.version_id,
                 secret.kms_key_id.as_deref(),
                 v.secret_string.as_deref(),
-            )
-        });
+            )?,
+            None => None,
+        };
         match check_secret_version_idempotency(
             &secret.versions,
             &version_id,
@@ -499,6 +510,19 @@ impl SecretsManagerService {
             }
             VersionIdempotency::NotFound => {}
         }
+
+        // Seal the value before changing any stage: a KMS refusal fails the
+        // call with the secret as it was.
+        let kms_key_for_enc = secret.kms_key_id.clone();
+        let arn_for_enc = secret.arn.clone();
+        let stored_secret_string = self.maybe_encrypt_secret_string(
+            &req.account_id,
+            &req.region,
+            &arn_for_enc,
+            &version_id,
+            kms_key_for_enc.as_deref(),
+            secret_string,
+        )?;
 
         let mut version_stages: Vec<String> = body["VersionStages"]
             .as_array()
@@ -539,15 +563,6 @@ impl SecretsManagerService {
         // Remove versions with no stages
         secret.versions.retain(|_, v| !v.stages.is_empty());
 
-        let kms_key_for_enc = secret.kms_key_id.clone();
-        let arn_for_enc = secret.arn.clone();
-        let stored_secret_string = self.maybe_encrypt_secret_string(
-            &req.account_id,
-            &req.region,
-            &arn_for_enc,
-            kms_key_for_enc.as_deref(),
-            secret_string,
-        );
         let version = SecretVersion {
             version_id: version_id.clone(),
             secret_string: stored_secret_string,
@@ -603,12 +618,11 @@ impl SecretsManagerService {
             ));
         }
 
-        if let Some(desc) = body["Description"].as_str() {
-            secret.description = Some(desc.to_string());
-        }
-        if let Some(kms) = body["KmsKeyId"].as_str() {
-            secret.kms_key_id = Some(kms.to_string());
-        }
+        // A new value is sealed under the key the secret has once updated.
+        let new_kms_key_id = body["KmsKeyId"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| secret.kms_key_id.clone());
 
         // If SecretString or SecretBinary is provided, create a new version
         let secret_string = body["SecretString"].as_str().map(|s| s.to_string());
@@ -625,14 +639,16 @@ impl SecretsManagerService {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-            let existing_plaintext = secret.versions.get(&vid).and_then(|v| {
-                self.maybe_decrypt_secret_string(
+            let existing_plaintext = match secret.versions.get(&vid) {
+                Some(v) => self.maybe_decrypt_secret_string(
                     &req.account_id,
                     &secret.arn,
+                    &v.version_id,
                     secret.kms_key_id.as_deref(),
                     v.secret_string.as_deref(),
-                )
-            });
+                )?,
+                None => None,
+            };
             match check_secret_version_idempotency(
                 &secret.versions,
                 &vid,
@@ -660,6 +676,21 @@ impl SecretsManagerService {
                 VersionIdempotency::NotFound => {}
             }
 
+            // Seal the value before changing anything: a KMS refusal fails
+            // the call with the secret as it was.
+            let secret_string = self.maybe_encrypt_secret_string(
+                &req.account_id,
+                &req.region,
+                &secret.arn,
+                &vid,
+                new_kms_key_id.as_deref(),
+                secret_string,
+            )?;
+            if let Some(desc) = body["Description"].as_str() {
+                secret.description = Some(desc.to_string());
+            }
+            secret.kms_key_id = new_kms_key_id;
+
             let now = Utc::now();
 
             // Move AWSCURRENT -> AWSPREVIOUS on old version, keeping AWSPREVIOUS
@@ -684,6 +715,10 @@ impl SecretsManagerService {
             secret.versions.retain(|_, v| !v.stages.is_empty());
             Some(vid)
         } else {
+            if let Some(desc) = body["Description"].as_str() {
+                secret.description = Some(desc.to_string());
+            }
+            secret.kms_key_id = new_kms_key_id;
             secret.last_changed_at = Utc::now();
             None
         };
@@ -1734,9 +1769,10 @@ impl SecretsManagerService {
                                         .maybe_decrypt_secret_string(
                                             &req.account_id,
                                             &secret.arn,
+                                            &version.version_id,
                                             secret.kms_key_id.as_deref(),
                                             Some(s.as_str()),
-                                        )
+                                        )?
                                         .unwrap_or_else(|| s.clone());
                                     entry["SecretString"] = json!(plaintext);
                                 }
@@ -1834,9 +1870,10 @@ impl SecretsManagerService {
                                 .maybe_decrypt_secret_string(
                                     &req.account_id,
                                     &secret.arn,
+                                    &version.version_id,
                                     secret.kms_key_id.as_deref(),
                                     Some(s.as_str()),
-                                )
+                                )?
                                 .unwrap_or_else(|| s.clone());
                             entry["SecretString"] = json!(plaintext);
                         }
@@ -2635,47 +2672,43 @@ pub(crate) fn resource_policy_allows(
 mod tests;
 
 /// Encrypt a `SecretString` for storage with the secret's KMS key, when a KMS
-/// hook is wired and the secret has a key; otherwise stored as is.
+/// hook is wired and the secret has a key; otherwise stored as is. Secrets
+/// Manager binds each version to `{SecretARN, SecretVersionId}` (its
+/// documented encryption context). A KMS refusal fails the write, as on AWS
+/// (see [`crate::value::secrets_manager_kms_error`]).
 pub(crate) fn encrypt_secret_string(
     kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
     account_id: &str,
     region: &str,
     secret_arn: &str,
+    version_id: &str,
     kms_key_id: Option<&str>,
     plaintext: Option<String>,
-) -> Option<String> {
-    let pt = plaintext?;
+) -> Result<Option<String>, AwsServiceError> {
+    let Some(pt) = plaintext else {
+        return Ok(None);
+    };
     let (Some(hook), Some(key)) = (kms_hook, kms_key_id) else {
-        return Some(pt);
+        return Ok(Some(pt));
     };
     let key = if key.is_empty() {
         "aws/secretsmanager"
     } else {
         key
     };
-    let mut ctx = HashMap::new();
-    ctx.insert(
-        "aws:secretsmanager:secretArn".to_string(),
-        secret_arn.to_string(),
-    );
-    match hook.encrypt(
+    hook.encrypt(
         account_id,
         region,
         key,
         pt.as_bytes(),
-        "secretsmanager.amazonaws.com",
-        ctx,
-    ) {
-        Ok(ciphertext) => Some(ciphertext),
-        Err(err) => {
-            tracing::warn!(
-                secret_arn = %secret_arn,
-                error = %err,
-                "KMS encrypt failed for secret; storing plaintext"
-            );
-            Some(pt)
-        }
-    }
+        fakecloud_core::delivery::KmsCaller::via("secretsmanager.amazonaws.com"),
+        crate::value::secret_encryption_context(secret_arn, version_id),
+    )
+    .map(Some)
+    .map_err(|err| {
+        tracing::warn!(secret_arn = %secret_arn, error = %err, "KMS encrypt failed for secret");
+        crate::value::secrets_manager_kms_error(&err, false)
+    })
 }
 
 /// Bring every replicated secret's replicas in line with their primary (see
@@ -2753,23 +2786,38 @@ pub fn sync_replicas(
             replica.last_accessed_at = existing.last_accessed_at;
         }
         for version in replica.versions.values_mut() {
-            let plaintext = version.secret_string.take().map(|stored| {
-                crate::value::decrypt_secret_string(
-                    kms_hook,
-                    account,
-                    &primary.arn,
-                    primary.kms_key_id.as_deref(),
-                    stored,
-                )
-            });
-            version.secret_string = encrypt_secret_string(
+            // A version KMS will not re-seal for the replica (its key is
+            // refused or gone) keeps what it holds; the failure is logged.
+            let Some(stored) = version.secret_string.clone() else {
+                continue;
+            };
+            let resealed = crate::value::decrypt_secret_string(
                 kms_hook,
                 account,
-                replica_region,
-                &replica_arn,
-                setting.kms_key_id.as_deref(),
-                plaintext,
-            );
+                &primary.arn,
+                &version.version_id,
+                primary.kms_key_id.as_deref(),
+                stored,
+            )
+            .and_then(|plaintext| {
+                encrypt_secret_string(
+                    kms_hook,
+                    account,
+                    replica_region,
+                    &replica_arn,
+                    &version.version_id,
+                    setting.kms_key_id.as_deref(),
+                    Some(plaintext),
+                )
+            });
+            match resealed {
+                Ok(value) => version.secret_string = value,
+                Err(err) => tracing::warn!(
+                    secret_arn = %replica_arn,
+                    error = %err.message(),
+                    "could not re-encrypt a secret version for its replica"
+                ),
+            }
         }
         target.secrets.insert(name.to_string(), replica);
     }

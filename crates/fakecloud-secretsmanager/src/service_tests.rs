@@ -2644,18 +2644,18 @@ impl fakecloud_core::delivery::KmsHook for PrefixKmsHook {
         _region: &str,
         _key_id: &str,
         plaintext: &[u8],
-        _service_principal: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _ctx: std::collections::HashMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
         Ok(format!("ENC:{}", String::from_utf8_lossy(plaintext)))
     }
     fn decrypt(
         &self,
         _account_id: &str,
         ciphertext_b64: &str,
-        _service_principal: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _ctx: std::collections::HashMap<String, String>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
         Ok(ciphertext_b64
             .strip_prefix("ENC:")
             .unwrap_or(ciphertext_b64)

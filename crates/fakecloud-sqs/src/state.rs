@@ -47,6 +47,21 @@ pub struct SqsMessage {
     pub created_at: DateTime<Utc>,
     /// FIFO sequence number
     pub sequence_number: Option<String>,
+    /// The ARN of the queue whose SSE encryption context (`aws:sqs:arn`)
+    /// the stored body was sealed with. A message keeps its body when it
+    /// moves to a dead-letter queue or is redriven, so it is decrypted with
+    /// this context, not the current queue's. `None` for a plaintext body or
+    /// one stored before this was recorded (sealed with no context).
+    #[serde(default)]
+    pub sealed_for_queue: Option<String>,
+}
+
+impl SqsMessage {
+    /// The queue ARN whose encryption context opens the stored body, for a
+    /// message now held by `holder_arn`.
+    pub fn sealing_queue<'a>(&'a self, holder_arn: &'a str) -> &'a str {
+        self.sealed_for_queue.as_deref().unwrap_or(holder_arn)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

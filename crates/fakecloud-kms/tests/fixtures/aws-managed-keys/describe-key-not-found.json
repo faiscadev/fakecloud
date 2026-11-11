@@ -1,0 +1,5 @@
+{
+  "cloudtrail": "An error occurred (NotFoundException) when calling the DescribeKey operation: Alias arn:aws:kms:us-east-1:123456789012:alias/aws/cloudtrail is not found.",
+  "logs": "An error occurred (NotFoundException) when calling the DescribeKey operation: Alias arn:aws:kms:us-east-1:123456789012:alias/aws/logs is not found.",
+  "sagemaker": "An error occurred (NotFoundException) when calling the DescribeKey operation: Alias arn:aws:kms:us-east-1:123456789012:alias/aws/sagemaker is not found."
+}

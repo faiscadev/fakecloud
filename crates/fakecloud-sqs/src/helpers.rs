@@ -391,6 +391,8 @@ pub(crate) fn process_batch_send_entry(
         None
     };
 
+    // A pre-encrypted body is sealed with this queue's encryption context.
+    let sealed_for_queue = stored_body_override.as_ref().map(|_| queue.arn.clone());
     let msg = SqsMessage {
         message_id: uuid::Uuid::new_v4().to_string(),
         receipt_handle: None,
@@ -406,6 +408,7 @@ pub(crate) fn process_batch_send_entry(
         message_dedup_id: effective_dedup_id.clone(),
         created_at: cfg.now,
         sequence_number: sequence_number.clone(),
+        sealed_for_queue,
     };
     let message_id = msg.message_id.clone();
 
@@ -1452,6 +1455,38 @@ pub(crate) fn missing_param(name: &str) -> AwsServiceError {
         StatusCode::BAD_REQUEST,
         "MissingParameter",
         format!("The request must contain the parameter {name}"),
+    )
+}
+
+/// SQS's error for a failed KMS call on an encrypted queue: SendMessage,
+/// SendMessageBatch and ReceiveMessage declare `KmsAccessDenied`,
+/// `KmsDisabled`, `KmsInvalidKeyUsage`, `KmsInvalidState` and `KmsNotFound`
+/// with the awsQuery codes `KMS.AccessDeniedException` etc. (HTTP 400), and
+/// relay KMS's message with the AWS SDK's service suffix (recorded:
+/// `SendMessage` to a queue whose key is `alias/aws/s3`, or a missing alias).
+/// A ciphertext KMS cannot open is reported as the key's invalid state; a
+/// KMS-side failure as 500 `KMS.InternalFailureException`.
+pub(crate) fn kms_error(err: &fakecloud_core::delivery::KmsError) -> AwsServiceError {
+    use fakecloud_core::delivery::KmsErrorKind;
+    let code = match err.kind {
+        KmsErrorKind::AccessDenied => "KMS.AccessDeniedException",
+        KmsErrorKind::Disabled => "KMS.DisabledException",
+        KmsErrorKind::InvalidKeyUsage => "KMS.InvalidKeyUsageException",
+        KmsErrorKind::InvalidState | KmsErrorKind::InvalidCiphertext => "KMS.InvalidStateException",
+        KmsErrorKind::NotFound => "KMS.NotFoundException",
+        KmsErrorKind::Internal => {
+            return AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMS.InternalFailureException",
+                err.relayed_message(),
+            );
+        }
+    };
+    AwsServiceError::aws_error_with_headers(
+        StatusCode::BAD_REQUEST,
+        code,
+        err.relayed_message(),
+        vec![("x-amzn-query-error".to_string(), format!("{code};Sender"))],
     )
 }
 

@@ -157,6 +157,7 @@ mod tests {
             message_dedup_id: None,
             created_at: Utc::now() - Duration::seconds(age_seconds),
             sequence_number: None,
+            sealed_for_queue: None,
         }
     }
 

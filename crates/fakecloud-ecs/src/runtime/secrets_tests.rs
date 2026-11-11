@@ -21,22 +21,27 @@ impl fakecloud_core::delivery::KmsHook for PrefixKmsHook {
         _region: &str,
         _key_id: &str,
         plaintext: &[u8],
-        _service_principal: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _ctx: HashMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
         Ok(format!("ENC:{}", String::from_utf8_lossy(plaintext)))
     }
     fn decrypt(
         &self,
         _account_id: &str,
         ciphertext: &str,
-        _service_principal: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _ctx: HashMap<String, String>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
         ciphertext
             .strip_prefix("ENC:")
             .map(|p| p.as_bytes().to_vec())
-            .ok_or_else(|| "not ciphertext".to_string())
+            .ok_or_else(|| {
+                fakecloud_core::delivery::KmsError::new(
+                    fakecloud_core::delivery::KmsErrorKind::InvalidCiphertext,
+                    "not ciphertext",
+                )
+            })
     }
 }
 

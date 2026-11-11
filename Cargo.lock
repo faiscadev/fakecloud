@@ -5368,6 +5368,7 @@ dependencies = [
 name = "fakecloud-e2e"
 version = "0.51.0"
 dependencies = [
+ "aes-gcm",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-acm",
@@ -6774,6 +6775,7 @@ dependencies = [
 name = "fakecloud-ses"
 version = "0.51.0"
 dependencies = [
+ "aes-gcm",
  "async-trait",
  "base64 0.22.1",
  "bytes",

@@ -12053,9 +12053,9 @@ impl fakecloud_core::delivery::KmsHook for ReadableKms {
         _region: &str,
         key_id: &str,
         plaintext: &[u8],
-        _service_principal: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _encryption_context: HashMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
         Ok(format!(
             "enc:{key_id}:{}",
             String::from_utf8_lossy(plaintext)
@@ -12066,13 +12066,21 @@ impl fakecloud_core::delivery::KmsHook for ReadableKms {
         &self,
         _account_id: &str,
         ciphertext_b64: &str,
-        _service_principal: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _encryption_context: HashMap<String, String>,
-    ) -> Result<Vec<u8>, String> {
-        let rest = ciphertext_b64
-            .strip_prefix("enc:")
-            .ok_or("not an envelope")?;
-        let (_, plaintext) = rest.split_once(':').ok_or("not an envelope")?;
+    ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+        let rest = ciphertext_b64.strip_prefix("enc:").ok_or_else(|| {
+            fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::InvalidCiphertext,
+                "not an envelope",
+            )
+        })?;
+        let (_, plaintext) = rest.split_once(':').ok_or_else(|| {
+            fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::InvalidCiphertext,
+                "not an envelope",
+            )
+        })?;
         Ok(plaintext.as_bytes().to_vec())
     }
 }

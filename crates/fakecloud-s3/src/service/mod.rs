@@ -676,12 +676,15 @@ impl S3Service {
     /// `AccessDenied` / `KMS.*` errors back to the caller. When no hook is
     /// wired (legacy / in-process tests with no KMS dependency), the
     /// plaintext is returned unchanged so existing tests keep working.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn encrypt_object_body(
         &self,
         req: &AwsRequest,
         account_id: &str,
         region: &str,
         bucket: &str,
+        object_key: &str,
+        bucket_key: bool,
         plaintext: &[u8],
         kms_key_id: Option<&str>,
     ) -> Result<bytes::Bytes, AwsServiceError> {
@@ -699,12 +702,14 @@ impl S3Service {
             account_id,
             region,
             bucket,
+            object_key,
+            bucket_key,
             plaintext,
             Some(key),
         )
         .map_err(|err| {
             tracing::warn!(bucket = %bucket, error = %err, "SSE-KMS encrypt failed");
-            kms_hook_error(&err, key, "encrypt")
+            kms_hook_error(&err)
         })
     }
 
@@ -719,11 +724,14 @@ impl S3Service {
     /// this returns `Err`. When no hook is wired, or the bytes aren't UTF-8
     /// (legacy snapshots from before the hook landed), the bytes are
     /// returned unchanged.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn decrypt_object_body(
         &self,
         req: &AwsRequest,
         account_id: &str,
         bucket: &str,
+        object_key: &str,
+        bucket_key: bool,
         ciphertext: &[u8],
         kms_key_id: Option<&str>,
     ) -> Result<bytes::Bytes, AwsServiceError> {
@@ -742,15 +750,18 @@ impl S3Service {
             .bucket_region(bucket)
             .unwrap_or_else(|| req.region.clone());
         self.authorize_kms_key_use(req, key_account, &region, key, "Decrypt")?;
-        let bucket_arn = Arn::s3(bucket).to_string();
-        let mut ctx = std::collections::HashMap::new();
-        ctx.insert("aws:s3:arn".to_string(), bucket_arn);
-        hook.decrypt(key_account, envelope, "s3.amazonaws.com", ctx)
-            .map(bytes::Bytes::from)
-            .map_err(|err| {
-                tracing::warn!(bucket = %bucket, error = %err, "SSE-KMS decrypt failed");
-                kms_hook_error(&err, key, "decrypt")
-            })
+        let ctx = crate::side_effects::s3_encryption_context(bucket, object_key, bucket_key);
+        hook.decrypt(
+            key_account,
+            envelope,
+            fakecloud_core::delivery::KmsCaller::via("s3.amazonaws.com"),
+            ctx,
+        )
+        .map(bytes::Bytes::from)
+        .map_err(|err| {
+            tracing::warn!(bucket = %bucket, error = %err, "SSE-KMS decrypt failed");
+            kms_hook_error(&err)
+        })
     }
 
     /// Authorize the requester's use of a KMS key that another account owns
@@ -803,7 +814,7 @@ impl S3Service {
                 // An AWS-managed key not minted yet has the managed-key
                 // policy, which trusts only its own account.
                 None if key_ref.starts_with("alias/aws/") => (key_ref.clone(), String::new()),
-                None => return Err(kms_not_found(key)),
+                None => return Err(kms_not_found(key_account, key_region, &key_ref)),
             }
         };
         let principal = req
@@ -3956,33 +3967,36 @@ pub(crate) fn kms_reference_account(key: &str) -> Option<&str> {
         .filter(|a| !a.is_empty())
 }
 
-/// `KMS.NotFoundException` for an SSE-KMS key reference that names no key.
-pub(crate) fn kms_not_found(key: &str) -> AwsServiceError {
-    AwsServiceError::aws_error(
-        StatusCode::BAD_REQUEST,
-        "KMS.NotFoundException",
-        format!("Invalid keyId '{key}'"),
-    )
+/// `KMS.NotFoundException` for an SSE-KMS key reference that names no key
+/// (recorded: "Alias arn:...:alias/x is not found.", "Key 'arn:...' does not
+/// exist").
+pub(crate) fn kms_not_found(account_id: &str, region: &str, key: &str) -> AwsServiceError {
+    kms_hook_error(&fakecloud_core::delivery::KmsError::not_found(
+        account_id, region, key,
+    ))
 }
 
-/// The S3 error for a failed KMS hook call: a missing key is
-/// `KMS.NotFoundException` and a disabled one `KMS.DisabledException` (both
-/// 400, as S3 relays them); only a corrupt envelope is an internal failure.
-fn kms_hook_error(err: &str, key: &str, op: &str) -> AwsServiceError {
-    if err.starts_with("kms key not found") {
-        kms_not_found(key)
-    } else if err.starts_with("kms key is disabled") {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "KMS.DisabledException",
-            format!("{key} is disabled."),
-        )
-    } else {
-        AwsServiceError::aws_error(
+/// The S3 error for a failed KMS hook call. Recorded (PutObject with SSE-KMS):
+/// a key policy refusal is 403 `AccessDenied` and a missing key 400
+/// `KMS.NotFoundException`, each with KMS's own message; S3 relays the other
+/// KMS failures as `KMS.<KMS error code>` (400), with KMS's message. A KMS
+/// internal failure is a 500.
+pub(crate) fn kms_hook_error(err: &fakecloud_core::delivery::KmsError) -> AwsServiceError {
+    use fakecloud_core::delivery::KmsErrorKind;
+    match err.kind {
+        KmsErrorKind::AccessDenied => {
+            AwsServiceError::aws_error(StatusCode::FORBIDDEN, "AccessDenied", err.message.clone())
+        }
+        KmsErrorKind::Internal => AwsServiceError::aws_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "KMS.InternalFailureException",
-            format!("Failed to {op} object via KMS: {err}"),
-        )
+            "InternalError",
+            err.message.clone(),
+        ),
+        kind => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            format!("KMS.{}", kind.code()),
+            err.message.clone(),
+        ),
     }
 }
 

@@ -259,8 +259,16 @@ impl SqsLambdaPoller {
                         return msg;
                     }
                     let mut ctx = HashMap::new();
-                    ctx.insert("aws:sqs:arn".to_string(), mapping.queue_arn.clone());
-                    match hook.decrypt(&account_id, &msg.body, "sqs.amazonaws.com", ctx) {
+                    ctx.insert(
+                        "aws:sqs:arn".to_string(),
+                        msg.sealing_queue(&mapping.queue_arn).to_string(),
+                    );
+                    match hook.decrypt(
+                        &account_id,
+                        &msg.body,
+                        fakecloud_core::delivery::KmsCaller::via("sqs.amazonaws.com"),
+                        ctx,
+                    ) {
                         Ok(bytes) => {
                             msg.body = String::from_utf8_lossy(&bytes).to_string();
                         }
@@ -785,6 +793,7 @@ mod tests {
                 message_dedup_id: None,
                 created_at: Utc::now(),
                 sequence_number: None,
+                sealed_for_queue: None,
             }]),
             inflight: Vec::new(),
             attributes: attrs,
@@ -897,6 +906,7 @@ mod tests {
                 message_dedup_id: None,
                 created_at: Utc::now(),
                 sequence_number: None,
+                sealed_for_queue: None,
             });
         }
 

@@ -1,0 +1,41 @@
+### S3
+$ aws s3api put-object --bucket fc-kmsrec-99d346d5 --key k1 --body body.bin --server-side-encryption aws:kms --ssekms-key-id alias/aws/sqs
+
+An error occurred (AccessDenied) when calling the PutObject operation: User: arn:aws:iam::123456789012:user/admin is not authorized to perform: kms:GenerateDataKey on resource: arn:aws:kms:us-east-1:123456789012:key/c28eca62-8088-4c90-91bb-b8c04c04c2f1 because no resource-based policy allows the kms:GenerateDataKey action. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/cpg623i0notgxjhomnfxvao4j for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: cpg623i0notgxjhomnfxvao4j
+[exit 254]
+$ aws s3api put-object --bucket fc-kmsrec-99d346d5 --key k2 --body body.bin --server-side-encryption aws:kms --ssekms-key-id alias/fc-does-not-exist
+
+An error occurred (KMS.NotFoundException) when calling the PutObject operation: Alias arn:aws:kms:us-east-1:123456789012:alias/fc-does-not-exist is not found.
+[exit 254]
+$ aws s3api put-object --bucket fc-kmsrec-99d346d5 --key k3 --body body.bin --server-side-encryption aws:kms --ssekms-key-id arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000
+
+An error occurred (KMS.NotFoundException) when calling the PutObject operation: Key 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000' does not exist
+[exit 254]
+$ aws s3api put-object --bucket fc-kmsrec-99d346d5 --key k1 --body body.bin --server-side-encryption aws:kms --ssekms-key-id alias/aws/sqs --debug (status + body)
+2026-11-11 04:01:57,975 - MainThread - urllib3.connectionpool - DEBUG - https://fc-kmsrec-99d346d5.s3.us-east-1.amazonaws.com:443 "PUT /k1 HTTP/1.1" 403 None
+2026-11-11 04:01:57,976 - MainThread - botocore.hooks - DEBUG - Event before-parse.s3.PutObject: calling handler <function _handle_200_error at 0x10b39c680>
+2026-11-11 04:01:57,977 - MainThread - botocore.parsers - DEBUG - Response body:
+b'<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>AccessDenied</Code><Message>User: arn:aws:iam::123456789012:user/admin is not authorized to perform: kms:GenerateDataKey on resource: arn:aws:kms:us-east-1:123456789012:key/c28eca62-8088-4c90-91bb-b8c04c04c2f1 because no resource-based policy allows the kms:GenerateDataKey action. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/d56gy17g3k40g01k2qnuhohc4 for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: d56gy17g3k40g01k2qnuhohc4</Message><RequestId>2668CCVZ33PKGYRA</RequestId><HostId>d1ZjoydHaSXcUZs9cr6dTq9QZOD69ohn88UD1UIOiB3Onp3WMIYNNCpK8euvGclsx6q4/xIBMdM=</HostId></Error>'
+### wire
+$ aws sqs send-message --queue-url https://sqs.us-east-1.amazonaws.com/123456789012/fc-kmsrec-s3key-99d346d5 --message-body hello --debug (status + body)
+2026-11-11 04:01:59,725 - MainThread - urllib3.connectionpool - DEBUG - https://sqs.us-east-1.amazonaws.com:443 "POST / HTTP/1.1" 400 700
+2026-11-11 04:01:59,725 - MainThread - botocore.parsers - DEBUG - Response body:
+b'{"__type":"com.amazonaws.sqs#KmsAccessDenied","message":"User: arn:aws:iam::123456789012:user/admin is not authorized to perform: kms:GenerateDataKey on resource: arn:aws:kms:us-east-1:123456789012:key/540d4f86-be5c-49fd-8051-98ff2c9768f4 because no resource-based policy allows the kms:GenerateDataKey action. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/72fi1qxcxvzqae6ngo0ln61yo for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: 72fi1qxcxvzqae6ngo0ln61yo (Service: AWSKMS; Status Code: 400; Error Code: AccessDeniedException; Request ID: 49a7ae3b-9b11-4a53-8bc5-543eda94874c; Proxy: null)"}'
+$ aws sqs send-message --queue-url https://sqs.us-east-1.amazonaws.com/123456789012/fc-kmsrec-nokey-99d346d5 --message-body hello --debug (status + body)
+2026-11-11 04:02:02,555 - MainThread - urllib3.connectionpool - DEBUG - https://sqs.us-east-1.amazonaws.com:443 "POST / HTTP/1.1" 400 263
+2026-11-11 04:02:02,555 - MainThread - botocore.parsers - DEBUG - Response body:
+b'{"__type":"com.amazonaws.sqs#KmsNotFound","message":"Alias arn:aws:kms:us-east-1:123456789012:alias/fc-does-not-exist is not found. (Service: AWSKMS; Status Code: 400; Error Code: NotFoundException; Request ID: e342a3d0-72d1-4b59-b659-b1fdf70350b8; Proxy: null)"}'
+$ aws sns publish --topic-arn arn:aws:sns:us-east-1:123456789012:fc-kmsrec-topic-99d346d5 --message hello --debug (status + body)
+2026-11-11 04:02:04,783 - MainThread - urllib3.connectionpool - DEBUG - https://sns.us-east-1.amazonaws.com:443 "POST / HTTP/1.1" 400 887
+2026-11-11 04:02:04,784 - MainThread - botocore.parsers - DEBUG - Response body:
+b'<ErrorResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">\n  <Error>\n    <Type>Sender</Type>\n    <Code>KMSAccessDenied</Code>\n    <Message>User: arn:aws:iam::123456789012:user/admin is not authorized to perform: kms:GenerateDataKey on resource: arn:aws:kms:us-east-1:123456789012:key/540d4f86-be5c-49fd-8051-98ff2c9768f4 because no resource-based policy allows the kms:GenerateDataKey action. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/1uqds4bxj5t2fr4du7xjxorbe for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: 1uqds4bxj5t2fr4du7xjxorbe (Service: AWSKMS; Status Code: 400; Error Code: AccessDeniedException; Request ID: 930edb79-017b-4c47-b228-3228e65f8e88; Proxy: null)</Message>\n  </Error>\n  <RequestId>4a7b3d2d-f1e7-5e02-9f23-5e43e4cb71e8</RequestId>\n</ErrorResponse>\n'
+2026-11-11 04:02:04,785 - MainThread - botocore.parsers - DEBUG - Response body:
+b'<ErrorResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">\n  <Error>\n    <Type>Sender</Type>\n    <Code>KMSAccessDenied</Code>\n    <Message>User: arn:aws:iam::123456789012:user/admin is not authorized to perform: kms:GenerateDataKey on resource: arn:aws:kms:us-east-1:123456789012:key/540d4f86-be5c-49fd-8051-98ff2c9768f4 because no resource-based policy allows the kms:GenerateDataKey action. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/1uqds4bxj5t2fr4du7xjxorbe for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: 1uqds4bxj5t2fr4du7xjxorbe (Service: AWSKMS; Status Code: 400; Error Code: AccessDeniedException; Request ID: 930edb79-017b-4c47-b228-3228e65f8e88; Proxy: null)</Message>\n  </Error>\n  <RequestId>4a7b3d2d-f1e7-5e02-9f23-5e43e4cb71e8</RequestId>\n</ErrorResponse>\n'
+$ aws ssm put-parameter --name /fc-kmsrec/99d346d5/a --type SecureString --value v --key-id alias/aws/s3 --debug (status + body)
+2026-11-11 04:02:07,213 - MainThread - urllib3.connectionpool - DEBUG - https://ssm.us-east-1.amazonaws.com:443 "POST / HTTP/1.1" 400 672
+2026-11-11 04:02:07,214 - MainThread - botocore.parsers - DEBUG - Response body:
+b'{"__type":"AccessDeniedException","Message":"User: arn:aws:iam::123456789012:user/admin is not authorized to perform: kms:Encrypt on resource: arn:aws:kms:us-east-1:123456789012:key/540d4f86-be5c-49fd-8051-98ff2c9768f4 because no resource-based policy allows the kms:Encrypt action. Go to https://us-east-1.console.aws.amazon.com/iam/home?region=us-east-1#/authorization-details/4i238sl4kuxw6ry2f85cv4pdb for complete details, or call the GetRequestAuthorizationDetails API with the following authorization id: 4i238sl4kuxw6ry2f85cv4pdb (Service: AWSKMS; Status Code: 400; Error Code: AccessDeniedException; Request ID: 3c44c1bb-293d-49c1-8ecc-194c8a940107; Proxy: null)"}'
+$ aws secretsmanager create-secret --name fc-kmsrec-a-99d346d5 --secret-string v --kms-key-id alias/aws/s3 --debug (status + body)
+2026-11-11 04:02:11,241 - MainThread - urllib3.connectionpool - DEBUG - https://secretsmanager.us-east-1.amazonaws.com:443 "POST / HTTP/1.1" 400 75
+2026-11-11 04:02:11,242 - MainThread - botocore.parsers - DEBUG - Response body:
+b'{"__type":"AccessDeniedException","Message":"Access to KMS is not allowed"}'

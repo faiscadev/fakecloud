@@ -1,6 +1,7 @@
 pub mod dkim;
 pub mod fanout;
 pub mod mime;
+pub mod s3_action;
 pub(crate) mod service;
 pub mod smtp_relay;
 pub(crate) mod state;

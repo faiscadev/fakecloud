@@ -932,10 +932,12 @@ impl SsmService {
     /// Encrypt a SecureString value via the configured KMS hook.
     ///
     /// When a KMS hook is wired (production server, real e2e tests) the
-    /// encrypt call is strict: any failure raises `KMSAccessDeniedException`
-    /// rather than silently storing plaintext. Real AWS SSM cannot
-    /// PutParameter a SecureString when KMS is unavailable, and silent
+    /// encrypt call is strict: a KMS failure is SSM's error for it (see
+    /// [`ssm_kms_error`]) rather than silently storing plaintext. Real AWS
+    /// SSM cannot PutParameter a SecureString when KMS refuses, and silent
     /// plaintext fallback would leak secrets on a misconfigured deployment.
+    /// Parameter Store encrypts a value with `kms:Encrypt` (recorded: the
+    /// refusal names that action) bound to `PARAMETER_ARN`.
     ///
     /// When no hook is wired the value is returned unchanged. This is
     /// reachable only from in-process unit tests that intentionally skip
@@ -955,24 +957,16 @@ impl SsmService {
         let key = key_id.filter(|k| !k.is_empty()).unwrap_or("aws/ssm");
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("PARAMETER_ARN".to_string(), param_arn.to_string());
-        hook.encrypt(
+        hook.encrypt_with_operation(
+            "Encrypt",
             account_id,
             region,
             key,
             plaintext.as_bytes(),
-            "ssm.amazonaws.com",
+            fakecloud_core::delivery::KmsCaller::via("ssm.amazonaws.com"),
             ctx,
         )
-        .map_err(|err| {
-            // PutParameter's Smithy errors list does not include
-            // KMSAccessDeniedException, so a KMS encrypt failure is
-            // surfaced as InvalidKeyId (which is declared).
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidKeyId",
-                format!("Unable to encrypt SecureString parameter {param_arn} via KMS: {err}"),
-            )
-        })
+        .map_err(|err| ssm_kms_error(&err))
     }
 
     /// Decrypt a stored SecureString value via the configured KMS hook.
@@ -986,7 +980,7 @@ impl SsmService {
         account_id: &str,
         param_arn: &str,
         ciphertext: &str,
-    ) -> String {
+    ) -> Result<String, AwsServiceError> {
         decrypt_parameter_value(self.kms_hook.as_deref(), account_id, param_arn, ciphertext)
     }
 
@@ -1000,17 +994,17 @@ impl SsmService {
         with_value: bool,
         with_decryption: bool,
         account_id: &str,
-    ) -> Value {
+    ) -> Result<Value, AwsServiceError> {
         if with_value
             && with_decryption
             && p.param_type == "SecureString"
             && self.kms_hook.is_some()
         {
             let mut clone = p.clone();
-            clone.value = self.decrypt_secure_value(account_id, &p.arn, &p.value);
-            return param_to_json(&clone, with_value, with_decryption);
+            clone.value = self.decrypt_secure_value(account_id, &p.arn, &p.value)?;
+            return Ok(param_to_json(&clone, with_value, with_decryption));
         }
-        param_to_json(p, with_value, with_decryption)
+        Ok(param_to_json(p, with_value, with_decryption))
     }
 
     /// Wrapper around [`build_param_history_value`] that decrypts the
@@ -1022,13 +1016,13 @@ impl SsmService {
         hist: &SsmParameterVersion,
         with_decryption: bool,
         account_id: &str,
-    ) -> Value {
+    ) -> Result<Value, AwsServiceError> {
         if with_decryption && hist.param_type == "SecureString" && self.kms_hook.is_some() {
             let mut clone = hist.clone();
-            clone.value = self.decrypt_secure_value(account_id, &param.arn, &hist.value);
-            return build_param_history_value(param, &clone, with_decryption);
+            clone.value = self.decrypt_secure_value(account_id, &param.arn, &hist.value)?;
+            return Ok(build_param_history_value(param, &clone, with_decryption));
         }
-        build_param_history_value(param, hist, with_decryption)
+        Ok(build_param_history_value(param, hist, with_decryption))
     }
 
     /// Resolve a Secrets Manager reference parameter.
@@ -1155,7 +1149,7 @@ impl SsmService {
         if arn_resource(raw_name, "ssm").is_some() {
             let param = resolve_param_by_name_or_arn(state, raw_name)?;
             return Ok(AwsResponse::ok_json(json!({
-                "Parameter": self.render_param_to_json(param, true, with_decryption, &req.account_id),
+                "Parameter": self.render_param_to_json(param, true, with_decryption, &req.account_id)?,
             })));
         }
 
@@ -1172,17 +1166,17 @@ impl SsmService {
 
         match selector {
             ParamSelector::None => Ok(AwsResponse::ok_json(json!({
-                "Parameter": self.render_param_to_json(param, true, with_decryption, &req.account_id),
+                "Parameter": self.render_param_to_json(param, true, with_decryption, &req.account_id)?,
             }))),
             ParamSelector::Version(ver) => {
                 if param.version == ver {
                     return Ok(AwsResponse::ok_json(json!({
-                        "Parameter": self.render_param_to_json(param, true, with_decryption, &req.account_id),
+                        "Parameter": self.render_param_to_json(param, true, with_decryption, &req.account_id)?,
                     })));
                 }
                 if let Some(hist) = param.history.iter().find(|h| h.version == ver) {
                     let v =
-                        self.render_history_value(param, hist, with_decryption, &req.account_id);
+                        self.render_history_value(param, hist, with_decryption, &req.account_id)?;
                     return Ok(AwsResponse::ok_json(json!({ "Parameter": v })));
                 }
                 Err(AwsServiceError::aws_error(
@@ -1200,7 +1194,7 @@ impl SsmService {
                     if labels.contains(&label) {
                         if *ver == param.version {
                             return Ok(AwsResponse::ok_json(json!({
-                                "Parameter": self.render_param_to_json(param, true, with_decryption, &req.account_id),
+                                "Parameter": self.render_param_to_json(param, true, with_decryption, &req.account_id)?,
                             })));
                         }
                         if let Some(hist) = param.history.iter().find(|h| h.version == *ver) {
@@ -1209,7 +1203,7 @@ impl SsmService {
                                 hist,
                                 with_decryption,
                                 &req.account_id,
-                            );
+                            )?;
                             return Ok(AwsResponse::ok_json(json!({ "Parameter": v })));
                         }
                     }
@@ -1275,7 +1269,7 @@ impl SsmService {
                             true,
                             with_decryption,
                             &req.account_id,
-                        )),
+                        )?),
                         Err(_) => invalid.push(raw_name.to_string()),
                     }
                     continue;
@@ -1294,7 +1288,7 @@ impl SsmService {
                                 true,
                                 with_decryption,
                                 &req.account_id,
-                            ));
+                            )?);
                         } else {
                             invalid.push(raw_name.to_string());
                         }
@@ -1307,7 +1301,7 @@ impl SsmService {
                                     true,
                                     with_decryption,
                                     &req.account_id,
-                                ));
+                                )?);
                             } else if let Some(hist) =
                                 param.history.iter().find(|h| h.version == ver)
                             {
@@ -1316,7 +1310,7 @@ impl SsmService {
                                     hist,
                                     with_decryption,
                                     &req.account_id,
-                                ));
+                                )?);
                             } else {
                                 invalid.push(raw_name.to_string());
                             }
@@ -1335,7 +1329,7 @@ impl SsmService {
                                             true,
                                             with_decryption,
                                             &req.account_id,
-                                        ));
+                                        )?);
                                     } else if let Some(hist) =
                                         param.history.iter().find(|h| h.version == *ver)
                                     {
@@ -1344,7 +1338,7 @@ impl SsmService {
                                             hist,
                                             with_decryption,
                                             &req.account_id,
-                                        ));
+                                        )?);
                                     }
                                     found = true;
                                     break;
@@ -1446,7 +1440,7 @@ impl SsmService {
         let parameters: Vec<Value> = page_params
             .iter()
             .map(|p| self.render_param_to_json(p, true, with_decryption, &req.account_id))
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         let mut resp = json!({ "Parameters": parameters });
         if let Some(token) = next_token {
@@ -1625,11 +1619,11 @@ impl SsmService {
             .iter()
             .map(|h| {
                 let displayed = if with_decryption && h.param_type == "SecureString" {
-                    self.decrypt_secure_value(&req.account_id, &param.arn, &h.value)
+                    self.decrypt_secure_value(&req.account_id, &param.arn, &h.value)?
                 } else {
                     h.value.clone()
                 };
-                history_entry_json(
+                Ok(history_entry_json(
                     &param.name,
                     h.version,
                     &h.param_type,
@@ -1639,12 +1633,12 @@ impl SsmService {
                     h.last_modified.timestamp_millis() as f64 / 1000.0,
                     param.labels.get(&h.version),
                     with_decryption,
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<_, AwsServiceError>>()?;
 
         let displayed = if with_decryption && param.param_type == "SecureString" {
-            self.decrypt_secure_value(&req.account_id, &param.arn, &param.value)
+            self.decrypt_secure_value(&req.account_id, &param.arn, &param.value)?
         } else {
             param.value.clone()
         };
@@ -2830,7 +2824,7 @@ pub fn read_parameter_value(
     if value.param_type != "SecureString" {
         return Ok(value);
     }
-    let value_text = decrypt_parameter_value(kms_hook, &owner_account, &param_arn, &value.value);
+    let value_text = decrypt_parameter_value(kms_hook, &owner_account, &param_arn, &value.value)?;
     Ok(ParameterValue {
         value: value_text,
         ..value
@@ -2838,23 +2832,48 @@ pub fn read_parameter_value(
 }
 
 /// Decrypt a stored `SecureString` value. Values written while a KMS hook
-/// was wired are stored as ciphertext; anything else (no hook, or a value
-/// that does not decrypt) is returned as stored.
+/// was wired are stored as ciphertext; a value that is not a ciphertext (no
+/// hook, or one stored before the hook existed) is returned as stored. A KMS
+/// refusal (key policy, disabled or deleted key) is SSM's error for it.
 pub(crate) fn decrypt_parameter_value(
     kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
     account_id: &str,
     param_arn: &str,
     stored: &str,
-) -> String {
+) -> Result<String, AwsServiceError> {
     let Some(hook) = kms_hook else {
-        return stored.to_string();
+        return Ok(stored.to_string());
     };
     let mut ctx = std::collections::HashMap::new();
     ctx.insert("PARAMETER_ARN".to_string(), param_arn.to_string());
-    match hook.decrypt(account_id, stored, "ssm.amazonaws.com", ctx) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-        Err(_) => stored.to_string(),
+    match hook.decrypt(
+        account_id,
+        stored,
+        fakecloud_core::delivery::KmsCaller::via("ssm.amazonaws.com"),
+        ctx,
+    ) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
+        Err(err) if err.kind == fakecloud_core::delivery::KmsErrorKind::InvalidCiphertext => {
+            Ok(stored.to_string())
+        }
+        Err(err) => Err(ssm_kms_error(&err)),
     }
+}
+
+/// SSM's error for a failed KMS call on a `SecureString`. Recorded
+/// (PutParameter): a key policy refusal is 400 `AccessDeniedException` and a
+/// missing key 400 `InvalidKeyId` (declared by the parameter operations),
+/// each relaying KMS's message with the AWS SDK's service suffix. A disabled,
+/// deleted or unusable key is the key SSM cannot use, `InvalidKeyId` too
+/// (not recorded); a KMS internal failure `InternalServerError`.
+pub(crate) fn ssm_kms_error(err: &fakecloud_core::delivery::KmsError) -> AwsServiceError {
+    use fakecloud_core::delivery::KmsErrorKind;
+    let (status, code) = match err.kind {
+        KmsErrorKind::AccessDenied => (StatusCode::BAD_REQUEST, "AccessDeniedException"),
+        KmsErrorKind::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "InternalServerError"),
+        _ => (StatusCode::BAD_REQUEST, "InvalidKeyId"),
+    };
+    AwsServiceError::aws_error(status, code, err.relayed_message())
 }
 
 /// Whether a resource policy attached to `param` (in its owner's state)

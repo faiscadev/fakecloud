@@ -189,7 +189,7 @@ impl DynamoDbService {
             {
                 return Err(already_exists());
             }
-            self.resolve_sse_key_arn(req, sse_kms_key_arn)
+            self.checked_sse_key_arn(req, sse_kms_key_arn)?
         } else {
             sse_kms_key_arn
         };
@@ -439,7 +439,7 @@ impl DynamoDbService {
                     .ok_or_else(not_found)?;
                 validate_update_table_request(table, &body)?;
             }
-            self.resolve_sse_key_arn(req, sse_spec["KMSMasterKeyId"].as_str().map(str::to_string))
+            self.checked_sse_key_arn(req, sse_spec["KMSMasterKeyId"].as_str().map(str::to_string))?
         } else {
             None
         };
@@ -797,6 +797,67 @@ impl DynamoDbService {
         key_id: Option<String>,
     ) -> Option<String> {
         self.resolve_sse_key_arn_in(&req.account_id, &req.region, key_id)
+    }
+
+    /// The KMS key a table `CreateTable` / `UpdateTable` encrypts with
+    /// (see [`Self::resolve_sse_key_arn`]), checked as DynamoDB checks it:
+    /// DynamoDB creates a grant on the key through itself, so the key must
+    /// exist, be enabled and its policy allow `kms:CreateGrant` via DynamoDB.
+    /// Recorded: a table whose `KMSMasterKeyId` is `alias/aws/s3` is refused
+    /// with 400 `AccessDeniedException` "KMS key access denied error:
+    /// com.amazonaws.services.kms.model.AWSKMSException: <KMS message>", and
+    /// a missing alias with 400 `ValidationException` "KMS validation error:
+    /// com.amazonaws.services.kms.model.NotFoundException: <KMS message>"
+    /// (other KMS failures take the same form with their KMS exception; not
+    /// recorded).
+    pub(super) fn checked_sse_key_arn(
+        &self,
+        req: &AwsRequest,
+        key_id: Option<String>,
+    ) -> Result<Option<String>, AwsServiceError> {
+        let (Some(hook), Some(wanted)) = (&self.kms_hook, key_id.as_deref()) else {
+            return Ok(self.resolve_sse_key_arn(req, key_id));
+        };
+        match hook.authorize_key_use(
+            &req.account_id,
+            &req.region,
+            wanted,
+            fakecloud_core::delivery::KmsCaller::via("dynamodb.amazonaws.com"),
+            &["kms:CreateGrant"],
+            &HashMap::new(),
+        ) {
+            Ok(arn) => Ok(Some(arn)),
+            Err(err) => {
+                use fakecloud_core::delivery::KmsErrorKind;
+                let (code, exception) = match err.kind {
+                    KmsErrorKind::AccessDenied => ("AccessDeniedException", "AWSKMSException"),
+                    KmsErrorKind::NotFound => ("ValidationException", "NotFoundException"),
+                    KmsErrorKind::Disabled => ("ValidationException", "DisabledException"),
+                    KmsErrorKind::InvalidState => {
+                        ("ValidationException", "KMSInvalidStateException")
+                    }
+                    KmsErrorKind::InvalidKeyUsage => {
+                        ("ValidationException", "InvalidKeyUsageException")
+                    }
+                    KmsErrorKind::InvalidCiphertext | KmsErrorKind::Internal => {
+                        ("ValidationException", "KMSInternalException")
+                    }
+                };
+                let what = if code == "AccessDeniedException" {
+                    "KMS key access denied error"
+                } else {
+                    "KMS validation error"
+                };
+                Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    code,
+                    format!(
+                        "{what}: com.amazonaws.services.kms.model.{exception}: {}",
+                        err.relayed_message()
+                    ),
+                ))
+            }
+        }
     }
 
     /// [`Self::resolve_sse_key_arn`] for a table in `region` of `account`.

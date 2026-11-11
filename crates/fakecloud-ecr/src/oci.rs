@@ -1430,8 +1430,9 @@ mod kms_region_tests {
         let kms: fakecloud_kms::SharedKmsState =
             Arc::new(RwLock::new(MultiAccountState::new(ACCT, "us-east-1", "")));
         let hook = fakecloud_kms::hook::KmsServiceHook::new(kms.clone(), Default::default());
-        let (west_key, _) =
-            hook.aws_managed_key_arn_tracked(ACCT, "eu-west-1", "ecr", "ecr.amazonaws.com");
+        let (west_key, _) = hook
+            .aws_managed_key_arn_tracked(ACCT, "eu-west-1", "ecr", "ecr.amazonaws.com")
+            .unwrap();
 
         let mut mas: MultiAccountState<crate::state::EcrState> =
             MultiAccountState::new(ACCT, "us-east-1", "http://fakecloud:4566");

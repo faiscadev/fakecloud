@@ -208,6 +208,11 @@ impl SqsDelivery for SqsDeliveryImpl {
             })
             .collect();
 
+        let sealed_for_queue = kms_key_id
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .and(self.kms_hook.as_ref())
+            .map(|_| queue_arn_owned.clone());
         let stored_body = match (kms_key_id.as_deref(), &self.kms_hook) {
             (Some(key), Some(hook)) if !key.is_empty() => {
                 let mut ctx = HashMap::new();
@@ -218,7 +223,7 @@ impl SqsDelivery for SqsDeliveryImpl {
                     &region,
                     key,
                     message_body.as_bytes(),
-                    "sqs.amazonaws.com",
+                    fakecloud_core::delivery::KmsCaller::via("sqs.amazonaws.com"),
                     ctx,
                 )
                 .map_err(|e| {
@@ -254,6 +259,7 @@ impl SqsDelivery for SqsDeliveryImpl {
             message_dedup_id: effective_dedup_id,
             created_at: now,
             sequence_number,
+            sealed_for_queue,
         };
         queue.messages.push_back(msg);
         drop(accounts);
@@ -641,19 +647,22 @@ mod tests {
             _region: &str,
             _key_id: &str,
             plaintext: &[u8],
-            _service: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _ctx: HashMap<String, String>,
-        ) -> Result<String, String> {
+        ) -> Result<String, fakecloud_core::delivery::KmsError> {
             Ok(format!("ENC:{}", String::from_utf8_lossy(plaintext)))
         }
         fn decrypt(
             &self,
             _account_id: &str,
             _envelope: &str,
-            _service: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _ctx: HashMap<String, String>,
-        ) -> Result<Vec<u8>, String> {
-            Err("unused".to_string())
+        ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::AccessDenied,
+                "unused",
+            ))
         }
     }
 

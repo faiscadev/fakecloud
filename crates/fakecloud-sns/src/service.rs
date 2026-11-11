@@ -26,6 +26,33 @@ pub struct SnsService {
     pub(crate) region: String,
 }
 
+/// SNS's error for a failed KMS call on an encrypted topic: Publish and
+/// PublishBatch declare `KMSAccessDeniedException`, `KMSDisabledException`,
+/// `KMSInvalidStateException` and `KMSNotFoundException` with the awsQuery
+/// codes `KMSAccessDenied` etc. (HTTP 400), and relay KMS's message with the
+/// AWS SDK's service suffix (recorded: Publish to a topic whose key is
+/// `alias/aws/s3`, or a missing alias). SNS declares no key-usage error, so
+/// an unusable key (or a ciphertext KMS cannot open) is its invalid state.
+fn sns_kms_error(err: &fakecloud_core::delivery::KmsError) -> AwsServiceError {
+    use fakecloud_core::delivery::KmsErrorKind;
+    let code = match err.kind {
+        KmsErrorKind::AccessDenied => "KMSAccessDenied",
+        KmsErrorKind::Disabled => "KMSDisabled",
+        KmsErrorKind::NotFound => "KMSNotFound",
+        KmsErrorKind::InvalidState
+        | KmsErrorKind::InvalidKeyUsage
+        | KmsErrorKind::InvalidCiphertext => "KMSInvalidState",
+        KmsErrorKind::Internal => {
+            return AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                err.relayed_message(),
+            );
+        }
+    };
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, code, err.relayed_message())
+}
+
 impl SnsService {
     pub fn new(state: SharedSnsState, delivery: Arc<DeliveryBus>) -> Self {
         Self {
@@ -73,40 +100,34 @@ impl SnsService {
         let Some(key) = kms_key_id.filter(|k| !k.is_empty()) else {
             return Ok(());
         };
+        // SNS's documented encryption context for topic messages.
         let mut ctx = std::collections::HashMap::new();
-        ctx.insert("aws:sns:arn".to_string(), topic_arn.to_string());
+        ctx.insert("aws:sns:topicArn".to_string(), topic_arn.to_string());
         // The key (or alias) lives in the topic's region.
         let region = fakecloud_aws::arn::region_of(topic_arn).unwrap_or(&self.region);
-        let envelope = match hook.encrypt(
-            account_id,
-            region,
-            key,
-            message.as_bytes(),
-            "sns.amazonaws.com",
-            ctx.clone(),
-        ) {
-            Ok(env) => env,
-            Err(err) => {
+        let sns = fakecloud_core::delivery::KmsCaller::via("sns.amazonaws.com");
+        let envelope = hook
+            .encrypt(
+                account_id,
+                region,
+                key,
+                message.as_bytes(),
+                sns,
+                ctx.clone(),
+            )
+            .map_err(|err| {
                 tracing::warn!(topic = %topic_arn, error = %err, "SNS SSE-KMS encrypt failed");
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "KMS.InternalFailureException",
-                    format!("Failed to encrypt SNS message via KMS: {err}"),
-                ));
-            }
-        };
+                sns_kms_error(&err)
+            })?;
         // Mirror the GenerateDataKey with the matching Decrypt the
         // service would emit at fan-out time. A decrypt failure here
         // means the topic's CMK is unusable for delivery — also
         // fail-closed so callers don't silently lose audit records.
-        if let Err(err) = hook.decrypt(account_id, &envelope, "sns.amazonaws.com", ctx) {
-            tracing::warn!(topic = %topic_arn, error = %err, "SNS SSE-KMS decrypt failed");
-            return Err(AwsServiceError::aws_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "KMS.InternalFailureException",
-                format!("Failed to decrypt SNS message via KMS: {err}"),
-            ));
-        }
+        hook.decrypt(account_id, &envelope, sns, ctx)
+            .map_err(|err| {
+                tracing::warn!(topic = %topic_arn, error = %err, "SNS SSE-KMS decrypt failed");
+                sns_kms_error(&err)
+            })?;
         Ok(())
     }
 

@@ -1,0 +1,25 @@
+{
+  "alias": "alias/aws/kafka",
+  "describe_key": {
+    "AWSAccountId": "123456789012",
+    "KeyId": "86c29481-45a6-476a-8671-5239cdbc28d0",
+    "Arn": "arn:aws:kms:us-east-1:123456789012:key/86c29481-45a6-476a-8671-5239cdbc28d0",
+    "CreationDate": "2026-11-11T03:58:18.741000-03:00",
+    "Enabled": true,
+    "Description": "Default key that protects my Kafka data when no other key is defined",
+    "KeyUsage": "ENCRYPT_DECRYPT",
+    "KeyState": "Enabled",
+    "Origin": "AWS_KMS",
+    "KeyManager": "AWS",
+    "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+    "KeySpec": "SYMMETRIC_DEFAULT",
+    "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+    ],
+    "MultiRegion": false
+  },
+  "get_key_policy": {
+    "PolicyName": "default",
+    "Policy": "{\n  \"Version\" : \"2012-10-17\",\n  \"Id\" : \"auto-kafka-1\",\n  \"Statement\" : [ {\n    \"Sid\" : \"Allow access through Kafka for all principals in the account that are authorized to use Kafka\",\n    \"Effect\" : \"Allow\",\n    \"Principal\" : {\n      \"AWS\" : \"*\"\n    },\n    \"Action\" : [ \"kms:Encrypt\", \"kms:Decrypt\", \"kms:ReEncrypt*\", \"kms:GenerateDataKey*\", \"kms:CreateGrant\", \"kms:ListGrants\", \"kms:DescribeKey\" ],\n    \"Resource\" : \"*\",\n    \"Condition\" : {\n      \"StringEquals\" : {\n        \"kms:CallerAccount\" : \"123456789012\",\n        \"kms:ViaService\" : \"kafka.us-east-1.amazonaws.com\"\n      }\n    }\n  }, {\n    \"Sid\" : \"Allow direct access to key metadata to the account\",\n    \"Effect\" : \"Allow\",\n    \"Principal\" : {\n      \"AWS\" : \"arn:aws:iam::123456789012:root\"\n    },\n    \"Action\" : [ \"kms:Describe*\", \"kms:Get*\", \"kms:List*\", \"kms:RevokeGrant\" ],\n    \"Resource\" : \"*\"\n  } ]\n}"
+  }
+}

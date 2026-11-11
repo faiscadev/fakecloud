@@ -35,7 +35,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -208,7 +208,7 @@ impl KmsService {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "NotFoundException",
-                        format!("Key '{caller_key_id}' does not exist"),
+                        crate::hook::not_found_message(&req.account_id, &req.region, caller_key_id),
                     ));
                 }
             }
@@ -305,7 +305,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{dest_key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, dest_key_id),
                 )
             })?;
 
@@ -467,7 +467,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -535,7 +535,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -640,7 +640,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -762,7 +762,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -850,7 +850,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -909,7 +909,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -1007,7 +1007,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -1128,7 +1128,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -1198,7 +1198,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -1274,7 +1274,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 

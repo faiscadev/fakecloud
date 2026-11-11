@@ -222,6 +222,8 @@ impl S3Service {
                     req,
                     account_id,
                     bucket,
+                    &obj.key,
+                    obj.bucket_key_enabled == Some(true),
                     &raw,
                     obj.sse_kms_key_id.as_deref(),
                 )?)

@@ -242,8 +242,12 @@ impl AwsService for KmsService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let mutates = is_mutating_action(req.action.as_str());
+        let materialized = self.materialize_aws_managed_keys(&req);
+        let mutates = materialized || is_mutating_action(req.action.as_str());
         if let Some(err) = self.aws_managed_key_refusal(&req) {
+            if materialized {
+                self.save_snapshot().await;
+            }
             return Err(err);
         }
         let result = match req.action.as_str() {
@@ -305,7 +309,9 @@ impl AwsService for KmsService {
             "UpdateCustomKeyStore" => self.update_custom_key_store(&req),
             _ => Err(AwsServiceError::action_not_implemented("kms", &req.action)),
         };
-        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+        if materialized
+            || (mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()))
+        {
             self.save_snapshot().await;
         }
         result
@@ -542,6 +548,68 @@ impl KmsService {
         }
         let replica = format!("{region}:{}", key.key_id);
         state.keys.contains_key(&replica).then_some(replica)
+    }
+
+    /// Create the AWS-managed key behind every `alias/aws/<service>` the
+    /// request names (by name or alias ARN) that does not exist yet, as AWS
+    /// does on first use: recorded, a direct `DescribeKey`, `Encrypt` or
+    /// `GenerateDataKey` on a predefined alias that `ListAliases` showed
+    /// without a target (`alias/aws/dynamodb`), or on an unlisted one
+    /// (`alias/aws/sns`), creates the key, which then refuses the
+    /// cryptographic call. A name AWS has no AWS-managed key for
+    /// (`alias/aws/logs`) stays `NotFoundException`. The key-policy
+    /// operations take no alias (`InvalidArnException`) and the alias
+    /// operations name aliases, not keys, so neither creates one. Returns
+    /// whether a key was created.
+    fn materialize_aws_managed_keys(&self, req: &AwsRequest) -> bool {
+        if matches!(
+            req.action.as_str(),
+            "GetKeyPolicy"
+                | "PutKeyPolicy"
+                | "ListKeyPolicies"
+                | "CreateAlias"
+                | "UpdateAlias"
+                | "DeleteAlias"
+                | "ListAliases"
+                | "CreateKey"
+        ) {
+            return false;
+        }
+        let body = req.json_body();
+        let mut minted = false;
+        for field in ["KeyId", "DestinationKeyId", "SourceKeyId"] {
+            let Some(key_ref) = body[field].as_str() else {
+                continue;
+            };
+            let (region, account, resource) = match parse_kms_arn(key_ref) {
+                Some((r, a, res)) => (r.to_string(), a.to_string(), res),
+                None => (req.region.clone(), req.account_id.clone(), key_ref),
+            };
+            let Some(service) = resource
+                .strip_prefix("alias/aws/")
+                .filter(|s| crate::aws_managed::is_aws_managed_service(s))
+            else {
+                continue;
+            };
+            // AWS-managed keys belong to the caller's own account.
+            if account != req.account_id {
+                continue;
+            }
+            let alias = format!("alias/aws/{service}");
+            let exists = self
+                .state
+                .read()
+                .get(&account)
+                .is_some_and(|state| state.alias(&region, &alias).is_some());
+            if !exists {
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(&account);
+                minted |=
+                    crate::hook::ensure_aws_managed_key(state, &region, &format!("aws/{service}"))
+                        .1;
+            }
+        }
+        minted
     }
 
     /// AWS refuses the key-management operations below on AWS-managed keys
@@ -865,13 +933,14 @@ impl KmsService {
         let empty = KmsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
-        // Check key policy for Deny rules
+        // Check key policy for Deny rules. An unknown alias (recorded:
+        // `alias/aws/logs`) is named by its ARN.
         let resolved = Self::resolve_key_id_with_state(state, &req.region, key_id_input)
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id_input}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, key_id_input),
                 )
             })?;
 

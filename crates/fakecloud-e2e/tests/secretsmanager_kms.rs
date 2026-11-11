@@ -2,8 +2,8 @@
 //! - CreateSecret with `KmsKeyId` triggers `kms:GenerateDataKey`
 //! - GetSecretValue triggers `kms:Decrypt` and returns the original
 //!   plaintext (transparent encrypt/decrypt round-trip)
-//! - Both calls land in `/_fakecloud/kms/usage` with the
-//!   secret-arn-shaped encryption context AWS uses
+//! - Both calls land in `/_fakecloud/kms/usage` with the encryption
+//!   context AWS uses (`SecretARN` + `SecretVersionId`)
 //!
 //! No KMS key is created up-front — the hook auto-provisions an
 //! `aws/secretsmanager` AWS-managed key on first use, mirroring real
@@ -58,16 +58,16 @@ async fn secretsmanager_create_get_round_trips_through_kms() {
     assert!(
         svc_records.iter().any(|r| {
             r["operation"].as_str() == Some("GenerateDataKey")
-                && r["encryptionContext"]["aws:secretsmanager:secretArn"].as_str()
-                    == Some(arn.as_str())
+                && r["encryptionContext"]["SecretARN"].as_str() == Some(arn.as_str())
+                && r["encryptionContext"]["SecretVersionId"].as_str().is_some()
         }),
         "expected GenerateDataKey record bound to secret ARN, got: {svc_records:?}"
     );
     assert!(
         svc_records.iter().any(|r| {
             r["operation"].as_str() == Some("Decrypt")
-                && r["encryptionContext"]["aws:secretsmanager:secretArn"].as_str()
-                    == Some(arn.as_str())
+                && r["encryptionContext"]["SecretARN"].as_str() == Some(arn.as_str())
+                && r["encryptionContext"]["SecretVersionId"].as_str().is_some()
         }),
         "expected Decrypt record bound to secret ARN, got: {svc_records:?}"
     );

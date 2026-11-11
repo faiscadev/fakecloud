@@ -3481,19 +3481,25 @@ fn put_parameter_secure_string_hard_fails_when_kms_rejects() {
             _region: &str,
             _key_id: &str,
             _plaintext: &[u8],
-            _service_principal: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _ec: HashMap<String, String>,
-        ) -> Result<String, String> {
-            Err("KMS unavailable".into())
+        ) -> Result<String, fakecloud_core::delivery::KmsError> {
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::NotFound,
+                "Alias arn:aws:kms:us-east-1:123456789012:alias/aws/ssm is not found.",
+            ))
         }
         fn decrypt(
             &self,
             _account_id: &str,
             _ciphertext_b64: &str,
-            _service_principal: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _ec: HashMap<String, String>,
-        ) -> Result<Vec<u8>, String> {
-            Err("KMS unavailable".into())
+        ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::AccessDenied,
+                "KMS unavailable",
+            ))
         }
     }
 
@@ -3506,10 +3512,16 @@ fn put_parameter_secure_string_hard_fails_when_kms_rejects() {
         Err(e) => e,
         Ok(_) => panic!("expected InvalidKeyId (KMS encrypt failure)"),
     };
-    // PutParameter's Smithy errors list doesn't include
-    // KMSAccessDeniedException, so KMS encrypt failures surface as
-    // InvalidKeyId (the declared shape covering key-related errors).
+    // Recorded: a key KMS cannot find is InvalidKeyId, relaying KMS's
+    // message (a key policy refusal is AccessDeniedException).
     assert_eq!(err.code(), "InvalidKeyId");
+    assert!(
+        err.message().starts_with(
+            "Alias arn:aws:kms:us-east-1:123456789012:alias/aws/ssm is not found. (Service: AWSKMS; Status Code: 400; Error Code: NotFoundException; Request ID: "
+        ),
+        "{}",
+        err.message()
+    );
 }
 
 /// The tier/policy conflict must be rejected BEFORE any KMS encryption work,
@@ -3528,19 +3540,25 @@ fn put_parameter_validates_tier_policy_before_kms() {
             _region: &str,
             _key_id: &str,
             _plaintext: &[u8],
-            _service_principal: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _ec: HashMap<String, String>,
-        ) -> Result<String, String> {
-            Err("KMS unavailable".into())
+        ) -> Result<String, fakecloud_core::delivery::KmsError> {
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::AccessDenied,
+                "KMS unavailable",
+            ))
         }
         fn decrypt(
             &self,
             _account_id: &str,
             _ciphertext_b64: &str,
-            _service_principal: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _ec: HashMap<String, String>,
-        ) -> Result<Vec<u8>, String> {
-            Err("KMS unavailable".into())
+        ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::AccessDenied,
+                "KMS unavailable",
+            ))
         }
     }
 

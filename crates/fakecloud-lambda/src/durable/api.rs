@@ -1446,19 +1446,25 @@ mod tests {
             _: &str,
             _: &str,
             _: &[u8],
-            _: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _: std::collections::HashMap<String, String>,
-        ) -> Result<String, String> {
-            Err("unused".into())
+        ) -> Result<String, fakecloud_core::delivery::KmsError> {
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::AccessDenied,
+                "unused",
+            ))
         }
         fn decrypt(
             &self,
             _: &str,
             _: &str,
-            _: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _: std::collections::HashMap<String, String>,
-        ) -> Result<Vec<u8>, String> {
-            Err("unused".into())
+        ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::AccessDenied,
+                "unused",
+            ))
         }
         fn check_service_key_use(
             &self,

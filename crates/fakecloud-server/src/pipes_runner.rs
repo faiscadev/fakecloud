@@ -423,7 +423,8 @@ impl PipesRunner {
                 }
             }
             msg.visible_at = Some(visible_at);
-            let body = self.decrypt_body(&msg.body, source_arn, &acct, encrypted);
+            let body =
+                self.decrypt_body(&msg.body, msg.sealing_queue(source_arn), &acct, encrypted);
             out.push((
                 msg.message_id.clone(),
                 sqs_source_event(msg, &body, source_arn, &region),
@@ -449,7 +450,12 @@ impl PipesRunner {
         };
         let mut ctx = HashMap::new();
         ctx.insert("aws:sqs:arn".to_string(), source_arn.to_string());
-        match hook.decrypt(account, body, "sqs.amazonaws.com", ctx) {
+        match hook.decrypt(
+            account,
+            body,
+            fakecloud_core::delivery::KmsCaller::via("sqs.amazonaws.com"),
+            ctx,
+        ) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
             Err(err) => {
                 tracing::warn!(%source_arn, %err, "pipes: KMS decrypt failed; forwarding opaque body");
@@ -1558,6 +1564,7 @@ mod tests {
                 message_dedup_id: None,
                 created_at: Utc::now(),
                 sequence_number: None,
+                sealed_for_queue: None,
             }]),
             inflight: Vec::new(),
             attributes: attrs,

@@ -3666,7 +3666,11 @@ async fn dynamodb_sse_specification_kms() {
     let server = TestServer::start().await;
     let client = server.dynamodb_client().await;
 
-    let kms_key_id = "arn:aws:kms:us-east-1:123456789012:key/test-key-id";
+    // DynamoDB checks the key at CreateTable (a missing one is refused), so
+    // the table is encrypted with a real customer managed key.
+    let kms = server.kms_client().await;
+    let key = kms.create_key().send().await.unwrap().key_metadata.unwrap();
+    let kms_key_id = key.arn().unwrap();
 
     // Create table with KMS SSE
     client

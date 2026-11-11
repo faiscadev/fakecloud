@@ -1,5 +1,5 @@
 //! SSM SecureString + KMS hook end-to-end:
-//! - PutParameter with `Type=SecureString` triggers `kms:GenerateDataKey`
+//! - PutParameter with `Type=SecureString` triggers `kms:Encrypt`
 //! - GetParameter with `WithDecryption=true` triggers `kms:Decrypt` and
 //!   returns the original plaintext (transparent round-trip)
 //! - Both calls land in `/_fakecloud/kms/usage` with the
@@ -52,10 +52,10 @@ async fn ssm_securestring_round_trips_through_kms() {
         .collect();
     assert!(
         svc_records.iter().any(|r| {
-            r["operation"].as_str() == Some("GenerateDataKey")
+            r["operation"].as_str() == Some("Encrypt")
                 && r["encryptionContext"]["PARAMETER_ARN"].as_str().is_some()
         }),
-        "expected GenerateDataKey record bound to PARAMETER_ARN, got: {svc_records:?}"
+        "expected Encrypt record bound to PARAMETER_ARN, got: {svc_records:?}"
     );
     assert!(
         svc_records.iter().any(|r| {

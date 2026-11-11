@@ -797,6 +797,10 @@ fn seed_service_resources<'a>(
             seed_secretsmanager(client, endpoint);
             OperationSeedValues::default()
         }
+        "kms" if op_name == "ListAliases" => {
+            seed_kms_list_aliases(client, endpoint);
+            OperationSeedValues::default()
+        }
         _ => OperationSeedValues::default(),
     };
     // On a server the probe owns, S3 is reset before every operation; only
@@ -1255,6 +1259,29 @@ fn seed_secretsmanager(client: &reqwest::blocking::Client, endpoint: &str) {
         "PutResourcePolicy",
         r#"{"SecretId":"MyTestDatabaseSecret","ResourcePolicy":"{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:aws:iam::123456789012:root\"},\"Action\":\"secretsmanager:GetSecretValue\",\"Resource\":\"*\"}]}"}"#,
     );
+}
+
+/// Bring the KMS account to the state the documented `ListAliases` example
+/// was taken in: its AWS-managed aliases (`aws/acm`, `aws/ebs`, `aws/rds`,
+/// `aws/redshift`, `aws/s3`) all have a `TargetKeyId`, because their keys
+/// had been used. In a fresh account AWS lists the predefined aliases
+/// without one until first use (recorded, and documented on ListAliases:
+/// "The response might also include aliases that have no TargetKeyId
+/// field"), and `DescribeKey` on such an alias creates its key, as it does
+/// here. AWS-managed keys cannot be deleted (on AWS either), so nothing is
+/// torn down. Best-effort, like the other seeds.
+fn seed_kms_list_aliases(client: &reqwest::blocking::Client, endpoint: &str) {
+    let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/kms/aws4_request, \
+                SignedHeaders=host;x-amz-date, Signature=00";
+    for service in ["acm", "ebs", "rds", "redshift", "s3"] {
+        let _ = client
+            .post(endpoint)
+            .header("Content-Type", "application/x-amz-json-1.1")
+            .header("X-Amz-Target", "TrentService.DescribeKey")
+            .header("Authorization", auth)
+            .body(format!(r#"{{"KeyId":"alias/aws/{service}"}}"#))
+            .send();
+    }
 }
 
 const LAMBDA_SEED_AUTH: &str =
