@@ -1042,16 +1042,10 @@ impl SsmService {
         region: &str,
         account_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let sm_state = self.secretsmanager_state.as_ref().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ParameterNotFound",
-                format!(
-                    "An error occurred (ParameterNotFound) when referencing \
-                     Secrets Manager: Secret {raw_name} not found.",
-                ),
-            )
-        })?;
+        let sm_state = self
+            .secretsmanager_state
+            .as_ref()
+            .ok_or_else(|| reference_not_found(raw_name))?;
 
         // The secret is read from the caller's own account and region, the
         // way the Secrets Manager endpoint of that region resolves it.
@@ -1059,52 +1053,26 @@ impl SsmService {
         let secret = sm_accounts
             .regional(account_id, region)
             .and_then(|sm| sm.secrets.get(secret_name))
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ParameterNotFound",
-                    format!(
-                        "An error occurred (ParameterNotFound) when referencing \
-                     Secrets Manager: Secret {raw_name} not found.",
-                    ),
-                )
-            })?;
+            .ok_or_else(|| reference_not_found(raw_name))?;
 
         if secret.deleted {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ParameterNotFound",
-                format!(
-                    "An error occurred (ParameterNotFound) when referencing \
-                     Secrets Manager: Secret {raw_name} not found.",
-                ),
-            ));
+            return Err(reference_not_found(raw_name));
         }
 
         // Get the current version's secret string
-        let current_vid = secret.current_version_id.as_ref().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ParameterNotFound",
-                format!(
-                    "An error occurred (ParameterNotFound) when referencing \
-                     Secrets Manager: Secret {raw_name} not found.",
-                ),
-            )
-        })?;
-        let version = secret.versions.get(current_vid).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ParameterNotFound",
-                format!(
-                    "An error occurred (ParameterNotFound) when referencing \
-                     Secrets Manager: Secret {raw_name} not found.",
-                ),
-            )
-        })?;
+        let current_vid = secret
+            .current_version_id
+            .as_ref()
+            .ok_or_else(|| reference_not_found(raw_name))?;
+        let version = secret
+            .versions
+            .get(current_vid)
+            .ok_or_else(|| reference_not_found(raw_name))?;
 
         // Secret values are stored encrypted; the reference resolves to the
-        // plaintext, as GetSecretValue returns it.
+        // plaintext, as GetSecretValue returns it. A value Secrets Manager
+        // cannot decrypt fails the reference (recorded:
+        // AccessDeniedException), never resolves to an empty Value.
         let value = fakecloud_secretsmanager::value::plaintext_secret_string(
             self.kms_hook.as_deref(),
             fakecloud_aws::arn::account_of(&secret.arn).unwrap_or(account_id),
@@ -1112,10 +1080,13 @@ impl SsmService {
             current_vid,
             version.secret_string.clone().unwrap_or_default(),
         )
-        .unwrap_or_else(|err| {
-            tracing::warn!(secret = %secret.arn, error = %err.message(), "secret value not readable");
-            String::new()
-        });
+        .map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AccessDeniedException",
+                "Secrets Manager can't decrypt the protected secret text using the provided KMS key",
+            )
+        })?;
 
         let arn =
             Arn::regional("ssm", region, account_id, &format!("parameter{raw_name}")).to_string();
@@ -1278,12 +1249,12 @@ impl SsmService {
                 // ARN. Apply the same ARN->name normalization here.
                 if arn_resource(raw_name, "ssm").is_some() {
                     match resolve_param_by_name_or_arn(state, raw_name) {
-                        Ok(param) => parameters.push(self.render_param_to_json(
-                            param,
-                            true,
-                            with_decryption,
-                            req,
-                        )?),
+                        Ok(param) => push_or_invalid(
+                            &mut parameters,
+                            &mut invalid,
+                            raw_name,
+                            self.render_param_to_json(param, true, with_decryption, req),
+                        ),
                         Err(_) => invalid.push(raw_name.to_string()),
                     }
                     continue;
@@ -1297,12 +1268,12 @@ impl SsmService {
                     }
                     ParamSelector::None => {
                         if let Some(param) = lookup_param(&state.parameters, base_name) {
-                            parameters.push(self.render_param_to_json(
-                                param,
-                                true,
-                                with_decryption,
-                                req,
-                            )?);
+                            push_or_invalid(
+                                &mut parameters,
+                                &mut invalid,
+                                raw_name,
+                                self.render_param_to_json(param, true, with_decryption, req),
+                            );
                         } else {
                             invalid.push(raw_name.to_string());
                         }
@@ -1310,21 +1281,21 @@ impl SsmService {
                     ParamSelector::Version(ver) => {
                         if let Some(param) = lookup_param(&state.parameters, base_name) {
                             if param.version == ver {
-                                parameters.push(self.render_param_to_json(
-                                    param,
-                                    true,
-                                    with_decryption,
-                                    req,
-                                )?);
+                                push_or_invalid(
+                                    &mut parameters,
+                                    &mut invalid,
+                                    raw_name,
+                                    self.render_param_to_json(param, true, with_decryption, req),
+                                );
                             } else if let Some(hist) =
                                 param.history.iter().find(|h| h.version == ver)
                             {
-                                parameters.push(self.render_history_value(
-                                    param,
-                                    hist,
-                                    with_decryption,
-                                    req,
-                                )?);
+                                push_or_invalid(
+                                    &mut parameters,
+                                    &mut invalid,
+                                    raw_name,
+                                    self.render_history_value(param, hist, with_decryption, req),
+                                );
                             } else {
                                 invalid.push(raw_name.to_string());
                             }
@@ -1338,21 +1309,31 @@ impl SsmService {
                             for (ver, labels) in &param.labels {
                                 if labels.contains(label) {
                                     if *ver == param.version {
-                                        parameters.push(self.render_param_to_json(
-                                            param,
-                                            true,
-                                            with_decryption,
-                                            req,
-                                        )?);
+                                        push_or_invalid(
+                                            &mut parameters,
+                                            &mut invalid,
+                                            raw_name,
+                                            self.render_param_to_json(
+                                                param,
+                                                true,
+                                                with_decryption,
+                                                req,
+                                            ),
+                                        );
                                     } else if let Some(hist) =
                                         param.history.iter().find(|h| h.version == *ver)
                                     {
-                                        parameters.push(self.render_history_value(
-                                            param,
-                                            hist,
-                                            with_decryption,
-                                            req,
-                                        )?);
+                                        push_or_invalid(
+                                            &mut parameters,
+                                            &mut invalid,
+                                            raw_name,
+                                            self.render_history_value(
+                                                param,
+                                                hist,
+                                                with_decryption,
+                                                req,
+                                            ),
+                                        );
                                     }
                                     found = true;
                                     break;
@@ -2862,6 +2843,11 @@ pub(crate) fn decrypt_parameter_value(
     let Some(hook) = kms_hook else {
         return Ok(stored.to_string());
     };
+    // Only a value stored before KMS was wired is not a ciphertext; a
+    // ciphertext that does not open is KMS's failure, never the value.
+    if !hook.is_ciphertext(account_id, stored) {
+        return Ok(stored.to_string());
+    }
     let mut ctx = std::collections::HashMap::new();
     ctx.insert("PARAMETER_ARN".to_string(), param_arn.to_string());
     match hook.decrypt(
@@ -2871,26 +2857,55 @@ pub(crate) fn decrypt_parameter_value(
         ctx,
     ) {
         Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
-        Err(err) if err.kind == fakecloud_core::delivery::KmsErrorKind::InvalidCiphertext => {
-            Ok(stored.to_string())
-        }
         Err(err) => Err(ssm_kms_error(&err)),
     }
 }
 
 /// The plaintext of a stored `SecureString` value, decrypted for a service
 /// that reads it for a resource (CodeBuild resolving a build's environment)
-/// with that resource's role. A value KMS refuses reads as empty.
+/// with that resource's role. A value KMS refuses is SSM's error (see
+/// [`ssm_kms_error`]), which the reading service reports in its own terms;
+/// it never reads as empty or as its ciphertext.
 pub fn plaintext_parameter_value(
     kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
     account_id: &str,
     param_arn: &str,
     stored: &str,
-) -> String {
-    decrypt_parameter_value(kms_hook, account_id, param_arn, stored, None).unwrap_or_else(|err| {
-        tracing::warn!(param_arn, error = %err.message(), "parameter value not readable");
-        String::new()
-    })
+) -> Result<String, AwsServiceError> {
+    decrypt_parameter_value(kms_hook, account_id, param_arn, stored, None)
+}
+
+/// The error for a `/aws/reference/secretsmanager/<secret>` parameter whose
+/// secret does not exist (recorded in
+/// `fakecloud-codebuild/tests/fixtures/env-var-resolution-direct-reads.txt`):
+/// the reference is named without its leading `/`, followed by Secrets
+/// Manager's own message.
+fn reference_not_found(raw_name: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ParameterNotFound",
+        format!(
+            "An error occurred (ParameterNotFound) when referencing Secrets Manager: Secret {} not found. Secrets Manager can't find the specified secret.",
+            raw_name.trim_start_matches('/')
+        ),
+    )
+}
+
+/// Add a `GetParameters` result: a parameter whose value cannot be
+/// decrypted (its KMS key disabled or refusing) is listed under
+/// `InvalidParameters` rather than failing the call (recorded in
+/// `fakecloud-codebuild/tests/fixtures/env-var-resolution-direct-reads.txt`;
+/// `GetParameter` on the same parameter is `InvalidKeyId`).
+fn push_or_invalid(
+    parameters: &mut Vec<Value>,
+    invalid: &mut Vec<String>,
+    raw_name: &str,
+    rendered: Result<Value, AwsServiceError>,
+) {
+    match rendered {
+        Ok(value) => parameters.push(value),
+        Err(_) => invalid.push(raw_name.to_string()),
+    }
 }
 
 /// SSM's error for a failed KMS call on a `SecureString`. Recorded

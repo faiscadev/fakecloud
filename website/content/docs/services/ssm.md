@@ -88,6 +88,13 @@ prevents a silent fallback to plaintext storage when an explicit `KeyId` is
 unreachable; tests can flip the CMK state via the KMS admin endpoints and
 assert that the subsequent `PutParameter` errors rather than persisting.
 
+Reading a SecureString whose key KMS refuses (disabled, deleted, policy) is
+`InvalidKeyId` relaying KMS's message on `GetParameter`, while `GetParameters`
+lists it under `InvalidParameters` like a missing name, as recorded against
+AWS. A `/aws/reference/secretsmanager/<secret>` reference to a secret Secrets
+Manager cannot decrypt is `AccessDeniedException`; one to a missing secret is
+`ParameterNotFound`.
+
 ## Regions
 
 Everything SSM keeps is regional, as on AWS: parameters, documents, maintenance windows, patch baselines (and the default baseline registered per operating system with `RegisterDefaultPatchBaseline`), associations, OpsItems, inventory, managed instances, sessions, resource data syncs and service settings. The same parameter name can hold different values in two regions, `GetParametersByPath` / `DescribeParameters` only see the request region, a parameter ARN names its own region and is not found from another region's endpoint, and `/aws/reference/secretsmanager/...` reads the secret of the request region. The AWS-owned public parameters (`/aws/service/...`) exist in every region. ECS and CodeBuild resolve a parameter name in the task's or build's region and a full ARN in the region it names.

@@ -450,3 +450,85 @@ async fn glob_artifacts_upload_to_s3() {
         "non-matching file must not be uploaded as an artifact"
     );
 }
+
+/// A `SECRETS_MANAGER` / `PARAMETER_STORE` variable naming nothing fails the
+/// build in `DOWNLOAD_SOURCE` after provisioning, with the phase sequence and
+/// contexts recorded from real CodeBuild
+/// (`fakecloud-codebuild/tests/fixtures/env-var-resolution-failures.json`),
+/// instead of running the commands with the variable empty.
+#[tokio::test]
+async fn unresolvable_env_vars_fail_download_source() {
+    if !require_docker_or_skip("unresolvable_env_vars_fail_download_source") {
+        return;
+    }
+    let s = TestServer::start().await;
+    let cb = aws_sdk_codebuild::Client::new(&s.aws_config().await);
+    create_project(
+        &cb,
+        "e2e-env",
+        "version: 0.2\nphases:\n  build:\n    commands:\n      - echo hi\n",
+    )
+    .await;
+
+    for (ty, value, status_code, message) in [
+        (
+            aws_sdk_codebuild::types::EnvironmentVariableType::SecretsManager,
+            "fc-does-not-exist-secret",
+            "Secrets Manager Error",
+            "ResourceNotFoundException: Secrets Manager can't find the specified secret.",
+        ),
+        (
+            aws_sdk_codebuild::types::EnvironmentVariableType::ParameterStore,
+            "/fc/does-not-exist",
+            "Decrypted Variables Error",
+            "parameter does not exist: /fc/does-not-exist",
+        ),
+    ] {
+        let start = cb
+            .start_build()
+            .project_name("e2e-env")
+            .environment_variables_override(
+                aws_sdk_codebuild::types::EnvironmentVariable::builder()
+                    .name("V")
+                    .value(value)
+                    .r#type(ty)
+                    .build()
+                    .unwrap(),
+            )
+            .send()
+            .await
+            .expect("start build");
+        let build_id = start.build_value().unwrap().id().unwrap().to_string();
+        let build = wait_complete(&cb, &build_id).await;
+        assert_eq!(build.build_status(), Some(&StatusType::Failed));
+        let phases: Vec<(&str, Option<&str>)> = build
+            .phases()
+            .iter()
+            .map(|p| {
+                (
+                    p.phase_type().unwrap().as_str(),
+                    p.phase_status().map(|s| s.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            phases,
+            [
+                ("SUBMITTED", Some("SUCCEEDED")),
+                ("QUEUED", Some("SUCCEEDED")),
+                ("PROVISIONING", Some("SUCCEEDED")),
+                ("DOWNLOAD_SOURCE", Some("FAILED")),
+                ("FINALIZING", Some("SUCCEEDED")),
+                ("COMPLETED", None),
+            ]
+        );
+        let download = build
+            .phases()
+            .iter()
+            .find(|p| p.phase_type().map(|t| t.as_str()) == Some("DOWNLOAD_SOURCE"))
+            .unwrap();
+        let context = &download.contexts()[0];
+        assert_eq!(context.status_code(), Some(status_code));
+        assert_eq!(context.message(), Some(message));
+    }
+}

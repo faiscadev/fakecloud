@@ -1,0 +1,25 @@
+$ aws secretsmanager get-secret-value --secret-id <disabled-key secret>
+
+An error occurred (DecryptionFailure) when calling the GetSecretValue operation: Secrets Manager can't decrypt the secret value: arn:aws:kms:us-east-1:123456789012:key/f6a80219-d548-4f33-a94d-7dbe0a481031 is disabled. (Service: AWSKMS; Status Code: 400; Error Code: DisabledException; Request ID: e4019ed8-0682-4e0f-be04-7e1cc19ed632; Proxy: null)
+exit=254
+$ aws ssm get-parameters --names <disabled-key SecureString> /fc/does-not-exist --with-decryption
+{
+    "Parameters": [],
+    "InvalidParameters": [
+        "/fc-cb-rec/sec",
+        "/fc/does-not-exist"
+    ]
+}
+exit=0
+$ aws ssm get-parameter --name <disabled-key SecureString> --with-decryption
+
+An error occurred (InvalidKeyId) when calling the GetParameter operation: arn:aws:kms:us-east-1:123456789012:key/f6a80219-d548-4f33-a94d-7dbe0a481031 is disabled. (Service: AWSKMS; Status Code: 400; Error Code: DisabledException; Request ID: ee2f94ba-2938-482a-a941-90e730cc39ef; Proxy: null)
+exit=254
+$ aws ssm get-parameter --name /aws/reference/secretsmanager/<disabled-key secret> --with-decryption
+
+An error occurred (AccessDeniedException) when calling the GetParameter operation: Secrets Manager can't decrypt the protected secret text using the provided KMS key
+exit=254
+$ aws ssm get-parameter --name /aws/reference/secretsmanager/fc-does-not-exist-secret --with-decryption
+
+An error occurred (ParameterNotFound) when calling the GetParameter operation: An error occurred (ParameterNotFound) when referencing Secrets Manager: Secret aws/reference/secretsmanager/fc-does-not-exist-secret not found. Secrets Manager can't find the specified secret.
+exit=254

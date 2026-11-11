@@ -1,0 +1,277 @@
+{
+  "missing-secret": {
+    "environmentVariablesOverride": [
+      {
+        "name": "V",
+        "value": "fc-does-not-exist-secret",
+        "type": "SECRETS_MANAGER"
+      }
+    ],
+    "buildStatus": "FAILED",
+    "currentPhase": "COMPLETED",
+    "buildComplete": true,
+    "phases": [
+      {
+        "phaseType": "SUBMITTED",
+        "phaseStatus": "SUCCEEDED"
+      },
+      {
+        "phaseType": "QUEUED",
+        "phaseStatus": "SUCCEEDED"
+      },
+      {
+        "phaseType": "PROVISIONING",
+        "phaseStatus": "SUCCEEDED",
+        "contexts": [
+          {
+            "statusCode": "",
+            "message": ""
+          }
+        ]
+      },
+      {
+        "phaseType": "DOWNLOAD_SOURCE",
+        "phaseStatus": "FAILED",
+        "contexts": [
+          {
+            "statusCode": "Secrets Manager Error",
+            "message": "ResourceNotFoundException: Secrets Manager can't find the specified secret."
+          }
+        ]
+      },
+      {
+        "phaseType": "FINALIZING",
+        "phaseStatus": "SUCCEEDED",
+        "contexts": [
+          {
+            "statusCode": "",
+            "message": ""
+          }
+        ]
+      },
+      {
+        "phaseType": "COMPLETED"
+      }
+    ]
+  },
+  "missing-parameter": {
+    "environmentVariablesOverride": [
+      {
+        "name": "V",
+        "value": "/fc/does-not-exist",
+        "type": "PARAMETER_STORE"
+      }
+    ],
+    "buildStatus": "FAILED",
+    "currentPhase": "COMPLETED",
+    "buildComplete": true,
+    "phases": [
+      {
+        "phaseType": "SUBMITTED",
+        "phaseStatus": "SUCCEEDED"
+      },
+      {
+        "phaseType": "QUEUED",
+        "phaseStatus": "SUCCEEDED"
+      },
+      {
+        "phaseType": "PROVISIONING",
+        "phaseStatus": "SUCCEEDED",
+        "contexts": [
+          {
+            "statusCode": "",
+            "message": ""
+          }
+        ]
+      },
+      {
+        "phaseType": "DOWNLOAD_SOURCE",
+        "phaseStatus": "FAILED",
+        "contexts": [
+          {
+            "statusCode": "Decrypted Variables Error",
+            "message": "parameter does not exist: /fc/does-not-exist"
+          }
+        ]
+      },
+      {
+        "phaseType": "FINALIZING",
+        "phaseStatus": "SUCCEEDED",
+        "contexts": [
+          {
+            "statusCode": "",
+            "message": ""
+          }
+        ]
+      },
+      {
+        "phaseType": "COMPLETED"
+      }
+    ]
+  },
+  "disabled-key-secret": {
+    "environmentVariablesOverride": [
+      {
+        "name": "V",
+        "value": "fc-cb-rec-sec",
+        "type": "SECRETS_MANAGER"
+      }
+    ],
+    "buildStatus": "FAILED",
+    "currentPhase": "COMPLETED",
+    "buildComplete": true,
+    "phases": [
+      {
+        "phaseType": "SUBMITTED",
+        "phaseStatus": "SUCCEEDED"
+      },
+      {
+        "phaseType": "QUEUED",
+        "phaseStatus": "SUCCEEDED"
+      },
+      {
+        "phaseType": "PROVISIONING",
+        "phaseStatus": "SUCCEEDED",
+        "contexts": [
+          {
+            "statusCode": "",
+            "message": ""
+          }
+        ]
+      },
+      {
+        "phaseType": "DOWNLOAD_SOURCE",
+        "phaseStatus": "FAILED",
+        "contexts": [
+          {
+            "statusCode": "Secrets Manager Error",
+            "message": "DecryptionFailure: Secrets Manager can't decrypt the secret value: arn:aws:kms:us-east-1:123456789012:key/f6a80219-d548-4f33-a94d-7dbe0a481031 is disabled. (Service: AWSKMS; Status Code: 400; Error Code: DisabledException; Request ID: 274ad5c2-56fb-422a-b80a-3ef2e9117687; Proxy: null)"
+          }
+        ]
+      },
+      {
+        "phaseType": "FINALIZING",
+        "phaseStatus": "SUCCEEDED",
+        "contexts": [
+          {
+            "statusCode": "",
+            "message": ""
+          }
+        ]
+      },
+      {
+        "phaseType": "COMPLETED"
+      }
+    ]
+  },
+  "disabled-key-parameter": {
+    "environmentVariablesOverride": [
+      {
+        "name": "V",
+        "value": "/fc-cb-rec/sec",
+        "type": "PARAMETER_STORE"
+      }
+    ],
+    "buildStatus": "FAILED",
+    "currentPhase": "COMPLETED",
+    "buildComplete": true,
+    "phases": [
+      {
+        "phaseType": "SUBMITTED",
+        "phaseStatus": "SUCCEEDED"
+      },
+      {
+        "phaseType": "QUEUED",
+        "phaseStatus": "SUCCEEDED"
+      },
+      {
+        "phaseType": "PROVISIONING",
+        "phaseStatus": "SUCCEEDED",
+        "contexts": [
+          {
+            "statusCode": "",
+            "message": ""
+          }
+        ]
+      },
+      {
+        "phaseType": "DOWNLOAD_SOURCE",
+        "phaseStatus": "FAILED",
+        "contexts": [
+          {
+            "statusCode": "Decrypted Variables Error",
+            "message": "parameter does not exist: /fc-cb-rec/sec"
+          }
+        ]
+      },
+      {
+        "phaseType": "FINALIZING",
+        "phaseStatus": "SUCCEEDED",
+        "contexts": [
+          {
+            "statusCode": "",
+            "message": ""
+          }
+        ]
+      },
+      {
+        "phaseType": "COMPLETED"
+      }
+    ]
+  },
+  "missing-secret-json-key": {
+    "environmentVariablesOverride": [
+      {
+        "name": "V",
+        "value": "fc-does-not-exist-secret:password",
+        "type": "SECRETS_MANAGER"
+      }
+    ],
+    "buildStatus": "FAILED",
+    "currentPhase": "COMPLETED",
+    "buildComplete": true,
+    "phases": [
+      {
+        "phaseType": "SUBMITTED",
+        "phaseStatus": "SUCCEEDED"
+      },
+      {
+        "phaseType": "QUEUED",
+        "phaseStatus": "SUCCEEDED"
+      },
+      {
+        "phaseType": "PROVISIONING",
+        "phaseStatus": "SUCCEEDED",
+        "contexts": [
+          {
+            "statusCode": "",
+            "message": ""
+          }
+        ]
+      },
+      {
+        "phaseType": "DOWNLOAD_SOURCE",
+        "phaseStatus": "FAILED",
+        "contexts": [
+          {
+            "statusCode": "Secrets Manager Error",
+            "message": "ResourceNotFoundException: Secrets Manager can't find the specified secret."
+          }
+        ]
+      },
+      {
+        "phaseType": "FINALIZING",
+        "phaseStatus": "SUCCEEDED",
+        "contexts": [
+          {
+            "statusCode": "",
+            "message": ""
+          }
+        ]
+      },
+      {
+        "phaseType": "COMPLETED"
+      }
+    ]
+  }
+}

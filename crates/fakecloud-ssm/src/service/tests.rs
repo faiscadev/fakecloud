@@ -6613,3 +6613,241 @@ fn deleted_document_policies_do_not_share_a_recreated_document() {
         vec!["111111111111"]
     );
 }
+
+/// A ciphertext KMS will not open (sealed for another parameter, or under a
+/// key it refuses) fails the read; only a value that is not a ciphertext
+/// (stored before KMS was wired) reads as stored.
+#[test]
+fn secure_string_ciphertext_that_does_not_open_is_an_error_not_the_value() {
+    use fakecloud_core::delivery::{KmsCaller, KmsError, KmsErrorKind, KmsHook};
+
+    struct WrongContextKms;
+    impl KmsHook for WrongContextKms {
+        fn encrypt(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            _key_id: &str,
+            _plaintext: &[u8],
+            _caller: KmsCaller<'_>,
+            _ec: HashMap<String, String>,
+        ) -> Result<String, KmsError> {
+            unreachable!()
+        }
+        fn decrypt(
+            &self,
+            _account_id: &str,
+            _ciphertext_b64: &str,
+            _caller: KmsCaller<'_>,
+            _ec: HashMap<String, String>,
+        ) -> Result<Vec<u8>, KmsError> {
+            Err(KmsError::new(KmsErrorKind::InvalidCiphertext, ""))
+        }
+        fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+            stored.starts_with("ENC:")
+        }
+    }
+
+    let hook = WrongContextKms;
+    let arn = "arn:aws:ssm:us-east-1:123456789012:parameter/p";
+    let err = super::parameters::decrypt_parameter_value(
+        Some(&hook),
+        "123456789012",
+        arn,
+        "ENC:sealed-elsewhere",
+        None,
+    )
+    .expect_err("a ciphertext that does not open must not read as its value");
+    assert_eq!(err.code(), "InvalidKeyId");
+    assert_eq!(
+        super::parameters::decrypt_parameter_value(
+            Some(&hook),
+            "123456789012",
+            arn,
+            "legacy plaintext",
+            None
+        )
+        .unwrap(),
+        "legacy plaintext"
+    );
+}
+
+/// A `/aws/reference/secretsmanager/` parameter whose secret Secrets Manager
+/// cannot decrypt (its key disabled) fails the reference, never resolves to
+/// an empty `Value`; a missing secret is `ParameterNotFound`. Both recorded
+/// in `fakecloud-codebuild/tests/fixtures/env-var-resolution-direct-reads.txt`.
+#[test]
+fn secretsmanager_reference_fails_when_the_secret_does_not_decrypt() {
+    use fakecloud_core::delivery::{KmsCaller, KmsError, KmsErrorKind, KmsHook};
+    use std::collections::BTreeMap;
+
+    struct DisabledKeyKms;
+    impl KmsHook for DisabledKeyKms {
+        fn encrypt(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            _key_id: &str,
+            _plaintext: &[u8],
+            _caller: KmsCaller<'_>,
+            _ec: HashMap<String, String>,
+        ) -> Result<String, KmsError> {
+            unreachable!()
+        }
+        fn decrypt(
+            &self,
+            _account_id: &str,
+            _ciphertext_b64: &str,
+            _caller: KmsCaller<'_>,
+            _ec: HashMap<String, String>,
+        ) -> Result<Vec<u8>, KmsError> {
+            Err(KmsError::new(KmsErrorKind::Disabled, "key is disabled"))
+        }
+        fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+            stored.starts_with("ENC:")
+        }
+    }
+
+    let mut sm: fakecloud_core::multi_account::MultiRegionState<
+        fakecloud_secretsmanager::SecretsManagerState,
+    > = fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", "");
+    let arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-AbCdEf";
+    let now = chrono::Utc::now();
+    sm.regional_mut("123456789012", "us-east-1").secrets.insert(
+        "db".to_string(),
+        fakecloud_secretsmanager::Secret {
+            name: "db".to_string(),
+            arn: arn.to_string(),
+            description: None,
+            kms_key_id: Some("alias/app".to_string()),
+            versions: BTreeMap::from([(
+                "v1".to_string(),
+                fakecloud_secretsmanager::SecretVersion {
+                    version_id: "v1".to_string(),
+                    secret_string: Some("ENC:sealed".to_string()),
+                    secret_binary: None,
+                    stages: vec!["AWSCURRENT".to_string()],
+                    created_at: now,
+                    kms_key_ids: vec!["alias/app".to_string()],
+                },
+            )]),
+            current_version_id: Some("v1".to_string()),
+            tags: vec![],
+            tags_ever_set: false,
+            deleted: false,
+            deletion_date: None,
+            created_at: now,
+            last_changed_at: now,
+            last_accessed_at: None,
+            rotation_enabled: None,
+            rotation_lambda_arn: None,
+            rotation_rules: None,
+            last_rotated_at: None,
+            resource_policy: None,
+            replica_regions: Vec::new(),
+            replica_settings: BTreeMap::new(),
+            primary_region: None,
+        },
+    );
+    let svc = make_service()
+        .with_secretsmanager(Arc::new(RwLock::new(sm)))
+        .with_kms_hook(Arc::new(DisabledKeyKms));
+    let req = make_request(
+        "GetParameter",
+        json!({"Name": "/aws/reference/secretsmanager/db", "WithDecryption": true}),
+    );
+    let err = match svc.get_parameter(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("a secret that does not decrypt must fail the reference"),
+    };
+    assert_eq!(err.code(), "AccessDeniedException");
+    assert_eq!(
+        err.message(),
+        "Secrets Manager can't decrypt the protected secret text using the provided KMS key"
+    );
+
+    let req = make_request(
+        "GetParameter",
+        json!({"Name": "/aws/reference/secretsmanager/fc-does-not-exist-secret", "WithDecryption": true}),
+    );
+    let err = match svc.get_parameter(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("a missing secret must fail the reference"),
+    };
+    assert_eq!(err.code(), "ParameterNotFound");
+    assert_eq!(
+        err.message(),
+        "An error occurred (ParameterNotFound) when referencing Secrets Manager: Secret aws/reference/secretsmanager/fc-does-not-exist-secret not found. Secrets Manager can't find the specified secret."
+    );
+}
+
+/// `GetParameters` lists a SecureString whose key KMS refuses under
+/// `InvalidParameters` (next to a missing name) instead of failing the call;
+/// `GetParameter` on it is `InvalidKeyId` relaying KMS. Recorded in
+/// `fakecloud-codebuild/tests/fixtures/env-var-resolution-direct-reads.txt`.
+#[test]
+fn get_parameters_lists_undecryptable_secure_strings_as_invalid() {
+    use fakecloud_core::delivery::{KmsCaller, KmsError, KmsErrorKind, KmsHook};
+
+    struct DisabledAfterSealKms;
+    impl KmsHook for DisabledAfterSealKms {
+        fn encrypt(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            _key_id: &str,
+            plaintext: &[u8],
+            _caller: KmsCaller<'_>,
+            _ec: HashMap<String, String>,
+        ) -> Result<String, KmsError> {
+            Ok(format!("ENC:{}", String::from_utf8_lossy(plaintext)))
+        }
+        fn decrypt(
+            &self,
+            _account_id: &str,
+            _ciphertext_b64: &str,
+            _caller: KmsCaller<'_>,
+            _ec: HashMap<String, String>,
+        ) -> Result<Vec<u8>, KmsError> {
+            Err(KmsError::new(
+                KmsErrorKind::Disabled,
+                "arn:aws:kms:us-east-1:123456789012:key/k is disabled.",
+            ))
+        }
+        fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+            stored.starts_with("ENC:")
+        }
+    }
+
+    let svc = make_service().with_kms_hook(Arc::new(DisabledAfterSealKms));
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({"Name": "/app/sec", "Value": "hunter2", "Type": "SecureString"}),
+    ))
+    .unwrap();
+
+    let resp = svc
+        .get_parameters(&make_request(
+            "GetParameters",
+            json!({"Names": ["/app/sec", "/fc/does-not-exist"], "WithDecryption": true}),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Parameters"], json!([]));
+    assert_eq!(
+        body["InvalidParameters"],
+        json!(["/app/sec", "/fc/does-not-exist"])
+    );
+
+    let err = match svc.get_parameter(&make_request(
+        "GetParameter",
+        json!({"Name": "/app/sec", "WithDecryption": true}),
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("a SecureString KMS refuses must not read"),
+    };
+    assert_eq!(err.code(), "InvalidKeyId");
+    assert!(err.message().starts_with(
+        "arn:aws:kms:us-east-1:123456789012:key/k is disabled. (Service: AWSKMS; Status Code: 400; Error Code: DisabledException; Request ID: "
+    ));
+}

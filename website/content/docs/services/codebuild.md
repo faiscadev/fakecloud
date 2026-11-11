@@ -71,7 +71,12 @@ When a container runtime is available, the background build task:
   `CODEBUILD_BUILD_ARN`, `CODEBUILD_SOURCE_VERSION`, `CODEBUILD_BUILD_NUMBER`,
   plus the project's `environmentVariables` and the buildspec `env.variables`).
   `PARAMETER_STORE` and `SECRETS_MANAGER` environment variables are resolved
-  cross-service from SSM / Secrets Manager and injected into the container. A
+  cross-service from SSM / Secrets Manager and injected into the container; as
+  on AWS, one that names nothing or cannot be decrypted (its KMS key disabled
+  or refusing) fails the build in `DOWNLOAD_SOURCE` after provisioning
+  (`Secrets Manager Error` with `GetSecretValue`'s `<code>: <message>`, or
+  `Decrypted Variables Error` "parameter does not exist: <name>") instead of
+  running with the variable empty. A
   failing command fails its phase; a failed `install`/`pre_build`/`build` skips
   ahead but `post_build` still runs — matching AWS's phase-failure semantics.
   Each `phases[]` entry carries the real `phaseStatus`, `startTime`, `endTime`,
