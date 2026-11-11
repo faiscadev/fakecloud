@@ -517,32 +517,18 @@ impl DockerBackend {
             // Streamed in as a tar so the directory keeps its mode: world
             // writable (sticky) for the launcher's bookkeeping whatever user
             // the image runs as.
-            use tokio::io::AsyncWriteExt;
-            let mut child = tokio::process::Command::new(&self.cli)
-                .arg("cp")
-                .arg("-")
-                .arg(format!("{container_id}:/var"))
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(&super::extensions::launcher_tar())
-                    .await
-                    .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-            }
-            let out = child
-                .wait_with_output()
-                .await
-                .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-            if !out.status.success() {
-                return Err(RuntimeError::ContainerStartFailed(format!(
-                    "docker cp of the extension launcher failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                )));
-            }
+            let target = format!("{container_id}:/var");
+            run_with_stdin(
+                &self.cli,
+                &["cp", "-", &target],
+                &super::extensions::launcher_tar(),
+            )
+            .await
+            .map_err(|e| {
+                RuntimeError::ContainerStartFailed(format!(
+                    "docker cp of the extension launcher failed: {e}"
+                ))
+            })?;
         }
         Ok(())
     }
@@ -714,9 +700,12 @@ impl LambdaBackend for DockerBackend {
         let BackendHandle::Container { id } = handle else {
             return None;
         };
+        // A caller that gives up on a hung CLI (see `monitor_launcher`)
+        // must not leave the process behind.
         let out = tokio::process::Command::new(&self.cli)
             .args(["cp", &format!("{id}:{path}"), "-"])
             .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
             .output()
             .await
             .ok()
@@ -753,6 +742,7 @@ impl LambdaBackend for DockerBackend {
             .arg(&local)
             .arg(format!("{id}:{path}"))
             .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
             .output()
             .await
             .is_ok_and(|o| o.status.success())
@@ -885,6 +875,38 @@ fn fakecloud_on_its_network(
 struct SelfNetwork {
     network: String,
     ip: String,
+}
+
+/// Run `cli args...` with `input` on its stdin. `Err` names why it failed,
+/// with the CLI's stderr: a CLI that exits before reading all of `input`
+/// (a `cp -` refusing its target, say) makes the write fail with a broken
+/// pipe, and what it said on stderr is the reason worth reporting.
+async fn run_with_stdin(cli: &str, args: &[&str], input: &[u8]) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new(cli)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("could not run {cli}: {e}"))?;
+    let written = match child.stdin.take() {
+        // Dropped once written, so the CLI sees the end of its input.
+        Some(mut stdin) => stdin.write_all(input).await,
+        None => Ok(()),
+    };
+    let out = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("could not wait for {cli}: {e}"))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = stderr.trim();
+    match (written, out.status.success()) {
+        (Ok(()), true) => Ok(()),
+        (Err(e), true) => Err(format!("writing its input failed: {e}: {stderr}")),
+        (_, false) => Err(format!("{}: {stderr}", out.status)),
+    }
 }
 
 /// Find the container fakecloud runs in and the network to share with Lambda
@@ -1585,5 +1607,34 @@ mod tests {
                 ("AWS_SESSION_TOKEN".to_string(), "tok".to_string()),
             ]
         );
+    }
+
+    /// A CLI that exits without reading its input (as `cp -` does when it
+    /// refuses the target) breaks the pipe; the error still carries what it
+    /// said on stderr.
+    #[tokio::test]
+    async fn a_cli_that_exits_early_reports_its_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_str().unwrap().to_string()
+        };
+        let refuses = script(
+            "refuses",
+            "#!/bin/sh\necho 'Error: No such container: abc' >&2\nexit 1\n",
+        );
+        let accepts = script("accepts", "#!/bin/sh\ncat > /dev/null\n");
+        // Far more than a pipe buffer, so the write cannot complete.
+        let input = vec![0u8; 8 << 20];
+        let err = run_with_stdin(&refuses, &["cp", "-", "abc:/var"], &input)
+            .await
+            .unwrap_err();
+        assert!(err.contains("No such container: abc"), "{err}");
+        run_with_stdin(&accepts, &["cp", "-", "abc:/var"], &input)
+            .await
+            .unwrap();
     }
 }
