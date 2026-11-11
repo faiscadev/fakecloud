@@ -653,8 +653,8 @@ impl AwsService for CloudFrontService {
                 self.list_invalidations_for_distribution_tenant(&resolved)
             }
             "CreateConnectionFunction" => self.create_connection_function(&req),
-            "GetConnectionFunction" => self.get_connection_function(&resolved),
-            "DescribeConnectionFunction" => self.describe_connection_function(&resolved),
+            "GetConnectionFunction" => self.get_connection_function(&req, &resolved),
+            "DescribeConnectionFunction" => self.describe_connection_function(&req, &resolved),
             "UpdateConnectionFunction" => self.update_connection_function(&req, &resolved),
             "DeleteConnectionFunction" => self.delete_connection_function(&req, &resolved),
             "ListConnectionFunctions" => self.list_connection_functions(&req),
@@ -1626,15 +1626,24 @@ impl CloudFrontService {
         let if_match = crate::policies::require_if_match(req)?;
         let parsed: AssociateAliasRequest = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid request XML: {e}")))?;
+        // Like DisassociateDistributionWebACL, this operation reports an
+        // unknown distribution as EntityNotFound, not NoSuchDistribution.
+        let entity_not_found = || {
+            aws_error(
+                StatusCode::NOT_FOUND,
+                "EntityNotFound",
+                format!("The specified distribution does not exist: {id}"),
+            )
+        };
         let mut state = self.state.write();
         let account = state
             .accounts
             .get_mut(&req.account_id)
-            .ok_or_else(|| no_such_distribution(id))?;
+            .ok_or_else(entity_not_found)?;
         let dist = account
             .distributions
             .get_mut(id)
-            .ok_or_else(|| no_such_distribution(id))?;
+            .ok_or_else(entity_not_found)?;
         if dist.etag != if_match {
             return Err(crate::policies::precondition_failed());
         }
@@ -3642,16 +3651,18 @@ mod tests {
                 },
             );
             let mut config = crate::fle::FieldLevelEncryptionConfig::default();
-            config.query_arg_profile_config.query_arg_profiles =
-                Some(crate::fle::QueryArgProfiles {
-                    quantity: 1,
-                    items: Some(crate::fle::QueryArgProfileItems {
-                        query_arg_profile: vec![crate::fle::QueryArgProfile {
-                            query_arg: "q".into(),
-                            profile_id: "prof".into(),
-                        }],
-                    }),
-                });
+            config
+                .query_arg_profile_config
+                .get_or_insert_with(Default::default)
+                .query_arg_profiles = Some(crate::fle::QueryArgProfiles {
+                quantity: 1,
+                items: Some(crate::fle::QueryArgProfileItems {
+                    query_arg_profile: vec![crate::fle::QueryArgProfile {
+                        query_arg: "q".into(),
+                        profile_id: "prof".into(),
+                    }],
+                }),
+            });
             a.field_level_encryptions.insert(
                 "fle".into(),
                 crate::fle::StoredFieldLevelEncryption {
@@ -5080,5 +5091,128 @@ mod tests {
         let mut expected = [d1, d2];
         expected.sort();
         assert_eq!(seen, expected, "pages did not cover both distributions");
+    }
+
+    fn body_text(resp: &AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).into_owned()
+    }
+
+    #[tokio::test]
+    async fn associate_web_acl_on_unknown_distribution_is_entity_not_found() {
+        let svc = CloudFrontService::new(make_state());
+        let mut r = make_request(
+            http::Method::PUT,
+            "/2020-05-31/distribution/ENOPE/associate-web-acl",
+            "",
+            "<AssociateDistributionWebACLRequest><WebACLArn>arn:acl</WebACLArn></AssociateDistributionWebACLRequest>",
+        );
+        r.headers.insert(IF_MATCH, "E1".parse().unwrap());
+        let err = svc.handle(r).await.err().expect("unknown distribution");
+        assert_eq!(err.code(), "EntityNotFound");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn field_level_encryption_config_profile_configs_are_optional() {
+        let svc = CloudFrontService::new(make_state());
+        let body = format!(
+            r#"<FieldLevelEncryptionConfig xmlns="{NS}"><CallerReference>fle-opt</CallerReference><Comment>c</Comment></FieldLevelEncryptionConfig>"#,
+            NS = crate::NAMESPACE
+        );
+        let resp = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/field-level-encryption",
+                "",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let xml = body_text(&resp);
+        assert!(!xml.contains("QueryArgProfileConfig"), "{xml}");
+        assert!(!xml.contains("ContentTypeProfileConfig"), "{xml}");
+    }
+
+    #[tokio::test]
+    async fn realtime_log_config_endpoint_without_kinesis_config_and_partial_update_by_name() {
+        let svc = CloudFrontService::new(make_state());
+        let create = format!(
+            r#"<CreateRealtimeLogConfigRequest xmlns="{NS}"><EndPoints><member><StreamType>Kinesis</StreamType></member></EndPoints><Fields><Field>timestamp</Field></Fields><Name>rtl-opt</Name><SamplingRate>5</SamplingRate></CreateRealtimeLogConfigRequest>"#,
+            NS = crate::NAMESPACE
+        );
+        let resp = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/realtime-log-config",
+                "",
+                &create,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::CREATED);
+        assert!(!body_text(&resp).contains("KinesisStreamConfig"));
+
+        // Addressed by Name, only SamplingRate supplied: the endpoints and
+        // fields are kept.
+        let update = format!(
+            r#"<UpdateRealtimeLogConfigRequest xmlns="{NS}"><Name>rtl-opt</Name><SamplingRate>50</SamplingRate></UpdateRealtimeLogConfigRequest>"#,
+            NS = crate::NAMESPACE
+        );
+        let resp = svc
+            .handle(make_request(
+                http::Method::PUT,
+                "/2020-05-31/realtime-log-config",
+                "",
+                &update,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let xml = body_text(&resp);
+        assert!(xml.contains("<SamplingRate>50</SamplingRate>"), "{xml}");
+        assert!(xml.contains("<Field>timestamp</Field>"), "{xml}");
+        assert!(xml.contains("<StreamType>Kinesis</StreamType>"), "{xml}");
+
+        // Neither Name nor ARN: nothing to address.
+        let neither = format!(
+            r#"<UpdateRealtimeLogConfigRequest xmlns="{NS}"><SamplingRate>5</SamplingRate></UpdateRealtimeLogConfigRequest>"#,
+            NS = crate::NAMESPACE
+        );
+        let err = svc
+            .handle(make_request(
+                http::Method::PUT,
+                "/2020-05-31/realtime-log-config",
+                "",
+                &neither,
+            ))
+            .await
+            .err()
+            .expect("no identifier");
+        assert_eq!(err.code(), "InvalidArgument");
+    }
+
+    #[tokio::test]
+    async fn streaming_distribution_without_price_class_defaults_to_all() {
+        let svc = CloudFrontService::new(make_state());
+        let body = format!(
+            r#"<StreamingDistributionConfig xmlns="{NS}"><CallerReference>sd-opt</CallerReference><S3Origin><DomainName>b.s3.amazonaws.com</DomainName><OriginAccessIdentity></OriginAccessIdentity></S3Origin><Comment>c</Comment><TrustedSigners><Enabled>false</Enabled><Quantity>0</Quantity></TrustedSigners><Enabled>true</Enabled></StreamingDistributionConfig>"#,
+            NS = crate::NAMESPACE
+        );
+        let resp = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/streaming-distribution",
+                "",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let xml = body_text(&resp);
+        assert!(
+            xml.contains("<PriceClass>PriceClass_All</PriceClass>"),
+            "{xml}"
+        );
     }
 }

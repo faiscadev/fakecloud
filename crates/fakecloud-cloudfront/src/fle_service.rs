@@ -195,12 +195,12 @@ impl CloudFrontService {
             if let Some(c) = &f.config.comment {
                 body.push_str(&format!("<Comment>{}</Comment>", esc(c)));
             }
-            body.push_str(&render_query_arg_profile_config(
-                &f.config.query_arg_profile_config,
-            ));
-            body.push_str(&render_content_type_profile_config(
-                &f.config.content_type_profile_config,
-            ));
+            if let Some(q) = &f.config.query_arg_profile_config {
+                body.push_str(&render_query_arg_profile_config(q));
+            }
+            if let Some(c) = &f.config.content_type_profile_config {
+                body.push_str(&render_content_type_profile_config(c));
+            }
             body.push_str("</FieldLevelEncryptionSummary>");
         }
         body.push_str("</Items>");
@@ -489,21 +489,34 @@ impl CloudFrontService {
             xml_io::from_xml_root(&req.body).map_err(|e| {
                 invalid_argument(format!("invalid UpdateRealtimeLogConfigRequest XML: {e}"))
             })?;
-        if parsed.arn.is_empty() {
-            return Err(invalid_argument("ARN is required"));
-        }
         let mut state = self.state.write();
+        let key = resolve_rtl_key(
+            state
+                .accounts
+                .get(&req.account_id)
+                .map(|a| &a.realtime_log_configs),
+            &GetOrDeleteRealtimeLogConfigRequest {
+                name: parsed.name.clone(),
+                arn: parsed.arn.clone(),
+            },
+        )?;
         let account = state
             .accounts
             .get_mut(&req.account_id)
-            .ok_or_else(|| not_found("RealtimeLogConfig", &parsed.arn))?;
+            .ok_or_else(|| not_found("RealtimeLogConfig", &key))?;
         let r = account
             .realtime_log_configs
-            .get_mut(&parsed.arn)
-            .ok_or_else(|| not_found("RealtimeLogConfig", &parsed.arn))?;
-        r.sampling_rate = parsed.sampling_rate;
-        r.end_points = parsed.end_points;
-        r.fields = parsed.fields;
+            .get_mut(&key)
+            .ok_or_else(|| not_found("RealtimeLogConfig", &key))?;
+        if let Some(sampling_rate) = parsed.sampling_rate {
+            r.sampling_rate = sampling_rate;
+        }
+        if let Some(end_points) = parsed.end_points {
+            r.end_points = end_points;
+        }
+        if let Some(fields) = parsed.fields {
+            r.fields = fields;
+        }
         let snap = r.clone();
         drop(state);
         let body = render_realtime_log(&snap, "UpdateRealtimeLogConfigResult");
@@ -634,12 +647,12 @@ fn render_fle_config_body(cfg: &FieldLevelEncryptionConfig) -> String {
     if let Some(c) = &cfg.comment {
         out.push_str(&format!("<Comment>{}</Comment>", esc(c)));
     }
-    out.push_str(&render_query_arg_profile_config(
-        &cfg.query_arg_profile_config,
-    ));
-    out.push_str(&render_content_type_profile_config(
-        &cfg.content_type_profile_config,
-    ));
+    if let Some(q) = &cfg.query_arg_profile_config {
+        out.push_str(&render_query_arg_profile_config(q));
+    }
+    if let Some(c) = &cfg.content_type_profile_config {
+        out.push_str(&render_content_type_profile_config(c));
+    }
     out
 }
 
@@ -804,16 +817,12 @@ fn push_realtime_log_inner(out: &mut String, r: &StoredRealtimeLogConfig) {
             "<StreamType>{}</StreamType>",
             esc(&ep.stream_type)
         ));
-        out.push_str("<KinesisStreamConfig>");
-        out.push_str(&format!(
-            "<RoleARN>{}</RoleARN>",
-            esc(&ep.kinesis_stream_config.role_arn)
-        ));
-        out.push_str(&format!(
-            "<StreamARN>{}</StreamARN>",
-            esc(&ep.kinesis_stream_config.stream_arn)
-        ));
-        out.push_str("</KinesisStreamConfig>");
+        if let Some(k) = &ep.kinesis_stream_config {
+            out.push_str("<KinesisStreamConfig>");
+            out.push_str(&format!("<RoleARN>{}</RoleARN>", esc(&k.role_arn)));
+            out.push_str(&format!("<StreamARN>{}</StreamARN>", esc(&k.stream_arn)));
+            out.push_str("</KinesisStreamConfig>");
+        }
         out.push_str("</member>");
     }
     out.push_str("</EndPoints>");

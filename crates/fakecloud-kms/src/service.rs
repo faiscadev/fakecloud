@@ -243,6 +243,9 @@ impl AwsService for KmsService {
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let mutates = is_mutating_action(req.action.as_str());
+        if let Some(err) = self.aws_managed_key_refusal(&req) {
+            return Err(err);
+        }
         let result = match req.action.as_str() {
             "CreateKey" => self.create_key(&req),
             "DescribeKey" => self.describe_key(&req),
@@ -508,6 +511,69 @@ impl KmsService {
         }
         let replica = format!("{region}:{}", key.key_id);
         state.keys.contains_key(&replica).then_some(replica)
+    }
+
+    /// AWS refuses the key-management operations below on AWS-managed keys
+    /// to every caller (recorded against `alias/aws/lambda`'s key): an
+    /// AWS-managed key's policy grants account principals only
+    /// `Describe*` / `Get*` / `List*` / `RevokeGrant` (plus cryptographic use
+    /// through the owning service), and it cannot be changed, so IAM
+    /// policies cannot grant more. The cryptographic operations are left to
+    /// each operation: AWS allows them conditionally (through the service,
+    /// or for `aws/lambda` decrypts with a function encryption context).
+    fn aws_managed_key_refusal(&self, req: &AwsRequest) -> Option<AwsServiceError> {
+        let field = match req.action.as_str() {
+            "PutKeyPolicy"
+            | "ScheduleKeyDeletion"
+            | "CancelKeyDeletion"
+            | "EnableKey"
+            | "DisableKey"
+            | "EnableKeyRotation"
+            | "DisableKeyRotation"
+            | "RotateKeyOnDemand"
+            | "TagResource"
+            | "UntagResource"
+            | "UpdateKeyDescription"
+            | "CreateGrant"
+            | "ImportKeyMaterial"
+            | "DeleteImportedKeyMaterial"
+            | "ReplicateKey"
+            | "UpdatePrimaryRegion" => "KeyId",
+            "CreateAlias" | "UpdateAlias" => "TargetKeyId",
+            _ => return None,
+        };
+        let body = req.json_body();
+        let key_ref = body[field].as_str()?;
+        // PutKeyPolicy refuses an alias as its KeyId on its own.
+        if req.action == "PutKeyPolicy" && key_ref.contains("alias/") {
+            return None;
+        }
+        let account = parse_kms_arn(key_ref)
+            .map(|(_, account, _)| account.to_string())
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| req.account_id.clone());
+        let key_arn = {
+            let accounts = self.state.read();
+            let state = accounts.get(&account)?;
+            let id = Self::resolve_key_id_with_state(state, &req.region, key_ref)?;
+            let key = state.keys.get(&id)?;
+            if key.key_manager != "AWS" {
+                return None;
+            }
+            key.arn.clone()
+        };
+        let caller = req.principal.as_ref().map_or_else(
+            || Arn::global_in(&req.region, "iam", &req.account_id, "root").to_string(),
+            |p| p.arn.clone(),
+        );
+        let action = format!("kms:{}", req.action);
+        Some(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "AccessDeniedException",
+            format!(
+                "User: {caller} is not authorized to perform: {action} on resource: {key_arn} because no resource-based policy allows the {action} action"
+            ),
+        ))
     }
 
     fn require_key_id(body: &Value) -> Result<String, AwsServiceError> {

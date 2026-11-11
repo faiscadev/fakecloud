@@ -60,7 +60,11 @@ impl LambdaService {
         let function_arn = if function_name.starts_with("arn:") {
             function_name.clone()
         } else {
-            let func = state.functions.get(&function_name).ok_or_else(|| {
+            // `name` or `name:qualifier`: the mapping targets that version or
+            // alias, which must exist.
+            let name = crate::service::normalize_function_name(&function_name);
+            let qualifier = crate::service::qualifier_from_function_ref(&function_name);
+            let not_found = || {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "ResourceNotFoundException",
@@ -69,8 +73,23 @@ impl LambdaService {
                         function_arn(&req.region, &state.account_id, &function_name)
                     ),
                 )
-            })?;
-            func.function_arn.clone()
+            };
+            let func = state.functions.get(&name).ok_or_else(not_found)?;
+            match qualifier.as_deref() {
+                None => func.function_arn.clone(),
+                Some(q) => {
+                    let exists = q == "$LATEST"
+                        || state
+                            .function_versions
+                            .get(&name)
+                            .is_some_and(|vs| vs.iter().any(|v| v == q))
+                        || state.aliases.contains_key(&format!("{name}:{q}"));
+                    if !exists {
+                        return Err(not_found());
+                    }
+                    format!("{}:{q}", func.function_arn)
+                }
+            }
         };
 
         let batch_size = body["BatchSize"].as_i64().unwrap_or(10);

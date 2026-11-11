@@ -204,6 +204,29 @@ fn merged_traits(target: &ShapeTraits, member: &ShapeTraits) -> ShapeTraits {
             .or_else(|| target.ec2_query_name.clone()),
         xml_name: member.xml_name.clone().or_else(|| target.xml_name.clone()),
         xml_flattened: member.xml_flattened || target.xml_flattened,
+        xml_namespace: member
+            .xml_namespace
+            .clone()
+            .or_else(|| target.xml_namespace.clone()),
+        xml_attribute: member.xml_attribute || target.xml_attribute,
+        timestamp_format: member
+            .timestamp_format
+            .clone()
+            .or_else(|| target.timestamp_format.clone()),
+        http_prefix_headers: member
+            .http_prefix_headers
+            .clone()
+            .or_else(|| target.http_prefix_headers.clone()),
+        http_query_params: member.http_query_params || target.http_query_params,
+        media_type: member
+            .media_type
+            .clone()
+            .or_else(|| target.media_type.clone()),
+        xml_list_member_name: target.xml_list_member_name.clone(),
+        xml_map_key_name: target.xml_map_key_name.clone(),
+        xml_map_value_name: target.xml_map_value_name.clone(),
+        list_member_timestamp_format: target.list_member_timestamp_format.clone(),
+        map_value_timestamp_format: target.map_value_timestamp_format.clone(),
     }
 }
 
@@ -285,6 +308,7 @@ mod tests {
             service_name: "lambda".to_string(),
             operations: vec![op_with_uri("GetFunction", "test#GetFunctionRequest")],
             shapes,
+            ..Default::default()
         };
 
         let variants = generate(&model, "GetFunction", &HashMap::new());
@@ -359,6 +383,7 @@ mod tests {
             service_name: "iam".to_string(),
             operations: vec![op_with_uri("GetThing", "test#NamedRequest")],
             shapes,
+            ..Default::default()
         };
         assert!(generate(&model, "GetThing", &HashMap::new()).is_empty());
     }
@@ -384,6 +409,7 @@ mod tests {
             service_name: "lambda".to_string(),
             operations: vec![op],
             shapes,
+            ..Default::default()
         };
         assert!(generate(&model, "Foo", &HashMap::new()).is_empty());
     }

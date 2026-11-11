@@ -993,61 +993,107 @@ async fn lambda_durable_execution_lifecycle() {
     let server = TestServer::start().await;
     let client = server.lambda_client().await;
 
-    // No public "create execution" op exists in the model — durable
-    // executions are spawned implicitly when an in-band Lambda invoke
-    // requests one. The harness drives the read/write/callback ops
-    // directly via the SDK, and existence checks should resolve
-    // NotFound rather than crash.
-    let arn = "arn:aws:lambda:us-east-1:000000000000:durable-execution/conf-exec";
+    // Executions start from `Invoke` of a durable function and only the
+    // invocation holding a checkpoint token may read state or checkpoint,
+    // so an execution nobody started answers the errors AWS returns
+    // (recorded in `fakecloud-lambda/tests/fixtures/durable`).
+    let arn = "arn:aws:lambda:us-east-1:000000000000:function:any-fn:$LATEST/durable-execution/conf-exec/00000000-0000-3000-8000-000000000000";
 
-    let _ = client
+    let code = |e: Option<&str>| e.map(str::to_string);
+    let err = client
         .get_durable_execution()
         .durable_execution_arn(arn)
         .send()
-        .await;
-    let _ = client
+        .await
+        .expect_err("unknown execution");
+    assert_eq!(
+        code(err.into_service_error().meta().code()).as_deref(),
+        Some("ResourceNotFoundException")
+    );
+    let err = client
         .get_durable_execution_history()
         .durable_execution_arn(arn)
         .send()
-        .await;
-    let _ = client
+        .await
+        .expect_err("unknown execution");
+    assert_eq!(
+        code(err.into_service_error().meta().code()).as_deref(),
+        Some("ResourceNotFoundException")
+    );
+    let err = client
         .get_durable_execution_state()
         .durable_execution_arn(arn)
+        .checkpoint_token("AAAA")
         .send()
-        .await;
-    let _ = client
+        .await
+        .expect_err("no invocation holds this token");
+    assert_eq!(
+        code(err.into_service_error().meta().code()).as_deref(),
+        Some("InvalidParameterValueException")
+    );
+    let err = client
         .checkpoint_durable_execution()
         .durable_execution_arn(arn)
+        .checkpoint_token("AAAA")
         .send()
-        .await;
-    let _ = client
+        .await
+        .expect_err("no invocation holds this token");
+    assert_eq!(
+        code(err.into_service_error().meta().code()).as_deref(),
+        Some("InvalidParameterValueException")
+    );
+    let err = client
         .stop_durable_execution()
         .durable_execution_arn(arn)
         .send()
-        .await;
-    let _ = client
+        .await
+        .expect_err("unknown execution");
+    assert_eq!(
+        code(err.into_service_error().meta().code()).as_deref(),
+        Some("ResourceNotFoundException")
+    );
+    let err = client
         .list_durable_executions_by_function()
         .function_name("any-fn")
         .send()
-        .await;
-    client
+        .await
+        .expect_err("unknown function");
+    assert_eq!(
+        code(err.into_service_error().meta().code()).as_deref(),
+        Some("ResourceNotFoundException")
+    );
+    // Callback ids are minted by the service; one that does not decode is
+    // refused, whichever callback operation receives it.
+    let err = client
         .send_durable_execution_callback_success()
         .callback_id("Y2Itb2s=")
         .send()
         .await
-        .unwrap();
-    client
+        .expect_err("never minted");
+    assert_eq!(
+        code(err.into_service_error().meta().code()).as_deref(),
+        Some("InvalidParameterValueException")
+    );
+    let err = client
         .send_durable_execution_callback_failure()
         .callback_id("Y2ItZmFpbA==")
         .send()
         .await
-        .unwrap();
-    client
+        .expect_err("never minted");
+    assert_eq!(
+        code(err.into_service_error().meta().code()).as_deref(),
+        Some("InvalidParameterValueException")
+    );
+    let err = client
         .send_durable_execution_callback_heartbeat()
         .callback_id("Y2ItaGI=")
         .send()
         .await
-        .unwrap();
+        .expect_err("never minted");
+    assert_eq!(
+        code(err.into_service_error().meta().code()).as_deref(),
+        Some("InvalidParameterValueException")
+    );
     // A callback id outside the base64 `@pattern` is rejected up front.
     let err = client
         .send_durable_execution_callback_success()

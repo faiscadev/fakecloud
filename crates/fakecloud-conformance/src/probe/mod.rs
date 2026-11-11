@@ -266,7 +266,7 @@ type RestRequestParts = (
     reqwest::Method,
     String,
     Vec<(String, String)>,
-    Option<String>,
+    Option<Vec<u8>>,
 );
 
 /// Look up a JSON field tolerating PascalCase vs camelCase first-letter
@@ -456,6 +456,7 @@ mod tests {
             service_name: "test".to_string(),
             operations: vec![op],
             shapes: map,
+            ..Default::default()
         }
     }
 
@@ -591,7 +592,7 @@ mod tests {
         let input = serde_json::json!({"Idempotency": "abc", "Other": "keep"});
         let (_, _, headers, body) = build_http_request_from_model(&op, &model, &input).unwrap();
         assert_eq!(headers, vec![("x-idem".to_string(), "abc".to_string())]);
-        let body: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
         assert_eq!(body, serde_json::json!({"Other": "keep"}));
     }
 
@@ -607,7 +608,7 @@ mod tests {
         );
         let input = serde_json::json!({"Body": "raw-openapi-doc"});
         let (_, _, _, body) = build_http_request_from_model(&op, &model, &input).unwrap();
-        assert_eq!(body.unwrap(), "raw-openapi-doc");
+        assert_eq!(body.unwrap(), b"raw-openapi-doc");
     }
 
     #[test]
@@ -783,7 +784,7 @@ mod tests {
         let input = serde_json::json!({"Body": "delete-me"});
         let (method, _, _, body) = build_http_request_from_model(&op, &model, &input).unwrap();
         assert_eq!(method, reqwest::Method::DELETE);
-        assert_eq!(body.unwrap(), "delete-me");
+        assert_eq!(body.unwrap(), b"delete-me");
     }
 
     #[test]
@@ -807,7 +808,7 @@ mod tests {
         let input = serde_json::json!({"Id": "abc", "Description": "updated"});
         let (method, _, _, body) = build_http_request_from_model(&op, &model, &input).unwrap();
         assert_eq!(method, reqwest::Method::PATCH);
-        let body: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
         assert_eq!(body, serde_json::json!({"Description": "updated"}));
     }
 
@@ -886,6 +887,9 @@ mod tests {
         for (status, code) in [
             (400, "MalformedXML"),
             (400, "InvalidArgument"),
+            (400, "MalformedACLError"),
+            (400, "MalformedPolicy"),
+            (400, "InvalidRequest"),
             (404, "NoSuchBucketPolicy"),
             (404, "NoSuchCORSConfiguration"),
             (404, "NoSuchLifecycleConfiguration"),
@@ -1219,7 +1223,9 @@ mod tests {
 mod followup;
 mod protocols;
 mod response;
+mod rest_headers;
 mod rest_request;
+mod rest_xml;
 mod service_detection;
 use followup::*;
 use protocols::*;

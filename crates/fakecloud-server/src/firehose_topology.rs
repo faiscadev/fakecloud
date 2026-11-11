@@ -81,8 +81,8 @@ mod tests {
         .unwrap()
     }
 
-    /// A domain exists whether or not a client can reach it, and today none can:
-    /// its synthetic endpoint must not pass for a reachable cluster.
+    /// A domain exists whether or not a client can reach it: its synthetic
+    /// endpoint must not pass for a reachable cluster.
     #[test]
     fn a_domain_is_present_without_a_reachable_url_and_a_deleted_one_is_absent() {
         let topology = topology();
@@ -107,5 +107,30 @@ mod tests {
         }
         let other = format!("arn:aws:es:{REGION}:999999999999:domain/logs");
         assert_eq!(topology.search_domain(&other), SearchDomain::Absent);
+    }
+
+    /// Once a domain's backing cluster answers, DomainARN delivery goes there.
+    #[test]
+    fn a_domain_with_a_running_cluster_resolves_to_it() {
+        let topology = topology();
+        let arn = format!("arn:aws:es:{REGION}:{ACCOUNT}:domain/logs");
+        let mut d = domain(&arn, false);
+        d.data_plane = Some(fakecloud_opensearch::state::DomainDataPlane {
+            container_id: "c1".into(),
+            host: "127.0.0.1".into(),
+            port: 49200,
+        });
+        topology
+            .opensearch
+            .write()
+            .get_or_create(ACCOUNT)
+            .domains
+            .insert("logs".into(), d);
+        assert_eq!(
+            topology.search_domain(&arn),
+            SearchDomain::Present {
+                reachable_url: Some("http://127.0.0.1:49200".into()),
+            }
+        );
     }
 }

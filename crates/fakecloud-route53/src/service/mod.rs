@@ -2703,4 +2703,133 @@ mod tests {
         let (status, out) = call(&svc, disassociate_req(ACCOUNT_B, &zid, "vpc-own")).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{out}");
     }
+
+    fn post_xml(path: &str, body: &str) -> AwsRequest {
+        AwsRequest {
+            service: "route53".to_string(),
+            action: String::new(),
+            region: "us-east-1".to_string(),
+            account_id: DEFAULT_ACCOUNT.to_string(),
+            request_id: "rid".to_string(),
+            headers: HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: Bytes::from(body.to_string()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: fakecloud_core::path::split_path_segments(path),
+            raw_path: path.to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn empty_svc() -> Route53Service {
+        Route53Service::new(Arc::new(RwLock::new(Route53Accounts::default())))
+    }
+
+    fn err_code(r: Result<AwsResponse, AwsServiceError>) -> (u16, String) {
+        let e = r.err().expect("expected an error");
+        (e.status().as_u16(), e.code().to_string())
+    }
+
+    #[test]
+    fn reusable_delegation_set_from_unknown_zone_is_hosted_zone_not_found() {
+        let svc = empty_svc();
+        let req = post_xml(
+            "/2013-04-01/delegationset",
+            &format!(
+                "<CreateReusableDelegationSetRequest xmlns=\"{NS}\"><CallerReference>r1</CallerReference>\
+                 <HostedZoneId>ZNOPE</HostedZoneId></CreateReusableDelegationSetRequest>"
+            ),
+        );
+        assert_eq!(
+            err_code(svc.create_reusable_delegation_set(&req)),
+            (400, "HostedZoneNotFound".to_string())
+        );
+    }
+
+    #[test]
+    fn create_requests_enforce_body_field_lengths() {
+        let svc = empty_svc();
+        let long = |n: usize| "a".repeat(n);
+        let cases = [
+            (
+                "/2013-04-01/cidrcollection",
+                format!(
+                    "<CreateCidrCollectionRequest xmlns=\"{NS}\"><Name>{}</Name>\
+                     <CallerReference>r</CallerReference></CreateCidrCollectionRequest>",
+                    long(65)
+                ),
+            ),
+            (
+                "/2013-04-01/cidrcollection",
+                format!(
+                    "<CreateCidrCollectionRequest xmlns=\"{NS}\"><Name>bad name</Name>\
+                     <CallerReference>r</CallerReference></CreateCidrCollectionRequest>"
+                ),
+            ),
+            (
+                "/2013-04-01/hostedzone",
+                format!(
+                    "<CreateHostedZoneRequest xmlns=\"{NS}\"><Name>example.com</Name>\
+                     <CallerReference>{}</CallerReference></CreateHostedZoneRequest>",
+                    long(129)
+                ),
+            ),
+            (
+                "/2013-04-01/trafficpolicy",
+                format!(
+                    "<CreateTrafficPolicyRequest xmlns=\"{NS}\"><Name>{}</Name>\
+                     <Document>{{}}</Document></CreateTrafficPolicyRequest>",
+                    long(513)
+                ),
+            ),
+            (
+                "/2013-04-01/delegationset",
+                format!(
+                    "<CreateReusableDelegationSetRequest xmlns=\"{NS}\">\
+                     <CallerReference>{}</CallerReference></CreateReusableDelegationSetRequest>",
+                    long(129)
+                ),
+            ),
+        ];
+        for (path, body) in cases {
+            let req = post_xml(path, &body);
+            let result = match path {
+                "/2013-04-01/cidrcollection" => svc.create_cidr_collection(&req),
+                "/2013-04-01/hostedzone" => svc.create_hosted_zone(&req),
+                "/2013-04-01/trafficpolicy" => svc.create_traffic_policy(&req),
+                _ => svc.create_reusable_delegation_set(&req),
+            };
+            assert_eq!(
+                err_code(result),
+                (400, "InvalidInput".to_string()),
+                "{path}: {body}"
+            );
+        }
+        // Nothing was created by the rejected requests.
+        let st = svc.state.read();
+        if let Some(account) = st.accounts.get(DEFAULT_ACCOUNT) {
+            assert!(account.cidr_collections.is_empty());
+            assert!(account.hosted_zones.is_empty());
+            assert!(account.traffic_policies.is_empty());
+            assert!(account.reusable_delegation_sets.is_empty());
+        }
+    }
+
+    #[test]
+    fn create_cidr_collection_accepts_a_max_length_name() {
+        let svc = empty_svc();
+        let req = post_xml(
+            "/2013-04-01/cidrcollection",
+            &format!(
+                "<CreateCidrCollectionRequest xmlns=\"{NS}\"><Name>{}</Name>\
+                 <CallerReference>r</CallerReference></CreateCidrCollectionRequest>",
+                "a".repeat(64)
+            ),
+        );
+        svc.create_cidr_collection(&req).unwrap();
+    }
 }

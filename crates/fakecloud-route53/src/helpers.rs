@@ -606,6 +606,31 @@ pub(crate) fn invalid_argument(msg: impl Into<String>) -> AwsServiceError {
     aws_error(StatusCode::BAD_REQUEST, "InvalidInput", msg)
 }
 
+/// Enforce a Smithy `@length` constraint on a request-body field. Route 53
+/// rejects a violation with `InvalidInput` and the standard validation
+/// message naming the field.
+pub(crate) fn check_field_length(
+    field: &str,
+    value: &str,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    let len = value.chars().count();
+    if len > max {
+        return Err(invalid_argument(format!(
+            "1 validation error detected: Value '{value}' at '{field}' failed to satisfy \
+             constraint: Member must have length less than or equal to {max}"
+        )));
+    }
+    if len < min {
+        return Err(invalid_argument(format!(
+            "1 validation error detected: Value '{value}' at '{field}' failed to satisfy \
+             constraint: Member must have length greater than or equal to {min}"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn invalid_change_batch(msg: impl Into<String>) -> AwsServiceError {
     aws_error(StatusCode::BAD_REQUEST, "InvalidChangeBatch", msg)
 }
@@ -1342,6 +1367,10 @@ impl Route53Service {
         if cfg.caller_reference.is_empty() {
             return Err(invalid_argument("CallerReference is required"));
         }
+        check_field_length("callerReference", &cfg.caller_reference, 1, 128)?;
+        if let Some(hosted_zone_id) = &cfg.hosted_zone_id {
+            check_field_length("hostedZoneId", hosted_zone_id, 0, 32)?;
+        }
         let mut state = self.state.write();
         let account = state.accounts.entry(req.account_id.clone()).or_default();
         if account
@@ -1363,13 +1392,21 @@ impl Route53Service {
         // zone's authoritative name servers — that's the documented Route
         // 53 behavior for "promote a zone's delegation set to a reusable
         // one." Without that lookup, an unknown HostedZoneId silently
-        // succeeds, which is what Cubic flagged.
+        // succeeds, which is what Cubic flagged. This operation reports the
+        // miss as `HostedZoneNotFound` (400), not the `NoSuchHostedZone` (404)
+        // the zone-addressed operations use.
         let name_servers = if let Some(hosted_zone_id) = cfg.hosted_zone_id.as_deref() {
             let hosted_zone_id = strip_zone_prefix(hosted_zone_id);
             account
                 .hosted_zones
                 .get(&hosted_zone_id)
-                .ok_or_else(|| no_such_hosted_zone(&hosted_zone_id))?
+                .ok_or_else(|| {
+                    aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "HostedZoneNotFound",
+                        format!("The specified hosted zone can't be found: {hosted_zone_id}"),
+                    )
+                })?
                 .name_servers
                 .clone()
         } else {

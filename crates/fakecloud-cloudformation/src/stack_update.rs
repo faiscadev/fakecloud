@@ -2341,9 +2341,14 @@ impl<'a> UpdateEngine<'a> {
         // Whatever is queued is this attempt's forward pass, for resources this
         // rollback undoes, and none of it has run. An earlier attempt's stop
         // already drained its own. The queues are shared with nested stacks, so
-        // only the outermost rollback empties them.
+        // only the outermost rollback empties them. An intent that converges
+        // on the resource's state when it runs is kept: it settles what the
+        // rollback leaves.
         if !options.nested {
-            self.provisioner.pending_container_spawns.lock().clear();
+            self.provisioner
+                .pending_container_spawns
+                .lock()
+                .retain(crate::resource_provisioner::ContainerSpawnIntent::survives_rollback);
             self.provisioner.pending_custom_invokes.lock().clear();
         }
 

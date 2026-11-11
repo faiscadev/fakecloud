@@ -117,6 +117,7 @@ impl From<KmsStateRepr> for KmsState {
             PersistedAliases::Regional(aliases) => state.aliases = aliases,
             PersistedAliases::Legacy(aliases) => state.migrate_legacy_aliases(aliases),
         }
+        crate::hook::migrate_aws_lambda_key_policies(&mut state);
         state
     }
 }

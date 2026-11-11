@@ -2271,3 +2271,276 @@ async fn dry_run_progress_reports_the_requested_dry_run() {
         (409, "ResourceNotFoundException".to_string())
     );
 }
+
+fn service_with_state() -> (OpenSearchService, SharedOpenSearchState) {
+    let state: SharedOpenSearchState = Arc::new(RwLock::new(MultiAccountState::new(
+        "000000000000",
+        "us-east-1",
+        "",
+    )));
+    (OpenSearchService::new(state.clone()), state)
+}
+
+/// Without a container runtime a domain keeps settling on its first describe,
+/// with no processing status and no reachable cluster.
+#[tokio::test]
+async fn without_a_runtime_a_domain_is_control_plane_only() {
+    let (svc, state) = service_with_state();
+    let created = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/domain"),
+                json!({"DomainName": "cpo", "EngineVersion": "OpenSearch_2.11"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(created["DomainStatus"]["Processing"], true);
+    assert_eq!(created["DomainStatus"]["DomainProcessingStatus"], "Active");
+    let described = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/cpo"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(described["DomainStatus"]["Processing"], false);
+    assert_eq!(described["DomainStatus"]["UpgradeProcessing"], false);
+    let accounts = state.read();
+    let d = &accounts.get("000000000000").unwrap().domains["cpo"];
+    assert!(d.processing.is_none());
+    assert_eq!(d.reachable_url(), None);
+}
+
+/// A domain persisted mid-bring-up (or bound to a previous process's
+/// container) reads back control-plane only when this run has no runtime:
+/// the stale binding is dropped, never advertised.
+#[tokio::test]
+async fn recovery_without_a_runtime_drops_stale_bindings() {
+    let (svc, state) = service_with_state();
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain"),
+            json!({"DomainName": "kept"}),
+        ),
+    )
+    .await;
+    {
+        let mut accounts = state.write();
+        let d = accounts
+            .get_or_create("000000000000")
+            .domains
+            .get_mut("kept")
+            .unwrap();
+        d.processing = Some("Modifying".into());
+        d.data_plane = Some(fakecloud_opensearch::state::DomainDataPlane {
+            container_id: "gone".into(),
+            host: "127.0.0.1".into(),
+            port: 49200,
+        });
+        assert_eq!(d.reachable_url().as_deref(), Some("http://127.0.0.1:49200"));
+    }
+    svc.recover_persisted_containers().await;
+    let described = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/kept"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(described["DomainStatus"]["Processing"], false);
+    assert_eq!(
+        described["DomainStatus"]["DomainProcessingStatus"],
+        "Active"
+    );
+    let accounts = state.read();
+    let d = &accounts.get("000000000000").unwrap().domains["kept"];
+    assert!(d.data_plane.is_none() && d.processing.is_none());
+}
+
+/// While a backing cluster is being replaced the status reports it.
+#[tokio::test]
+async fn a_processing_domain_reports_its_processing_status() {
+    let (svc, state) = service_with_state();
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{ES}/es/domain"),
+            json!({"DomainName": "upg", "ElasticsearchVersion": "7.10"}),
+        ),
+    )
+    .await;
+    state
+        .write()
+        .get_or_create("000000000000")
+        .domains
+        .get_mut("upg")
+        .unwrap()
+        .processing = Some(fakecloud_opensearch::backing::UPGRADING.into());
+    for path in [
+        format!("{ES}/es/domain/upg"),
+        format!("{OS}/opensearch/domain/upg"),
+    ] {
+        let status = json_of(&call(&svc, req(Method::GET, &path, json!({}))).await);
+        assert_eq!(status["DomainStatus"]["Processing"], true, "{path}");
+        assert_eq!(status["DomainStatus"]["UpgradeProcessing"], true, "{path}");
+    }
+    let os = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/upg"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(
+        os["DomainStatus"]["DomainProcessingStatus"],
+        "UpgradingEngineVersion"
+    );
+}
+
+/// While a container-backed domain is still coming up, or replacing its
+/// cluster, the status operations agree with `Processing`.
+#[tokio::test]
+async fn status_operations_agree_with_processing() {
+    use fakecloud_opensearch::backing::{CREATING, MODIFYING, UPGRADING};
+    let (svc, state) = service_with_state();
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain"),
+            json!({"DomainName": "agree"}),
+        ),
+    )
+    .await;
+    let set = |p: Option<&str>| {
+        state
+            .write()
+            .get_or_create("000000000000")
+            .domains
+            .get_mut("agree")
+            .unwrap()
+            .processing = p.map(str::to_string);
+    };
+    let describe = || {
+        req(
+            Method::GET,
+            &format!("{OS}/opensearch/domain/agree"),
+            json!({}),
+        )
+    };
+
+    // Creating: not Created yet, even across describes.
+    set(Some(CREATING));
+    for _ in 0..2 {
+        let s = json_of(&call(&svc, describe()).await);
+        assert_eq!(s["DomainStatus"]["Created"], false);
+        assert_eq!(s["DomainStatus"]["DomainProcessingStatus"], "Creating");
+    }
+    set(None);
+    assert_eq!(
+        json_of(&call(&svc, describe()).await)["DomainStatus"]["Created"],
+        true
+    );
+
+    // Modifying: the latest change is still being applied.
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain/agree/config"),
+            json!({"AdvancedOptions": {"indices.query.bool.max_clause_count": "2048"}}),
+        ),
+    )
+    .await;
+    let progress = || {
+        req(
+            Method::GET,
+            &format!("{OS}/opensearch/domain/agree/progress"),
+            json!({}),
+        )
+    };
+    let set_pending = |pending: bool| {
+        state
+            .write()
+            .get_or_create("000000000000")
+            .domains
+            .get_mut("agree")
+            .unwrap()
+            .change_pending = pending;
+    };
+    // A restart's recovery (no change of the caller's started it) leaves the
+    // last change complete.
+    set(Some(MODIFYING));
+    set_pending(false);
+    let p = json_of(&call(&svc, progress()).await)["ChangeProgressStatus"].clone();
+    assert_eq!(p["Status"], "COMPLETED");
+    assert_eq!(p["ConfigChangeStatus"], "Completed");
+    assert_eq!(p["PendingProperties"], json!([]));
+    // The change itself replacing the cluster is in progress.
+    set_pending(true);
+    let p = json_of(&call(&svc, progress()).await)["ChangeProgressStatus"].clone();
+    assert_eq!(p["Status"], "PROCESSING");
+    assert_eq!(p["ConfigChangeStatus"], "ApplyingChanges");
+    assert_eq!(p["PendingProperties"], json!(["AdvancedOptions"]));
+    assert_eq!(p["CompletedProperties"], json!([]));
+    set(None);
+    set_pending(false);
+    let p = json_of(&call(&svc, progress()).await)["ChangeProgressStatus"].clone();
+    assert_eq!(p["Status"], "COMPLETED");
+    assert_eq!(p["ConfigChangeStatus"], "Completed");
+    assert_eq!(p["CompletedProperties"], json!(["AdvancedOptions"]));
+
+    // Upgrading: the upgrade is in progress.
+    let upgrade_status = || {
+        req(
+            Method::GET,
+            &format!("{OS}/opensearch/upgradeDomain/agree/status"),
+            json!({}),
+        )
+    };
+    set(Some(UPGRADING));
+    let u = json_of(&call(&svc, upgrade_status()).await);
+    assert_eq!(u["StepStatus"], "IN_PROGRESS");
+    assert_eq!(u["UpgradeStep"], "UPGRADE");
+    set(None);
+    assert_eq!(
+        json_of(&call(&svc, upgrade_status()).await)["StepStatus"],
+        "SUCCEEDED"
+    );
+
+    // Delete reports the domain as being deleted.
+    let deleted = json_of(
+        &call(
+            &svc,
+            req(
+                Method::DELETE,
+                &format!("{OS}/opensearch/domain/agree"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(
+        deleted["DomainStatus"]["DomainProcessingStatus"],
+        "Deleting"
+    );
+    assert_eq!(deleted["DomainStatus"]["Deleted"], true);
+}

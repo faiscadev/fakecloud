@@ -232,6 +232,12 @@ impl TestServer {
                 // `*.amazonaws.com:9092` the provider asserts; the data plane is
                 // proven separately by the msk-broker Docker E2E.
                 ("FAKECLOUD_KAFKA_DISABLE_BACKEND", "1"),
+                // OpenSearch / Elasticsearch: a real search cluster per domain
+                // would boot a JVM for every acceptance-test domain and keep it
+                // `Processing` until healthy, racing the provider's waiters and
+                // starving the shard; the data plane is proven separately by
+                // the opensearch_domains E2E.
+                ("FAKECLOUD_OPENSEARCH_DISABLE_BACKEND", "1"),
                 // Amazon Managed Service for Apache Flink: a real Flink-job
                 // container would race the provider's status/attribute
                 // assertions with async job settling; the data plane is proven

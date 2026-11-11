@@ -778,7 +778,7 @@ pub(super) fn legacy_rest_request(
     };
     let has_body = matches!(method, reqwest::Method::POST | reqwest::Method::PUT);
     let body = if has_body {
-        Some(serde_json::to_string(&variant.input).unwrap_or_else(|_| "{}".to_string()))
+        Some(serde_json::to_vec(&variant.input).unwrap_or_else(|_| b"{}".to_vec()))
     } else {
         None
     };
@@ -935,6 +935,9 @@ pub(super) fn build_http_request_from_model(
         })
         .unwrap_or_default();
 
+    // restXml headers are bound once, after the body is built, by the shared
+    // binder; this loop only collects them for the other REST protocols.
+    let rest_xml = model.is_rest_xml();
     for member in &members {
         let target_traits = model.shapes.get(&member.target).map(|s| &s.traits);
         let member_traits = &member.traits;
@@ -944,10 +947,15 @@ pub(super) fn build_http_request_from_model(
             .http_query
             .clone()
             .or_else(|| target_traits.and_then(|t| t.http_query.clone()));
-        let header_name = member_traits
-            .http_header
-            .clone()
-            .or_else(|| target_traits.and_then(|t| t.http_header.clone()));
+        // restXml: `bind_headers` reads header members straight from `input`.
+        let header_name = if rest_xml {
+            None
+        } else {
+            member_traits
+                .http_header
+                .clone()
+                .or_else(|| target_traits.and_then(|t| t.http_header.clone()))
+        };
         let is_payload =
             member_traits.http_payload || target_traits.map(|t| t.http_payload).unwrap_or(false);
 
@@ -1014,8 +1022,29 @@ pub(super) fn build_http_request_from_model(
         method,
         reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::DELETE
     );
-    let body = if let Some(v) = payload_value {
-        Some(value_to_body(&v))
+    let body = if rest_xml {
+        // restXml bodies are XML documents built from the binding traits,
+        // not the JSON the generators produce, and the header members are
+        // bound by the shared restXml binder (http-date timestamps, prefix
+        // headers, @mediaType, computed integrity headers) over that body.
+        let (body, content_type) = super::rest_xml::rest_xml_body(op, model, input);
+        headers = super::rest_headers::bind_headers(
+            op,
+            model,
+            input,
+            body.as_deref().unwrap_or_default(),
+        );
+        if let Some(ct) = content_type {
+            if !headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            {
+                headers.push(("Content-Type".to_string(), ct.to_string()));
+            }
+        }
+        body
+    } else if let Some(v) = payload_value {
+        Some(value_to_body(&v).into_bytes())
     } else if is_bodyless_method {
         None
     } else {
@@ -1024,9 +1053,9 @@ pub(super) fn build_http_request_from_model(
             remaining.remove(name);
         }
         if remaining.is_empty() {
-            Some("{}".to_string())
+            Some(b"{}".to_vec())
         } else {
-            Some(serde_json::to_string(&serde_json::Value::Object(remaining)).unwrap_or_default())
+            Some(serde_json::to_vec(&serde_json::Value::Object(remaining)).unwrap_or_default())
         }
     };
 

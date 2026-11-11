@@ -14,3 +14,16 @@ retries = 2
 # retries above, re-run. The 8 min ceiling sits well above the slowest legit
 # test (kms_rsa_sign_verifies_outside_fakecloud ~276s) so it never trips real work.
 slow-timeout = { period = "120s", terminate-after = 4 }
+
+# Tests that run real single-node search clusters (a 512 MiB-heap JVM each,
+# ~1 GiB resident): at most two at a time so a partition never runs more
+# JVMs than a runner's memory takes, with a longer budget for a cold image
+# pull plus boots and replacements (slow at 5 min, killed after 20). Default
+# profile overrides also apply to the `ci` profile.
+[test-groups]
+search-clusters = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = 'binary(opensearch_domains) | binary(firehose_search_containers)'
+test-group = 'search-clusters'
+slow-timeout = { period = "300s", terminate-after = 4 }
