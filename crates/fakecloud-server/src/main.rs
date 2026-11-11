@@ -4223,7 +4223,8 @@ async fn main() {
             iam: Some(iam_state.clone()),
             ec2: Some(ec2_state.clone()),
         })
-        .with_lambda(lambda_state.clone(), container_runtime.clone());
+        .with_lambda(lambda_state.clone(), container_runtime.clone())
+        .with_durable_hub(lambda_durable.clone());
     if let Some(store) = config_snapshot_store.clone() {
         config_inner = config_inner.with_snapshot_store(store);
     }

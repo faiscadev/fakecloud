@@ -659,3 +659,67 @@ async fn remediation_exception_round_trips_expiration_time() {
     assert_eq!(exc["ResourceId"], json!("b-1"));
     assert_eq!(exc["ExpirationTime"], json!(expiration));
 }
+
+/// A custom rule whose function is durable is started as a durable
+/// execution (Config invokes rule functions asynchronously), not run as a
+/// plain function that would fail on the missing execution envelope.
+#[tokio::test]
+async fn custom_rule_on_a_durable_function_starts_a_durable_execution() {
+    let account = "123456789012";
+    let lambda: fakecloud_lambda::SharedLambdaState = Arc::new(RwLock::new(
+        MultiAccountState::new(account, "us-east-1", "http://localhost:4566"),
+    ));
+    lambda
+        .write()
+        .regional_mut(account, "us-east-1")
+        .functions
+        .insert(
+            "durable-rule".into(),
+            fakecloud_lambda::LambdaFunction {
+                function_name: "durable-rule".into(),
+                durable_config: Some(json!({"ExecutionTimeout": 600})),
+                ..Default::default()
+            },
+        );
+    let hub = fakecloud_lambda::DurableHub::new(lambda.clone());
+    let state: SharedConfigState = Arc::new(RwLock::new(ConfigAccounts::new()));
+    let svc = ConfigService::new(state)
+        .with_lambda(lambda.clone(), None)
+        .with_durable_hub(hub);
+    call(
+        &svc,
+        "PutConfigRule",
+        account,
+        json!({
+            "ConfigRule": {
+                "ConfigRuleName": "durable",
+                "Source": {
+                    "Owner": "CUSTOM_LAMBDA",
+                    "SourceIdentifier": "arn:aws:lambda:us-east-1:123456789012:function:durable-rule:$LATEST",
+                    "SourceDetails": [{
+                        "EventSource": "aws.config",
+                        "MessageType": "ScheduledNotification",
+                        "MaximumExecutionFrequency": "One_Hour"
+                    }]
+                },
+            }
+        }),
+    )
+    .await;
+    call(
+        &svc,
+        "StartConfigRulesEvaluation",
+        account,
+        json!({"ConfigRuleNames": ["durable"]}),
+    )
+    .await;
+    let accounts = lambda.read();
+    let execs = &accounts
+        .regional(account, "us-east-1")
+        .unwrap()
+        .durable_executions;
+    assert_eq!(execs.len(), 1, "{execs:?}");
+    let exec = execs.values().next().unwrap();
+    let input: Value = serde_json::from_str(&exec.input_payload).unwrap();
+    assert_eq!(input["configRuleName"], "durable");
+}

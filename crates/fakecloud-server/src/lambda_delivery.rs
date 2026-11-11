@@ -146,8 +146,11 @@ impl LambdaDelivery for LambdaDeliveryImpl {
         on_unrunnable: fakecloud_core::delivery::AsyncUnrunnableHook,
     ) -> Result<(), String> {
         self.record_invocation(function_arn, payload);
-        // A durable execution always runs once started, so the hook (for
-        // events Lambda discards unrun) never applies to it.
+        // A durable function runs as a durable execution. The hook reports
+        // events Lambda discards from its async queue unrun; a durable
+        // execution is never queued there, and one whose invocations cannot
+        // run fails as an execution, so the caller waits out its own timeout
+        // as on AWS.
         if let Some(started) =
             fakecloud_lambda::start_durable_for_async_delivery(&self.durable, function_arn, payload)
         {

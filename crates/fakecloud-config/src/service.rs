@@ -184,6 +184,8 @@ pub struct ConfigService {
     cross: CrossServiceStates,
     lambda_state: Option<SharedLambdaState>,
     container_runtime: Option<Arc<ContainerRuntime>>,
+    /// Durable executions: a custom rule whose function is durable starts one.
+    durable: Option<fakecloud_lambda::DurableHub>,
     /// Monotonic counter bumped whenever recorded items or rules change. Lets
     /// managed-rule evaluation skip recomputing when nothing changed since the
     /// last evaluation (avoids re-running the full evaluation on every poll).
@@ -205,6 +207,7 @@ impl ConfigService {
             cross: CrossServiceStates::default(),
             lambda_state: None,
             container_runtime: None,
+            durable: None,
             state_version: Arc::new(AtomicU64::new(1)),
             last_eval_version: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -227,6 +230,12 @@ impl ConfigService {
     ) -> Self {
         self.lambda_state = Some(lambda_state);
         self.container_runtime = runtime;
+        self
+    }
+
+    /// Start custom rules backed by durable functions as durable executions.
+    pub fn with_durable_hub(mut self, hub: fakecloud_lambda::DurableHub) -> Self {
+        self.durable = Some(hub);
         self
     }
 
@@ -2023,11 +2032,6 @@ impl ConfigService {
         lambda_arn: &str,
         input_parameters: Option<&str>,
     ) {
-        let (Some(lambda_state), Some(runtime)) =
-            (self.lambda_state.clone(), self.container_runtime.clone())
-        else {
-            return;
-        };
         let func_name = lambda_arn
             .rsplit(':')
             .next()
@@ -2041,6 +2045,25 @@ impl ConfigService {
             input_parameters,
             &result_token,
         );
+        // Config invokes a rule's function asynchronously; a durable function
+        // runs as a durable execution, which reports through PutEvaluations.
+        if let Some(hub) = &self.durable {
+            if let Some(started) = fakecloud_lambda::start_durable_for_async_delivery(
+                hub,
+                lambda_arn,
+                &event.to_string(),
+            ) {
+                if let Err(e) = started {
+                    tracing::warn!(function = %func_name, error = %e, "Config custom rule Lambda invocation failed");
+                }
+                return;
+            }
+        }
+        let (Some(lambda_state), Some(runtime)) =
+            (self.lambda_state.clone(), self.container_runtime.clone())
+        else {
+            return;
+        };
         // Resolve the Lambda in the account and region its ARN names; a bare
         // name is the rule's own account and region.
         let resolved = {
