@@ -712,14 +712,19 @@ fn start_for_delivery(
     hub: &DurableHub,
     function_ref: &str,
     payload: &str,
+    defaults: Option<(&str, &str)>,
 ) -> Option<Result<(String, String, String), String>> {
     let started = {
         let mut accounts = hub.state().write();
-        let (account, region, name) = crate::state::function_location(
-            function_ref,
-            accounts.default_account_id(),
-            accounts.region(),
-        );
+        let (default_account, default_region) = match defaults {
+            Some((a, r)) => (a.to_string(), r.to_string()),
+            None => (
+                accounts.default_account_id().to_string(),
+                accounts.region().to_string(),
+            ),
+        };
+        let (account, region, name) =
+            crate::state::function_location(function_ref, &default_account, &default_region);
         let (account, region, name) = (account.to_string(), region.to_string(), name.to_string());
         let st = accounts.regional_get_mut(&account, &region)?;
         let settings = DurableSettings::of(st.functions.get(&name)?)?;
@@ -764,7 +769,7 @@ pub async fn invoke_for_delivery(
     function_ref: &str,
     payload: &str,
 ) -> Option<Result<fakecloud_core::delivery::LambdaInvocationOutput, String>> {
-    let (account, region, arn) = match start_for_delivery(hub, function_ref, payload)? {
+    let (account, region, arn) = match start_for_delivery(hub, function_ref, payload, None)? {
         Ok(started) => started,
         Err(e) => return Some(Err(e)),
     };
@@ -791,7 +796,21 @@ pub fn start_async_for_delivery(
     function_ref: &str,
     payload: &str,
 ) -> Option<Result<(), String>> {
-    Some(start_for_delivery(hub, function_ref, payload)?.map(|_| ()))
+    Some(start_for_delivery(hub, function_ref, payload, None)?.map(|_| ()))
+}
+
+/// [`start_async_for_delivery`] for a caller that resolves a bare function
+/// name or a partial ARN in its own `account` and `region` (as AWS Config
+/// resolves a rule's `SourceIdentifier` in the rule's account and region)
+/// rather than the server's defaults.
+pub fn start_async_for_delivery_in(
+    hub: &DurableHub,
+    function_ref: &str,
+    payload: &str,
+    account: &str,
+    region: &str,
+) -> Option<Result<(), String>> {
+    Some(start_for_delivery(hub, function_ref, payload, Some((account, region)))?.map(|_| ()))
 }
 
 /// `DurableExecutionName`: `^[a-zA-Z0-9-_]+$`, 1 to 64 characters.

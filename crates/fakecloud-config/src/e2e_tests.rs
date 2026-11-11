@@ -723,3 +723,69 @@ async fn custom_rule_on_a_durable_function_starts_a_durable_execution() {
     let input: Value = serde_json::from_str(&exec.input_payload).unwrap();
     assert_eq!(input["configRuleName"], "durable");
 }
+
+/// A bare function name in a custom rule resolves in the rule's own account
+/// and region, for a durable function as for a plain one: the execution
+/// starts on that account's function, not the server default account's.
+#[tokio::test]
+async fn durable_custom_rule_bare_name_resolves_in_the_rules_account() {
+    let rule_account = "111111111111";
+    let lambda: fakecloud_lambda::SharedLambdaState = Arc::new(RwLock::new(
+        MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566"),
+    ));
+    for account in ["000000000000", rule_account] {
+        lambda
+            .write()
+            .regional_mut(account, "us-east-1")
+            .functions
+            .insert(
+                "durable-rule".into(),
+                fakecloud_lambda::LambdaFunction {
+                    function_name: "durable-rule".into(),
+                    durable_config: Some(json!({"ExecutionTimeout": 600})),
+                    ..Default::default()
+                },
+            );
+    }
+    let hub = fakecloud_lambda::DurableHub::new(lambda.clone());
+    let state: SharedConfigState = Arc::new(RwLock::new(ConfigAccounts::new()));
+    let svc = ConfigService::new(state)
+        .with_lambda(lambda.clone(), None)
+        .with_durable_hub(hub);
+    call(
+        &svc,
+        "PutConfigRule",
+        rule_account,
+        json!({
+            "ConfigRule": {
+                "ConfigRuleName": "durable",
+                "Source": {
+                    "Owner": "CUSTOM_LAMBDA",
+                    "SourceIdentifier": "durable-rule:$LATEST",
+                    "SourceDetails": [{
+                        "EventSource": "aws.config",
+                        "MessageType": "ScheduledNotification",
+                        "MaximumExecutionFrequency": "One_Hour"
+                    }]
+                },
+            }
+        }),
+    )
+    .await;
+    call(
+        &svc,
+        "StartConfigRulesEvaluation",
+        rule_account,
+        json!({"ConfigRuleNames": ["durable"]}),
+    )
+    .await;
+    let accounts = lambda.read();
+    let count = |account: &str| {
+        accounts
+            .regional(account, "us-east-1")
+            .map(|st| st.durable_executions.len())
+            .unwrap_or(0)
+    };
+    assert_eq!(count(rule_account), 1);
+    assert_eq!(count("000000000000"), 0);
+}

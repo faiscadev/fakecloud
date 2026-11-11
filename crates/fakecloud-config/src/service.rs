@@ -2047,11 +2047,22 @@ impl ConfigService {
         );
         // Config invokes a rule's function asynchronously; a durable function
         // runs as a durable execution, which reports through PutEvaluations.
-        if let Some(hub) = &self.durable {
-            if let Some(started) = fakecloud_lambda::start_durable_for_async_delivery(
+        // Resolved, like the plain path below, in the rule's account and the
+        // rule ARN's region when the identifier does not name them.
+        let rule_region = fakecloud_aws::arn::region_of(rule_arn)
+            .map(str::to_string)
+            .or_else(|| {
+                self.lambda_state
+                    .as_ref()
+                    .map(|l| l.read().region().to_string())
+            });
+        if let (Some(hub), Some(rule_region)) = (&self.durable, rule_region.as_deref()) {
+            if let Some(started) = fakecloud_lambda::start_durable_for_async_delivery_in(
                 hub,
                 lambda_arn,
                 &event.to_string(),
+                account,
+                rule_region,
             ) {
                 if let Err(e) = started {
                     tracing::warn!(function = %func_name, error = %e, "Config custom rule Lambda invocation failed");
