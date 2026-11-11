@@ -922,6 +922,77 @@ done
     );
 }
 
+/// An extension that exits between invocations, while parked in
+/// `/event/next`, is noticed through its dropped request: the next
+/// invocation fails with `Extension.Crash` carrying its exit status, and the
+/// one after runs on a fresh environment.
+#[tokio::test]
+async fn an_extension_exiting_while_idle_fails_the_next_invocation() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let ext = r#"#!/bin/sh
+API="http://${AWS_LAMBDA_RUNTIME_API}/2020-01-01/extension"
+H=$(mktemp)
+curl -sS -D "$H" -o /dev/null -X POST "$API/register" -H "Lambda-Extension-Name: quitter" -d '{"events":["INVOKE"]}'
+ID=$(grep -Fi Lambda-Extension-Identifier "$H" | cut -d: -f2- | tr -d '[:space:]')
+curl -sS -o /dev/null "$API/event/next" -H "Lambda-Extension-Identifier: $ID"
+curl -sS -o /dev/null "$API/event/next" -H "Lambda-Extension-Identifier: $ID" &
+NEXT=$!
+sleep 3
+kill "$NEXT"
+exit 7
+"#;
+    let layer = publish_layer(&client, "quitter", &[("extensions/quitter", ext)]).await;
+    let bootstrap = r#"#!/bin/sh
+API="http://${AWS_LAMBDA_RUNTIME_API}/2018-06-01/runtime"
+N=0
+while true; do
+  HEADERS=$(mktemp)
+  curl -sS -D "$HEADERS" -o /dev/null "$API/invocation/next"
+  ID=$(grep -Fi Lambda-Runtime-Aws-Request-Id "$HEADERS" | cut -d: -f2- | tr -d '[:space:]')
+  N=$((N+1))
+  curl -sS -o /dev/null -X POST "$API/invocation/$ID/response" -d "$N"
+done
+"#;
+    client
+        .create_function()
+        .function_name("quitter-fn")
+        .runtime(Runtime::Providedal2023)
+        .role(ROLE)
+        .handler("bootstrap")
+        .timeout(10)
+        .layers(layer)
+        .code(
+            FunctionCode::builder()
+                .zip_file(Blob::new(make_zip(&[("bootstrap", bootstrap)])))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        json(&invoke(&client, "quitter-fn", "{}").await),
+        serde_json::json!(1)
+    );
+    // The extension quits three seconds after the first event.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let resp = invoke(&client, "quitter-fn", "{}").await;
+    assert_eq!(resp.function_error(), Some("Unhandled"));
+    let body = json(&resp);
+    assert_eq!(body["errorType"], "Extension.Crash", "{body}");
+    assert!(
+        body["errorMessage"]
+            .as_str()
+            .unwrap()
+            .contains("extension quitter exited with error: exit status 7"),
+        "{body}"
+    );
+    // A fresh environment (whose extension has not quit yet) runs the next.
+    let resp = invoke(&client, "quitter-fn", "{}").await;
+    assert_eq!(resp.function_error(), None, "{}", json(&resp));
+    assert_eq!(json(&resp), serde_json::json!(1));
+}
+
 /// An integration targeting a version runs that version's code and
 /// configuration, not `$LATEST`'s.
 #[tokio::test]
