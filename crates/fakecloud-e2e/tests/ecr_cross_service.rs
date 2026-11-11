@@ -452,13 +452,35 @@ async fn lambda_image_package_requires_image_uri() {
 /// next event waits until it is done with the previous one.
 #[tokio::test]
 async fn ecr_image_lambda_starts_its_own_extensions() {
-    if !require_docker_or_skip("ecr_image_lambda_starts_its_own_extensions") {
+    image_with_extension_case(
+        "ecr_image_lambda_starts_its_own_extensions",
+        "lambda-ext-image",
+        None,
+    )
+    .await;
+}
+
+/// The same with an image that runs as a non-root `USER`: the extension
+/// launcher's bookkeeping still works, so the extensions start and the
+/// invocation runs instead of hanging.
+#[tokio::test]
+async fn ecr_image_lambda_with_a_non_root_user_starts_its_extensions() {
+    image_with_extension_case(
+        "ecr_image_lambda_with_a_non_root_user_starts_its_extensions",
+        "lambda-ext-image-nonroot",
+        Some("1000:1000"),
+    )
+    .await;
+}
+
+async fn image_with_extension_case(test: &str, repo: &str, user: Option<&str>) {
+    if !require_docker_or_skip(test) {
         return;
     }
     let server = TestServer::start().await;
     let ecr = server.ecr_client().await;
     ecr.create_repository()
-        .repository_name("lambda-ext-image")
+        .repository_name(repo)
         .send()
         .await
         .expect("create_repository");
@@ -489,17 +511,21 @@ done
     std::fs::write(dir.path().join("bootstrap"), bootstrap).unwrap();
     std::fs::write(
         dir.path().join("Dockerfile"),
-        "FROM public.ecr.aws/lambda/provided:al2023\n\
-         COPY image-ext /opt/extensions/image-ext\n\
-         COPY bootstrap /var/runtime/bootstrap\n\
-         RUN chmod 755 /opt/extensions/image-ext /var/runtime/bootstrap\n\
-         CMD [\"handler\"]\n",
+        format!(
+            "FROM public.ecr.aws/lambda/provided:al2023\n\
+             COPY image-ext /opt/extensions/image-ext\n\
+             COPY bootstrap /var/runtime/bootstrap\n\
+             RUN chmod 755 /opt/extensions/image-ext /var/runtime/bootstrap\n\
+             {}\
+             CMD [\"handler\"]\n",
+            user.map(|u| format!("USER {u}\n")).unwrap_or_default()
+        ),
     )
     .unwrap();
 
     let port = port_from_endpoint(server.endpoint());
-    let local_uri = format!("127.0.0.1:{port}/lambda-ext-image:v1");
-    let aws_uri = format!("{AWS_ACCOUNT}.dkr.ecr.{AWS_REGION}.amazonaws.com/lambda-ext-image:v1");
+    let local_uri = format!("127.0.0.1:{port}/{repo}:v1");
+    let aws_uri = format!("{AWS_ACCOUNT}.dkr.ecr.{AWS_REGION}.amazonaws.com/{repo}:v1");
     run_docker_pull_with_retry("public.ecr.aws/lambda/provided:al2023").await;
     run_docker(&["build", "-t", &local_uri, dir.path().to_str().unwrap()]).await;
     let docker_home = tempfile::tempdir().expect("tempdir");

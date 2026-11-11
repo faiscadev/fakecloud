@@ -514,24 +514,27 @@ impl DockerBackend {
     ) -> Result<(), RuntimeError> {
         self.copy_layers_into(container_id, layers).await?;
         if launcher {
-            let dir = TempDir::new().map_err(|e| RuntimeError::LocalIo(e.to_string()))?;
-            let path = dir.path().join("launch");
-            std::fs::write(&path, super::extensions::LAUNCHER_SCRIPT)
-                .map_err(|e| RuntimeError::LocalIo(e.to_string()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                    .map_err(|e| RuntimeError::LocalIo(e.to_string()))?;
-            }
-            let out = tokio::process::Command::new(&self.cli)
+            // Streamed in as a tar so the directory keeps its mode: world
+            // writable (sticky) for the launcher's bookkeeping whatever user
+            // the image runs as.
+            use tokio::io::AsyncWriteExt;
+            let mut child = tokio::process::Command::new(&self.cli)
                 .arg("cp")
-                .arg(format!("{}/.", dir.path().display()))
-                .arg(format!(
-                    "{container_id}:{}",
-                    super::extensions::LAUNCHER_DIR
-                ))
-                .output()
+                .arg("-")
+                .arg(format!("{container_id}:/var"))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(&super::extensions::launcher_tar())
+                    .await
+                    .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+            }
+            let out = child
+                .wait_with_output()
                 .await
                 .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
             if !out.status.success() {

@@ -64,6 +64,13 @@ pub struct PodSpecContext<'a> {
     pub launch_command: Option<Vec<String>>,
 }
 
+/// `value` as Kubernetes passes it on unchanged: the kubelet expands
+/// `$(VAR)` references in a container's `command`, `args` and `env` values
+/// (and reduces `$$` to `$`), so every `$` is doubled.
+fn verbatim(value: &str) -> String {
+    value.replace('$', "$$")
+}
+
 /// Resource cap for the `/tmp` `emptyDir` (`medium: Memory`) — sized
 /// from the function's `ephemeral_storage_size`. AWS defaults to 512
 /// MiB; clamp at 64 MiB so wildly stale snapshots still produce a spec
@@ -118,7 +125,7 @@ pub fn build_pod_spec(
             .into_iter()
             .map(|(k, v)| EnvVar {
                 name: k,
-                value: Some(v),
+                value: Some(verbatim(&v)),
                 value_from: None,
             })
             .collect();
@@ -222,10 +229,14 @@ pub fn build_pod_spec(
             .to_string()
     };
 
+    // The launcher's directory takes its bookkeeping files whatever user
+    // the function's image runs as (an `emptyDir` is created world
+    // writable; the sticky bit is added where the init user may).
     let init_script = if ctx.launch_command.is_some() {
         format!(
-            "{init_script}; printf '%s' \"$FAKECLOUD_LAUNCHER\" > {path}; chmod 755 {path}",
-            path = crate::runtime::extensions::LAUNCHER_PATH
+            "{init_script}; printf '%s' \"$FAKECLOUD_LAUNCHER\" > {path}; chmod 755 {path}; chmod 1777 {dir} 2>/dev/null || true",
+            path = crate::runtime::extensions::LAUNCHER_PATH,
+            dir = crate::runtime::extensions::LAUNCHER_DIR
         )
     } else {
         init_script
@@ -273,7 +284,7 @@ pub fn build_pod_spec(
     if ctx.launch_command.is_some() {
         init_env.push(EnvVar {
             name: "FAKECLOUD_LAUNCHER".into(),
-            value: Some(crate::runtime::extensions::LAUNCHER_SCRIPT.into()),
+            value: Some(verbatim(crate::runtime::extensions::LAUNCHER_SCRIPT)),
             value_from: None,
         });
     }
@@ -307,7 +318,7 @@ pub fn build_pod_spec(
         Some(command) => {
             main_container.command =
                 Some(vec![crate::runtime::extensions::LAUNCHER_PATH.to_string()]);
-            main_container.args = Some(command.clone());
+            main_container.args = Some(command.iter().map(|a| verbatim(a)).collect());
         }
         // An image run as is: `ImageConfig` still overrides its command.
         None => {
@@ -323,8 +334,9 @@ pub fn build_pod_spec(
                     })
                     .filter(|v| !v.is_empty())
             };
-            main_container.command = list("EntryPoint");
-            main_container.args = list("Command");
+            main_container.command =
+                list("EntryPoint").map(|c| c.iter().map(|a| verbatim(a)).collect());
+            main_container.args = list("Command").map(|c| c.iter().map(|a| verbatim(a)).collect());
         }
     }
 
@@ -637,13 +649,145 @@ mod tests {
         assert!(mounted(init));
         let script = &init.command.as_ref().unwrap()[2];
         assert!(script.contains("> /var/fakecloud/launch"), "{script}");
-        assert!(init
+        // The launcher's bookkeeping directory is writable whatever user the
+        // image runs as.
+        assert!(script.contains("chmod 1777 /var/fakecloud"), "{script}");
+        let launcher = init
             .env
             .as_ref()
             .unwrap()
             .iter()
-            .any(|e| e.name == "FAKECLOUD_LAUNCHER"
-                && e.value.as_deref() == Some(crate::runtime::extensions::LAUNCHER_SCRIPT)));
+            .find(|e| e.name == "FAKECLOUD_LAUNCHER")
+            .and_then(|e| e.value.clone())
+            .unwrap();
+        // What the kubelet hands the init container is the script itself.
+        assert_eq!(
+            kubelet_expand(&launcher),
+            crate::runtime::extensions::LAUNCHER_SCRIPT
+        );
+    }
+
+    /// The kubelet's `$(VAR)` expansion of `command`, `args` and `env`
+    /// values (`third_party/forked/golang/expansion`), with `VAR` and `HOME`
+    /// defined: `$$` is reduced to `$`, `$(NAME)` of a defined variable is
+    /// replaced, and anything else is kept.
+    fn kubelet_expand(input: &str) -> String {
+        let defined = |name: &str| match name {
+            "VAR" => Some("expanded".to_string()),
+            "HOME" => Some("/root".to_string()),
+            _ => None,
+        };
+        let bytes = input.as_bytes();
+        let mut out = String::new();
+        let mut checkpoint = 0;
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if bytes[cursor] == b'$' && cursor + 1 < bytes.len() {
+                out.push_str(&input[checkpoint..cursor]);
+                let rest = &input[cursor + 1..];
+                let advance = match rest.as_bytes()[0] {
+                    b'$' => {
+                        out.push('$');
+                        1
+                    }
+                    b'(' => match rest.find(')') {
+                        Some(close) => {
+                            let name = &rest[1..close];
+                            out.push_str(&defined(name).unwrap_or_else(|| format!("$({name})")));
+                            close + 1
+                        }
+                        None => {
+                            out.push_str("$(");
+                            1
+                        }
+                    },
+                    _ => {
+                        let c = rest.chars().next().unwrap();
+                        out.push('$');
+                        out.push(c);
+                        c.len_utf8()
+                    }
+                };
+                cursor += advance;
+                checkpoint = cursor + 1;
+            }
+            cursor += 1;
+        }
+        out.push_str(&input[checkpoint.min(input.len())..]);
+        out
+    }
+
+    #[test]
+    fn the_expansion_model_matches_the_kubelet() {
+        assert_eq!(kubelet_expand("$(VAR)"), "expanded");
+        assert_eq!(kubelet_expand("$(UNSET)"), "$(UNSET)");
+        assert_eq!(kubelet_expand("$$(VAR)"), "$(VAR)");
+        assert_eq!(kubelet_expand("a$$b"), "a$b");
+        assert_eq!(kubelet_expand("$HOME $"), "$HOME $");
+        assert_eq!(kubelet_expand("$(VAR"), "$(VAR");
+    }
+
+    #[test]
+    fn verbatim_survives_the_kubelet_expansion() {
+        for s in [
+            "plain",
+            "$(VAR)",
+            "echo $(HOME) $$ $(UNSET) $HOME",
+            "trailing $",
+            "$$(VAR)",
+            "$(VAR",
+            "ünï$(VAR)cødé",
+        ] {
+            assert_eq!(kubelet_expand(&verbatim(s)), s, "{s}");
+        }
+    }
+
+    /// `ImageConfig` command and arguments, the launcher's arguments and the
+    /// function's environment reach the container as written: the kubelet
+    /// does not expand `$(VAR)` in them (Lambda never does).
+    #[test]
+    fn container_command_args_and_env_are_not_expanded() {
+        let tricky = "$(HOME)/x $$ $(VAR)";
+        let mut f = zip_function("dollar-fn");
+        f.environment.insert("LITERAL".into(), tricky.into());
+        let mut c = ctx();
+        c.launch_command = Some(vec!["/bin/app".into(), tricky.into()]);
+        let pod = build_pod_spec(&f, "d", &c).unwrap();
+        let main = &pod.spec.unwrap().containers[0];
+        let args: Vec<String> = main
+            .args
+            .clone()
+            .unwrap()
+            .iter()
+            .map(|a| kubelet_expand(a))
+            .collect();
+        assert_eq!(args, vec!["/bin/app".to_string(), tricky.to_string()]);
+        let env = main.env.clone().unwrap();
+        let literal = env.iter().find(|e| e.name == "LITERAL").unwrap();
+        assert_eq!(kubelet_expand(literal.value.as_deref().unwrap()), tricky);
+
+        // An image run without the launcher: `ImageConfig` EntryPoint and
+        // Command become the container's command and args.
+        let mut f = zip_function("dollar-img");
+        f.package_type = "Image".into();
+        f.image_uri = Some("public.ecr.aws/test/img:1".into());
+        f.image_config = Some(serde_json::json!({
+            "EntryPoint": ["/bin/sh", "-c"],
+            "Command": [format!("echo {tricky}")],
+        }));
+        let mut c = ctx();
+        c.launch_command = None;
+        let pod = build_pod_spec(&f, "d", &c).unwrap();
+        let main = &pod.spec.unwrap().containers[0];
+        let expand = |v: &Option<Vec<String>>| {
+            v.clone()
+                .unwrap()
+                .iter()
+                .map(|a| kubelet_expand(a))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(expand(&main.command), vec!["/bin/sh", "-c"]);
+        assert_eq!(expand(&main.args), vec![format!("echo {tricky}")]);
     }
 
     #[test]

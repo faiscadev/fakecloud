@@ -50,9 +50,35 @@ fi
 exec "$@"
 "#;
 
+/// The launcher as a tar of `fakecloud/` (extracted into `/var`): the
+/// directory world-writable with the sticky bit, so the launcher can record
+/// its bookkeeping whatever user the image runs as, and the script
+/// executable by all.
+pub(crate) fn launcher_tar() -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut dir = tar::Header::new_gnu();
+    dir.set_entry_type(tar::EntryType::Directory);
+    dir.set_mode(0o1777);
+    dir.set_size(0);
+    let _ = dir.set_path("fakecloud/");
+    dir.set_cksum();
+    let _ = builder.append(&dir, std::io::empty());
+    let mut file = tar::Header::new_gnu();
+    file.set_entry_type(tar::EntryType::Regular);
+    file.set_mode(0o755);
+    file.set_size(LAUNCHER_SCRIPT.len() as u64);
+    let _ = file.set_path("fakecloud/launch");
+    file.set_cksum();
+    let _ = builder.append(&file, LAUNCHER_SCRIPT.as_bytes());
+    builder.into_inner().unwrap_or_default()
+}
+
 /// The command a function's container runs: its entrypoint followed by its
-/// command, from the function's `ImageConfig` where set (as Lambda applies
-/// it), else the image's own.
+/// command, from the function's `ImageConfig` where set, else the image's
+/// own. Lambda applies these as Docker does (its container image settings
+/// defer to Docker's ENTRYPOINT/CMD reference), and in Docker overriding
+/// the entrypoint clears the image's default command: an `ImageConfig`
+/// that sets only `EntryPoint` runs that entrypoint with no arguments.
 pub(crate) fn function_command(
     image_entrypoint: &[String],
     image_cmd: &[String],
@@ -69,8 +95,11 @@ pub(crate) fn function_command(
             })
             .filter(|v: &Vec<String>| !v.is_empty())
     };
-    let mut command = list("EntryPoint").unwrap_or_else(|| image_entrypoint.to_vec());
-    command.extend(list("Command").unwrap_or_else(|| image_cmd.to_vec()));
+    let (mut command, default_cmd) = match list("EntryPoint") {
+        Some(entrypoint) => (entrypoint, Vec::new()),
+        None => (image_entrypoint.to_vec(), image_cmd.to_vec()),
+    };
+    command.extend(list("Command").unwrap_or(default_cmd));
     command
 }
 
@@ -112,17 +141,70 @@ mod tests {
             function_command(&entry, &cmd, Some(&config)),
             vec!["/lambda-entrypoint.sh", "other.handler"]
         );
-        let config = serde_json::json!({"EntryPoint": ["/bin/app"], "Command": []});
+        let config = serde_json::json!({"EntryPoint": ["/bin/app", "--serve"], "Command": ["x.y"]});
         assert_eq!(
             function_command(&entry, &cmd, Some(&config)),
-            vec!["/bin/app", "app.handler"]
+            vec!["/bin/app", "--serve", "x.y"]
         );
+    }
+
+    /// Overriding only the entrypoint drops the image's CMD, as
+    /// `docker run --entrypoint` does ("Passing --entrypoint clears out any
+    /// default command set on the image").
+    #[test]
+    fn an_entrypoint_override_clears_the_image_command() {
+        let entry = vec!["/lambda-entrypoint.sh".to_string()];
+        let cmd = vec!["app.handler".to_string()];
+        for config in [
+            serde_json::json!({"EntryPoint": ["/bin/app"]}),
+            serde_json::json!({"EntryPoint": ["/bin/app"], "Command": []}),
+        ] {
+            assert_eq!(
+                function_command(&entry, &cmd, Some(&config)),
+                vec!["/bin/app"],
+                "{config}"
+            );
+        }
+        // An empty EntryPoint list overrides nothing.
+        let config = serde_json::json!({"EntryPoint": []});
+        assert_eq!(
+            function_command(&entry, &cmd, Some(&config)),
+            vec!["/lambda-entrypoint.sh", "app.handler"]
+        );
+    }
+
+    #[test]
+    fn image_working_directory_reads_image_config() {
         assert_eq!(
             image_working_directory(Some(&serde_json::json!({"WorkingDirectory": "/srv"})))
                 .as_deref(),
             Some("/srv")
         );
         assert_eq!(image_working_directory(None), None);
+    }
+
+    #[test]
+    fn the_launcher_tar_leaves_its_directory_writable_for_any_user() {
+        let tar = launcher_tar();
+        let mut archive = tar::Archive::new(tar.as_slice());
+        let entries: Vec<(String, u32)> = archive
+            .entries()
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                (
+                    e.path().unwrap().to_string_lossy().into_owned(),
+                    e.header().mode().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                ("fakecloud/".to_string(), 0o1777),
+                ("fakecloud/launch".to_string(), 0o755)
+            ]
+        );
     }
 
     #[test]
