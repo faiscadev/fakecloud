@@ -2688,3 +2688,22 @@ fn a_negative_jsonata_tolerance_is_refused_as_negative() {
         Some(2)
     );
 }
+
+#[test]
+fn map_run_arn_joins_machine_and_execution_names_for_both_types() {
+    let standard =
+        map_run_arn_for("arn:aws:states:us-east-1:123456789012:execution:sm:run").unwrap();
+    assert!(
+        standard.starts_with("arn:aws:states:us-east-1:123456789012:mapRun:sm/run:"),
+        "{standard}"
+    );
+    let express = map_run_arn_for(
+        "arn:aws:states:us-east-1:123456789012:express:sm:run:0b1c2d3e-aaaa-bbbb-cccc-0123456789ab",
+    )
+    .unwrap();
+    assert!(
+        express.starts_with("arn:aws:states:us-east-1:123456789012:mapRun:sm/run:"),
+        "{express}"
+    );
+    assert!(!express.contains("0b1c2d3e"), "{express}");
+}

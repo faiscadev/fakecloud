@@ -370,6 +370,26 @@ impl StepFunctionsState {
     ) -> String {
         execution_arn(region, &self.account_id, state_machine_name, execution_name)
     }
+
+    /// The ARN for a new execution of a `machine_type` state machine: the
+    /// name-keyed `execution:` ARN for STANDARD, a fresh `express:` ARN for
+    /// EXPRESS (see [`express_execution_arn`]).
+    pub fn new_execution_arn(
+        &self,
+        region: &str,
+        machine_type: StateMachineType,
+        state_machine_name: &str,
+        execution_name: &str,
+    ) -> String {
+        match machine_type {
+            StateMachineType::Standard => {
+                self.execution_arn(region, state_machine_name, execution_name)
+            }
+            StateMachineType::Express => {
+                express_execution_arn(region, &self.account_id, state_machine_name, execution_name)
+            }
+        }
+    }
 }
 
 /// A Step Functions ARN (`arn:<partition>:states:<region>:<account>:<resource>`)
@@ -394,6 +414,27 @@ pub fn execution_arn(
         region,
         account_id,
         &format!("execution:{state_machine_name}:{execution_name}"),
+    )
+}
+
+/// A fresh ARN for one EXPRESS execution: `express:<machine>:<name>:<id>`.
+///
+/// EXPRESS names can be reused immediately and StartExecution is never
+/// idempotent for them, so every start is its own execution. The trailing id
+/// keeps two starts under the same name apart.
+pub fn express_execution_arn(
+    region: &str,
+    account_id: &str,
+    state_machine_name: &str,
+    execution_name: &str,
+) -> String {
+    states_arn(
+        region,
+        account_id,
+        &format!(
+            "express:{state_machine_name}:{execution_name}:{}",
+            uuid::Uuid::new_v4()
+        ),
     )
 }
 

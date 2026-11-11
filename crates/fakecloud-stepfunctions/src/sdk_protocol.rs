@@ -125,10 +125,14 @@ pub(crate) struct Caller<'a> {
 }
 
 /// The assumed-role session a state machine's Tasks run as.
-pub(crate) fn execution_principal(role_arn: &str, execution_arn: &str) -> Option<Principal> {
+pub(crate) fn execution_principal(role_arn: &str, execution_name: &str) -> Option<Principal> {
     let account = fakecloud_aws::arn::account_of(role_arn)?;
     let role = role_arn.rsplit('/').next()?;
-    let session = execution_arn.rsplit(':').next().unwrap_or("execution");
+    let session = if execution_name.is_empty() {
+        "execution"
+    } else {
+        execution_name
+    };
     Some(Principal {
         arn: format!("arn:aws:sts::{account}:assumed-role/{role}/{session}"),
         user_id: format!("AROAFAKECLOUDSTATES:{session}"),
@@ -1329,6 +1333,20 @@ mod tests {
 
     fn svc(id: &str) -> Arc<SdkService> {
         service(id).unwrap_or_else(|| panic!("no table for {id}"))
+    }
+
+    #[test]
+    fn execution_principal_session_is_the_execution_name() {
+        let role = "arn:aws:iam::123456789012:role/sfn-role";
+        let p = execution_principal(role, "run-1").unwrap();
+        assert_eq!(
+            p.arn,
+            "arn:aws:sts::123456789012:assumed-role/sfn-role/run-1"
+        );
+        assert_eq!(p.user_id, "AROAFAKECLOUDSTATES:run-1");
+        assert_eq!(p.account_id, "123456789012");
+        let unnamed = execution_principal(role, "").unwrap();
+        assert_eq!(unnamed.user_id, "AROAFAKECLOUDSTATES:execution");
     }
 
     #[test]

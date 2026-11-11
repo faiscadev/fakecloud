@@ -1594,6 +1594,7 @@ pub fn start_execution_from_delivery(
 
     let sm_name = sm.name.clone();
     let sm_role_arn = sm.role_arn.clone();
+    let sm_type = sm.machine_type;
     let definition = sm.definition.clone();
     // No request in this delivery path; the execution inherits the region its
     // state machine ARN was minted in (the request region at CreateStateMachine).
@@ -1602,7 +1603,7 @@ pub fn start_execution_from_delivery(
         .nth(3)
         .unwrap_or("us-east-1")
         .to_string();
-    let exec_arn = st.execution_arn(&region, &sm_name, &execution_name);
+    let exec_arn = st.new_execution_arn(&region, sm_type, &sm_name, &execution_name);
 
     let now = Utc::now();
     let execution = Execution {
@@ -2856,7 +2857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_execution_express_name_collision_never_idempotent() {
+    async fn start_execution_express_reuses_names_as_new_executions() {
         let svc = StepFunctionsService::new(make_state());
         let arn = create_express_sm(&svc, "dup-exec-express");
 
@@ -2865,13 +2866,90 @@ mod tests {
             "name": "same-name",
             "input": "{\"a\":1}",
         });
+        // AWS: EXPRESS names can be reused immediately and StartExecution is
+        // never idempotent, so an identical re-issue starts a second execution.
         let req = make_request("StartExecution", &body.to_string());
-        svc.start_execution(&req).unwrap();
+        let first = body_json(&svc.start_execution(&req).unwrap());
+        let req = make_request("StartExecution", &body.to_string());
+        let second = body_json(&svc.start_execution(&req).unwrap());
 
-        // EXPRESS has no idempotency: even an identical re-issue conflicts.
-        let req = make_request("StartExecution", &body.to_string());
-        let err = expect_err(svc.start_execution(&req));
-        assert!(err.to_string().contains("ExecutionAlreadyExists"));
+        let (a, b) = (
+            first["executionArn"].as_str().unwrap(),
+            second["executionArn"].as_str().unwrap(),
+        );
+        assert_ne!(a, b);
+        for exec_arn in [a, b] {
+            assert!(
+                exec_arn.starts_with(
+                    "arn:aws:states:us-east-1:123456789012:express:dup-exec-express:same-name:"
+                ),
+                "{exec_arn}"
+            );
+        }
+        let accounts = svc.state.read();
+        let state = accounts.by_arn(a).unwrap();
+        assert_eq!(state.executions[a].name, "same-name");
+        assert_eq!(state.executions[b].name, "same-name");
+    }
+
+    #[tokio::test]
+    async fn delivered_express_executions_get_express_arns() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_express_sm(&svc, "delivered-express");
+        start_execution_from_delivery(&svc.state, &None, &None, &None, &arn, "{}");
+        start_execution_from_delivery(&svc.state, &None, &None, &None, &arn, "{}");
+
+        let accounts = svc.state.read();
+        let state = accounts.by_arn(&arn).unwrap();
+        let arns: Vec<_> = state
+            .executions
+            .keys()
+            .filter(|k| k.contains("delivered-express"))
+            .collect();
+        assert_eq!(arns.len(), 2);
+        for exec_arn in arns {
+            assert!(
+                exec_arn.starts_with(
+                    "arn:aws:states:us-east-1:123456789012:express:delivered-express:"
+                ),
+                "{exec_arn}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn start_sync_execution_rejects_a_malformed_arn() {
+        let svc = StepFunctionsService::new(make_state());
+        let req = make_request(
+            "StartSyncExecution",
+            &json!({"stateMachineArn": "foo"}).to_string(),
+        );
+        let err = expect_err(svc.start_sync_execution(&req).await);
+        assert!(err.to_string().contains("InvalidArn"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn start_sync_execution_uses_the_given_name() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_express_sm(&svc, "sync-named");
+        let body = json!({"stateMachineArn": arn, "name": "my-run"});
+
+        let req = make_request("StartSyncExecution", &body.to_string());
+        let first = body_json(&svc.start_sync_execution(&req).await.unwrap());
+        let req = make_request("StartSyncExecution", &body.to_string());
+        let second = body_json(&svc.start_sync_execution(&req).await.unwrap());
+
+        assert_eq!(first["name"], "my-run");
+        assert_eq!(second["name"], "my-run");
+        assert_ne!(first["executionArn"], second["executionArn"]);
+        assert!(first["executionArn"]
+            .as_str()
+            .unwrap()
+            .contains(":express:sync-named:my-run:"));
+
+        let bad = json!({"stateMachineArn": arn, "name": "has space"});
+        let req = make_request("StartSyncExecution", &bad.to_string());
+        assert!(svc.start_sync_execution(&req).await.is_err());
     }
 
     // ── DescribeExecution ──
