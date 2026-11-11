@@ -80,6 +80,10 @@ pub enum KmsHookError {
     /// be used for a cryptographic operation (mirrors real KMS, which
     /// fails Decrypt with `DisabledException` / `KMSInvalidStateException`).
     KeyDisabled(String),
+    /// The key is an AWS-managed key whose (AWS-written, unchangeable) key
+    /// policy does not let the calling service use it: an `aws/<service>`
+    /// key works only through its own service. Carries the key ARN.
+    AccessDenied(String),
 }
 
 impl std::fmt::Display for KmsHookError {
@@ -88,6 +92,10 @@ impl std::fmt::Display for KmsHookError {
             Self::KeyNotFound(k) => write!(f, "kms key not found: {k}"),
             Self::InvalidCiphertext(msg) => write!(f, "invalid ciphertext: {msg}"),
             Self::KeyDisabled(k) => write!(f, "kms key is disabled: {k}"),
+            Self::AccessDenied(k) => write!(
+                f,
+                "access denied: the key policy of the AWS-managed key {k} does not allow this service to use it"
+            ),
         }
     }
 }
@@ -112,9 +120,21 @@ impl KmsServiceHook {
         service_principal: &str,
         encryption_context: HashMap<String, String>,
     ) -> Result<String, KmsHookError> {
-        let (key_arn, _) =
-            self.resolve_or_provision(account_id, region, key_id, service_principal)?;
+        let (key_arn, _) = self.resolve_or_provision(account_id, region, key_id)?;
         let key_short = key_id_from_arn(&key_arn).to_string();
+        // Services encrypt by deriving a data key under the KMS key.
+        {
+            let mas = self.state.read();
+            if let Some(key) = mas.get(account_id).and_then(|s| s.keys.get(&key_short)) {
+                authorize_via_service(
+                    key,
+                    account_id,
+                    service_principal,
+                    "kms:GenerateDataKey",
+                    &encryption_context,
+                )?;
+            }
+        }
 
         // Default to the AWS-shaped binary blob (AES-256-GCM under the
         // per-account master key persisted in `KmsState`). The legacy
@@ -168,6 +188,13 @@ impl KmsServiceHook {
             if !key.enabled {
                 return Err(KmsHookError::KeyDisabled(key_short.clone()));
             }
+            authorize_via_service(
+                key,
+                account_id,
+                service_principal,
+                "kms:Decrypt",
+                &encryption_context,
+            )?;
             key.arn.clone()
         };
 
@@ -236,9 +263,9 @@ impl KmsServiceHook {
         account_id: &str,
         region: &str,
         key_id: &str,
-        service_principal: &str,
+        _service_principal: &str,
     ) -> Result<String, KmsHookError> {
-        self.resolve_or_provision(account_id, region, key_id, service_principal)
+        self.resolve_or_provision(account_id, region, key_id)
             .map(|(arn, _)| arn)
     }
 
@@ -249,9 +276,9 @@ impl KmsServiceHook {
         account_id: &str,
         region: &str,
         key_id: &str,
-        service_principal: &str,
+        _service_principal: &str,
     ) -> Result<(String, bool), KmsHookError> {
-        self.resolve_or_provision(account_id, region, key_id, service_principal)
+        self.resolve_or_provision(account_id, region, key_id)
     }
 
     /// The ARN of the AWS-managed key for `service` (`alias/aws/<service>`)
@@ -263,14 +290,9 @@ impl KmsServiceHook {
         account_id: &str,
         region: &str,
         service: &str,
-        service_principal: &str,
+        _service_principal: &str,
     ) -> (String, bool) {
-        self.aws_managed_key(
-            account_id,
-            region,
-            &format!("aws/{service}"),
-            service_principal,
-        )
+        self.aws_managed_key(account_id, region, &format!("aws/{service}"))
     }
 
     /// Resolve `key_id` to its key ARN; the flag is `true` when an
@@ -281,7 +303,6 @@ impl KmsServiceHook {
         account_id: &str,
         region: &str,
         key_id: &str,
-        service_principal: &str,
     ) -> Result<(String, bool), KmsHookError> {
         // Pre-flight read to see if the key resolves cleanly.
         {
@@ -301,19 +322,13 @@ impl KmsServiceHook {
             return Err(KmsHookError::KeyNotFound(key_id.to_string()));
         }
         let alias_region = parse_kms_arn(key_id).map_or(region, |(r, _, _)| r);
-        Ok(self.aws_managed_key(account_id, alias_region, &alias, service_principal))
+        Ok(self.aws_managed_key(account_id, alias_region, &alias))
     }
 
     /// The AWS-managed key for `alias` (`aws/<service>`) in `account_id` and
     /// `region`, minted on first use. One key exists per account AND region,
     /// and that region's `alias/aws/<service>` alias targets it.
-    fn aws_managed_key(
-        &self,
-        account_id: &str,
-        region: &str,
-        alias: &str,
-        service_principal: &str,
-    ) -> (String, bool) {
+    fn aws_managed_key(&self, account_id: &str, region: &str, alias: &str) -> (String, bool) {
         let alias_full = format!("alias/{alias}");
         {
             let mas = self.state.read();
@@ -328,7 +343,44 @@ impl KmsServiceHook {
         let state = mas.get_or_create(account_id);
         // Re-check under the write lock in case a concurrent caller won the
         // race; this also records a key/alias pair that is half-recorded.
-        ensure_aws_managed_key(state, region, alias, service_principal)
+        ensure_aws_managed_key(state, region, alias)
+    }
+}
+
+/// Authorize a fakecloud service's use of `key` through the KMS hook. The
+/// hook is how a service such as S3 or SQS calls KMS on its caller's behalf,
+/// so the request is evaluated as AWS evaluates it: made in `account_id` (the
+/// `kms:CallerAccount`) through the service named by `service_principal` (the
+/// `kms:ViaService`, that service's endpoint in the key's region). Only
+/// AWS-managed keys are checked here: their policy is AWS's (see
+/// [`crate::aws_managed`]) and grants cryptographic use only through the
+/// owning service, so S3 uses `aws/s3` but SQS cannot. Customer keys are
+/// governed by policies the caller wrote and checked where the service
+/// validates its key configuration (`KmsHook::check_service_key_use`).
+fn authorize_via_service(
+    key: &KmsKey,
+    account_id: &str,
+    service_principal: &str,
+    action: &str,
+    encryption_context: &HashMap<String, String>,
+) -> Result<(), KmsHookError> {
+    if key.key_manager != "AWS" {
+        return Ok(());
+    }
+    let region = parse_kms_arn(&key.arn).map_or("us-east-1", |(r, _, _)| r);
+    let context = encryption_context
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let caller = crate::aws_managed::KeyCaller::ViaService {
+        service_principal,
+        region,
+        account: account_id,
+    };
+    if crate::aws_managed::policy_allows(&key.policy, &key.arn, &caller, action, &context, &[]) {
+        Ok(())
+    } else {
+        Err(KmsHookError::AccessDenied(key.arn.clone()))
     }
 }
 
@@ -462,13 +514,7 @@ pub const DEFAULT_AWS_MANAGED_ALIASES: &[&str] = &[
 /// matching the auto-provision-on-first-use path in [`resolve_or_provision`].
 pub fn ensure_default_managed_aliases(state: &mut KmsState, region: &str) {
     for alias in DEFAULT_AWS_MANAGED_ALIASES {
-        // `aws/<service>` -> `<service>.amazonaws.com`. The principal only
-        // shapes the default key policy; the data source asserts on the
-        // target key id, not the principal, so an approximate principal is
-        // fine here.
-        let service = alias.strip_prefix("aws/").unwrap_or(alias);
-        let principal = format!("{service}.amazonaws.com");
-        ensure_aws_managed_key(state, region, alias, &principal);
+        ensure_aws_managed_key(state, region, alias);
     }
 }
 
@@ -489,19 +535,11 @@ fn existing_aws_managed_key(state: &KmsState, region: &str, alias_full: &str) ->
 /// when the region has none; the flag is `true` when this call minted it.
 /// Afterwards the region's `alias/aws/<service>` alias targets the key and
 /// [`KmsState::aws_managed_keys`] records it for the region.
-fn ensure_aws_managed_key(
-    state: &mut KmsState,
-    region: &str,
-    alias: &str,
-    service_principal: &str,
-) -> (String, bool) {
+fn ensure_aws_managed_key(state: &mut KmsState, region: &str, alias: &str) -> (String, bool) {
     let alias_full = format!("alias/{alias}");
     let (arn, minted) = match existing_aws_managed_key(state, region, &alias_full) {
         Some(arn) => (arn, false),
-        None => (
-            mint_aws_managed_key(state, region, alias, service_principal),
-            true,
-        ),
+        None => (mint_aws_managed_key(state, region, alias), true),
     };
     let key_id = key_id_from_arn(&arn).to_string();
     state.aws_managed_keys.insert(
@@ -523,109 +561,38 @@ fn ensure_aws_managed_key(
     (arn, minted)
 }
 
-/// The key policy AWS gives the `aws/lambda` AWS-managed key (recorded from
-/// AWS): account principals use it through Lambda, and the Lambda service
-/// principal may only derive data keys for the account's functions, so the
-/// key cannot protect durable execution data (Lambda also needs
-/// `kms:Decrypt`).
-fn aws_lambda_key_policy(account: &str, region: &str) -> String {
-    let partition = fakecloud_aws::arn::partition_for(region);
-    let functions = format!("arn:*:lambda:{region}:{account}:function:*");
-    let services = serde_json::json!([
-        "lambda.amazonaws.com",
-        format!("lambda.{region}.amazonaws.com")
-    ]);
-    serde_json::json!({
-        "Version": "2012-10-17",
-        "Id": "auto-awslambda-3",
-        "Statement": [
-            {
-                "Sid": "Allow access through AWS Lambda for all principals in the account that are authorized to use AWS Lambda",
-                "Effect": "Allow",
-                "Principal": {"AWS": "*"},
-                "Action": ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:CreateGrant", "kms:DescribeKey"],
-                "Resource": "*",
-                "Condition": {"StringEquals": {
-                    "kms:ViaService": format!("lambda.{region}.amazonaws.com"),
-                    "kms:CallerAccount": account,
-                }}
-            },
-            {
-                "Sid": "Allow all principals in the account to decrypt ciphertexts for Lambda functions in the account",
-                "Effect": "Allow",
-                "Principal": {"AWS": "*"},
-                "Action": "kms:Decrypt",
-                "Resource": "*",
-                "Condition": {
-                    "StringEquals": {"kms:CallerAccount": account},
-                    "ArnLike": {"kms:EncryptionContext:aws:lambda:FunctionArn": functions}
-                }
-            },
-            {
-                "Sid": "Allow Lambda service access",
-                "Effect": "Allow",
-                "Principal": {"Service": services},
-                "Action": "kms:GenerateDataKey",
-                "Resource": "*",
-                "Condition": {"ArnLike": {"kms:EncryptionContext:aws:lambda:FunctionArn": functions}}
-            },
-            {
-                "Sid": "Allow Lambda to directly describe the key and list its grants",
-                "Effect": "Allow",
-                "Principal": {"Service": services},
-                "Action": ["kms:Describe*", "kms:Get*", "kms:List*"],
-                "Resource": "*"
-            },
-            {
-                "Sid": "Allow direct access to key metadata to the account",
-                "Effect": "Allow",
-                "Principal": {"AWS": format!("arn:{partition}:iam::{account}:root")},
-                "Action": ["kms:Describe*", "kms:Get*", "kms:List*", "kms:RevokeGrant"],
-                "Resource": "*"
-            }
-        ]
-    })
-    .to_string()
-}
-
-/// The key policy fakecloud gives AWS-managed keys of services without a
-/// recorded one (and gave `aws/lambda` keys before its policy was recorded).
-fn generic_managed_key_policy(service_principal: &str) -> serde_json::Value {
-    serde_json::json!({
-        "Version": "2012-10-17",
-        "Statement": [{
-            "Sid": "Allow access through service",
-            "Effect": "Allow",
-            "Principal": {"Service": service_principal},
-            "Action": ["kms:GenerateDataKey", "kms:Decrypt", "kms:DescribeKey"],
-            "Resource": "*"
-        }]
-    })
-}
-
-/// Give `aws/lambda` AWS-managed keys minted before its key policy was
-/// recorded the recorded policy. AWS refuses `PutKeyPolicy` (and every other
-/// key-management operation) on AWS-managed keys, so their policy can never
-/// differ from AWS's; any other policy found (the generic one fakecloud
-/// generated, or one set through its `PutKeyPolicy` before that refused
-/// AWS-managed keys) is replaced.
-pub(crate) fn migrate_aws_lambda_key_policies(state: &mut KmsState) {
-    // Both the recorded slots and the `alias/aws/lambda` aliases: snapshots
-    // from before the slots were recorded reach the key only by its alias.
-    let mut slots: std::collections::BTreeSet<(String, String)> = state
+/// Give AWS-managed keys minted by an older fakecloud the policy (and
+/// description) AWS gives them (see [`crate::aws_managed::key_policy`]). AWS
+/// refuses `PutKeyPolicy` (and every other key-management operation) on
+/// AWS-managed keys, so their policy can never differ from AWS's; any other
+/// policy found (the generic one fakecloud used to generate, or one set
+/// through its `PutKeyPolicy` before that refused AWS-managed keys) is
+/// replaced.
+pub(crate) fn migrate_aws_managed_key_policies(state: &mut KmsState) {
+    // Both the recorded slots and the `alias/aws/<service>` aliases:
+    // snapshots from before the slots were recorded reach the key only by
+    // its alias.
+    let mut slots: std::collections::BTreeSet<(String, String, String)> = state
         .aws_managed_keys
         .iter()
         .filter_map(|(slot, id)| {
             let (region, name) = slot.split_once('/')?;
-            (name == "alias/aws/lambda").then(|| (region.to_string(), id.clone()))
+            let service = crate::aws_managed::alias_service(name)?;
+            Some((region.to_string(), service.to_string(), id.clone()))
         })
         .collect();
     for (region, aliases) in &state.aliases {
-        if let Some(alias) = aliases.get("alias/aws/lambda") {
-            slots.insert((region.clone(), alias.target_key_id.clone()));
+        for (name, alias) in aliases {
+            if let Some(service) = crate::aws_managed::alias_service(name) {
+                slots.insert((
+                    region.clone(),
+                    service.to_string(),
+                    alias.target_key_id.clone(),
+                ));
+            }
         }
     }
-    for (region, key_id) in slots {
+    for (region, service, key_id) in slots {
         let account = state.account_id.clone();
         let Some(key) = state.keys.get_mut(&key_id) else {
             continue;
@@ -633,34 +600,28 @@ pub(crate) fn migrate_aws_lambda_key_policies(state: &mut KmsState) {
         if key.key_manager != "AWS" {
             continue;
         }
-        let recorded = aws_lambda_key_policy(&account, &region);
+        let recorded = crate::aws_managed::key_policy(&service, &account, &region);
         if key.policy != recorded {
             key.policy = recorded;
+        }
+        let description = crate::aws_managed::key_description(&service);
+        if key.description != description {
+            key.description = description;
         }
     }
 }
 
 /// Mint an AWS-managed key protecting `alias` (`aws/<service>`) in `region`.
-fn mint_aws_managed_key(
-    state: &mut KmsState,
-    region: &str,
-    alias: &str,
-    service_principal: &str,
-) -> String {
+fn mint_aws_managed_key(state: &mut KmsState, region: &str, alias: &str) -> String {
     let key_id = uuid::Uuid::new_v4().to_string();
     let arn = kms_key_arn(region, &state.account_id, &key_id);
-    let policy = if alias == "aws/lambda" {
-        aws_lambda_key_policy(&state.account_id, region)
-    } else {
-        generic_managed_key_policy(service_principal).to_string()
-    };
+    let service = alias.strip_prefix("aws/").unwrap_or(alias);
+    let policy = crate::aws_managed::key_policy(service, &state.account_id, region);
     let key = KmsKey {
         key_id: key_id.clone(),
         arn: arn.clone(),
         creation_date: Utc::now().timestamp() as f64,
-        description: format!(
-            "Default master key that protects {alias} when no other key is defined"
-        ),
+        description: crate::aws_managed::key_description(service),
         enabled: true,
         key_usage: "ENCRYPT_DECRYPT".to_string(),
         key_spec: "SYMMETRIC_DEFAULT".to_string(),
@@ -733,29 +694,26 @@ mod tests {
         assert_eq!(hook.peek_plaintext("999999999999", &ct), None);
     }
 
+    /// The policy fakecloud used to give AWS-managed keys before their AWS
+    /// policies were recorded.
+    const GENERIC_OLD_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Sid":"Allow access through service","Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":["kms:GenerateDataKey","kms:Decrypt","kms:DescribeKey"],"Resource":"*"}]}"#;
+
     /// A snapshot from before `aws_managed_keys` was recorded reaches its
     /// `aws/lambda` key only through the alias; loading it migrates the
     /// key's policy too.
     #[test]
     fn old_aws_lambda_keys_reached_only_by_alias_are_migrated() {
         let mut state = KmsState::new("123456789012", "us-east-1");
-        let arn = ensure_aws_managed_key(
-            &mut state,
-            "us-east-1",
-            "aws/lambda",
-            "lambda.amazonaws.com",
-        )
-        .0;
+        let arn = ensure_aws_managed_key(&mut state, "us-east-1", "aws/lambda").0;
         let id = key_id_from_arn(&arn).to_string();
-        state.keys.get_mut(&id).unwrap().policy =
-            generic_managed_key_policy("lambda.amazonaws.com").to_string();
+        state.keys.get_mut(&id).unwrap().policy = GENERIC_OLD_POLICY.to_string();
         let mut snapshot = serde_json::to_value(&state).unwrap();
         snapshot.as_object_mut().unwrap().remove("aws_managed_keys");
         let loaded: KmsState = serde_json::from_value(snapshot).unwrap();
         assert!(loaded.aws_managed_keys.is_empty());
         assert_eq!(
             loaded.keys[&id].policy,
-            aws_lambda_key_policy("123456789012", "us-east-1")
+            crate::aws_managed::key_policy("lambda", "123456789012", "us-east-1")
         );
     }
 
@@ -765,8 +723,7 @@ mod tests {
     fn the_aws_lambda_key_policy_uses_the_region_partition() {
         for (region, partition) in [("cn-north-1", "aws-cn"), ("us-gov-west-1", "aws-us-gov")] {
             let mut state = KmsState::new("123456789012", region);
-            let arn =
-                ensure_aws_managed_key(&mut state, region, "aws/lambda", "lambda.amazonaws.com").0;
+            let arn = ensure_aws_managed_key(&mut state, region, "aws/lambda").0;
             let policy: serde_json::Value =
                 serde_json::from_str(&state.keys[key_id_from_arn(&arn)].policy).unwrap();
             let root = policy["Statement"]
@@ -781,54 +738,143 @@ mod tests {
             );
             assert_eq!(
                 policy["Statement"][0]["Condition"]["StringEquals"]["kms:ViaService"],
-                format!("lambda.{region}.amazonaws.com")
+                format!(
+                    "lambda.{region}.{}",
+                    fakecloud_aws::endpoint::dns_suffix_for_region(region)
+                )
             );
         }
     }
 
-    /// Snapshots from before the `aws/lambda` policy was recorded hold the
-    /// generic generated policy (or one an older fakecloud let PutKeyPolicy
-    /// set); loading one gives every `aws/lambda` key the recorded policy and
-    /// leaves other AWS-managed keys alone.
+    /// Snapshots from before the AWS policies were recorded hold the generic
+    /// generated policy and description (or a policy an older fakecloud let
+    /// PutKeyPolicy set); loading one gives every AWS-managed key AWS's
+    /// policy and description for its service and region, and leaves
+    /// customer keys alone.
     #[test]
-    fn old_aws_lambda_key_policies_are_migrated_on_load() {
+    fn old_aws_managed_key_policies_are_migrated_on_load() {
         let mut state = KmsState::new("123456789012", "us-east-1");
-        let old = ensure_aws_managed_key(
-            &mut state,
-            "us-east-1",
-            "aws/lambda",
-            "lambda.amazonaws.com",
-        )
-        .0;
-        let changed = ensure_aws_managed_key(
-            &mut state,
-            "eu-west-1",
-            "aws/lambda",
-            "lambda.amazonaws.com",
-        )
-        .0;
-        let other =
-            ensure_aws_managed_key(&mut state, "us-east-1", "aws/sqs", "sqs.amazonaws.com").0;
-        let generic = generic_managed_key_policy("lambda.amazonaws.com").to_string();
+        let old = ensure_aws_managed_key(&mut state, "us-east-1", "aws/lambda").0;
+        let changed = ensure_aws_managed_key(&mut state, "eu-west-1", "aws/lambda").0;
+        let sqs = ensure_aws_managed_key(&mut state, "us-east-1", "aws/sqs").0;
+        let s3 = ensure_aws_managed_key(&mut state, "us-east-1", "aws/s3").0;
         let custom = r#"{"Version":"2012-10-17","Statement":[]}"#.to_string();
-        state.keys.get_mut(key_id_from_arn(&old)).unwrap().policy = generic;
+        for arn in [&old, &sqs, &s3] {
+            let key = state.keys.get_mut(key_id_from_arn(arn)).unwrap();
+            key.policy = GENERIC_OLD_POLICY.to_string();
+            key.description = "Default master key that protects aws/x".to_string();
+        }
         state
             .keys
             .get_mut(key_id_from_arn(&changed))
             .unwrap()
-            .policy = custom;
-        let sqs_policy = state.keys[key_id_from_arn(&other)].policy.clone();
+            .policy = custom.clone();
+        // A customer key that happens to carry an old-looking policy.
+        let customer = mint_aws_managed_key(&mut state, "us-east-1", "custom");
+        {
+            let key = state.keys.get_mut(key_id_from_arn(&customer)).unwrap();
+            key.key_manager = "CUSTOMER".to_string();
+            key.policy = custom.clone();
+        }
         let loaded: KmsState =
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        let policy = |arn: &str| loaded.keys[key_id_from_arn(arn)].policy.clone();
+        let acct = "123456789012";
         assert_eq!(
-            loaded.keys[key_id_from_arn(&old)].policy,
-            aws_lambda_key_policy("123456789012", "us-east-1")
+            policy(&old),
+            crate::aws_managed::key_policy("lambda", acct, "us-east-1")
         );
         assert_eq!(
-            loaded.keys[key_id_from_arn(&changed)].policy,
-            aws_lambda_key_policy("123456789012", "eu-west-1")
+            policy(&changed),
+            crate::aws_managed::key_policy("lambda", acct, "eu-west-1")
         );
-        assert_eq!(loaded.keys[key_id_from_arn(&other)].policy, sqs_policy);
+        assert_eq!(
+            policy(&sqs),
+            crate::aws_managed::key_policy("sqs", acct, "us-east-1")
+        );
+        assert_eq!(
+            policy(&s3),
+            crate::aws_managed::key_policy("s3", acct, "us-east-1")
+        );
+        assert_eq!(
+            loaded.keys[key_id_from_arn(&s3)].description,
+            "Default key that protects my S3 objects when no other key is defined"
+        );
+        assert_eq!(policy(&customer), custom);
+    }
+
+    /// The hook acts through the service that calls it: a service encrypts
+    /// and decrypts under its own `aws/<service>` key, another service's
+    /// `aws/*` key is refused by that key's policy, and customer keys are
+    /// not policy-checked here.
+    #[test]
+    fn hook_uses_aws_managed_keys_only_through_their_service() {
+        let acct = "123456789012";
+        let (state, _) = crate::test_support::kms_hook(acct);
+        let hook = KmsServiceHook::new(state.clone(), Default::default());
+        let ct = hook
+            .encrypt(
+                acct,
+                "us-east-1",
+                "alias/aws/s3",
+                b"object",
+                "s3.amazonaws.com",
+                HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            hook.decrypt(acct, &ct, "s3.amazonaws.com", HashMap::new())
+                .unwrap(),
+            b"object"
+        );
+        let err = hook
+            .decrypt(acct, &ct, "sqs.amazonaws.com", HashMap::new())
+            .unwrap_err();
+        assert!(matches!(err, KmsHookError::AccessDenied(_)), "{err}");
+        let err = hook
+            .encrypt(
+                acct,
+                "us-east-1",
+                "alias/aws/s3",
+                b"msg",
+                "sqs.amazonaws.com",
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, KmsHookError::AccessDenied(ref k) if k.starts_with("arn:aws:kms:us-east-1:123456789012:key/")),
+            "{err}"
+        );
+        // Secrets Manager derives data keys through any region's endpoint.
+        hook.encrypt(
+            acct,
+            "eu-west-1",
+            "alias/aws/secretsmanager",
+            b"secret",
+            "secretsmanager.amazonaws.com",
+            HashMap::new(),
+        )
+        .unwrap();
+        // A customer key carries no via-service restriction in the hook.
+        let customer = {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(acct);
+            let arn = mint_aws_managed_key(s, "us-east-1", "custom");
+            s.keys.get_mut(key_id_from_arn(&arn)).unwrap().key_manager = "CUSTOMER".into();
+            arn
+        };
+        let ct = hook
+            .encrypt(
+                acct,
+                "us-east-1",
+                &customer,
+                b"x",
+                "sqs.amazonaws.com",
+                HashMap::new(),
+            )
+            .unwrap();
+        hook.decrypt(acct, &ct, "sns.amazonaws.com", HashMap::new())
+            .unwrap();
     }
 
     #[test]
@@ -962,7 +1008,7 @@ mod tests {
         let key_arn = {
             let mut accounts = state.write();
             let s = accounts.get_or_create(acct);
-            let arn = mint_aws_managed_key(s, "eu-west-1", "custom", "x.amazonaws.com");
+            let arn = mint_aws_managed_key(s, "eu-west-1", "custom");
             let alias = crate::state::KmsAlias {
                 alias_name: "alias/app".into(),
                 alias_arn: kms_alias_arn("eu-west-1", acct, "alias/app"),
@@ -1122,12 +1168,7 @@ mod tests {
     #[test]
     fn china_region_managed_key_is_minted_and_resolved_in_aws_cn() {
         let mut state = KmsState::new("000000000000", "cn-north-1");
-        let (arn, minted) = ensure_aws_managed_key(
-            &mut state,
-            "cn-north-1",
-            "aws/secretsmanager",
-            "secretsmanager.amazonaws.com",
-        );
+        let (arn, minted) = ensure_aws_managed_key(&mut state, "cn-north-1", "aws/secretsmanager");
         assert!(minted);
         assert!(
             arn.starts_with("arn:aws-cn:kms:cn-north-1:000000000000:key/"),

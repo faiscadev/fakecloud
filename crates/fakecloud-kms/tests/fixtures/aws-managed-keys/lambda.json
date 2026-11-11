@@ -1,0 +1,113 @@
+{
+  "alias": "alias/aws/lambda",
+  "describe_key": {
+    "AWSAccountId": "123456789012",
+    "KeyId": "24a82b2a-b0bb-4dc1-ab38-ec0754d22153",
+    "Arn": "arn:aws:kms:us-east-1:123456789012:key/24a82b2a-b0bb-4dc1-ab38-ec0754d22153",
+    "CreationDate": "2026-11-10T14:18:47.518000-03:00",
+    "Enabled": true,
+    "Description": "Default key that protects my Lambda functions when no other key is defined",
+    "KeyUsage": "ENCRYPT_DECRYPT",
+    "KeyState": "Enabled",
+    "Origin": "AWS_KMS",
+    "KeyManager": "AWS",
+    "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+    "KeySpec": "SYMMETRIC_DEFAULT",
+    "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+    ],
+    "MultiRegion": false
+  },
+  "policy": {
+    "Version": "2012-10-17",
+    "Id": "auto-awslambda-3",
+    "Statement": [
+      {
+        "Sid": "Allow access through AWS Lambda for all principals in the account that are authorized to use AWS Lambda",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "*"
+        },
+        "Action": [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:CreateGrant",
+          "kms:DescribeKey"
+        ],
+        "Resource": "*",
+        "Condition": {
+          "StringEquals": {
+            "kms:ViaService": "lambda.us-east-1.amazonaws.com",
+            "kms:CallerAccount": "123456789012"
+          }
+        }
+      },
+      {
+        "Sid": "Allow all principals in the account to decrypt ciphertexts for Lambda functions in the account",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "*"
+        },
+        "Action": "kms:Decrypt",
+        "Resource": "*",
+        "Condition": {
+          "StringEquals": {
+            "kms:CallerAccount": "123456789012"
+          },
+          "ArnLike": {
+            "kms:EncryptionContext:aws:lambda:FunctionArn": "arn:*:lambda:us-east-1:123456789012:function:*"
+          }
+        }
+      },
+      {
+        "Sid": "Allow Lambda service access",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": [
+            "lambda.us-east-1.amazonaws.com",
+            "lambda.amazonaws.com"
+          ]
+        },
+        "Action": "kms:GenerateDataKey",
+        "Resource": "*",
+        "Condition": {
+          "ArnLike": {
+            "kms:EncryptionContext:aws:lambda:FunctionArn": "arn:*:lambda:us-east-1:123456789012:function:*"
+          }
+        }
+      },
+      {
+        "Sid": "Allow Lambda to directly describe the key and list its grants",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": [
+            "lambda.us-east-1.amazonaws.com",
+            "lambda.amazonaws.com"
+          ]
+        },
+        "Action": [
+          "kms:Describe*",
+          "kms:Get*",
+          "kms:List*"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Sid": "Allow direct access to key metadata to the account",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "arn:aws:iam::123456789012:root"
+        },
+        "Action": [
+          "kms:Describe*",
+          "kms:Get*",
+          "kms:List*",
+          "kms:RevokeGrant"
+        ],
+        "Resource": "*"
+      }
+    ]
+  }
+}

@@ -1,0 +1,121 @@
+{
+  "alias": "alias/aws/acm",
+  "describe_key": {
+    "AWSAccountId": "123456789012",
+    "KeyId": "62c68512-9e92-48c2-8159-1079590e068a",
+    "Arn": "arn:aws:kms:us-east-1:123456789012:key/62c68512-9e92-48c2-8159-1079590e068a",
+    "CreationDate": "2026-01-30T16:57:33.195000-03:00",
+    "Enabled": true,
+    "Description": "Default key that protects my ACM private keys when no other key is defined",
+    "KeyUsage": "ENCRYPT_DECRYPT",
+    "KeyState": "Enabled",
+    "Origin": "AWS_KMS",
+    "KeyManager": "AWS",
+    "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+    "KeySpec": "SYMMETRIC_DEFAULT",
+    "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+    ],
+    "MultiRegion": false
+  },
+  "policy": {
+    "Version": "2012-10-17",
+    "Id": "auto-acm-4",
+    "Statement": [
+      {
+        "Sid": "Allow creation of decryption grants",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "*"
+        },
+        "Action": "kms:CreateGrant",
+        "Resource": "*",
+        "Condition": {
+          "StringEquals": {
+            "kms:ViaService": "acm.us-east-1.amazonaws.com",
+            "kms:CallerAccount": "123456789012"
+          },
+          "ForAllValues:StringEquals": {
+            "kms:GrantOperations": "Decrypt"
+          },
+          "Bool": {
+            "kms:GrantIsForAWSResource": "true"
+          }
+        }
+      },
+      {
+        "Sid": "Allow creation of encryption grant",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "*"
+        },
+        "Action": "kms:CreateGrant",
+        "Resource": "*",
+        "Condition": {
+          "StringEquals": {
+            "kms:ViaService": "acm.us-east-1.amazonaws.com",
+            "kms:CallerAccount": "123456789012"
+          },
+          "ForAllValues:StringEquals": {
+            "kms:GrantOperations": [
+              "Encrypt",
+              "ReEncryptFrom",
+              "ReEncryptTo"
+            ]
+          },
+          "Bool": {
+            "kms:GrantIsForAWSResource": "true"
+          }
+        }
+      },
+      {
+        "Sid": "Allowed operations for the key owner",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "*"
+        },
+        "Action": [
+          "kms:DescribeKey",
+          "kms:ListGrants",
+          "kms:RevokeGrant",
+          "kms:GetKeyPolicy"
+        ],
+        "Resource": "*",
+        "Condition": {
+          "StringEquals": {
+            "kms:CallerAccount": "123456789012"
+          }
+        }
+      },
+      {
+        "Sid": "Deny re-encryption to any other key",
+        "Effect": "Deny",
+        "Principal": {
+          "AWS": "*"
+        },
+        "Action": "kms:ReEncrypt*",
+        "Resource": "*",
+        "Condition": {
+          "Bool": {
+            "kms:ReEncryptOnSameKey": "false"
+          }
+        }
+      },
+      {
+        "Sid": "Allow decrypt",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "*"
+        },
+        "Action": "kms:Decrypt",
+        "Resource": "*",
+        "Condition": {
+          "StringEquals": {
+            "kms:ViaService": "acm.us-east-1.amazonaws.com",
+            "kms:CallerAccount": "123456789012"
+          }
+        }
+      }
+    ]
+  }
+}

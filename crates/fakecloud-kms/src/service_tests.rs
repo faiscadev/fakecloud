@@ -2202,7 +2202,11 @@ fn get_key_policy_rejects_alias_as_key_id() {
         ))
         .err()
         .expect("expected error");
-    assert_eq!(err.code(), "NotFoundException");
+    assert_eq!(err.code(), "InvalidArnException");
+    assert!(
+        format!("{err:?}").contains("Key Aliases are not supported for this operation."),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -4549,4 +4553,250 @@ async fn aws_managed_keys_refuse_key_management() {
         .handle(make_request("DisableKey", json!({"KeyId": mine})))
         .await
         .is_ok());
+}
+
+/// The key id the `alias/aws/<service>` alias of `svc` targets in us-east-1.
+fn aws_managed_target(svc: &KmsService, service: &str) -> String {
+    let aliases = body_json(
+        svc.list_aliases(&make_request("ListAliases", json!({})))
+            .unwrap(),
+    );
+    aliases["Aliases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["AliasName"] == format!("alias/aws/{service}"))
+        .unwrap()["TargetKeyId"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn assert_key_policy_denied(err: AwsServiceError, caller: &str, action: &str, arn: &str) {
+    assert_eq!(
+        (err.status(), err.code(), err.message()),
+        (
+            StatusCode::BAD_REQUEST,
+            "AccessDeniedException",
+            format!("User: {caller} is not authorized to perform: {action} on resource: {arn} because no resource-based policy allows the {action} action")
+        ),
+        "{action}"
+    );
+}
+
+/// AWS refuses direct cryptographic use of AWS-managed keys (recorded:
+/// `alias/aws/s3`, `alias/aws/secretsmanager`, `alias/aws/ebs` Encrypt and
+/// GenerateDataKey, 400 AccessDeniedException naming the resolved key): their
+/// key policies grant it only through the owning service. The refusal names
+/// the key the alias resolves to and the operation's IAM action.
+#[tokio::test]
+async fn aws_managed_keys_refuse_direct_crypto() {
+    let svc = make_service();
+    let root = "arn:aws:iam::123456789012:root";
+    for service in ["s3", "secretsmanager", "ebs", "sqs", "lambda"] {
+        let target = aws_managed_target(&svc, service);
+        let arn = format!("arn:aws:kms:us-east-1:123456789012:key/{target}");
+        let alias = format!("alias/aws/{service}");
+        for (action, body) in [
+            ("Encrypt", json!({"KeyId": alias, "Plaintext": "aGVsbG8="})),
+            (
+                "GenerateDataKey",
+                json!({"KeyId": alias, "KeySpec": "AES_256"}),
+            ),
+            (
+                "GenerateDataKeyWithoutPlaintext",
+                json!({"KeyId": arn, "KeySpec": "AES_256"}),
+            ),
+            (
+                "GenerateDataKeyPair",
+                json!({"KeyId": target, "KeyPairSpec": "RSA_2048"}),
+            ),
+            (
+                "GenerateDataKeyPairWithoutPlaintext",
+                json!({"KeyId": target, "KeyPairSpec": "RSA_2048"}),
+            ),
+        ] {
+            let err = svc.handle(make_request(action, body)).await.err().unwrap();
+            assert_key_policy_denied(err, root, &format!("kms:{action}"), &arn);
+        }
+        // Metadata reads stay allowed.
+        svc.handle(make_request("DescribeKey", json!({"KeyId": alias})))
+            .await
+            .unwrap();
+    }
+}
+
+/// A ciphertext a service produced under its AWS-managed key (through the
+/// KMS hook) cannot be decrypted or re-encrypted directly, and a customer
+/// key's ciphertext cannot be re-encrypted into an AWS-managed key.
+#[tokio::test]
+async fn aws_managed_key_ciphertexts_stay_with_their_service() {
+    let svc = make_service();
+    let hook = crate::hook::KmsServiceHook::new(svc.state.clone(), Default::default());
+    let ct = hook
+        .encrypt(
+            "123456789012",
+            "us-east-1",
+            "alias/aws/s3",
+            b"object",
+            "s3.amazonaws.com",
+            HashMap::new(),
+        )
+        .unwrap();
+    let target = aws_managed_target(&svc, "s3");
+    let s3_arn = format!("arn:aws:kms:us-east-1:123456789012:key/{target}");
+    let root = "arn:aws:iam::123456789012:root";
+    let err = svc
+        .handle(make_request("Decrypt", json!({"CiphertextBlob": ct})))
+        .await
+        .err()
+        .unwrap();
+    assert_key_policy_denied(err, root, "kms:Decrypt", &s3_arn);
+
+    let customer = create_key(&svc);
+    let err = svc
+        .handle(make_request(
+            "ReEncrypt",
+            json!({"CiphertextBlob": ct, "DestinationKeyId": customer}),
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_key_policy_denied(err, root, "kms:ReEncryptFrom", &s3_arn);
+
+    let mine = body_json(
+        svc.handle(make_request(
+            "Encrypt",
+            json!({"KeyId": customer, "Plaintext": "aGVsbG8="}),
+        ))
+        .await
+        .unwrap(),
+    )["CiphertextBlob"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let err = svc
+        .handle(make_request(
+            "ReEncrypt",
+            json!({"CiphertextBlob": mine, "DestinationKeyId": "alias/aws/s3"}),
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_key_policy_denied(err, root, "kms:ReEncryptTo", &s3_arn);
+    // The customer key itself is unaffected.
+    svc.handle(make_request("Decrypt", json!({"CiphertextBlob": mine})))
+        .await
+        .unwrap();
+}
+
+/// The recorded `aws/lambda` policy lets account principals decrypt
+/// ciphertexts bound to one of the account's functions directly (its
+/// `kms:EncryptionContext:aws:lambda:FunctionArn` statement); any other
+/// context is refused. The refusal names the calling IAM identity.
+#[tokio::test]
+async fn aws_lambda_key_decrypts_function_ciphertexts_directly() {
+    let svc = make_service();
+    let function = "arn:aws:lambda:us-east-1:123456789012:function:f";
+    let target = aws_managed_target(&svc, "lambda");
+    // A ciphertext Lambda sealed under the key, bound to the function.
+    let ct = {
+        let accounts = svc.state.read();
+        let state = accounts.get("123456789012").unwrap();
+        let aad =
+            canonical_encryption_context(&json!({"aws:lambda:FunctionArn": function})).unwrap();
+        let blob = crate::blob::encode_with_context(&state.master_key_bytes, &target, b"env", &aad);
+        base64::engine::general_purpose::STANDARD.encode(blob)
+    };
+    let out = body_json(
+        svc.handle(make_request(
+            "Decrypt",
+            json!({"CiphertextBlob": ct, "EncryptionContext": {"aws:lambda:FunctionArn": function}}),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert_eq!(out["Plaintext"], "ZW52");
+    let err = svc
+        .handle(make_request("Decrypt", json!({"CiphertextBlob": ct})))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "InvalidCiphertextException");
+
+    let arn = format!("arn:aws:kms:us-east-1:123456789012:key/{target}");
+    let mut req = make_request(
+        "Encrypt",
+        json!({"KeyId": "alias/aws/lambda", "Plaintext": "ZW52", "EncryptionContext": {"aws:lambda:FunctionArn": function}}),
+    );
+    req.principal = Some(fakecloud_core::auth::Principal {
+        arn: "arn:aws:iam::123456789012:user/admin".to_string(),
+        user_id: "AIDAEXAMPLE".to_string(),
+        account_id: "123456789012".to_string(),
+        principal_type: fakecloud_core::auth::PrincipalType::User,
+        source_identity: None,
+        tags: None,
+    });
+    let err = svc.handle(req).await.err().unwrap();
+    assert_key_policy_denied(
+        err,
+        "arn:aws:iam::123456789012:user/admin",
+        "kms:Encrypt",
+        &arn,
+    );
+}
+
+/// GetKeyPolicy returns the policy AWS gives each AWS-managed key, with the
+/// account and region substituted.
+#[tokio::test]
+async fn aws_managed_key_policies_are_the_recorded_ones() {
+    let svc = make_service();
+    for service in ["s3", "secretsmanager", "ebs", "lambda", "dynamodb"] {
+        let target = aws_managed_target(&svc, service);
+        let policy = body_json(
+            svc.handle(make_request(
+                "GetKeyPolicy",
+                json!({"KeyId": target, "PolicyName": "default"}),
+            ))
+            .await
+            .unwrap(),
+        )["Policy"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            policy,
+            crate::aws_managed::key_policy(service, "123456789012", "us-east-1")
+        );
+        let doc: Value = serde_json::from_str(&policy).unwrap();
+        let via = if service == "ebs" { "ec2" } else { service };
+        assert_eq!(
+            doc["Statement"][0]["Condition"]["StringEquals"]["kms:ViaService"],
+            format!("{via}.us-east-1.amazonaws.com"),
+            "{service}"
+        );
+    }
+}
+
+/// Under `--iam`, key policies see `kms:CallerAccount` and the request's
+/// encryption context.
+#[test]
+fn iam_condition_keys_carry_caller_account_and_encryption_context() {
+    let svc = make_service();
+    let req = make_request(
+        "Decrypt",
+        json!({"CiphertextBlob": "x", "EncryptionContext": {"aws:lambda:FunctionArn": "arn"}}),
+    );
+    let action = svc.iam_action_for(&req).unwrap();
+    let keys = svc.iam_condition_keys_for(&req, &action);
+    assert_eq!(keys["kms:calleraccount"], vec!["123456789012".to_string()]);
+    assert_eq!(
+        keys["kms:encryptioncontext:aws:lambda:FunctionArn"],
+        vec!["arn".to_string()]
+    );
+    assert_eq!(
+        keys["kms:encryptioncontextkeys"],
+        vec!["aws:lambda:FunctionArn".to_string()]
+    );
+    assert!(!keys.contains_key("kms:viaservice"));
 }

@@ -329,6 +329,37 @@ impl AwsService for KmsService {
         })
     }
 
+    /// `kms:CallerAccount` (the calling principal's account) on every
+    /// request, and `kms:EncryptionContext:<key>` /
+    /// `kms:EncryptionContextKeys` on the operations that take an
+    /// `EncryptionContext`. Key policies condition on these (the AWS-managed
+    /// keys' policies all require `kms:CallerAccount`). `kms:ViaService` is
+    /// never set here: a request reaching the KMS API directly did not come
+    /// through another service.
+    fn iam_condition_keys_for(
+        &self,
+        request: &AwsRequest,
+        _action: &fakecloud_core::auth::IamAction,
+    ) -> BTreeMap<String, Vec<String>> {
+        let mut out = BTreeMap::new();
+        out.insert(
+            "kms:calleraccount".to_string(),
+            vec![request.account_id.clone()],
+        );
+        let body = request.json_body();
+        if body.get("EncryptionContext").is_some() {
+            let context = crate::aws_managed::encryption_context_map(&body["EncryptionContext"]);
+            out.insert(
+                "kms:encryptioncontextkeys".to_string(),
+                context.keys().cloned().collect(),
+            );
+            for (k, v) in context {
+                out.insert(format!("kms:encryptioncontext:{k}"), vec![v]);
+            }
+        }
+        out
+    }
+
     fn resource_tags_for(
         &self,
         resource_arn: &str,
@@ -562,18 +593,78 @@ impl KmsService {
             }
             key.arn.clone()
         };
+        Some(Self::key_policy_denied(
+            req,
+            &format!("kms:{}", req.action),
+            &key_arn,
+        ))
+    }
+
+    /// AWS's refusal of `action` on `key_arn` when no key policy statement
+    /// allows the caller (recorded: `tests/fixtures/aws-managed-key-refusals.txt`
+    /// and `tests/fixtures/aws-managed-keys/direct-crypto.txt`). AWS appends a
+    /// console link with a per-request authorization id, which has no meaning
+    /// outside AWS and is left out.
+    fn key_policy_denied(req: &AwsRequest, action: &str, key_arn: &str) -> AwsServiceError {
         let caller = req.principal.as_ref().map_or_else(
             || Arn::global_in(&req.region, "iam", &req.account_id, "root").to_string(),
             |p| p.arn.clone(),
         );
-        let action = format!("kms:{}", req.action);
-        Some(AwsServiceError::aws_error(
+        AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "AccessDeniedException",
             format!(
                 "User: {caller} is not authorized to perform: {action} on resource: {key_arn} because no resource-based policy allows the {action} action"
             ),
-        ))
+        )
+    }
+
+    /// Authorize a direct KMS API call's use of `key` for `action`
+    /// (`kms:Encrypt`, `kms:ReEncryptFrom`, ...). AWS-managed keys carry
+    /// AWS's own key policy (see [`crate::aws_managed`]), which grants the
+    /// cryptographic operations only through the owning service
+    /// (`kms:ViaService`), so a direct call is refused unless a statement
+    /// without that condition allows it (the `aws/lambda` key lets account
+    /// principals decrypt their functions' ciphertexts). The policy itself
+    /// decides: it is evaluated with the request's `kms:CallerAccount` and
+    /// encryption context, and no `kms:ViaService`, since the caller came to
+    /// KMS directly. Customer keys are governed by IAM enforcement at
+    /// dispatch (`--iam`), as before.
+    pub(super) fn authorize_direct_key_use(
+        req: &AwsRequest,
+        key: &KmsKey,
+        action: &str,
+        encryption_context: &Value,
+        extra: &[(&str, &str)],
+    ) -> Result<(), AwsServiceError> {
+        if key.key_manager != "AWS" {
+            return Ok(());
+        }
+        let root;
+        let principal = match req.principal.as_ref() {
+            Some(p) => p,
+            None => {
+                root = crate::aws_managed::account_root(&req.account_id, &req.region);
+                &root
+            }
+        };
+        let context = crate::aws_managed::encryption_context_map(encryption_context);
+        let caller = crate::aws_managed::KeyCaller::Direct {
+            principal,
+            account: &req.account_id,
+        };
+        if crate::aws_managed::policy_allows(
+            &key.policy,
+            &key.arn,
+            &caller,
+            action,
+            &context,
+            extra,
+        ) {
+            Ok(())
+        } else {
+            Err(Self::key_policy_denied(req, action, &key.arn))
+        }
     }
 
     fn require_key_id(body: &Value) -> Result<String, AwsServiceError> {
@@ -1153,12 +1244,13 @@ impl KmsService {
         let body = req.json_body();
         let key_id = Self::require_key_id(&body)?;
 
-        // For key policy operations, aliases should not work
+        // GetKeyPolicy takes a key id or key ARN only. Recorded against
+        // `alias/aws/s3` (tests/fixtures/aws-managed-keys/direct-crypto.txt).
         if key_id.starts_with("alias/") {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "NotFoundException",
-                format!("Invalid keyId {key_id}"),
+                "InvalidArnException",
+                "Key Aliases are not supported for this operation.",
             ));
         }
 
@@ -1183,6 +1275,8 @@ impl KmsService {
             )
         })?;
 
+        // An AWS-managed key's policy is AWS's (see `crate::aws_managed`),
+        // and the account's principals may read it (`kms:Get*`).
         Ok(AwsResponse::json(
             StatusCode::OK,
             serde_json::to_string(&json!({

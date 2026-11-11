@@ -1,0 +1,61 @@
+{
+  "alias": "alias/aws/s3",
+  "describe_key": {
+    "AWSAccountId": "123456789012",
+    "KeyId": "540d4f86-be5c-49fd-8051-98ff2c9768f4",
+    "Arn": "arn:aws:kms:us-east-1:123456789012:key/540d4f86-be5c-49fd-8051-98ff2c9768f4",
+    "CreationDate": "2026-02-26T23:11:37.488000-03:00",
+    "Enabled": true,
+    "Description": "Default key that protects my S3 objects when no other key is defined",
+    "KeyUsage": "ENCRYPT_DECRYPT",
+    "KeyState": "Enabled",
+    "Origin": "AWS_KMS",
+    "KeyManager": "AWS",
+    "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+    "KeySpec": "SYMMETRIC_DEFAULT",
+    "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+    ],
+    "MultiRegion": false
+  },
+  "policy": {
+    "Version": "2012-10-17",
+    "Id": "auto-s3-2",
+    "Statement": [
+      {
+        "Sid": "Allow access through S3 for all principals in the account that are authorized to use S3",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "*"
+        },
+        "Action": [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ],
+        "Resource": "*",
+        "Condition": {
+          "StringEquals": {
+            "kms:CallerAccount": "123456789012",
+            "kms:ViaService": "s3.us-east-1.amazonaws.com"
+          }
+        }
+      },
+      {
+        "Sid": "Allow direct access to key metadata to the account",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "arn:aws:iam::123456789012:root"
+        },
+        "Action": [
+          "kms:Describe*",
+          "kms:Get*",
+          "kms:List*"
+        ],
+        "Resource": "*"
+      }
+    ]
+  }
+}
