@@ -802,7 +802,17 @@ impl PipesRunner {
             let payload =
                 serde_json::to_string(&Value::Array(input)).unwrap_or_else(|_| "[]".into());
             match self.delivery.invoke_lambda(enr_arn, &payload).await {
-                Some(Ok(bytes)) => Some(enrichment_output(&bytes)),
+                // A function error fails the enrichment step, like an
+                // invocation failure: the events are retried.
+                Some(Ok(output)) if output.is_function_error() => {
+                    tracing::warn!(
+                        %enr_arn,
+                        error = %String::from_utf8_lossy(&output.payload),
+                        "pipes: enrichment Lambda returned an error; events will be retried"
+                    );
+                    None
+                }
+                Some(Ok(output)) => Some(enrichment_output(&output.payload)),
                 Some(Err(err)) => {
                     tracing::warn!(%enr_arn, %err, "pipes: enrichment Lambda failed; events will be retried");
                     None
@@ -834,7 +844,28 @@ impl PipesRunner {
         if target_arn.contains(":lambda:") {
             let payload = serde_json::to_string(&Value::Array(batch.to_vec()))
                 .unwrap_or_else(|_| "[]".to_string());
+            // `FIRE_AND_FORGET` is an asynchronous (Event) invocation: the
+            // events are delivered once Lambda queues them, and a function
+            // error is Lambda's to retry and route.
+            if lambda_target_is_fire_and_forget(target_params) {
+                return match self.delivery.invoke_lambda_async(target_arn, &payload) {
+                    Some(Ok(())) => true,
+                    Some(Err(err)) => {
+                        tracing::warn!(%target_arn, %err, "pipes: Lambda target could not be queued; events will be retried");
+                        false
+                    }
+                    None => false,
+                };
+            }
             match self.delivery.invoke_lambda(target_arn, &payload).await {
+                Some(Ok(output)) if output.is_function_error() => {
+                    tracing::warn!(
+                        %target_arn,
+                        error = %String::from_utf8_lossy(&output.payload),
+                        "pipes: Lambda target returned an error; events will be retried"
+                    );
+                    false
+                }
                 Some(Ok(_)) => true,
                 Some(Err(err)) => {
                     tracing::warn!(%target_arn, %err, "pipes: Lambda target invocation failed; events will be retried");
@@ -1294,6 +1325,17 @@ fn looks_like_fakecloud_envelope(body: &str) -> bool {
     }
 }
 
+/// Whether a Lambda target's `TargetParameters.LambdaFunctionParameters`
+/// ask for an asynchronous invocation (`InvocationType: FIRE_AND_FORGET`;
+/// the default is `REQUEST_RESPONSE`).
+fn lambda_target_is_fire_and_forget(target_params: Option<&Value>) -> bool {
+    target_params
+        .and_then(|p| p.get("LambdaFunctionParameters"))
+        .and_then(|p| p.get("InvocationType"))
+        .and_then(Value::as_str)
+        == Some("FIRE_AND_FORGET")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1596,5 +1638,17 @@ mod tests {
             snapshot_calls.load(Ordering::SeqCst) >= 1,
             "consuming SQS messages must persist SQS state through the hook"
         );
+    }
+
+    #[test]
+    fn lambda_target_invocation_type() {
+        use serde_json::json;
+        assert!(super::lambda_target_is_fire_and_forget(Some(
+            &json!({"LambdaFunctionParameters": {"InvocationType": "FIRE_AND_FORGET"}})
+        )));
+        assert!(!super::lambda_target_is_fire_and_forget(Some(
+            &json!({"LambdaFunctionParameters": {"InvocationType": "REQUEST_RESPONSE"}})
+        )));
+        assert!(!super::lambda_target_is_fire_and_forget(None));
     }
 }

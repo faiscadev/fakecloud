@@ -1023,103 +1023,6 @@ impl InvocationType {
     }
 }
 
-/// Route an async-invoke result to the configured OnSuccess / OnFailure
-/// destination. Destination is matched by ARN scheme: SQS, SNS, EventBridge,
-/// or another Lambda. Mirrors the AWS Lambda destinations record schema.
-fn route_to_destination(
-    bus: Arc<fakecloud_core::delivery::DeliveryBus>,
-    function_arn: &str,
-    execution_role: &str,
-    request_payload: &[u8],
-    result: &Result<Vec<u8>, String>,
-    destination_config: Option<&serde_json::Value>,
-) {
-    let Some(cfg) = destination_config else {
-        return;
-    };
-    let (key, condition, response_value): (&str, &str, serde_json::Value) = match result {
-        Ok(bytes) => (
-            "OnSuccess",
-            "Success",
-            serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null),
-        ),
-        Err(err) => (
-            "OnFailure",
-            "RetriesExhausted",
-            serde_json::json!({ "errorMessage": err }),
-        ),
-    };
-    let Some(dest) = cfg
-        .get(key)
-        .and_then(|v| v.get("Destination"))
-        .and_then(|v| v.as_str())
-    else {
-        return;
-    };
-    let request_payload_v: serde_json::Value =
-        serde_json::from_slice(request_payload).unwrap_or(serde_json::Value::Null);
-    let record = serde_json::json!({
-        "version": "1.0",
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-        "requestContext": {
-            "requestId": uuid::Uuid::new_v4().to_string(),
-            "functionArn": format!("{function_arn}:$LATEST"),
-            "condition": condition,
-            "approximateInvokeCount": 1,
-        },
-        "requestPayload": request_payload_v,
-        "responseContext": {
-            "statusCode": 200,
-            "executedVersion": "$LATEST",
-        },
-        "responsePayload": response_value,
-    });
-    let body = record.to_string();
-    if dest.contains(":sqs:") {
-        bus.send_to_sqs(dest, &body, &std::collections::HashMap::new());
-    } else if dest.contains(":sns:") {
-        bus.publish_to_sns(dest, &body, None);
-    } else if dest.contains(":lambda:") {
-        let dest = dest.to_string();
-        let payload = body.clone();
-        tokio::spawn(async move {
-            let _ = bus.invoke_lambda(&dest, &payload).await;
-        });
-    } else if dest.contains(":events:") || dest.contains(":eventbridge:") {
-        let detail_type = if result.is_ok() {
-            "Lambda Function Invocation Result - Success"
-        } else {
-            "Lambda Function Invocation Result - Failure"
-        };
-        // The destination names the bus by ARN (possibly another account's);
-        // the event originates in the function's account and region.
-        let mut arn_parts = function_arn.split(':');
-        let region = arn_parts.nth(3).unwrap_or("");
-        let account_id = arn_parts.next().unwrap_or("");
-        // Lambda puts the record as the function's execution role; a bus in
-        // another account must allow it, else the destination delivery fails.
-        if let Err(err) =
-            bus.put_event_to_eventbridge(&fakecloud_core::delivery::CrossServiceEvent {
-                source: "lambda",
-                detail_type,
-                detail: &body,
-                event_bus: dest,
-                account_id,
-                region,
-                resources: &[function_arn.to_string()],
-                principal_arn: (!execution_role.is_empty()).then_some(execution_role),
-            })
-        {
-            tracing::warn!(
-                function_arn,
-                destination = dest,
-                %err,
-                "Lambda destination: EventBridge bus refused the invocation record"
-            );
-        }
-    }
-}
-
 /// Decrements the per-function in-flight counter on drop. Lives as
 /// long as the invocation it gates — for synchronous invokes that's
 /// the function call's stack frame; for `Event` invokes the guard is
@@ -1371,6 +1274,7 @@ pub struct LambdaService {
     pub(crate) durable: crate::durable::DurableHub,
 }
 
+pub(crate) mod async_invoke;
 mod functions;
 mod init;
 mod invoke;
@@ -1903,6 +1807,7 @@ impl AwsService for LambdaService {
                             invocation_type,
                             qualifier,
                             log_tail,
+                            &req.request_id,
                         )
                         .await
                     }

@@ -1472,7 +1472,7 @@ fn verify_user_attribute_with_correct_code() {
         access_key_id: None,
         principal: None,
     };
-    let resp = svc.get_user_attribute_verification_code(&req).unwrap();
+    let resp = block_on(svc.get_user_attribute_verification_code(&req)).unwrap();
     let resp_json: Value =
         serde_json::from_str(core::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
     assert_eq!(resp_json["CodeDeliveryDetails"]["DeliveryMedium"], "EMAIL");
@@ -1555,7 +1555,7 @@ fn verify_user_attribute_with_correct_code() {
         access_key_id: None,
         principal: None,
     };
-    svc.get_user_attribute_verification_code(&req).unwrap();
+    block_on(svc.get_user_attribute_verification_code(&req)).unwrap();
 
     let req = AwsRequest {
         service: "cognito-idp".to_string(),
@@ -7075,7 +7075,7 @@ fn resend_confirmation_code_unknown_client_errors() {
     let (svc, _) = make_svc();
     let body = json!({"ClientId": "ghost", "Username": "u"});
     let req = make_req("ResendConfirmationCode", &body.to_string());
-    assert!(svc.resend_confirmation_code(&req).is_err());
+    assert!(block_on(svc.resend_confirmation_code(&req)).is_err());
 }
 
 #[test]
@@ -7085,7 +7085,7 @@ fn resend_confirmation_code_unknown_user_errors() {
     let client_id = create_client(&svc, &pool_id);
     let body = json!({"ClientId": client_id, "Username": "ghost"});
     let req = make_req("ResendConfirmationCode", &body.to_string());
-    assert!(svc.resend_confirmation_code(&req).is_err());
+    assert!(block_on(svc.resend_confirmation_code(&req)).is_err());
 }
 
 #[test]
@@ -7096,7 +7096,7 @@ fn resend_confirmation_code_returns_masked_email() {
     admin_create_user_helper(&svc, &pool_id, "steve");
     let body = json!({"ClientId": client_id, "Username": "steve"});
     let req = make_req("ResendConfirmationCode", &body.to_string());
-    let resp = svc.resend_confirmation_code(&req).unwrap();
+    let resp = block_on(svc.resend_confirmation_code(&req)).unwrap();
     let b = resp_json(&resp);
     let dest = b["CodeDeliveryDetails"]["Destination"].as_str().unwrap();
     assert!(dest.contains("***"));
@@ -7108,7 +7108,7 @@ fn get_user_attribute_verification_code_invalid_token() {
     let (svc, _) = make_svc();
     let body = json!({"AccessToken": "bad", "AttributeName": "email"});
     let req = make_req("GetUserAttributeVerificationCode", &body.to_string());
-    assert!(svc.get_user_attribute_verification_code(&req).is_err());
+    assert!(block_on(svc.get_user_attribute_verification_code(&req)).is_err());
 }
 
 #[test]
@@ -7120,7 +7120,7 @@ fn get_user_attribute_verification_code_email_path() {
 
     let body = json!({"AccessToken": token, "AttributeName": "email"});
     let req = make_req("GetUserAttributeVerificationCode", &body.to_string());
-    let resp = svc.get_user_attribute_verification_code(&req).unwrap();
+    let resp = block_on(svc.get_user_attribute_verification_code(&req)).unwrap();
     let b = resp_json(&resp);
     assert_eq!(b["CodeDeliveryDetails"]["DeliveryMedium"], "EMAIL");
 }
@@ -7149,7 +7149,7 @@ fn get_user_attribute_verification_code_phone_path() {
     let token = issue_at_for_users(&state, &pool_id, "lee", "c");
     let body = json!({"AccessToken": token, "AttributeName": "phone_number"});
     let req = make_req("GetUserAttributeVerificationCode", &body.to_string());
-    let resp = svc.get_user_attribute_verification_code(&req).unwrap();
+    let resp = block_on(svc.get_user_attribute_verification_code(&req)).unwrap();
     let b = resp_json(&resp);
     assert_eq!(b["CodeDeliveryDetails"]["DeliveryMedium"], "SMS");
     let dest = b["CodeDeliveryDetails"]["Destination"].as_str().unwrap();
@@ -7177,7 +7177,7 @@ fn verify_user_attribute_wrong_code() {
 
     let body = json!({"AccessToken": token, "AttributeName": "email"});
     let req = make_req("GetUserAttributeVerificationCode", &body.to_string());
-    svc.get_user_attribute_verification_code(&req).unwrap();
+    block_on(svc.get_user_attribute_verification_code(&req)).unwrap();
 
     let body = json!({"AccessToken": token, "AttributeName": "email", "Code": "000000"});
     let req = make_req("VerifyUserAttribute", &body.to_string());
@@ -7632,7 +7632,7 @@ fn run_confirmation_flows(
     };
     let base = json!({"ClientId": client_id, "Username": username});
     check("ResendConfirmationCode", &base, &|b| {
-        svc.resend_confirmation_code(&make_req("ResendConfirmationCode", &b.to_string()))
+        block_on(svc.resend_confirmation_code(&make_req("ResendConfirmationCode", &b.to_string())))
     });
     let mut body = base.clone();
     body["ConfirmationCode"] = json!(code());
@@ -9140,7 +9140,13 @@ impl fakecloud_core::delivery::LambdaDelivery for SwitchingTriggerLambda {
         &self,
         _function_arn: &str,
         payload: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                > + Send,
+        >,
+    > {
         let event: Value = serde_json::from_str(payload).unwrap_or_else(|_| json!({}));
         let src = event["triggerSource"].as_str().unwrap_or("").to_string();
         let resp = if src.contains("VerifyAuthChallenge") {
@@ -9161,7 +9167,11 @@ impl fakecloud_core::delivery::LambdaDelivery for SwitchingTriggerLambda {
             json!({"response": {}})
         };
         let bytes = serde_json::to_vec(&resp).unwrap();
-        Box::pin(async move { Ok(bytes) })
+        Box::pin(async move {
+            Ok(fakecloud_core::delivery::LambdaInvocationOutput::success(
+                bytes,
+            ))
+        })
     }
 }
 
@@ -12575,4 +12585,824 @@ fn confidential_client_challenge_without_responses_fails_closed() {
             );
         }
     }
+}
+
+/// A trigger Lambda that answers every invocation with `output`.
+struct FixedTriggerLambda(fakecloud_core::delivery::LambdaInvocationOutput);
+
+impl fakecloud_core::delivery::LambdaDelivery for FixedTriggerLambda {
+    fn invoke_lambda(
+        &self,
+        _function_arn: &str,
+        _payload: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                > + Send,
+        >,
+    > {
+        let output = self.0.clone();
+        Box::pin(async move { Ok(output) })
+    }
+}
+
+fn svc_with_trigger_output(
+    output: fakecloud_core::delivery::LambdaInvocationOutput,
+) -> (CognitoService, crate::state::SharedCognitoState) {
+    let state = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4569",
+        ),
+    ));
+    let bus = std::sync::Arc::new(
+        fakecloud_core::delivery::DeliveryBus::new()
+            .with_lambda(std::sync::Arc::new(FixedTriggerLambda(output))),
+    );
+    let ctx = triggers::CognitoDeliveryContext::new(bus);
+    let svc = CognitoService::new(state.clone()).with_delivery(ctx);
+    (svc, state)
+}
+
+fn sign_up_with_pre_sign_up(
+    output: fakecloud_core::delivery::LambdaInvocationOutput,
+) -> Result<AwsResponse, AwsServiceError> {
+    sign_up_with_pre_sign_up_state(output).0
+}
+
+/// Sign up `carol` behind a PreSignUp trigger answering `output`; also
+/// report whether `carol` exists afterwards and how many SIGN_UP events
+/// were recorded.
+fn sign_up_with_pre_sign_up_state(
+    output: fakecloud_core::delivery::LambdaInvocationOutput,
+) -> (Result<AwsResponse, AwsServiceError>, bool, usize) {
+    let (svc, state) = svc_with_trigger_output(output);
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreSignUp": "arn:aws:lambda:us-east-1:123456789012:function:presignup"}),
+    );
+    let body = json!({
+        "ClientId": client_id,
+        "Username": "carol",
+        "Password": "P@ssw0rd!",
+    });
+    let result = block_on(svc.sign_up(&make_req("SignUp", &body.to_string())));
+    let r = state.read();
+    let st = r.default_ref();
+    let exists = st
+        .users
+        .get(&pool_id)
+        .is_some_and(|users| users.contains_key("carol"));
+    let sign_ups = st
+        .auth_events
+        .iter()
+        .filter(|e| e.event_type == "SIGN_UP")
+        .count();
+    (result, exists, sign_ups)
+}
+
+#[test]
+fn pre_sign_up_function_error_fails_sign_up_with_user_lambda_validation() {
+    let (result, exists, sign_ups) = sign_up_with_pre_sign_up_state(
+        fakecloud_core::delivery::LambdaInvocationOutput::unhandled(
+            br#"{"errorType":"Error","errorMessage":"Email domain not allowed"}"#.to_vec(),
+        ),
+    );
+    assert!(!exists, "a failed PreSignUp creates no user");
+    assert_eq!(sign_ups, 0, "and records no successful sign-up");
+    let err = match result {
+        Ok(_) => panic!("a failing PreSignUp trigger must fail SignUp"),
+        Err(e) => e,
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "PreSignUp failed with error Email domain not allowed."
+    );
+}
+
+#[test]
+fn pre_sign_up_error_shaped_response_is_a_normal_response() {
+    // Only the function-error flag fails the trigger.
+    let resp = sign_up_with_pre_sign_up(fakecloud_core::delivery::LambdaInvocationOutput::success(
+        br#"{"errorType":"X","errorMessage":"y","response":{}}"#.to_vec(),
+    ));
+    assert!(resp.is_ok(), "{:?}", resp.err());
+}
+
+#[test]
+fn pre_authentication_function_error_fails_auth() {
+    let (svc, state) =
+        svc_with_trigger_output(fakecloud_core::delivery::LambdaInvocationOutput::unhandled(
+            br#"{"errorType":"Error","errorMessage":"Account locked"}"#.to_vec(),
+        ));
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "dave");
+    set_user_password(&svc, &pool_id, "dave", "P@ssw0rd!");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreAuthentication": "arn:aws:lambda:us-east-1:123456789012:function:preauth"}),
+    );
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientId": client_id,
+        "AuthFlow": "ADMIN_NO_SRP_AUTH",
+        "AuthParameters": {"USERNAME": "dave", "PASSWORD": "P@ssw0rd!"},
+    });
+    let err = match block_on(
+        svc.admin_initiate_auth(&make_req("AdminInitiateAuth", &body.to_string())),
+    ) {
+        Ok(_) => panic!("a failing PreAuthentication trigger must fail auth"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "PreAuthentication failed with error Account locked."
+    );
+}
+
+/// A failing PreTokenGeneration trigger fails GetTokensFromRefreshToken, and
+/// with rotation enabled the caller keeps its refresh token: the swap does
+/// not take effect for a call that returned no tokens.
+#[test]
+fn failed_pre_token_generation_keeps_the_rotated_refresh_token() {
+    let (svc, state) =
+        svc_with_trigger_output(fakecloud_core::delivery::LambdaInvocationOutput::unhandled(
+            br#"{"errorType":"Error","errorMessage":"no tokens today"}"#.to_vec(),
+        ));
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "rita");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreTokenGeneration": "arn:aws:lambda:us-east-1:123456789012:function:pretoken"}),
+    );
+    {
+        let mut st = state.write();
+        let acct = st.get_or_create("123456789012");
+        acct.user_pool_clients
+            .get_mut(&client_id)
+            .unwrap()
+            .refresh_token_rotation = Some(crate::state::RefreshTokenRotationConfig {
+            feature: "ENABLED".to_string(),
+            retry_grace_period_seconds: None,
+        });
+        acct.refresh_tokens.insert(
+            "rt-keep".to_string(),
+            crate::state::RefreshTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "rita".to_string(),
+                client_id: client_id.clone(),
+                issued_at: chrono::Utc::now(),
+                auth_context: None,
+            },
+        );
+    }
+    let body = json!({"RefreshToken": "rt-keep", "ClientId": client_id});
+    let req = make_req("GetTokensFromRefreshToken", &body.to_string());
+    let err = match block_on(svc.get_tokens_from_refresh_token(&req)) {
+        Ok(_) => panic!("a failing PreTokenGeneration trigger must fail the call"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "PreTokenGeneration failed with error no tokens today."
+    );
+    let st = state.read();
+    let tokens = &st.default_ref().refresh_tokens;
+    assert!(tokens.contains_key("rt-keep"), "the old token still works");
+    assert_eq!(tokens.len(), 1, "no orphaned replacement token");
+}
+
+fn trigger_said_no() -> fakecloud_core::delivery::LambdaInvocationOutput {
+    fakecloud_core::delivery::LambdaInvocationOutput::unhandled(
+        br#"{"errorType":"Error","errorMessage":"trigger said no"}"#.to_vec(),
+    )
+}
+
+fn user_status_of(
+    state: &crate::state::SharedCognitoState,
+    pool_id: &str,
+    username: &str,
+) -> Option<String> {
+    let r = state.read();
+    r.default_ref()
+        .users
+        .get(pool_id)
+        .and_then(|users| users.get(username))
+        .map(|u| u.user_status.clone())
+}
+
+/// Recorded: `cognito."PostConfirmation/AdminConfirmSignUp"` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json. The
+/// call fails, yet the user is confirmed.
+#[test]
+fn post_confirmation_failure_fails_the_call_but_confirms() {
+    let (svc, state) = svc_with_trigger_output(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    let body = json!({"ClientId": client_id, "Username": "u1", "Password": "P@ssw0rd!"});
+    block_on(svc.sign_up(&make_req("SignUp", &body.to_string()))).unwrap();
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PostConfirmation": "arn:aws:lambda:us-east-1:123456789012:function:post"}),
+    );
+    let body = json!({"UserPoolId": pool_id, "Username": "u1"});
+    let err = match block_on(
+        svc.admin_confirm_sign_up(&make_req("AdminConfirmSignUp", &body.to_string())),
+    ) {
+        Ok(_) => panic!("a failing PostConfirmation trigger must fail the call"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "PostConfirmation failed with error trigger said no."
+    );
+    assert_eq!(
+        user_status_of(&state, &pool_id, "u1").as_deref(),
+        Some("CONFIRMED")
+    );
+}
+
+/// Recorded: `cognito."PostAuthentication/InitiateAuth"`. No tokens come back.
+#[test]
+fn post_authentication_failure_fails_sign_in() {
+    let (svc, state) = svc_with_trigger_output(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "u1");
+    set_user_password(&svc, &pool_id, "u1", "P@ssw0rd!");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PostAuthentication": "arn:aws:lambda:us-east-1:123456789012:function:post"}),
+    );
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientId": client_id,
+        "AuthFlow": "ADMIN_NO_SRP_AUTH",
+        "AuthParameters": {"USERNAME": "u1", "PASSWORD": "P@ssw0rd!"},
+    });
+    let err = match block_on(
+        svc.admin_initiate_auth(&make_req("AdminInitiateAuth", &body.to_string())),
+    ) {
+        Ok(_) => panic!("a failing PostAuthentication trigger must fail sign-in"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "PostAuthentication failed with error trigger said no."
+    );
+}
+
+/// Recorded: `cognito."CustomMessage/SignUp"`. SignUp fails and the user
+/// exists, UNCONFIRMED.
+#[test]
+fn custom_message_failure_fails_sign_up_but_keeps_the_user() {
+    let (svc, state) = svc_with_trigger_output(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"CustomMessage": "arn:aws:lambda:us-east-1:123456789012:function:msg"}),
+    );
+    let body = json!({
+        "ClientId": client_id,
+        "Username": "u2",
+        "Password": "P@ssw0rd!",
+        "UserAttributes": [{"Name": "email", "Value": "u2@example.com"}],
+    });
+    let err = match block_on(svc.sign_up(&make_req("SignUp", &body.to_string()))) {
+        Ok(_) => panic!("a failing CustomMessage trigger must fail SignUp"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "CustomMessage failed with error trigger said no."
+    );
+    assert_eq!(
+        user_status_of(&state, &pool_id, "u2").as_deref(),
+        Some("UNCONFIRMED")
+    );
+}
+
+/// Custom sender triggers are invoked asynchronously: their failure never
+/// fails the call (Cognito developer guide, "Things to know about Lambda
+/// triggers").
+#[test]
+fn custom_email_sender_failure_does_not_fail_sign_up() {
+    let (svc, state) = svc_with_trigger_output(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"CustomEmailSender": {"LambdaArn": "arn:aws:lambda:us-east-1:123456789012:function:sender", "LambdaVersion": "V1_0"}}),
+    );
+    let body = json!({
+        "ClientId": client_id,
+        "Username": "u3",
+        "Password": "P@ssw0rd!",
+        "UserAttributes": [{"Name": "email", "Value": "u3@example.com"}],
+    });
+    block_on(svc.sign_up(&make_req("SignUp", &body.to_string()))).expect("sign-up succeeds");
+}
+
+/// Recorded: `cognito."PreTokenGeneration/oauth2-token refresh_token grant"`.
+/// The hosted-UI token endpoint answers a failing trigger with 400 and the
+/// trigger message in `error`.
+#[test]
+fn oauth_refresh_grant_fails_on_pre_token_generation_error() {
+    let (svc, state) = svc_with_trigger_output(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "u1");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreTokenGeneration": "arn:aws:lambda:us-east-1:123456789012:function:pretoken"}),
+    );
+    {
+        let mut w = state.write();
+        w.default_mut().refresh_tokens.insert(
+            "rt-fail".to_string(),
+            crate::state::RefreshTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "u1".to_string(),
+                client_id: client_id.clone(),
+                issued_at: Utc::now(),
+                auth_context: None,
+            },
+        );
+    }
+    let ctx = svc.delivery_ctx.clone().unwrap();
+    let mut params = std::collections::BTreeMap::new();
+    params.insert("grant_type".to_string(), "refresh_token".to_string());
+    params.insert("refresh_token".to_string(), "rt-fail".to_string());
+    params.insert("client_id".to_string(), client_id.clone());
+    let err = match block_on(handle_oauth2_token(
+        &state,
+        &params,
+        None,
+        "us-east-1",
+        Some(&ctx),
+    )) {
+        Ok(_) => panic!("a failing PreTokenGeneration trigger must fail the grant"),
+        Err(e) => e,
+    };
+    assert_eq!(err.status_code(), 400);
+    let error = err.as_oauth_code();
+    assert!(
+        error.starts_with("PreTokenGeneration failed with error trigger said no. (Service: AWSCognitoIdentityProviderInternalService; Status Code: 400; Error Code: UserLambdaValidationException; Request ID: "),
+        "{error}"
+    );
+    assert!(error.ends_with("; Proxy: null)"), "{error}");
+    assert!(err.description().is_none());
+}
+
+/// InitiateAuth REFRESH_TOKEN_AUTH reports `TokenGeneration_RefreshTokens`
+/// (recorded: `cognito."PreTokenGeneration/InitiateAuth REFRESH_TOKEN_AUTH"`).
+#[test]
+fn refresh_token_auth_trigger_source_is_refresh_tokens() {
+    assert_eq!(
+        crate::triggers::TriggerSource::TokenGenerationRefreshTokens.as_str(),
+        "TokenGeneration_RefreshTokens"
+    );
+}
+
+/// Records every trigger event and answers each with `output`.
+struct RecordingTriggerLambda {
+    output: fakecloud_core::delivery::LambdaInvocationOutput,
+    events: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
+}
+
+impl fakecloud_core::delivery::LambdaDelivery for RecordingTriggerLambda {
+    fn invoke_lambda(
+        &self,
+        _function_arn: &str,
+        payload: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                > + Send,
+        >,
+    > {
+        self.events
+            .lock()
+            .push(serde_json::from_str(payload).unwrap());
+        let output = self.output.clone();
+        Box::pin(async move { Ok(output) })
+    }
+}
+
+#[derive(Default)]
+struct RecordingEmail(parking_lot::Mutex<Vec<(String, String, String)>>);
+
+impl fakecloud_core::delivery::EmailDispatcher for RecordingEmail {
+    fn send_email(
+        &self,
+        _account_id: &str,
+        _from: &str,
+        to: &str,
+        subject: &str,
+        body_text: &str,
+        _body_html: Option<&str>,
+    ) {
+        self.0
+            .lock()
+            .push((to.to_string(), subject.to_string(), body_text.to_string()));
+    }
+}
+
+type TriggerEvents = std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>>;
+
+fn svc_recording_triggers(
+    output: fakecloud_core::delivery::LambdaInvocationOutput,
+) -> (
+    CognitoService,
+    crate::state::SharedCognitoState,
+    TriggerEvents,
+    std::sync::Arc<RecordingEmail>,
+) {
+    let state = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4569",
+        ),
+    ));
+    let events = TriggerEvents::default();
+    let bus = std::sync::Arc::new(fakecloud_core::delivery::DeliveryBus::new().with_lambda(
+        std::sync::Arc::new(RecordingTriggerLambda {
+            output,
+            events: events.clone(),
+        }),
+    ));
+    let email = std::sync::Arc::new(RecordingEmail::default());
+    let ctx = triggers::CognitoDeliveryContext::new(bus).with_email(email.clone());
+    let svc = CognitoService::new(state.clone()).with_delivery(ctx);
+    (svc, state, events, email)
+}
+
+fn custom_message_answer(
+    subject: &str,
+    message: &str,
+) -> fakecloud_core::delivery::LambdaInvocationOutput {
+    fakecloud_core::delivery::LambdaInvocationOutput::success(
+        json!({"response": {"emailSubject": subject, "emailMessage": message}})
+            .to_string()
+            .into_bytes(),
+    )
+}
+
+/// Recorded: `cognito."CustomMessage/AdminCreateUser"`. AdminCreateUser fails
+/// and the user exists, FORCE_CHANGE_PASSWORD.
+#[test]
+fn custom_message_failure_fails_admin_create_user_but_keeps_the_user() {
+    let (svc, state, events, email) = svc_recording_triggers(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"CustomMessage": "arn:aws:lambda:us-east-1:123456789012:function:msg"}),
+    );
+    let body = json!({
+        "UserPoolId": pool_id,
+        "Username": "invitee",
+        "DesiredDeliveryMediums": ["EMAIL"],
+        "UserAttributes": [{"Name": "email", "Value": "invitee@example.com"}],
+    });
+    let err = match block_on(svc.admin_create_user(&make_req("AdminCreateUser", &body.to_string())))
+    {
+        Ok(_) => panic!("a failing CustomMessage trigger must fail AdminCreateUser"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "UserLambdaValidationException");
+    assert_eq!(
+        err.message(),
+        "CustomMessage failed with error trigger said no."
+    );
+    assert_eq!(
+        user_status_of(&state, &pool_id, "invitee").as_deref(),
+        Some("FORCE_CHANGE_PASSWORD")
+    );
+    let events = events.lock();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["triggerSource"], "CustomMessage_AdminCreateUser");
+    assert_eq!(events[0]["request"]["codeParameter"], "{####}");
+    assert_eq!(events[0]["request"]["usernameParameter"], "{username}");
+    assert!(email.0.lock().is_empty(), "no invitation is sent");
+}
+
+/// The invitation carries the generated temporary password, rendered into
+/// the trigger's message, and that password signs the user in.
+#[test]
+fn admin_create_user_sends_the_invitation_through_custom_message() {
+    let (svc, state, events, email) = svc_recording_triggers(custom_message_answer(
+        "Welcome {username}",
+        "Use {####} to sign in",
+    ));
+    let pool_id = create_pool(&svc);
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"CustomMessage": "arn:aws:lambda:us-east-1:123456789012:function:msg"}),
+    );
+    let body = json!({
+        "UserPoolId": pool_id,
+        "Username": "invitee",
+        "DesiredDeliveryMediums": ["EMAIL"],
+        "UserAttributes": [{"Name": "email", "Value": "invitee@example.com"}],
+    });
+    block_on(svc.admin_create_user(&make_req("AdminCreateUser", &body.to_string()))).unwrap();
+    assert_eq!(
+        events.lock()[0]["triggerSource"],
+        "CustomMessage_AdminCreateUser"
+    );
+    let sent = email.0.lock().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, "invitee@example.com");
+    assert_eq!(sent[0].1, "Welcome invitee");
+    let password = sent[0]
+        .2
+        .strip_prefix("Use ")
+        .unwrap()
+        .strip_suffix(" to sign in")
+        .unwrap();
+    let stored = state.read().default_ref().users[&pool_id]["invitee"]
+        .temporary_password
+        .clone();
+    assert_eq!(stored.as_deref(), Some(password));
+    let policy = crate::state::PasswordPolicy::default();
+    validate_password(password, &policy).expect("the generated password meets the policy");
+}
+
+/// SUPPRESS sends nothing and runs no CustomMessage trigger.
+#[test]
+fn admin_create_user_suppress_sends_no_invitation() {
+    let (svc, state, events, email) = svc_recording_triggers(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"CustomMessage": "arn:aws:lambda:us-east-1:123456789012:function:msg"}),
+    );
+    let body = json!({
+        "UserPoolId": pool_id,
+        "Username": "quiet",
+        "MessageAction": "SUPPRESS",
+        "DesiredDeliveryMediums": ["EMAIL"],
+        "UserAttributes": [{"Name": "email", "Value": "quiet@example.com"}],
+    });
+    block_on(svc.admin_create_user(&make_req("AdminCreateUser", &body.to_string()))).unwrap();
+    assert!(events.lock().is_empty());
+    assert!(email.0.lock().is_empty());
+}
+
+/// ResendConfirmationCode and GetUserAttributeVerificationCode name their own
+/// CustomMessage trigger sources.
+#[test]
+fn resend_and_attribute_verification_name_their_custom_message_sources() {
+    let (svc, state, events, _email) =
+        svc_recording_triggers(custom_message_answer("s", "code {####}"));
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    let body = json!({
+        "ClientId": client_id,
+        "Username": "u4",
+        "Password": "P@ssw0rd!",
+        "UserAttributes": [{"Name": "email", "Value": "u4@example.com"}],
+    });
+    block_on(svc.sign_up(&make_req("SignUp", &body.to_string()))).unwrap();
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"CustomMessage": "arn:aws:lambda:us-east-1:123456789012:function:msg"}),
+    );
+    let body = json!({"ClientId": client_id, "Username": "u4"});
+    block_on(svc.resend_confirmation_code(&make_req("ResendConfirmationCode", &body.to_string())))
+        .unwrap();
+    assert_eq!(
+        events.lock().last().unwrap()["triggerSource"],
+        "CustomMessage_ResendCode"
+    );
+
+    admin_create_user_helper(&svc, &pool_id, "u5");
+    let token = issue_at_for_users(&state, &pool_id, "u5", "c");
+    let body = json!({"AccessToken": token, "AttributeName": "email"});
+    block_on(svc.get_user_attribute_verification_code(&make_req(
+        "GetUserAttributeVerificationCode",
+        &body.to_string(),
+    )))
+    .unwrap();
+    assert_eq!(
+        events.lock().last().unwrap()["triggerSource"],
+        "CustomMessage_VerifyUserAttribute"
+    );
+}
+
+fn admin_create(
+    svc: &CognitoService,
+    body: serde_json::Value,
+) -> Result<AwsResponse, AwsServiceError> {
+    block_on(svc.admin_create_user(&make_req("AdminCreateUser", &body.to_string())))
+}
+
+fn expect_error(result: Result<AwsResponse, AwsServiceError>, code: &str, message: &str) {
+    match result {
+        Ok(_) => panic!("expected {code}"),
+        Err(e) => {
+            assert_eq!(e.code(), code);
+            assert_eq!(e.message(), message);
+        }
+    }
+}
+
+/// Recorded on AWS (pool without SmsConfiguration): a user with a phone
+/// number invited by SMS fails the call but is created.
+#[test]
+fn sms_invitation_without_sms_configuration_fails_but_creates_the_user() {
+    let (svc, state, _events, _email) = svc_recording_triggers(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    expect_error(
+        admin_create(
+            &svc,
+            json!({
+                "UserPoolId": pool_id,
+                "Username": "p1",
+                "UserAttributes": [{"Name": "phone_number", "Value": "+15555550100"}],
+            }),
+        ),
+        "InvalidParameterException",
+        "User pool does not have SMS configuration to send messages.",
+    );
+    assert_eq!(
+        user_status_of(&state, &pool_id, "p1").as_deref(),
+        Some("FORCE_CHANGE_PASSWORD")
+    );
+    // A user with no phone number is just not sent an SMS.
+    admin_create(
+        &svc,
+        json!({
+            "UserPoolId": pool_id,
+            "Username": "e1",
+            "UserAttributes": [{"Name": "email", "Value": "e1@example.com"}],
+        }),
+    )
+    .unwrap();
+}
+
+/// Recorded on AWS: an EMAIL invitation for a user without an email fails
+/// the call but creates the user.
+#[test]
+fn email_invitation_without_an_email_fails_but_creates_the_user() {
+    let (svc, state, _events, _email) = svc_recording_triggers(trigger_said_no());
+    let pool_id = create_pool(&svc);
+    expect_error(
+        admin_create(
+            &svc,
+            json!({
+                "UserPoolId": pool_id,
+                "Username": "p2",
+                "DesiredDeliveryMediums": ["EMAIL"],
+                "UserAttributes": [{"Name": "phone_number", "Value": "+15555550102"}],
+            }),
+        ),
+        "InvalidParameterException",
+        "No email provided but desired delivery medium was Email",
+    );
+    assert_eq!(
+        user_status_of(&state, &pool_id, "p2").as_deref(),
+        Some("FORCE_CHANGE_PASSWORD")
+    );
+}
+
+/// Recorded on AWS: RESEND needs an existing FORCE_CHANGE_PASSWORD user,
+/// sends a new temporary password and applies the attributes given.
+#[test]
+fn resend_invitation() {
+    let (svc, state, _events, email) =
+        svc_recording_triggers(custom_message_answer("unused", "unused"));
+    let pool_id = create_pool(&svc);
+    expect_error(
+        admin_create(
+            &svc,
+            json!({"UserPoolId": pool_id, "Username": "ghost", "MessageAction": "RESEND"}),
+        ),
+        "UserNotFoundException",
+        "User does not exist.",
+    );
+
+    admin_create(
+        &svc,
+        json!({
+            "UserPoolId": pool_id,
+            "Username": "inv",
+            "MessageAction": "SUPPRESS",
+            "TemporaryPassword": "First-Passw0rd!",
+            "UserAttributes": [{"Name": "email", "Value": "inv@example.com"}],
+        }),
+    )
+    .unwrap();
+    let resp = admin_create(
+        &svc,
+        json!({
+            "UserPoolId": pool_id,
+            "Username": "inv",
+            "MessageAction": "RESEND",
+            "DesiredDeliveryMediums": ["EMAIL"],
+            "UserAttributes": [{"Name": "given_name", "Value": "Ann"}],
+        }),
+    )
+    .unwrap();
+    let user = &resp_json(&resp)["User"];
+    assert_eq!(user["UserStatus"], "FORCE_CHANGE_PASSWORD");
+    assert!(user["Attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["Name"] == "given_name" && a["Value"] == "Ann"));
+    let sent = email.0.lock().clone();
+    assert_eq!(sent.len(), 1);
+    // The pool's default invitation.
+    assert_eq!(sent[0].1, "Your temporary password");
+    let password = sent[0]
+        .2
+        .strip_prefix("Your username is inv and temporary password is ")
+        .and_then(|rest| rest.strip_suffix('.'))
+        .unwrap()
+        .to_string();
+    assert_ne!(password, "First-Passw0rd!", "a new temporary password");
+    let stored = state.read().default_ref().users[&pool_id]["inv"]
+        .temporary_password
+        .clone();
+    assert_eq!(stored.as_deref(), Some(password.as_str()));
+
+    set_user_password(&svc, &pool_id, "inv", "P@ssw0rd!");
+    expect_error(
+        admin_create(
+            &svc,
+            json!({"UserPoolId": pool_id, "Username": "inv", "MessageAction": "RESEND"}),
+        ),
+        "UnsupportedUserStateException",
+        "Resend not possible. inv status is not FORCE_CHANGE_PASSWORD",
+    );
+}
+
+/// A pool in another account runs its triggers and sends its invitation
+/// with its own settings.
+#[test]
+fn invitation_uses_the_pools_own_account() {
+    let (svc, state, events, email) =
+        svc_recording_triggers(custom_message_answer("hi {username}", "pw {####}"));
+    let mut req = make_req("CreateUserPool", r#"{"PoolName":"other"}"#);
+    req.account_id = "222222222222".to_string();
+    let pool_id = resp_json(&block_on(svc.create_user_pool(&req)).unwrap())["UserPool"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    {
+        let mut accounts = state.write();
+        let pool = accounts
+            .get_or_create("222222222222")
+            .user_pools
+            .get_mut(&pool_id)
+            .unwrap();
+        pool.lambda_config =
+            Some(json!({"CustomMessage": "arn:aws:lambda:us-east-1:222222222222:function:msg"}));
+    }
+    let mut req = make_req(
+        "AdminCreateUser",
+        &json!({
+            "UserPoolId": pool_id,
+            "Username": "x",
+            "DesiredDeliveryMediums": ["EMAIL"],
+            "UserAttributes": [{"Name": "email", "Value": "x@example.com"}],
+        })
+        .to_string(),
+    );
+    req.account_id = "222222222222".to_string();
+    block_on(svc.admin_create_user(&req)).unwrap();
+    assert_eq!(
+        events.lock()[0]["triggerSource"],
+        "CustomMessage_AdminCreateUser"
+    );
+    assert_eq!(email.0.lock()[0].1, "hi x");
 }

@@ -511,11 +511,9 @@ async fn cloudformation_custom_resource_invokes_lambda() {
     let cf_client = server.cloudformation_client().await;
     let lambda_client = server.lambda_client().await;
 
-    // 1. Create a simple no-op Lambda
-    let python_code = r#"
-def lambda_handler(event, context):
-    return {"statusCode": 200, "body": "ok"}
-"#;
+    // 1. A handler that answers CloudFormation at its ResponseURL (a
+    //    custom resource that never answers fails after its ServiceTimeout).
+    let python_code = CUSTOM_RESOURCE_HANDLER;
 
     let zip = make_zip(&[("lambda_function.py", python_code.as_bytes())]);
 
@@ -586,6 +584,208 @@ def lambda_handler(event, context):
     assert_eq!(invocation_event["LogicalResourceId"], "MyCustom");
     assert_eq!(invocation_event["ResourceProperties"]["Foo"], "bar");
     assert_eq!(invocation_event["ResourceProperties"]["Count"], 42);
+
+    // 4. The stack is complete once the handler answered; deleting it sends a
+    //    Delete with the resource's properties and waits for that answer too.
+    wait_for_stack_status(&cf_client, "custom-resource-stack", "CREATE_COMPLETE").await;
+    cf_client
+        .delete_stack()
+        .stack_name("custom-resource-stack")
+        .send()
+        .await
+        .unwrap();
+    let mut delete_event = None;
+    for _ in 0..60 {
+        let invocations = get_lambda_invocations(server.endpoint()).await;
+        if let Some(inv) = invocations["invocations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|inv| {
+                inv["functionArn"] == lambda_arn && inv["payload"]["RequestType"] == "Delete"
+            })
+        {
+            delete_event = Some(inv["payload"].clone());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    let delete_event = delete_event.expect("the stack delete invokes the handler");
+    assert_eq!(delete_event["PhysicalResourceId"], "custom-MyCustom");
+    assert_eq!(delete_event["ResourceProperties"]["Foo"], "bar");
+    assert_eq!(delete_event["ResourceProperties"]["Count"], 42);
+    wait_for_stack_status(&cf_client, "custom-resource-stack", "DELETE_COMPLETE").await;
+}
+
+/// Poll a stack (by name, deleted ones included via its events) until it
+/// reaches `status`.
+async fn wait_for_stack_status(
+    cf: &aws_sdk_cloudformation::Client,
+    stack_name: &str,
+    status: &str,
+) {
+    let mut last = String::new();
+    for _ in 0..120 {
+        let stacks = cf.list_stacks().send().await.unwrap();
+        if let Some(s) = stacks
+            .stack_summaries()
+            .iter()
+            .find(|s| s.stack_name() == Some(stack_name))
+        {
+            last = s
+                .stack_status()
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default();
+            if last == status {
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!("{stack_name} never reached {status} (last {last})");
+}
+
+/// A custom resource handler that answers SUCCESS at its ResponseURL.
+const CUSTOM_RESOURCE_HANDLER: &str = r#"
+import json
+import urllib.request
+
+def lambda_handler(event, context):
+    body = json.dumps({
+        "Status": "SUCCESS",
+        "PhysicalResourceId": "custom-" + event["LogicalResourceId"],
+        "StackId": event["StackId"],
+        "RequestId": event["RequestId"],
+        "LogicalResourceId": event["LogicalResourceId"],
+        "Data": {},
+    }).encode()
+    req = urllib.request.Request(event["ResponseURL"], data=body, method="PUT")
+    req.add_header("Content-Type", "")
+    urllib.request.urlopen(req)
+"#;
+
+/// CloudFormation invokes a custom resource asynchronously and waits for an
+/// answer at the ResponseURL until the resource's ServiceTimeout; a handler
+/// that fails without answering fails the resource with CloudFormation's
+/// recorded reason (`cloudformation.custom_resource_no_response` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json).
+#[tokio::test]
+async fn cloudformation_custom_resource_without_answer_fails_after_service_timeout() {
+    if !require_docker_or_skip(
+        "cloudformation_custom_resource_without_answer_fails_after_service_timeout",
+    ) {
+        return;
+    }
+    use aws_sdk_lambda::primitives::Blob;
+    use aws_sdk_lambda::types::{FunctionCode, Runtime};
+
+    let server = TestServer::start().await;
+    let cf_client = server.cloudformation_client().await;
+    let lambda_client = server.lambda_client().await;
+    let zip = make_zip(&[(
+        "lambda_function.py",
+        b"def lambda_handler(event, context):\n    raise ValueError('custom resource boom')\n",
+    )]);
+    lambda_client
+        .create_function()
+        .function_name("cf-silent-handler")
+        .runtime(Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("lambda_function.lambda_handler")
+        .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
+        .send()
+        .await
+        .unwrap();
+    let template = serde_json::json!({
+        "Resources": {
+            "Silent": {
+                "Type": "Custom::Thing",
+                "Properties": {
+                    "ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:cf-silent-handler",
+                    "ServiceTimeout": 3
+                }
+            }
+        }
+    });
+    cf_client
+        .create_stack()
+        .stack_name("custom-silent-stack")
+        .template_body(template.to_string())
+        .on_failure(aws_sdk_cloudformation::types::OnFailure::DoNothing)
+        .send()
+        .await
+        .unwrap();
+    let mut reason = None;
+    for _ in 0..60 {
+        let events = cf_client
+            .describe_stack_events()
+            .stack_name("custom-silent-stack")
+            .send()
+            .await
+            .unwrap();
+        if let Some(e) = events.stack_events().iter().find(|e| {
+            e.logical_resource_id() == Some("Silent")
+                && e.resource_status().map(|s| s.as_str()) == Some("CREATE_FAILED")
+        }) {
+            reason = e.resource_status_reason().map(str::to_string);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    let reason = reason.expect("the silent custom resource fails");
+    assert!(
+        reason.starts_with(
+            "CloudFormation did not receive a response from your Custom Resource. Please check your logs for requestId ["
+        ),
+        "{reason}"
+    );
+    assert!(
+        reason.ends_with("If you are using the Python cfn-response module, you may need to update your Lambda function code so that CloudFormation can attach the updated version."),
+        "{reason}"
+    );
+
+    // Deleting the stack sends the handler a Delete it never answers either:
+    // the delete fails with the same reason, as recorded.
+    wait_for_stack_status(&cf_client, "custom-silent-stack", "CREATE_FAILED").await;
+    cf_client
+        .delete_stack()
+        .stack_name("custom-silent-stack")
+        .send()
+        .await
+        .unwrap();
+    let stack = cf_client
+        .describe_stacks()
+        .stack_name("custom-silent-stack")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        stack.stacks()[0].stack_status().map(|s| s.as_str()),
+        Some("DELETE_IN_PROGRESS"),
+        "the delete waits for the handler"
+    );
+    wait_for_stack_status(&cf_client, "custom-silent-stack", "DELETE_FAILED").await;
+    let events = cf_client
+        .describe_stack_events()
+        .stack_name("custom-silent-stack")
+        .send()
+        .await
+        .unwrap();
+    let failed = events
+        .stack_events()
+        .iter()
+        .find(|e| {
+            e.logical_resource_id() == Some("Silent")
+                && e.resource_status().map(|s| s.as_str()) == Some("DELETE_FAILED")
+        })
+        .expect("the custom resource fails to delete");
+    assert!(
+        failed
+            .resource_status_reason()
+            .unwrap_or_default()
+            .starts_with("CloudFormation did not receive a response from your Custom Resource."),
+        "{failed:?}"
+    );
 }
 
 #[tokio::test]

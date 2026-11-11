@@ -324,10 +324,17 @@ pub async fn handle(
             // If the specific category has no override, fall back to
             // DEFAULT_4XX — AWS treats it as the catch-all for any 4xx
             // response that isn't otherwise customized.
+            let configuration_error = err.code() == authorizers::AUTHORIZER_CONFIGURATION_ERROR;
             let response_type = match err.status() {
                 StatusCode::UNAUTHORIZED => "UNAUTHORIZED",
                 StatusCode::FORBIDDEN => "ACCESS_DENIED",
+                _ if configuration_error => "AUTHORIZER_CONFIGURATION_ERROR",
                 _ => "DEFAULT_4XX",
+            };
+            let fallback_type = if configuration_error {
+                "DEFAULT_5XX"
+            } else {
+                "DEFAULT_4XX"
             };
             let overridden = apply_gateway_response_override(
                 service,
@@ -337,17 +344,52 @@ pub async fn handle(
                 &err,
             )
             .or_else(|| {
-                if response_type == "DEFAULT_4XX" {
+                if response_type == fallback_type {
                     None
                 } else {
                     apply_gateway_response_override(
                         service,
                         &req.account_id,
                         &api_id,
-                        "DEFAULT_4XX",
+                        fallback_type,
                         &err,
                     )
                 }
+            })
+            .or_else(|| {
+                // AWS's built-in gateway responses, as recorded
+                // (`apigateway_rest.t-authother` / `.t-authunauth` in
+                // fakecloud-lambda/tests/fixtures/function-errors/
+                // aws-recordings.json): AUTHORIZER_CONFIGURATION_ERROR is
+                // 500 `{"message":null}`, UNAUTHORIZED is 401
+                // `{"message":"Unauthorized"}`, each naming its error type.
+                let (status, error_type, body): (_, &'static str, &'static [u8]) =
+                    if configuration_error {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            authorizers::AUTHORIZER_CONFIGURATION_ERROR,
+                            br#"{"message":null}"#,
+                        )
+                    } else if err.status() == StatusCode::UNAUTHORIZED {
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            "UnauthorizedException",
+                            br#"{"message":"Unauthorized"}"#,
+                        )
+                    } else {
+                        return None;
+                    };
+                let mut headers = http::HeaderMap::new();
+                headers.insert(
+                    "x-amzn-errortype",
+                    http::HeaderValue::from_static(error_type),
+                );
+                Some(AwsResponse {
+                    status,
+                    content_type: "application/json".to_string(),
+                    body: bytes::Bytes::from_static(body).into(),
+                    headers,
+                })
             });
             let recorded_status = overridden
                 .as_ref()
@@ -794,7 +836,9 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use chrono::Utc;
-    use fakecloud_core::delivery::{CognitoJwtVerifier, DeliveryBus, LambdaDelivery};
+    use fakecloud_core::delivery::{
+        CognitoJwtVerifier, DeliveryBus, LambdaDelivery, LambdaInvocationOutput,
+    };
     use fakecloud_core::multi_account::MultiAccountState;
     use fakecloud_core::service::AwsService;
     use http::HeaderMap;
@@ -1001,7 +1045,7 @@ mod tests {
     /// invocations and a generic 200 proxy response for the backend.
     /// `expectations` records how many times each function was invoked.
     struct StubLambda {
-        responses: parking_lot::Mutex<HashMap<String, Vec<u8>>>,
+        responses: parking_lot::Mutex<HashMap<String, LambdaInvocationOutput>>,
         invocations: parking_lot::Mutex<Vec<(String, String)>>,
     }
 
@@ -1014,9 +1058,18 @@ mod tests {
         }
 
         fn set(&self, arn: &str, body: serde_json::Value) {
-            self.responses
-                .lock()
-                .insert(arn.to_string(), body.to_string().into_bytes());
+            self.responses.lock().insert(
+                arn.to_string(),
+                LambdaInvocationOutput::success(body.to_string().into_bytes()),
+            );
+        }
+
+        /// The function returns a function error with `body` as its payload.
+        fn set_function_error(&self, arn: &str, body: serde_json::Value) {
+            self.responses.lock().insert(
+                arn.to_string(),
+                LambdaInvocationOutput::unhandled(body.to_string().into_bytes()),
+            );
         }
 
         fn invocation_count(&self, arn: &str) -> usize {
@@ -1042,7 +1095,8 @@ mod tests {
             &self,
             function_arn: &str,
             payload: &str,
-        ) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>> {
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<LambdaInvocationOutput, String>> + Send>>
+        {
             self.invocations
                 .lock()
                 .push((function_arn.to_string(), payload.to_string()));
@@ -1052,9 +1106,11 @@ mod tests {
                 .get(function_arn)
                 .cloned()
                 .unwrap_or_else(|| {
-                    serde_json::json!({"statusCode": 200, "body": "ok"})
-                        .to_string()
-                        .into_bytes()
+                    LambdaInvocationOutput::success(
+                        serde_json::json!({"statusCode": 200, "body": "ok"})
+                            .to_string()
+                            .into_bytes(),
+                    )
                 });
             Box::pin(async move { Ok(resp) })
         }
@@ -1283,6 +1339,179 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backend_function_error_is_502_whatever_its_payload() {
+        // The function-error flag decides, even when the error payload
+        // happens to carry a `statusCode`.
+        let state = build_state("NONE", None);
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set_function_error(
+            BACKEND_ARN,
+            serde_json::json!({"errorType": "Error", "errorMessage": "boom", "statusCode": 200}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let resp = handle(&service, &make_request(HeaderMap::new()))
+            .await
+            .expect("a function error is answered, not raised");
+        assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            resp.body.expect_bytes(),
+            br#"{"message": "Internal server error"}"#.as_slice()
+        );
+    }
+
+    /// Recorded on AWS (`apigateway_rest.msgstatus` / `.typestatus` in
+    /// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json):
+    /// a successful invocation whose proxy response carries a field outside
+    /// the proxy response format, here `errorType` / `errorMessage`, is a
+    /// malformed proxy response even with a valid `statusCode`.
+    #[tokio::test]
+    async fn backend_response_with_extra_fields_is_malformed() {
+        for extra in [
+            serde_json::json!({"statusCode": 201, "errorType": "X", "body": "typed-ok"}),
+            serde_json::json!({"statusCode": 200, "errorMessage": "with status", "body": "b"}),
+            serde_json::json!({"statusCode": 200, "body": "extra-ok", "extra": "x"}),
+        ] {
+            let state = build_state("NONE", None);
+            let lambda = Arc::new(StubLambda::new());
+            lambda.set(BACKEND_ARN, extra.clone());
+            let service = build_service(state, lambda.clone(), None);
+            let resp = handle(&service, &make_request(HeaderMap::new()))
+                .await
+                .expect("answered");
+            assert_eq!(resp.status, StatusCode::BAD_GATEWAY, "{extra}");
+            assert_eq!(
+                resp.headers.get("x-amzn-errortype").unwrap(),
+                "InternalServerErrorException"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_response_with_every_proxy_field_passes_through() {
+        let state = build_state("NONE", None);
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({
+                "statusCode": 422,
+                "headers": {"x-a": "1"},
+                "multiValueHeaders": {"x-b": ["2"]},
+                "body": "invalid",
+                "isBase64Encoded": false,
+            }),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let resp = handle(&service, &make_request(HeaderMap::new()))
+            .await
+            .expect("request must succeed");
+        assert_eq!(resp.status.as_u16(), 422);
+        assert_eq!(resp.body.expect_bytes(), b"invalid".as_slice());
+    }
+
+    #[tokio::test]
+    async fn token_authorizer_throwing_unauthorized_is_401() {
+        let state = build_state("CUSTOM", Some(token_authorizer()));
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set_function_error(
+            FN_ARN,
+            serde_json::json!({"errorType": "Error", "errorMessage": "Unauthorized"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "tok".parse().unwrap());
+        assert_unauthorized_gateway_response(handle(&service, &make_request(headers)).await);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    /// AWS's built-in UNAUTHORIZED gateway response, as recorded
+    /// (`apigateway_rest.t-authunauth` in
+    /// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json).
+    fn assert_unauthorized_gateway_response(result: Result<AwsResponse, AwsServiceError>) {
+        let resp = match result {
+            Ok(resp) => resp,
+            Err(e) => panic!("expected the UNAUTHORIZED gateway response, got {e:?}"),
+        };
+        assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.content_type, "application/json");
+        assert_eq!(
+            resp.headers.get("x-amzn-errortype").unwrap(),
+            "UnauthorizedException"
+        );
+        assert_eq!(
+            resp.body.expect_bytes(),
+            br#"{"message":"Unauthorized"}"#.as_slice()
+        );
+    }
+
+    /// A Lambda authorizer response without a policy document, including a
+    /// returned (not thrown) `{"errorMessage":"Unauthorized"}`, is an
+    /// AUTHORIZER_CONFIGURATION_ERROR (`apigateway_rest.t-authinvalid` /
+    /// `.t-authreturnunauth`).
+    #[tokio::test]
+    async fn token_authorizer_without_policy_is_configuration_error() {
+        for answer in [
+            serde_json::json!({"foo": "bar"}),
+            serde_json::json!({"errorMessage": "Unauthorized"}),
+        ] {
+            let state = build_state("CUSTOM", Some(token_authorizer()));
+            let lambda = Arc::new(StubLambda::new());
+            lambda.set(FN_ARN, answer.clone());
+            let service = build_service(state, lambda.clone(), None);
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", "tok".parse().unwrap());
+            let resp = handle(&service, &make_request(headers))
+                .await
+                .expect("answered with the gateway response");
+            assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR, "{answer}");
+            assert_eq!(resp.body.expect_bytes(), br#"{"message":null}"#.as_slice());
+            assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+        }
+    }
+
+    /// A policy without a principalId is accepted (`apigateway_rest.t-authnoprincipal`).
+    #[tokio::test]
+    async fn token_authorizer_policy_without_principal_is_allowed() {
+        let state = build_state("CUSTOM", Some(token_authorizer()));
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            FN_ARN,
+            serde_json::json!({"policyDocument": {"Version": "2012-10-17", "Statement": [
+                {"Effect": "Allow", "Action": "execute-api:Invoke", "Resource": "*"}
+            ]}}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "tok".parse().unwrap());
+        let resp = handle(&service, &make_request(headers))
+            .await
+            .expect("allowed");
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn token_authorizer_throwing_other_error_is_configuration_error() {
+        let state = build_state("CUSTOM", Some(token_authorizer()));
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set_function_error(
+            FN_ARN,
+            serde_json::json!({"errorType": "TypeError", "errorMessage": "x is undefined"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "tok".parse().unwrap());
+        let resp = handle(&service, &make_request(headers))
+            .await
+            .expect("answered with the built-in gateway response");
+        assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.body.expect_bytes(), br#"{"message":null}"#.as_slice());
+        assert_eq!(
+            resp.headers.get("x-amzn-errortype").unwrap(),
+            "AuthorizerConfigurationException"
+        );
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[tokio::test]
     async fn request_blocked_by_token_authorizer_returning_deny() {
         let state = build_state("CUSTOM", Some(token_authorizer()));
         let lambda = Arc::new(StubLambda::new());
@@ -1352,11 +1581,7 @@ mod tests {
         let lambda = Arc::new(StubLambda::new());
         let service = build_service(state, lambda.clone(), None);
         let result = handle(&service, &make_request(HeaderMap::new())).await;
-        let err = match result {
-            Ok(_) => panic!("missing identity source must 401"),
-            Err(e) => e,
-        };
-        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        assert_unauthorized_gateway_response(result);
         assert_eq!(lambda.invocation_count(FN_ARN), 0);
         assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
     }
@@ -1427,11 +1652,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer tampered".parse().unwrap());
         let result = handle(&service, &make_request(headers)).await;
-        let err = match result {
-            Ok(_) => panic!("tampered JWT must 401"),
-            Err(e) => e,
-        };
-        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        assert_unauthorized_gateway_response(result);
         assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
     }
 

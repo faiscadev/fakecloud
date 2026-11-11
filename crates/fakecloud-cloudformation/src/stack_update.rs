@@ -79,7 +79,7 @@ const UPDATING: bool = true;
 const REPLACEMENT_REASON: &str =
     "Requested update requires the creation of a new physical resource; hence creating one.";
 const CREATE_INITIATED_REASON: &str = "Resource creation Initiated";
-const USER_INITIATED_REASON: &str = "User Initiated";
+pub(crate) const USER_INITIATED_REASON: &str = "User Initiated";
 pub(crate) const USER_INITIATED_ROLLBACK_REASON: &str = "User Initiated Rollback";
 const VALIDATION_FAILED_SUMMARY: &str = "Validation failed with 1 error(s). Call DescribeEvents to retrieve the full list of issues with resource and property details, resolve each error, then retry the operation.";
 const VALIDATION_FAILURE_REASON: &str =
@@ -458,6 +458,7 @@ fn guarded<T>(call: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
 /// updating, since a create's goes through the handler.
 fn provisioning_reason(message: &str, updating: bool) -> String {
     if message.starts_with("Received response status")
+        || message.starts_with(CUSTOM_NO_RESPONSE_PREFIX)
         || message.starts_with("Modifying service token")
         || (updating && message.starts_with("CloudFormation does not support"))
     {
@@ -466,6 +467,11 @@ fn provisioning_reason(message: &str, updating: bool) -> String {
         handler_reason(message)
     }
 }
+
+/// How CloudFormation's own failure for a custom resource that never
+/// answered begins; it stands unwrapped, like a handler's answer.
+pub(crate) const CUSTOM_NO_RESPONSE_PREFIX: &str =
+    "CloudFormation did not receive a response from your Custom Resource.";
 
 pub(crate) fn handler_reason(message: &str) -> String {
     // InvalidRequest is recorded for the provisioning-level refusals, and
@@ -1423,6 +1429,7 @@ impl<'a> UpdateEngine<'a> {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         });
         ForwardFailure {
             reason: format!("The following resource(s) failed to create: [{logical_id}]. "),
@@ -1566,6 +1573,7 @@ impl<'a> UpdateEngine<'a> {
                     attributes: BTreeMap::new(),
                     deletion_policy: def.deletion_policy.clone(),
                     update_replace_policy: def.update_replace_policy.clone(),
+                    custom_properties: None,
                 };
                 self.upsert_resource(&failed);
                 journal
@@ -2806,7 +2814,7 @@ pub(crate) fn cleanups_to_resume(state: &CloudFormationState) -> Vec<(String, St
 }
 
 /// A stack's own name and id, and those of the stacks nested under it.
-fn stack_family(state: &CloudFormationState, stack: &Stack) -> Vec<(String, String)> {
+pub(crate) fn stack_family(state: &CloudFormationState, stack: &Stack) -> Vec<(String, String)> {
     let mut family = vec![(stack.name.clone(), stack.stack_id.clone())];
     let mut next = 0;
     while next < family.len() {
@@ -4238,6 +4246,7 @@ mod tests {
                 attributes: BTreeMap::new(),
                 deletion_policy: None,
                 update_replace_policy: None,
+                custom_properties: None,
             };
             for status in ["UPDATE_FAILED", "UPDATE_ROLLBACK_FAILED"] {
                 assert!(
@@ -4494,7 +4503,7 @@ mod tests {
             // The stack as CreateStack seeds it, already provisioned.
             let body = template.to_string();
             let stack_id = "arn:aws:cloudformation:us-east-1:123456789012:stack/late/1".to_string();
-            let provisioner = svc.provisioner(&stack_id, ACCOUNT, REGION);
+            let provisioner = svc.scratch_provisioner(&stack_id, ACCOUNT, REGION);
             let parsed = template::parse_template(&body, &BTreeMap::new()).unwrap();
             let resources: Vec<StackResource> = parsed
                 .resources
@@ -4736,7 +4745,7 @@ mod tests {
 
             // Back to the moment of the snapshot, service state included.
             let new_stream = after_real_cleanup;
-            let provisioner = svc.provisioner("x", ACCOUNT, REGION);
+            let provisioner = svc.scratch_provisioner("x", ACCOUNT, REGION);
             let recreated = provisioner
                 .create_resource(&ResourceDefinition {
                     logical_id: "Also".to_string(),
@@ -4791,7 +4800,7 @@ mod tests {
             let bytes = taken.borrow().clone().expect("reached the cleanup");
 
             // Back to that moment: the topic the cleanup had yet to delete exists.
-            svc.provisioner("x", ACCOUNT, REGION)
+            svc.scratch_provisioner("x", ACCOUNT, REGION)
                 .create_resource(&ResourceDefinition {
                     logical_id: "Added".to_string(),
                     resource_type: "AWS::SNS::Topic".to_string(),

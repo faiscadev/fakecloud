@@ -3141,7 +3141,7 @@ pub(crate) mod tests {
     #[test]
     fn cfn_provisions_eks_cluster_write_through() {
         let service = svc();
-        let prov = service.provisioner("stack-id", "000000000000", "us-east-1");
+        let prov = service.scratch_provisioner("stack-id", "000000000000", "us-east-1");
         let res = prov
             .create_resource(&resource(
                 "MyCluster",
@@ -3199,7 +3199,7 @@ pub(crate) mod tests {
     #[test]
     fn cfn_provisions_servicediscovery_namespace_and_service() {
         let service = svc();
-        let prov = service.provisioner("stack-id", "000000000000", "us-east-1");
+        let prov = service.scratch_provisioner("stack-id", "000000000000", "us-east-1");
 
         let ns = prov
             .create_resource(&resource(

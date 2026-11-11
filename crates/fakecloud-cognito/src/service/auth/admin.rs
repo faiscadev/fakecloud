@@ -228,7 +228,7 @@ impl CognitoService {
                     region,
                     &account_id,
                 );
-                triggers::invoke_trigger(ctx, &function_arn, &event).await
+                triggers::invoke_trigger(ctx, &function_arn, &event).await?
             } else {
                 None
             }
@@ -334,38 +334,41 @@ impl CognitoService {
         let pool_id = require_str(&body, "UserPoolId")?;
         let username = require_str(&body, "Username")?;
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let (username_owned, user_attrs, region, account_id) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
 
-        // Validate pool exists
-        ensure_user_pool_exists(state, pool_id)?;
+            // Validate pool exists
+            ensure_user_pool_exists(state, pool_id)?;
 
-        // Resolve an email/phone alias -> stored username for
-        // UsernameAttributes pools.
-        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
-        let username = resolved.as_str();
+            // Resolve an email/phone alias -> stored username for
+            // UsernameAttributes pools.
+            let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+            let username = resolved.as_str();
 
-        let user = state
-            .users
-            .get_mut(pool_id)
-            .and_then(|users| users.get_mut(username))
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "UserNotFoundException",
-                    "User does not exist.",
-                )
-            })?;
+            let user = state
+                .users
+                .get_mut(pool_id)
+                .and_then(|users| users.get_mut(username))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "UserNotFoundException",
+                        "User does not exist.",
+                    )
+                })?;
 
-        user.user_status = user_status::CONFIRMED.to_string();
-        user.user_last_modified_date = Utc::now();
+            user.user_status = user_status::CONFIRMED.to_string();
+            user.user_last_modified_date = Utc::now();
 
-        let user_attrs = triggers::collect_user_attributes(user);
-        let region = state.region.clone();
-        let account_id = state.account_id.clone();
-        drop(accounts);
+            let user_attrs = triggers::collect_user_attributes(user);
+            let region = state.region.clone();
+            let account_id = state.account_id.clone();
+            (username.to_string(), user_attrs, region, account_id)
+        };
+        let username = username_owned.as_str();
 
-        // PostConfirmation_AdminConfirmSignUp trigger (fire-and-forget)
+        // PostConfirmation_ConfirmSignUp trigger for AdminConfirmSignUp
         if let Some(ref ctx) = self.delivery_ctx {
             if let Some(function_arn) = triggers::get_trigger_arn(
                 &self.state,
@@ -381,7 +384,9 @@ impl CognitoService {
                     &region,
                     &account_id,
                 );
-                triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
+                // Synchronous: a failing trigger fails the call (the state
+                // change above stays, as on AWS).
+                triggers::invoke_trigger(ctx, &function_arn, &event).await?;
             }
         }
 

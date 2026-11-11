@@ -15,6 +15,7 @@ impl LambdaService {
         invocation_type: InvocationType,
         qualifier: Option<&str>,
         log_tail: bool,
+        request_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         // An unknown alias must 404 like GetFunction does, not silently fall
         // through to $LATEST. resolve_qualifier_to_version returns None for both
@@ -183,68 +184,43 @@ impl LambdaService {
             self.runtime.clone()
         };
 
+        let mut function_errored = false;
         let result: Result<AwsResponse, AwsServiceError> = if let Some(resp) = dry_run_response {
             Ok(resp)
         } else if let Some(runtime) = runtime_for_invoke {
             match invocation_type {
                 InvocationType::Event => {
-                    // Fire-and-forget. AWS returns 202 with no body. Move
-                    // the concurrency guard into the spawned task so the
-                    // counter only drops once the async invocation
-                    // actually finishes.
-                    let runtime = runtime.clone();
-                    let func_clone = func.clone();
-                    let payload_vec = payload.to_vec();
-                    let bus = self.delivery_bus.clone();
-                    let destination_config =
-                        self.lookup_destination_config(&func, account_id, region, qualifier);
-                    let function_arn = func.function_arn.clone();
-                    let layer_zips_async = layer_zips.clone();
-                    let async_guard = _concurrency_guard;
-                    tokio::spawn(async move {
-                        let _g = async_guard;
-                        let result = match runtime
-                            .invoke(&func_clone, &payload_vec, &layer_zips_async)
-                            .await
-                        {
-                            Ok(bytes) => {
-                                // Lambda runtime returns 200 even on uncaught
-                                // function errors; the body has errorMessage /
-                                // errorType. Treat that as failure for routing.
-                                let parsed: Option<serde_json::Value> =
-                                    serde_json::from_slice(&bytes).ok();
-                                let is_error = parsed
-                                    .as_ref()
-                                    .and_then(|v| v.as_object())
-                                    .map(|m| {
-                                        m.contains_key("errorMessage")
-                                            || m.contains_key("errorType")
+                    // Lambda queues the event and answers 202; the queued
+                    // invocation runs with the function's async error
+                    // handling (retries, event age, destinations, DLQ). The
+                    // concurrency guard travels with it so the counter only
+                    // drops once the async work finishes.
+                    super::async_invoke::spawn(super::async_invoke::AsyncInvocation {
+                        runtime: runtime.clone(),
+                        bus: self.delivery_bus.clone(),
+                        settings: self.async_settings(&func, account_id, region, qualifier),
+                        func: func.clone(),
+                        resolve: super::async_invoke::invoked_version_resolver(
+                            self.state.clone(),
+                            super::async_invoke::InvokedVersion {
+                                account_id: account_id.to_string(),
+                                region: region.to_string(),
+                                function_name: function_name.to_string(),
+                                alias: qualifier
+                                    .filter(|q| {
+                                        *q != "$LATEST"
+                                            && *q != crate::state::LATEST_PUBLISHED
+                                            && !q.chars().all(|c| c.is_ascii_digit())
                                     })
-                                    .unwrap_or(false);
-                                if is_error {
-                                    let msg = parsed
-                                        .as_ref()
-                                        .and_then(|v| v.get("errorMessage"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("function error")
-                                        .to_string();
-                                    Err(msg)
-                                } else {
-                                    Ok(bytes)
-                                }
-                            }
-                            Err(e) => Err(e.to_string()),
-                        };
-                        if let Some(bus) = bus {
-                            route_to_destination(
-                                bus,
-                                &function_arn,
-                                &func_clone.role,
-                                &payload_vec,
-                                &result,
-                                destination_config.as_ref(),
-                            );
-                        }
+                                    .map(str::to_string),
+                                executed_version: executed_version.clone(),
+                            },
+                        ),
+                        payload: payload.to_vec(),
+                        executed_version: executed_version.clone(),
+                        request_id: request_id.to_string(),
+                        guard: Some(Box::new(_concurrency_guard)),
+                        on_unrunnable: None,
                     });
                     let mut resp = AwsResponse::json(StatusCode::ACCEPTED, "");
                     if let Ok(v) = http::header::HeaderValue::from_str(&executed_version) {
@@ -268,36 +244,32 @@ impl LambdaService {
                         runtime
                             .invoke(&func, payload, &layer_zips)
                             .await
-                            .map(|b| (b, None))
+                            .map(|output| (output, None))
                     };
-                    match invoke_result.map(|(bytes, logs)| (bytes, logs.filter(|_| log_tail))) {
-                        Ok((response_bytes, log_tail_text)) => {
-                            // A handler that throws still returns HTTP 200 with
-                            // the error payload in the body; AWS signals it with
-                            // the `X-Amz-Function-Error` header (surfaced as
-                            // `FunctionError` by the SDKs). Without it, boto3/JS
-                            // callers treat a failed invocation as success. The
-                            // async Event branch already detects this envelope;
-                            // mirror it here (bug-audit 2026-06-20, 1.8).
-                            let is_function_error = is_function_error_payload(&response_bytes);
-                            let mut resp = AwsResponse::json(StatusCode::OK, response_bytes);
+                    match invoke_result.map(|(output, logs)| (output, logs.filter(|_| log_tail))) {
+                        Ok((output, log_tail_text)) => {
+                            // A function error still answers HTTP 200; AWS
+                            // signals it with `X-Amz-Function-Error` (surfaced
+                            // as `FunctionError` by the SDKs) and the error
+                            // object as the payload. The runtime layer decides
+                            // which invocations failed.
+                            function_errored = output.is_function_error();
+                            let mut resp = AwsResponse::json(StatusCode::OK, output.payload);
                             if let Ok(v) = http::header::HeaderValue::from_str(&executed_version) {
                                 resp.headers.insert(
                                     http::header::HeaderName::from_static("x-amz-executed-version"),
                                     v,
                                 );
                             }
-                            if is_function_error {
-                                // The error envelope (errorMessage/errorType)
-                                // means the handler raised an exception the
-                                // runtime caught and serialized — AWS labels
-                                // that "Handled". "Unhandled" is for runtime
-                                // crashes (OOM/timeout/init) that never produce
-                                // an envelope.
-                                resp.headers.insert(
-                                    http::header::HeaderName::from_static("x-amz-function-error"),
-                                    http::header::HeaderValue::from_static("Handled"),
-                                );
+                            if let Some(function_error) = output.function_error.as_deref() {
+                                if let Ok(v) = http::header::HeaderValue::from_str(function_error) {
+                                    resp.headers.insert(
+                                        http::header::HeaderName::from_static(
+                                            "x-amz-function-error",
+                                        ),
+                                        v,
+                                    );
+                                }
                             }
                             // LogType=Tail: base64 of the last 4 KiB of logs.
                             if let Some(text) = log_tail_text {
@@ -366,7 +338,9 @@ impl LambdaService {
                 dims.clone(),
                 now_ms,
             );
-            if result.is_err() {
+            // `Errors` counts invocations that resulted in a function
+            // error as well as ones Lambda could not run.
+            if result.is_err() || function_errored {
                 bus.put_cloudwatch_metric(
                     account_id,
                     region,
@@ -383,70 +357,21 @@ impl LambdaService {
         result
     }
 
-    /// Pull EventInvokeConfig.DestinationConfig for the function. The
-    /// stored key is `<function_name>:<qualifier>`; treat unqualified
-    /// invokes as the empty qualifier (matches `parse_qualifier` in
-    /// `extras.rs` when no `Qualifier` is supplied).
-    pub(crate) fn lookup_destination_config(
+    /// The function's async error-handling settings for `qualifier`.
+    pub(crate) fn async_settings(
         &self,
         func: &crate::state::LambdaFunction,
         account_id: &str,
         region: &str,
         qualifier: Option<&str>,
-    ) -> Option<serde_json::Value> {
+    ) -> super::async_invoke::AsyncSettings {
         let accounts = self.state.read();
-        let state = accounts.regional(account_id, region)?;
-        // EventInvokeConfig is keyed per-qualifier on AWS — alias/version
-        // can carry its own DestinationConfig. Walk qualifier-specific
-        // first, then fall back to $LATEST so unqualified invokes still
-        // see function-level config.
-        let candidates = [qualifier.unwrap_or("$LATEST"), "$LATEST"];
-        for q in candidates {
-            let key = format!("{}:{}", func.function_name, q);
-            if let Some(cfg) = state.event_invoke_configs.get(&key) {
-                if let Some(dc) = cfg.destination_config.clone() {
-                    if !dc.is_null() && !dc.as_object().map(|o| o.is_empty()).unwrap_or(false) {
-                        return Some(dc);
-                    }
-                }
-            }
-        }
-        None
-    }
-}
-
-/// True when a synchronous invoke's response body is a Lambda function-error
-/// envelope (`{"errorMessage": ..., "errorType": ...}`). The runtime returns
-/// HTTP 200 with this body when the handler throws; the caller sets
-/// `X-Amz-Function-Error` so SDKs surface it as `FunctionError`
-/// (bug-audit 2026-06-20, 1.8).
-pub(crate) fn is_function_error_payload(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(bytes)
-        .ok()
-        .as_ref()
-        .and_then(|v| v.as_object())
-        .map(|m| m.contains_key("errorMessage") || m.contains_key("errorType"))
-        .unwrap_or(false)
-}
-
-#[cfg(test)]
-mod invoke_error_tests {
-    use super::is_function_error_payload;
-
-    #[test]
-    fn detects_function_error_envelope() {
-        assert!(is_function_error_payload(
-            br#"{"errorMessage":"boom","errorType":"Error"}"#
-        ));
-        assert!(is_function_error_payload(
-            br#"{"errorType":"Runtime.Error"}"#
-        ));
-    }
-
-    #[test]
-    fn plain_result_is_not_a_function_error() {
-        assert!(!is_function_error_payload(br#"{"statusCode":200}"#));
-        assert!(!is_function_error_payload(br#""just a string""#));
-        assert!(!is_function_error_payload(b"not json"));
+        super::async_invoke::resolve_settings(
+            &accounts,
+            account_id,
+            region,
+            &func.function_name,
+            qualifier,
+        )
     }
 }

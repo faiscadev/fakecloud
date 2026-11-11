@@ -984,11 +984,15 @@ pub(crate) fn deliver_to_lambda_subscribers(
     tokio::spawn(async move {
         for (function_arn, payload, subscription_arn, redrive_policy) in lambda_payloads {
             tracing::info!(function_arn = %function_arn, "SNS invoking Lambda function");
-            match delivery.invoke_lambda(&function_arn, &payload).await {
-                Some(Ok(_)) => {
+            // SNS invokes the function asynchronously: delivery succeeds once
+            // Lambda queues the event, and a function error is retried and
+            // routed by Lambda's async error handling, never the
+            // subscription's DLQ.
+            match delivery.invoke_lambda_async(&function_arn, &payload) {
+                Some(Ok(())) => {
                     tracing::info!(
                         function_arn = %function_arn,
-                        "SNS->Lambda invocation succeeded"
+                        "SNS->Lambda invocation queued"
                     );
                 }
                 Some(Err(e)) => {

@@ -163,14 +163,24 @@ pub async fn check_and_rotate(
                         "Step": step,
                     });
                     let payload_str = payload.to_string();
+                    // A step runs only when the previous one succeeded.
                     match bus.invoke_lambda(&inv.lambda_arn, &payload_str).await {
+                        Some(Ok(output)) if output.is_function_error() => {
+                            tracing::warn!(
+                                step = step,
+                                error = %String::from_utf8_lossy(&output.payload),
+                                "scheduled rotation Lambda step failed; rotation stopped"
+                            );
+                            break;
+                        }
                         Some(Ok(_)) => {}
                         Some(Err(e)) => {
                             tracing::warn!(
                                 step = step,
                                 error = %e,
-                                "scheduled rotation Lambda invocation failed"
+                                "scheduled rotation Lambda invocation failed; rotation stopped"
                             );
+                            break;
                         }
                         None => {
                             tracing::warn!(

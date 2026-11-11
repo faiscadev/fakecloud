@@ -1,0 +1,123 @@
+{
+  "_about": "Cognito AdminCreateUser invitations recorded on AWS (us-east-1, 2026-11-10) with the AWS CLI on a user pool created with no SmsConfiguration and the default (COGNITO_DEFAULT) email setup. Each entry gives the call and its result; 'user_after' is what AdminGetUser returned afterwards.",
+  "calls": {
+    "phone_number, default mediums (SMS)": {
+      "result": {
+        "error_code": "InvalidParameterException",
+        "message": "User pool does not have SMS configuration to send messages."
+      },
+      "user_after": {
+        "UserStatus": "FORCE_CHANGE_PASSWORD",
+        "attributes": [
+          "phone_number",
+          "sub"
+        ]
+      }
+    },
+    "phone_number, DesiredDeliveryMediums SMS": {
+      "result": {
+        "error_code": "InvalidParameterException",
+        "message": "User pool does not have SMS configuration to send messages."
+      }
+    },
+    "email only, default mediums (SMS)": {
+      "result": {
+        "UserStatus": "FORCE_CHANGE_PASSWORD",
+        "attributes": [
+          "email",
+          "sub"
+        ]
+      }
+    },
+    "no attributes, default mediums": {
+      "result": {
+        "UserStatus": "FORCE_CHANGE_PASSWORD",
+        "attributes": [
+          "sub"
+        ]
+      }
+    },
+    "phone_number, DesiredDeliveryMediums EMAIL": {
+      "result": {
+        "error_code": "InvalidParameterException",
+        "message": "No email provided but desired delivery medium was Email"
+      },
+      "user_after": "exists (AdminGetUser succeeded)"
+    },
+    "phone_number and email, DesiredDeliveryMediums EMAIL SMS": {
+      "result": {
+        "error_code": "InvalidParameterException",
+        "message": "User pool does not have SMS configuration to send messages."
+      },
+      "user_after": {
+        "UserStatus": "FORCE_CHANGE_PASSWORD",
+        "attributes": [
+          "email",
+          "phone_number",
+          "sub"
+        ]
+      }
+    },
+    "RESEND, user does not exist": {
+      "result": {
+        "error_code": "UserNotFoundException",
+        "message": "User does not exist."
+      }
+    },
+    "RESEND, FORCE_CHANGE_PASSWORD user, EMAIL": {
+      "result": {
+        "UserStatus": "FORCE_CHANGE_PASSWORD",
+        "attributes": [
+          "email",
+          "sub"
+        ]
+      },
+      "note": "UserLastModifiedDate moved; same UserCreateDate"
+    },
+    "RESEND with TemporaryPassword": {
+      "result": {
+        "UserStatus": "FORCE_CHANGE_PASSWORD",
+        "attributes": [
+          "email",
+          "sub"
+        ]
+      }
+    },
+    "RESEND with UserAttributes given_name": {
+      "result": {
+        "UserStatus": "FORCE_CHANGE_PASSWORD",
+        "attributes": [
+          "email",
+          "given_name",
+          "sub"
+        ]
+      },
+      "user_after": {
+        "UserStatus": "FORCE_CHANGE_PASSWORD",
+        "attributes": [
+          "email",
+          "given_name",
+          "sub"
+        ]
+      }
+    },
+    "RESEND, CONFIRMED user 'bare'": {
+      "result": {
+        "error_code": "UnsupportedUserStateException",
+        "message": "Resend not possible. bare status is not FORCE_CHANGE_PASSWORD"
+      }
+    },
+    "RESEND, phone-only user, default mediums": {
+      "result": {
+        "error_code": "InvalidParameterException",
+        "message": "User pool does not have SMS configuration to send messages."
+      }
+    },
+    "RESEND, phone-only user, EMAIL": {
+      "result": {
+        "error_code": "InvalidParameterException",
+        "message": "No email provided but desired delivery medium was Email"
+      }
+    }
+  }
+}

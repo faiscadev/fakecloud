@@ -538,6 +538,7 @@ impl EventBridgeService {
                 );
             }
             invoke_lambda_async(
+                &self.delivery,
                 &self.container_runtime,
                 &self.lambda_state,
                 target_arn,

@@ -15,7 +15,7 @@ pub mod k8s;
 
 pub use backend::{BackendHandle, LambdaBackend, RuntimeError, StreamingInvocation, WarmInstance};
 pub use docker::{extract_zip, runtime_to_image, DockerBackend};
-pub use facade::{LambdaRuntime, TakenInstances};
+pub use facade::{classify_invocation_response, LambdaRuntime, TakenInstances};
 pub use k8s::{K8sBackend, K8sBackendError};
 
 /// Backwards-compatible alias used by callers across the workspace

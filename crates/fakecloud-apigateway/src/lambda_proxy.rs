@@ -185,65 +185,72 @@ pub async fn invoke_lambda(
                 "Lambda delivery not configured",
             )
         })?;
-    let bytes = response.map_err(|e| {
+    let output = response.map_err(|e| {
         AwsServiceError::aws_error(
             StatusCode::BAD_GATEWAY,
             "BadGatewayException",
             format!("Lambda invocation failed: {}", e),
         )
     })?;
-    let resp_json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_GATEWAY,
-            "BadGatewayException",
-            format!("Failed to parse Lambda response: {}", e),
-        )
-    })?;
+    // AWS maps a Lambda function error (`X-Amz-Function-Error`) to HTTP 502,
+    // whatever the error payload looks like.
+    if output.is_function_error() {
+        return Ok(malformed_proxy_response());
+    }
+    // A response that is not JSON is a malformed proxy response.
+    let Ok(resp_json) = serde_json::from_slice::<serde_json::Value>(&output.payload) else {
+        return Ok(malformed_proxy_response());
+    };
     parse_lambda_response(resp_json)
 }
 
-/// True when a proxied Lambda response is actually a **function-error**
-/// envelope rather than a proxy response. A handler that throws makes the
-/// Lambda runtime reply HTTP 200 with a body shaped like
-/// `{"errorMessage": "...", "errorType": "...", "stackTrace": [...]}` and
-/// no `statusCode`.
-///
-/// The guard requires BOTH `errorType` AND `errorMessage` as strings AND
-/// the absence of `statusCode` — exactly the check the Lambda `Invoke`
-/// handler and StepFunctions interpreter use. That avoids over-rejecting a
-/// SUCCESSFUL Lambda whose 200 body legitimately carries an `errorMessage`
-/// field: such a response either sets `statusCode` (a proxy response) or is
-/// a plain object, so it will not trip all three conditions.
-fn is_function_error_envelope(response: &serde_json::Value) -> bool {
-    let Some(obj) = response.as_object() else {
-        return false;
-    };
-    obj.get("errorType").and_then(|v| v.as_str()).is_some()
-        && obj.get("errorMessage").and_then(|v| v.as_str()).is_some()
-        && !obj.contains_key("statusCode")
-}
+/// The top-level fields a REST API Lambda proxy response may carry; any
+/// other field (`errorMessage`, `errorType`, ...) makes it malformed.
+/// Recorded: `{"statusCode":200,"body":"extra-ok","extra":"x"}` and
+/// `{"statusCode":201,"errorType":"X","body":"typed-ok"}` both answer 502
+/// (fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json,
+/// `apigateway_rest.extrakey` / `.typestatus`).
+const PROXY_RESPONSE_FIELDS: [&str; 5] = [
+    "statusCode",
+    "headers",
+    "multiValueHeaders",
+    "body",
+    "isBase64Encoded",
+];
 
 /// AWS's response for a malformed proxy response or a Lambda function
-/// error: HTTP 502 with `{"message":"Internal server error"}` and
-/// `Content-Type: application/json`. Real API Gateway also logs
-/// "Execution failed ... malformed Lambda proxy response".
+/// error, byte for byte as recorded (`apigateway_rest.throw` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json):
+/// HTTP 502, `Content-Type: application/json`,
+/// `x-amzn-ErrorType: InternalServerErrorException` and the body
+/// `{"message": "Internal server error"}` (note the space).
 fn malformed_proxy_response() -> AwsResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-amzn-errortype",
+        http::HeaderValue::from_static("InternalServerErrorException"),
+    );
     AwsResponse {
         status: StatusCode::BAD_GATEWAY,
         content_type: "application/json".to_string(),
-        headers: HeaderMap::new(),
-        body: Bytes::from_static(br#"{"message":"Internal server error"}"#).into(),
+        headers,
+        body: Bytes::from_static(br#"{"message": "Internal server error"}"#).into(),
     }
 }
 
 fn parse_lambda_response(response: serde_json::Value) -> Result<AwsResponse, AwsServiceError> {
-    // A thrown handler surfaces as a 200 error envelope with no statusCode.
-    // AWS maps a Lambda function error to HTTP 502. A REST (v1) proxy
-    // integration also REQUIRES statusCode on every response, so any
-    // response lacking it — function error or otherwise malformed — is a
-    // 502. (v2 payload format 2.0's statusCode-less "simple response" is
+    // A REST (v1) proxy integration REQUIRES statusCode on every response,
+    // so any response lacking it is malformed: a 502. (Function errors are
+    // mapped to 502 by the caller from the invocation's function-error
+    // flag; v2 payload format 2.0's statusCode-less "simple response" is
     // handled separately in the apigatewayv2 parser.)
-    if is_function_error_envelope(&response) || response.get("statusCode").is_none() {
+    let well_formed = response.as_object().is_some_and(|fields| {
+        fields.contains_key("statusCode")
+            && fields
+                .keys()
+                .all(|k| PROXY_RESPONSE_FIELDS.contains(&k.as_str()))
+    });
+    if !well_formed {
         return Ok(malformed_proxy_response());
     }
 
@@ -419,7 +426,7 @@ mod tests {
         assert_eq!(r.content_type, "application/json");
         assert_eq!(
             r.body.expect_bytes(),
-            br#"{"message":"Internal server error"}"#.as_slice()
+            br#"{"message": "Internal server error"}"#.as_slice()
         );
     }
 

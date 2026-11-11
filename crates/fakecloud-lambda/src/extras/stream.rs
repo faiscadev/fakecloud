@@ -104,6 +104,7 @@ impl LambdaService {
 
         let (error_code, error_details) = match invoke_result {
             Ok(mut stream) => {
+                let status = stream.status();
                 let mut last_chunk: Option<bytes::Bytes> = None;
                 let mut had_chunks = false;
                 loop {
@@ -138,33 +139,24 @@ impl LambdaService {
                     }
                 }
 
-                // The Lambda runtime returns 200 even when the user
-                // handler threw, packing `errorMessage`/`errorType`
-                // into the buffered body. Streaming handlers do the
-                // same on the final chunk. Inspect the last chunk we
-                // saw and surface that as a function error in the
-                // terminal `InvokeComplete` event.
+                // A function error ends the stream with the runtime's error
+                // object as the final chunk (or the whole body, for a
+                // runtime that exited / timed out). The runtime layer's
+                // classification decides, and its error object names the
+                // terminal `InvokeComplete` event's code and details.
                 let mut error: Option<(String, String)> = None;
-                if had_chunks {
-                    if let Some(bytes) = last_chunk {
-                        if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
-                            if let Some(obj) = v.as_object() {
-                                if obj.contains_key("errorMessage") || obj.contains_key("errorType")
-                                {
-                                    let etype = obj
-                                        .get("errorType")
-                                        .and_then(|x| x.as_str())
-                                        .unwrap_or("Runtime.Unknown")
-                                        .to_string();
-                                    let emsg = obj
-                                        .get("errorMessage")
-                                        .and_then(|x| x.as_str())
-                                        .unwrap_or("function error")
-                                        .to_string();
-                                    error = Some((etype, emsg));
-                                }
-                            }
-                        }
+                let tail = last_chunk.unwrap_or_default();
+                if had_chunks || status != 200 {
+                    let output = crate::runtime::classify_invocation_response(status, &tail);
+                    if output.is_function_error() {
+                        error = Some((
+                            output
+                                .error_type()
+                                .unwrap_or_else(|| "Runtime.Unknown".to_string()),
+                            output
+                                .error_message()
+                                .unwrap_or_else(|| "function error".to_string()),
+                        ));
                     }
                 }
                 match error {

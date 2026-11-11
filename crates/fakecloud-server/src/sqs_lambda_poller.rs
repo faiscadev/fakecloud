@@ -368,8 +368,18 @@ impl SqsLambdaPoller {
             .collect();
 
         let (acked_ids, failed_ids) = match &invoke_result {
-            Some(Ok(body)) if mapping.report_batch_item_failures => {
-                split_batch_failures(body, &matched_msg_ids)
+            // A function error fails the whole batch, with or without
+            // ReportBatchItemFailures: every message returns to the queue.
+            Some(Ok(output)) if output.is_function_error() => {
+                tracing::warn!(
+                    function_arn = %mapping.function_arn,
+                    error = %String::from_utf8_lossy(&output.payload),
+                    "SQS->Lambda: function returned an error; messages will be retried"
+                );
+                (Vec::new(), matched_msg_ids.clone())
+            }
+            Some(Ok(output)) if mapping.report_batch_item_failures => {
+                split_batch_failures(&output.payload, &matched_msg_ids)
             }
             Some(Ok(_)) => (matched_msg_ids.clone(), Vec::new()),
             Some(Err(err)) => {
@@ -386,22 +396,8 @@ impl SqsLambdaPoller {
         if !acked_ids.is_empty() || !failed_ids.is_empty() {
             {
                 let mut sqs_mas = self.sqs_state.write();
-                if let Some(queue) = sqs_mas
-                    .by_arn_mut(&mapping.queue_arn)
-                    .and_then(|sqs| sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn))
-                {
-                    queue
-                        .messages
-                        .retain(|m| !acked_ids.contains(&m.message_id));
-                    // Failed messages stay; bump receive_count and clear
-                    // any pending visibility timeout so the queue
-                    // immediately considers them again on the next poll.
-                    for msg in queue.messages.iter_mut() {
-                        if failed_ids.contains(&msg.message_id) {
-                            msg.receive_count = msg.receive_count.saturating_add(1);
-                            msg.visible_at = None;
-                        }
-                    }
+                if let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) {
+                    settle_batch(sqs, &mapping.queue_arn, &acked_ids, &failed_ids);
                 }
             }
             // Persist acked removals + receive_count/visibility bumps so a
@@ -429,6 +425,62 @@ impl SqsLambdaPoller {
     }
 }
 
+/// Apply a batch's outcome to its queue: acked messages are deleted; failed
+/// ones count the failed receive and stay hidden until the visibility
+/// timeout set when the batch was picked runs out, as on AWS (the message
+/// reappears in the queue after the timeout). A failed message that has
+/// reached the queue's `maxReceiveCount` moves to the redrive policy's
+/// dead-letter queue, as SQS does on its next receive.
+fn settle_batch(
+    sqs: &mut fakecloud_sqs::SqsState,
+    queue_arn: &str,
+    acked_ids: &[String],
+    failed_ids: &[String],
+) {
+    let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == queue_arn) else {
+        return;
+    };
+    queue
+        .messages
+        .retain(|m| !acked_ids.contains(&m.message_id));
+    for msg in queue.messages.iter_mut() {
+        if failed_ids.contains(&msg.message_id) {
+            msg.receive_count = msg.receive_count.saturating_add(1);
+        }
+    }
+    let Some(redrive) = queue.redrive_policy.clone() else {
+        return;
+    };
+    let (exhausted, kept): (Vec<_>, Vec<_>) = queue.messages.drain(..).partition(|m| {
+        failed_ids.contains(&m.message_id) && m.receive_count >= redrive.max_receive_count
+    });
+    queue.messages = kept.into_iter().collect();
+    if exhausted.is_empty() {
+        return;
+    }
+    match sqs
+        .queues
+        .values_mut()
+        .find(|q| q.arn == redrive.dead_letter_target_arn)
+    {
+        Some(dlq) => {
+            for mut msg in exhausted {
+                // A redriven message starts a fresh receive history.
+                msg.visible_at = None;
+                msg.receipt_handle = None;
+                msg.receive_count = 0;
+                dlq.messages.push_back(msg);
+            }
+        }
+        None => {
+            // No such DLQ: the messages stay in the source queue.
+            if let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == queue_arn) {
+                queue.messages.extend(exhausted);
+            }
+        }
+    }
+}
+
 /// Mirrors `fakecloud_sqs::looks_like_fakecloud_envelope`: detect
 /// bodies that the SQS SendMessage path produced via the KMS hook so
 /// the poller only invokes the hook on bodies we actually encrypted.
@@ -444,38 +496,38 @@ fn looks_like_fakecloud_envelope(body: &str) -> bool {
     }
 }
 
-/// Parse the Lambda response body as `{"batchItemFailures":[...]}`. Any
-/// id that appears in the failures list is reported as failed; the
-/// rest are acked. If the body doesn't decode or contains an empty
-/// failures list, the entire batch is acked.
+/// Apply a `ReportBatchItemFailures` response (`{"batchItemFailures":
+/// [{"itemIdentifier": ...}]}`) to the batch: `(acked, failed)` ids.
+///
+/// As on AWS, the batch is a complete success for an empty or null
+/// `batchItemFailures` list or an empty or null response, and a complete
+/// failure for an invalid JSON response, or an entry whose `itemIdentifier`
+/// is empty, null, missing (a bad key name) or names a message that isn't
+/// in the batch.
 fn split_batch_failures(body: &[u8], batch_ids: &[String]) -> (Vec<String>, Vec<String>) {
+    let all_acked = || (batch_ids.to_vec(), Vec::new());
+    let all_failed = || (Vec::new(), batch_ids.to_vec());
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return all_acked();
+    }
     let parsed: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
-        Err(_) => return (batch_ids.to_vec(), Vec::new()),
+        Err(_) => return all_failed(),
     };
-    let raw_failures: Vec<String> = parsed
-        .get("batchItemFailures")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|f| {
-                    f.get("itemIdentifier")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    // Intersect against batch_ids: a stale or made-up itemIdentifier
-    // shouldn't keep an unrelated message visible / hold up an acked
-    // one. AWS behaves the same way — failures referencing ids
-    // outside the batch are ignored.
-    let failures: Vec<String> = raw_failures
-        .into_iter()
-        .filter(|id| batch_ids.contains(id))
-        .collect();
-    if failures.is_empty() {
-        return (batch_ids.to_vec(), Vec::new());
+    let Some(entries) = parsed.get("batchItemFailures").and_then(Value::as_array) else {
+        // Null response, no `batchItemFailures`, or a null list.
+        return all_acked();
+    };
+    let mut failures: Vec<String> = Vec::new();
+    for entry in entries {
+        match entry.get("itemIdentifier").and_then(Value::as_str) {
+            Some(id) if !id.is_empty() && batch_ids.iter().any(|b| b == id) => {
+                if !failures.iter().any(|f| f == id) {
+                    failures.push(id.to_string());
+                }
+            }
+            _ => return all_failed(),
+        }
     }
     let acked = batch_ids
         .iter()
@@ -492,6 +544,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Mutex;
 
+    use fakecloud_core::delivery::LambdaInvocationOutput;
     use fakecloud_core::multi_account::{MultiAccountState, MultiRegionState};
     use fakecloud_lambda::{EventSourceMapping, LambdaState};
     use fakecloud_sqs::{SqsMessage, SqsQueue, SqsState};
@@ -515,6 +568,32 @@ mod tests {
     }
 
     #[test]
+    fn batch_failures_empty_or_null_response_acks_all() {
+        for body in [&b""[..], b"null", br#"{"batchItemFailures":null}"#] {
+            let (acked, failed) = split_batch_failures(body, &["a".into(), "b".into()]);
+            assert_eq!(acked, vec!["a".to_string(), "b".to_string()]);
+            assert!(failed.is_empty());
+        }
+    }
+
+    #[test]
+    fn batch_failures_invalid_entries_fail_the_whole_batch() {
+        // Invalid JSON, empty / null / missing itemIdentifier, and an id
+        // outside the batch each make the batch a complete failure.
+        for body in [
+            &b"not json"[..],
+            br#"{"batchItemFailures":[{"itemIdentifier":""}]}"#,
+            br#"{"batchItemFailures":[{"itemIdentifier":null}]}"#,
+            br#"{"batchItemFailures":[{"itemId":"a"}]}"#,
+            br#"{"batchItemFailures":[{"itemIdentifier":"a"},{"itemIdentifier":"zzz"}]}"#,
+        ] {
+            let (acked, failed) = split_batch_failures(body, &["a".into(), "b".into()]);
+            assert!(acked.is_empty(), "{}", String::from_utf8_lossy(body));
+            assert_eq!(failed, vec!["a".to_string(), "b".to_string()]);
+        }
+    }
+
+    #[test]
     fn batch_failures_no_field_acks_all() {
         let body = br#"{"ok":true}"#;
         let (acked, failed) = split_batch_failures(body, &["a".into(), "b".into()]);
@@ -535,10 +614,143 @@ mod tests {
             &self,
             _function_arn: &str,
             payload: &str,
-        ) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>> {
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<LambdaInvocationOutput, String>> + Send>>
+        {
             self.invocations.lock().unwrap().push(payload.to_string());
-            Box::pin(async move { Ok(b"{}".to_vec()) })
+            Box::pin(async move { Ok(LambdaInvocationOutput::success(b"{}".to_vec())) })
         }
+    }
+
+    /// `LambdaDelivery` whose function answers every invocation with
+    /// `output`.
+    struct AnsweringLambda {
+        output: LambdaInvocationOutput,
+    }
+
+    impl LambdaDelivery for AnsweringLambda {
+        fn invoke_lambda(
+            &self,
+            _function_arn: &str,
+            _payload: &str,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<LambdaInvocationOutput, String>> + Send>>
+        {
+            let output = self.output.clone();
+            Box::pin(async move { Ok(output) })
+        }
+    }
+
+    /// Poll once with a function answering `output`; return the queue's
+    /// remaining messages' receive counts.
+    async fn poll_once_answering(output: LambdaInvocationOutput) -> Vec<u32> {
+        let (poller, sqs_state, _lambda_state) = build_states();
+        let delivery: Arc<dyn LambdaDelivery> = Arc::new(AnsweringLambda { output });
+        let poller = poller.with_lambda_delivery(delivery);
+        let mut batching = BatchingState::default();
+        poller.poll(&mut batching).await;
+        let sqs = sqs_state.read();
+        let queue = sqs
+            .default_regional()
+            .unwrap()
+            .queues
+            .values()
+            .next()
+            .unwrap();
+        queue.messages.iter().map(|m| m.receive_count).collect()
+    }
+
+    #[tokio::test]
+    async fn function_error_returns_the_batch_to_the_queue() {
+        let before = {
+            let (_, sqs_state, _) = build_states();
+            let sqs = sqs_state.read();
+            sqs.default_regional()
+                .unwrap()
+                .queues
+                .values()
+                .next()
+                .unwrap()
+                .messages[0]
+                .receive_count
+        };
+        let counts = poll_once_answering(LambdaInvocationOutput::unhandled(
+            br#"{"errorType":"Error","errorMessage":"boom"}"#.to_vec(),
+        ))
+        .await;
+        assert_eq!(counts.len(), 1, "a failed batch stays in the queue");
+        assert!(counts[0] > before, "the failed receive is counted");
+    }
+
+    #[tokio::test]
+    async fn error_shaped_success_acks_the_batch() {
+        let counts = poll_once_answering(LambdaInvocationOutput::success(
+            br#"{"errorType":"Error","errorMessage":"not an error"}"#.to_vec(),
+        ))
+        .await;
+        assert!(counts.is_empty(), "a successful invocation acks the batch");
+    }
+
+    #[tokio::test]
+    async fn failed_batch_stays_hidden_for_the_visibility_timeout() {
+        let (poller, sqs_state, _lambda_state) = build_states();
+        let delivery: Arc<dyn LambdaDelivery> = Arc::new(AnsweringLambda {
+            output: LambdaInvocationOutput::unhandled(
+                br#"{"errorType":"Error","errorMessage":"boom"}"#.to_vec(),
+            ),
+        });
+        let poller = poller.with_lambda_delivery(delivery);
+        let before = Utc::now();
+        poller.poll(&mut BatchingState::default()).await;
+        let sqs = sqs_state.read();
+        let queue = sqs
+            .default_regional()
+            .unwrap()
+            .queues
+            .values()
+            .next()
+            .unwrap();
+        let visible_at = queue.messages[0].visible_at.expect("still hidden");
+        assert!(
+            visible_at >= before + chrono::Duration::seconds(29),
+            "the message reappears only after the 30s visibility timeout"
+        );
+    }
+
+    #[test]
+    fn exhausted_failed_message_moves_to_the_dead_letter_queue() {
+        let (_, sqs_state, _) = build_states();
+        let dlq_arn = format!("arn:aws:sqs:{REGION}:{ACCOUNT}:k2-dlq");
+        let mut sqs = sqs_state.write();
+        let st = sqs.default_regional_mut();
+        let mut dlq = st.queues.values().next().unwrap().clone();
+        dlq.queue_name = "k2-dlq".to_string();
+        dlq.queue_url = format!("http://localhost:4566/{ACCOUNT}/k2-dlq");
+        dlq.arn = dlq_arn.clone();
+        dlq.messages.clear();
+        let source_arn = {
+            let source = st.queues.values_mut().next().unwrap();
+            source.redrive_policy = Some(fakecloud_sqs::RedrivePolicy {
+                dead_letter_target_arn: dlq_arn.clone(),
+                max_receive_count: 2,
+            });
+            source.arn.clone()
+        };
+        st.queues.insert(dlq.queue_url.clone(), dlq);
+        let failed = vec!["msg-1".to_string()];
+
+        super::settle_batch(st, &source_arn, &[], &failed);
+        let source = st.queues.values().find(|q| q.arn == source_arn).unwrap();
+        assert_eq!(source.messages.len(), 1, "below maxReceiveCount it stays");
+
+        super::settle_batch(st, &source_arn, &[], &failed);
+        let source = st.queues.values().find(|q| q.arn == source_arn).unwrap();
+        assert!(
+            source.messages.is_empty(),
+            "at maxReceiveCount it is redriven"
+        );
+        let dlq = st.queues.values().find(|q| q.arn == dlq_arn).unwrap();
+        assert_eq!(dlq.messages.len(), 1);
+        assert_eq!(dlq.messages[0].message_id, "msg-1");
+        assert_eq!(dlq.messages[0].receive_count, 0);
     }
 
     const ACCOUNT: &str = "123456789012";

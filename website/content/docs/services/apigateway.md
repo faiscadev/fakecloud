@@ -58,6 +58,7 @@ REST-style URL dispatch. fakecloud's facade routes `/restapis/...`, `/apikeys`, 
 
 - **API Gateway v1 -> Lambda** — REST API methods with `AWS_PROXY` integrations invoke Lambda functions with proxy event v1.0 format
 - **API Gateway v1 -> Lambda (authorizers)** — TOKEN and REQUEST authorizers invoke real Lambda functions and honor the returned IAM policy + context
+- **Lambda errors, as recorded on AWS** — a function error behind an `AWS_PROXY` integration, or a proxy response with any top-level field outside the proxy format, answers 502 `{"message": "Internal server error"}` with `x-amzn-ErrorType: InternalServerErrorException`; an authorizer that fails with `Unauthorized` answers 401, and any other authorizer error or a response without a policy document answers 500 `AuthorizerConfigurationException`
 - **API Gateway v1 -> Cognito** — COGNITO_USER_POOLS authorizers fetch the configured user pool's JWKS and verify caller JWTs end-to-end
 - **API Gateway v1 -> AWS services** — `AWS` integrations dispatch to in-process service handlers (SQS, SNS, DynamoDB, S3, ...) without leaving the process
 

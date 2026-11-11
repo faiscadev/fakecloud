@@ -1298,12 +1298,13 @@ async fn provision_v2_lambda_api(
     format!("{}/prod/hello", server.endpoint())
 }
 
-/// A Lambda handler that throws must surface as HTTP 502
-/// `{"message":"Internal server error"}`, not a 200 echoing the raw
-/// error envelope.
+/// A Lambda handler that throws surfaces as HTTP 500
+/// `{"message":"Internal Server Error"}`, not a 200 echoing the raw error
+/// envelope. Recorded on AWS: `apigateway_http.throw` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json.
 #[tokio::test]
-async fn v2_lambda_function_error_returns_502() {
-    if !require_docker_or_skip("v2_lambda_function_error_returns_502") {
+async fn v2_lambda_function_error_returns_500() {
+    if !require_docker_or_skip("v2_lambda_function_error_returns_500") {
         return;
     }
     let server = TestServer::start().await;
@@ -1316,9 +1317,12 @@ async fn v2_lambda_function_error_returns_502() {
     .await;
 
     let resp = reqwest::Client::new().get(&url).send().await.unwrap();
-    assert_eq!(resp.status(), 502);
+    assert_eq!(resp.status(), 500);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["message"], "Internal server error");
+    assert_eq!(
+        body,
+        serde_json::json!({"message": "Internal Server Error"})
+    );
 }
 
 /// Payload format 2.0 "simple response": a plain object with no statusCode

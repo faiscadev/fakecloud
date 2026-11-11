@@ -2076,7 +2076,11 @@ pub(crate) fn deliver_execution_logs(
             if level == "ERROR"
                 && !matches!(
                     ev.event_type.as_str(),
-                    "ExecutionFailed" | "TaskFailed" | "StateFailed"
+                    "ExecutionFailed"
+                        | "TaskFailed"
+                        | "StateFailed"
+                        | "LambdaFunctionFailed"
+                        | "LambdaFunctionTimedOut"
                 )
             {
                 return None;

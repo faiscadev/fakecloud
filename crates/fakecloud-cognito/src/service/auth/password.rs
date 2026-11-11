@@ -105,90 +105,100 @@ impl CognitoService {
         let client_id = require_str(&body, "ClientId")?;
         let username = require_str(&body, "Username")?;
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let (pool_id, email, user_attrs, code, destination, region, account_id) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
 
-        // Find pool from client
-        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("User pool client {client_id} does not exist."),
-            )
-        })?;
-        // When the app client has a secret, ForgotPassword must present a valid
-        // SECRET_HASH (matches the SignUp + InitiateAuth checks).
-        crate::service::validate_secret_hash(client, body["SecretHash"].as_str(), username)?;
-        let pool_id = client.user_pool_id.clone();
-        let masks_existence = client.prevent_user_existence_errors.as_deref() == Some("ENABLED");
-
-        let user = match state
-            .users
-            .get_mut(&pool_id)
-            .and_then(|users| users.get_mut(username))
-        {
-            Some(u) => u,
-            None => {
-                // PreventUserExistenceErrors=ENABLED: don't leak that the user
-                // is unknown — return plausible CodeDeliveryDetails (L3).
-                if masks_existence {
-                    return Ok(AwsResponse::ok_json(json!({
-                        "CodeDeliveryDetails": {
-                            "Destination": fake_masked_destination(username),
-                            "DeliveryMedium": "EMAIL",
-                            "AttributeName": "email"
-                        }
-                    })));
-                }
-                return Err(AwsServiceError::aws_error(
+            // Find pool from client
+            let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "UserNotFoundException",
-                    "User does not exist.",
-                ));
-            }
-        };
+                    "ResourceNotFoundException",
+                    format!("User pool client {client_id} does not exist."),
+                )
+            })?;
+            // When the app client has a secret, ForgotPassword must present a valid
+            // SECRET_HASH (matches the SignUp + InitiateAuth checks).
+            crate::service::validate_secret_hash(client, body["SecretHash"].as_str(), username)?;
+            let pool_id = client.user_pool_id.clone();
+            let masks_existence =
+                client.prevent_user_existence_errors.as_deref() == Some("ENABLED");
 
-        let code = generate_confirmation_code();
-        user.confirmation_code = Some(code.clone());
-
-        // Find email from user attributes for CodeDeliveryDetails
-        let email = user
-            .attributes
-            .iter()
-            .find(|a| a.name == "email")
-            .map(|a| a.value.clone());
-
-        let user_attrs = triggers::collect_user_attributes(user);
-
-        let destination = email
-            .clone()
-            .map(|e| {
-                // Mask email: show first char + *** + @domain
-                if let Some(at_pos) = e.find('@') {
-                    let first = e.chars().next().unwrap_or('*');
-                    let domain = &e[at_pos..];
-                    format!("{first}***{domain}")
-                } else {
-                    "***".to_string()
+            let user = match state
+                .users
+                .get_mut(&pool_id)
+                .and_then(|users| users.get_mut(username))
+            {
+                Some(u) => u,
+                None => {
+                    // PreventUserExistenceErrors=ENABLED: don't leak that the user
+                    // is unknown — return plausible CodeDeliveryDetails (L3).
+                    if masks_existence {
+                        return Ok(AwsResponse::ok_json(json!({
+                            "CodeDeliveryDetails": {
+                                "Destination": fake_masked_destination(username),
+                                "DeliveryMedium": "EMAIL",
+                                "AttributeName": "email"
+                            }
+                        })));
+                    }
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "UserNotFoundException",
+                        "User does not exist.",
+                    ));
                 }
-            })
-            .unwrap_or_else(|| "***".to_string());
+            };
 
-        let region = state.region.clone();
-        let account_id = state.account_id.clone();
+            let code = generate_confirmation_code();
+            user.confirmation_code = Some(code.clone());
 
-        state.auth_events.push(AuthEvent {
-            event_id: Uuid::new_v4().to_string(),
-            event_type: "FORGOT_PASSWORD".to_string(),
-            username: username.to_string(),
-            user_pool_id: pool_id.clone(),
-            client_id: Some(client_id.to_string()),
-            timestamp: Utc::now(),
-            success: true,
-            feedback_value: None,
-        });
+            // Find email from user attributes for CodeDeliveryDetails
+            let email = user
+                .attributes
+                .iter()
+                .find(|a| a.name == "email")
+                .map(|a| a.value.clone());
 
-        drop(accounts);
+            let user_attrs = triggers::collect_user_attributes(user);
+
+            let destination = email
+                .clone()
+                .map(|e| {
+                    // Mask email: show first char + *** + @domain
+                    if let Some(at_pos) = e.find('@') {
+                        let first = e.chars().next().unwrap_or('*');
+                        let domain = &e[at_pos..];
+                        format!("{first}***{domain}")
+                    } else {
+                        "***".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "***".to_string());
+
+            let region = state.region.clone();
+            let account_id = state.account_id.clone();
+
+            state.auth_events.push(AuthEvent {
+                event_id: Uuid::new_v4().to_string(),
+                event_type: "FORGOT_PASSWORD".to_string(),
+                username: username.to_string(),
+                user_pool_id: pool_id.clone(),
+                client_id: Some(client_id.to_string()),
+                timestamp: Utc::now(),
+                success: true,
+                feedback_value: None,
+            });
+            (
+                pool_id,
+                email,
+                user_attrs,
+                code,
+                destination,
+                region,
+                account_id,
+            )
+        };
 
         if let Some(addr) = email {
             self.dispatch_verification_email(
@@ -202,27 +212,8 @@ impl CognitoService {
                 TriggerSource::CustomEmailSenderForgotPassword,
                 &region,
                 &account_id,
-            );
-        }
-
-        // CustomMessage_ForgotPassword trigger (fire-and-forget)
-        if let Some(ref ctx) = self.delivery_ctx {
-            if let Some(function_arn) = triggers::get_trigger_arn(
-                &self.state,
-                &pool_id,
-                TriggerSource::CustomMessageForgotPassword,
-            ) {
-                let event = triggers::build_trigger_event(
-                    TriggerSource::CustomMessageForgotPassword,
-                    &pool_id,
-                    Some(client_id),
-                    username,
-                    &user_attrs,
-                    &region,
-                    &account_id,
-                );
-                triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
-            }
+            )
+            .await?;
         }
 
         Ok(AwsResponse::ok_json(json!({

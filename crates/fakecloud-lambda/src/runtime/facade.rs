@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use fakecloud_core::auth::{SessionCredentialIssuer, SessionCredentials};
+use fakecloud_core::delivery::LambdaInvocationOutput;
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 
@@ -205,16 +206,110 @@ fn deploy_id_from(code_sha256: &str, launch_config: &str, layers: &[Vec<u8>]) ->
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
-/// Quick liveness check: can a TCP connection to `endpoint` (`host:port`) be
-/// opened within `timeout`? Used before forwarding a payload to a warm instance
-/// so a dead/black-holed Pod is detected in ~1s instead of hanging the full
-/// invoke timeout. A failed connect provably never reached the handler, so the
-/// caller can safely evict and retry.
-async fn endpoint_reachable(endpoint: &str, timeout: Duration) -> bool {
-    matches!(
-        tokio::time::timeout(timeout, tokio::net::TcpStream::connect(endpoint)).await,
-        Ok(Ok(_))
-    )
+/// Quick liveness check: does the Runtime Interface Emulator at `endpoint`
+/// (`host:port`) answer HTTP within `timeout`? Used before forwarding a
+/// payload to a warm instance so a dead/black-holed instance is detected in
+/// ~1s instead of hanging the full invoke timeout, and by the Docker backend
+/// to wait for a fresh container.
+///
+/// A TCP connect is not enough: a published Docker port is a forwarder
+/// that accepts connections whether or not anything listens in the
+/// container, then closes them. A freshly started container therefore
+/// looked ready before its RIE listened, and the first invocation failed
+/// with "error sending request" (never retried, since the connection had
+/// been established). `GET /` is answered `404` by a listening RIE and runs
+/// no invocation, so any HTTP response proves the instance is serving; a
+/// failed probe provably never reached the handler, so the caller can
+/// safely evict and retry.
+pub(crate) async fn endpoint_reachable(endpoint: &str, timeout: Duration) -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout)
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    client
+        .get(format!("http://{endpoint}/"))
+        .send()
+        .await
+        .is_ok()
+}
+
+/// Decide what a Runtime Interface Emulator response means, in the terms of
+/// the Lambda `Invoke` API: the payload plus the `X-Amz-Function-Error`
+/// value. This is the one place fakecloud decides whether an invocation
+/// produced a function error; every consumer (the `Invoke` API, async
+/// destinations, and cross-service integrations through
+/// [`fakecloud_core::delivery::LambdaDelivery`]) reads the result.
+///
+/// The RIE reports the outcomes differently from Lambda:
+/// - a runtime that exited or failed init (`Runtime.ExitError`,
+///   `Runtime.ImportModuleError`, ...) comes back as a non-200 status with the
+///   error object as the body; Lambda returns 200 + `Unhandled`;
+/// - a timeout comes back as 200 with the plain text `Task timed out after
+///   N.00 seconds`; Lambda returns 200 + `Unhandled` with
+///   `{"errorType":"Sandbox.Timedout","errorMessage":"RequestId: <id> Error:
+///   Task timed out after N.00 seconds"}`;
+/// - an exception the handler threw comes back as 200 with the runtime
+///   client's error object, with no header or status distinguishing it from
+///   a normal return. Every AWS runtime client reports a thrown error with
+///   both a string `errorType` and a string `errorMessage`, so that is how it
+///   is recognised here. A handler that *returns* exactly such an object is
+///   indistinguishable at this layer (the RIE swallows the runtime's
+///   `/invocation/<id>/error` call) and is reported as a function error.
+pub fn classify_invocation_response(status: u16, body: &[u8]) -> LambdaInvocationOutput {
+    let parsed: Option<serde_json::Value> = serde_json::from_slice(body).ok();
+    if status != 200 {
+        if parsed.as_ref().is_some_and(serde_json::Value::is_object) {
+            return LambdaInvocationOutput::unhandled(body.to_vec());
+        }
+        let message = String::from_utf8_lossy(body).trim().to_string();
+        let message = if message.is_empty() {
+            format!("Runtime returned HTTP {status}")
+        } else {
+            message
+        };
+        return LambdaInvocationOutput::unhandled(
+            serde_json::json!({ "errorType": "Runtime.Unknown", "errorMessage": message })
+                .to_string(),
+        );
+    }
+    if parsed.is_none() {
+        if let Some(timed_out) = rie_timeout_message(body) {
+            let request_id = uuid::Uuid::new_v4();
+            return LambdaInvocationOutput::unhandled(
+                serde_json::json!({
+                    "errorType": "Sandbox.Timedout",
+                    "errorMessage": format!("RequestId: {request_id} Error: {timed_out}"),
+                })
+                .to_string(),
+            );
+        }
+    }
+    let is_runtime_error_object = parsed
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|m| {
+            m.get("errorType").is_some_and(serde_json::Value::is_string)
+                && m.get("errorMessage")
+                    .is_some_and(serde_json::Value::is_string)
+        });
+    if is_runtime_error_object {
+        LambdaInvocationOutput::unhandled(body.to_vec())
+    } else {
+        LambdaInvocationOutput::success(body.to_vec())
+    }
+}
+
+/// The RIE's timeout body is the bare text `Task timed out after N.00
+/// seconds`; return it when `body` is exactly that.
+fn rie_timeout_message(body: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(body).ok()?.trim();
+    let secs = text
+        .strip_prefix("Task timed out after ")?
+        .strip_suffix(" seconds")?;
+    secs.parse::<f64>().ok()?;
+    Some(text)
 }
 
 /// Warm instances taken out of the pool by
@@ -246,6 +341,11 @@ pub struct LambdaRuntime {
     /// Mints the execution-role credentials each instance is started with.
     /// Unset (no credentials exported) until the server wires IAM in.
     credential_issuer: OnceLock<Arc<dyn SessionCredentialIssuer>>,
+    /// Where asynchronous (`Event`) invocations record their outcome
+    /// (`OnSuccess`/`OnFailure` destinations, dead-letter queues). Held
+    /// weakly: the destinations bus reaches Lambda again through the
+    /// invoker built on this runtime. Unset until the server wires it.
+    async_destinations: OnceLock<std::sync::Weak<fakecloud_core::delivery::DeliveryBus>>,
 }
 
 impl LambdaRuntime {
@@ -264,7 +364,21 @@ impl LambdaRuntime {
             starting: RwLock::new(HashMap::new()),
             max_concurrency,
             credential_issuer: OnceLock::new(),
+            async_destinations: OnceLock::new(),
         }
+    }
+
+    /// Bind the bus asynchronous invocations route their outcome through.
+    /// Set once at server startup; later calls are ignored.
+    pub fn set_async_destinations(&self, bus: &Arc<fakecloud_core::delivery::DeliveryBus>) {
+        let _ = self.async_destinations.set(Arc::downgrade(bus));
+    }
+
+    /// The bus bound by [`Self::set_async_destinations`], if still alive.
+    pub fn async_destinations(&self) -> Option<Arc<fakecloud_core::delivery::DeliveryBus>> {
+        self.async_destinations
+            .get()
+            .and_then(std::sync::Weak::upgrade)
     }
 
     /// Give instances execution-role credentials: each launch mints a
@@ -435,15 +549,18 @@ impl LambdaRuntime {
     /// or prior crash) it is evicted and the call retried (up to four
     /// times) against a freshly cold-started instance, so a dead instance can't
     /// wedge the function permanently.
+    ///
+    /// `Ok` means the function ran; whether it failed is reported in the
+    /// output's `function_error` (see [`classify_invocation_response`]).
     pub async fn invoke(
         &self,
         func: &LambdaFunction,
         payload: &[u8],
         layers: &[Vec<u8>],
-    ) -> Result<Vec<u8>, RuntimeError> {
+    ) -> Result<LambdaInvocationOutput, RuntimeError> {
         self.invoke_inner(func, payload, layers, false)
             .await
-            .map(|(bytes, _)| bytes)
+            .map(|(output, _)| output)
     }
 
     /// Like [`Self::invoke`] but also returns the instance's recent log tail
@@ -454,7 +571,7 @@ impl LambdaRuntime {
         func: &LambdaFunction,
         payload: &[u8],
         layers: &[Vec<u8>],
-    ) -> Result<(Vec<u8>, Option<String>), RuntimeError> {
+    ) -> Result<(LambdaInvocationOutput, Option<String>), RuntimeError> {
         self.invoke_inner(func, payload, layers, true).await
     }
 
@@ -464,7 +581,7 @@ impl LambdaRuntime {
         payload: &[u8],
         layers: &[Vec<u8>],
         capture_logs: bool,
-    ) -> Result<(Vec<u8>, Option<String>), RuntimeError> {
+    ) -> Result<(LambdaInvocationOutput, Option<String>), RuntimeError> {
         let client = reqwest::Client::builder()
             .connect_timeout(REACHABILITY_PROBE_TIMEOUT)
             .build()
@@ -511,6 +628,7 @@ impl LambdaRuntime {
                 .await;
             match send {
                 Ok(resp) => {
+                    let status = resp.status().as_u16();
                     let body = resp.bytes().await;
                     *slot.entry.last_used.write() = Instant::now();
                     return match body {
@@ -524,7 +642,7 @@ impl LambdaRuntime {
                             } else {
                                 None
                             };
-                            Ok((b.to_vec(), logs))
+                            Ok((classify_invocation_response(status, &b), logs))
                         }
                         Err(e) => {
                             // Response failed mid-stream — the instance is
@@ -1229,6 +1347,16 @@ mod tests {
                     if n == 0 {
                         return;
                     }
+                    // The readiness probe (`GET /`): the real RIE answers it
+                    // 404 at once and starts no event.
+                    if buf[..n].starts_with(b"GET ") {
+                        let _ = sock
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                        return;
+                    }
                     let now = cur.fetch_add(1, SeqCst) + 1;
                     peak.fetch_max(now, SeqCst);
                     tokio::time::sleep(delay).await;
@@ -1252,6 +1380,7 @@ mod tests {
             starting: RwLock::new(HashMap::new()),
             max_concurrency,
             credential_issuer: std::sync::OnceLock::new(),
+            async_destinations: std::sync::OnceLock::new(),
         })
     }
 
@@ -1398,7 +1527,7 @@ mod tests {
             .invoke(&test_func("dead", "sha-A"), b"{}", &[])
             .await
             .expect("should recover via cold-start retry");
-        assert_eq!(out, b"ok");
+        assert_eq!(out.payload, b"ok");
         assert_eq!(
             backend.launches.load(SeqCst),
             3,
@@ -1433,7 +1562,7 @@ mod tests {
             .expect("should recover via cold-start retry");
         let elapsed = started.elapsed();
 
-        assert_eq!(out, b"ok");
+        assert_eq!(out.payload, b"ok");
         assert_eq!(
             backend.launches.load(SeqCst),
             2,
@@ -1848,6 +1977,7 @@ mod tests {
             starting: RwLock::new(HashMap::new()),
             max_concurrency: 2,
             credential_issuer: std::sync::OnceLock::new(),
+            async_destinations: std::sync::OnceLock::new(),
         })
     }
 
@@ -1945,5 +2075,102 @@ mod tests {
             super::deploy_id_for(&plain, &[], true),
             super::deploy_id_for(&tagged, &[], true)
         );
+    }
+
+    // Bodies below are what the AWS Runtime Interface Emulator actually
+    // returns for each outcome (probed against public.ecr.aws/lambda images).
+
+    #[test]
+    fn classify_plain_return_is_success() {
+        let out = super::classify_invocation_response(200, br#"{"ok": true}"#);
+        assert_eq!(out.function_error, None);
+        assert_eq!(out.payload, br#"{"ok": true}"#);
+        assert_eq!(
+            super::classify_invocation_response(200, b"null").function_error,
+            None
+        );
+    }
+
+    #[test]
+    fn classify_thrown_error_is_unhandled() {
+        let body = br#"{"errorMessage": "boom", "errorType": "ValueError", "requestId": "r", "stackTrace": []}"#;
+        let out = super::classify_invocation_response(200, body);
+        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
+        assert_eq!(out.payload, body);
+    }
+
+    #[test]
+    fn classify_partial_error_shape_is_success() {
+        // A runtime error object always carries both fields as strings; a
+        // returned object with only one of them is a normal result.
+        for body in [
+            &br#"{"errorMessage": "fine"}"#[..],
+            br#"{"errorType": "X"}"#,
+            br#"{"errorType": 1, "errorMessage": "x"}"#,
+        ] {
+            assert_eq!(
+                super::classify_invocation_response(200, body).function_error,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn classify_runtime_exit_is_unhandled_with_the_runtime_error() {
+        let body = br#"{"errorType":"Runtime.ExitError","errorMessage":"RequestId: x Error: Runtime exited with error: exit status 3"}"#;
+        let out = super::classify_invocation_response(502, body);
+        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
+        assert_eq!(out.error_type().as_deref(), Some("Runtime.ExitError"));
+    }
+
+    #[test]
+    fn classify_non_json_failure_status_wraps_the_text() {
+        let out = super::classify_invocation_response(500, b"internal failure");
+        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
+        assert_eq!(out.error_type().as_deref(), Some("Runtime.Unknown"));
+        assert_eq!(out.error_message().as_deref(), Some("internal failure"));
+    }
+
+    #[test]
+    fn classify_rie_timeout_reports_sandbox_timedout() {
+        let out = super::classify_invocation_response(200, b"Task timed out after 2.00 seconds");
+        assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
+        assert_eq!(out.error_type().as_deref(), Some("Sandbox.Timedout"));
+        let message = out.error_message().unwrap();
+        assert!(message.starts_with("RequestId: "), "{message}");
+        assert!(
+            message.ends_with(" Error: Task timed out after 2.00 seconds"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn classify_returned_timeout_string_is_success() {
+        // A handler returning that sentence as a string is JSON-encoded.
+        let out =
+            super::classify_invocation_response(200, br#""Task timed out after 2.00 seconds""#);
+        assert_eq!(out.function_error, None);
+    }
+
+    /// The cold-start race: a published Docker port is a forwarder that
+    /// accepts TCP with nothing listening in the container and closes the
+    /// connection. Such an endpoint must not count as ready, while a
+    /// listening RIE (any HTTP answer) must.
+    #[tokio::test]
+    async fn readiness_needs_an_http_answer_not_just_a_tcp_accept() {
+        let forwarder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fwd_addr = forwarder.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = forwarder.accept().await {
+                drop(sock);
+            }
+        });
+        assert!(
+            !super::endpoint_reachable(&fwd_addr, Duration::from_millis(500)).await,
+            "an accept-and-close forwarder is not a listening RIE"
+        );
+
+        let rie = spawn_rie(Duration::from_secs(5), Arc::new(AtomicUsize::new(0))).await;
+        assert!(super::endpoint_reachable(&rie, Duration::from_millis(500)).await);
     }
 }

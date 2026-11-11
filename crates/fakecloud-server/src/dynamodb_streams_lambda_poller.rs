@@ -2,7 +2,9 @@
 //!
 //! Periodically checks Lambda state for enabled event source mappings
 //! pointing to DynamoDB streams, reads stream records, and invokes Lambda
-//! functions with batches of records.
+//! functions with batches of records. Failed batches are retried, bisected,
+//! partially checkpointed and finally discarded to the OnFailure destination
+//! as `stream_esm_failures` describes.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,11 +12,19 @@ use std::time::Duration;
 use chrono::Utc;
 use serde_json::json;
 
-use fakecloud_core::delivery::LambdaDelivery;
+use fakecloud_core::delivery::{DeliveryBus, LambdaDelivery};
 use fakecloud_dynamodb::{cmp_seq, SharedDynamoDbState};
 use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
 use fakecloud_persistence::SnapshotHook;
+
+use crate::stream_esm_failures::{
+    Attempt, DiscardCause, DiscardedBatch, FailurePolicy, Pending, Resolution, RetryTracker, Step,
+    StreamKind,
+};
+
+/// The one shard a DynamoDB stream reports (`DescribeStream`).
+const STREAM_SHARD_ID: &str = "shardId-00000000000000000000-00000001";
 
 /// DynamoDB Streams -> Lambda event source mapping poller.
 pub struct DynamoDbStreamsLambdaPoller {
@@ -26,6 +36,10 @@ pub struct DynamoDbStreamsLambdaPoller {
     /// DynamoDB API write, so a restart in the window re-delivered records the
     /// mapping had already consumed (bug-audit 4.5).
     snapshot_hook: Option<SnapshotHook>,
+    /// Failed-batch retries per mapping.
+    retries: RetryTracker,
+    /// Where a mapping's OnFailure destination records go.
+    failure_destinations: Option<Arc<DeliveryBus>>,
 }
 
 impl DynamoDbStreamsLambdaPoller {
@@ -35,7 +49,14 @@ impl DynamoDbStreamsLambdaPoller {
             lambda_state,
             lambda_delivery: None,
             snapshot_hook: None,
+            retries: RetryTracker::default(),
+            failure_destinations: None,
         }
+    }
+
+    pub fn with_failure_destinations(mut self, bus: Arc<DeliveryBus>) -> Self {
+        self.failure_destinations = Some(bus);
+        self
     }
 
     pub fn with_lambda_delivery(mut self, delivery: Arc<dyn LambdaDelivery>) -> Self {
@@ -74,6 +95,7 @@ impl DynamoDbStreamsLambdaPoller {
             filter: FilterSet,
             starting_position: Option<String>,
             starting_position_timestamp: Option<f64>,
+            policy: FailurePolicy,
         }
 
         // Collect enabled mappings that point to DynamoDB streams across
@@ -100,11 +122,20 @@ impl DynamoDbStreamsLambdaPoller {
                             filter: FilterSet::from_strings(m.filter_patterns.iter()),
                             starting_position: m.starting_position.clone(),
                             starting_position_timestamp: m.starting_position_timestamp,
+                            policy: FailurePolicy::of(m),
                         })
                         .collect::<Vec<_>>()
                 })
                 .collect()
         };
+
+        // A deleted (or disabled) mapping's retries go with it.
+        self.retries.retain(|key| {
+            mappings.iter().any(|m| {
+                key.strip_prefix(m.uuid.as_str())
+                    .is_some_and(|rest| rest.starts_with(':'))
+            })
+        });
 
         if mappings.is_empty() {
             return;
@@ -118,6 +149,7 @@ impl DynamoDbStreamsLambdaPoller {
             filter,
             starting_position,
             starting_position_timestamp,
+            policy,
         } in mappings
         {
             // Extract table name from stream ARN
@@ -212,36 +244,42 @@ impl DynamoDbStreamsLambdaPoller {
                 continue;
             }
 
+            let retry_key = format!("{mapping_id}:{STREAM_SHARD_ID}");
+            let pending: Vec<Pending> = records
+                .iter()
+                .map(|r| (r.dynamodb.sequence_number.clone(), r.timestamp))
+                .collect();
+            let n = match self.retries.plan(&retry_key, &policy, &pending, Utc::now()) {
+                Step::Wait => continue,
+                Step::DiscardTooOld { n, invoke_count } => {
+                    let batch = &records[..n];
+                    self.discard(
+                        &mapping_id,
+                        &function_arn,
+                        &stream_arn,
+                        &policy,
+                        batch,
+                        invoke_count,
+                        DiscardCause::RecordAge,
+                        json!({ "Records": batch.iter().map(ddb_event_record).collect::<Vec<_>>() })
+                            .to_string(),
+                    );
+                    self.retries.discarded(&retry_key, &pending, n);
+                    self.checkpoint_past(&stream_arn, &mapping_id, batch).await;
+                    continue;
+                }
+                Step::Invoke(n) => n,
+            };
+            let records = &records[..n];
+
             // Build per-record Lambda event JSON, then drop any record
             // whose JSON doesn't match FilterCriteria. AWS treats
             // filtered-out records as consumed — the checkpoint always
             // advances past them.
-            let last_seq = records.last().map(|r| r.dynamodb.sequence_number.clone());
             let event_records: Vec<serde_json::Value> = records
                 .iter()
                 .filter_map(|record| {
-                    let mut event_record = json!({
-                        "eventID": record.event_id,
-                        "eventName": record.event_name,
-                        "eventVersion": record.event_version,
-                        "eventSource": record.event_source,
-                        "awsRegion": record.aws_region,
-                        "dynamodb": {
-                            "Keys": record.dynamodb.keys,
-                            "SequenceNumber": record.dynamodb.sequence_number,
-                            "SizeBytes": record.dynamodb.size_bytes,
-                            "StreamViewType": record.dynamodb.stream_view_type,
-                        },
-                        "eventSourceARN": record.event_source_arn,
-                    });
-
-                    if let Some(ref new_img) = record.dynamodb.new_image {
-                        event_record["dynamodb"]["NewImage"] = json!(new_img);
-                    }
-                    if let Some(ref old_img) = record.dynamodb.old_image {
-                        event_record["dynamodb"]["OldImage"] = json!(old_img);
-                    }
-
+                    let event_record = ddb_event_record(record);
                     if filter.matches(&event_record) {
                         Some(event_record)
                     } else {
@@ -250,56 +288,24 @@ impl DynamoDbStreamsLambdaPoller {
                 })
                 .collect();
 
-            // If the filter dropped every record, advance the
-            // checkpoint past them — AWS treats filtered records as
-            // consumed. Otherwise, hold the checkpoint until after a
-            // successful invoke so failures retry on the next poll.
+            // If the filter dropped every record, advance the checkpoint
+            // past them — AWS treats filtered records as consumed.
             if event_records.is_empty() {
-                if let Some(seq) = last_seq.clone() {
-                    self.advance_checkpoint(&stream_arn, &mapping_id, seq);
-                }
+                self.retries
+                    .resolve(&retry_key, &policy, &pending, n, Attempt::Succeeded);
+                self.checkpoint_past(&stream_arn, &mapping_id, records)
+                    .await;
                 continue;
             }
 
             let event = json!({ "Records": &event_records });
             let payload = serde_json::to_string(&event).unwrap_or_default();
 
-            let invoke_succeeded = match &self.lambda_delivery {
-                Some(delivery) => match delivery.invoke_lambda(&function_arn, &payload).await {
-                    Ok(_) => {
-                        tracing::info!(
-                            function_arn = %function_arn,
-                            record_count = event_records.len(),
-                            "DynamoDB Streams->Lambda invocation succeeded"
-                        );
-                        true
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            function_arn = %function_arn,
-                            error = %e,
-                            "DynamoDB Streams->Lambda invocation failed"
-                        );
-                        false
-                    }
-                },
-                None => true,
-            };
-
-            if !invoke_succeeded {
-                continue;
-            }
-
-            // Successful invoke — advance the checkpoint and record
-            // the invocation when no real Lambda runtime is wired.
-            if let Some(seq) = last_seq.clone() {
-                self.advance_checkpoint(&stream_arn, &mapping_id, seq);
-                // Persist the advanced checkpoint so a restart resumes past the
-                // records this batch already delivered.
-                self.persist().await;
-            }
-
-            if self.lambda_delivery.is_none() {
+            let Some(delivery) = &self.lambda_delivery else {
+                self.retries
+                    .resolve(&retry_key, &policy, &pending, n, Attempt::Succeeded);
+                self.checkpoint_past(&stream_arn, &mapping_id, records)
+                    .await;
                 // Recorded in the account and region the function ARN names.
                 let mut lambda_accounts = self.lambda_state.write();
                 let default_account = lambda_accounts.default_account_id().to_string();
@@ -316,8 +322,124 @@ impl DynamoDbStreamsLambdaPoller {
                     timestamp: Utc::now(),
                     source: "dynamodb:streams".to_string(),
                 });
+                continue;
+            };
+
+            let result = delivery.invoke_lambda(&function_arn, &payload).await;
+            // A ReportBatchItemFailures item identifier is the record's
+            // SequenceNumber.
+            let seqs: Vec<String> = records
+                .iter()
+                .map(|r| r.dynamodb.sequence_number.clone())
+                .collect();
+            let attempt = Attempt::of(&result, &policy, &seqs);
+            match &attempt {
+                Attempt::Failed { .. } => tracing::warn!(
+                    function_arn = %function_arn,
+                    error = %match &result {
+                        Ok(output) => String::from_utf8_lossy(&output.payload).into_owned(),
+                        Err(e) => e.clone(),
+                    },
+                    "DynamoDB Streams->Lambda: batch failed"
+                ),
+                _ => tracing::info!(
+                    function_arn = %function_arn,
+                    record_count = event_records.len(),
+                    "DynamoDB Streams->Lambda invocation succeeded"
+                ),
+            }
+            match self
+                .retries
+                .resolve(&retry_key, &policy, &pending, n, attempt)
+            {
+                Resolution::Advance(k) => {
+                    self.checkpoint_past(&stream_arn, &mapping_id, &records[..k])
+                        .await;
+                }
+                Resolution::Retry => {}
+                Resolution::Discard {
+                    n,
+                    invoke_count,
+                    function_error,
+                } => {
+                    let batch = &records[..n];
+                    self.discard(
+                        &mapping_id,
+                        &function_arn,
+                        &stream_arn,
+                        &policy,
+                        batch,
+                        invoke_count,
+                        DiscardCause::RetriesExhausted { function_error },
+                        payload.clone(),
+                    );
+                    self.checkpoint_past(&stream_arn, &mapping_id, batch).await;
+                }
             }
         }
+    }
+
+    /// Checkpoint past the last of `records` and persist it, so a restart
+    /// resumes past the records already handled.
+    async fn checkpoint_past(
+        &self,
+        stream_arn: &str,
+        mapping_id: &str,
+        records: &[fakecloud_dynamodb::StreamRecord],
+    ) {
+        if let Some(last) = records.last() {
+            self.advance_checkpoint(
+                stream_arn,
+                mapping_id,
+                last.dynamodb.sequence_number.clone(),
+            );
+            self.persist().await;
+        }
+    }
+
+    /// Describe a discarded batch to the mapping's OnFailure destination.
+    #[allow(clippy::too_many_arguments)]
+    fn discard(
+        &self,
+        mapping_id: &str,
+        function_arn: &str,
+        stream_arn: &str,
+        policy: &FailurePolicy,
+        records: &[fakecloud_dynamodb::StreamRecord],
+        invoke_count: u32,
+        cause: DiscardCause,
+        payload: String,
+    ) {
+        tracing::warn!(
+            function_arn,
+            stream_arn,
+            records = records.len(),
+            "DynamoDB Streams->Lambda: discarding a failed batch"
+        );
+        let (Some(destination), Some(bus), Some(first), Some(last)) = (
+            policy.on_failure.as_deref(),
+            self.failure_destinations.as_ref(),
+            records.first(),
+            records.last(),
+        ) else {
+            return;
+        };
+        DiscardedBatch {
+            kind: StreamKind::DynamoDb,
+            mapping_uuid: mapping_id,
+            function_arn,
+            stream_arn,
+            shard_id: STREAM_SHARD_ID,
+            first_sequence: &first.dynamodb.sequence_number,
+            last_sequence: &last.dynamodb.sequence_number,
+            first_arrival: first.timestamp,
+            last_arrival: last.timestamp,
+            batch_size: records.len(),
+            invoke_count,
+            cause,
+            payload,
+        }
+        .send(bus, destination);
     }
 
     /// Persist the last-delivered sequence number for a mapping into the
@@ -330,6 +452,31 @@ impl DynamoDbStreamsLambdaPoller {
             dynamodb.set_lambda_stream_checkpoint(mapping_id, sequence_number);
         }
     }
+}
+
+/// A stream record as the function receives it.
+fn ddb_event_record(record: &fakecloud_dynamodb::StreamRecord) -> serde_json::Value {
+    let mut event_record = json!({
+        "eventID": record.event_id,
+        "eventName": record.event_name,
+        "eventVersion": record.event_version,
+        "eventSource": record.event_source,
+        "awsRegion": record.aws_region,
+        "dynamodb": {
+            "Keys": record.dynamodb.keys,
+            "SequenceNumber": record.dynamodb.sequence_number,
+            "SizeBytes": record.dynamodb.size_bytes,
+            "StreamViewType": record.dynamodb.stream_view_type,
+        },
+        "eventSourceARN": record.event_source_arn,
+    });
+    if let Some(ref new_img) = record.dynamodb.new_image {
+        event_record["dynamodb"]["NewImage"] = json!(new_img);
+    }
+    if let Some(ref old_img) = record.dynamodb.old_image {
+        event_record["dynamodb"]["OldImage"] = json!(old_img);
+    }
+    event_record
 }
 
 #[cfg(test)]
@@ -545,6 +692,66 @@ mod tests {
             invocation_count(&lambda_state, OTHER),
             1,
             "cross-account mapping must fire"
+        );
+    }
+
+    /// A function that answers every invocation with a function error.
+    struct FailingLambda(parking_lot::Mutex<usize>);
+
+    impl LambdaDelivery for FailingLambda {
+        fn invoke_lambda(
+            &self,
+            _function_arn: &str,
+            _payload: &str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                    > + Send,
+            >,
+        > {
+            *self.0.lock() += 1;
+            Box::pin(async {
+                Ok(fakecloud_core::delivery::LambdaInvocationOutput::unhandled(
+                    br#"{"errorType":"Error","errorMessage":"boom"}"#.to_vec(),
+                ))
+            })
+        }
+    }
+
+    /// A function error holds the checkpoint: the batch is redelivered on
+    /// the next poll instead of being consumed as a success.
+    #[tokio::test]
+    async fn function_error_retries_the_batch() {
+        let dynamodb_state: SharedDynamoDbState = Arc::new(RwLock::new(MultiAccountState::new(
+            DEFAULT_ACCOUNT,
+            REGION,
+            ENDPOINT,
+        )));
+        let svc = DynamoDbService::new(dynamodb_state.clone());
+        create_streamed_table(&svc, DEFAULT_ACCOUNT, "tbl").await;
+        put_item(&svc, DEFAULT_ACCOUNT, "tbl", "a").await;
+
+        let arn = stream_arn(&dynamodb_state, DEFAULT_ACCOUNT, "tbl");
+        let lambda_state = lambda_state_with(DEFAULT_ACCOUNT, esm("esm-1", DEFAULT_ACCOUNT, &arn));
+        let delivery = Arc::new(FailingLambda(parking_lot::Mutex::new(0)));
+        let poller = DynamoDbStreamsLambdaPoller::new(dynamodb_state.clone(), lambda_state)
+            .with_lambda_delivery(delivery.clone());
+        poller.poll().await;
+        // Retries wait out a backoff (about 200ms after the first failure).
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        poller.poll().await;
+        assert_eq!(*delivery.0.lock(), 2, "the failed batch is redelivered");
+        // TRIM_HORIZON seeds an empty checkpoint; a failed batch leaves it.
+        assert_eq!(
+            dynamodb_state
+                .read()
+                .regional(DEFAULT_ACCOUNT, REGION)
+                .unwrap()
+                .lambda_stream_checkpoint("esm-1")
+                .as_deref(),
+            Some(""),
+            "the checkpoint does not move past a failed batch"
         );
     }
 }

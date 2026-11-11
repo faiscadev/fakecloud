@@ -990,7 +990,7 @@ mod tests {
     }
 
     /// Minimal RIE stand-in: records each invocation request body and answers
-    /// 200 `{}`. Bare reachability probes (connect, no bytes) are ignored.
+    /// 200 `{}`. Readiness probes (`GET /`) are answered 404 and not recorded.
     async fn spawn_recording_rie(bodies: Arc<Mutex<Vec<String>>>) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1011,6 +1011,16 @@ mod tests {
                         let Some(header_end) = text.find("\r\n\r\n") else {
                             continue;
                         };
+                        // The readiness probe (`GET /`): the real RIE
+                        // answers it 404 and runs no invocation.
+                        if text.starts_with("GET ") {
+                            let _ = sock
+                                .write_all(
+                                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                )
+                                .await;
+                            return;
+                        }
                         let content_length = text[..header_end]
                             .lines()
                             .find_map(|l| {

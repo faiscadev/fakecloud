@@ -14,7 +14,9 @@ const AWS_COMMONS_SQL: &str = include_str!("../../assets/postgres/aws_commons--1
 const AWS_COMMONS_UPGRADE_SQL: &str =
     include_str!("../../assets/postgres/aws_commons--1.0--1.1.sql");
 const AWS_LAMBDA_CONTROL: &str = include_str!("../../assets/postgres/aws_lambda.control");
-const AWS_LAMBDA_SQL: &str = include_str!("../../assets/postgres/aws_lambda--1.0.sql");
+const AWS_LAMBDA_SQL_1_0: &str = include_str!("../../assets/postgres/aws_lambda--1.0.sql");
+const AWS_LAMBDA_SQL: &str = include_str!("../../assets/postgres/aws_lambda--1.1.sql");
+const AWS_LAMBDA_UPGRADE_SQL: &str = include_str!("../../assets/postgres/aws_lambda--1.0--1.1.sql");
 const AWS_S3_CONTROL: &str = include_str!("../../assets/postgres/aws_s3.control");
 const AWS_S3_SQL: &str = include_str!("../../assets/postgres/aws_s3--1.0.sql");
 
@@ -656,6 +658,14 @@ impl RdsRuntime {
                     let _ = connection.await;
                 });
                 if client.simple_query("SELECT 1").await.is_ok() {
+                    update_bundled_extensions(
+                        &client,
+                        &self.net.sibling_host,
+                        host_port,
+                        username,
+                        password,
+                    )
+                    .await;
                     return Ok(());
                 }
             }
@@ -900,13 +910,15 @@ impl RdsRuntime {
         major_version: &str,
         tag: &str,
     ) -> Result<(), RuntimeError> {
-        let assets: [(&str, &str); 8] = [
+        let assets: [(&str, &str); 10] = [
             ("Dockerfile", POSTGRES_DOCKERFILE),
             ("aws_commons.control", AWS_COMMONS_CONTROL),
             ("aws_commons--1.1.sql", AWS_COMMONS_SQL),
             ("aws_commons--1.0--1.1.sql", AWS_COMMONS_UPGRADE_SQL),
             ("aws_lambda.control", AWS_LAMBDA_CONTROL),
-            ("aws_lambda--1.0.sql", AWS_LAMBDA_SQL),
+            ("aws_lambda--1.0.sql", AWS_LAMBDA_SQL_1_0),
+            ("aws_lambda--1.1.sql", AWS_LAMBDA_SQL),
+            ("aws_lambda--1.0--1.1.sql", AWS_LAMBDA_UPGRADE_SQL),
             ("aws_s3.control", AWS_S3_CONTROL),
             ("aws_s3--1.0.sql", AWS_S3_SQL),
         ];
@@ -1284,6 +1296,106 @@ impl RdsRuntime {
     }
 }
 
+/// Bring every database's installed fakecloud extensions (`aws_commons`,
+/// `aws_lambda`, `aws_s3`) up to the version this image ships, the way
+/// RDS upgrades its extensions: a database restored from a persisted
+/// volume keeps the version it was created with until `ALTER EXTENSION
+/// ... UPDATE`. An image that ships nothing newer leaves nothing to do.
+/// Best effort and bounded: the whole pass gives up after a few seconds,
+/// and a database that cannot be reached or updated is logged and left as
+/// is, never failing or holding up the instance.
+pub(super) async fn update_bundled_extensions(
+    client: &tokio_postgres::Client,
+    host: &str,
+    host_port: u16,
+    username: &str,
+    password: &str,
+) {
+    let pass = update_bundled_extensions_inner(client, host, host_port, username, password);
+    if tokio::time::timeout(EXTENSION_UPDATE_BUDGET, pass)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            host,
+            host_port,
+            "gave up updating postgres extensions after {}s",
+            EXTENSION_UPDATE_BUDGET.as_secs()
+        );
+    }
+}
+
+/// How long the startup extension update may take in all.
+const EXTENSION_UPDATE_BUDGET: Duration = Duration::from_secs(10);
+
+async fn update_bundled_extensions_inner(
+    client: &tokio_postgres::Client,
+    host: &str,
+    host_port: u16,
+    username: &str,
+    password: &str,
+) {
+    let rows = match client
+        .query(
+            "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate",
+            &[],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list databases to update postgres extensions");
+            return;
+        }
+    };
+    for row in rows {
+        let db: String = row.get(0);
+        let connection_string =
+            format!("host={host} port={host_port} user={username} password={password} dbname={db}");
+        let (db_client, connection) = match tokio_postgres::connect(&connection_string, NoTls).await
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(database = %db, error = %e, "could not connect to update postgres extensions");
+                continue;
+            }
+        };
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let installed = match db_client
+            .query(
+                "SELECT e.extname FROM pg_extension e \
+                 JOIN pg_available_extensions a ON a.name = e.extname \
+                 WHERE e.extname IN ('aws_commons', 'aws_lambda', 'aws_s3') \
+                 AND e.extversion <> a.default_version",
+                &[],
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(database = %db, error = %e, "could not read installed postgres extensions");
+                continue;
+            }
+        };
+        for ext in installed {
+            let name: String = ext.get(0);
+            match db_client
+                .simple_query(&format!("ALTER EXTENSION {name} UPDATE"))
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(database = %db, extension = %name, "updated postgres extension")
+                }
+                Err(e) => {
+                    tracing::warn!(database = %db, extension = %name, error = %e, "could not update postgres extension")
+                }
+            }
+        }
+    }
+}
+
 /// Whether DB data should survive a container being recreated via a named
 /// Docker volume. The server defaults `FAKECLOUD_PERSIST_DB_VOLUMES` on in
 /// persistent mode (volumes scoped to the data dir); unset means off, as in
@@ -1389,6 +1501,21 @@ fn bridge_image_tag_with_registry(registry: &str, image: &str, major_version: &s
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn aws_lambda_extension_ships_its_default_version_and_an_upgrade_to_it() {
+        assert!(super::AWS_LAMBDA_CONTROL.contains("default_version = '1.1'"));
+        // 1.0 stays as released, so databases created with it can upgrade.
+        assert!(!super::AWS_LAMBDA_SQL_1_0.contains("_check_function_error"));
+        for sql in [super::AWS_LAMBDA_SQL, super::AWS_LAMBDA_UPGRADE_SQL] {
+            assert!(sql.contains("CREATE FUNCTION aws_lambda._check_function_error("));
+            assert!(sql.contains("'lambda invocation failed'"));
+        }
+        // The upgrade replaces the 1.0 invoke the extension already owns.
+        assert!(
+            super::AWS_LAMBDA_UPGRADE_SQL.contains("CREATE OR REPLACE FUNCTION aws_lambda.invoke(")
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -17,14 +17,17 @@ use tokio_postgres::NoTls;
 
 fn make_echo_zip() -> Vec<u8> {
     // Returns the raw event back to the caller so we can verify the
-    // payload round-trips through plpython3u + the bridge endpoint.
+    // payload round-trips through plpython3u + the bridge endpoint; raises
+    // for `{"fail": true}`.
     let buf = Vec::new();
     let cursor = std::io::Cursor::new(buf);
     let mut writer = zip::ZipWriter::new(cursor);
     let options = zip::write::SimpleFileOptions::default();
     writer.start_file("index.py", options).unwrap();
     writer
-        .write_all(b"def handler(event, context):\n    return event\n")
+        .write_all(
+            b"def handler(event, context):\n    if isinstance(event, dict) and event.get('fail'):\n        raise ValueError('db said no')\n    return event\n",
+        )
         .unwrap();
     let cursor = writer.finish().unwrap();
     cursor.into_inner()
@@ -62,7 +65,10 @@ async fn connect_with_retry(
 
 #[tokio::test]
 async fn aws_lambda_extension_invoke_round_trip() {
-    let server = TestServer::start().await;
+    // Build the postgres image from this tree's extension assets rather than
+    // pulling the image published for this version, so the test exercises
+    // the shipped `aws_lambda` SQL (step 8 depends on it).
+    let server = TestServer::start_with_env(&[("FAKECLOUD_REBUILD_POSTGRES_IMAGE", "1")]).await;
     let lambda = server.lambda_client().await;
     let rds = server.rds_client().await;
 
@@ -168,4 +174,85 @@ async fn aws_lambda_extension_invoke_round_trip() {
     let payload_text: Option<String> = row.get(1);
     assert_eq!(status_code, 202);
     assert!(payload_text.is_none());
+
+    // 8. A function error fails the call the way RDS does: "lambda
+    //    invocation failed" with the function's error in the DETAIL.
+    let err = client
+        .query_one(
+            "SELECT status_code FROM aws_lambda.invoke('echo', '{\"fail\":true}'::json)",
+            &[],
+        )
+        .await
+        .expect_err("a function error fails aws_lambda.invoke");
+    let db_err = err.as_db_error().expect("a database error");
+    assert_eq!(db_err.message(), "lambda invocation failed");
+    let detail = db_err.detail().unwrap_or_default();
+    // The function ARN names the DB instance's account.
+    assert!(
+        detail.starts_with("\"arn:aws:lambda:us-east-1:"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains(":function:echo\" returned error \"Unhandled\", details: \"{"),
+        "{detail}"
+    );
+    assert!(detail.contains("db said no"), "{detail}");
+
+    // 9. A database still on extension 1.0 (as one restored from a volume
+    //    created before 1.1 would be) is brought up to 1.1 when the instance
+    //    comes back, so it gets the function-error behaviour too.
+    client
+        .simple_query("CREATE DATABASE olddb")
+        .await
+        .expect("create olddb");
+    let old = connect_with_retry(&host, port, "admin", "secret123", "olddb").await;
+    old.simple_query("CREATE EXTENSION aws_lambda VERSION '1.0' CASCADE")
+        .await
+        .expect("install aws_lambda 1.0");
+    let version: String = old
+        .query_one(
+            "SELECT extversion FROM pg_extension WHERE extname = 'aws_lambda'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(version, "1.0");
+    drop(old);
+    drop(client);
+    rds.reboot_db_instance()
+        .db_instance_identifier("aws-lambda-ext-db")
+        .send()
+        .await
+        .expect("reboot");
+    let instance = helpers::wait_for_db_available(&rds, "aws-lambda-ext-db", 240).await;
+    let endpoint = instance.endpoint().expect("endpoint");
+    let old = connect_with_retry(
+        endpoint.address().unwrap(),
+        endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "olddb",
+    )
+    .await;
+    let version: String = old
+        .query_one(
+            "SELECT extversion FROM pg_extension WHERE extname = 'aws_lambda'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(version, "1.1", "the extension is updated in place");
+    let err = old
+        .query_one(
+            "SELECT status_code FROM aws_lambda.invoke('echo', '{\"fail\":true}'::json)",
+            &[],
+        )
+        .await
+        .expect_err("the updated extension raises the function error");
+    assert_eq!(
+        err.as_db_error().unwrap().message(),
+        "lambda invocation failed"
+    );
 }

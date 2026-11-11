@@ -585,24 +585,23 @@ async fn execute_task_state(
         } else {
             effective_input.clone()
         };
+        let events = TaskEvents::for_resource(&resource);
+        let task_input_text = serde_json::to_string(&task_input)
+            .expect("serde_json::Value serialization is infallible");
         add_event(
             shared_state,
             execution_arn,
-            "TaskScheduled",
+            events.scheduled,
             entered_event_id,
-            json!({
-                "resource": resource,
-                "region": region_from_execution_arn(execution_arn),
-                "parameters": serde_json::to_string(&task_input).expect("serde_json::Value serialization is infallible"),
-            }),
+            events.scheduled_details(&task_input_text, &region_from_execution_arn(execution_arn)),
         );
 
         add_event(
             shared_state,
             execution_arn,
-            "TaskStarted",
+            events.started,
             entered_event_id,
-            json!({ "resource": resource }),
+            events.started_details(),
         );
 
         let invoke_result = invoke_resource(
@@ -639,12 +638,12 @@ async fn execute_task_state(
                             add_event(
                                 shared_state,
                                 execution_arn,
-                                "TaskSucceeded",
+                                events.succeeded,
                                 entered_event_id,
-                                json!({
-                                    "resource": resource,
-                                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
-                                }),
+                                events.succeeded_details(
+                                    &serde_json::to_string(&output)
+                                        .expect("serde_json::Value serialization is infallible"),
+                                ),
                             );
 
                             return Ok(finish_task_result(
@@ -662,9 +661,9 @@ async fn execute_task_state(
                             add_event(
                                 shared_state,
                                 execution_arn,
-                                "TaskFailed",
+                                events.failed_type(&error),
                                 entered_event_id,
-                                json!({ "error": error, "cause": cause }),
+                                events.failed_details(&error, &cause),
                             );
 
                             if let Some(delay_ms) = should_retry(retriers, &error, *attempt, true) {
@@ -684,12 +683,12 @@ async fn execute_task_state(
                 add_event(
                     shared_state,
                     execution_arn,
-                    "TaskSucceeded",
+                    events.succeeded,
                     entered_event_id,
-                    json!({
-                        "resource": resource,
-                        "output": serde_json::to_string(&result).expect("serde_json::Value serialization is infallible"),
-                    }),
+                    events.succeeded_details(
+                        &serde_json::to_string(&result)
+                            .expect("serde_json::Value serialization is infallible"),
+                    ),
                 );
 
                 return Ok(finish_task_result(
@@ -707,9 +706,9 @@ async fn execute_task_state(
                 add_event(
                     shared_state,
                     execution_arn,
-                    "TaskFailed",
+                    events.failed_type(&error),
                     entered_event_id,
-                    json!({ "error": error, "cause": cause }),
+                    events.failed_details(&error, &cause),
                 );
 
                 if let Some(delay_ms) = should_retry(retriers, &error, *attempt, true) {
@@ -723,6 +722,123 @@ async fn execute_task_state(
                 return Err(StateFailure::Ran((error, cause)));
             }
         }
+    }
+}
+
+/// The history events a Task state records around its work, as AWS names
+/// them. A Lambda function ARN used as the `Resource` records
+/// `LambdaFunctionScheduled` / `Started` / `Succeeded` / `Failed`
+/// (`TimedOut` for `States.Timeout`); a service integration records
+/// `Task*` events naming the integration as `resourceType` + `resource`
+/// (`lambda` + `invoke`). Recorded: `stepfunctions.direct-typed` /
+/// `.opt-typed` `task_events` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json.
+struct TaskEvents {
+    scheduled: &'static str,
+    started: &'static str,
+    succeeded: &'static str,
+    lambda_function: bool,
+    /// `resource` as the Task* event details name it.
+    resource_fields: serde_json::Map<String, Value>,
+}
+
+/// `<service>:<action>` -> (`<service>`, `<action>`); `aws-sdk:<service>:<action>`
+/// -> (`aws-sdk:<service>`, `<action>`).
+fn split_integration(rest: &str) -> Option<(&str, &str)> {
+    if let Some(sdk) = rest.strip_prefix("aws-sdk:") {
+        let (service, action) = sdk.split_once(':')?;
+        return Some((&rest[.."aws-sdk:".len() + service.len()], action));
+    }
+    rest.split_once(':')
+}
+
+impl TaskEvents {
+    fn for_resource(resource: &str) -> Self {
+        let is_lambda_function = fakecloud_aws::arn::arn_resource(resource, "lambda")
+            .is_some_and(|rest| rest.split(':').nth(2) == Some("function"));
+        if is_lambda_function {
+            let mut fields = serde_json::Map::new();
+            fields.insert("resource".to_string(), json!(resource));
+            return Self {
+                scheduled: "LambdaFunctionScheduled",
+                started: "LambdaFunctionStarted",
+                succeeded: "LambdaFunctionSucceeded",
+                lambda_function: true,
+                resource_fields: fields,
+            };
+        }
+        let mut fields = serde_json::Map::new();
+        // `arn:<partition>:states:::<service>:<action>` names an integration;
+        // an SDK integration's type is `aws-sdk:<service>`.
+        match resource
+            .split_once(":states:::")
+            .and_then(|(_, rest)| split_integration(rest))
+        {
+            Some((service, action)) if resource.starts_with("arn:") => {
+                fields.insert("resourceType".to_string(), json!(service));
+                fields.insert("resource".to_string(), json!(action));
+            }
+            _ => {
+                fields.insert("resource".to_string(), json!(resource));
+            }
+        }
+        Self {
+            scheduled: "TaskScheduled",
+            started: "TaskStarted",
+            succeeded: "TaskSucceeded",
+            lambda_function: false,
+            resource_fields: fields,
+        }
+    }
+
+    fn scheduled_details(&self, input: &str, region: &str) -> Value {
+        let mut d = self.resource_fields.clone();
+        if self.lambda_function {
+            d.insert("input".to_string(), json!(input));
+            d.insert("inputDetails".to_string(), json!({"truncated": false}));
+        } else {
+            d.insert("region".to_string(), json!(region));
+            d.insert("parameters".to_string(), json!(input));
+        }
+        Value::Object(d)
+    }
+
+    fn started_details(&self) -> Value {
+        if self.lambda_function {
+            json!({})
+        } else {
+            Value::Object(self.resource_fields.clone())
+        }
+    }
+
+    fn succeeded_details(&self, output: &str) -> Value {
+        let mut d = if self.lambda_function {
+            serde_json::Map::new()
+        } else {
+            self.resource_fields.clone()
+        };
+        d.insert("output".to_string(), json!(output));
+        d.insert("outputDetails".to_string(), json!({"truncated": false}));
+        Value::Object(d)
+    }
+
+    fn failed_type(&self, error: &str) -> &'static str {
+        match (self.lambda_function, error == "States.Timeout") {
+            (true, true) => "LambdaFunctionTimedOut",
+            (true, false) => "LambdaFunctionFailed",
+            (false, _) => "TaskFailed",
+        }
+    }
+
+    fn failed_details(&self, error: &str, cause: &str) -> Value {
+        let mut d = if self.lambda_function {
+            serde_json::Map::new()
+        } else {
+            self.resource_fields.clone()
+        };
+        d.insert("error".to_string(), json!(error));
+        d.insert("cause".to_string(), json!(cause));
+        Value::Object(d)
     }
 }
 
@@ -1847,7 +1963,7 @@ async fn invoke_resource(
 
     // Direct Lambda ARN: arn:aws:lambda:<region>:<account>:function:<name>
     if resource.contains(":lambda:") && resource.contains(":function:") {
-        return invoke_lambda_direct(resource, input, delivery, timeout_seconds).await;
+        return invoke_lambda_direct(resource, input, delivery, timeout_seconds, false).await;
     }
 
     // SDK integration patterns: arn:<partition>:states:::<service>:<action>
@@ -1871,7 +1987,7 @@ async fn invoke_resource(
         // payload. `SdkHttpMetadata`/`SdkResponseMetadata` are omitted; real
         // templates select `Payload`/`StatusCode`.
         let function_arn = qualify_lambda_function_ref(function_name, execution_arn);
-        return invoke_lambda_direct(&function_arn, &payload, delivery, timeout_seconds)
+        return invoke_lambda_direct(&function_arn, &payload, delivery, timeout_seconds, true)
             .await
             .map(|payload| {
                 let mut envelope = json!({
@@ -2848,11 +2964,14 @@ pub(crate) enum UpdateClause {
 }
 
 /// Invoke a Lambda function directly via DeliveryBus.
+/// `optimized` is true for the `arn:aws:states:::lambda:invoke` integration
+/// and false for a function ARN used as the Task's `Resource`.
 async fn invoke_lambda_direct(
     function_arn: &str,
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
     timeout_seconds: Option<u64>,
+    optimized: bool,
 ) -> Result<Value, (String, String)> {
     let delivery = delivery.as_ref().ok_or_else(|| {
         (
@@ -2881,37 +3000,13 @@ async fn invoke_lambda_direct(
     };
 
     match result {
-        Some(Ok(bytes)) => {
-            let response_str = String::from_utf8_lossy(&bytes);
+        Some(Ok(output)) => {
+            if output.is_function_error() {
+                return Err(lambda_function_error(&output, optimized));
+            }
+            let response_str = String::from_utf8_lossy(&output.payload);
             let value: Value =
                 serde_json::from_str(&response_str).unwrap_or(json!(response_str.to_string()));
-
-            // The Lambda runtime returns HTTP 200 even for unhandled function
-            // errors, encoding the failure in the payload as
-            // `{"errorMessage", "errorType", "stackTrace"}`. The delivery trait
-            // only conveys bytes, so the payload is the only available signal —
-            // the same heuristic the Lambda service uses for async destination
-            // routing. Mirror real AWS: a function error fails the task with the
-            // function's `errorType` as the Error and the serialized payload as
-            // the Cause, which is exactly what makes Retry/Catch on custom
-            // exception names work.
-            //
-            // Require BOTH `errorType` and `errorMessage` (not either) to avoid
-            // misreading a legitimate success payload that merely happens to
-            // contain one of those field names as a function error.
-            if let Some(obj) = value.as_object() {
-                if obj.contains_key("errorType") && obj.contains_key("errorMessage") {
-                    let error_type = obj
-                        .get("errorType")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Exception")
-                        .to_string();
-                    let cause = serde_json::to_string(&value)
-                        .expect("serde_json::Value serialization is infallible");
-                    return Err((error_type, cause));
-                }
-            }
-
             Ok(value)
         }
         Some(Err(e)) => {
@@ -2935,6 +3030,61 @@ async fn invoke_lambda_direct(
             Ok(json!({}))
         }
     }
+}
+
+/// The Task failure for a Lambda invocation that returned a function error
+/// (`X-Amz-Function-Error`). The Error is the error object's `errorType`
+/// (what makes Retry/Catch on custom exception names work), or
+/// `Lambda.Unknown` when the function failed without reporting a type (an
+/// older-runtime timeout or crash). The Cause is the error payload: as the
+/// function sent it for a function ARN Resource, re-serialized compactly
+/// (key order kept) for the optimized `lambda:invoke` integration. Recorded:
+/// `stepfunctions.direct-typed` vs `.opt-typed` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json.
+fn lambda_function_error(
+    output: &fakecloud_core::delivery::LambdaInvocationOutput,
+    optimized: bool,
+) -> (String, String) {
+    let raw = String::from_utf8_lossy(&output.payload).into_owned();
+    let payload = if optimized { compact_json(&raw) } else { raw };
+    match output.error_type() {
+        Some(error_type) => (error_type, payload),
+        None => (
+            "Lambda.Unknown".to_string(),
+            format!(
+                "The cause could not be determined because Lambda did not return an error type. Returned payload: {payload}"
+            ),
+        ),
+    }
+}
+
+/// `text` with the whitespace between JSON tokens removed, leaving strings
+/// (and so key order) untouched. Text that is not JSON is returned as is.
+fn compact_json(text: &str) -> String {
+    if serde_json::from_str::<serde::de::IgnoredAny>(text).is_err() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in text.chars() {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if c == '"' {
+            in_string = true;
+            out.push(c);
+        } else if !c.is_whitespace() {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Invoke an activity worker. Inserts a `PENDING` token into shared state

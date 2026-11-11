@@ -443,6 +443,23 @@ impl ProvisionFailure {
     }
 }
 
+/// Whether deleting `stack` has a custom-resource handler to wait for: a
+/// custom resource with a ServiceToken and no retaining DeletionPolicy, in
+/// the stack or any stack nested under it.
+fn family_waits_for_handlers(state: &CloudFormationState, stack: &Stack) -> bool {
+    crate::stack_update::stack_family(state, stack)
+        .iter()
+        .filter_map(|(_, id)| state.stacks.values().find(|s| &s.stack_id == id))
+        .flat_map(|s| s.resources.iter())
+        .any(|r| {
+            is_custom_resource_type(&r.resource_type)
+                && r.service_token.is_some()
+                && !crate::resource_provisioner::policy_retains_physical(
+                    r.deletion_policy.as_deref(),
+                )
+        })
+}
+
 fn is_custom_resource_type(resource_type: &str) -> bool {
     resource_type.starts_with("Custom::") || resource_type == "AWS::CloudFormation::CustomResource"
 }
@@ -488,6 +505,7 @@ pub(crate) fn provision_stack_resources(
                 attributes: BTreeMap::new(),
                 deletion_policy: def.deletion_policy.clone(),
                 update_replace_policy: def.update_replace_policy.clone(),
+                custom_properties: Some(def.properties.clone()),
             }),
         }
     };
@@ -623,6 +641,7 @@ fn reconstruct_stack_resource(
         // Cloud Control has no CloudFormation DeletionPolicy concept.
         deletion_policy: None,
         update_replace_policy: None,
+        custom_properties: None,
     }
 }
 
@@ -722,6 +741,15 @@ pub struct CloudFormationDeps {
     pub mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
     pub kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
     pub opensearch_runtime: Option<Arc<fakecloud_opensearch::OpenSearchRuntime>>,
+}
+
+/// What the resource-deleting half of DeleteStack needs.
+struct StackDeleteJob {
+    account_id: String,
+    region: String,
+    stack_id: String,
+    resources: Vec<StackResource>,
+    orphans: Vec<StackResource>,
 }
 
 #[derive(Clone)]
@@ -1302,29 +1330,26 @@ pub(crate) fn spawn_custom_invokes(provisioner: &ResourceProvisioner) {
     if intents.is_empty() {
         return;
     }
-    let delivery = provisioner.delivery.clone();
+    // CloudFormation invokes custom resource handlers asynchronously.
     for intent in intents {
-        let delivery = delivery.clone();
-        tokio::spawn(async move {
-            match delivery
-                .invoke_lambda(&intent.service_token, &intent.payload)
-                .await
-            {
-                Some(Ok(_)) => {
-                    tracing::info!(
-                        "Custom resource Lambda {} invoked successfully",
-                        intent.service_token
-                    );
-                }
-                Some(Err(e)) => {
-                    tracing::warn!(
-                        "Custom resource Lambda {} invocation failed: {e}",
-                        intent.service_token
-                    );
-                }
-                None => {}
+        match provisioner
+            .delivery
+            .invoke_lambda_async(&intent.service_token, &intent.payload)
+        {
+            Some(Ok(())) => {
+                tracing::info!(
+                    "Custom resource Lambda {} invocation queued",
+                    intent.service_token
+                );
             }
-        });
+            Some(Err(e)) => {
+                tracing::warn!(
+                    "Custom resource Lambda {} invocation failed: {e}",
+                    intent.service_token
+                );
+            }
+            None => {}
+        }
     }
 }
 
@@ -1441,6 +1466,28 @@ impl CloudFormationService {
                 &outcome,
             );
             persist_touched_services(&self.snapshot_hooks, outcome.touched_types).await;
+        }
+        // Stack deletes a restart interrupted carry on in the background.
+        let deleting: Vec<(String, String, String)> = {
+            let accounts = self.state.read();
+            accounts
+                .iter()
+                .flat_map(|(account_id, account)| {
+                    account.regions.iter().flat_map(move |(region, state)| {
+                        state
+                            .stacks
+                            .values()
+                            .filter(|s| s.status == "DELETE_IN_PROGRESS")
+                            .map(move |s| {
+                                (account_id.to_string(), region.clone(), s.stack_id.clone())
+                            })
+                    })
+                })
+                .collect()
+        };
+        for (account_id, region, stack_id) in deleting {
+            tracing::info!(%stack_id, "resuming a stack delete interrupted by a restart");
+            self.spawn_background_delete(&account_id, &region, &stack_id);
         }
         self.save_snapshot().await;
     }
@@ -1587,6 +1634,7 @@ impl CloudFormationService {
             reprovision_losses: Default::default(),
             custom_responses: self.custom_responses.clone(),
             custom_failures: Default::default(),
+            guard_stack_id: (!stack_id.starts_with("cloudcontrol-")).then(|| stack_id.to_string()),
         }
     }
 
@@ -1727,6 +1775,21 @@ impl CloudFormationService {
     /// image pull never blocks the client past its read timeout or stalls every
     /// other CFN op behind the state write lock; the caller drains and
     /// `tokio::spawn`s the queued invokes after dropping the lock.
+    /// A provisioner tied to no recorded stack, for tests that provision
+    /// resources directly.
+    #[cfg(test)]
+    pub(crate) fn scratch_provisioner(
+        &self,
+        stack_id: &str,
+        account_id: &str,
+        region: &str,
+    ) -> ResourceProvisioner {
+        ResourceProvisioner {
+            guard_stack_id: None,
+            ..self.provisioner(stack_id, account_id, region)
+        }
+    }
+
     pub(crate) fn provisioner_deferred(
         &self,
         stack_id: &str,
@@ -2697,7 +2760,10 @@ impl CloudFormationService {
             failure.logical_id
         );
         let reason = if is_custom_resource_type(&failure.resource_type)
-            && failure.reason.starts_with("Received response status")
+            && (failure.reason.starts_with("Received response status")
+                || failure
+                    .reason
+                    .starts_with(crate::stack_update::CUSTOM_NO_RESPONSE_PREFIX))
         {
             failure.reason.clone()
         } else {
@@ -3012,6 +3078,7 @@ impl CloudFormationService {
         // work is wrapped in a block so the lock is dropped on every path -
         // including the stack-not-found path - before the await below.
         let mut deleted_types: Vec<String> = Vec::new();
+        let mut background: Option<String> = None;
         {
             let mut accounts = self.state.write();
             // DeleteStack on a stack that does not exist succeeds without
@@ -3030,7 +3097,6 @@ impl CloudFormationService {
             if let Some(stack) = stack {
                 let stack_id = stack.stack_id.clone();
                 let stack_name_for_notif = stack.name.clone();
-                let notification_arns = stack.notification_arns.clone();
                 let resources: Vec<_> = stack.resources.clone();
                 let termination_protected = stack.enable_termination_protection;
 
@@ -3048,6 +3114,15 @@ impl CloudFormationService {
                         format!(
                             "Stack [{stack_name_for_notif}] cannot be deleted while TerminationProtection is enabled"
                         ),
+                    ));
+                }
+
+                // A delete already under way (waiting on custom resources)
+                // carries on; asking again changes nothing.
+                if stack.status == "DELETE_IN_PROGRESS" {
+                    return Ok(AwsResponse::xml(
+                        StatusCode::OK,
+                        xml_responses::delete_stack_response(&req.request_id),
                     ));
                 }
 
@@ -3117,104 +3192,58 @@ impl CloudFormationService {
                     ));
                 }
 
-                // Build the provisioner while we still have the stack_id
-                // Drop the write lock temporarily so the provisioner can read state
-                drop(accounts);
-                // `provisioner_deferred`: queue any custom-resource Delete Lambda
-                // invokes so a cold image pull never blocks the client past its
-                // read timeout (drained off the request path below).
-                let provisioner =
-                    self.provisioner_deferred(&stack_id, &req.account_id, &req.region);
-
-                // Delete resources in reverse order, honoring each resource's
-                // DeletionPolicy (Retain/Snapshot leaves the physical resource
-                // in place instead of destroying it).
-                // A resource whose delete fails stays, and fails the stack's delete
-                // (`DELETE_FAILED`), as on AWS; the rest are still deleted.
-                let mut failed: Vec<(String, String)> = Vec::new();
-                for resource in resources.iter().rev() {
-                    if let Err(reason) = provisioner.delete_resource_respecting_policy(resource) {
-                        failed.push((resource.logical_id.clone(), reason));
-                    }
-                }
-                for orphan in &orphans {
-                    let _ = provisioner.delete_resource(orphan);
-                }
-
-                // Reap the REAL backing containers for the deleted container
-                // resources (RDS / ElastiCache / ECS / ASG-EC2) off the request
-                // path, so a stack delete does not leak running containers (the
-                // create-side #2031-#2034 hardening reaching the delete path).
-                // Each delete_resource above only removed the in-memory record.
-                // The snapshot hooks let the detached teardown persist the EC2
-                // records it terminates, which this stack op has already
-                // serialized as still running.
-                ContainerBackingHandles::from_provisioner(&provisioner)
-                    .with_snapshot_hooks(&self.snapshot_hooks)
-                    .spawn_teardown_intents(std::mem::take(
-                        &mut *provisioner.pending_container_teardowns.lock(),
-                    ));
-                spawn_custom_invokes(&provisioner);
-
-                // Re-acquire the write lock to update stack status
-                let mut accounts = self.state.write();
-                let outcome = if failed.is_empty() {
-                    "DELETE_COMPLETE"
-                } else {
-                    "DELETE_FAILED"
-                };
-                if !failed.is_empty() {
-                    if let Some(state) = accounts.regional_get_mut(&req.account_id, &req.region) {
-                        record_delete_failure(state, &stack_id, &failed);
-                    }
-                } else if let Some(state) = accounts.regional_get_mut(&req.account_id, &req.region)
-                {
+                // A custom resource's Delete waits for its handler's answer
+                // (up to its ServiceTimeout), so a stack with one, itself or
+                // in a nested stack, deletes in the background,
+                // DELETE_IN_PROGRESS meanwhile, as on AWS; any other stack
+                // deletes within the call.
+                let waits_for_handlers = state
+                    .live_stack(&stack_id)
+                    .is_some_and(|s| family_waits_for_handlers(state, s));
+                if waits_for_handlers {
                     if let Some(stack) = state.stacks.values_mut().find(|s| s.stack_id == stack_id)
                     {
-                        stack.status = "DELETE_COMPLETE".to_string();
-                        // The reason belonged to the previous status (a failed
-                        // create/update); carrying it into DELETE_COMPLETE would
-                        // report a stale failure on a cleanly deleted stack.
+                        stack.status = "DELETE_IN_PROGRESS".to_string();
                         stack.status_reason = None;
-                        stack.resources.clear();
-                        stack.outputs.clear();
-                        // A deleted stack's policy goes with it; a later stack
-                        // of the same name starts without one. Only when this
-                        // call deleted the stack: a concurrent delete may have
-                        // finished first and the name been reused since.
-                        state.stack_policies.remove(&stack_name_for_notif);
+                        // A retried delete tries again what failed last time.
+                        for resource in &mut stack.resources {
+                            if resource.status == "DELETE_FAILED" {
+                                resource.status = "DELETE_IN_PROGRESS".to_string();
+                            }
+                        }
                     }
-                    // Drop this stack's exports + import-consumer entries.
-                    let stale_exports: Vec<String> = state
-                        .exports
-                        .iter()
-                        .filter(|(_, e)| e.exporting_stack_name == stack_name_for_notif)
-                        .map(|(k, _)| k.clone())
-                        .collect();
-                    for k in stale_exports {
-                        state.exports.remove(&k);
-                    }
-                    for entries in state.imports.values_mut() {
-                        entries.retain(|s| s != &stack_name_for_notif);
-                    }
-                    state.imports.retain(|_, v| !v.is_empty());
-                    // A stack's change sets go with it. Left behind, they would
-                    // still answer DescribeChangeSet, and a re-created stack of
-                    // the same name would find them by name.
-                    if let Some(change_sets) = state.extras.get_mut("change_sets") {
-                        change_sets.retain(|_, v| v["StackId"].as_str() != Some(stack_id.as_str()));
-                    }
+                    record_stack_status_event_with_reason(
+                        state,
+                        &stack_id,
+                        &stack_name_for_notif,
+                        "AWS::CloudFormation::Stack",
+                        "DELETE_IN_PROGRESS",
+                        Some(crate::stack_update::USER_INITIATED_REASON),
+                    );
+                    background = Some(stack_id.clone());
+                } else {
+                    drop(accounts);
+                    self.run_stack_delete(StackDeleteJob {
+                        account_id: req.account_id.clone(),
+                        region: req.region.clone(),
+                        stack_id: stack_id.clone(),
+                        resources: resources.clone(),
+                        orphans: orphans.clone(),
+                    });
                 }
-                drop(accounts);
-
-                Self::send_stack_notification(
-                    &self.deps.delivery,
-                    &notification_arns,
-                    &stack_name_for_notif,
-                    &stack_id,
-                    outcome,
-                );
             }
+        }
+
+        // The background delete starts from a persisted DELETE_IN_PROGRESS,
+        // so a restart while it waits picks it up again
+        // (`resume_interrupted_cleanups`).
+        if let Some(stack_id) = background {
+            self.save_snapshot().await;
+            self.spawn_background_delete(&req.account_id, &req.region, &stack_id);
+            return Ok(AwsResponse::xml(
+                StatusCode::OK,
+                xml_responses::delete_stack_response(&req.request_id),
+            ));
         }
 
         // Persist every snapshot-backed service whose resource was deleted, so
@@ -3226,6 +3255,300 @@ impl CloudFormationService {
             StatusCode::OK,
             xml_responses::delete_stack_response(&req.request_id),
         ))
+    }
+
+    /// The resource-deleting half of DeleteStack for a stack no handler has
+    /// to answer, run within the call.
+    fn run_stack_delete(&self, job: StackDeleteJob) {
+        let stack_id = job.stack_id.clone();
+        // Nothing waits on a handler here: queued invokes are sent after.
+        let provisioner = self.provisioner_deferred(&stack_id, &job.account_id, &job.region);
+
+        // Delete resources in reverse order, honoring each resource's
+        // DeletionPolicy (Retain/Snapshot leaves the physical resource
+        // in place instead of destroying it).
+        // A resource whose delete fails stays, and fails the stack's delete
+        // (`DELETE_FAILED`), as on AWS; the rest are still deleted.
+        let mut failed: Vec<(String, String)> = Vec::new();
+        for resource in job.resources.iter().rev() {
+            if let Err(reason) = provisioner.delete_resource_respecting_policy(resource) {
+                failed.push((resource.logical_id.clone(), reason));
+            }
+        }
+        for orphan in &job.orphans {
+            let _ = provisioner.delete_resource(orphan);
+        }
+        self.drain_delete_intents(&provisioner);
+        self.finish_stack_delete(&job.account_id, &job.region, &stack_id, &failed, true);
+    }
+
+    /// Reap the REAL backing containers of the deleted container resources
+    /// (RDS / ElastiCache / ECS / ASG-EC2) off the request path, so a stack
+    /// delete does not leak running containers, and send queued
+    /// custom-resource invokes. The snapshot hooks let the detached teardown
+    /// persist the EC2 records it terminates.
+    fn drain_delete_intents(&self, provisioner: &ResourceProvisioner) {
+        ContainerBackingHandles::from_provisioner(provisioner)
+            .with_snapshot_hooks(&self.snapshot_hooks)
+            .spawn_teardown_intents(std::mem::take(
+                &mut *provisioner.pending_container_teardowns.lock(),
+            ));
+        spawn_custom_invokes(provisioner);
+    }
+
+    pub(crate) fn spawn_background_delete(&self, account_id: &str, region: &str, stack_id: &str) {
+        let service = self.clone();
+        let (account_id, region, stack_id) = (
+            account_id.to_string(),
+            region.to_string(),
+            stack_id.to_string(),
+        );
+        tokio::spawn(async move {
+            service
+                .run_background_delete(&account_id, &region, &stack_id)
+                .await;
+        });
+    }
+
+    /// DeleteStack of a stack whose custom resources must answer: one
+    /// resource at a time, latest first, each Delete waiting for its handler.
+    /// The stack's resource list is the journal: a deleted resource leaves
+    /// it, a failed one stays `DELETE_FAILED`. It is persisted when the
+    /// delete starts, after each resource that waited on a handler, after a
+    /// failure and at the end, so after a restart the delete carries on from
+    /// there; a plain resource deleted since the last save is deleted again,
+    /// which `delete_resource` treats as done (a resource already gone counts
+    /// as deleted). A stack that
+    /// is gone, or no longer DELETE_IN_PROGRESS (a reset, a delete finished
+    /// elsewhere), ends the job without touching anything.
+    pub(crate) async fn run_background_delete(
+        &self,
+        account_id: &str,
+        region: &str,
+        stack_id: &str,
+    ) {
+        let provisioner = Arc::new(self.provisioner(stack_id, account_id, region));
+        let deleting = |state: &CloudFormationState| {
+            state
+                .stacks
+                .values()
+                .find(|s| s.stack_id == stack_id && s.status == "DELETE_IN_PROGRESS")
+                .cloned()
+        };
+        let mut touched_since_save: Vec<String> = Vec::new();
+        loop {
+            let (resource, touched, waited) = {
+                let accounts = self.state.read();
+                let Some(state) = accounts.regional(account_id, region) else {
+                    return;
+                };
+                let Some(stack) = deleting(state) else {
+                    return;
+                };
+                let Some(resource) = stack
+                    .resources
+                    .iter()
+                    .rev()
+                    .find(|r| r.status != "DELETE_FAILED")
+                    .cloned()
+                else {
+                    break;
+                };
+                let mut touched = Vec::new();
+                collect_nested_touched_types(
+                    state,
+                    &resource.resource_type,
+                    &resource.physical_id,
+                    &mut touched,
+                    0,
+                );
+                // A custom resource, or a nested stack holding one, waited
+                // on its handler: worth persisting past.
+                let waited = (is_custom_resource_type(&resource.resource_type)
+                    && resource.service_token.is_some())
+                    || (resource.resource_type == "AWS::CloudFormation::Stack"
+                        && state
+                            .stacks
+                            .values()
+                            .find(|s| s.stack_id == resource.physical_id)
+                            .is_some_and(|child| family_waits_for_handlers(state, child)));
+                (resource, touched, waited)
+            };
+            let worker = provisioner.clone();
+            let target = resource.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                worker.delete_resource_respecting_policy(&target)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("Internal Failure: {e}")));
+            {
+                let mut accounts = self.state.write();
+                let Some(state) = accounts.regional_get_mut(account_id, region) else {
+                    return;
+                };
+                let Some(stack) = state
+                    .stacks
+                    .values_mut()
+                    .find(|s| s.stack_id == stack_id && s.status == "DELETE_IN_PROGRESS")
+                else {
+                    return;
+                };
+                let stack_name = stack.name.clone();
+                match &result {
+                    Ok(()) => stack
+                        .resources
+                        .retain(|r| r.logical_id != resource.logical_id),
+                    Err(_) => {
+                        if let Some(r) = stack
+                            .resources
+                            .iter_mut()
+                            .find(|r| r.logical_id == resource.logical_id)
+                        {
+                            r.status = "DELETE_FAILED".to_string();
+                        }
+                    }
+                }
+                if let Err(why) = &result {
+                    record_event_with_reason(
+                        state,
+                        stack_id,
+                        &stack_name,
+                        &resource.logical_id,
+                        &resource.physical_id,
+                        &resource.resource_type,
+                        "DELETE_FAILED",
+                        Some(why),
+                    );
+                }
+            }
+            self.drain_delete_intents(&provisioner);
+            touched_since_save.extend(touched);
+            if waited || result.is_err() {
+                persist_touched_services(
+                    &self.snapshot_hooks,
+                    std::mem::take(&mut touched_since_save),
+                )
+                .await;
+                self.save_snapshot().await;
+            }
+        }
+
+        // What a held update replaced or created outside the resource list.
+        let orphans = {
+            let mut accounts = self.state.write();
+            accounts
+                .regional_get_mut(account_id, region)
+                .and_then(|state| {
+                    state
+                        .stacks
+                        .values_mut()
+                        .find(|s| s.stack_id == stack_id && s.status == "DELETE_IN_PROGRESS")
+                })
+                .and_then(|stack| stack.pending_update.take())
+                .map(|journal| journal.orphans())
+                .unwrap_or_default()
+        };
+        if !orphans.is_empty() {
+            let worker = provisioner.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                for orphan in &orphans {
+                    let _ = worker.delete_resource(orphan);
+                }
+            })
+            .await;
+            self.drain_delete_intents(&provisioner);
+        }
+
+        let failed: Vec<(String, String)> = {
+            let accounts = self.state.read();
+            accounts
+                .regional(account_id, region)
+                .and_then(deleting)
+                .map(|stack| {
+                    stack
+                        .resources
+                        .iter()
+                        .filter(|r| r.status == "DELETE_FAILED")
+                        .map(|r| (r.logical_id.clone(), String::new()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        self.finish_stack_delete(account_id, region, stack_id, &failed, false);
+        persist_touched_services(&self.snapshot_hooks, touched_since_save).await;
+        self.save_snapshot().await;
+    }
+
+    /// Close a stack delete: DELETE_COMPLETE (with the stack's exports,
+    /// imports, policy and change sets gone) or DELETE_FAILED naming
+    /// `failed`, then the stack's notifications. Only the stack `stack_id`
+    /// names is touched: a stack of the same name created since (after a
+    /// reset) keeps everything. `resource_events` records each failed
+    /// resource's DELETE_FAILED event (the background delete already did).
+    fn finish_stack_delete(
+        &self,
+        account_id: &str,
+        region: &str,
+        stack_id: &str,
+        failed: &[(String, String)],
+        resource_events: bool,
+    ) {
+        let mut accounts = self.state.write();
+        let Some(state) = accounts.regional_get_mut(account_id, region) else {
+            return;
+        };
+        let Some(stack) = state
+            .stacks
+            .values_mut()
+            .find(|s| s.stack_id == stack_id && s.status != "DELETE_COMPLETE")
+        else {
+            return;
+        };
+        let stack_name = stack.name.clone();
+        let notification_arns = stack.notification_arns.clone();
+        let outcome = if failed.is_empty() {
+            "DELETE_COMPLETE"
+        } else {
+            "DELETE_FAILED"
+        };
+        if !failed.is_empty() {
+            record_delete_failure(state, stack_id, failed, resource_events);
+        } else {
+            stack.status = "DELETE_COMPLETE".to_string();
+            // The reason belonged to the previous status (a failed
+            // create/update); carrying it into DELETE_COMPLETE would
+            // report a stale failure on a cleanly deleted stack.
+            stack.status_reason = None;
+            stack.resources.clear();
+            stack.outputs.clear();
+            stack.pending_update = None;
+            // A deleted stack's policy goes with it; a later stack of the
+            // same name starts without one.
+            state.stack_policies.remove(&stack_name);
+            // Drop this stack's exports + import-consumer entries.
+            state
+                .exports
+                .retain(|_, e| e.exporting_stack_name != stack_name);
+            for entries in state.imports.values_mut() {
+                entries.retain(|s| s != &stack_name);
+            }
+            state.imports.retain(|_, v| !v.is_empty());
+            // A stack's change sets go with it. Left behind, they would
+            // still answer DescribeChangeSet, and a re-created stack of
+            // the same name would find them by name.
+            if let Some(change_sets) = state.extras.get_mut("change_sets") {
+                change_sets.retain(|_, v| v["StackId"].as_str() != Some(stack_id));
+            }
+        }
+        drop(accounts);
+
+        Self::send_stack_notification(
+            &self.deps.delivery,
+            &notification_arns,
+            &stack_name,
+            stack_id,
+            outcome,
+        );
     }
 
     fn describe_stacks(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -4389,6 +4712,7 @@ fn record_delete_failure(
     state: &mut crate::state::CloudFormationState,
     stack_id: &str,
     failed: &[(String, String)],
+    resource_events: bool,
 ) {
     let Some(stack) = state.stacks.values_mut().find(|s| s.stack_id == stack_id) else {
         return;
@@ -4416,6 +4740,9 @@ fn record_delete_failure(
         }
     }
     let stack_name = stack.name.clone();
+    if !resource_events {
+        rows.clear();
+    }
     for (logical_id, physical_id, resource_type, why) in rows {
         record_event_with_reason(
             state,
@@ -5872,6 +6199,397 @@ pub(crate) mod tests {
         svc.create_stack(&req)
             .await
             .expect("bad-body create succeeds");
+    }
+
+    /// Answers a custom resource's Create with SUCCESS, and its Delete only
+    /// once the flag is set (so a stack delete waits out the ServiceTimeout).
+    struct CreateOnlyHandler(
+        Arc<crate::resource_provisioner::CustomResponses>,
+        Arc<std::sync::atomic::AtomicBool>,
+    );
+
+    impl fakecloud_core::delivery::LambdaDelivery for CreateOnlyHandler {
+        fn invoke_lambda(
+            &self,
+            _function_arn: &str,
+            _payload: &str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                    > + Send,
+            >,
+        > {
+            Box::pin(async { Err("unused".to_string()) })
+        }
+
+        fn invoke_lambda_async(&self, _function_arn: &str, payload: &str) -> Result<(), String> {
+            let event: serde_json::Value = serde_json::from_str(payload).unwrap();
+            let answers = event["RequestType"] == "Create"
+                || (event["RequestType"] == "Delete"
+                    && self.1.load(std::sync::atomic::Ordering::SeqCst));
+            if answers {
+                let body =
+                    serde_json::json!({"Status": "SUCCESS", "PhysicalResourceId": "custom-1"});
+                self.0.accept(
+                    event["RequestId"].as_str().unwrap(),
+                    body.to_string().as_bytes(),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    fn service_with_create_only_handler() -> CloudFormationService {
+        service_with_handler(Default::default())
+    }
+
+    /// A handler that answers Create, and Delete once `answers_delete` is set.
+    fn service_with_handler(
+        answers_delete: Arc<std::sync::atomic::AtomicBool>,
+    ) -> CloudFormationService {
+        let mut svc = make_service();
+        svc.deps.delivery = Arc::new(DeliveryBus::new().with_lambda(Arc::new(CreateOnlyHandler(
+            svc.custom_responses.clone(),
+            answers_delete,
+        ))));
+        svc
+    }
+
+    async fn stack_status_becomes(svc: &CloudFormationService, name: &str, status: &str) {
+        for _ in 0..200 {
+            let current = svc
+                .state
+                .read()
+                .regional("123456789012", "us-east-1")
+                .and_then(|s| s.stacks.get(name).map(|st| st.status.clone()));
+            if current.as_deref() == Some(status) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("{name} never reached {status}");
+    }
+
+    fn queue_names(svc: &CloudFormationService) -> Vec<String> {
+        let accounts = svc.deps.sqs.read();
+        accounts
+            .get("123456789012")
+            .map(|s| {
+                s.regions()
+                    .flat_map(|(_, r)| r.queues.values().map(|q| q.queue_name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn create_stack_params(name: &str, template: serde_json::Value) -> AwsRequest {
+        let mut params = HashMap::new();
+        params.insert("StackName".to_string(), name.to_string());
+        params.insert("TemplateBody".to_string(), template.to_string());
+        make_request("CreateStack", params)
+    }
+
+    fn queue_and_silent_custom() -> serde_json::Value {
+        serde_json::json!({
+            "Resources": {
+                "Queue": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "shared"}},
+                "Custom": {
+                    "Type": "Custom::Thing",
+                    "DependsOn": "Queue",
+                    "Properties": {
+                        "ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:h",
+                        "ServiceTimeout": "1"
+                    }
+                }
+            }
+        })
+    }
+
+    /// A reset while a stack delete waits on a handler: the delete drops
+    /// itself, leaving a same-named stack and queue created since alone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reset_during_a_stack_delete_leaves_new_state_alone() {
+        let svc = service_with_create_only_handler();
+        svc.create_stack(&create_stack_params("s", queue_and_silent_custom()))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "CREATE_COMPLETE").await;
+        let mut params = HashMap::new();
+        params.insert("StackName".to_string(), "s".to_string());
+        svc.delete_stack(&make_request("DeleteStack", params))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "DELETE_IN_PROGRESS").await;
+
+        svc.state.write().reset();
+        svc.deps.sqs.write().reset();
+        let template = serde_json::json!({
+            "Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "shared"}}},
+            "Outputs": {"Url": {"Value": {"Ref": "Queue"}, "Export": {"Name": "shared-url"}}}
+        });
+        svc.create_stack(&create_stack_params("s", template))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "CREATE_COMPLETE").await;
+
+        // The old delete's handler wait (1s) runs out.
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        stack_status_becomes(&svc, "s", "CREATE_COMPLETE").await;
+        assert_eq!(queue_names(&svc), vec!["shared".to_string()]);
+        let accounts = svc.state.read();
+        let state = accounts.regional("123456789012", "us-east-1").unwrap();
+        assert!(state.exports.contains_key("shared-url"));
+    }
+
+    /// An operation (update, rollback, cleanup or delete) that outlives a
+    /// reset of its stack refuses to touch resources: their names may belong
+    /// to something created since.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_provisioner_outliving_its_stack_touches_nothing() {
+        let svc = make_service();
+        let template = serde_json::json!({
+            "Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "shared"}}}
+        });
+        svc.create_stack(&create_stack_params("s", template.clone()))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "CREATE_COMPLETE").await;
+        let (stack_id, queue) = {
+            let accounts = svc.state.read();
+            let stack = &accounts
+                .regional("123456789012", "us-east-1")
+                .unwrap()
+                .stacks["s"];
+            (stack.stack_id.clone(), stack.resources[0].clone())
+        };
+        let provisioner = svc.provisioner(&stack_id, "123456789012", "us-east-1");
+
+        svc.state.write().reset();
+        svc.deps.sqs.write().reset();
+        svc.create_stack(&create_stack_params("s", template))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "CREATE_COMPLETE").await;
+
+        let err = provisioner.delete_resource(&queue).unwrap_err();
+        assert_eq!(err, format!("Stack [{stack_id}] does not exist"));
+        assert_eq!(queue_names(&svc), vec!["shared".to_string()]);
+    }
+
+    /// A custom resource in a nested stack makes its root's delete wait too.
+    #[test]
+    fn a_nested_custom_resource_makes_the_root_delete_wait() {
+        fn stack(name: &str, resources: Vec<StackResource>) -> Stack {
+            serde_json::from_value(serde_json::json!({
+                "name": name,
+                "stack_id": format!("id-{name}"),
+                "template": "{}",
+                "status": "CREATE_COMPLETE",
+                "resources": [],
+                "parameters": {},
+                "tags": {},
+                "created_at": "2026-11-10T00:00:00Z",
+                "updated_at": null,
+                "description": null,
+                "notification_arns": [],
+            }))
+            .map(|mut s: Stack| {
+                s.resources = resources;
+                s
+            })
+            .unwrap()
+        }
+        fn resource(
+            logical: &str,
+            kind: &str,
+            physical: &str,
+            token: Option<&str>,
+        ) -> StackResource {
+            StackResource {
+                logical_id: logical.to_string(),
+                physical_id: physical.to_string(),
+                resource_type: kind.to_string(),
+                status: "CREATE_COMPLETE".to_string(),
+                service_token: token.map(str::to_string),
+                attributes: BTreeMap::new(),
+                deletion_policy: None,
+                update_replace_policy: None,
+                custom_properties: None,
+            }
+        }
+        let mut state = CloudFormationState::new("123456789012", "us-east-1");
+        let root = stack(
+            "root",
+            vec![resource(
+                "Child",
+                "AWS::CloudFormation::Stack",
+                "id-child",
+                None,
+            )],
+        );
+        state.stacks.insert("root".into(), root.clone());
+        state.stacks.insert(
+            "child".into(),
+            stack(
+                "child",
+                vec![resource("Plain", "AWS::SQS::Queue", "q", None)],
+            ),
+        );
+        assert!(!family_waits_for_handlers(&state, &root));
+        state.stacks.insert(
+            "child".into(),
+            stack(
+                "child",
+                vec![resource(
+                    "C",
+                    "Custom::X",
+                    "c",
+                    Some("arn:aws:lambda:us-east-1:1:function:h"),
+                )],
+            ),
+        );
+        assert!(family_waits_for_handlers(&state, &root));
+    }
+
+    /// A restart while a stack delete waits on a handler: the persisted
+    /// DELETE_IN_PROGRESS stack is picked up again and finishes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restart_during_a_stack_delete_resumes_it() {
+        let svc = service_with_create_only_handler();
+        svc.create_stack(&create_stack_params("s", queue_and_silent_custom()))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "CREATE_COMPLETE").await;
+        // As the snapshot of a delete under way restores: DELETE_IN_PROGRESS,
+        // the custom resource already deleted, the queue still to go.
+        {
+            let mut accounts = svc.state.write();
+            let stack = accounts
+                .regional_get_mut("123456789012", "us-east-1")
+                .unwrap()
+                .stacks
+                .get_mut("s")
+                .unwrap();
+            stack.status = "DELETE_IN_PROGRESS".to_string();
+            stack.resources.retain(|r| r.logical_id == "Queue");
+        }
+        svc.resume_interrupted_cleanups().await;
+        stack_status_becomes(&svc, "s", "DELETE_COMPLETE").await;
+        assert!(queue_names(&svc).is_empty());
+    }
+
+    /// A retried DeleteStack of a DELETE_FAILED stack asks the handler
+    /// again: once it answers, the stack is deleted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retrying_a_failed_delete_asks_the_handler_again() {
+        let answers_delete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let svc = service_with_handler(answers_delete.clone());
+        svc.create_stack(&create_stack_params("s", queue_and_silent_custom()))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "CREATE_COMPLETE").await;
+        let delete = || {
+            let mut params = HashMap::new();
+            params.insert("StackName".to_string(), "s".to_string());
+            make_request("DeleteStack", params)
+        };
+        svc.delete_stack(&delete()).await.unwrap();
+        stack_status_becomes(&svc, "s", "DELETE_FAILED").await;
+
+        answers_delete.store(true, std::sync::atomic::Ordering::SeqCst);
+        svc.delete_stack(&delete()).await.unwrap();
+        stack_status_becomes(&svc, "s", "DELETE_COMPLETE").await;
+    }
+
+    /// Counts snapshot writes.
+    #[derive(Default)]
+    struct CountingStore(std::sync::atomic::AtomicUsize);
+
+    impl SnapshotStore for CountingStore {
+        fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn save(&self, _bytes: &[u8]) -> std::io::Result<()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A background delete persists at its transitions and after resources
+    /// that waited on a handler, not after every plain resource.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_background_delete_persists_at_handler_steps_only() {
+        let answers_delete = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let store = Arc::new(CountingStore::default());
+        let svc = service_with_handler(answers_delete).with_snapshot_store(store.clone());
+        let template = serde_json::json!({
+            "Resources": {
+                "Q1": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "q1"}},
+                "Q2": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "q2"}},
+                "Q3": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "q3"}},
+                "Custom": {
+                    "Type": "Custom::Thing",
+                    "DependsOn": ["Q1", "Q2", "Q3"],
+                    "Properties": {
+                        "ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:h",
+                        "ServiceTimeout": "5"
+                    }
+                }
+            }
+        });
+        svc.create_stack(&create_stack_params("s", template))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "CREATE_COMPLETE").await;
+        // Let the create's own saves land before counting.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let before = store.0.load(std::sync::atomic::Ordering::SeqCst);
+        let mut params = HashMap::new();
+        params.insert("StackName".to_string(), "s".to_string());
+        svc.delete_stack(&make_request("DeleteStack", params))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "DELETE_COMPLETE").await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let saves = store.0.load(std::sync::atomic::Ordering::SeqCst) - before;
+        // The start, after the custom resource, the end.
+        assert_eq!(saves, 3);
+        assert!(queue_names(&svc).is_empty());
+    }
+
+    /// A handler that never answers a Delete fails the stack's delete in the
+    /// background, with the recorded reason, the rest still deleted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_silent_handler_fails_the_background_delete() {
+        let svc = service_with_create_only_handler();
+        svc.create_stack(&create_stack_params("s", queue_and_silent_custom()))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "CREATE_COMPLETE").await;
+        let mut params = HashMap::new();
+        params.insert("StackName".to_string(), "s".to_string());
+        svc.delete_stack(&make_request("DeleteStack", params))
+            .await
+            .unwrap();
+        stack_status_becomes(&svc, "s", "DELETE_FAILED").await;
+        let accounts = svc.state.read();
+        let stack = &accounts
+            .regional("123456789012", "us-east-1")
+            .unwrap()
+            .stacks["s"];
+        assert_eq!(
+            stack.status_reason.as_deref(),
+            Some("The following resource(s) failed to delete: [Custom]. ")
+        );
+        let left: Vec<&str> = stack
+            .resources
+            .iter()
+            .map(|r| r.logical_id.as_str())
+            .collect();
+        assert_eq!(left, vec!["Custom"]);
+        drop(accounts);
+        assert!(queue_names(&svc).is_empty(), "the queue was still deleted");
     }
 
     #[tokio::test]

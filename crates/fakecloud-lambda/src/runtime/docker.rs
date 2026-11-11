@@ -252,13 +252,12 @@ impl DockerBackend {
 
         // Extract ZIP to a temp directory (only needed during container setup).
         // Run in spawn_blocking to avoid blocking the async runtime with fs I/O.
-        let code_dir =
-            TempDir::new().map_err(|e| RuntimeError::ZipExtractionFailed(e.to_string()))?;
+        let code_dir = TempDir::new().map_err(|e| RuntimeError::LocalIo(e.to_string()))?;
         let zip_bytes = zip_bytes.to_vec();
         let code_path = code_dir.path().to_path_buf();
         tokio::task::spawn_blocking(move || extract_zip(&zip_bytes, &code_path))
             .await
-            .map_err(|e| RuntimeError::ZipExtractionFailed(e.to_string()))??;
+            .map_err(|e| RuntimeError::LocalIo(e.to_string()))??;
 
         // Step 1: docker create (no volume mounts — works in Docker-in-Docker)
         let mut cmd = tokio::process::Command::new(&self.cli);
@@ -388,15 +387,17 @@ impl DockerBackend {
             })
     }
 
+    /// Wait until the container's Runtime Interface Emulator answers HTTP
+    /// (see `facade::endpoint_reachable`: the published port accepts TCP
+    /// before anything listens in the container).
     async fn wait_for_ready(&self, container_id: &str, port: u16) -> Result<(), RuntimeError> {
-        for _ in 0..20 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if tokio::net::TcpStream::connect(format!("{}:{port}", self.sibling_host))
-                .await
-                .is_ok()
-            {
+        let endpoint = format!("{}:{port}", self.sibling_host);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            if super::facade::endpoint_reachable(&endpoint, Duration::from_millis(500)).await {
                 return Ok(());
             }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         self.remove_container(container_id).await;
         Err(RuntimeError::ContainerStartFailed(
@@ -418,8 +419,7 @@ impl DockerBackend {
         if layers.is_empty() {
             return Ok(());
         }
-        let layers_dir =
-            TempDir::new().map_err(|e| RuntimeError::ZipExtractionFailed(e.to_string()))?;
+        let layers_dir = TempDir::new().map_err(|e| RuntimeError::LocalIo(e.to_string()))?;
         let layers_path = layers_dir.path().to_path_buf();
         let layers_owned: Vec<Vec<u8>> = layers.to_vec();
         tokio::task::spawn_blocking(move || {
@@ -429,7 +429,7 @@ impl DockerBackend {
             Ok::<_, RuntimeError>(())
         })
         .await
-        .map_err(|e| RuntimeError::ZipExtractionFailed(e.to_string()))??;
+        .map_err(|e| RuntimeError::LocalIo(e.to_string()))??;
 
         let cp_result = tokio::process::Command::new(&self.cli)
             .arg("cp")
@@ -677,6 +677,16 @@ fn tmpfs_size_mib(size: Option<i64>) -> i64 {
 }
 
 /// Extract a ZIP archive to a destination directory.
+/// An entry copy failed: a corrupt entry (the archive's fault) reads as
+/// `InvalidData`; anything else is writing it out locally.
+fn copy_error(e: std::io::Error) -> RuntimeError {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        RuntimeError::ZipExtractionFailed(e.to_string())
+    } else {
+        RuntimeError::LocalIo(e.to_string())
+    }
+}
+
 pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), RuntimeError> {
     let cursor = std::io::Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(cursor)
@@ -692,17 +702,15 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), RuntimeError> {
         })?);
 
         if file.is_dir() {
-            std::fs::create_dir_all(&out_path)
-                .map_err(|e| RuntimeError::ZipExtractionFailed(e.to_string()))?;
+            std::fs::create_dir_all(&out_path).map_err(|e| RuntimeError::LocalIo(e.to_string()))?;
         } else {
             if let Some(parent) = out_path.parent() {
                 std::fs::create_dir_all(parent)
-                    .map_err(|e| RuntimeError::ZipExtractionFailed(e.to_string()))?;
+                    .map_err(|e| RuntimeError::LocalIo(e.to_string()))?;
             }
             let mut out_file = std::fs::File::create(&out_path)
-                .map_err(|e| RuntimeError::ZipExtractionFailed(e.to_string()))?;
-            std::io::copy(&mut file, &mut out_file)
-                .map_err(|e| RuntimeError::ZipExtractionFailed(e.to_string()))?;
+                .map_err(|e| RuntimeError::LocalIo(e.to_string()))?;
+            std::io::copy(&mut file, &mut out_file).map_err(copy_error)?;
 
             #[cfg(unix)]
             {
@@ -714,7 +722,7 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), RuntimeError> {
                         &out_path,
                         std::fs::Permissions::from_mode(mode & 0o777),
                     )
-                    .map_err(|e| RuntimeError::ZipExtractionFailed(e.to_string()))?;
+                    .map_err(|e| RuntimeError::LocalIo(e.to_string()))?;
                 }
             }
         }
@@ -882,6 +890,34 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// A broken archive is the package's fault; failing to write it out is
+    /// fakecloud's (a full disk, a missing directory), and reads as such.
+    #[test]
+    fn extract_zip_tells_a_bad_archive_from_a_local_failure() {
+        let dir = TempDir::new().unwrap();
+        assert!(matches!(
+            extract_zip(b"not a zip", dir.path()),
+            Err(RuntimeError::ZipExtractionFailed(_))
+        ));
+
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "nested/handler.py",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer.write_all(b"x = 1\n").unwrap();
+        let zip_bytes = writer.finish().unwrap().into_inner();
+        // The destination is a file, so its directories cannot be created.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        assert!(matches!(
+            extract_zip(&zip_bytes, &blocker),
+            Err(RuntimeError::LocalIo(_))
+        ));
+    }
+
     #[test]
     fn extract_zip_strips_setuid_setgid_and_sticky_bits() {
         use std::os::unix::fs::PermissionsExt;

@@ -4033,3 +4033,76 @@ async fn a_migrated_pre_regional_snapshot_gets_its_replica_secrets() {
     assert_eq!(replica.primary_region.as_deref(), Some("us-east-1"));
     assert!(replica.arn.contains(":eu-west-1:"));
 }
+
+/// Rotation Lambda stub that records each step and fails `fail_step`
+/// with a function error.
+struct StepLambda {
+    steps: parking_lot::Mutex<Vec<String>>,
+    fail_step: &'static str,
+}
+
+impl fakecloud_core::delivery::LambdaDelivery for StepLambda {
+    fn invoke_lambda(
+        &self,
+        _function_arn: &str,
+        payload: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                > + Send,
+        >,
+    > {
+        let step = serde_json::from_str::<Value>(payload).unwrap()["Step"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let failed = step == self.fail_step;
+        self.steps.lock().push(step);
+        Box::pin(async move {
+            Ok(if failed {
+                fakecloud_core::delivery::LambdaInvocationOutput::unhandled(
+                    br#"{"errorType":"ValueError","errorMessage":"setSecret failed"}"#.to_vec(),
+                )
+            } else {
+                fakecloud_core::delivery::LambdaInvocationOutput::success(b"null".to_vec())
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn rotation_stops_at_the_first_failing_step() {
+    let lambda = Arc::new(StepLambda {
+        steps: parking_lot::Mutex::new(Vec::new()),
+        fail_step: "setSecret",
+    });
+    let bus = DeliveryBus::new().with_lambda(lambda.clone());
+    let inv = RotationInvocation {
+        lambda_arn: "arn:aws:lambda:us-east-1:123456789012:function:rotator".into(),
+        secret_id: "arn:aws:secretsmanager:us-east-1:123456789012:secret:s".into(),
+        client_request_token: "tok".into(),
+        steps: vec!["createSecret", "setSecret", "testSecret", "finishSecret"],
+        cleanup_pending: None,
+    };
+    run_rotation_steps(&bus, &inv).await;
+    assert_eq!(*lambda.steps.lock(), vec!["createSecret", "setSecret"]);
+}
+
+#[tokio::test]
+async fn rotation_runs_every_step_when_each_succeeds() {
+    let lambda = Arc::new(StepLambda {
+        steps: parking_lot::Mutex::new(Vec::new()),
+        fail_step: "none",
+    });
+    let bus = DeliveryBus::new().with_lambda(lambda.clone());
+    let inv = RotationInvocation {
+        lambda_arn: "arn:aws:lambda:us-east-1:123456789012:function:rotator".into(),
+        secret_id: "arn:aws:secretsmanager:us-east-1:123456789012:secret:s".into(),
+        client_request_token: "tok".into(),
+        steps: vec!["createSecret", "setSecret", "testSecret", "finishSecret"],
+        cleanup_pending: None,
+    };
+    run_rotation_steps(&bus, &inv).await;
+    assert_eq!(lambda.steps.lock().len(), 4);
+}

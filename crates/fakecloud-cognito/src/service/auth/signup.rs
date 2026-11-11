@@ -19,7 +19,7 @@ impl CognitoService {
                 )
             })?;
 
-        let (pool_id, sub, user, region, account_id) = {
+        let (pool_id, sub, user, region, account_id, sign_up_event_id) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
 
@@ -95,8 +95,9 @@ impl CognitoService {
             let region = state.region.clone();
             let account_id = state.account_id.clone();
 
+            let sign_up_event_id = Uuid::new_v4().to_string();
             state.auth_events.push(AuthEvent {
-                event_id: Uuid::new_v4().to_string(),
+                event_id: sign_up_event_id.clone(),
                 event_type: "SIGN_UP".to_string(),
                 username: username.to_string(),
                 user_pool_id: pool_id.clone(),
@@ -106,7 +107,7 @@ impl CognitoService {
                 feedback_value: None,
             });
 
-            (pool_id, sub, user, region, account_id)
+            (pool_id, sub, user, region, account_id, sign_up_event_id)
         };
 
         // PreSignUp_SignUp trigger (synchronous — response can auto-confirm)
@@ -124,7 +125,18 @@ impl CognitoService {
                     &region,
                     &account_id,
                 );
-                if let Some(response) = triggers::invoke_trigger(ctx, &function_arn, &event).await {
+                let outcome = triggers::invoke_trigger(ctx, &function_arn, &event).await;
+                if outcome.is_err() {
+                    // A failing PreSignUp trigger means no user is created
+                    // and the sign-up did not succeed.
+                    let mut accounts = self.state.write();
+                    let state = accounts.get_or_create(&req.account_id);
+                    if let Some(users) = state.users.get_mut(&pool_id) {
+                        users.remove(username);
+                    }
+                    state.auth_events.retain(|e| e.event_id != sign_up_event_id);
+                }
+                if let Some(response) = outcome? {
                     if response["response"]["autoConfirmUser"].as_bool() == Some(true) {
                         auto_confirm = true;
                     }
@@ -178,7 +190,8 @@ impl CognitoService {
                     TriggerSource::CustomEmailSenderSignUp,
                     &region,
                     &account_id,
-                );
+                )
+                .await?;
             }
         }
 
@@ -206,72 +219,75 @@ impl CognitoService {
             ));
         }
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let (pool_id, user_attrs, region, account_id) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
 
-        let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("User pool client {client_id} does not exist."),
-            )
-        })?;
-        // When the app client has a secret, ConfirmSignUp must present a valid
-        // SECRET_HASH (matches the SignUp + InitiateAuth checks).
-        crate::service::validate_secret_hash(client, body["SecretHash"].as_str(), username)?;
-        let pool_id = client.user_pool_id.clone();
-        let masks_existence = client.prevent_user_existence_errors.as_deref() == Some("ENABLED");
+            let client = state.user_pool_clients.get(client_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("User pool client {client_id} does not exist."),
+                )
+            })?;
+            // When the app client has a secret, ConfirmSignUp must present a valid
+            // SECRET_HASH (matches the SignUp + InitiateAuth checks).
+            crate::service::validate_secret_hash(client, body["SecretHash"].as_str(), username)?;
+            let pool_id = client.user_pool_id.clone();
+            let masks_existence =
+                client.prevent_user_existence_errors.as_deref() == Some("ENABLED");
 
-        let user = match state
-            .users
-            .get_mut(&pool_id)
-            .and_then(|users| users.get_mut(username))
-        {
-            Some(u) => u,
-            None => {
-                // PreventUserExistenceErrors=ENABLED: an unknown user must not
-                // be distinguishable from a wrong code (L3).
-                if masks_existence {
+            let user = match state
+                .users
+                .get_mut(&pool_id)
+                .and_then(|users| users.get_mut(username))
+            {
+                Some(u) => u,
+                None => {
+                    // PreventUserExistenceErrors=ENABLED: an unknown user must not
+                    // be distinguishable from a wrong code (L3).
+                    if masks_existence {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "CodeMismatchException",
+                            "Invalid verification code provided, please try again.",
+                        ));
+                    }
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "UserNotFoundException",
+                        "User does not exist.",
+                    ));
+                }
+            };
+
+            // Validate confirmation code against the stored value before
+            // promoting the user to CONFIRMED. Without this check anyone
+            // calling ConfirmSignUp with the user's name + a non-empty
+            // string could activate the account. Stored code is set by
+            // SignUp (auth/signup.rs:153) and ResendConfirmationCode.
+            match user.confirmation_code.as_deref() {
+                Some(stored) if stored == code => {}
+                _ => {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "CodeMismatchException",
                         "Invalid verification code provided, please try again.",
                     ));
                 }
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "UserNotFoundException",
-                    "User does not exist.",
-                ));
             }
+            user.confirmation_code = None;
+
+            user.user_status = user_status::CONFIRMED.to_string();
+            user.user_last_modified_date = Utc::now();
+
+            let user_attrs = triggers::collect_user_attributes(user);
+            let region = state.region.clone();
+            let account_id = state.account_id.clone();
+            (pool_id, user_attrs, region, account_id)
         };
 
-        // Validate confirmation code against the stored value before
-        // promoting the user to CONFIRMED. Without this check anyone
-        // calling ConfirmSignUp with the user's name + a non-empty
-        // string could activate the account. Stored code is set by
-        // SignUp (auth/signup.rs:153) and ResendConfirmationCode.
-        match user.confirmation_code.as_deref() {
-            Some(stored) if stored == code => {}
-            _ => {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "CodeMismatchException",
-                    "Invalid verification code provided, please try again.",
-                ));
-            }
-        }
-        user.confirmation_code = None;
-
-        user.user_status = user_status::CONFIRMED.to_string();
-        user.user_last_modified_date = Utc::now();
-
-        let user_attrs = triggers::collect_user_attributes(user);
-        let region = state.region.clone();
-        let account_id = state.account_id.clone();
-        drop(accounts);
-
-        // PostConfirmation_ConfirmSignUp trigger (fire-and-forget)
+        // PostConfirmation_ConfirmSignUp trigger
         if let Some(ref ctx) = self.delivery_ctx {
             if let Some(function_arn) = triggers::get_trigger_arn(
                 &self.state,
@@ -287,7 +303,9 @@ impl CognitoService {
                     &region,
                     &account_id,
                 );
-                triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
+                // Synchronous: a failing trigger fails the call (the state
+                // change above stays, as on AWS).
+                triggers::invoke_trigger(ctx, &function_arn, &event).await?;
             }
         }
 

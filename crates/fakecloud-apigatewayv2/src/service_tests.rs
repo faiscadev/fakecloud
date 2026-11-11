@@ -1343,8 +1343,8 @@ async fn execute_api_jwt_authorizer_no_token_returns_401() {
 
     // Execute without token -> 401
     let req = make_request(Method::GET, "/prod/pets", "");
-    let err = expect_err(svc.handle(req).await);
-    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    let resp = expect_gateway_response(svc.handle(req).await);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1419,8 +1419,10 @@ async fn execute_api_jwt_authorizer_no_delivery_returns_500() {
 
 // ─── Lambda authorizer tests ───────────────────────────────────────
 
+use fakecloud_core::delivery::LambdaInvocationOutput;
+
 struct MockLambdaInvoker {
-    response: Result<Vec<u8>, String>,
+    response: Result<LambdaInvocationOutput, String>,
 }
 
 impl fakecloud_core::delivery::LambdaDelivery for MockLambdaInvoker {
@@ -1428,13 +1430,22 @@ impl fakecloud_core::delivery::LambdaDelivery for MockLambdaInvoker {
         &self,
         _function_arn: &str,
         _payload: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<LambdaInvocationOutput, String>> + Send>,
+    > {
         let res = self.response.clone();
         Box::pin(async move { res })
     }
 }
 
+/// A service whose Lambda returns `response` as a successful invocation.
 fn make_svc_with_lambda(response: Result<Vec<u8>, String>) -> ApiGatewayV2Service {
+    make_svc_with_lambda_output(response.map(LambdaInvocationOutput::success))
+}
+
+fn make_svc_with_lambda_output(
+    response: Result<LambdaInvocationOutput, String>,
+) -> ApiGatewayV2Service {
     let state = make_state();
     let delivery = Arc::new(
         fakecloud_core::delivery::DeliveryBus::new()
@@ -1771,8 +1782,8 @@ async fn execute_api_lambda_authorizer_no_identity_source_returns_401() {
 
     // No Authorization header -> 401
     let req = make_request(Method::GET, "/prod/pets", "");
-    let err = expect_err(svc.handle(req).await);
-    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    let resp = expect_gateway_response(svc.handle(req).await);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1901,8 +1912,8 @@ async fn execute_api_lambda_authorizer_partial_identity_source_returns_401() {
     let mut req = make_request(Method::GET, "/prod/pets", "");
     req.headers
         .insert("Authorization", "Bearer tok".parse().unwrap());
-    let err = expect_err(svc.handle(req).await);
-    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    let resp = expect_gateway_response(svc.handle(req).await);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1965,8 +1976,8 @@ async fn execute_api_lambda_authorizer_empty_identity_source_returns_401() {
     // Authorization header present but empty -> 401.
     let mut req = make_request(Method::GET, "/prod/pets", "");
     req.headers.insert("Authorization", "".parse().unwrap());
-    let err = expect_err(svc.handle(req).await);
-    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    let resp = expect_gateway_response(svc.handle(req).await);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -3789,4 +3800,205 @@ async fn get_apis_pages_by_next_token() {
 
     let err = expect_err(svc.handle(list(&[("nextToken", "bogus")])).await);
     assert_eq!(err.code(), "BadRequestException");
+}
+
+// ── Lambda function errors (X-Amz-Function-Error) ──
+
+/// `POST` a control-plane resource and return its `id_field`.
+async fn post_id(
+    svc: &ApiGatewayV2Service,
+    path: &str,
+    body: serde_json::Value,
+    id_field: &str,
+) -> String {
+    let resp = svc
+        .handle(make_request(Method::POST, path, &body.to_string()))
+        .await
+        .unwrap();
+    body_json(&resp)[id_field]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// An HTTP API with `GET /pets` on stage `prod` routed to a Lambda proxy
+/// integration, optionally behind a REQUEST Lambda authorizer (then the
+/// route's integration is MOCK).
+async fn function_error_api(svc: &ApiGatewayV2Service, with_authorizer: bool) {
+    let api_id = create_api(svc);
+    let integration = if with_authorizer {
+        serde_json::json!({"integrationType": "MOCK"})
+    } else {
+        serde_json::json!({
+            "integrationType": "AWS_PROXY",
+            "integrationUri": "arn:aws:lambda:us-east-1:123456789012:function:backend",
+            "payloadFormatVersion": "2.0",
+        })
+    };
+    let integration_id = post_id(
+        svc,
+        &format!("/v2/apis/{api_id}/integrations"),
+        integration,
+        "integrationId",
+    )
+    .await;
+    let mut route = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+    });
+    if with_authorizer {
+        let auth_id = post_id(
+            svc,
+            &format!("/v2/apis/{api_id}/authorizers"),
+            serde_json::json!({
+                "name": "lambda-auth",
+                "authorizerType": "REQUEST",
+                "identitySource": ["$request.header.Authorization"],
+                "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:authorizer/invocations"
+            }),
+            "authorizerId",
+        )
+        .await;
+        route["authorizerId"] = serde_json::json!(auth_id);
+    }
+    post_id(svc, &format!("/v2/apis/{api_id}/routes"), route, "routeId").await;
+    post_id(
+        svc,
+        &format!("/v2/apis/{api_id}/stages"),
+        serde_json::json!({"stageName": "prod"}),
+        "stageName",
+    )
+    .await;
+}
+
+fn pets_request() -> AwsRequest {
+    let mut req = make_request(Method::GET, "/prod/pets", "");
+    req.headers
+        .insert("Authorization", "Bearer tok".parse().unwrap());
+    req
+}
+
+/// Recorded: `apigateway_http.throw` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json.
+#[tokio::test]
+async fn execute_api_backend_function_error_is_500() {
+    let svc = make_svc_with_lambda_output(Ok(LambdaInvocationOutput::unhandled(
+        serde_json::json!({"errorType": "Error", "errorMessage": "boom"})
+            .to_string()
+            .into_bytes(),
+    )));
+    function_error_api(&svc, false).await;
+    let resp = svc.handle(pets_request()).await.unwrap();
+    assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        resp.body.expect_bytes(),
+        br#"{"message":"Internal Server Error"}"#.as_slice()
+    );
+}
+
+/// An HTTP API fails a returned object carrying `errorMessage`
+/// (`apigateway_http.shaped`, `.msgonly`, `.msgstatus`) but passes one with
+/// only `errorType` (`.typeonly`).
+#[tokio::test]
+async fn execute_api_backend_error_message_field_is_500_error_type_alone_passes() {
+    for (answer, status) in [
+        (
+            serde_json::json!({"errorType": "X", "errorMessage": "y"}),
+            500,
+        ),
+        (serde_json::json!({"errorMessage": "only message"}), 500),
+        (
+            serde_json::json!({"statusCode": 200, "errorMessage": "with status", "body": "b"}),
+            500,
+        ),
+        (serde_json::json!({"errorType": "OnlyType"}), 200),
+        (
+            serde_json::json!({"statusCode": 201, "errorType": "X", "body": "typed-ok"}),
+            201,
+        ),
+    ] {
+        let svc = make_svc_with_lambda(Ok(answer.to_string().into_bytes()));
+        function_error_api(&svc, false).await;
+        let resp = svc.handle(pets_request()).await.unwrap();
+        assert_eq!(resp.status.as_u16(), status, "{answer}");
+    }
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_throwing_unauthorized_returns_401() {
+    let svc = make_svc_with_lambda_output(Ok(LambdaInvocationOutput::unhandled(
+        serde_json::json!({"errorType": "Error", "errorMessage": "Unauthorized"})
+            .to_string()
+            .into_bytes(),
+    )));
+    function_error_api(&svc, true).await;
+    let resp = expect_gateway_response(svc.handle(pets_request()).await);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_returning_unauthorized_returns_401() {
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({"errorMessage": "Unauthorized"})
+        .to_string()
+        .into_bytes()));
+    function_error_api(&svc, true).await;
+    let resp = expect_gateway_response(svc.handle(pets_request()).await);
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_function_error_returns_500() {
+    let svc = make_svc_with_lambda_output(Ok(LambdaInvocationOutput::unhandled(
+        serde_json::json!({"errorType": "TypeError", "errorMessage": "x is undefined"})
+            .to_string()
+            .into_bytes(),
+    )));
+    function_error_api(&svc, true).await;
+    let resp = expect_gateway_response(svc.handle(pets_request()).await);
+    assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        resp.body.expect_bytes(),
+        br#"{"message":"Internal Server Error"}"#.as_slice()
+    );
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_invoke_failure_returns_500() {
+    let svc = make_svc_with_lambda(Err("Function not found: authorizer".to_string()));
+    function_error_api(&svc, true).await;
+    let resp = expect_gateway_response(svc.handle(pets_request()).await);
+    assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+/// An HTTP API authorizer rejection is answered with AWS's bare gateway
+/// response (`{"message":"Unauthorized"}` / `{"message":"Internal Server
+/// Error"}`), not raised as a service error.
+fn expect_gateway_response(result: Result<AwsResponse, AwsServiceError>) -> AwsResponse {
+    match result {
+        Ok(resp) => {
+            assert_eq!(resp.content_type, "application/json");
+            let body: serde_json::Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            let expected = match resp.status.as_u16() {
+                401 => "Unauthorized",
+                500 => "Internal Server Error",
+                other => panic!("unexpected gateway response status {other}"),
+            };
+            assert_eq!(body, serde_json::json!({ "message": expected }));
+            resp
+        }
+        Err(e) => panic!("expected a gateway response, got {e:?}"),
+    }
+}
+
+/// Recorded: `apigateway_http.authinvalid` in
+/// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json. A
+/// response with neither `isAuthorized` nor a policy document is a 500.
+#[tokio::test]
+async fn execute_api_lambda_authorizer_invalid_response_returns_500() {
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({"foo": "bar"})
+        .to_string()
+        .into_bytes()));
+    function_error_api(&svc, true).await;
+    let resp = expect_gateway_response(svc.handle(pets_request()).await);
+    assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
 }

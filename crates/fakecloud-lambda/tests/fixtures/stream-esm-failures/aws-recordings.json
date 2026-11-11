@@ -1,0 +1,571 @@
+{
+  "_about": "Stream event source mappings (DynamoDB Streams, Kinesis) against functions that fail. Every mapping: batch-size 10, batching window 2s, LATEST, OnFailure SQS destination, filtered to its scenario's records. Handlers: failall raises; poison raises when any record id contains 'poison'; partial returns batchItemFailures naming the poison records. invocations: each invoke's record ids with seconds since the scenario's first invoke. on_failure: SQS destination message bodies.",
+  "scenarios": {
+    "A": {
+      "source": "dynamodb",
+      "handler": "failall",
+      "mapping_args": "--maximum-retry-attempts 0",
+      "invocations": [
+        {
+          "after_s": 0.0,
+          "records": [
+            "a-1"
+          ]
+        },
+        {
+          "after_s": 0.03,
+          "records": [
+            "a-2"
+          ]
+        }
+      ],
+      "on_failure": [
+        {
+          "requestContext": {
+            "requestId": "418b267b-67fa-4222-a5ee-5f1ad852955f",
+            "functionArn": "arn:aws:lambda:us-east-1:123456789012:function:fcrec-esm-A",
+            "condition": "RetryAttemptsExhausted",
+            "approximateInvokeCount": 1
+          },
+          "responseContext": {
+            "statusCode": 200,
+            "executedVersion": "$LATEST",
+            "functionError": "Unhandled"
+          },
+          "version": "1.0",
+          "timestamp": "2026-11-10T19:49:32.215Z",
+          "DDBStreamBatchInfo": {
+            "shardId": "shardId-00000001794339584480-2d3c7f77",
+            "startSequenceNumber": "32700002631810628233808",
+            "endSequenceNumber": "32700002631810628233808",
+            "approximateArrivalOfFirstRecord": "2026-11-10T19:49:31Z",
+            "approximateArrivalOfLastRecord": "2026-11-10T19:49:31Z",
+            "batchSize": 1,
+            "streamArn": "arn:aws:dynamodb:us-east-1:123456789012:table/fcrec-esm/stream/2026-11-10T19:39:40.383"
+          }
+        },
+        {
+          "requestContext": {
+            "requestId": "532dabe1-b9d3-48a5-8ab1-39c45edf0f11",
+            "functionArn": "arn:aws:lambda:us-east-1:123456789012:function:fcrec-esm-A",
+            "condition": "RetryAttemptsExhausted",
+            "approximateInvokeCount": 1
+          },
+          "responseContext": {
+            "statusCode": 200,
+            "executedVersion": "$LATEST",
+            "functionError": "Unhandled"
+          },
+          "version": "1.0",
+          "timestamp": "2026-11-10T19:49:32.187Z",
+          "DDBStreamBatchInfo": {
+            "shardId": "shardId-00000001794339584054-46470279",
+            "startSequenceNumber": "32600000646481663557082",
+            "endSequenceNumber": "32600000646481663557082",
+            "approximateArrivalOfFirstRecord": "2026-11-10T19:49:31Z",
+            "approximateArrivalOfLastRecord": "2026-11-10T19:49:31Z",
+            "batchSize": 1,
+            "streamArn": "arn:aws:dynamodb:us-east-1:123456789012:table/fcrec-esm/stream/2026-11-10T19:39:40.383"
+          }
+        }
+      ]
+    },
+    "B": {
+      "source": "dynamodb",
+      "handler": "failall",
+      "mapping_args": "--maximum-retry-attempts 1",
+      "invocations": [
+        {
+          "after_s": 0.0,
+          "records": [
+            "b-1"
+          ]
+        },
+        {
+          "after_s": 0.21,
+          "records": [
+            "b-1"
+          ]
+        }
+      ],
+      "on_failure": [
+        {
+          "requestContext": {
+            "requestId": "8fe5011f-b437-4c43-bda5-1a515bdbe322",
+            "functionArn": "arn:aws:lambda:us-east-1:123456789012:function:fcrec-esm-B",
+            "condition": "RetryAttemptsExhausted",
+            "approximateInvokeCount": 2
+          },
+          "responseContext": {
+            "statusCode": 200,
+            "executedVersion": "$LATEST",
+            "functionError": "Unhandled"
+          },
+          "version": "1.0",
+          "timestamp": "2026-11-10T19:49:33.665Z",
+          "DDBStreamBatchInfo": {
+            "shardId": "shardId-00000001794339585105-3baacd50",
+            "startSequenceNumber": "32600000554392368456249",
+            "endSequenceNumber": "32600000554392368456249",
+            "approximateArrivalOfFirstRecord": "2026-11-10T19:49:32Z",
+            "approximateArrivalOfLastRecord": "2026-11-10T19:49:32Z",
+            "batchSize": 1,
+            "streamArn": "arn:aws:dynamodb:us-east-1:123456789012:table/fcrec-esm/stream/2026-11-10T19:39:40.383"
+          }
+        }
+      ]
+    },
+    "C": {
+      "source": "kinesis",
+      "handler": "failall",
+      "mapping_args": "--maximum-retry-attempts 1",
+      "invocations": [
+        {
+          "after_s": 0.0,
+          "records": [
+            "c-1",
+            "c-2"
+          ]
+        },
+        {
+          "after_s": 0.2,
+          "records": [
+            "c-1",
+            "c-2"
+          ]
+        }
+      ],
+      "on_failure": [
+        {
+          "requestContext": {
+            "requestId": "6f3623b3-6b56-443a-be66-160a5e7b2112",
+            "functionArn": "arn:aws:lambda:us-east-1:123456789012:function:fcrec-esm-C",
+            "condition": "RetryAttemptsExhausted",
+            "approximateInvokeCount": 2
+          },
+          "responseContext": {
+            "statusCode": 200,
+            "executedVersion": "$LATEST",
+            "functionError": "Unhandled"
+          },
+          "version": "1.0",
+          "timestamp": "2026-11-10T19:49:36.697Z",
+          "KinesisBatchInfo": {
+            "shardId": "shardId-000000000000",
+            "startSequenceNumber": "49680099063009502977069292612104883090756303613969039362",
+            "endSequenceNumber": "49680099063009502977069292612106092016575918243143745538",
+            "approximateArrivalOfFirstRecord": "2026-11-10T19:49:34.387Z",
+            "approximateArrivalOfLastRecord": "2026-11-10T19:49:34.387Z",
+            "batchSize": 2,
+            "streamArn": "arn:aws:kinesis:us-east-1:123456789012:stream/fcrec-esm"
+          }
+        }
+      ]
+    },
+    "D": {
+      "source": "kinesis",
+      "handler": "poison",
+      "mapping_args": "--maximum-retry-attempts 2 --bisect-batch-on-function-error",
+      "invocations": [
+        {
+          "after_s": 0.0,
+          "records": [
+            "d-1",
+            "d-2",
+            "d-poison-3",
+            "d-4"
+          ]
+        },
+        {
+          "after_s": 0.03,
+          "records": [
+            "d-1",
+            "d-2"
+          ]
+        },
+        {
+          "after_s": 0.06,
+          "records": [
+            "d-poison-3",
+            "d-4"
+          ]
+        },
+        {
+          "after_s": 0.09,
+          "records": [
+            "d-poison-3"
+          ]
+        },
+        {
+          "after_s": 0.26,
+          "records": [
+            "d-poison-3"
+          ]
+        },
+        {
+          "after_s": 0.71,
+          "records": [
+            "d-poison-3"
+          ]
+        },
+        {
+          "after_s": 0.73,
+          "records": [
+            "d-4"
+          ]
+        }
+      ],
+      "on_failure": [
+        {
+          "requestContext": {
+            "requestId": "28143a0e-30fe-4ec7-82b9-f6c995fd2d50",
+            "functionArn": "arn:aws:lambda:us-east-1:123456789012:function:fcrec-esm-D",
+            "condition": "RetryAttemptsExhausted",
+            "approximateInvokeCount": 3
+          },
+          "responseContext": {
+            "statusCode": 200,
+            "executedVersion": "$LATEST",
+            "functionError": "Unhandled"
+          },
+          "version": "1.0",
+          "timestamp": "2026-11-10T19:49:37.158Z",
+          "KinesisBatchInfo": {
+            "shardId": "shardId-000000000000",
+            "startSequenceNumber": "49680099063009502977069292612259625595666976217050906626",
+            "endSequenceNumber": "49680099063009502977069292612259625595666976217050906626",
+            "approximateArrivalOfFirstRecord": "2026-11-10T19:49:35.932Z",
+            "approximateArrivalOfLastRecord": "2026-11-10T19:49:35.932Z",
+            "batchSize": 1,
+            "streamArn": "arn:aws:kinesis:us-east-1:123456789012:stream/fcrec-esm"
+          }
+        }
+      ]
+    },
+    "E": {
+      "source": "kinesis",
+      "handler": "partial",
+      "mapping_args": "--maximum-retry-attempts 1 --function-response-types ReportBatchItemFailures",
+      "invocations": [
+        {
+          "after_s": 0.0,
+          "records": [
+            "e-1",
+            "e-poison-2",
+            "e-3",
+            "e-4"
+          ]
+        },
+        {
+          "after_s": 0.01,
+          "records": [
+            "e-poison-2",
+            "e-3",
+            "e-4"
+          ]
+        },
+        {
+          "after_s": 0.2,
+          "records": [
+            "e-poison-2",
+            "e-3",
+            "e-4"
+          ]
+        }
+      ],
+      "on_failure": [
+        {
+          "requestContext": {
+            "requestId": "3b740ea2-3f36-476c-b4bb-80a84a416794",
+            "functionArn": "arn:aws:lambda:us-east-1:123456789012:function:fcrec-esm-E",
+            "condition": "RetryAttemptsExhausted",
+            "approximateInvokeCount": 2
+          },
+          "responseContext": {
+            "statusCode": 200,
+            "executedVersion": "$LATEST",
+            "functionError": null
+          },
+          "version": "1.0",
+          "timestamp": "2026-11-10T19:49:38.038Z",
+          "KinesisBatchInfo": {
+            "shardId": "shardId-000000000000",
+            "startSequenceNumber": "49680099063009502977069292612491739353032985156033445890",
+            "endSequenceNumber": "49680099063009502977069292612494157204672214414382858242",
+            "approximateArrivalOfFirstRecord": "2026-11-10T19:49:37.502Z",
+            "approximateArrivalOfLastRecord": "2026-11-10T19:49:37.502Z",
+            "batchSize": 3,
+            "streamArn": "arn:aws:kinesis:us-east-1:123456789012:stream/fcrec-esm"
+          }
+        }
+      ]
+    },
+    "F": {
+      "source": "dynamodb",
+      "handler": "partial",
+      "mapping_args": "--maximum-retry-attempts 1 --function-response-types ReportBatchItemFailures",
+      "invocations": [
+        {
+          "after_s": 0.0,
+          "records": [
+            "f-3"
+          ]
+        },
+        {
+          "after_s": 0.77,
+          "records": [
+            "f-1",
+            "f-poison-2"
+          ]
+        },
+        {
+          "after_s": 0.78,
+          "records": [
+            "f-poison-2"
+          ]
+        },
+        {
+          "after_s": 1.04,
+          "records": [
+            "f-poison-2"
+          ]
+        }
+      ],
+      "on_failure": [
+        {
+          "requestContext": {
+            "requestId": "b4aff602-00ae-46d0-9f5f-4d64c68427dd",
+            "functionArn": "arn:aws:lambda:us-east-1:123456789012:function:fcrec-esm-F",
+            "condition": "RetryAttemptsExhausted",
+            "approximateInvokeCount": 2
+          },
+          "responseContext": {
+            "statusCode": 200,
+            "executedVersion": "$LATEST",
+            "functionError": null
+          },
+          "version": "1.0",
+          "timestamp": "2026-11-10T19:49:40.195Z",
+          "DDBStreamBatchInfo": {
+            "shardId": "shardId-00000001794339584205-07ca26d8",
+            "startSequenceNumber": "33300002827422611596652",
+            "endSequenceNumber": "33300002827422611596652",
+            "approximateArrivalOfFirstRecord": "2026-11-10T19:49:38Z",
+            "approximateArrivalOfLastRecord": "2026-11-10T19:49:38Z",
+            "batchSize": 1,
+            "streamArn": "arn:aws:dynamodb:us-east-1:123456789012:table/fcrec-esm/stream/2026-11-10T19:39:40.383"
+          }
+        }
+      ]
+    },
+    "G": {
+      "source": "dynamodb",
+      "handler": "poison",
+      "mapping_args": "--maximum-retry-attempts 2 --bisect-batch-on-function-error",
+      "invocations": [
+        {
+          "after_s": 0.0,
+          "records": [
+            "g-2"
+          ]
+        },
+        {
+          "after_s": 0.02,
+          "records": [
+            "g-poison-3",
+            "g-1"
+          ]
+        },
+        {
+          "after_s": 0.02,
+          "records": [
+            "g-4"
+          ]
+        },
+        {
+          "after_s": 0.03,
+          "records": [
+            "g-poison-3"
+          ]
+        },
+        {
+          "after_s": 0.27,
+          "records": [
+            "g-poison-3"
+          ]
+        },
+        {
+          "after_s": 0.62,
+          "records": [
+            "g-poison-3"
+          ]
+        },
+        {
+          "after_s": 0.64,
+          "records": [
+            "g-1"
+          ]
+        }
+      ],
+      "on_failure": [
+        {
+          "requestContext": {
+            "requestId": "c75da413-9571-43e4-a395-30d74bcbae1d",
+            "functionArn": "arn:aws:lambda:us-east-1:123456789012:function:fcrec-esm-G",
+            "condition": "RetryAttemptsExhausted",
+            "approximateInvokeCount": 3
+          },
+          "responseContext": {
+            "statusCode": 200,
+            "executedVersion": "$LATEST",
+            "functionError": "Unhandled"
+          },
+          "version": "1.0",
+          "timestamp": "2026-11-10T19:49:42.763Z",
+          "DDBStreamBatchInfo": {
+            "shardId": "shardId-00000001794339584205-07ca26d8",
+            "startSequenceNumber": "33400000107643140079332",
+            "endSequenceNumber": "33400000107643140079332",
+            "approximateArrivalOfFirstRecord": "2026-11-10T19:49:40Z",
+            "approximateArrivalOfLastRecord": "2026-11-10T19:49:40Z",
+            "batchSize": 1,
+            "streamArn": "arn:aws:dynamodb:us-east-1:123456789012:table/fcrec-esm/stream/2026-11-10T19:39:40.383"
+          }
+        }
+      ]
+    },
+    "H": {
+      "source": "kinesis",
+      "handler": "failall",
+      "mapping_args": "--maximum-retry-attempts -1 --maximum-record-age-in-seconds 60",
+      "invocations": [
+        {
+          "after_s": 0.0,
+          "records": [
+            "h-1"
+          ]
+        },
+        {
+          "after_s": 0.17,
+          "records": [
+            "h-1"
+          ]
+        },
+        {
+          "after_s": 0.51,
+          "records": [
+            "h-1"
+          ]
+        },
+        {
+          "after_s": 1.19,
+          "records": [
+            "h-1"
+          ]
+        },
+        {
+          "after_s": 2.71,
+          "records": [
+            "h-1"
+          ]
+        },
+        {
+          "after_s": 6.59,
+          "records": [
+            "h-1"
+          ]
+        },
+        {
+          "after_s": 12.82,
+          "records": [
+            "h-1"
+          ]
+        },
+        {
+          "after_s": 24.55,
+          "records": [
+            "h-1"
+          ]
+        },
+        {
+          "after_s": 49.18,
+          "records": [
+            "h-1"
+          ]
+        }
+      ],
+      "on_failure": [
+        {
+          "requestContext": {
+            "requestId": "3820e30e-c61a-44bd-bae1-1dea9ab0f204",
+            "functionArn": "arn:aws:lambda:us-east-1:123456789012:function:fcrec-esm-H",
+            "condition": "RecordAgeExceeded",
+            "approximateInvokeCount": 10
+          },
+          "version": "1.0",
+          "timestamp": "2026-11-10T19:51:17.993Z",
+          "KinesisBatchInfo": {
+            "shardId": "shardId-000000000000",
+            "startSequenceNumber": "49680099063009502977069292613146977147264114512321576962",
+            "endSequenceNumber": "49680099063009502977069292613146977147264114512321576962",
+            "approximateArrivalOfFirstRecord": "2026-11-10T19:49:42.214Z",
+            "approximateArrivalOfLastRecord": "2026-11-10T19:49:42.214Z",
+            "batchSize": 1,
+            "streamArn": "arn:aws:kinesis:us-east-1:123456789012:stream/fcrec-esm"
+          }
+        }
+      ]
+    },
+    "S3_DESTINATION": {
+      "source": "kinesis",
+      "handler": "failall",
+      "mapping_args": "--maximum-retry-attempts 0, OnFailure S3 bucket",
+      "invocations": [
+        {
+          "after_s": 0.0,
+          "records": [
+            "s-1",
+            "s-2"
+          ]
+        }
+      ],
+      "object_key_shape": "aws/lambda/<mapping uuid>/<shard id>/YYYY/MM/DD/YYYY-MM-DDTHH.MM.SS-<uuid>",
+      "object_content_type": "application/octet-stream",
+      "on_failure": [
+        {
+          "requestContext": {
+            "requestId": "395d7962-a030-4cb3-b9dd-b687aa31b74d",
+            "functionArn": "arn:aws:lambda:us-east-1:123456789012:function:fcrec-esm2-s3",
+            "condition": "RetryAttemptsExhausted",
+            "approximateInvokeCount": 1
+          },
+          "responseContext": {
+            "statusCode": 200,
+            "executedVersion": "$LATEST",
+            "functionError": "Unhandled"
+          },
+          "version": "1.0",
+          "payload": "{\"Records\":[{\"kinesis\":{\"kinesisSchemaVersion\":\"1.0\",\"partitionKey\":\"pk\",\"sequenceNumber\":\"49680101223505697810703734285538549586004877709632602114\",\"data\":\"eyJpZCI6InMtMSJ9\",\"approximateArrivalTimestamp\":1.794345876839E9},\"eventSource\":\"aws:kinesis\",\"eventVersion\":\"1.0\",\"eventID\":\"shardId-000000000000:49680101223505697810703734285538549586004877709632602114\",\"eventName\":\"aws:kinesis:record\",\"invokeIdentityArn\":\"arn:aws:iam::123456789012:role/fcrec-esm2-role\",\"awsRegion\":\"us-east-1\",\"eventSourceARN\":\"arn:aws:kinesis:us-east-1:123456789012:stream/fcrec-esm2\"},{\"kinesis\":{\"kinesisSchemaVersion\":\"1.0\",\"partitionKey\":\"pk\",\"sequenceNumber\":\"49680101223505697810703734285539758511824492338807308290\",\"data\":\"eyJpZCI6InMtMiJ9\",\"approximateArrivalTimestamp\":1.794345876842E9},\"eventSource\":\"aws:kinesis\",\"eventVersion\":\"1.0\",\"eventID\":\"shardId-000000000000:49680101223505697810703734285539758511824492338807308290\",\"eventName\":\"aws:kinesis:record\",\"invokeIdentityArn\":\"arn:aws:iam::123456789012:role/fcrec-esm2-role\",\"awsRegion\":\"us-east-1\",\"eventSourceARN\":\"arn:aws:kinesis:us-east-1:123456789012:stream/fcrec-esm2\"}]}",
+          "timestamp": "2026-11-10T21:24:38.687Z",
+          "KinesisBatchInfo": {
+            "shardId": "shardId-000000000000",
+            "startSequenceNumber": "49680101223505697810703734285538549586004877709632602114",
+            "endSequenceNumber": "49680101223505697810703734285539758511824492338807308290",
+            "approximateArrivalOfFirstRecord": "2026-11-10T21:24:36.839Z",
+            "approximateArrivalOfLastRecord": "2026-11-10T21:24:36.842Z",
+            "batchSize": 2,
+            "streamArn": "arn:aws:kinesis:us-east-1:123456789012:stream/fcrec-esm2"
+          }
+        }
+      ]
+    },
+    "THROTTLED": {
+      "source": "kinesis",
+      "handler": "failall with reserved concurrency 0 (every invocation throttled)",
+      "mapping_args": "--maximum-retry-attempts 1 --bisect-batch-on-function-error, OnFailure SQS",
+      "invocations": [],
+      "observed": "12 Throttles in CloudWatch over about 4 minutes, no OnFailure record: a batch Lambda cannot run (throttled) is retried without using up MaximumRetryAttempts, and is not bisected away",
+      "on_failure": []
+    }
+  }
+}

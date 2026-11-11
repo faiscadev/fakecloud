@@ -117,6 +117,9 @@ impl ResourceProvisioner {
             reprovision_losses: Default::default(),
             custom_responses: self.custom_responses.clone(),
             custom_failures: self.custom_failures.clone(),
+            // A nested stack is guarded by its root, which exists before the
+            // child stack is recorded.
+            guard_stack_id: self.guard_stack_id.clone(),
         }
     }
 

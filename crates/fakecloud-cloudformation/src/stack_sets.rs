@@ -3088,8 +3088,17 @@ impl CloudFormationService {
                 status: "FAILED",
                 reason: Some(format!("Account gate function invocation failed: {e}")),
             },
-            Some(Ok(bytes)) => {
-                let status = serde_json::from_slice::<Value>(&bytes)
+            Some(Ok(output)) if output.is_function_error() => GateResult {
+                status: "FAILED",
+                reason: Some(format!(
+                    "Account gate function failed: {}",
+                    output
+                        .error_message()
+                        .unwrap_or_else(|| String::from_utf8_lossy(&output.payload).into_owned())
+                )),
+            },
+            Some(Ok(output)) => {
+                let status = serde_json::from_slice::<Value>(&output.payload)
                     .ok()
                     .and_then(|v| v.get("Status").and_then(Value::as_str).map(str::to_string));
                 match status.as_deref() {
@@ -7751,8 +7760,13 @@ mod tests {
             &self,
             _function_arn: &str,
             _payload: &str,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>
-        {
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                    > + Send,
+            >,
+        > {
             let svc = self.0.get().cloned();
             Box::pin(async move {
                 if let Some(svc) = svc {
@@ -7764,7 +7778,9 @@ mod tests {
                     .await
                     .map_err(|e| e.message())?;
                 }
-                Ok(br#"{"Status":"SUCCEEDED"}"#.to_vec())
+                Ok(fakecloud_core::delivery::LambdaInvocationOutput::success(
+                    br#"{"Status":"SUCCEEDED"}"#.to_vec(),
+                ))
             })
         }
     }
@@ -8504,8 +8520,13 @@ mod tests {
             &self,
             _function_arn: &str,
             _payload: &str,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>
-        {
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                    > + Send,
+            >,
+        > {
             Box::pin(async { Err("custom resource handler failed".to_string()) })
         }
     }
@@ -8560,10 +8581,19 @@ mod tests {
             &self,
             _function_arn: &str,
             _payload: &str,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>
-        {
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                    > + Send,
+            >,
+        > {
             let body = format!("{{\"Status\":\"{}\"}}", self.0);
-            Box::pin(async move { Ok(body.into_bytes()) })
+            Box::pin(async move {
+                Ok(fakecloud_core::delivery::LambdaInvocationOutput::success(
+                    body.into_bytes(),
+                ))
+            })
         }
     }
 

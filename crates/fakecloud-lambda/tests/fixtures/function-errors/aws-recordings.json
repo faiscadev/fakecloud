@@ -1,0 +1,444 @@
+{
+  "apigateway_http": {
+    "authcbunauth": {
+      "body": "{\"message\":\"Unauthorized\"}",
+      "content_type": "application/json",
+      "status": 401,
+      "x_amzn_errortype": null
+    },
+    "authinvalid": {
+      "body": "{\"message\":\"Internal Server Error\"}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": null
+    },
+    "authother": {
+      "body": "{\"message\":\"Internal Server Error\"}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": null
+    },
+    "authreturnunauth": {
+      "body": "{\"message\":\"Unauthorized\"}",
+      "content_type": "application/json",
+      "status": 401,
+      "x_amzn_errortype": null
+    },
+    "authunauth": {
+      "body": "{\"message\":\"Unauthorized\"}",
+      "content_type": "application/json",
+      "status": 401,
+      "x_amzn_errortype": null
+    },
+    "msgonly": {
+      "body": "{\"message\":\"Internal Server Error\"}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": null
+    },
+    "msgonly-v1": {
+      "body": "{\"message\":\"Internal Server Error\"}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": null
+    },
+    "msgstatus": {
+      "body": "{\"message\":\"Internal Server Error\"}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": null
+    },
+    "plain": {
+      "body": "{\"message\":\"hi\"}",
+      "content_type": "application/json",
+      "status": 200,
+      "x_amzn_errortype": null
+    },
+    "shaped": {
+      "body": "{\"message\":\"Internal Server Error\"}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": null
+    },
+    "throw": {
+      "body": "{\"message\":\"Internal Server Error\"}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": null
+    },
+    "throw-v1": {
+      "body": "{\"message\":\"Internal Server Error\"}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": null
+    },
+    "typeonly": {
+      "body": "{\"errorType\":\"OnlyType\"}",
+      "content_type": "application/json",
+      "status": 200,
+      "x_amzn_errortype": null
+    },
+    "typestatus": {
+      "body": "typed-ok",
+      "content_type": "text/plain; charset=utf-8",
+      "status": 201,
+      "x_amzn_errortype": null
+    }
+  },
+  "apigateway_rest": {
+    "extrakey": {
+      "body": "{\"message\": \"Internal server error\"}",
+      "content_type": "application/json",
+      "status": 502,
+      "x_amzn_errortype": "InternalServerErrorException"
+    },
+    "msgonly": {
+      "body": "{\"message\": \"Internal server error\"}",
+      "content_type": "application/json",
+      "status": 502,
+      "x_amzn_errortype": "InternalServerErrorException"
+    },
+    "msgstatus": {
+      "body": "{\"message\": \"Internal server error\"}",
+      "content_type": "application/json",
+      "status": 502,
+      "x_amzn_errortype": "InternalServerErrorException"
+    },
+    "r-authcbunauth": {
+      "body": "{\"message\":\"Unauthorized\"}",
+      "content_type": "application/json",
+      "status": 401,
+      "x_amzn_errortype": "UnauthorizedException"
+    },
+    "r-authinvalid": {
+      "body": "{\"message\":null}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": "AuthorizerConfigurationException"
+    },
+    "r-authother": {
+      "body": "{\"message\":null}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": "AuthorizerConfigurationException"
+    },
+    "r-authreturnunauth": {
+      "body": "{\"message\":null}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": "AuthorizerConfigurationException"
+    },
+    "r-authunauth": {
+      "body": "{\"message\":\"Unauthorized\"}",
+      "content_type": "application/json",
+      "status": 401,
+      "x_amzn_errortype": "UnauthorizedException"
+    },
+    "shaped": {
+      "body": "{\"message\": \"Internal server error\"}",
+      "content_type": "application/json",
+      "status": 502,
+      "x_amzn_errortype": "InternalServerErrorException"
+    },
+    "t-authallow": {
+      "body": "ok",
+      "content_type": "application/json",
+      "status": 200,
+      "x_amzn_errortype": null
+    },
+    "t-authcbunauth": {
+      "body": "{\"message\":\"Unauthorized\"}",
+      "content_type": "application/json",
+      "status": 401,
+      "x_amzn_errortype": "UnauthorizedException"
+    },
+    "t-authinvalid": {
+      "body": "{\"message\":null}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": "AuthorizerConfigurationException"
+    },
+    "t-authnoprincipal": {
+      "body": "ok",
+      "content_type": "application/json",
+      "status": 200,
+      "x_amzn_errortype": null
+    },
+    "t-authother": {
+      "body": "{\"message\":null}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": "AuthorizerConfigurationException"
+    },
+    "t-authreturnunauth": {
+      "body": "{\"message\":null}",
+      "content_type": "application/json",
+      "status": 500,
+      "x_amzn_errortype": "AuthorizerConfigurationException"
+    },
+    "t-authunauth": {
+      "body": "{\"message\":\"Unauthorized\"}",
+      "content_type": "application/json",
+      "status": 401,
+      "x_amzn_errortype": "UnauthorizedException"
+    },
+    "throw": {
+      "body": "{\"message\": \"Internal server error\"}",
+      "content_type": "application/json",
+      "status": 502,
+      "x_amzn_errortype": "InternalServerErrorException"
+    },
+    "typestatus": {
+      "body": "{\"message\": \"Internal server error\"}",
+      "content_type": "application/json",
+      "status": 502,
+      "x_amzn_errortype": "InternalServerErrorException"
+    }
+  },
+  "apigateway_websocket_connect": {
+    "_setup": "WebSocket API, $connect route -> AWS_PROXY Lambda integration, curl upgrade request",
+    "typed (function error)": {
+      "body": "{\"message\": \"Internal server error\", \"connectionId\":\"ggUV1K6HgQAYKEhP3A==\", \"requestId\":\"GoySqFaAIAMEWLQ=\"}",
+      "content_type": "application/json; charset=UTF-8",
+      "status": 502
+    },
+    "ws403 (returns {statusCode:403, body:\"nope\"})": {
+      "body": "nope",
+      "content_type": "application/json; charset=UTF-8",
+      "status": 403
+    },
+    "wsnostatus (returns {hello})": {
+      "body": "{\"message\": \"Internal server error\", \"connectionId\":\"ggUVqS_p4QAYKEiKqA==\", \"requestId\":\"GoyNOH7NIAMEvww=\"}",
+      "content_type": "application/json; charset=UTF-8",
+      "status": 502
+    },
+    "wsok (returns {statusCode:200})": {
+      "status": 101
+    }
+  },
+  "cloudformation": {
+    "custom_resource_no_response": {
+      "_setup": "Custom::Thing with ServiceTimeout 5, handler python3.12 that raises ValueError without answering the ResponseURL",
+      "delete": "DeleteStack of the same resource failed with DELETE_FAILED and the same reason",
+      "invocations": "three invocations with the same request ID at t=0, +67s and +200s (Lambda async retries), so CloudFormation invokes asynchronously",
+      "reason": "CloudFormation did not receive a response from your Custom Resource. Please check your logs for requestId [4ae793ab-4166-43a5-9e75-5159c16ab332]. If you are using the Python cfn-response module, you may need to update your Lambda function code so that CloudFormation can attach the updated version.",
+      "resource_status": "CREATE_FAILED"
+    }
+  },
+  "cognito": {
+    "CustomMessage/AdminCreateUser": {
+      "error_code": "UserLambdaValidationException",
+      "message": "CustomMessage failed with error trigger said no.",
+      "side_effect": "user created (FORCE_CHANGE_PASSWORD)"
+    },
+    "CustomMessage/SignUp": {
+      "error_code": "UserLambdaValidationException",
+      "message": "CustomMessage failed with error trigger said no.",
+      "side_effect": "user created (UNCONFIRMED)"
+    },
+    "PostAuthentication/InitiateAuth": {
+      "error_code": "UserLambdaValidationException",
+      "message": "PostAuthentication failed with error trigger said no.",
+      "side_effect": "no tokens returned"
+    },
+    "PostConfirmation/AdminConfirmSignUp": {
+      "error_code": "UserLambdaValidationException",
+      "message": "PostConfirmation failed with error trigger said no.",
+      "side_effect": "user is CONFIRMED anyway"
+    },
+    "PreAuthentication/InitiateAuth": {
+      "error_code": "UserLambdaValidationException",
+      "message": "PreAuthentication failed with error trigger said no."
+    },
+    "PreSignUp/SignUp": {
+      "error_code": "UserLambdaValidationException",
+      "message": "PreSignUp failed with error trigger said no.",
+      "side_effect": "no user created"
+    },
+    "PreTokenGeneration/InitiateAuth": {
+      "error_code": "UserLambdaValidationException",
+      "message": "PreTokenGeneration failed with error trigger said no."
+    },
+    "PreTokenGeneration/InitiateAuth REFRESH_TOKEN_AUTH": {
+      "error_code": "UserLambdaValidationException",
+      "message": "PreTokenGeneration failed with error trigger said no.",
+      "trigger_source": "TokenGeneration_RefreshTokens"
+    },
+    "PreTokenGeneration/oauth2-token refresh_token grant": {
+      "body": "{\"error\":\"PreTokenGeneration failed with error trigger said no. (Service: AWSCognitoIdentityProviderInternalService; Status Code: 400; Error Code: UserLambdaValidationException; Request ID: d941a685-0285-4b57-82d6-e047f6d35ecf; Proxy: null)\"}",
+      "content_type": "application/json;charset=UTF-8",
+      "status": 400,
+      "trigger_source": "TokenGeneration_RefreshTokens"
+    },
+    "_function": "nodejs20.x async: throw new Error(\"trigger said no\")"
+  },
+  "functions": {
+    "authallow": "authorizer: principalId + Allow policy",
+    "authcbunauth": "authorizer, nodejs20.x: callback(\"Unauthorized\")",
+    "authinvalid": "authorizer, nodejs20.x: return {foo: \"bar\"}",
+    "authnoprincipal": "authorizer: Allow policy, no principalId",
+    "authother": "authorizer, nodejs20.x async: throw new Error(\"kaboom\")",
+    "authreturnunauth": "authorizer, nodejs20.x: return {errorMessage: \"Unauthorized\"}",
+    "authunauth": "authorizer, nodejs20.x async: throw new Error(\"Unauthorized\")",
+    "cb": "nodejs20.x: callback(\"callback error\")",
+    "exit": "python3.12: os._exit(3)",
+    "extrakey": "nodejs20.x: return {statusCode: 200, body: \"extra-ok\", extra: \"x\"}",
+    "msgonly": "nodejs20.x: return {errorMessage: \"only message\"}",
+    "msgstatus": "nodejs20.x: return {statusCode: 200, errorMessage: \"with status\", body: \"b\"}",
+    "opt-* / direct-*": "Step Functions STANDARD Task: arn:aws:states:::lambda:invoke (FunctionName from input) / the function ARN as Resource",
+    "plain": "nodejs20.x: return {message: \"hi\"}",
+    "shaped": "python3.12: return {\"errorType\": \"X\", \"errorMessage\": \"y\"}",
+    "t-* / r-*": "REST TOKEN / REQUEST authorizer (TTL 0) in front of a 200 proxy backend; HTTP API authorizers are REQUEST, payload 2.0, simple responses",
+    "throw / throw-v1": "the typed function behind a proxy integration (HTTP API payload 2.0 / 1.0)",
+    "timeout": "python3.12, Timeout=1: time.sleep(10)",
+    "typed": "python3.12: raise ValueError('typed boom')",
+    "typeonly": "nodejs20.x: return {errorType: \"OnlyType\"}",
+    "typestatus": "nodejs20.x: return {statusCode: 201, errorType: \"X\", body: \"typed-ok\"}",
+    "untyped": "nodejs20.x async: throw \"plain string error\""
+  },
+  "invoke": {
+    "cb": {
+      "function_error": "Unhandled",
+      "payload": "{\"errorType\":\"string\",\"errorMessage\":\"callback error\",\"trace\":[]}",
+      "status_code": 200
+    },
+    "exit": {
+      "function_error": "Unhandled",
+      "payload": "{\"errorType\":\"Runtime.ExitError\",\"errorMessage\":\"RequestId: 80d648c7-0b67-46f6-9fab-f8ebb3fe7db1 Error: Runtime exited with error: exit status 3\"}",
+      "status_code": 200
+    },
+    "shaped": {
+      "function_error": null,
+      "payload": "{\"errorType\": \"X\", \"errorMessage\": \"y\"}",
+      "status_code": 200
+    },
+    "timeout": {
+      "function_error": "Unhandled",
+      "payload": "{\"errorType\":\"Sandbox.Timedout\",\"errorMessage\":\"RequestId: fc67e8e5-fbb0-4cff-9ffb-73ff86612e8e Error: Task timed out after 1.00 seconds\"}",
+      "status_code": 200
+    },
+    "typed": {
+      "function_error": "Unhandled",
+      "payload": "{\"errorMessage\": \"typed boom\", \"errorType\": \"ValueError\", \"requestId\": \"47b990ea-0c7e-4524-a4f5-f089b320c55f\", \"stackTrace\": [\"  File \\\"/var/task/typed.py\\\", line 2, in handler\\n    raise ValueError('typed boom')\\n\"]}",
+      "status_code": 200
+    },
+    "untyped": {
+      "function_error": "Unhandled",
+      "payload": "{\"errorType\":\"string\",\"errorMessage\":\"plain string error\",\"trace\":[]}",
+      "status_code": 200
+    }
+  },
+  "note": "Recorded against real AWS with the AWS CLI; account IDs replaced by 123456789012. Request IDs are AWS-generated.",
+  "recorded": "2026-11-10",
+  "region": "us-east-1",
+  "stepfunctions": {
+    "direct-shaped": {
+      "cause": null,
+      "error": null,
+      "output_payload": {
+        "errorMessage": "y",
+        "errorType": "X"
+      },
+      "status": "SUCCEEDED",
+      "task_events": [
+        "LambdaFunctionScheduled",
+        "LambdaFunctionStarted",
+        "LambdaFunctionSucceeded"
+      ]
+    },
+    "direct-timeout": {
+      "cause": "{\"errorType\":\"Sandbox.Timedout\",\"errorMessage\":\"RequestId: 3e80c6fd-58f6-4285-9671-6ed15596c015 Error: Task timed out after 1.00 seconds\"}",
+      "error": "Sandbox.Timedout",
+      "status": "FAILED",
+      "task_events": [
+        "LambdaFunctionScheduled",
+        "LambdaFunctionStarted",
+        "LambdaFunctionFailed"
+      ]
+    },
+    "direct-typed": {
+      "cause": "{\"errorMessage\": \"typed boom\", \"errorType\": \"ValueError\", \"requestId\": \"de6c54de-c4d6-4e32-a60c-affbf5041b09\", \"stackTrace\": [\"  File \\\"/var/task/typed.py\\\", line 2, in handler\\n    raise ValueError('typed boom')\\n\"]}",
+      "error": "ValueError",
+      "status": "FAILED",
+      "task_events": [
+        "LambdaFunctionScheduled",
+        "LambdaFunctionStarted",
+        "LambdaFunctionFailed"
+      ]
+    },
+    "direct-untyped": {
+      "cause": "{\"errorType\":\"string\",\"errorMessage\":\"plain string error\",\"trace\":[]}",
+      "error": "string",
+      "status": "FAILED",
+      "task_events": [
+        "LambdaFunctionScheduled",
+        "LambdaFunctionStarted",
+        "LambdaFunctionFailed"
+      ]
+    },
+    "opt-cb": {
+      "cause": "{\"errorType\":\"string\",\"errorMessage\":\"callback error\",\"trace\":[]}",
+      "error": "string",
+      "status": "FAILED",
+      "task_events": [
+        "TaskScheduled",
+        "TaskStarted",
+        "TaskFailed"
+      ]
+    },
+    "opt-exit": {
+      "cause": "{\"errorType\":\"Runtime.ExitError\",\"errorMessage\":\"RequestId: 6c14ea55-afa0-4af3-8145-8c7dbf4f2905 Error: Runtime exited with error: exit status 3\"}",
+      "error": "Runtime.ExitError",
+      "status": "FAILED",
+      "task_events": [
+        "TaskScheduled",
+        "TaskStarted",
+        "TaskFailed"
+      ]
+    },
+    "opt-shaped": {
+      "cause": null,
+      "error": null,
+      "output_payload": {
+        "errorMessage": "y",
+        "errorType": "X"
+      },
+      "status": "SUCCEEDED",
+      "task_events": [
+        "TaskScheduled",
+        "TaskStarted",
+        "TaskSucceeded"
+      ]
+    },
+    "opt-timeout": {
+      "cause": "{\"errorType\":\"Sandbox.Timedout\",\"errorMessage\":\"RequestId: 61dbeb32-398d-40f9-88d1-eda57144be16 Error: Task timed out after 1.00 seconds\"}",
+      "error": "Sandbox.Timedout",
+      "status": "FAILED",
+      "task_events": [
+        "TaskScheduled",
+        "TaskStarted",
+        "TaskFailed"
+      ]
+    },
+    "opt-typed": {
+      "cause": "{\"errorMessage\":\"typed boom\",\"errorType\":\"ValueError\",\"requestId\":\"d138fec3-8e7f-4872-bc84-f786fad8ccbf\",\"stackTrace\":[\"  File \\\"/var/task/typed.py\\\", line 2, in handler\\n    raise ValueError('typed boom')\\n\"]}",
+      "error": "ValueError",
+      "status": "FAILED",
+      "task_events": [
+        "TaskScheduled",
+        "TaskStarted",
+        "TaskFailed"
+      ]
+    },
+    "opt-untyped": {
+      "cause": "{\"errorType\":\"string\",\"errorMessage\":\"plain string error\",\"trace\":[]}",
+      "error": "string",
+      "status": "FAILED",
+      "task_events": [
+        "TaskScheduled",
+        "TaskStarted",
+        "TaskFailed"
+      ]
+    }
+  }
+}

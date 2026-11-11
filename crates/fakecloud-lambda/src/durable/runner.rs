@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
+use fakecloud_core::delivery::LambdaInvocationOutput;
 use parking_lot::{Mutex, RwLock};
 use serde_json::{json, Value};
 
@@ -527,9 +528,9 @@ impl DurableHub {
         match runtime.invoke(func, &bytes, layers).await {
             Ok(out) => match function_error(&out) {
                 Some(e) => InvocationOutcome::FunctionError(e),
-                None => {
-                    InvocationOutcome::Output(serde_json::from_slice(&out).unwrap_or(Value::Null))
-                }
+                None => InvocationOutcome::Output(
+                    serde_json::from_slice(&out.payload).unwrap_or(Value::Null),
+                ),
             },
             Err(e) => InvocationOutcome::FunctionError(json!({
                 "ErrorType": "Runtime.InvocationFailed",
@@ -562,7 +563,7 @@ impl DurableHub {
                     },
                     None => ChainedOutcome {
                         status: OpStatus::Succeeded,
-                        result: Some(String::from_utf8_lossy(&out).into_owned()),
+                        result: Some(String::from_utf8_lossy(&out.payload).into_owned()),
                         error: None,
                     },
                 },
@@ -658,23 +659,29 @@ pub(crate) fn version_exists(st: &LambdaState, function_name: &str, version: &st
             .is_some_and(|m| m.contains_key(version))
 }
 
-/// The `ErrorObject` a function error envelope (`errorMessage` /
-/// `errorType` / `stackTrace`) stands for, or `None` for a normal return.
-fn function_error(bytes: &[u8]) -> Option<Value> {
-    let v: Value = serde_json::from_slice(bytes).ok()?;
-    let obj = v.as_object()?;
-    if obj.contains_key("Status") {
-        return None;
-    }
-    if !obj.contains_key("errorMessage") && !obj.contains_key("errorType") {
-        return None;
-    }
+/// The error object of an invocation that produced a function error
+/// (`X-Amz-Function-Error`), built from the error the runtime reported;
+/// `None` for an invocation that returned normally, whatever its payload.
+fn function_error(out: &LambdaInvocationOutput) -> Option<Value> {
+    let kind = out.function_error.as_deref()?;
+    let obj = serde_json::from_slice::<Value>(&out.payload)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
     let mut e = serde_json::Map::new();
-    if let Some(t) = obj.get("errorType").and_then(Value::as_str) {
-        e.insert("ErrorType".into(), json!(t));
-    }
-    if let Some(m) = obj.get("errorMessage").and_then(Value::as_str) {
-        e.insert("ErrorMessage".into(), json!(m));
+    let error_type = obj.get("errorType").and_then(Value::as_str).unwrap_or(kind);
+    e.insert("ErrorType".into(), json!(error_type));
+    match obj.get("errorMessage").and_then(Value::as_str) {
+        Some(m) => {
+            e.insert("ErrorMessage".into(), json!(m));
+        }
+        None if obj.is_empty() && !out.payload.is_empty() => {
+            e.insert(
+                "ErrorMessage".into(),
+                json!(String::from_utf8_lossy(&out.payload)),
+            );
+        }
+        None => {}
     }
     if let Some(st) = obj.get("stackTrace").and_then(Value::as_array) {
         let lines: Vec<Value> = st.iter().filter(|l| l.is_string()).cloned().collect();
@@ -1206,13 +1213,34 @@ mod tests {
     }
 
     #[test]
-    fn function_error_envelopes_become_error_objects() {
+    fn function_errors_follow_the_signal_not_the_payload() {
+        let failed = |p: &[u8]| LambdaInvocationOutput {
+            payload: p.to_vec(),
+            function_error: Some("Unhandled".into()),
+        };
         assert_eq!(
-            function_error(br#"{"errorMessage":"crashed invocation","errorType":"Error","stackTrace":["at x"]}"#),
+            function_error(&failed(
+                br#"{"errorMessage":"crashed invocation","errorType":"Error","stackTrace":["at x"]}"#
+            )),
             Some(json!({"ErrorType":"Error","ErrorMessage":"crashed invocation","StackTrace":["at x"]}))
         );
-        assert_eq!(function_error(br#"{"Status":"PENDING"}"#), None);
-        assert_eq!(function_error(br#""ok""#), None);
+        assert_eq!(
+            function_error(&failed(b"not json")),
+            Some(json!({"ErrorType":"Unhandled","ErrorMessage":"not json"}))
+        );
+        // A function that returns an error-shaped object succeeded.
+        assert_eq!(
+            function_error(&LambdaInvocationOutput::success(
+                br#"{"errorMessage":"m","errorType":"E"}"#.to_vec()
+            )),
+            None
+        );
+        assert_eq!(
+            function_error(&LambdaInvocationOutput::success(
+                br#"{"Status":"PENDING"}"#.to_vec()
+            )),
+            None
+        );
     }
 
     #[test]

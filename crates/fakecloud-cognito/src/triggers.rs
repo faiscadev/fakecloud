@@ -9,6 +9,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use fakecloud_core::delivery::{DeliveryBus, EmailDispatcher, SmsDispatcher};
+use fakecloud_core::service::AwsServiceError;
 
 use crate::state::{ChallengeResult, SharedCognitoState, User, UserAttribute};
 
@@ -51,8 +52,13 @@ pub enum TriggerSource {
     PreAuthenticationAuthentication,
     PostAuthenticationAuthentication,
     CustomMessageSignUp,
+    CustomMessageAdminCreateUser,
+    CustomMessageResendCode,
     CustomMessageForgotPassword,
+    CustomMessageVerifyUserAttribute,
     TokenGenerationAuthentication,
+    TokenGenerationRefreshTokens,
+    TokenGenerationHostedAuth,
     UserMigrationAuthentication,
     DefineAuthChallengeAuthentication,
     CreateAuthChallengeAuthentication,
@@ -79,12 +85,20 @@ impl TriggerSource {
             Self::PreSignUpSignUp => "PreSignUp_SignUp",
             Self::PreSignUpAdminCreateUser => "PreSignUp_AdminCreateUser",
             Self::PostConfirmationConfirmSignUp => "PostConfirmation_ConfirmSignUp",
-            Self::PostConfirmationAdminConfirmSignUp => "PostConfirmation_AdminConfirmSignUp",
+            // AdminConfirmSignUp reports the same trigger source as
+            // ConfirmSignUp (Cognito developer guide, "Connecting API
+            // operations to Lambda triggers").
+            Self::PostConfirmationAdminConfirmSignUp => "PostConfirmation_ConfirmSignUp",
             Self::PreAuthenticationAuthentication => "PreAuthentication_Authentication",
             Self::PostAuthenticationAuthentication => "PostAuthentication_Authentication",
             Self::CustomMessageSignUp => "CustomMessage_SignUp",
+            Self::CustomMessageAdminCreateUser => "CustomMessage_AdminCreateUser",
+            Self::CustomMessageResendCode => "CustomMessage_ResendCode",
             Self::CustomMessageForgotPassword => "CustomMessage_ForgotPassword",
+            Self::CustomMessageVerifyUserAttribute => "CustomMessage_VerifyUserAttribute",
             Self::TokenGenerationAuthentication => "TokenGeneration_Authentication",
+            Self::TokenGenerationRefreshTokens => "TokenGeneration_RefreshTokens",
+            Self::TokenGenerationHostedAuth => "TokenGeneration_HostedAuth",
             Self::UserMigrationAuthentication => "UserMigration_Authentication",
             Self::DefineAuthChallengeAuthentication => "DefineAuthChallenge_Authentication",
             Self::CreateAuthChallengeAuthentication => "CreateAuthChallenge_Authentication",
@@ -119,8 +133,14 @@ impl TriggerSource {
             }
             Self::PreAuthenticationAuthentication => "PreAuthentication",
             Self::PostAuthenticationAuthentication => "PostAuthentication",
-            Self::CustomMessageSignUp | Self::CustomMessageForgotPassword => "CustomMessage",
-            Self::TokenGenerationAuthentication => "PreTokenGeneration",
+            Self::CustomMessageSignUp
+            | Self::CustomMessageAdminCreateUser
+            | Self::CustomMessageResendCode
+            | Self::CustomMessageForgotPassword
+            | Self::CustomMessageVerifyUserAttribute => "CustomMessage",
+            Self::TokenGenerationAuthentication
+            | Self::TokenGenerationRefreshTokens
+            | Self::TokenGenerationHostedAuth => "PreTokenGeneration",
             Self::UserMigrationAuthentication => "UserMigration",
             Self::DefineAuthChallengeAuthentication => "DefineAuthChallenge",
             Self::CreateAuthChallengeAuthentication => "CreateAuthChallenge",
@@ -155,8 +175,10 @@ pub fn get_trigger_arn(
     trigger_source: TriggerSource,
 ) -> Option<String> {
     let accounts = cognito_state.read();
-    let state = accounts.default_ref();
-    let pool = state.user_pools.get(pool_id)?;
+    // Pool ids are unique: the pool lives in whichever account created it.
+    let pool = accounts
+        .iter()
+        .find_map(|(_, state)| state.user_pools.get(pool_id))?;
     let lambda_config = pool.lambda_config.as_ref()?;
     let key = trigger_source.lambda_config_key();
     let raw = lambda_config.get(key)?;
@@ -221,70 +243,100 @@ pub fn build_trigger_event(
 }
 
 /// Invoke a Lambda trigger synchronously (waits for response).
-/// Used for PreSignUp and PreAuthentication triggers where the response
-/// can modify the operation outcome.
 ///
-/// Returns `Ok(Some(response))` if the trigger was invoked successfully,
-/// `Ok(None)` if no trigger is configured or the delivery bus has no Lambda,
-/// or silently returns `Ok(None)` on invocation errors (triggers should not
-/// fail the Cognito operation).
+/// Returns `Ok(Some(response))` when the trigger ran and returned a JSON
+/// response, and `Ok(None)` when no Lambda is wired, the invocation could
+/// not run, or the response was not JSON (triggers that cannot run do not
+/// fail the Cognito operation). A trigger that ran and returned a function
+/// error fails the operation the way Cognito does:
+/// `UserLambdaValidationException` "`<Trigger>` failed with error
+/// `<errorMessage>`."
 pub async fn invoke_trigger(
     ctx: &CognitoDeliveryContext,
     function_arn: &str,
     event: &Value,
-) -> Option<Value> {
+) -> Result<Option<Value>, AwsServiceError> {
     let payload = event.to_string();
     match ctx.delivery_bus.invoke_lambda(function_arn, &payload).await {
-        Some(Ok(bytes)) => match serde_json::from_slice::<Value>(&bytes) {
-            Ok(response) => Some(response),
-            Err(e) => {
-                tracing::warn!(
-                    function_arn = %function_arn,
-                    error = %e,
-                    "Failed to parse Lambda trigger response as JSON"
-                );
-                None
+        Some(Ok(output)) => {
+            if output.is_function_error() {
+                return Err(trigger_function_error(event, &output));
             }
-        },
+            match serde_json::from_slice::<Value>(&output.payload) {
+                Ok(response) => Ok(Some(response)),
+                Err(e) => {
+                    tracing::warn!(
+                        function_arn = %function_arn,
+                        error = %e,
+                        "Failed to parse Lambda trigger response as JSON"
+                    );
+                    Ok(None)
+                }
+            }
+        }
         Some(Err(e)) => {
             tracing::warn!(
                 function_arn = %function_arn,
                 error = %e,
                 "Lambda trigger invocation failed, skipping"
             );
-            None
+            Ok(None)
         }
-        None => None,
+        None => Ok(None),
     }
 }
 
-/// Invoke a Lambda trigger in fire-and-forget mode.
-/// Used for PostConfirmation, PostAuthentication, and CustomMessage triggers.
-pub fn invoke_trigger_fire_and_forget(
-    ctx: &CognitoDeliveryContext,
-    function_arn: String,
-    event: Value,
-) {
-    let bus = ctx.delivery_bus.clone();
-    tokio::spawn(async move {
-        let payload = event.to_string();
-        match bus.invoke_lambda(&function_arn, &payload).await {
-            Some(Ok(_)) => {
-                tracing::debug!(
-                    function_arn = %function_arn,
-                    "Fire-and-forget Lambda trigger completed"
-                );
-            }
-            Some(Err(e)) => {
-                tracing::warn!(
-                    function_arn = %function_arn,
-                    error = %e,
-                    "Fire-and-forget Lambda trigger failed"
-                );
-            }
-            None => {}
+/// The trigger name Cognito reports in a trigger failure: the Lambda config
+/// key the event's `triggerSource` belongs to (`PreSignUp_SignUp` ->
+/// `PreSignUp`, `TokenGeneration_*` -> `PreTokenGeneration`).
+fn trigger_name(event: &Value) -> String {
+    let source = event["triggerSource"].as_str().unwrap_or("");
+    let prefix = source.split('_').next().unwrap_or(source);
+    match prefix {
+        "TokenGeneration" => "PreTokenGeneration".to_string(),
+        "" => "Lambda trigger".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// `UserLambdaValidationException` for a trigger that returned a function
+/// error.
+pub(crate) fn trigger_function_error(
+    event: &Value,
+    output: &fakecloud_core::delivery::LambdaInvocationOutput,
+) -> AwsServiceError {
+    let message = output
+        .error_message()
+        .unwrap_or_else(|| String::from_utf8_lossy(&output.payload).into_owned());
+    AwsServiceError::aws_error(
+        http::StatusCode::BAD_REQUEST,
+        "UserLambdaValidationException",
+        format!("{} failed with error {message}.", trigger_name(event)),
+    )
+}
+
+/// Invoke a custom sender trigger (CustomEmailSender / CustomSMSSender).
+/// "Except for custom sender Lambda triggers, Amazon Cognito invokes Lambda
+/// functions synchronously" (Cognito developer guide, "Things to know about
+/// Lambda triggers"): custom senders are Event invocations, so a function
+/// error is Lambda's to retry and never fails the Cognito call.
+pub fn invoke_custom_sender(ctx: &CognitoDeliveryContext, function_arn: &str, event: &Value) {
+    match ctx
+        .delivery_bus
+        .invoke_lambda_async(function_arn, &event.to_string())
+    {
+        Some(Ok(())) => {
+            tracing::debug!(function_arn = %function_arn, "Custom sender trigger queued");
         }
-    });
+        Some(Err(e)) => {
+            tracing::warn!(
+                function_arn = %function_arn,
+                error = %e,
+                "Custom sender trigger could not be invoked"
+            );
+        }
+        None => {}
+    }
 }
 
 /// Build a DefineAuthChallenge trigger event.
@@ -523,7 +575,11 @@ pub fn render_verification_email(
     let body_html = body_template
         .replace("{####}", code)
         .replace("{username}", username);
-    let body_text = strip_html(&body_html);
+    // Strip the template's markup, not the values put into it: a code or a
+    // temporary password may hold `<` or `>`.
+    let body_text = strip_html(body_template)
+        .replace("{####}", code)
+        .replace("{username}", username);
     VerificationEmail {
         from: from_address
             .unwrap_or("no-reply@fakecloud.local")
@@ -558,6 +614,18 @@ pub fn render_verification_sms(sms_template: Option<&str>, username: &str, code:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn text_body_keeps_markup_like_characters_of_the_code() {
+        let email = render_verification_email(
+            None,
+            None,
+            Some("<p>Your password is <b>{####}</b></p>"),
+            "u",
+            "a<b>c&d",
+        );
+        assert_eq!(email.body_text, "Your password is a<b>c&d");
+    }
+
     use super::*;
 
     #[test]
@@ -573,7 +641,7 @@ mod tests {
         );
         assert_eq!(
             TriggerSource::PostConfirmationAdminConfirmSignUp.as_str(),
-            "PostConfirmation_AdminConfirmSignUp"
+            "PostConfirmation_ConfirmSignUp"
         );
         assert_eq!(
             TriggerSource::PreAuthenticationAuthentication.as_str(),
@@ -586,6 +654,18 @@ mod tests {
         assert_eq!(
             TriggerSource::CustomMessageForgotPassword.as_str(),
             "CustomMessage_ForgotPassword"
+        );
+        assert_eq!(
+            TriggerSource::CustomMessageAdminCreateUser.as_str(),
+            "CustomMessage_AdminCreateUser"
+        );
+        assert_eq!(
+            TriggerSource::CustomMessageResendCode.as_str(),
+            "CustomMessage_ResendCode"
+        );
+        assert_eq!(
+            TriggerSource::CustomMessageVerifyUserAttribute.as_str(),
+            "CustomMessage_VerifyUserAttribute"
         );
     }
 
@@ -698,10 +778,7 @@ mod tests {
         );
 
         assert_eq!(event["callerContext"]["clientId"], "");
-        assert_eq!(
-            event["triggerSource"],
-            "PostConfirmation_AdminConfirmSignUp"
-        );
+        assert_eq!(event["triggerSource"], "PostConfirmation_ConfirmSignUp");
     }
 
     #[test]

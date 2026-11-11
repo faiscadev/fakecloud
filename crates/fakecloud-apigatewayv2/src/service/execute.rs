@@ -434,9 +434,27 @@ impl ApiGatewayV2Service {
             matched_route_key = route_match.route.route_key.clone();
 
             // Authorizer enforcement
-            let authorizer_info = self
+            // An HTTP API answers an authorizer's 401 / 500 with a bare
+            // `{"message": ...}` body, as recorded (`apigateway_http.
+            // authunauth` / `.authother` / `.authinvalid` in
+            // fakecloud-lambda/tests/fixtures/function-errors/
+            // aws-recordings.json).
+            let authorizer_info = match self
                 .enforce_authorizer(&req, &api_id, &stage_name, &route_match.route)
-                .await?;
+                .await
+            {
+                Ok(info) => info,
+                Err(e) if e.status() == StatusCode::UNAUTHORIZED => {
+                    return Ok(http_api_message_response(
+                        StatusCode::UNAUTHORIZED,
+                        br#"{"message":"Unauthorized"}"#,
+                    ));
+                }
+                Err(e) if e.code() == "InternalServerErrorException" => {
+                    return Ok(crate::lambda_proxy::integration_failure_response());
+                }
+                Err(e) => return Err(e),
+            };
 
             // Get the integration for this route
             let integration_id = route_match
@@ -768,6 +786,17 @@ fn apply_request_parameters(
         format!("{prefix}{path}?{query_string}")
     };
     (url, headers)
+}
+
+/// A bare HTTP API gateway response: `Content-Type: application/json`,
+/// `body`, no `x-amzn-ErrorType`.
+fn http_api_message_response(status: StatusCode, body: &'static [u8]) -> AwsResponse {
+    AwsResponse {
+        status,
+        content_type: "application/json".to_string(),
+        headers: http::HeaderMap::new(),
+        body: bytes::Bytes::from_static(body).into(),
+    }
 }
 
 #[cfg(test)]

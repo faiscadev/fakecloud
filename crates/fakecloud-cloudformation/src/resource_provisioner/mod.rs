@@ -1139,6 +1139,12 @@ pub struct ResourceProvisioner {
     /// Physical ids a handler named while reporting `FAILED`, by logical id: a
     /// create that failed that way still has something to delete.
     pub custom_failures: Arc<parking_lot::Mutex<BTreeMap<String, String>>>,
+    /// The stack (the root one, for a nested provisioner) this provisioner
+    /// works for. Every create, update and delete first checks it still
+    /// exists: an operation outliving a reset, or its stack, would otherwise
+    /// act on resources that now belong to something else. `None` for Cloud
+    /// Control, which has no stack.
+    pub guard_stack_id: Option<String>,
 }
 
 /// What a custom-resource handler sent to its `ResponseURL`.
@@ -1156,11 +1162,28 @@ pub struct CustomResponse {
 #[derive(Debug, Default)]
 pub struct CustomResponses {
     waiting: parking_lot::Mutex<BTreeMap<String, Option<CustomResponse>>>,
+    /// Why Lambda could not run the handler for a request being waited on.
+    unrunnable: parking_lot::Mutex<BTreeMap<String, String>>,
 }
 
 impl CustomResponses {
     pub(crate) fn expect(&self, request_id: &str) {
         self.waiting.lock().insert(request_id.to_string(), None);
+        self.unrunnable.lock().remove(request_id);
+    }
+
+    /// Lambda discarded the handler's event for `request_id` without running
+    /// it (it can never run, or it never started before the event aged out):
+    /// the wait ends with that error rather than running out the
+    /// ServiceTimeout.
+    pub(crate) fn could_not_run(&self, request_id: &str, error: String) {
+        if self.waiting.lock().contains_key(request_id) {
+            self.unrunnable.lock().insert(request_id.to_string(), error);
+        }
+    }
+
+    pub(crate) fn take_unrunnable(&self, request_id: &str) -> Option<String> {
+        self.unrunnable.lock().remove(request_id)
     }
 
     pub fn accept(&self, request_id: &str, body: &[u8]) {
@@ -1174,8 +1197,41 @@ impl CustomResponses {
     }
 
     pub(crate) fn take(&self, request_id: &str) -> Option<CustomResponse> {
+        self.unrunnable.lock().remove(request_id);
         self.waiting.lock().remove(request_id).flatten()
     }
+
+    /// Whether the handler has answered `request_id` yet.
+    pub(crate) fn answered(&self, request_id: &str) -> bool {
+        self.waiting
+            .lock()
+            .get(request_id)
+            .is_some_and(Option::is_some)
+    }
+}
+
+/// How long CloudFormation waits for a custom resource's answer: the
+/// resource's `ServiceTimeout` (1-3600 seconds), else an hour.
+fn custom_service_timeout(event: &serde_json::Value) -> std::time::Duration {
+    let secs = event["ResourceProperties"]["ServiceTimeout"]
+        .as_u64()
+        .or_else(|| {
+            event["ResourceProperties"]["ServiceTimeout"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+        })
+        .filter(|s| (1..=3600).contains(s))
+        .unwrap_or(3600);
+    std::time::Duration::from_secs(secs)
+}
+
+/// CloudFormation's failure when a custom resource never answered, as
+/// recorded on AWS (fakecloud-lambda/tests/fixtures/function-errors/
+/// aws-recordings.json, `cloudformation.custom_resource_no_response`).
+pub(crate) fn custom_no_response_reason(request_id: &str) -> String {
+    format!(
+        "CloudFormation did not receive a response from your Custom Resource. Please check your logs for requestId [{request_id}]. If you are using the Python cfn-response module, you may need to update your Lambda function code so that CloudFormation can attach the updated version."
+    )
 }
 
 /// A container-backed resource the synchronous provisioning pass inserted as a
@@ -1426,7 +1482,31 @@ impl ResourceProvisioner {
     }
 
     /// Create a resource and return the StackResource with physical ID.
+    /// `Err` when the stack this provisioner works for is gone (deleted, or
+    /// wiped by a reset since the operation started).
+    fn ensure_stack_alive(&self) -> Result<(), String> {
+        let Some(stack_id) = &self.guard_stack_id else {
+            return Ok(());
+        };
+        use crate::state::RegionalAccounts;
+        let accounts = self.cloudformation_state.read();
+        let alive = accounts
+            .regional(&self.account_id, &self.region)
+            .is_some_and(|state| {
+                state
+                    .stacks
+                    .values()
+                    .any(|s| &s.stack_id == stack_id && s.status != "DELETE_COMPLETE")
+            });
+        if alive {
+            Ok(())
+        } else {
+            Err(format!("Stack [{stack_id}] does not exist"))
+        }
+    }
+
     pub fn create_resource(&self, resource: &ResourceDefinition) -> Result<StackResource, String> {
+        self.ensure_stack_alive()?;
         let result = match resource.resource_type.as_str() {
             "AWS::SQS::Queue" => self.create_sqs_queue(resource),
             "AWS::SQS::QueuePolicy" => self.create_sqs_queue_policy(resource),
@@ -1848,6 +1928,7 @@ impl ResourceProvisioner {
             physical_id: res.physical_id,
             resource_type: resource.resource_type.clone(),
             status: "CREATE_COMPLETE".to_string(),
+            custom_properties: service_token.is_some().then(|| resource.properties.clone()),
             service_token,
             attributes: res.attributes,
             deletion_policy: resource.deletion_policy.clone(),
@@ -1866,6 +1947,7 @@ impl ResourceProvisioner {
         existing: &StackResource,
         new_def: &ResourceDefinition,
     ) -> Result<Option<StackResource>, String> {
+        self.ensure_stack_alive()?;
         let result = match new_def.resource_type.as_str() {
             "AWS::Lambda::Function" => Some(self.update_lambda_function(existing, new_def)?),
             "AWS::Lambda::Permission" => Some(self.update_lambda_permission(existing, new_def)?),
@@ -2313,6 +2395,7 @@ impl ResourceProvisioner {
             // Carry the new template's policies onto the updated record.
             deletion_policy: new_def.deletion_policy.clone(),
             update_replace_policy: new_def.update_replace_policy.clone(),
+            custom_properties: existing.custom_properties.clone(),
         }))
     }
 
@@ -2670,6 +2753,7 @@ impl ResourceProvisioner {
     /// deleted, as on AWS: a resource removed out of band never fails a stack's
     /// delete.
     pub fn delete_resource(&self, resource: &StackResource) -> Result<(), String> {
+        self.ensure_stack_alive()?;
         self.keeping_teardowns_on_failure(|| {
             self.delete_resource_unchecked(resource).or_else(|e| {
                 if is_not_found_error(&e, &resource.physical_id) {
@@ -3565,47 +3649,6 @@ impl ResourceProvisioner {
 
     // --- Organizations ---
 
-    fn invoke_lambda_sync(&self, function_arn: &str, payload: &str) -> Result<(), String> {
-        let delivery = self.delivery.clone();
-        let function_arn = function_arn.to_string();
-        let payload = payload.to_string();
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|e| format!("Failed to create runtime: {e}"))?;
-                rt.block_on(async {
-                    match delivery.invoke_lambda(&function_arn, &payload).await {
-                        Some(Ok(_)) => {
-                            tracing::info!(
-                                "Custom resource Lambda {} invoked successfully",
-                                function_arn
-                            );
-                            Ok(())
-                        }
-                        Some(Err(e)) => {
-                            tracing::warn!(
-                                "Custom resource Lambda {} invocation failed: {e}",
-                                function_arn
-                            );
-                            Err(format!("Lambda invocation failed: {e}"))
-                        }
-                        None => {
-                            tracing::warn!(
-                                "No Lambda delivery configured; skipping custom resource invocation for {}",
-                                function_arn
-                            );
-                            Ok(())
-                        }
-                    }
-                })
-            })
-            .join()
-            .map_err(|_| "Lambda invocation thread panicked".to_string())?
-        })
-    }
-
     /// The URL a handler answers a request at.
     fn custom_response_url(&self, request_id: &str) -> String {
         let base = self
@@ -3616,11 +3659,12 @@ impl ResourceProvisioner {
         format!("{base}/_fakecloud/cloudformation/custom-resource-response/{request_id}")
     }
 
-    /// Send a custom resource's request. The queued form (`defer_custom_invokes`)
-    /// has no answer to read; the direct form returns what the handler put to its
-    /// `ResponseURL` by the time the invocation ended. A handler that answered
-    /// nothing is taken as having succeeded, since nothing here will hear from it
-    /// later.
+    /// Send a custom resource's request. CloudFormation invokes the handler
+    /// asynchronously (Lambda's async error handling retries a function
+    /// error) and waits for its answer at the `ResponseURL` until the
+    /// resource's `ServiceTimeout`; a handler that never answers fails the
+    /// operation (`custom_no_response_reason`). The queued form
+    /// (`defer_custom_invokes`) has no answer to read.
     fn send_custom_request(
         &self,
         service_token: &str,
@@ -3636,9 +3680,46 @@ impl ResourceProvisioner {
             return Ok(None);
         }
         self.custom_responses.expect(request_id);
-        let invoked = self.invoke_lambda_sync(service_token, &payload);
-        let response = self.custom_responses.take(request_id);
-        invoked.map(|()| response)
+        // The invocation runs on the server's runtime while this provisioning
+        // pass waits for the answer.
+        let handle = tokio::runtime::Handle::try_current().ok();
+        let queued = {
+            let _entered = handle.as_ref().map(tokio::runtime::Handle::enter);
+            let responses = self.custom_responses.clone();
+            let id = request_id.to_string();
+            self.delivery.invoke_lambda_async_observed(
+                service_token,
+                &payload,
+                Box::new(move |error| responses.could_not_run(&id, error)),
+            )
+        };
+        match queued {
+            None => {
+                tracing::warn!(
+                    "No Lambda delivery configured; skipping custom resource invocation for {}",
+                    service_token
+                );
+                return Ok(self.custom_responses.take(request_id));
+            }
+            Some(Err(e)) => {
+                self.custom_responses.take(request_id);
+                return Err(format!("Lambda invocation failed: {e}"));
+            }
+            Some(Ok(())) => {}
+        }
+        let deadline = std::time::Instant::now() + custom_service_timeout(&event);
+        while !self.custom_responses.answered(request_id) {
+            if let Some(error) = self.custom_responses.take_unrunnable(request_id) {
+                self.custom_responses.take(request_id);
+                return Err(format!("Lambda invocation failed: {error}"));
+            }
+            if std::time::Instant::now() >= deadline {
+                self.custom_responses.take(request_id);
+                return Err(custom_no_response_reason(request_id));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        Ok(self.custom_responses.take(request_id))
     }
 
     fn custom_failure_reason(response: &CustomResponse, request_id: &str) -> String {
@@ -3755,6 +3836,7 @@ impl ResourceProvisioner {
             attributes: existing.attributes.clone(),
             deletion_policy: resource.deletion_policy.clone(),
             update_replace_policy: resource.update_replace_policy.clone(),
+            custom_properties: Some(props.clone()),
         };
         if let Some(response) = response {
             if response.status.eq_ignore_ascii_case("FAILED") {
@@ -3788,21 +3870,19 @@ impl ResourceProvisioner {
             "ResourceType": resource.resource_type,
             "LogicalResourceId": resource.logical_id,
             "PhysicalResourceId": resource.physical_id,
+            "ResourceProperties": resource.custom_properties.clone().unwrap_or_else(|| {
+                serde_json::json!({ "ServiceToken": service_token })
+            }),
         });
 
-        match self.send_custom_request(&service_token, &request_id, event) {
-            Ok(Some(response)) if response.status.eq_ignore_ascii_case("FAILED") => {
+        // A handler that cannot be invoked, or never answers, fails the
+        // delete (DELETE_FAILED with the same reason as a create), as
+        // recorded.
+        match self.send_custom_request(&service_token, &request_id, event)? {
+            Some(response) if response.status.eq_ignore_ascii_case("FAILED") => {
                 Err(Self::custom_failure_reason(&response, &request_id))
             }
-            Ok(_) => Ok(()),
-            Err(e) => {
-                // Best-effort: don't fail stack deletion if Lambda invocation fails
-                tracing::warn!(
-                    "Custom resource delete Lambda invocation failed for {}: {e}",
-                    resource.logical_id
-                );
-                Ok(())
-            }
+            _ => Ok(()),
         }
     }
 
@@ -4739,6 +4819,7 @@ mod tests {
             reprovision_losses: Default::default(),
             custom_responses: Default::default(),
             custom_failures: Default::default(),
+            guard_stack_id: None,
         };
         // Wire KMS like the server does, over the provisioner's own KMS state.
         prov.kms_hook = Some(Arc::new(fakecloud_kms::hook::KmsServiceHook::new(
@@ -6026,6 +6107,7 @@ mod tests {
             attributes: Default::default(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         prov.delete_resource(&table)
             .expect("a table whose database is gone is already deleted");
@@ -10285,6 +10367,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&stack_resource, "Arn"), None);
     }
@@ -10308,6 +10391,7 @@ mod tests {
             },
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(
             prov.get_att(&stack_resource, "TopicArn"),
@@ -10516,6 +10600,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "Arn"), None);
     }
@@ -10548,6 +10633,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "Arn"), None);
     }
@@ -10579,6 +10665,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "Arn"), None);
     }
@@ -10612,6 +10699,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "Arn"), None);
     }
@@ -10743,6 +10831,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "Name"), None);
     }
@@ -10772,6 +10861,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "IdentityName"), None);
     }
@@ -10808,6 +10898,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "TemplateName"), None);
     }
@@ -10841,6 +10932,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "ContactListName"), None);
     }
@@ -10867,6 +10959,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "PoolName"), None);
     }
@@ -10893,6 +10986,7 @@ mod tests {
             attributes: BTreeMap::new(),
             deletion_policy: None,
             update_replace_policy: None,
+            custom_properties: None,
         };
         assert_eq!(prov.get_att(&fresh, "RuleSetName"), None);
     }
@@ -10994,6 +11088,7 @@ mod tests {
                     attributes: BTreeMap::new(),
                     deletion_policy: None,
                     update_replace_policy: None,
+                    custom_properties: None,
                 },
                 "Name",
             ),
@@ -13003,16 +13098,90 @@ mod tests {
             &self,
             _function_arn: &str,
             payload: &str,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>
-        {
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                    > + Send,
+            >,
+        > {
             let request: serde_json::Value = serde_json::from_str(payload).unwrap();
             self.responses.accept(
                 request["RequestId"].as_str().unwrap(),
                 self.answer.to_string().as_bytes(),
             );
             self.requests.lock().push(request);
-            Box::pin(async { Ok(Vec::new()) })
+            Box::pin(async {
+                Ok(fakecloud_core::delivery::LambdaInvocationOutput::success(
+                    Vec::new(),
+                ))
+            })
         }
+
+        /// CloudFormation invokes custom resources asynchronously; the
+        /// handler answers at its ResponseURL before the call returns.
+        fn invoke_lambda_async(&self, _function_arn: &str, payload: &str) -> Result<(), String> {
+            let request: serde_json::Value = serde_json::from_str(payload).unwrap();
+            // A null answer models a handler that never answers.
+            if !self.answer.is_null() {
+                self.responses.accept(
+                    request["RequestId"].as_str().unwrap(),
+                    self.answer.to_string().as_bytes(),
+                );
+            }
+            self.requests.lock().push(request);
+            Ok(())
+        }
+    }
+
+    /// Lambda accepts the event, then discards it without running the
+    /// handler.
+    struct Unrunnable;
+
+    impl fakecloud_core::delivery::LambdaDelivery for Unrunnable {
+        fn invoke_lambda(
+            &self,
+            _function_arn: &str,
+            _payload: &str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<fakecloud_core::delivery::LambdaInvocationOutput, String>,
+                    > + Send,
+            >,
+        > {
+            Box::pin(async { Err("unused".to_string()) })
+        }
+
+        fn invoke_lambda_async_observed(
+            &self,
+            _function_arn: &str,
+            _payload: &str,
+            on_unrunnable: fakecloud_core::delivery::AsyncUnrunnableHook,
+        ) -> Result<(), String> {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                on_unrunnable("unsupported runtime: python0.1".to_string());
+            });
+            Ok(())
+        }
+    }
+
+    /// A handler Lambda cannot run fails the resource with that error at
+    /// once instead of after its (hour-long) ServiceTimeout.
+    #[test]
+    fn a_handler_lambda_cannot_run_fails_without_waiting_out_the_timeout() {
+        let mut prov = make_provisioner();
+        prov.delivery = Arc::new(
+            fakecloud_core::delivery::DeliveryBus::new().with_lambda(Arc::new(Unrunnable)),
+        );
+        let started = std::time::Instant::now();
+        let reason = prov.create_resource(&custom_definition()).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(
+            reason,
+            "Lambda invocation failed: unsupported runtime: python0.1"
+        );
     }
 
     fn answering(
@@ -13061,6 +13230,56 @@ mod tests {
                 requests[0]["RequestId"].as_str().unwrap()
             )),
             "{url}"
+        );
+    }
+
+    /// A handler that never answers fails the resource once its
+    /// `ServiceTimeout` passes, with CloudFormation's recorded reason
+    /// (`cloudformation.custom_resource_no_response` in
+    /// fakecloud-lambda/tests/fixtures/function-errors/aws-recordings.json).
+    #[test]
+    fn a_silent_handler_fails_after_its_service_timeout() {
+        let (prov, requests) = answering(serde_json::Value::Null);
+        let resource = make_resource(
+            "Custom::Thing",
+            "Thing",
+            serde_json::json!({
+                "ServiceToken": "arn:aws:lambda:us-east-1:1:function:f",
+                "ServiceTimeout": "1"
+            }),
+        );
+        let started = std::time::Instant::now();
+        let reason = prov.create_resource(&resource).unwrap_err();
+        assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+        let request_id = requests.lock()[0]["RequestId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(reason, custom_no_response_reason(&request_id));
+        assert!(reason.starts_with(
+            "CloudFormation did not receive a response from your Custom Resource. Please check your logs for requestId ["
+        ));
+    }
+
+    #[test]
+    fn custom_service_timeout_reads_the_property() {
+        let ev =
+            |v: serde_json::Value| serde_json::json!({"ResourceProperties": {"ServiceTimeout": v}});
+        assert_eq!(
+            custom_service_timeout(&ev(serde_json::json!("5"))).as_secs(),
+            5
+        );
+        assert_eq!(
+            custom_service_timeout(&ev(serde_json::json!(90))).as_secs(),
+            90
+        );
+        assert_eq!(
+            custom_service_timeout(&ev(serde_json::json!("9999"))).as_secs(),
+            3600
+        );
+        assert_eq!(
+            custom_service_timeout(&serde_json::json!({})).as_secs(),
+            3600
         );
     }
 

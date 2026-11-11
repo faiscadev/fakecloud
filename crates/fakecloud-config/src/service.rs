@@ -184,6 +184,8 @@ pub struct ConfigService {
     cross: CrossServiceStates,
     lambda_state: Option<SharedLambdaState>,
     container_runtime: Option<Arc<ContainerRuntime>>,
+    /// Durable executions: a custom rule whose function is durable starts one.
+    durable: Option<fakecloud_lambda::DurableHub>,
     /// Monotonic counter bumped whenever recorded items or rules change. Lets
     /// managed-rule evaluation skip recomputing when nothing changed since the
     /// last evaluation (avoids re-running the full evaluation on every poll).
@@ -205,6 +207,7 @@ impl ConfigService {
             cross: CrossServiceStates::default(),
             lambda_state: None,
             container_runtime: None,
+            durable: None,
             state_version: Arc::new(AtomicU64::new(1)),
             last_eval_version: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -227,6 +230,12 @@ impl ConfigService {
     ) -> Self {
         self.lambda_state = Some(lambda_state);
         self.container_runtime = runtime;
+        self
+    }
+
+    /// Start custom rules backed by durable functions as durable executions.
+    pub fn with_durable_hub(mut self, hub: fakecloud_lambda::DurableHub) -> Self {
+        self.durable = Some(hub);
         self
     }
 
@@ -2023,11 +2032,6 @@ impl ConfigService {
         lambda_arn: &str,
         input_parameters: Option<&str>,
     ) {
-        let (Some(lambda_state), Some(runtime)) =
-            (self.lambda_state.clone(), self.container_runtime.clone())
-        else {
-            return;
-        };
         let func_name = lambda_arn
             .rsplit(':')
             .next()
@@ -2041,6 +2045,36 @@ impl ConfigService {
             input_parameters,
             &result_token,
         );
+        // Config invokes a rule's function asynchronously; a durable function
+        // runs as a durable execution, which reports through PutEvaluations.
+        // Resolved, like the plain path below, in the rule's account and the
+        // rule ARN's region when the identifier does not name them.
+        let rule_region = fakecloud_aws::arn::region_of(rule_arn)
+            .map(str::to_string)
+            .or_else(|| {
+                self.lambda_state
+                    .as_ref()
+                    .map(|l| l.read().region().to_string())
+            });
+        if let (Some(hub), Some(rule_region)) = (&self.durable, rule_region.as_deref()) {
+            if let Some(started) = fakecloud_lambda::start_durable_for_async_delivery_in(
+                hub,
+                lambda_arn,
+                &event.to_string(),
+                account,
+                rule_region,
+            ) {
+                if let Err(e) = started {
+                    tracing::warn!(function = %func_name, error = %e, "Config custom rule Lambda invocation failed");
+                }
+                return;
+            }
+        }
+        let (Some(lambda_state), Some(runtime)) =
+            (self.lambda_state.clone(), self.container_runtime.clone())
+        else {
+            return;
+        };
         // Resolve the Lambda in the account and region its ARN names; a bare
         // name is the rule's own account and region.
         let resolved = {
@@ -2054,9 +2088,16 @@ impl ConfigService {
         };
         let payload = event.to_string().into_bytes();
         match runtime.invoke(&func, &payload, &layer_zips).await {
-            Ok(resp) => {
+            Ok(output) if output.is_function_error() => {
+                tracing::warn!(
+                    function = %func_name,
+                    error = %String::from_utf8_lossy(&output.payload),
+                    "Config custom rule Lambda returned an error"
+                )
+            }
+            Ok(output) => {
                 // If the function returned evaluations directly, record them.
-                if let Ok(v) = serde_json::from_slice::<Value>(&resp) {
+                if let Ok(v) = serde_json::from_slice::<Value>(&output.payload) {
                     if let Some(arr) = v
                         .as_array()
                         .or_else(|| v.get("evaluations").and_then(Value::as_array))
