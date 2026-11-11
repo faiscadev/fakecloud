@@ -238,7 +238,9 @@ pub fn render_markdown_summary(
     out.push_str("## Conformance Report\n\n");
 
     if regressions.is_empty() {
-        out.push_str("**Status:** PASSED (every variant passes, no regressions vs baseline)\n\n");
+        out.push_str(
+            "**Status:** PASSED (every variant passes, results match the baseline exactly)\n\n",
+        );
     } else {
         out.push_str("**Status:** FAILED\n\n");
         for r in regressions {
