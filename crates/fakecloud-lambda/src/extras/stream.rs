@@ -52,32 +52,43 @@ impl LambdaService {
             let accounts = self.state.read();
             let empty = LambdaState::new(account_id, &req.region);
             let state = accounts.regional(account_id, &req.region).unwrap_or(&empty);
-            let func = match resolved_version.as_deref() {
-                Some(v) => state
-                    .version_snapshot(function_name, v)
+            // An unknown alias or version is not found, as on Invoke: it
+            // never runs `$LATEST` instead.
+            let func = match (
+                qualifier.filter(|q| *q != "$LATEST"),
+                resolved_version.as_deref(),
+            ) {
+                (Some(q), resolved) => resolved
+                    .and_then(|v| {
+                        if v == "$LATEST" {
+                            state.functions.get(function_name)
+                        } else {
+                            state.version_snapshot(function_name, v)
+                        }
+                    })
+                    .filter(|_| state.functions.contains_key(function_name))
                     .cloned()
-                    // A numeric version without a snapshot is legacy state
-                    // and runs `$LATEST`, as Invoke does; an alias that does
-                    // not exist is not found.
-                    .or_else(|| {
-                        v.chars()
-                            .all(|c| c.is_ascii_digit())
-                            .then(|| state.functions.get(function_name).cloned())
-                            .flatten()
-                    }),
-                None => state.functions.get(function_name).cloned(),
-            }
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFoundException",
-                    format!(
-                        "Function not found: {}{}",
-                        function_arn(&req.region, &state.account_id, function_name),
-                        qualifier.map(|q| format!(":{q}")).unwrap_or_default()
-                    ),
-                )
-            })?;
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "ResourceNotFoundException",
+                            format!(
+                                "Function not found: {}:{q}",
+                                function_arn(&req.region, &state.account_id, function_name)
+                            ),
+                        )
+                    })?,
+                (None, _) => state.functions.get(function_name).cloned().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "ResourceNotFoundException",
+                        format!(
+                            "Function not found: {}",
+                            function_arn(&req.region, &state.account_id, function_name)
+                        ),
+                    )
+                })?,
+            };
             let zips = crate::state::attached_layer_zips(&accounts, &func);
             (func, zips)
         };

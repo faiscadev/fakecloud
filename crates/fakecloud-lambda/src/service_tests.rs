@@ -412,6 +412,47 @@ async fn test_invoke_nonexistent_function() {
     assert!(resp.is_err());
 }
 
+/// A version that was never published is not found on a synchronous and an
+/// `Event` invoke alike, whether named in the path or by `Qualifier`: it
+/// never runs `$LATEST` instead.
+#[tokio::test]
+async fn invoke_of_an_unknown_version_is_not_found() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "vfn").await;
+    let req = make_request(Method::POST, "/2015-03-31/functions/vfn/versions", "{}");
+    svc.handle(req).await.unwrap();
+
+    for invocation_type in ["RequestResponse", "Event"] {
+        for by_query in [false, true] {
+            let path = if by_query {
+                "/2015-03-31/functions/vfn/invocations"
+            } else {
+                "/2015-03-31/functions/vfn:99/invocations"
+            };
+            let mut req = make_request(Method::POST, path, "{}");
+            if by_query {
+                req.query_params
+                    .insert("Qualifier".to_string(), "99".to_string());
+            }
+            req.headers.insert(
+                "x-amz-invocation-type",
+                http::HeaderValue::from_static(invocation_type),
+            );
+            let err = match svc.handle(req).await {
+                Err(e) => e,
+                Ok(r) => panic!("{invocation_type}: expected 404, got {}", r.status),
+            };
+            assert_eq!(err.status(), 404, "{invocation_type}");
+            assert_eq!(err.code(), "ResourceNotFoundException", "{invocation_type}");
+            assert_eq!(
+                err.message(),
+                "Function not found: arn:aws:lambda:us-east-1:123456789012:function:vfn:99",
+                "{invocation_type}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_list_functions() {
     let state = make_state();

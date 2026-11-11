@@ -80,12 +80,16 @@ impl LambdaService {
         };
         let qualifier = qualifier.or(default_qualifier);
         if let Some(q) = qualifier {
-            if q != "$LATEST" && !q.chars().all(|c| c.is_ascii_digit()) {
+            if q != "$LATEST" {
                 let accounts = self.state.read();
                 let empty = LambdaState::new(account_id, "");
                 let state = accounts.regional(account_id, region).unwrap_or(&empty);
                 let exists = if q == crate::state::LATEST_PUBLISHED {
                     state.latest_published.contains_key(function_name)
+                } else if q.chars().all(|c| c.is_ascii_digit()) {
+                    // A version that was never published (or was deleted)
+                    // does not exist: it never runs `$LATEST` instead.
+                    crate::state::version_exists(state, function_name, q)
                 } else {
                     state.aliases.contains_key(&format!("{function_name}:{q}"))
                 };
@@ -107,55 +111,52 @@ impl LambdaService {
         // pick across `function_version` + the additional versions,
         // mirroring AWS canary routing. The resolved version is
         // surfaced via `x-amz-executed-version` so callers can verify
-        // which version actually ran. We always invoke against the
-        // live `$LATEST` function record for now — version-snapshot
-        // execution is wired separately once
-        // `function_version_snapshots` lands.
+        // which version actually ran; a numbered version runs its
+        // `function_version_snapshots` entry (below).
         let resolved_version: Option<String> = {
             let accounts = self.state.read();
             let empty = LambdaState::new(account_id, "");
             let state = accounts.regional(account_id, region).unwrap_or(&empty);
             resolve_qualifier_to_version(state, function_name, qualifier)
         };
-        // Tracks the version actually executed — diverges from the
-        // requested version when the version snapshot is missing and
-        // we fall back to $LATEST code below.
-        let mut executed_version = resolved_version
+        // The version that runs: an alias's (routing config applied), the
+        // number named, or `$LATEST`.
+        let executed_version = resolved_version
             .clone()
             .unwrap_or_else(|| "$LATEST".to_string());
         let (func, layer_zips) = {
             let accounts = self.state.read();
             let empty = LambdaState::new(account_id, "");
             let state = accounts.regional(account_id, region).unwrap_or(&empty);
-            // Resolve numbered versions to the immutable snapshot stored
-            // by PublishVersion so an alias pinned to v1 runs the v1 code
-            // even after $LATEST is mutated. Falls back to $LATEST when
-            // the snapshot is missing (legacy state) so we never 404 a
-            // routable invoke.
-            let func = match resolved_version.as_deref() {
-                Some(v) => {
-                    let snap = state.version_snapshot(function_name, v).cloned();
-                    if snap.is_none() {
-                        // Snapshot missing: code is whatever is in
-                        // `functions` ($LATEST). Reflect that in the
-                        // response header so callers can't be misled
-                        // into thinking they ran v=`v`.
-                        executed_version = "$LATEST".to_string();
-                    }
-                    snap.or_else(|| state.functions.get(function_name).cloned())
-                }
-                None => state.functions.get(function_name).cloned(),
-            }
-            .ok_or_else(|| {
+            // A numbered version runs the immutable snapshot PublishVersion
+            // stored, so an alias pinned to v1 runs the v1 code even after
+            // $LATEST is mutated. A version that is gone is not found; it
+            // never runs `$LATEST` instead.
+            let not_found = |arn: String| {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "ResourceNotFoundException",
-                    format!(
-                        "Function not found: {}",
-                        function_arn(region, &state.account_id, function_name)
-                    ),
+                    format!("Function not found: {arn}"),
                 )
-            })?;
+            };
+            let func = match resolved_version.as_deref().filter(|v| *v != "$LATEST") {
+                Some(v) => state
+                    .functions
+                    .get(function_name)
+                    .and_then(|_| state.version_snapshot(function_name, v))
+                    .cloned()
+                    .ok_or_else(|| {
+                        not_found(qualified_function_arn(
+                            region,
+                            &state.account_id,
+                            function_name,
+                            qualifier.unwrap_or(v),
+                        ))
+                    })?,
+                None => state.functions.get(function_name).cloned().ok_or_else(|| {
+                    not_found(function_arn(region, &state.account_id, function_name))
+                })?,
+            };
             // Resolve attached layer ARNs to ZIP bytes under the same read
             // lock. Layers may live in sibling accounts (cross-account
             // attach is legal in AWS); an unresolvable layer is skipped with

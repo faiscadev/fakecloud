@@ -1002,4 +1002,44 @@ async fn a_qualified_integration_invoke_runs_that_version() {
     assert_eq!(record["responsePayload"]["code"], "v1", "{record}");
     assert_eq!(record["responsePayload"]["version"], "1");
     assert_eq!(record["responsePayload"]["arn"], fn_arn);
+    // The record names the version that ran, not `$LATEST`.
+    assert_eq!(
+        record["responseContext"]["executedVersion"], "1",
+        "{record}"
+    );
+}
+
+/// A version that was never published is not found, synchronously and for
+/// `Event`; it never runs `$LATEST` instead.
+#[tokio::test]
+async fn invoking_an_unknown_version_is_not_found() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    create(
+        &client,
+        "py-unknown-version",
+        Runtime::Python312,
+        "index.handler",
+        &[("index.py", "def handler(e, c):\n    return 1\n")],
+        None,
+    )
+    .await;
+    for invocation_type in [InvocationType::RequestResponse, InvocationType::Event] {
+        let err = client
+            .invoke()
+            .function_name("py-unknown-version")
+            .qualifier("99")
+            .invocation_type(invocation_type.clone())
+            .payload(Blob::new(b"{}".to_vec()))
+            .send()
+            .await
+            .expect_err("an unknown version must not run");
+        let err = err.into_service_error();
+        assert!(err.is_resource_not_found_exception(), "{err:?}");
+        assert_eq!(
+            err.meta().message(),
+            Some("Function not found: arn:aws:lambda:us-east-1:123456789012:function:py-unknown-version:99"),
+            "{invocation_type:?}"
+        );
+    }
 }

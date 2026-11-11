@@ -444,17 +444,19 @@ pub fn queue_async_invocation_observed(
     payload: &[u8],
     on_unrunnable: Option<fakecloud_core::delivery::AsyncUnrunnableHook>,
 ) -> Result<(), String> {
-    let (func, layer_zips, settings, executed_version, invoked_arn) = {
+    let (target, settings, invoked_arn) = {
         let accounts = state.read();
         let (account, region, name) = crate::function_location(
             function_arn,
             accounts.default_account_id(),
             accounts.region(),
         );
-        let (func, layer_zips) = crate::resolve_invocable(&accounts, function_arn, account, region)
-            .ok_or_else(|| format!("Function not found: {function_arn}"))?;
-        // A qualifier on the ARN selects the version that runs (see
-        // `resolve_invocable`) and its event invoke config.
+        // The version that runs is picked once, here (an alias's routing
+        // config included): every retry runs that same version.
+        let target =
+            crate::state::resolve_invocable_target(&accounts, function_arn, account, region)
+                .ok_or_else(|| format!("Function not found: {function_arn}"))?;
+        // A qualifier on the ARN selects its event invoke config.
         let settings = resolve_settings(
             &accounts,
             account,
@@ -467,14 +469,16 @@ pub fn queue_async_invocation_observed(
             accounts.default_account_id(),
             accounts.region(),
         );
-        (
-            func,
-            layer_zips,
-            settings,
-            "$LATEST".to_string(),
-            invoked_arn,
-        )
+        (target, settings, invoked_arn)
     };
+    let crate::state::InvocableTarget {
+        account_id,
+        region,
+        function_name,
+        alias,
+        executed_version,
+        func,
+    } = target;
     if func.code_zip.is_none() && func.package_type != "Image" {
         return Err(format!(
             "Function {} has no deployment package",
@@ -484,20 +488,19 @@ pub fn queue_async_invocation_observed(
     if tokio::runtime::Handle::try_current().is_err() {
         return Err("no async runtime is available to queue the invocation".to_string());
     }
-    let _ = layer_zips;
-    let resolve: Resolver = {
-        let state = state.clone();
-        let function_arn = function_arn.to_string();
-        Box::new(move || {
-            let accounts = state.read();
-            let (account, region, _) = crate::function_location(
-                &function_arn,
-                accounts.default_account_id(),
-                accounts.region(),
-            );
-            crate::resolve_invocable(&accounts, &function_arn, account, region)
-        })
-    };
+    // Each attempt runs the pinned version while it exists; once it (or the
+    // alias, or the function) is gone the event is dropped, never run on
+    // other code.
+    let resolve = invoked_version_resolver(
+        state.clone(),
+        InvokedVersion {
+            account_id,
+            region,
+            function_name,
+            alias,
+            executed_version: executed_version.clone(),
+        },
+    );
     spawn(AsyncInvocation {
         bus: runtime.async_destinations(),
         runtime,

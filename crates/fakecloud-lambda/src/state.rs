@@ -766,40 +766,82 @@ pub fn resolve_invocable(
     default_account: &str,
     default_region: &str,
 ) -> Option<(LambdaFunction, Vec<Vec<u8>>)> {
+    let target = resolve_invocable_target(accounts, function_ref, default_account, default_region)?;
+    let layers = attached_layer_zips(accounts, &target.func);
+    Some((target.func, layers))
+}
+
+/// What a function reference invokes, resolved once: the version that runs
+/// (an alias's routing config already applied) and the alias it was named
+/// through.
+#[derive(Debug, Clone)]
+pub struct InvocableTarget {
+    pub account_id: String,
+    pub region: String,
+    pub function_name: String,
+    /// The alias the reference named, if it named one.
+    pub alias: Option<String>,
+    /// `$LATEST`, `$LATEST.PUBLISHED` or a version number.
+    pub executed_version: String,
+    /// That version's code and configuration.
+    pub func: LambdaFunction,
+}
+
+/// [`resolve_invocable`] without the layers, keeping which version was
+/// picked so a caller that runs the reference more than once (async
+/// retries) runs that same version every time. `None` for an unknown
+/// function, alias or version: a version that does not exist is never
+/// replaced by `$LATEST`.
+pub fn resolve_invocable_target(
+    accounts: &MultiRegionState<LambdaState>,
+    function_ref: &str,
+    default_account: &str,
+    default_region: &str,
+) -> Option<InvocableTarget> {
     let (account, region, name) = function_location(function_ref, default_account, default_region);
     let state = accounts.regional(account, region)?;
     let live = state.functions.get(name)?;
     let qualifier = function_ref_qualifier(function_ref);
+    let target = |alias: Option<&str>, executed_version: &str, func: &LambdaFunction| {
+        Some(InvocableTarget {
+            account_id: account.to_string(),
+            region: region.to_string(),
+            function_name: name.to_string(),
+            alias: alias.map(str::to_string),
+            executed_version: executed_version.to_string(),
+            func: func.clone(),
+        })
+    };
     // A version or alias runs that version's code and configuration, as a
     // synchronous Invoke of it does (an alias's routing config picks the
     // version).
     if let Some(q) = qualifier.filter(|q| *q != "$LATEST" && *q != LATEST_PUBLISHED) {
         let version = crate::service::resolve_qualifier_to_version(state, name, Some(q))?;
-        let func = state
-            .version_snapshot(name, &version)
-            .cloned()
-            .unwrap_or_else(|| live.clone());
-        let layers = attached_layer_zips(accounts, &func);
-        return Some((func, layers));
+        let alias = (!q.chars().all(|c| c.is_ascii_digit())).then_some(q);
+        if version == "$LATEST" {
+            return target(alias, "$LATEST", live);
+        }
+        return target(alias, &version, state.version_snapshot(name, &version)?);
     }
     let wants_latest_published = match qualifier {
         Some(q) => q == LATEST_PUBLISHED,
         None => live.capacity_provider_config.is_some(),
     };
-    let func = if wants_latest_published {
+    if wants_latest_published {
         match state.latest_published.get(name) {
-            Some(snapshot) => snapshot,
+            Some(snapshot) => return target(None, LATEST_PUBLISHED, snapshot),
             // An explicit `$LATEST.PUBLISHED` that was never published does
             // not exist.
             None if qualifier.is_some() => return None,
-            None => live,
+            None => {}
         }
-    } else {
-        live
     }
-    .clone();
-    let layers = attached_layer_zips(accounts, &func);
-    Some((func, layers))
+    target(None, "$LATEST", live)
+}
+
+/// Whether `function_name` has the published version `version` (a number).
+pub(crate) fn version_exists(state: &LambdaState, function_name: &str, version: &str) -> bool {
+    state.version_snapshot(function_name, version).is_some()
 }
 
 /// The region a Lambda ARN names, `None` for anything else.
@@ -1282,6 +1324,68 @@ mod tests {
         assert_eq!(f.description, "latest");
         let (f, _) = resolve_invocable(&regional, "plain", account, "us-east-1").unwrap();
         assert_eq!(f.description, "latest");
+    }
+
+    /// A qualified reference resolves once to the version that runs: an
+    /// alias's version (named as the alias), a published number's
+    /// snapshot. A version that was never published, or whose snapshot is
+    /// gone, resolves to nothing rather than to `$LATEST`.
+    #[test]
+    fn resolve_invocable_target_pins_the_version_and_never_falls_back() {
+        let account = "111111111111";
+        let mut regional: MultiRegionState<LambdaState> =
+            MultiAccountState::new(account, "us-east-1", "");
+        let state = regional.regional_mut(account, "us-east-1");
+        let mut live = function("f", "us-east-1", account);
+        live.description = "latest".into();
+        state.functions.insert("f".into(), live);
+        let mut v1 = function("f", "us-east-1", account);
+        v1.description = "v1".into();
+        state
+            .function_version_snapshots
+            .entry("f".into())
+            .or_default()
+            .insert("1".into(), v1);
+        let alias = |name: &str, version: &str| FunctionAlias {
+            alias_arn: format!("{}:{name}", function_arn("us-east-1", account, "f")),
+            name: name.into(),
+            function_version: version.into(),
+            description: String::new(),
+            revision_id: String::new(),
+            routing_config: None,
+        };
+        state.aliases.insert("f:live".into(), alias("live", "1"));
+        state
+            .aliases
+            .insert("f:head".into(), alias("head", "$LATEST"));
+
+        let resolve = |accounts: &MultiRegionState<LambdaState>, r: &str| {
+            resolve_invocable_target(accounts, r, account, "us-east-1")
+                .map(|t| (t.alias, t.executed_version, t.func.description))
+        };
+        let some = |alias: Option<&str>, v: &str, d: &str| {
+            Some((alias.map(str::to_string), v.to_string(), d.to_string()))
+        };
+        assert_eq!(resolve(&regional, "f"), some(None, "$LATEST", "latest"));
+        assert_eq!(resolve(&regional, "f:1"), some(None, "1", "v1"));
+        assert_eq!(resolve(&regional, "f:live"), some(Some("live"), "1", "v1"));
+        assert_eq!(
+            resolve(&regional, "f:head"),
+            some(Some("head"), "$LATEST", "latest")
+        );
+        let arn = format!("{}:live", function_arn("us-east-1", account, "f"));
+        assert_eq!(resolve(&regional, &arn), some(Some("live"), "1", "v1"));
+        // Never published, unknown alias.
+        assert_eq!(resolve(&regional, "f:99"), None);
+        assert_eq!(resolve(&regional, "f:nope"), None);
+        // The snapshot an alias points at is gone.
+        regional
+            .regional_mut(account, "us-east-1")
+            .function_version_snapshots
+            .clear();
+        assert_eq!(resolve(&regional, "f:1"), None);
+        assert_eq!(resolve(&regional, "f:live"), None);
+        assert_eq!(resolve(&regional, "f"), some(None, "$LATEST", "latest"));
     }
 
     #[test]
