@@ -40,10 +40,31 @@ async fn persistence_round_trip_function_and_esm() {
         .await
         .unwrap();
 
+    // The mapping's source must exist.
+    let sqs = server.sqs_client().await;
+    let queue_url = sqs
+        .create_queue()
+        .queue_name("persist-queue")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let queue_arn = sqs
+        .get_queue_attributes()
+        .queue_url(queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap()
+        .attributes()
+        .unwrap()[&aws_sdk_sqs::types::QueueAttributeName::QueueArn]
+        .clone();
     let esm = client
         .create_event_source_mapping()
         .function_name("persist-func")
-        .event_source_arn("arn:aws:sqs:us-east-1:123456789012:persist-queue")
+        .event_source_arn(&queue_arn)
         .batch_size(5)
         .send()
         .await

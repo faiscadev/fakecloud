@@ -157,22 +157,30 @@ impl LambdaService {
         let max_items = crate::service::marker_page_size(req);
         let region = req.region.clone();
         self.with_state_read(account_id, &region, |state| {
+            // A layer is listed with its latest version matching the
+            // runtime / architecture filters; a layer none of whose versions
+            // match (or whose versions were all deleted) is not listed.
             let layers: Vec<Value> = state
                 .layers
                 .values()
-                .map(|l| {
-                    json!({
+                .filter_map(|l| {
+                    let v = l
+                        .versions
+                        .iter()
+                        .filter(|v| matches_compatibility_filters(v, req))
+                        .max_by_key(|v| v.version)?;
+                    Some(json!({
                         "LayerName": l.layer_name,
                         "LayerArn": l.layer_arn,
-                        "LatestMatchingVersion": l.versions.last().map(|v| json!({
+                        "LatestMatchingVersion": {
                             "LayerVersionArn": v.layer_version_arn,
                             "Version": v.version,
                             "Description": v.description,
                             "CreatedDate": v.created_date.format("%Y-%m-%dT%H:%M:%S.%3fZ").to_string(),
                             "CompatibleRuntimes": v.compatible_runtimes,
                             "CompatibleArchitectures": v.compatible_architectures,
-                        })),
-                    })
+                        },
+                    }))
                 })
                 .collect();
             let (page, next_marker) =
@@ -202,6 +210,7 @@ impl LambdaService {
                 .map(|l| {
                     l.versions
                         .iter()
+                        .filter(|v| matches_compatibility_filters(v, req))
                         .map(|v| {
                             json!({
                                 "LayerVersionArn": v.layer_version_arn,
@@ -478,6 +487,20 @@ impl LambdaService {
 /// The layer a `LayerName` (a bare name or a layer ARN) addresses. A bare
 /// name is the caller's layer in the request region; a layer ARN names its
 /// own account and region.
+/// Whether a layer version satisfies the `CompatibleRuntime` /
+/// `CompatibleArchitecture` filters of ListLayers / ListLayerVersions: it
+/// declares the requested runtime (and architecture) among its compatible
+/// ones. An absent filter matches every version.
+fn matches_compatibility_filters(v: &crate::state::LayerVersion, req: &AwsRequest) -> bool {
+    let wants = |param: &str, declared: &[String]| {
+        req.query_params
+            .get(param)
+            .is_none_or(|want| declared.iter().any(|d| d == want))
+    };
+    wants("CompatibleRuntime", &v.compatible_runtimes)
+        && wants("CompatibleArchitecture", &v.compatible_architectures)
+}
+
 fn layer_target(raw: &str, account_id: &str, region: &str) -> Result<LayerArn, AwsServiceError> {
     if raw.starts_with("arn:") {
         return match LayerArn::parse(raw) {

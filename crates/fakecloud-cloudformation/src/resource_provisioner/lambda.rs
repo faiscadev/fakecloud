@@ -502,7 +502,8 @@ impl ResourceProvisioner {
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
-        let function_name = parse_lambda_function_name(
+        // `name`, or `name:qualifier` for a permission on a version or alias.
+        let function_name = lambda_permission_target(
             props
                 .get("FunctionName")
                 .and_then(|v| v.as_str())
@@ -540,22 +541,7 @@ impl ResourceProvisioner {
         };
         // First strip the prior statement so we don't end up with a duplicate
         // sid in the policy doc.
-        {
-            let mut accounts = self.lambda_state.write();
-            let state = accounts.regional_mut(&self.account_id, &self.region);
-            if let Some(func) = state.functions.get_mut(function_name) {
-                if let Some(policy_str) = func.policy.as_deref() {
-                    if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(policy_str) {
-                        if let Some(arr) = doc.get_mut("Statement").and_then(|v| v.as_array_mut()) {
-                            arr.retain(|s| {
-                                s.get("Sid").and_then(|v| v.as_str()) != Some(statement_id)
-                            });
-                            func.policy = Some(doc.to_string());
-                        }
-                    }
-                }
-            }
-        }
+        self.remove_lambda_permission_statement(function_name, statement_id);
         self.append_lambda_permission_statement(function_name, statement_id, &resource.properties)?;
         Ok(ProvisionResult::new(existing.physical_id.clone()).with("Id", statement_id.to_string()))
     }
@@ -564,19 +550,34 @@ impl ResourceProvisioner {
         let Some((function_name, sid)) = physical_id.split_once('|') else {
             return Ok(());
         };
+        self.remove_lambda_permission_statement(function_name, sid);
+        Ok(())
+    }
+
+    /// Drop statement `sid` from the policy of `function_ref` (`name` or
+    /// `name:qualifier`), if it is there.
+    fn remove_lambda_permission_statement(&self, function_ref: &str, sid: &str) {
         let mut accounts = self.lambda_state.write();
         let state = accounts.regional_mut(&self.account_id, &self.region);
-        if let Some(func) = state.functions.get_mut(function_name) {
-            if let Some(policy_str) = func.policy.as_deref() {
-                if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(policy_str) {
-                    if let Some(arr) = doc.get_mut("Statement").and_then(|v| v.as_array_mut()) {
-                        arr.retain(|s| s.get("Sid").and_then(|v| v.as_str()) != Some(sid));
-                        func.policy = Some(doc.to_string());
-                    }
-                }
-            }
+        let (function_name, qualifier) = split_lambda_permission_target(function_ref);
+        let Some(slot) = fakecloud_lambda::resource_policy::policy_slot_mut(
+            state,
+            function_name,
+            fakecloud_lambda::resource_policy::PolicyQualifier::of(qualifier),
+        ) else {
+            return;
+        };
+        let Some(mut doc) = slot
+            .policy
+            .as_deref()
+            .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        else {
+            return;
+        };
+        if let Some(arr) = doc.get_mut("Statement").and_then(|v| v.as_array_mut()) {
+            arr.retain(|s| s.get("Sid").and_then(|v| v.as_str()) != Some(sid));
+            *slot.policy = Some(doc.to_string());
         }
-        Ok(())
     }
 
     pub(super) fn create_lambda_event_source_mapping(
@@ -590,6 +591,14 @@ impl ResourceProvisioner {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "FunctionName is required".to_string())?,
         );
+        // The checks CreateEventSourceMapping makes, source existence
+        // included, so the stack is refused what a direct call would be.
+        fakecloud_lambda::event_source::validate_create(
+            props,
+            &self.region,
+            self.event_source_lookup.as_deref(),
+        )
+        .map_err(|e| lambda_handler_error(&e))?;
         let cfg = parse_lambda_event_source_mapping_props(props)?;
 
         let mut accounts = self.lambda_state.write();
@@ -999,6 +1008,7 @@ impl ResourceProvisioner {
                 description,
                 revision_id: Uuid::new_v4().to_string(),
                 routing_config,
+                policy: None,
             },
         );
         // ProvisionedConcurrencyConfig — CFN allows attaching a target
@@ -1518,4 +1528,21 @@ impl ResourceProvisioner {
             _ => None,
         }
     }
+}
+
+/// A Lambda API refusal as the CloudFormation resource handler reports it in
+/// the resource's status reason.
+fn lambda_handler_error(err: &fakecloud_core::service::AwsServiceError) -> String {
+    let request_id = Uuid::new_v4();
+    let handler_code = match err.status().as_u16() {
+        404 => "NotFound",
+        409 => "AlreadyExists",
+        _ => "InvalidRequest",
+    };
+    format!(
+        "Resource handler returned message: \"{} (Service: Lambda, Status Code: {}, Request ID: {request_id})\" (RequestToken: {}, HandlerErrorCode: {handler_code})",
+        err.message(),
+        err.status().as_u16(),
+        Uuid::new_v4(),
+    )
 }

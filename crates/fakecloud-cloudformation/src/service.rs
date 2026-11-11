@@ -770,6 +770,9 @@ pub struct CloudFormationService {
     /// Service Quotas, so EC2 resources a stack provisions are held to the
     /// account's applied quotas like direct API calls.
     quota_provider: Option<Arc<dyn fakecloud_core::quota::QuotaProvider>>,
+    /// Lambda event sources' existence, checked when a stack maps one (see
+    /// [`fakecloud_lambda::event_source`]).
+    event_source_lookup: Option<Arc<dyn fakecloud_lambda::event_source::EventSourceLookup>>,
     /// Whole-state snapshot persist hooks keyed by service name (see
     /// `service_key_for_type`). After a stack op the handler invokes the hook
     /// for each touched service so a CFN-provisioned (or CFN-deleted) resource
@@ -1363,6 +1366,7 @@ impl CloudFormationService {
             s3_store: Arc::new(fakecloud_persistence::s3::MemoryS3Store::new()),
             kms_hook: None,
             quota_provider: None,
+            event_source_lookup: None,
             snapshot_hooks: BTreeMap::new(),
             auto_deployment_gate: Arc::new(parking_lot::Mutex::new(AutoDeploymentGate::default())),
             auto_deployment_retries: Arc::new(parking_lot::Mutex::new(BTreeSet::new())),
@@ -1396,6 +1400,16 @@ impl CloudFormationService {
         provider: Arc<dyn fakecloud_core::quota::QuotaProvider>,
     ) -> Self {
         self.quota_provider = Some(provider);
+        self
+    }
+
+    /// Check the sources of stack-provisioned Lambda event source mappings
+    /// the way CreateEventSourceMapping does.
+    pub fn with_event_source_lookup(
+        mut self,
+        lookup: Arc<dyn fakecloud_lambda::event_source::EventSourceLookup>,
+    ) -> Self {
+        self.event_source_lookup = Some(lookup);
         self
     }
 
@@ -1624,6 +1638,7 @@ impl CloudFormationService {
             s3_store: self.s3_store.clone(),
             kms_hook: self.kms_hook.clone(),
             quota_provider: self.quota_provider.clone(),
+            event_source_lookup: self.event_source_lookup.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
             stack_id: stack_id.to_string(),

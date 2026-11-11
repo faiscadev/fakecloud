@@ -451,6 +451,29 @@ fn parse_lambda_function_name(input: &str) -> String {
     input.split(':').next().unwrap_or(input).to_string()
 }
 
+/// The policy an `AWS::Lambda::Permission` writes to, from its
+/// `FunctionName`: `name`, or `name:qualifier` for a version or alias (an
+/// alias's `Ref` is its ARN). `$LATEST` is the function's own policy.
+fn lambda_permission_target(input: &str) -> String {
+    let name = parse_lambda_function_name(input);
+    let resource = arn_resource(input, "lambda")
+        .and_then(|rest| rest.split(":function:").nth(1))
+        .or_else(|| input.split(":function:").nth(1))
+        .unwrap_or(input);
+    match resource.split(':').nth(1) {
+        Some(q) if !q.is_empty() && q != "$LATEST" => format!("{name}:{q}"),
+        _ => name,
+    }
+}
+
+/// [`lambda_permission_target`] split into the function and its qualifier.
+fn split_lambda_permission_target(target: &str) -> (&str, Option<&str>) {
+    match target.split_once(':') {
+        Some((name, q)) => (name, Some(q)),
+        None => (target, None),
+    }
+}
+
 /// Recover the internal `{function}:{alias}` key used by the lambda
 /// state's `aliases` / `provisioned_concurrency` maps from an alias
 /// resource's physical id. The physical id is the alias ARN
@@ -1115,6 +1138,9 @@ pub struct ResourceProvisioner {
     /// Service Quotas, for the applied values of the quotas EC2 enforces.
     /// `None` outside the server wiring, where the AWS defaults apply.
     pub quota_provider: Option<Arc<dyn fakecloud_core::quota::QuotaProvider>>,
+    /// Whether a Lambda event source exists. `None` outside the server
+    /// wiring, where a mapping's source is not looked up.
+    pub event_source_lookup: Option<Arc<dyn fakecloud_lambda::event_source::EventSourceLookup>>,
     pub account_id: String,
     pub region: String,
     pub stack_id: String,
@@ -3437,9 +3463,12 @@ impl ResourceProvisioner {
     /// function's stored policy. Shared by create + update so the same
     /// property→condition mapping applies on both paths. Returns the
     /// function ARN of the target so callers can echo it back if needed.
+    /// Append the permission's statement to the policy of `function_ref`
+    /// (`name` or `name:qualifier`, see [`lambda_permission_target`]): an
+    /// alias or version has a policy of its own, as on AWS.
     fn append_lambda_permission_statement(
         &self,
-        function_name: &str,
+        function_ref: &str,
         statement_id: &str,
         props: &serde_json::Value,
     ) -> Result<String, String> {
@@ -3476,13 +3505,19 @@ impl ResourceProvisioner {
 
         let mut accounts = self.lambda_state.write();
         let state = accounts.regional_mut(&self.account_id, &self.region);
-        let func = state.functions.get_mut(function_name).ok_or_else(|| {
+        let (function_name, qualifier) = split_lambda_permission_target(function_ref);
+        let slot = fakecloud_lambda::resource_policy::policy_slot_mut(
+            state,
+            function_name,
+            fakecloud_lambda::resource_policy::PolicyQualifier::of(qualifier),
+        )
+        .ok_or_else(|| {
             format!(
-                "Function {function_name} does not exist yet — retry once it has been provisioned"
+                "Function {function_ref} does not exist yet — retry once it has been provisioned"
             )
         })?;
 
-        let mut doc: serde_json::Value = func
+        let mut doc: serde_json::Value = slot
             .policy
             .as_deref()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -3550,7 +3585,7 @@ impl ResourceProvisioner {
         statement.insert("Action".to_string(), serde_json::Value::String(action));
         statement.insert(
             "Resource".to_string(),
-            serde_json::Value::String(func.function_arn.clone()),
+            serde_json::Value::String(slot.arn.clone()),
         );
         if !conditions.is_empty() {
             statement.insert(
@@ -3562,8 +3597,8 @@ impl ResourceProvisioner {
             .as_array_mut()
             .unwrap()
             .push(serde_json::Value::Object(statement));
-        func.policy = Some(doc.to_string());
-        Ok(func.function_arn.clone())
+        *slot.policy = Some(doc.to_string());
+        Ok(slot.arn)
     }
 
     // --- ELBv2 ---
@@ -4811,6 +4846,7 @@ mod tests {
             s3_store: Arc::new(fakecloud_persistence::s3::MemoryS3Store::new()),
             kms_hook: None,
             quota_provider: None,
+            event_source_lookup: None,
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),
             stack_id: "arn:aws:cloudformation:us-east-1:123456789012:stack/test/00000000-0000-0000-0000-000000000000".to_string(),
@@ -11158,6 +11194,31 @@ mod tests {
         assert_eq!(sr.physical_id, "primary|my-ps");
 
         prov.delete_resource(&sr.clone()).unwrap();
+    }
+
+    #[test]
+    fn a_permission_on_a_version_or_alias_targets_that_qualifiers_policy() {
+        for (input, target) in [
+            ("my-func", "my-func"),
+            ("my-func:live", "my-func:live"),
+            ("my-func:$LATEST", "my-func"),
+            (
+                "arn:aws:lambda:us-east-1:123456789012:function:my-func",
+                "my-func",
+            ),
+            (
+                "arn:aws:lambda:us-east-1:123456789012:function:my-func:live",
+                "my-func:live",
+            ),
+            ("123456789012:function:my-func:3", "my-func:3"),
+        ] {
+            assert_eq!(lambda_permission_target(input), target, "{input}");
+        }
+        assert_eq!(
+            split_lambda_permission_target("my-func:live"),
+            ("my-func", Some("live"))
+        );
+        assert_eq!(split_lambda_permission_target("my-func"), ("my-func", None));
     }
 
     #[test]

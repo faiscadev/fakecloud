@@ -325,6 +325,13 @@ pub struct LambdaState {
     /// `ListVersionsByFunction` and version numbering read.
     #[serde(default)]
     pub latest_published: BTreeMap<String, LambdaFunction>,
+    /// Whether permissions on aliases live on the aliases themselves. State
+    /// saved before aliases had a policy of their own loads with `false`,
+    /// and its alias permissions are moved once
+    /// ([`crate::resource_policy::migrate_alias_policies`]); state created
+    /// since starts `true`.
+    #[serde(default)]
+    pub alias_policies_migrated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,6 +368,11 @@ pub struct FunctionAlias {
     pub description: String,
     pub revision_id: String,
     pub routing_config: Option<serde_json::Value>,
+    /// The alias's own resource-based policy (`AddPermission` with the
+    /// alias as `Qualifier`): AWS keeps it apart from the policy of the
+    /// version the alias points to and from the function's.
+    #[serde(default)]
+    pub policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -559,6 +571,7 @@ impl LambdaState {
             capacity_providers: BTreeMap::new(),
             durable_executions: BTreeMap::new(),
             latest_published: BTreeMap::new(),
+            alias_policies_migrated: true,
         }
     }
 
@@ -773,6 +786,7 @@ impl SplitByRegion for LambdaState {
     /// account settings) lands in the server's default region.
     fn split_by_region(self, into: &mut RegionalState<Self>) {
         let default_region = into.default_region().to_string();
+        let alias_policies_migrated = self.alias_policies_migrated;
         let mut function_regions: BTreeMap<String, String> = BTreeMap::new();
         for (name, func) in self.functions {
             let region = lambda_arn_region(&func.function_arn)
@@ -835,6 +849,11 @@ impl SplitByRegion for LambdaState {
         if let Some(settings) = self.account_settings {
             into.region_mut(&default_region).account_settings = Some(settings);
         }
+        // The regions are new states; they still hold the legacy state's
+        // alias permissions where it kept them.
+        for (_, state) in into.regions_mut() {
+            state.alias_policies_migrated &= alias_policies_migrated;
+        }
     }
 }
 
@@ -851,8 +870,11 @@ pub type LambdaSnapshot = RegionalSnapshot<LambdaState>;
 /// account's state; v2: one account-wide state per account) by splitting each
 /// account by region. A snapshot newer than this build comes back with its
 /// on-disk `schema_version` and no state, for the caller to refuse.
+///
+/// Permissions on an alias saved before aliases had a policy of their own
+/// are moved onto the alias ([`crate::resource_policy::migrate_alias_policies`]).
 pub fn parse_lambda_snapshot(bytes: &[u8]) -> Result<LambdaSnapshot, serde_json::Error> {
-    parse_regional_snapshot(
+    let mut snapshot = parse_regional_snapshot(
         bytes,
         LAMBDA_SNAPSHOT_SCHEMA_VERSION,
         |state: LambdaState| {
@@ -860,7 +882,20 @@ pub fn parse_lambda_snapshot(bytes: &[u8]) -> Result<LambdaSnapshot, serde_json:
             let region = state.region.clone();
             RegionalState::from_legacy(&account_id, &region, "", state)
         },
-    )
+    )?;
+    if let Some(accounts) = snapshot.accounts.as_mut() {
+        for (_, account) in accounts.iter_mut() {
+            for (_, state) in account.regions_mut() {
+                crate::resource_policy::migrate_alias_policies(state);
+            }
+        }
+    }
+    if let Some(account) = snapshot.state.as_mut() {
+        for (_, state) in account.regions_mut() {
+            crate::resource_policy::migrate_alias_policies(state);
+        }
+    }
+    Ok(snapshot)
 }
 
 #[cfg(test)]
@@ -922,6 +957,7 @@ mod tests {
                 description: String::new(),
                 revision_id: "r".into(),
                 routing_config: None,
+                policy: None,
             },
         );
         legacy.function_concurrency.insert("west".into(), 5);
@@ -1003,6 +1039,111 @@ mod tests {
             .unwrap()
             .functions
             .contains_key("west"));
+    }
+
+    /// Before aliases had a policy of their own, `AddPermission` on an alias
+    /// wrote into the policy of a version it pointed to (any of a weighted
+    /// alias's versions). Loading such state moves those statements (the ones
+    /// whose `Resource` is the alias ARN) onto the alias, once. A legacy
+    /// CloudFormation statement (unqualified, on the function) stays where
+    /// its stack looks for it, and state saved since keeps a verbatim
+    /// function document even when it names the alias.
+    #[test]
+    fn alias_permissions_saved_before_alias_policies_move_onto_the_alias() {
+        let account = "111111111111";
+        let region = "us-east-1";
+        let fn_arn = function_arn(region, account, "f");
+        let alias_arn = qualified_function_arn(region, account, "f", "live");
+        let statement = |sid: &str, resource: &str| {
+            serde_json::json!({"Sid": sid, "Effect": "Allow", "Action": "lambda:InvokeFunction",
+                "Principal": {"Service": "sns.amazonaws.com"}, "Resource": resource})
+        };
+        let doc = |sts: Vec<serde_json::Value>| {
+            serde_json::json!({"Version": "2012-10-17", "Statement": sts}).to_string()
+        };
+        let mut legacy = LambdaState::new(account, region);
+        let mut f = function("f", region, account);
+        f.policy = Some(doc(vec![
+            statement("fn", &fn_arn),
+            statement("cfn", &fn_arn),
+        ]));
+        let mut v1 = f.clone();
+        v1.policy = Some(doc(vec![statement("api", &alias_arn)]));
+        let mut v2 = f.clone();
+        v2.policy = Some(doc(vec![
+            statement("v2", &format!("{fn_arn}:2")),
+            statement("weighted", &alias_arn),
+        ]));
+        legacy.functions.insert("f".into(), f);
+        let versions = legacy
+            .function_version_snapshots
+            .entry("f".into())
+            .or_default();
+        versions.insert("1".into(), v1);
+        versions.insert("2".into(), v2);
+        legacy.aliases.insert(
+            "f:live".into(),
+            FunctionAlias {
+                alias_arn: alias_arn.clone(),
+                name: "live".into(),
+                function_version: "1".into(),
+                description: String::new(),
+                revision_id: "r".into(),
+                routing_config: None,
+                policy: None,
+            },
+        );
+        let mut accounts: MultiRegionState<LambdaState> =
+            MultiAccountState::new(account, region, "");
+        *accounts.regional_mut(account, region) = legacy;
+        let mut json = serde_json::to_value(LambdaSnapshot {
+            schema_version: LAMBDA_SNAPSHOT_SCHEMA_VERSION,
+            accounts: Some(accounts),
+            state: None,
+        })
+        .unwrap();
+        // State saved before the flag existed.
+        let regional = &mut json["accounts"]["accounts"][account]["regions"][region];
+        regional
+            .as_object_mut()
+            .expect("regional state object")
+            .remove("alias_policies_migrated")
+            .expect("flag serialized");
+        let parsed = parse_lambda_snapshot(&serde_json::to_vec(&json).unwrap()).unwrap();
+        let mut accounts = parsed.accounts.unwrap();
+        let s = accounts.regional_mut(account, region);
+        let sids = |policy: &Option<String>| -> Vec<String> {
+            let v: serde_json::Value = serde_json::from_str(policy.as_deref().unwrap()).unwrap();
+            v["Statement"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|st| st["Sid"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(sids(&s.functions["f"].policy), vec!["fn", "cfn"]);
+        assert!(sids(&s.function_version_snapshots["f"]["1"].policy).is_empty());
+        assert_eq!(
+            sids(&s.function_version_snapshots["f"]["2"].policy),
+            vec!["v2"]
+        );
+        let mut alias_sids = sids(&s.aliases["f:live"].policy);
+        alias_sids.sort();
+        assert_eq!(alias_sids, vec!["api", "weighted"]);
+        assert!(s.alias_policies_migrated);
+
+        // Saved again, a function document naming the alias stays put.
+        let f = s.functions.get_mut("f").unwrap();
+        f.policy = Some(doc(vec![statement("verbatim", &alias_arn)]));
+        let current = LambdaSnapshot {
+            schema_version: LAMBDA_SNAPSHOT_SCHEMA_VERSION,
+            accounts: Some(accounts),
+            state: None,
+        };
+        let reparsed = parse_lambda_snapshot(&serde_json::to_vec(&current).unwrap()).unwrap();
+        let accounts = reparsed.accounts.unwrap();
+        let s = accounts.regional(account, region).unwrap();
+        assert_eq!(sids(&s.functions["f"].policy), vec!["verbatim"]);
     }
 
     /// A v1 snapshot held one account's state; it is split by region too.

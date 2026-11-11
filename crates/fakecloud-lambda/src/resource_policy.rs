@@ -17,7 +17,199 @@ use std::sync::Arc;
 
 use fakecloud_core::auth::ResourcePolicyProvider;
 
-use crate::state::SharedLambdaState;
+use crate::state::{LambdaState, SharedLambdaState};
+
+/// Where the resource-based policy of one function qualifier lives, as AWS
+/// keeps them: the unqualified function (and `$LATEST`) has one, every
+/// published version has its own, and so does every alias -- an alias's
+/// policy is not the policy of the version it points to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyQualifier<'q> {
+    /// No qualifier, or `$LATEST`.
+    Function,
+    /// A published version number, or the `$LATEST.PUBLISHED` version of
+    /// a Lambda Managed Instances function.
+    Version(&'q str),
+    /// An alias name.
+    Alias(&'q str),
+}
+
+impl<'q> PolicyQualifier<'q> {
+    pub fn of(qualifier: Option<&'q str>) -> Self {
+        match qualifier {
+            None | Some("") | Some("$LATEST") => Self::Function,
+            Some(q)
+                if q == crate::state::LATEST_PUBLISHED || q.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                Self::Version(q)
+            }
+            Some(q) => Self::Alias(q),
+        }
+    }
+
+    /// The qualifier as it appears in an ARN suffix, if any.
+    pub fn suffix(self) -> Option<&'q str> {
+        match self {
+            Self::Function => None,
+            Self::Version(q) | Self::Alias(q) => Some(q),
+        }
+    }
+}
+
+/// A qualifier's policy slot and the revision that guards it.
+pub struct PolicySlot<'a> {
+    pub policy: &'a mut Option<String>,
+    pub revision_id: &'a mut String,
+    /// The ARN the slot's statements are scoped to (qualified for a
+    /// version or alias).
+    pub arn: String,
+}
+
+/// Read-only [`PolicySlot`].
+pub struct PolicyView<'a> {
+    pub policy: Option<&'a str>,
+    pub revision_id: &'a str,
+}
+
+/// The policy slot of `function_name` at `qualifier`; `None` when the
+/// function, version or alias does not exist.
+pub fn policy_slot_mut<'a>(
+    state: &'a mut LambdaState,
+    function_name: &str,
+    qualifier: PolicyQualifier<'_>,
+) -> Option<PolicySlot<'a>> {
+    let live_arn = state.functions.get(function_name)?.function_arn.clone();
+    match qualifier {
+        PolicyQualifier::Function => {
+            let f = state.functions.get_mut(function_name)?;
+            Some(PolicySlot {
+                policy: &mut f.policy,
+                revision_id: &mut f.revision_id,
+                arn: live_arn,
+            })
+        }
+        PolicyQualifier::Version(v) => {
+            let f = state.version_snapshot_mut(function_name, v)?;
+            Some(PolicySlot {
+                policy: &mut f.policy,
+                revision_id: &mut f.revision_id,
+                arn: format!("{live_arn}:{v}"),
+            })
+        }
+        PolicyQualifier::Alias(a) => {
+            let alias = state.aliases.get_mut(&format!("{function_name}:{a}"))?;
+            Some(PolicySlot {
+                policy: &mut alias.policy,
+                revision_id: &mut alias.revision_id,
+                arn: alias.alias_arn.clone(),
+            })
+        }
+    }
+}
+
+/// [`policy_slot_mut`], read-only.
+pub fn policy_view<'a>(
+    state: &'a LambdaState,
+    function_name: &str,
+    qualifier: PolicyQualifier<'_>,
+) -> Option<PolicyView<'a>> {
+    let live = state.functions.get(function_name)?;
+    let (policy, revision_id) = match qualifier {
+        PolicyQualifier::Function => (&live.policy, &live.revision_id),
+        PolicyQualifier::Version(v) => {
+            let f = state.version_snapshot(function_name, v)?;
+            (&f.policy, &f.revision_id)
+        }
+        PolicyQualifier::Alias(a) => {
+            let alias = state.aliases.get(&format!("{function_name}:{a}"))?;
+            (&alias.policy, &alias.revision_id)
+        }
+    };
+    Some(PolicyView {
+        policy: policy.as_deref(),
+        revision_id,
+    })
+}
+
+/// Move permissions granted on an alias out of the policies they were kept
+/// in before aliases had a policy of their own: `AddPermission` with an
+/// alias qualifier wrote the statement (its `Resource` the alias ARN) into
+/// the policy of a version the alias pointed to. Statements whose `Resource`
+/// is the alias ARN are moved from the function, its versions and
+/// `$LATEST.PUBLISHED`. CloudFormation's `AWS::Lambda::Permission` on an
+/// alias used to write an unqualified statement into the function's policy
+/// under the physical id `<function>|<sid>`; those stay where the stack's
+/// delete and update look for them. Runs once per state: state saved since
+/// (where `PutResourcePolicy` may store any document verbatim) is left alone.
+pub fn migrate_alias_policies(state: &mut LambdaState) {
+    if std::mem::replace(&mut state.alias_policies_migrated, true) {
+        return;
+    }
+    let alias_keys: Vec<String> = state.aliases.keys().cloned().collect();
+    for key in alias_keys {
+        let Some((function_name, _)) = key.split_once(':') else {
+            continue;
+        };
+        let alias_arn = state.aliases[&key].alias_arn.clone();
+        let mut moved: Vec<serde_json::Value> = Vec::new();
+        let mut take = |policy: &mut Option<String>, revision_id: &mut String| {
+            let Some(mut doc) = policy
+                .as_deref()
+                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+            else {
+                return;
+            };
+            let Some(statements) = doc.get_mut("Statement").and_then(|s| s.as_array_mut()) else {
+                return;
+            };
+            let before = statements.len();
+            let (alias_owned, kept): (Vec<_>, Vec<_>) = std::mem::take(statements)
+                .into_iter()
+                .partition(|st| st.get("Resource").and_then(|r| r.as_str()) == Some(&alias_arn));
+            *statements = kept;
+            if statements.len() != before {
+                moved.extend(alias_owned);
+                *policy = Some(doc.to_string());
+                *revision_id = uuid::Uuid::new_v4().to_string();
+            }
+        };
+        if let Some(f) = state.functions.get_mut(function_name) {
+            take(&mut f.policy, &mut f.revision_id);
+        }
+        if let Some(versions) = state.function_version_snapshots.get_mut(function_name) {
+            for v in versions.values_mut() {
+                take(&mut v.policy, &mut v.revision_id);
+            }
+        }
+        if let Some(v) = state.latest_published.get_mut(function_name) {
+            take(&mut v.policy, &mut v.revision_id);
+        }
+        if moved.is_empty() {
+            continue;
+        }
+        let alias = state
+            .aliases
+            .get_mut(&key)
+            .expect("alias key collected above");
+        let mut doc = alias
+            .policy
+            .as_deref()
+            .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+            .unwrap_or_else(|| serde_json::json!({"Version": "2012-10-17", "Statement": []}));
+        if !doc.get("Statement").is_some_and(|s| s.is_array()) {
+            doc["Statement"] = serde_json::json!([]);
+        }
+        let statements = doc["Statement"].as_array_mut().expect("array set above");
+        for st in moved {
+            let sid = st.get("Sid").cloned();
+            if sid.is_none() || !statements.iter().any(|e| e.get("Sid") == sid.as_ref()) {
+                statements.push(st);
+            }
+        }
+        alias.policy = Some(doc.to_string());
+        alias.revision_id = uuid::Uuid::new_v4().to_string();
+    }
+}
 
 /// Concrete [`ResourcePolicyProvider`] backed by the in-memory
 /// [`crate::state::LambdaState`]. Server bootstrap clone-shares it via
@@ -45,16 +237,25 @@ impl ResourcePolicyProvider for LambdaResourcePolicyProvider {
         if !service.eq_ignore_ascii_case("lambda") {
             return None;
         }
-        let function_name = parse_function_name(resource_arn)?;
+        let (function_name, qualifier) = parse_function_ref(resource_arn)?;
         // The function lives in the account and region its ARN names:
-        // arn:aws:lambda:REGION:ACCOUNT:function:NAME
+        // arn:aws:lambda:REGION:ACCOUNT:function:NAME[:QUALIFIER]. A
+        // qualified ARN (an invocation of a version or alias) is governed by
+        // that qualifier's own policy, as on AWS.
         let accounts = self.state.read();
         let state = accounts.by_arn(resource_arn)?;
-        state
-            .functions
-            .get(function_name)
-            .and_then(|f| f.policy.clone())
+        policy_view(state, function_name, PolicyQualifier::of(qualifier))?
+            .policy
+            .map(str::to_string)
     }
+}
+
+/// [`parse_function_name`] plus the ARN's qualifier, if any.
+fn parse_function_ref(arn: &str) -> Option<(&str, Option<&str>)> {
+    let name = parse_function_name(arn)?;
+    let rest = fakecloud_aws::arn::arn_resource(arn, "lambda")?;
+    let qualifier = rest.split(':').nth(4).filter(|q| !q.is_empty());
+    Some((name, qualifier))
 }
 
 /// Extract the function name from a Lambda ARN of the form
@@ -238,19 +439,91 @@ mod tests {
     }
 
     #[test]
-    fn qualified_arn_resolves_to_unqualified_function_policy() {
-        // Resource policies live on the function, not on specific
-        // version aliases. A qualified ARN must still resolve to the
-        // same stored document.
-        let doc = r#"{"Statement":[]}"#;
-        let state = state_with(func_with_policy("my-fn", Some(doc)));
+    fn a_qualified_arn_is_governed_by_its_qualifiers_own_policy() {
+        // AWS keeps one resource policy per qualifier: the function's does
+        // not grant an invocation of an alias or a version, and an alias's
+        // is not the policy of the version it points to.
+        let function_doc = r#"{"Statement":["function"]}"#;
+        let alias_doc = r#"{"Statement":["alias"]}"#;
+        let state = state_with(func_with_policy("my-fn", Some(function_doc)));
+        {
+            let mut accounts = state.write();
+            let s = accounts.regional_mut("123456789012", "us-east-1");
+            let mut v1 = s.functions["my-fn"].clone();
+            v1.policy = None;
+            s.function_version_snapshots
+                .entry("my-fn".to_string())
+                .or_default()
+                .insert("1".to_string(), v1);
+            s.aliases.insert(
+                "my-fn:PROD".to_string(),
+                crate::state::FunctionAlias {
+                    alias_arn: "arn:aws:lambda:us-east-1:123456789012:function:my-fn:PROD"
+                        .to_string(),
+                    name: "PROD".to_string(),
+                    function_version: "1".to_string(),
+                    description: String::new(),
+                    revision_id: "r".to_string(),
+                    routing_config: None,
+                    policy: Some(alias_doc.to_string()),
+                },
+            );
+        }
         let provider = LambdaResourcePolicyProvider::new(state);
+        let arn =
+            |suffix: &str| format!("arn:aws:lambda:us-east-1:123456789012:function:my-fn{suffix}");
+        assert_eq!(
+            provider.resource_policy("lambda", &arn("")),
+            Some(function_doc.to_string())
+        );
+        assert_eq!(
+            provider.resource_policy("lambda", &arn(":$LATEST")),
+            Some(function_doc.to_string())
+        );
+        assert_eq!(
+            provider.resource_policy("lambda", &arn(":PROD")),
+            Some(alias_doc.to_string())
+        );
+        assert_eq!(provider.resource_policy("lambda", &arn(":1")), None);
+        assert_eq!(provider.resource_policy("lambda", &arn(":BETA")), None);
+    }
+
+    #[test]
+    fn latest_published_is_a_version_with_its_own_policy() {
+        // A Lambda Managed Instances function's `$LATEST.PUBLISHED` is a
+        // version, not an alias: its policy lives on that version.
+        assert_eq!(
+            PolicyQualifier::of(Some(crate::state::LATEST_PUBLISHED)),
+            PolicyQualifier::Version(crate::state::LATEST_PUBLISHED)
+        );
+        let published_doc = r#"{"Statement":["published"]}"#;
+        let state = state_with(func_with_policy("my-fn", None));
+        {
+            let mut accounts = state.write();
+            let s = accounts.regional_mut("123456789012", "us-east-1");
+            let mut published = s.functions["my-fn"].clone();
+            published.policy = Some(published_doc.to_string());
+            s.latest_published.insert("my-fn".to_string(), published);
+        }
+        let provider = LambdaResourcePolicyProvider::new(state.clone());
         assert_eq!(
             provider.resource_policy(
                 "lambda",
-                "arn:aws:lambda:us-east-1:123456789012:function:my-fn:PROD"
+                "arn:aws:lambda:us-east-1:123456789012:function:my-fn:$LATEST.PUBLISHED"
             ),
-            Some(doc.to_string())
+            Some(published_doc.to_string())
+        );
+        let mut accounts = state.write();
+        let s = accounts.regional_mut("123456789012", "us-east-1");
+        let slot = policy_slot_mut(
+            s,
+            "my-fn",
+            PolicyQualifier::of(Some(crate::state::LATEST_PUBLISHED)),
+        )
+        .expect("the $LATEST.PUBLISHED slot");
+        assert_eq!(
+            slot.arn,
+            "arn:aws:lambda:us-east-1:123456789012:function:my-fn:$LATEST.PUBLISHED"
         );
     }
 

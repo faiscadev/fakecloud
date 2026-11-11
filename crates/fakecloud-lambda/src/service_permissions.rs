@@ -75,15 +75,15 @@ impl LambdaService {
             .and_then(|v| v.as_str())
             .map(str::to_string);
 
-        // `Qualifier` scopes the policy to a specific numbered version
-        // snapshot. AWS keeps a separate resource policy per qualifier
-        // (so a v1 policy doesn't leak to $LATEST or to v2). Aliases
-        // and `$LATEST` map back to the live function record's policy.
+        // `Qualifier` scopes the policy: AWS keeps a separate resource
+        // policy per qualifier, so a v1 policy doesn't leak to $LATEST or
+        // to v2, and an alias's is not its version's. `$LATEST` is the
+        // function's own.
         let qualifier = req.query_params.get("Qualifier").cloned();
 
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
-        let func =
+        let slot =
             resolve_policy_target_mut(state, function_name, &req.region, qualifier.as_deref())?;
 
         // Load current policy or seed a fresh canonical doc. Any
@@ -93,7 +93,7 @@ impl LambdaService {
         // JSON, so seeing a non-object here means something else
         // wrote garbage, and silently propagating it would make
         // later reads harder to debug.
-        let mut doc: Value = func
+        let mut doc: Value = slot
             .policy
             .as_deref()
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
@@ -170,10 +170,7 @@ impl LambdaService {
         // (snapshots clone the live arn without a suffix), so a plain
         // concat is correct — `trim_end_matches` would over-strip on
         // pathological function names like "v1" plus qualifier "1".
-        let resource_arn = match qualifier.as_deref() {
-            None | Some("$LATEST") => func.function_arn.clone(),
-            Some(q) => format!("{}:{q}", func.function_arn),
-        };
+        let resource_arn = slot.arn.clone();
 
         let mut new_statement = serde_json::Map::new();
         new_statement.insert("Sid".to_string(), json!(statement_id));
@@ -187,12 +184,12 @@ impl LambdaService {
         let statement_json = Value::Object(new_statement);
         statements.push(statement_json.clone());
 
-        func.policy = Some(serde_json::to_string(&doc).unwrap());
+        *slot.policy = Some(serde_json::to_string(&doc).unwrap());
         // The policy changed, so the revision the caller would pass back as a
         // `PutResourcePolicy`/`DeleteResourcePolicy` precondition must move —
         // otherwise a stale `RevisionId` still validates and silently discards
         // this statement.
-        func.revision_id = uuid::Uuid::new_v4().to_string();
+        *slot.revision_id = uuid::Uuid::new_v4().to_string();
 
         Ok(AwsResponse::json(
             StatusCode::CREATED,
@@ -210,8 +207,8 @@ impl LambdaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(account_id, region);
-        let func = resolve_policy_target_mut(state, function_name, region, qualifier)?;
-        let policy_str = func.policy.as_deref().ok_or_else(|| {
+        let slot = resolve_policy_target_mut(state, function_name, region, qualifier)?;
+        let policy_str = slot.policy.as_deref().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ResourceNotFoundException",
@@ -247,10 +244,10 @@ impl LambdaService {
         // Leave an empty {"Statement":[]} behind rather than clearing
         // the field to None — AWS's GetPolicy keeps returning the
         // (empty) doc until the function itself is deleted.
-        func.policy = Some(serde_json::to_string(&doc).unwrap());
+        *slot.policy = Some(serde_json::to_string(&doc).unwrap());
         // Same revision bump as `AddPermission`: the document changed, so a
         // `RevisionId` captured before this call must stop validating.
-        func.revision_id = uuid::Uuid::new_v4().to_string();
+        *slot.revision_id = uuid::Uuid::new_v4().to_string();
         Ok(AwsResponse::json(StatusCode::NO_CONTENT, String::new()))
     }
 
@@ -264,8 +261,8 @@ impl LambdaService {
         let accounts = self.state.read();
         let empty = LambdaState::new(account_id, "");
         let state = accounts.regional(account_id, region).unwrap_or(&empty);
-        let func = resolve_policy_target_ref(state, function_name, region, qualifier)?;
-        let policy = func.policy.as_deref().ok_or_else(|| {
+        let view = resolve_policy_target_ref(state, function_name, region, qualifier)?;
+        let policy = view.policy.ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ResourceNotFoundException",
@@ -276,7 +273,7 @@ impl LambdaService {
             StatusCode::OK,
             json!({
                 "Policy": policy,
-                "RevisionId": func.revision_id.clone(),
+                "RevisionId": view.revision_id,
             })
             .to_string(),
         ))
@@ -349,13 +346,13 @@ impl LambdaService {
 
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(account_id, region);
-        let func = resolve_policy_target_mut(state, function_name, region, qualifier)?;
-        check_revision(expected_revision, &func.revision_id)?;
-        func.policy = Some(policy.clone());
-        func.revision_id = uuid::Uuid::new_v4().to_string();
+        let slot = resolve_policy_target_mut(state, function_name, region, qualifier)?;
+        check_revision(expected_revision, slot.revision_id)?;
+        *slot.policy = Some(policy.clone());
+        *slot.revision_id = uuid::Uuid::new_v4().to_string();
         Ok(AwsResponse::json(
             StatusCode::OK,
-            json!({ "Policy": policy, "RevisionId": func.revision_id.clone() }).to_string(),
+            json!({ "Policy": policy, "RevisionId": slot.revision_id.clone() }).to_string(),
         ))
     }
 
@@ -384,96 +381,67 @@ impl LambdaService {
         let expected_revision = req.query_params.get("RevisionId").map(String::as_str);
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(account_id, region);
-        let func = resolve_policy_target_mut(state, function_name, region, qualifier)?;
-        if func.policy.is_none() {
+        let slot = resolve_policy_target_mut(state, function_name, region, qualifier)?;
+        if slot.policy.is_none() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ResourceNotFoundException",
                 format!("No policy is associated with function {function_name}"),
             ));
         }
-        check_revision(expected_revision, &func.revision_id)?;
+        check_revision(expected_revision, slot.revision_id)?;
         // Unlike `RemovePermission` (which leaves an empty statement list
         // behind), deleting the policy document removes it outright — a
         // following `GetResourcePolicy`/`GetPolicy` 404s.
-        func.policy = None;
-        func.revision_id = uuid::Uuid::new_v4().to_string();
+        *slot.policy = None;
+        *slot.revision_id = uuid::Uuid::new_v4().to_string();
         Ok(AwsResponse::json(StatusCode::NO_CONTENT, String::new()))
     }
 }
 
-/// Mutable lookup for the LambdaFunction record that owns the
-/// resource policy for `(function_name, qualifier)`. When the
-/// qualifier is a numeric version, the policy lives on the
-/// immutable snapshot in `function_version_snapshots`. Aliases
-/// resolve to the version they point at; missing aliases / versions
-/// 404 with `ResourceNotFoundException`. `$LATEST` and unqualified
-/// requests target the live `functions` map.
+/// The policy slot of `(function_name, qualifier)`: the live function for
+/// none or `$LATEST`, the version's snapshot for a version number, the
+/// alias's own policy for an alias (AWS keeps it apart from the policy of
+/// the version the alias points to). A missing function, version or alias
+/// is `ResourceNotFoundException`.
 fn resolve_policy_target_mut<'a>(
     state: &'a mut crate::state::LambdaState,
     function_name: &str,
     region: &str,
     qualifier: Option<&str>,
-) -> Result<&'a mut crate::state::LambdaFunction, AwsServiceError> {
-    let resolved_version =
-        crate::service::resolve_qualifier_to_version(state, function_name, qualifier);
-    let account_id = state.account_id.clone();
-    match resolved_version {
-        None => state.functions.get_mut(function_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFoundException",
-                format!(
-                    "Function not found: {}",
-                    function_arn(region, &account_id, function_name)
-                ),
-            )
-        }),
-        Some(v) => state
-            .version_snapshot_mut(function_name, &v)
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFoundException",
-                    format!(
-                        "Function not found: {}:{v}",
-                        function_arn(region, &account_id, function_name)
-                    ),
-                )
-            }),
-    }
+) -> Result<crate::resource_policy::PolicySlot<'a>, AwsServiceError> {
+    let target = crate::resource_policy::PolicyQualifier::of(qualifier);
+    let missing = policy_target_not_found(state, function_name, region, target);
+    crate::resource_policy::policy_slot_mut(state, function_name, target).ok_or(missing)
 }
 
+/// [`resolve_policy_target_mut`], read-only.
 fn resolve_policy_target_ref<'a>(
     state: &'a crate::state::LambdaState,
     function_name: &str,
     region: &str,
     qualifier: Option<&str>,
-) -> Result<&'a crate::state::LambdaFunction, AwsServiceError> {
-    let resolved_version =
-        crate::service::resolve_qualifier_to_version(state, function_name, qualifier);
-    match resolved_version {
-        None => state.functions.get(function_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFoundException",
-                format!(
-                    "Function not found: {}",
-                    function_arn(region, &state.account_id, function_name)
-                ),
-            )
-        }),
-        Some(v) => state.version_snapshot(function_name, &v).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFoundException",
-                format!(
-                    "Function not found: {}:{v}",
-                    function_arn(region, &state.account_id, function_name)
-                ),
-            )
-        }),
-    }
+) -> Result<crate::resource_policy::PolicyView<'a>, AwsServiceError> {
+    let target = crate::resource_policy::PolicyQualifier::of(qualifier);
+    crate::resource_policy::policy_view(state, function_name, target)
+        .ok_or_else(|| policy_target_not_found(state, function_name, region, target))
+}
+
+fn policy_target_not_found(
+    state: &crate::state::LambdaState,
+    function_name: &str,
+    region: &str,
+    target: crate::resource_policy::PolicyQualifier<'_>,
+) -> AwsServiceError {
+    let arn = function_arn(region, &state.account_id, function_name);
+    // A missing function is reported unqualified, as AWS does.
+    let message = match target.suffix() {
+        Some(q) if state.functions.contains_key(function_name) => {
+            format!("Function not found: {arn}:{q}")
+        }
+        _ => format!("Function not found: {arn}"),
+    };
+    AwsServiceError::aws_error(StatusCode::NOT_FOUND, "ResourceNotFoundException", message)
 }
 
 /// Reject a caller-supplied `RevisionId` that no longer matches the

@@ -79,6 +79,7 @@ impl LambdaService {
                         .is_some_and(|w| !w.is_empty())
                 })
                 .cloned(),
+            policy: None,
         };
         state
             .aliases

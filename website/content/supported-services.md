@@ -9,7 +9,7 @@ fakecloud provides 100% API conformance across 7,657 operations. Unlike mocks, f
 ## Coverage Summary
 - **Total Services**: 107
 - **Total Operations**: 7,657
-- **Conformance Engine**: 258,530 Smithy-based test variants
+- **Conformance Engine**: 257,522 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services

@@ -27,7 +27,7 @@ fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
     )
 }
 
-fn check_optional_int_range(
+pub(crate) fn check_optional_int_range(
     field: &str,
     v: Option<i64>,
     min: i64,
@@ -105,7 +105,7 @@ pub(crate) const LAMBDA_RUNTIMES: &[&str] = &[
     "provided.al2023",
 ];
 
-fn check_optional_enum(
+pub(crate) fn check_optional_enum(
     field: &str,
     v: Option<&str>,
     allowed: &[&str],
@@ -215,6 +215,16 @@ fn prevalidate_lambda(action: &str, req: &AwsRequest) -> Result<(), AwsServiceEr
             check_optional_len("S3Key", body["S3Key"].as_str(), 1, 1024)?;
             check_optional_len("S3ObjectVersion", body["S3ObjectVersion"].as_str(), 1, 1024)?;
         }
+        // CreateEventSourceMapping's checks run in its handler
+        // (`event_source::validate_create`), shared with CloudFormation.
+        "UpdateEventSourceMapping" => crate::event_source::validate_settings(&body)?,
+        "UpdateAlias" => {
+            check_optional_len("FunctionVersion", body["FunctionVersion"].as_str(), 1, 1024)?;
+            check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
+        }
+        "UpdateCodeSigningConfig" => {
+            check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
+        }
         "Invoke" | "InvokeWithResponseStream" => validate_invoke_headers(action, req)?,
         // `InvokeArgs` is the required `@httpPayload`. Recorded against
         // Lambda (us-east-1, 2026-11-09): an empty body is refused with this
@@ -299,6 +309,7 @@ pub(crate) fn action_takes_function_name(action: &str) -> bool {
             | "DeleteAlias"
             | "PutRuntimeManagementConfig"
             | "GetRuntimeManagementConfig"
+            | "ListDurableExecutionsByFunction"
     )
 }
 
@@ -1147,8 +1158,6 @@ fn snap_start_apply_on_eq(prev: Option<&Value>, live: Option<&Value>) -> bool {
     prev_apply == live_apply
 }
 
-/// versions in the weight map. Returns `None` for `$LATEST` /
-/// unqualified invokes (caller uses the live `$LATEST` config).
 /// The qualifier an unqualified invoke of `function_name` runs: the
 /// `$LATEST.PUBLISHED` version of a Lambda Managed Instances function that
 /// has one, `None` (`$LATEST`) otherwise.
@@ -1164,7 +1173,28 @@ pub(crate) fn default_invoke_qualifier(
         .then_some(crate::state::LATEST_PUBLISHED)
 }
 
+/// The version a qualifier names: a numeric version as is, an alias's
+/// version (a weighted alias picks between the versions in its weight map),
+/// `None` for `$LATEST` / no qualifier (callers use the live `$LATEST`
+/// config).
+///
+/// An alias that does not exist resolves to the qualifier itself, which no
+/// version snapshot is keyed by (alias names cannot be all digits), so every
+/// caller's version lookup answers `ResourceNotFoundException` for it, as
+/// AWS does, instead of quietly serving `$LATEST`. An alias pointing at
+/// `$LATEST` (which `CreateAlias` and CloudFormation allow) resolves to
+/// `None`, the live function, like an unqualified call.
 pub(crate) fn resolve_qualifier_to_version(
+    state: &LambdaState,
+    function_name: &str,
+    qualifier: Option<&str>,
+) -> Option<String> {
+    alias_or_version(state, function_name, qualifier).filter(|v| v != "$LATEST")
+}
+
+/// [`resolve_qualifier_to_version`] before an alias's `$LATEST` target is
+/// folded into `None`.
+fn alias_or_version(
     state: &LambdaState,
     function_name: &str,
     qualifier: Option<&str>,
@@ -1180,7 +1210,9 @@ pub(crate) fn resolve_qualifier_to_version(
         return Some(q.to_string());
     }
     let alias_key = format!("{function_name}:{q}");
-    let alias = state.aliases.get(&alias_key)?;
+    let Some(alias) = state.aliases.get(&alias_key) else {
+        return Some(q.to_string());
+    };
     let primary = alias.function_version.clone();
     let routing = alias
         .routing_config
@@ -1272,6 +1304,9 @@ pub struct LambdaService {
     /// Durable executions: starts, re-invokes and times out executions of
     /// functions with a `DurableConfig`.
     pub(crate) durable: crate::durable::DurableHub,
+    /// Whether an event source (SQS queue, Kinesis / DynamoDB stream) a
+    /// mapping names exists; `None` skips the check.
+    pub(crate) event_source_lookup: Option<Arc<dyn crate::event_source::EventSourceLookup>>,
 }
 
 pub(crate) mod async_invoke;
@@ -1297,11 +1332,22 @@ impl LambdaService {
             ec2_state: None,
             quota_provider: None,
             org_resolver: None,
+            event_source_lookup: None,
         }
     }
 
     /// Attach the Organizations membership graph (see the `org_resolver`
     /// field).
+    /// Look event sources up in their services' state, so
+    /// CreateEventSourceMapping refuses one that does not exist.
+    pub fn with_event_source_lookup(
+        mut self,
+        lookup: Arc<dyn crate::event_source::EventSourceLookup>,
+    ) -> Self {
+        self.event_source_lookup = Some(lookup);
+        self
+    }
+
     pub fn with_org_resolver(mut self, orgs: Arc<dyn fakecloud_core::auth::ScpResolver>) -> Self {
         self.org_resolver = Some(orgs);
         self
@@ -2185,7 +2231,25 @@ impl AwsService for LambdaService {
                         }
                         _ => &state.account_id,
                     };
-                    function_arn(&request.region, account, &name)
+                    let arn = function_arn(&request.region, account, &name);
+                    // An invocation of a version or alias is of that
+                    // qualified ARN, so identity policies scoped to the
+                    // function alone do not cover it and the resource policy
+                    // consulted is that qualifier's own, as on AWS.
+                    let invoked_qualifier = match action_str {
+                        "Invoke" | "InvokeWithResponseStream" => request
+                            .query_params
+                            .get("Qualifier")
+                            .cloned()
+                            .or_else(|| qualifier_from_function_ref(&raw)),
+                        _ => None,
+                    };
+                    match crate::resource_policy::PolicyQualifier::of(invoked_qualifier.as_deref())
+                        .suffix()
+                    {
+                        Some(q) => format!("{arn}:{q}"),
+                        None => arn,
+                    }
                 }
             }
             "CreateFunction" => {
@@ -2278,7 +2342,7 @@ impl AwsService for LambdaService {
 }
 
 #[path = "../service_event_sources.rs"]
-mod service_event_sources;
+pub(crate) mod service_event_sources;
 #[path = "../service_permissions.rs"]
 mod service_permissions;
 

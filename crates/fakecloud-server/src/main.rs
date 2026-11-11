@@ -1744,6 +1744,15 @@ async fn main() {
         } else {
             None
         };
+    // Lambda event sources (SQS queues, Kinesis / DynamoDB streams), looked
+    // up the same way by CreateEventSourceMapping and by CloudFormation's
+    // AWS::Lambda::EventSourceMapping.
+    let event_source_lookup: Arc<dyn fakecloud_lambda::event_source::EventSourceLookup> =
+        Arc::new(hooks::EventSourceLookupImpl {
+            sqs: sqs_state.clone(),
+            kinesis: kinesis_state.clone(),
+            dynamodb: dynamodb_state.clone(),
+        });
     let mut cloudformation_service = CloudFormationService::new(
         cloudformation_state.clone(),
         fakecloud_cloudformation::CloudFormationDeps {
@@ -2251,6 +2260,7 @@ async fn main() {
         fakecloud_iam::pass_role::IamRoleTrustValidator::shared(iam_state.clone()),
     );
     lambda_service = lambda_service.with_iam_mode(cli.iam_mode());
+    lambda_service = lambda_service.with_event_source_lookup(event_source_lookup.clone());
     // Layer version grants scoped to an organization (`aws:PrincipalOrgID`)
     // resolve the caller's organization from the Organizations state.
     lambda_service = lambda_service.with_org_resolver(
@@ -7401,6 +7411,7 @@ async fn main() {
     // The reset endpoints persist through the same hooks (see `reset_late`).
     let mut reset_hooks = cfn_snapshot_hooks.clone();
     let cloudformation_service = cloudformation_service
+        .with_event_source_lookup(event_source_lookup)
         .with_s3_store(s3_store.clone())
         .with_kms_hook(kms_hook_for_services.clone())
         .with_quota_provider(quota_provider.clone())

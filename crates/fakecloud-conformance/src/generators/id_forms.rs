@@ -3,18 +3,29 @@
 //! AWS REST APIs that take an identifier in the URL path (e.g.
 //! `GET /2015-03-31/functions/{FunctionName}` for Lambda) typically
 //! accept the identifier in multiple forms: bare name, `name:qualifier`,
-//! partial ARN, full ARN, URL-encoded full ARN. The conformance harness
-//! historically only generated the bare name — #817 was missed because
-//! the ARN form returned 404 from fakecloud and the negative-strategy
-//! classifier waved it through.
+//! partial ARN, full ARN. The conformance harness historically only
+//! generated the bare name -- #817 was missed because the ARN form
+//! returned 404 from fakecloud and the negative-strategy classifier waved
+//! it through.
 //!
 //! This strategy walks each REST operation's URL labels (members marked
 //! `@httpLabel`) and inspects the `@pattern` trait on the member's target
 //! shape. If the pattern admits ARN input (`smithy::pattern_admits_arn`),
 //! we emit one variant per accepted form. Each variant overrides the
-//! identifier value in the variant's input — the probe layer's
-//! Smithy-driven URL builder substitutes it into the path automatically.
+//! identifier value in the variant's input -- the probe layer's
+//! Smithy-driven URL builder substitutes it into the path automatically,
+//! percent-encoding it once (`:` -> `%3A`), exactly as an AWS SDK
+//! serializes a label. That is also why there is no separate "URL-encoded
+//! ARN" form: a full ARN already reaches the server URL-encoded, and a
+//! value encoded before the SDK sees it is encoded again on the wire
+//! (`%253A`), which names no resource.
+//!
+//! A form the member's `@pattern` rejects is not generated: AWS refuses it
+//! before looking anything up, so a success-path variant built on it can
+//! only ever be answered with an error (a layer has no `name:qualifier`
+//! form, a scheduler ARN no `function:` resource).
 
+use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -24,20 +35,80 @@ use crate::smithy::{
 };
 
 const FAKE_ACCOUNT: &str = "123456789012";
+const FAKE_REGION: &str = "us-east-1";
 
-/// Per-service ARN service prefix used to synthesise `arn:aws:<svc>:...` forms.
-/// Mirrors the SigV4 service identifier most services use.
-fn arn_service_prefix(service_name: &str) -> &'static str {
-    match service_name {
-        "lambda" => "lambda",
-        "s3" => "s3",
-        "iam" => "iam",
-        "ses" | "sesv2" => "ses",
-        "states" => "states",
-        "ecs" => "ecs",
-        "ecr" => "ecr",
-        _ => "service",
+/// The service segment of the synthesized ARNs: the model's ARN namespace,
+/// else the last segment of its Smithy namespace (`com.amazonaws.lambda`).
+fn arn_service(model: &ServiceModel) -> &str {
+    model.arn_namespace.as_deref().unwrap_or_else(|| {
+        model
+            .service_name
+            .rsplit('.')
+            .next()
+            .unwrap_or(&model.service_name)
+    })
+}
+
+/// The ARN resource type a label's pattern names (`layer` for a Lambda layer
+/// name), defaulting to Lambda's `function`.
+fn resource_type(pattern: &str) -> &'static str {
+    ["layer", "function"]
+        .into_iter()
+        .find(|t| pattern.contains(&format!("{t}:")))
+        .unwrap_or("function")
+}
+
+/// Whether `value` satisfies the whole `pattern`, as AWS validates a member
+/// (Smithy patterns are not anchored; AWS matches the full value). A
+/// pattern the `regex` crate cannot compile admits everything.
+fn satisfies(pattern: &str, value: &str) -> bool {
+    if pattern.is_empty() {
+        return true;
     }
+    match Regex::new(&format!("^(?:{pattern})$")) {
+        Ok(re) => re.is_match(value),
+        Err(_) => true,
+    }
+}
+
+/// The identifier forms of `basis` (a seeded identifier or the schema's
+/// default) that `pattern` admits, as `(form, value)`.
+fn forms(
+    basis: &str,
+    pattern: &str,
+    service: &str,
+    qualifier: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let base = strip_arn(basis);
+    let rtype = resource_type(pattern);
+    // A seeded ARN is the real one; synthesize the ARN only from a bare name.
+    let (full_arn, account) = if basis.starts_with("arn:") {
+        let account = basis.split(':').nth(4).unwrap_or(FAKE_ACCOUNT).to_string();
+        (basis.to_string(), account)
+    } else {
+        (
+            format!("arn:aws:{service}:{FAKE_REGION}:{FAKE_ACCOUNT}:{rtype}:{base}"),
+            FAKE_ACCOUNT.to_string(),
+        )
+    };
+    let candidates = [
+        ("bare", base.clone()),
+        // The seeded alias when there is one: `$LATEST` is the only
+        // qualifier that exists without a seed.
+        (
+            "qualifier",
+            format!("{base}:{}", qualifier.unwrap_or("$LATEST")),
+        ),
+        ("partial_arn", format!("{account}:{rtype}:{base}")),
+        ("full_arn", full_arn),
+    ];
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    for (form, value) in candidates {
+        if satisfies(pattern, &value) && !out.iter().any(|(_, v)| *v == value) {
+            out.push((form, value));
+        }
+    }
+    out
 }
 
 pub fn generate(
@@ -66,39 +137,18 @@ pub fn generate(
     }
 
     let mut variants = Vec::new();
-    let svc = arn_service_prefix(&model.service_name);
-    for (member_name, default_value) in labels {
-        // Derive the bare-name basis from the seeded identifier when the
-        // caller pinned one (so every form names a resource that exists and
-        // the variant tests the form, not a not-found), else the schema's
-        // default. Strip any `arn:` prefix so the synthetic forms below are
-        // always layered on a clean identifier.
+    let service = arn_service(model);
+    let qualifier = overrides.get("Qualifier").and_then(Value::as_str);
+    for (member_name, default_value, pattern) in labels {
+        // Build on the seeded identifier when the caller pinned one (so
+        // every form names a resource that exists and the variant tests the
+        // form, not a not-found), else the schema's default.
         let basis = overrides
             .get(&member_name)
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or(default_value);
-        let base = strip_arn(&basis);
-        let forms = vec![
-            ("bare", base.clone()),
-            ("qualifier", format!("{}:LATEST", base)),
-            ("partial_arn", format!("{}:function:{}", FAKE_ACCOUNT, base)),
-            (
-                "full_arn",
-                format!(
-                    "arn:aws:{}:us-east-1:{}:function:{}",
-                    svc, FAKE_ACCOUNT, base
-                ),
-            ),
-            (
-                "encoded_full_arn",
-                url_encode_colons(&format!(
-                    "arn:aws:{}:us-east-1:{}:function:{}",
-                    svc, FAKE_ACCOUNT, base
-                )),
-            ),
-        ];
-        for (form_name, value) in forms {
+        for (form_name, value) in forms(&basis, &pattern, service, qualifier) {
             let mut local_overrides = overrides.clone();
             local_overrides.insert(member_name.clone(), Value::String(value));
             let input = build_required_input(model, input_shape_id, &local_overrides);
@@ -116,13 +166,13 @@ pub fn generate(
 }
 
 /// Find input members carrying `@httpLabel` whose target string shape's
-/// `@pattern` trait admits an ARN. Returns `(member_name, default_value)`
-/// where the default is the schema-driven bare value used as the basis
-/// for ARN synthesis.
+/// `@pattern` trait admits an ARN. Returns `(member_name, default_value,
+/// pattern)` where the default is the schema-driven bare value used as the
+/// basis for ARN synthesis.
 fn httplabel_members_with_arn_pattern(
     model: &ServiceModel,
     input_shape_id: &str,
-) -> Vec<(String, String)> {
+) -> Vec<(String, String, String)> {
     let members = match effective_shape_type(model, input_shape_id) {
         Some(ShapeType::Structure { members }) => members,
         _ => return Vec::new(),
@@ -142,7 +192,7 @@ fn httplabel_members_with_arn_pattern(
             Value::String(s) => s,
             _ => continue,
         };
-        out.push((member.name.clone(), default_str));
+        out.push((member.name.clone(), default_str, pattern.to_string()));
     }
     out
 }
@@ -244,10 +294,6 @@ fn strip_arn(value: &str) -> String {
     }
 }
 
-fn url_encode_colons(s: &str) -> String {
-    s.replace(':', "%3A")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,8 +332,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn emits_five_variants_for_arn_admitting_label() {
+    fn get_function_model() -> ServiceModel {
         let mut shapes = std::collections::HashMap::new();
         shapes.insert(
             "test#GetFunctionRequest".to_string(),
@@ -308,51 +353,109 @@ mod tests {
             "test#FunctionName".to_string(),
             lambda_function_name_shape(),
         );
-
-        let model = ServiceModel {
-            service_name: "lambda".to_string(),
+        ServiceModel {
+            service_name: "com.amazonaws.lambda".to_string(),
+            arn_namespace: Some("lambda".to_string()),
             operations: vec![op_with_uri("GetFunction", "test#GetFunctionRequest")],
             shapes,
             ..Default::default()
-        };
+        }
+    }
 
+    fn form<'v>(variants: &'v [TestVariant], name: &str) -> Option<&'v str> {
+        variants
+            .iter()
+            .find(|v| v.name == format!("id_form_FunctionName_{name}"))
+            .map(|v| v.input["FunctionName"].as_str().unwrap())
+    }
+
+    #[test]
+    fn emits_one_variant_per_admitted_form() {
+        let model = get_function_model();
         let variants = generate(&model, "GetFunction", &HashMap::new());
         let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(variants.len(), 5, "expected 5 forms, got {:?}", names);
-        // Every variant carries the FunctionName override.
+        assert_eq!(
+            names,
+            [
+                "id_form_FunctionName_bare",
+                "id_form_FunctionName_qualifier",
+                "id_form_FunctionName_partial_arn",
+                "id_form_FunctionName_full_arn",
+            ]
+        );
         for v in &variants {
-            let obj = v.input.as_object().expect("object");
-            assert!(obj.contains_key("FunctionName"));
             assert_eq!(v.strategy, Strategy::IdForms);
+            // One level of encoding is the request builder's job: no form
+            // arrives pre-encoded.
+            assert!(!v.input["FunctionName"].as_str().unwrap().contains('%'));
         }
-        // Spot-check the full-ARN form.
-        let full = variants
-            .iter()
-            .find(|v| v.name.contains("full_arn") && !v.name.contains("encoded"))
-            .expect("full_arn variant present");
-        let val = full
-            .input
-            .as_object()
-            .unwrap()
-            .get("FunctionName")
-            .unwrap()
-            .as_str()
-            .unwrap();
-        assert!(val.starts_with("arn:aws:lambda:"), "got {val}");
-        // URL-encoded form.
-        let enc = variants
-            .iter()
-            .find(|v| v.name.contains("encoded_full_arn"))
-            .unwrap();
-        let enc_val = enc
-            .input
-            .as_object()
-            .unwrap()
-            .get("FunctionName")
-            .unwrap()
-            .as_str()
-            .unwrap();
-        assert!(enc_val.contains("%3A"), "got {enc_val}");
+        let full = form(&variants, "full_arn").unwrap();
+        assert!(
+            full.starts_with("arn:aws:lambda:us-east-1:123456789012:function:"),
+            "got {full}"
+        );
+    }
+
+    #[test]
+    fn arn_service_comes_from_the_arn_namespace() {
+        let mut model = get_function_model();
+        model.arn_namespace = Some("states".to_string());
+        assert_eq!(arn_service(&model), "states");
+        model.arn_namespace = None;
+        assert_eq!(arn_service(&model), "lambda");
+    }
+
+    #[test]
+    fn the_qualifier_form_uses_the_seeded_qualifier_else_latest() {
+        let model = get_function_model();
+        let overrides = HashMap::from([
+            ("FunctionName".to_string(), Value::String("fn".to_string())),
+            ("Qualifier".to_string(), Value::String("live".to_string())),
+        ]);
+        let seeded = generate(&model, "GetFunction", &overrides);
+        assert_eq!(form(&seeded, "qualifier"), Some("fn:live"));
+        let unseeded = generate(&model, "GetFunction", &HashMap::new());
+        assert!(form(&unseeded, "qualifier").unwrap().ends_with(":$LATEST"));
+    }
+
+    #[test]
+    fn a_seeded_arn_is_its_own_full_arn_form() {
+        let arn = "arn:aws:lambda:eu-west-1:210987654321:function:seeded";
+        let forms = forms(arn, "", "lambda", None);
+        assert!(forms.contains(&("full_arn", arn.to_string())));
+        assert!(forms.contains(&("bare", "seeded".to_string())));
+        assert!(forms.contains(&("partial_arn", "210987654321:function:seeded".to_string())));
+    }
+
+    #[test]
+    fn forms_the_pattern_rejects_are_not_generated() {
+        // Lambda's LayerName: a bare name or a layer ARN, nothing else.
+        let layer =
+            "(arn:[a-zA-Z0-9-]+:lambda:[a-zA-Z0-9-]+:\\d{12}:layer:[a-zA-Z0-9-_]+)|[a-zA-Z0-9-_]+";
+        let got = forms("my-layer", layer, "lambda", None);
+        assert_eq!(
+            got,
+            [
+                ("bare", "my-layer".to_string()),
+                (
+                    "full_arn",
+                    "arn:aws:lambda:us-east-1:123456789012:layer:my-layer".to_string()
+                ),
+            ]
+        );
+        // An ARN-only pattern of another resource type keeps no synthesized
+        // `function:` form.
+        let schedule =
+            "arn:aws(-[a-z]+)?:scheduler:[a-z0-9\\-]+:\\d{12}:schedule-group\\/[0-9a-zA-Z-_.]+";
+        assert!(forms("t", schedule, "scheduler", None).is_empty());
+    }
+
+    #[test]
+    fn patterns_match_the_whole_value() {
+        assert!(satisfies("[a-z]+", "abc"));
+        assert!(!satisfies("[a-z]+", "abc:1"));
+        // Unsupported syntax (lookahead) admits the value.
+        assert!(satisfies("(?!x)[a-z]+", "abc:1"));
     }
 
     #[test]

@@ -1,0 +1,56 @@
+{
+  "recorded": "2026-11-10, AWS CLI 2.26.5, CreateEventSourceMapping in us-east-1 against an existing python3.12 function whose role held AWSLambdaSQSQueueExecutionRole, AWSLambdaKinesisExecutionRole and AWSLambdaDynamoDBExecutionRole; every resource was deleted afterwards",
+  "account": "454591548454",
+  "region": "us-east-1",
+  "cases": [
+    {
+      "event_source_arn": "arn:aws:sqs:us-east-1:454591548454:fakecloud-esm-probe-missing-queue",
+      "code": "InvalidParameterValueException",
+      "message": "Error occurred while ReceiveMessage. SQS Error Code: AWS.SimpleQueueService.NonExistentQueue. SQS Error Message: The specified queue does not exist."
+    },
+    {
+      "event_source_arn": "arn:aws:kinesis:us-east-1:454591548454:stream/fakecloud-esm-probe-missing-stream",
+      "code": "InvalidParameterValueException",
+      "message": "Stream not found: arn:aws:kinesis:us-east-1:454591548454:stream/fakecloud-esm-probe-missing-stream"
+    },
+    {
+      "event_source_arn": "arn:aws:dynamodb:us-east-1:454591548454:table/fakecloud-esm-probe-missing-table/stream/2024-01-01T00:00:00.000",
+      "code": "InvalidParameterValueException",
+      "message": "Stream not found: arn:aws:dynamodb:us-east-1:454591548454:table/fakecloud-esm-probe-missing-table/stream/2024-01-01T00:00:00.000"
+    },
+    {
+      "event_source_arn": "",
+      "code": "ValidationException",
+      "message": "1 validation error detected: Value '' at 'eventSourceArn' failed to satisfy constraint: Member must satisfy regular expression pattern: arn:(aws[a-zA-Z0-9-]*):([a-zA-Z0-9\\-])+:((eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1})?:(\\d{12})?:(.*)"
+    },
+    {
+      "event_source_arn": "arn:aws:sqs:us-west-2:454591548454:fakecloud-esm-probe-missing-queue",
+      "code": "InvalidParameterValueException",
+      "message": "Event source region must match Lambda region us-east-1"
+    },
+    {
+      "event_source_arn": "arn:aws:sns:us-east-1:454591548454:fakecloud-esm-probe-topic",
+      "code": "InvalidParameterValueException",
+      "message": "Unrecognized event source. Unsupported source arn : arn:aws:sns:us-east-1:454591548454:fakecloud-esm-probe-topic"
+    },
+    {
+      "event_source_arn": null,
+      "code": "InvalidParameterValueException",
+      "message": "Unrecognized event source."
+    }
+  ],
+  "not_reproduced": [
+    {
+      "event_source_arn": "arn:aws:sqs:us-east-1:123456789012:fakecloud-esm-probe-missing-queue",
+      "code": "InvalidParameterValueException",
+      "message": "Error occurred while ReceiveMessage. SQS Error Code: InvalidAddress. SQS Error Message: The address https://sqs.us-east-1.amazonaws.com/123456789012/fakecloud-esm-probe-missing-queue is not valid for this endpoint.",
+      "why": "a queue of another (real, unrelated) AWS account; fakecloud looks the queue up in the ARN's account and answers NonExistentQueue"
+    },
+    {
+      "event_source_arn": "arn:aws:kinesis:us-east-1:123456789012:stream/fakecloud-esm-probe-missing-stream",
+      "code": "InvalidParameterValueException",
+      "message": "Received Exception while reading from provided stream. No account found for the given parameters",
+      "why": "as above, for Kinesis; fakecloud answers Stream not found"
+    }
+  ]
+}

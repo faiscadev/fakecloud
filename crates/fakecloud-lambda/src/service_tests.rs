@@ -5771,3 +5771,753 @@ async fn event_source_mapping_keeps_a_qualified_function_name() {
         .unwrap();
     assert_eq!(err.code(), "ResourceNotFoundException");
 }
+
+/// Send `method path` with a JSON body and `query` params.
+async fn call_with(
+    svc: &LambdaService,
+    method: Method,
+    path: &str,
+    query: &[(&str, &str)],
+    body: Value,
+) -> Result<AwsResponse, AwsServiceError> {
+    let mut req = make_request(method, path, &body.to_string());
+    for (k, v) in query {
+        req.query_params.insert(k.to_string(), v.to_string());
+    }
+    svc.handle(req).await
+}
+
+fn json_of(resp: &AwsResponse) -> Value {
+    serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+}
+
+#[tokio::test]
+async fn an_unknown_alias_qualifier_is_not_found_not_latest() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "afn").await;
+    for path in [
+        "/2015-03-31/functions/afn",
+        "/2015-03-31/functions/afn/configuration",
+    ] {
+        let err = call_with(
+            &svc,
+            Method::GET,
+            path,
+            &[("Qualifier", "LATEST")],
+            json!({}),
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{path}: an alias that does not exist was served"));
+        assert_eq!(err.status(), StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(err.code(), "ResourceNotFoundException", "{path}");
+    }
+    // The policy of an alias that does not exist is not the function's.
+    call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/functions/afn/policy",
+        &[],
+        json!({"StatementId": "s", "Action": "lambda:InvokeFunction", "Principal": "s3.amazonaws.com"}),
+    )
+    .await
+    .unwrap();
+    let err = call_with(
+        &svc,
+        Method::GET,
+        "/2015-03-31/functions/afn/policy",
+        &[("Qualifier", "nope")],
+        json!({}),
+    )
+    .await
+    .err()
+    .expect("GetPolicy on a missing alias");
+    assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    // `$LATEST` still names the live function.
+    let resp = call_with(
+        &svc,
+        Method::GET,
+        "/2015-03-31/functions/afn",
+        &[("Qualifier", "$LATEST")],
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(json_of(&resp)["Configuration"]["Version"], "$LATEST");
+}
+
+#[tokio::test]
+async fn deleting_a_function_deletes_its_configurations() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "cfn").await;
+    call_with(
+        &svc,
+        Method::POST,
+        "/2021-10-31/functions/cfn/url",
+        &[],
+        json!({"AuthType": "NONE"}),
+    )
+    .await
+    .unwrap();
+    call_with(
+        &svc,
+        Method::PUT,
+        "/2017-10-31/functions/cfn/concurrency",
+        &[],
+        json!({"ReservedConcurrentExecutions": 5}),
+    )
+    .await
+    .unwrap();
+    call_with(
+        &svc,
+        Method::PUT,
+        "/2019-09-25/functions/cfn/event-invoke-config",
+        &[],
+        json!({"MaximumRetryAttempts": 1}),
+    )
+    .await
+    .unwrap();
+    call_with(
+        &svc,
+        Method::DELETE,
+        "/2015-03-31/functions/cfn",
+        &[],
+        json!({}),
+    )
+    .await
+    .unwrap();
+    // A function re-created under the same name starts without them.
+    seed_function(&svc, "cfn").await;
+    let err = call_with(
+        &svc,
+        Method::GET,
+        "/2021-10-31/functions/cfn/url",
+        &[],
+        json!({}),
+    )
+    .await
+    .err()
+    .expect("the old function URL survived");
+    assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    let concurrency = call_with(
+        &svc,
+        Method::GET,
+        "/2019-09-30/functions/cfn/concurrency",
+        &[],
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert!(json_of(&concurrency)
+        .get("ReservedConcurrentExecutions")
+        .is_none());
+    let configs = call_with(
+        &svc,
+        Method::GET,
+        "/2019-09-25/functions/cfn/event-invoke-config/list",
+        &[],
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(json_of(&configs)["FunctionEventInvokeConfigs"], json!([]));
+}
+
+#[tokio::test]
+async fn list_function_event_invoke_configs_is_routed_to_the_listing() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "efn").await;
+    // No configuration yet: an empty listing, not GetFunctionEventInvokeConfig's 404.
+    let resp = call_with(
+        &svc,
+        Method::GET,
+        "/2019-09-25/functions/efn/event-invoke-config/list",
+        &[],
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(json_of(&resp)["FunctionEventInvokeConfigs"], json!([]));
+    call_with(
+        &svc,
+        Method::PUT,
+        "/2019-09-25/functions/efn/event-invoke-config",
+        &[],
+        json!({"MaximumRetryAttempts": 2}),
+    )
+    .await
+    .unwrap();
+    let resp = call_with(
+        &svc,
+        Method::GET,
+        "/2019-09-25/functions/efn/event-invoke-config/list",
+        &[],
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let configs = json_of(&resp)["FunctionEventInvokeConfigs"].clone();
+    assert_eq!(configs.as_array().unwrap().len(), 1);
+    assert_eq!(configs[0]["MaximumRetryAttempts"], 2);
+}
+
+#[tokio::test]
+async fn layer_listings_apply_their_compatibility_filters() {
+    let svc = LambdaService::new(make_state());
+    let publish = |runtime: &'static str| {
+        let svc = &svc;
+        async move {
+            call_with(
+                svc,
+                Method::POST,
+                "/2018-10-31/layers/lyr/versions",
+                &[],
+                json!({"Content": {"ZipFile": "UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA=="}, "CompatibleRuntimes": [runtime]}),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    publish("python3.12").await;
+    publish("nodejs20.x").await;
+    let layers = |query: &'static [(&'static str, &'static str)]| {
+        let svc = &svc;
+        async move {
+            json_of(
+                &call_with(svc, Method::GET, "/2018-10-31/layers", query, json!({}))
+                    .await
+                    .unwrap(),
+            )
+        }
+    };
+    let python = layers(&[("CompatibleRuntime", "python3.12")]).await;
+    assert_eq!(python["Layers"][0]["LatestMatchingVersion"]["Version"], 1);
+    let all = layers(&[]).await;
+    assert_eq!(all["Layers"][0]["LatestMatchingVersion"]["Version"], 2);
+    let none = layers(&[("CompatibleRuntime", "java21")]).await;
+    assert_eq!(none["Layers"], json!([]));
+    let versions = json_of(
+        &call_with(
+            &svc,
+            Method::GET,
+            "/2018-10-31/layers/lyr/versions",
+            &[("CompatibleRuntime", "nodejs20.x")],
+            json!({}),
+        )
+        .await
+        .unwrap(),
+    );
+    let listed: Vec<i64> = versions["LayerVersions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["Version"].as_i64().unwrap())
+        .collect();
+    assert_eq!(listed, [2]);
+    // A layer whose versions were all deleted is not listed.
+    for v in [1, 2] {
+        call_with(
+            &svc,
+            Method::DELETE,
+            &format!("/2018-10-31/layers/lyr/versions/{v}"),
+            &[],
+            json!({}),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(layers(&[]).await["Layers"], json!([]));
+}
+
+#[tokio::test]
+async fn update_event_source_mapping_validates_like_create() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "esmfn").await;
+    let created = call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/event-source-mappings",
+        &[],
+        json!({"EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:q", "FunctionName": "esmfn", "Enabled": false}),
+    )
+    .await
+    .unwrap();
+    let uuid = json_of(&created)["UUID"].as_str().unwrap().to_string();
+    let path = format!("/2015-03-31/event-source-mappings/{uuid}");
+    for body in [
+        json!({"BatchSize": 0}),
+        json!({"BatchSize": 10001}),
+        json!({"MaximumBatchingWindowInSeconds": 301}),
+        json!({"ParallelizationFactor": 11}),
+        json!({"MaximumRecordAgeInSeconds": -2}),
+        json!({"MaximumRetryAttempts": 10001}),
+        json!({"TumblingWindowInSeconds": 901}),
+        json!({"FunctionName": ""}),
+    ] {
+        let err = call_with(&svc, Method::PUT, &path, &[], body.clone())
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{body} was accepted"));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    let err = call_with(
+        &svc,
+        Method::PUT,
+        &path,
+        &[],
+        json!({"FunctionName": "nope"}),
+    )
+    .await
+    .err()
+    .expect("a mapping was pointed at a missing function");
+    assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    // Nothing above changed the mapping.
+    let got = json_of(
+        &call_with(&svc, Method::GET, &path, &[], json!({}))
+            .await
+            .unwrap(),
+    );
+    assert!(got["FunctionArn"]
+        .as_str()
+        .unwrap()
+        .ends_with(":function:esmfn"));
+    let ok = call_with(&svc, Method::PUT, &path, &[], json!({"BatchSize": 5}))
+        .await
+        .unwrap();
+    assert_eq!(json_of(&ok)["BatchSize"], 5);
+    let err = call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/event-source-mappings",
+        &[],
+        json!({"EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:q", "FunctionName": "esmfn", "StartingPosition": "SOMETIME"}),
+    )
+    .await
+    .err()
+    .expect("an unknown StartingPosition was accepted");
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn update_alias_and_code_signing_config_check_their_lengths() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "lfn").await;
+    call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/functions/lfn/versions",
+        &[],
+        json!({}),
+    )
+    .await
+    .unwrap();
+    call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/functions/lfn/aliases",
+        &[],
+        json!({"Name": "live", "FunctionVersion": "1"}),
+    )
+    .await
+    .unwrap();
+    for body in [
+        json!({"Description": "d".repeat(257)}),
+        json!({"FunctionVersion": ""}),
+        json!({"FunctionVersion": "1".repeat(1025)}),
+    ] {
+        let err = call_with(
+            &svc,
+            Method::PUT,
+            "/2015-03-31/functions/lfn/aliases/live",
+            &[],
+            body.clone(),
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("UpdateAlias accepted {body}"));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+    let csc = json_of(
+        &call_with(
+            &svc,
+            Method::POST,
+            "/2020-04-22/code-signing-configs",
+            &[],
+            json!({"AllowedPublishers": {"SigningProfileVersionArns": ["arn:aws:signer:us-east-1:123456789012:/signing-profiles/p/AbCdEf1234"]}}),
+        )
+        .await
+        .unwrap(),
+    );
+    let arn = csc["CodeSigningConfig"]["CodeSigningConfigArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let err = call_with(
+        &svc,
+        Method::PUT,
+        &format!("/2020-04-22/code-signing-configs/{arn}"),
+        &[],
+        json!({"Description": "d".repeat(257)}),
+    )
+    .await
+    .err()
+    .expect("UpdateCodeSigningConfig accepted a 257-character description");
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn list_function_versions_by_capacity_provider_names_the_provider() {
+    let svc = LambdaService::new(make_state());
+    call_with(
+        &svc,
+        Method::POST,
+        "/2025-11-30/capacity-providers",
+        &[],
+        json!({
+            "CapacityProviderName": "cp",
+            "VpcConfig": {"SubnetIds": ["subnet-1"], "SecurityGroupIds": ["sg-1"]},
+            "PermissionsConfig": {"CapacityProviderOperatorRoleArn": "arn:aws:iam::123456789012:role/r"},
+        }),
+    )
+    .await
+    .unwrap();
+    let path = "/2025-11-30/capacity-providers/cp/function-versions";
+    let resp = call_with(&svc, Method::GET, path, &[], json!({}))
+        .await
+        .unwrap();
+    let body = json_of(&resp);
+    assert!(body["CapacityProviderArn"]
+        .as_str()
+        .unwrap()
+        .ends_with(":capacity-provider:cp"));
+    assert_eq!(body["FunctionVersions"], json!([]));
+    let err = call_with(&svc, Method::GET, path, &[("MaxItems", "51")], json!({}))
+        .await
+        .err()
+        .expect("MaxItems above 50 was accepted");
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn list_durable_executions_by_function_accepts_every_function_reference() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "dfn").await;
+    for reference in [
+        "dfn",
+        "123456789012:function:dfn",
+        "arn:aws:lambda:us-east-1:123456789012:function:dfn",
+    ] {
+        let path = format!(
+            "/2025-12-01/functions/{}/durable-executions",
+            reference.replace(':', "%3A")
+        );
+        let mut req = make_request(Method::GET, &path, "");
+        req.path_segments = vec![
+            "2025-12-01".to_string(),
+            "functions".to_string(),
+            reference.to_string(),
+            "durable-executions".to_string(),
+        ];
+        let resp = svc
+            .handle(req)
+            .await
+            .unwrap_or_else(|e| panic!("{reference}: {}", e.message()));
+        assert_eq!(
+            json_of(&resp)["DurableExecutions"],
+            json!([]),
+            "{reference}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_response_stream_to_an_unknown_alias_is_not_found() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "sfn").await;
+    let err = call_with(
+        &svc,
+        Method::POST,
+        "/2021-11-15/functions/sfn/response-streaming-invocations",
+        &[("Qualifier", "nope")],
+        json!({}),
+    )
+    .await
+    .err()
+    .expect("streamed to an alias that does not exist");
+    assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    assert!(
+        err.message().ends_with(":function:sfn:nope"),
+        "{}",
+        err.message()
+    );
+}
+
+#[test]
+fn iam_action_for_an_invocation_of_a_qualifier_is_of_the_qualified_arn() {
+    let svc = LambdaService::new(make_state());
+    let invoke = |path: &str, qualifier: Option<&str>| {
+        let mut req = make_request(Method::POST, path, "");
+        if let Some(q) = qualifier {
+            req.query_params
+                .insert("Qualifier".to_string(), q.to_string());
+        }
+        svc.iam_action_for(&req).unwrap().resource
+    };
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:f";
+    assert_eq!(
+        invoke("/2015-03-31/functions/f/invocations", Some("PROD")),
+        format!("{arn}:PROD")
+    );
+    assert_eq!(
+        invoke("/2015-03-31/functions/f:7/invocations", None),
+        format!("{arn}:7")
+    );
+    assert_eq!(
+        invoke("/2015-03-31/functions/f/invocations", Some("$LATEST")),
+        arn
+    );
+    // Only invocations are qualified: reading the alias's policy is an
+    // operation on the function.
+    let mut get_policy = make_request(Method::GET, "/2015-03-31/functions/f/policy", "");
+    get_policy
+        .query_params
+        .insert("Qualifier".to_string(), "PROD".to_string());
+    assert_eq!(svc.iam_action_for(&get_policy).unwrap().resource, arn);
+}
+
+#[tokio::test]
+async fn an_alias_has_a_resource_policy_of_its_own() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "pfn").await;
+    call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/functions/pfn/versions",
+        &[],
+        json!({}),
+    )
+    .await
+    .unwrap();
+    call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/functions/pfn/aliases",
+        &[],
+        json!({"Name": "PROD", "FunctionVersion": "1"}),
+    )
+    .await
+    .unwrap();
+    let grant = json!({"StatementId": "alias-only", "Action": "lambda:InvokeFunction", "Principal": "s3.amazonaws.com"});
+    let added = call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/functions/pfn/policy",
+        &[("Qualifier", "PROD")],
+        grant.clone(),
+    )
+    .await
+    .unwrap();
+    let statement: Value =
+        serde_json::from_str(json_of(&added)["Statement"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        statement["Resource"],
+        "arn:aws:lambda:us-east-1:123456789012:function:pfn:PROD"
+    );
+    let policy_of = |qualifier: Option<&'static str>| {
+        let svc = &svc;
+        async move {
+            let query: Vec<(&str, &str)> =
+                qualifier.map(|q| ("Qualifier", q)).into_iter().collect();
+            call_with(
+                svc,
+                Method::GET,
+                "/2015-03-31/functions/pfn/policy",
+                &query,
+                json!({}),
+            )
+            .await
+            .map(|r| json_of(&r))
+        }
+    };
+    let alias_policy = policy_of(Some("PROD")).await.unwrap();
+    assert!(alias_policy["Policy"]
+        .as_str()
+        .unwrap()
+        .contains("alias-only"));
+    // The version the alias points to, and the function, have none.
+    for q in [Some("1"), None] {
+        let err = policy_of(q).await.expect_err("the alias's grant leaked");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND, "{q:?}");
+    }
+    // The same statement id is free on the version: it is another policy.
+    call_with(
+        &svc,
+        Method::POST,
+        "/2015-03-31/functions/pfn/policy",
+        &[("Qualifier", "1")],
+        grant,
+    )
+    .await
+    .unwrap();
+    call_with(
+        &svc,
+        Method::DELETE,
+        "/2015-03-31/functions/pfn/policy/alias-only",
+        &[("Qualifier", "PROD")],
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let alias_policy = policy_of(Some("PROD")).await.unwrap();
+    assert!(!alias_policy["Policy"]
+        .as_str()
+        .unwrap()
+        .contains("alias-only"));
+    assert!(policy_of(Some("1")).await.unwrap()["Policy"]
+        .as_str()
+        .unwrap()
+        .contains("alias-only"));
+    // A missing alias is not found.
+    let err = policy_of(Some("BETA")).await.unwrap_err();
+    assert!(
+        err.message().ends_with(":function:pfn:BETA"),
+        "{}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+async fn an_alias_pointing_at_latest_serves_the_live_function() {
+    // `CreateAlias` and CloudFormation accept `FunctionVersion: $LATEST`;
+    // reading or invoking through such an alias reaches the live function,
+    // as an unqualified call does, instead of a version that has no snapshot.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "lfn").await;
+    svc.handle(make_request(
+        Method::POST,
+        "/2015-03-31/functions/lfn/aliases",
+        &json!({"Name": "live", "FunctionVersion": "$LATEST"}).to_string(),
+    ))
+    .await
+    .expect("create alias");
+    for path in [
+        "/2015-03-31/functions/lfn",
+        "/2015-03-31/functions/lfn/configuration",
+    ] {
+        let mut req = make_request(Method::GET, path, "");
+        req.query_params
+            .insert("Qualifier".to_string(), "live".to_string());
+        let resp = svc.handle(req).await.expect(path);
+        assert_eq!(resp.status, StatusCode::OK, "{path}");
+    }
+    let state = svc.state.read();
+    let s = state.regional("123456789012", "us-east-1").unwrap();
+    assert_eq!(
+        crate::service::resolve_qualifier_to_version(s, "lfn", Some("live")),
+        None
+    );
+}
+
+#[tokio::test]
+async fn update_event_source_mapping_resolves_function_name_like_create() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "esm-a").await;
+    seed_function(&svc, "esm-b").await;
+    let resp = svc
+        .handle(make_request(
+            Method::POST,
+            "/2015-03-31/event-source-mappings",
+            &json!({
+                "FunctionName": "esm-a",
+                "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:q",
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let uuid = body["UUID"].as_str().unwrap().to_string();
+    let path = format!("/2015-03-31/event-source-mappings/{uuid}");
+
+    // A full ARN (what Terraform sends) is stored as that function's ARN.
+    let resp = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({"FunctionName": "arn:aws:lambda:us-east-1:123456789012:function:esm-b"})
+                .to_string(),
+        ))
+        .await
+        .expect("update by ARN");
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        body["FunctionArn"],
+        "arn:aws:lambda:us-east-1:123456789012:function:esm-b"
+    );
+
+    // An alias that does not exist is refused, as on create.
+    let err = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({"FunctionName": "esm-b:missing"}).to_string(),
+        ))
+        .await
+        .err()
+        .expect("missing alias refused");
+    assert_eq!(err.code(), "ResourceNotFoundException");
+    assert!(
+        err.message()
+            .contains("arn:aws:lambda:us-east-1:123456789012:function:esm-b:missing"),
+        "{}",
+        err.message()
+    );
+
+    // A function of another account is not found in this one.
+    let err = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({"FunctionName": "arn:aws:lambda:us-east-1:210987654321:function:esm-b"})
+                .to_string(),
+        ))
+        .await
+        .err()
+        .expect("foreign function refused");
+    assert_eq!(err.code(), "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn update_event_source_mapping_refuses_a_function_of_another_region() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "esm-r").await;
+    let resp = svc
+        .handle(make_request(
+            Method::POST,
+            "/2015-03-31/event-source-mappings",
+            &json!({
+                "FunctionName": "esm-r",
+                "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:q",
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let uuid = body["UUID"].as_str().unwrap().to_string();
+    let err = svc
+        .handle(make_request(
+            Method::PUT,
+            &format!("/2015-03-31/event-source-mappings/{uuid}"),
+            &json!({"FunctionName": "arn:aws:lambda:us-west-2:123456789012:function:esm-r"})
+                .to_string(),
+        ))
+        .await
+        .err()
+        .expect("another region's function refused");
+    assert_eq!(err.code(), "InvalidParameterValueException");
+    assert_eq!(
+        err.message(),
+        "Functions from 'us-west-2' are not reachable in this region ('us-east-1')"
+    );
+}

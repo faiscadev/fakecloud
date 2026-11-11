@@ -1,10 +1,10 @@
 {
-  "variants_passed": 258530,
-  "total_variants": 258530,
+  "variants_passed": 257522,
+  "total_variants": 257522,
   "per_service": {
     "ce": {
-      "passed": 1781,
-      "total": 1781
+      "passed": 1787,
+      "total": 1787
     },
     "opensearch": {
       "passed": 3095,
@@ -19,12 +19,12 @@
       "total": 483
     },
     "cloudformation": {
-      "passed": 3434,
-      "total": 3434
+      "passed": 3435,
+      "total": 3435
     },
     "elasticfilesystem": {
-      "passed": 1091,
-      "total": 1091
+      "passed": 996,
+      "total": 996
     },
     "kafka": {
       "passed": 1688,
@@ -51,24 +51,24 @@
       "total": 1446
     },
     "backup": {
-      "passed": 3274,
-      "total": 3274
+      "passed": 3264,
+      "total": 3264
     },
     "codecommit": {
       "passed": 2607,
       "total": 2607
     },
     "pipes": {
-      "passed": 424,
-      "total": 424
+      "passed": 412,
+      "total": 412
     },
     "appsync": {
-      "passed": 2380,
-      "total": 2380
+      "passed": 2365,
+      "total": 2365
     },
     "glue": {
-      "passed": 10478,
-      "total": 10478
+      "passed": 10538,
+      "total": 10538
     },
     "iam": {
       "passed": 6071,
@@ -139,8 +139,8 @@
       "total": 2607
     },
     "amplify": {
-      "passed": 1570,
-      "total": 1570
+      "passed": 1555,
+      "total": 1555
     },
     "apigatewayv2": {
       "passed": 2786,
@@ -171,8 +171,8 @@
       "total": 3555
     },
     "bedrock-runtime": {
-      "passed": 470,
-      "total": 470
+      "passed": 451,
+      "total": 451
     },
     "cloudfront": {
       "passed": 4110,
@@ -219,8 +219,8 @@
       "total": 2391
     },
     "scheduler": {
-      "passed": 504,
-      "total": 504
+      "passed": 489,
+      "total": 489
     },
     "account": {
       "passed": 479,
@@ -251,12 +251,12 @@
       "total": 2757
     },
     "appconfig": {
-      "passed": 2252,
-      "total": 2252
+      "passed": 2240,
+      "total": 2240
     },
     "bedrock-agent": {
-      "passed": 2506,
-      "total": 2506
+      "passed": 2391,
+      "total": 2391
     },
     "xray": {
       "passed": 1067,
@@ -291,24 +291,24 @@
       "total": 3345
     },
     "lambda": {
-      "passed": 3946,
-      "total": 3946
+      "passed": 3795,
+      "total": 3795
     },
     "monitoring": {
       "passed": 1909,
       "total": 1909
     },
     "resource-groups": {
-      "passed": 786,
-      "total": 786
+      "passed": 771,
+      "total": 771
     },
     "emr": {
       "passed": 2102,
       "total": 2102
     },
     "mwaa": {
-      "passed": 549,
-      "total": 549
+      "passed": 534,
+      "total": 534
     },
     "secretsmanager": {
       "passed": 864,
@@ -327,8 +327,8 @@
       "total": 2845
     },
     "transcribe": {
-      "passed": 2443,
-      "total": 2443
+      "passed": 2428,
+      "total": 2428
     },
     "translate": {
       "passed": 642,
@@ -343,20 +343,20 @@
       "total": 2282
     },
     "managedblockchain": {
-      "passed": 1023,
-      "total": 1023
+      "passed": 1011,
+      "total": 1011
     },
     "bedrock": {
-      "passed": 4037,
-      "total": 4037
+      "passed": 3805,
+      "total": 3805
     },
     "iotdata": {
       "passed": 359,
       "total": 359
     },
     "dsql": {
-      "passed": 491,
-      "total": 491
+      "passed": 479,
+      "total": 479
     },
     "s3": {
       "passed": 4046,
@@ -371,8 +371,8 @@
       "total": 1073
     },
     "bedrock-agent-runtime": {
-      "passed": 1163,
-      "total": 1163
+      "passed": 1028,
+      "total": 1028
     },
     "docdb": {
       "passed": 1517,
@@ -395,8 +395,8 @@
       "total": 1942
     },
     "s3tables": {
-      "passed": 1644,
-      "total": 1644
+      "passed": 1464,
+      "total": 1464
     },
     "eks": {
       "passed": 1995,

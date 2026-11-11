@@ -13,6 +13,10 @@ const TEMPLATE: &str = r#"
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Resources:
+  JobsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: jobs
   Worker:
     Type: AWS::Serverless::Function
     Properties:
@@ -36,7 +40,8 @@ Resources:
         Jobs:
           Type: SQS
           Properties:
-            Queue: arn:aws:sqs:us-east-1:000000000000:jobs
+            # An event source mapping's queue must exist.
+            Queue: !GetAtt JobsQueue.Arn
             BatchSize: 10
 "#;
 
@@ -140,7 +145,7 @@ async fn sam_function_expands_policies_and_events() {
     assert!(
         esms.event_source_mappings()
             .iter()
-            .any(|m| m.event_source_arn() == Some("arn:aws:sqs:us-east-1:000000000000:jobs")),
+            .any(|m| m.event_source_arn() == Some("arn:aws:sqs:us-east-1:123456789012:jobs")),
         "SQS event must create an EventSourceMapping: {:?}",
         esms.event_source_mappings()
     );

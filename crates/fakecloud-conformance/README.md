@@ -32,7 +32,7 @@ For every operation, [`generators/`](./src/generators/) produces test variants u
 | **Round-trip echo** (`round_trip.rs`) | Walks the Smithy graph to pair every `Create*`/`Put*`/`Update*` with its matching `Get*`/`Describe*`. Sends the writer with one optional input field set, then chases the reader and asserts that field echoed | Silent input drops on Create/Put/Update — the field is accepted at the wire layer but lost before storage (e.g. Lambda `Layers` dropped on `CreateFunction`, [#853](https://github.com/faiscadev/fakecloud/issues/853)) |
 | **Identifier-form fanout** (`id_forms.rs`) | For URL-bound `@httpLabel` members whose `@pattern` admits an ARN, sends the operation with each accepted identifier form: bare name, `name:qualifier`, partial ARN, full ARN, URL-encoded full ARN | REST endpoints that 404 on alternate identifier forms (e.g. Lambda `GetFunction` rejecting full ARNs, [#817](https://github.com/faiscadev/fakecloud/issues/817)) |
 
-A single operation typically produces anywhere from a dozen to several hundred variants. Across all 107 services the baseline is **258,530 / 258,530 variants passing (100%)** — see [`conformance-baseline.json`](../../conformance-baseline.json) for the per-service breakdown.
+A single operation typically produces anywhere from a dozen to several hundred variants. Across all 107 services the baseline is **257,522 / 257,522 variants passing (100%)** — see [`conformance-baseline.json`](../../conformance-baseline.json) for the per-service breakdown.
 
 ### 3. Send and capture
 

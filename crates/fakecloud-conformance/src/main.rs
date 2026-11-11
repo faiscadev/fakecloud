@@ -46,6 +46,7 @@ use std::time::Duration;
 
 mod checksum;
 mod generators;
+mod lambda_seed;
 mod probe;
 mod report;
 mod shape_validator;
@@ -456,8 +457,14 @@ fn run_probes(
                     output_shape_id.map(|oid| (model, oid)),
                 )
             };
+            // An operation that removes the seeded resource (Lambda's
+            // DeleteAlias, RemovePermission, ...) succeeds once: the first
+            // variant removes it and every later one, concurrent or not,
+            // only finds it gone. Each of its variants runs alone on a seed
+            // of its own instead.
+            let reseed_each = seed.reseed_each_variant;
             let (round_trips, concurrent): (Vec<usize>, Vec<usize>) =
-                (0..variants.len()).partition(|&i| variants[i].followup.is_some());
+                (0..variants.len()).partition(|&i| reseed_each || variants[i].followup.is_some());
             let mut slots: Vec<Option<probe::ProbeResult>> =
                 variants.iter().map(|_| None).collect();
             for chunk in concurrent.chunks(max_concurrent) {
@@ -476,7 +483,20 @@ fn run_probes(
                 });
             }
             for i in round_trips {
-                slots[i] = Some(probe_one(&variants[i]));
+                slots[i] = Some(if reseed_each {
+                    let own = seed_service_resources(
+                        &client,
+                        &endpoint,
+                        service_name,
+                        &op.name,
+                        &seed_context.for_operation(op_index),
+                    );
+                    let rebuilt =
+                        rebind_variants(&[&variants[i]], seeded_variants(model, &op.name, &own));
+                    probe_one(&rebuilt[0])
+                } else {
+                    probe_one(&variants[i])
+                });
             }
             let mut op_results: Vec<probe::ProbeResult> = slots
                 .into_iter()
@@ -587,8 +607,16 @@ struct OperationSeedValues<'a> {
     /// variant carries it, except one that exercises that member itself (a
     /// boundary, negative or id-form variant of `Bucket` keeps its own value).
     overrides: HashMap<String, serde_json::Value>,
-    /// Also replace these members in the operation's documented examples.
-    pin_examples: bool,
+    /// Which of the operation's documented examples also use these members.
+    pin_examples: ExamplePins,
+    /// Optional members every generated variant sends (with its `overrides`
+    /// value) unless it sets the member itself: the generators only fill in
+    /// required members, but some operations do nothing useful without an
+    /// optional one (CreateEventSourceMapping without `EventSourceArn`).
+    include: Vec<&'static str>,
+    /// The operation removes what the seed created, so each variant gets a
+    /// fresh seed and runs alone.
+    reseed_each_variant: bool,
     /// Removes the seeded resources when dropped (operator endpoints only).
     teardown: Option<SeedTeardown<'a>>,
 }
@@ -650,6 +678,10 @@ struct SeedNames {
     /// A bucket nothing creates: CreateBucket's variants create it.
     new_bucket: String,
     function: String,
+    /// Lambda's seeded layer, event-source queue and capacity provider.
+    layer: String,
+    queue: String,
+    capacity_provider: String,
 }
 
 impl SeedNames {
@@ -659,38 +691,68 @@ impl SeedNames {
                 bucket: S3_SEED_BUCKET.to_string(),
                 new_bucket: S3_NEW_BUCKET.to_string(),
                 function: LAMBDA_SEED_FUNCTION.to_string(),
+                layer: lambda_seed::LAYER.to_string(),
+                queue: lambda_seed::QUEUE.to_string(),
+                capacity_provider: lambda_seed::CAPACITY_PROVIDER.to_string(),
             }
         } else {
+            let unique = |base: &str| format!("{base}-{run_id}-{op_index}");
             Self {
-                bucket: format!("{S3_SEED_BUCKET}-{run_id}-{op_index}"),
-                new_bucket: format!("{S3_NEW_BUCKET}-{run_id}-{op_index}"),
-                function: format!("{LAMBDA_SEED_FUNCTION}-{run_id}-{op_index}"),
+                bucket: unique(S3_SEED_BUCKET),
+                new_bucket: unique(S3_NEW_BUCKET),
+                function: unique(LAMBDA_SEED_FUNCTION),
+                layer: unique(lambda_seed::LAYER),
+                queue: unique(lambda_seed::QUEUE),
+                capacity_provider: unique(lambda_seed::CAPACITY_PROVIDER),
             }
         }
     }
 }
 
-/// The resources one operation's seed created on an operator-supplied
-/// endpoint, removed (best effort) when dropped -- after the operation's
+/// The resources one operation's seed created that nothing else removes,
+/// removed (best effort, in order) when dropped -- after the operation's
 /// variants ran, or while unwinding from a panicking one.
 struct SeedTeardown<'a> {
     client: &'a reqwest::blocking::Client,
     endpoint: &'a str,
-    buckets: Vec<String>,
-    functions: Vec<String>,
+    steps: Vec<TeardownStep>,
+}
+
+/// One resource [`SeedTeardown`] removes.
+#[derive(Debug, Clone, PartialEq)]
+enum TeardownStep {
+    /// Empty and delete this bucket.
+    S3Bucket(String),
+    /// `DELETE` this Lambda path (already percent-encoded).
+    Lambda(String),
+    /// Delete the SQS queue at this URL.
+    SqsQueue(String),
+    /// Delete every event source mapping of this Lambda function: the seeded
+    /// one, and those CreateEventSourceMapping's variants created.
+    EventSourceMappingsOf(String),
 }
 
 impl Drop for SeedTeardown<'_> {
     fn drop(&mut self) {
-        for bucket in &self.buckets {
-            remove_s3_bucket(self.client, self.endpoint, bucket);
-        }
-        for function in &self.functions {
-            let _ = self
-                .client
-                .delete(format!("{}/2015-03-31/functions/{function}", self.endpoint))
-                .header("Authorization", LAMBDA_SEED_AUTH)
-                .send();
+        for step in &self.steps {
+            match step {
+                TeardownStep::S3Bucket(bucket) => {
+                    remove_s3_bucket(self.client, self.endpoint, bucket)
+                }
+                TeardownStep::Lambda(path) => {
+                    let _ = self
+                        .client
+                        .delete(format!("{}{path}", self.endpoint))
+                        .header("Authorization", LAMBDA_SEED_AUTH)
+                        .send();
+                }
+                TeardownStep::SqsQueue(url) => {
+                    lambda_seed::delete_queue(self.client, self.endpoint, url)
+                }
+                TeardownStep::EventSourceMappingsOf(function) => {
+                    lambda_seed::delete_event_source_mappings(self.client, self.endpoint, function)
+                }
+            }
         }
     }
 }
@@ -730,33 +792,24 @@ fn seed_service_resources<'a>(
 ) -> OperationSeedValues<'a> {
     let mut seed = match service_name {
         "s3" => seed_s3(client, endpoint, op_name, ctx),
-        "lambda" => seed_lambda(client, endpoint, op_name, ctx),
+        "lambda" => lambda_seed::seed(client, endpoint, op_name, ctx),
         "secretsmanager" => {
             seed_secretsmanager(client, endpoint);
             OperationSeedValues::default()
         }
         _ => OperationSeedValues::default(),
     };
-    if !ctx.owns_server {
-        match service_name {
-            "s3" => {
-                seed.teardown = Some(SeedTeardown {
-                    client,
-                    endpoint,
-                    buckets: vec![ctx.names.bucket.clone(), ctx.names.new_bucket.clone()],
-                    functions: Vec::new(),
-                })
-            }
-            "lambda" => {
-                seed.teardown = Some(SeedTeardown {
-                    client,
-                    endpoint,
-                    buckets: Vec::new(),
-                    functions: vec![ctx.names.function.clone()],
-                })
-            }
-            _ => {}
-        }
+    // On a server the probe owns, S3 is reset before every operation; only
+    // an operator-supplied endpoint keeps the buckets, so they are removed.
+    if service_name == "s3" && !ctx.owns_server {
+        seed.teardown = Some(SeedTeardown {
+            client,
+            endpoint,
+            steps: vec![
+                TeardownStep::S3Bucket(ctx.names.bucket.clone()),
+                TeardownStep::S3Bucket(ctx.names.new_bucket.clone()),
+            ],
+        })
     }
     seed
 }
@@ -768,10 +821,48 @@ fn seeded_variants(
     seed: &OperationSeedValues<'_>,
 ) -> Vec<generators::TestVariant> {
     let mut variants = generators::generate_all_variants(model, op_name, &seed.overrides);
-    if seed.pin_examples {
-        pin_example_identifiers(&mut variants, &seed.overrides);
-    }
+    pin_example_identifiers(&mut variants, &seed.overrides, seed.pin_examples);
+    include_members(&mut variants, &seed.include, &seed.overrides);
     variants
+}
+
+/// Add each `include` member (with its `overrides` value) to every generated
+/// variant that does not set it. Documented examples keep their own inputs.
+fn include_members(
+    variants: &mut [generators::TestVariant],
+    include: &[&str],
+    overrides: &HashMap<String, serde_json::Value>,
+) {
+    for v in variants.iter_mut().filter(|v| {
+        !matches!(
+            v.strategy,
+            generators::Strategy::Examples | generators::Strategy::ExamplesDiff
+        )
+    }) {
+        if let Some(obj) = v.input.as_object_mut() {
+            for member in include {
+                if let (false, Some(value)) = (obj.contains_key(*member), overrides.get(*member)) {
+                    obj.insert(member.to_string(), value.clone());
+                }
+            }
+        }
+    }
+}
+
+/// Which documented examples [`pin_example_identifiers`] rewrites.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ExamplePins {
+    /// Examples keep their documented identifiers.
+    #[default]
+    None,
+    /// The example requests (`Examples`), not the output diffs: the diff
+    /// compares the documented resource's output, configuration and all, so
+    /// against a seed configured otherwise it reports the configuration, not
+    /// the operation (Lambda's documented function has an environment and a
+    /// KMS key; the seed function has neither).
+    Requests,
+    /// The example requests and their output diffs.
+    All,
 }
 
 /// Replace the seeded identifiers in an operation's documented examples.
@@ -782,12 +873,15 @@ fn seeded_variants(
 fn pin_example_identifiers(
     variants: &mut [generators::TestVariant],
     overrides: &HashMap<String, serde_json::Value>,
+    pins: ExamplePins,
 ) {
-    for v in variants.iter_mut().filter(|v| {
-        matches!(
+    for v in variants.iter_mut().filter(|v| match pins {
+        ExamplePins::None => false,
+        ExamplePins::Requests => v.strategy == generators::Strategy::Examples,
+        ExamplePins::All => matches!(
             v.strategy,
             generators::Strategy::Examples | generators::Strategy::ExamplesDiff
-        )
+        ),
     }) {
         if let Some(obj) = v.input.as_object_mut() {
             for (member, value) in overrides {
@@ -987,7 +1081,9 @@ fn seed_s3<'a>(
     }
     OperationSeedValues {
         overrides,
-        pin_examples: true,
+        pin_examples: ExamplePins::All,
+        include: Vec::new(),
+        reseed_each_variant: false,
         teardown: None,
     }
 }
@@ -1124,64 +1220,6 @@ fn xml_text_decoded(xml: &str, tag: &str) -> Option<String> {
 }
 
 const LAMBDA_SEED_FUNCTION: &str = "test-conformance-function";
-
-/// Lambda: a function (`test-conformance-function`) every function-scoped
-/// variant addresses, by name or, for the tagging and resource-policy
-/// operations, by ARN. CreateFunction's variants keep their generated names.
-///
-/// Lambda is not reset between operations: its documented examples build on
-/// each other (`my-function`, created by the CreateFunction example, is read
-/// by later examples), so the examples keep their own names too. The seed
-/// function alone is re-created before every operation on a server the probe
-/// owns, so what one operation changed on it (configuration, aliases,
-/// versions, policy, tags) does not leak into the next.
-fn seed_lambda<'a>(
-    client: &reqwest::blocking::Client,
-    endpoint: &str,
-    op_name: &str,
-    ctx: &OperationSeedContext<'_>,
-) -> OperationSeedValues<'a> {
-    let Some(account) = ctx.account else {
-        return OperationSeedValues::default();
-    };
-    let function = ctx.names.function.as_str();
-    if ctx.owns_server {
-        // 404 for the first operation, and after one that deleted it.
-        let _ = client
-            .delete(format!("{endpoint}/2015-03-31/functions/{function}"))
-            .header("Authorization", LAMBDA_SEED_AUTH)
-            .send();
-    }
-    let create = serde_json::json!({
-        "FunctionName": function,
-        "Runtime": "python3.12",
-        "Role": format!("arn:aws:iam::{account}:role/test-conformance-role"),
-        "Handler": "index.handler",
-        "Code": {"ZipFile": LAMBDA_SEED_ZIP},
-    });
-    let _ = client
-        .post(format!("{endpoint}/2015-03-31/functions"))
-        .header("Content-Type", "application/json")
-        .header("Authorization", LAMBDA_SEED_AUTH)
-        .body(create.to_string())
-        .send();
-
-    let mut overrides = HashMap::new();
-    if op_name != "CreateFunction" {
-        let arn = format!("arn:aws:lambda:us-east-1:{account}:function:{function}");
-        let s = |v: &str| serde_json::Value::String(v.to_string());
-        overrides.insert("FunctionName".to_string(), s(function));
-        // TagResource / UntagResource / ListTags and the resource-policy
-        // operations address the function by ARN.
-        overrides.insert("Resource".to_string(), s(&arn));
-        overrides.insert("ResourceArn".to_string(), s(&arn));
-    }
-    OperationSeedValues {
-        overrides,
-        pin_examples: false,
-        teardown: None,
-    }
-}
 
 /// Base64 of a zip holding `index.py`, a handler that echoes its event:
 ///
@@ -2020,7 +2058,7 @@ mod tests {
             ("Bucket".to_string(), serde_json::json!("seeded")),
             ("Key".to_string(), serde_json::json!("test-key")),
         ]);
-        pin_example_identifiers(&mut vs, &overrides);
+        pin_example_identifiers(&mut vs, &overrides, ExamplePins::All);
         assert_eq!(
             vs[0].input,
             serde_json::json!({"Bucket": "seeded", "Key": "test-key"})
@@ -2028,6 +2066,66 @@ mod tests {
         assert_eq!(vs[1].input, serde_json::json!({"Bucket": "seeded"}));
         // Generated variants already carry their overrides from the generators.
         assert_eq!(vs[2].input, serde_json::json!({"Bucket": "t"}));
+    }
+
+    #[test]
+    fn request_pins_leave_the_example_output_diffs_alone() {
+        let variant = |strategy| generators::TestVariant {
+            name: "v".to_string(),
+            strategy,
+            input: serde_json::json!({"FunctionName": "my-function"}),
+            expectation: generators::Expectation::Success,
+            expected_output: None,
+            followup: None,
+        };
+        let mut vs = vec![
+            variant(generators::Strategy::Examples),
+            variant(generators::Strategy::ExamplesDiff),
+        ];
+        let overrides = HashMap::from([("FunctionName".to_string(), serde_json::json!("seeded"))]);
+        pin_example_identifiers(&mut vs, &overrides, ExamplePins::Requests);
+        assert_eq!(vs[0].input["FunctionName"], "seeded");
+        assert_eq!(vs[1].input["FunctionName"], "my-function");
+        pin_example_identifiers(&mut vs, &overrides, ExamplePins::None);
+        assert_eq!(vs[1].input["FunctionName"], "my-function");
+    }
+
+    #[test]
+    fn included_members_are_added_where_a_variant_leaves_them_out() {
+        let variant = |strategy, input: serde_json::Value| generators::TestVariant {
+            name: "v".to_string(),
+            strategy,
+            input,
+            expectation: generators::Expectation::Success,
+            expected_output: None,
+            followup: None,
+        };
+        let mut vs = vec![
+            variant(
+                generators::Strategy::Optionals,
+                serde_json::json!({"FunctionName": "f"}),
+            ),
+            // A variant about the member keeps its own value.
+            variant(
+                generators::Strategy::Boundary,
+                serde_json::json!({"FunctionName": "f", "EventSourceArn": ""}),
+            ),
+            variant(
+                generators::Strategy::Examples,
+                serde_json::json!({"FunctionName": "my-function"}),
+            ),
+        ];
+        let overrides = HashMap::from([(
+            "EventSourceArn".to_string(),
+            serde_json::json!("arn:aws:sqs:us-east-1:123456789012:q"),
+        )]);
+        include_members(&mut vs, &["EventSourceArn"], &overrides);
+        assert_eq!(
+            vs[0].input["EventSourceArn"],
+            "arn:aws:sqs:us-east-1:123456789012:q"
+        );
+        assert_eq!(vs[1].input["EventSourceArn"], "");
+        assert!(vs[2].input.get("EventSourceArn").is_none());
     }
 
     #[test]
@@ -2051,10 +2149,15 @@ mod tests {
         assert_ne!(a.bucket, b.bucket);
         assert_ne!(a.function, b.function);
         assert_ne!(a.bucket, a.new_bucket);
+        assert_ne!(a.layer, b.layer);
+        assert_ne!(a.queue, b.queue);
+        assert_ne!(a.capacity_provider, b.capacity_provider);
         // Still valid bucket and function names at the largest index.
         let big = SeedNames::new(false, "ffffffff", usize::MAX);
         assert!(big.bucket.len() <= 63 && big.new_bucket.len() <= 63);
         assert!(big.function.len() <= 64);
+        assert!(big.layer.len() <= 140 && big.capacity_provider.len() <= 140);
+        assert!(big.queue.len() <= 80);
     }
 
     #[test]
