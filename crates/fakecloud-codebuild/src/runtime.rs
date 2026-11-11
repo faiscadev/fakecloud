@@ -802,21 +802,30 @@ impl PhaseTimer {
     }
 }
 
+/// The phases a build passes before provisioning. Recorded
+/// (`tests/fixtures/env-var-resolution-failures.json`): `SUBMITTED` and
+/// `QUEUED` carry no `contexts`.
 fn submitted_queued(now: DateTime<Utc>, is_batch: bool) -> Vec<Value> {
     let mut phases = vec![json!({
         "phaseType": "SUBMITTED", "phaseStatus": "SUCCEEDED",
         "startTime": ts(now), "endTime": ts(now),
-        "durationInSeconds": 0, "contexts": [],
+        "durationInSeconds": 0,
     })];
     // Single builds pass through QUEUED; a build batch downloads the batch spec.
     if !is_batch {
         phases.push(json!({
             "phaseType": "QUEUED", "phaseStatus": "SUCCEEDED",
             "startTime": ts(now), "endTime": ts(now),
-            "durationInSeconds": 0, "contexts": [],
+            "durationInSeconds": 0,
         }));
     }
     phases
+}
+
+/// The context a successful `PROVISIONING` / `FINALIZING` phase of a single
+/// build carries (recorded: one entry, both fields empty).
+pub(crate) fn empty_context() -> Value {
+    json!({ "statusCode": "", "message": "" })
 }
 
 // ---------------------------------------------------------------------------
@@ -886,7 +895,13 @@ pub async fn run_build(job: BuildJob) {
         Ok(id) => {
             guard.set_container(&id);
             job.running.lock().insert(job.build_id.clone(), id.clone());
-            phases.push(prov.finish("SUCCEEDED", vec![]));
+            // A batch's DOWNLOAD_BATCHSPEC is not recorded.
+            let contexts = if job.is_batch {
+                vec![]
+            } else {
+                vec![empty_context()]
+            };
+            phases.push(prov.finish("SUCCEEDED", contexts));
             id
         }
         Err(e) => {
@@ -912,7 +927,7 @@ pub async fn run_build(job: BuildJob) {
         if let Some(err) = &job.env_error {
             phases.push(dl.finish("FAILED", vec![env_error_context(err)]));
             let fin = PhaseTimer::start("FINALIZING");
-            phases.push(fin.finish("SUCCEEDED", vec![]));
+            phases.push(fin.finish("SUCCEEDED", vec![empty_context()]));
             finalize(&job, &guard, phases, "FAILED").await;
             kill_container(&cli, &container).await;
             return;
@@ -1058,7 +1073,7 @@ pub async fn run_build(job: BuildJob) {
         }));
     } else {
         let fin = PhaseTimer::start("FINALIZING");
-        phases.push(fin.finish("SUCCEEDED", vec![]));
+        phases.push(fin.finish("SUCCEEDED", vec![empty_context()]));
         phases.push(json!({ "phaseType": "COMPLETED", "endTime": ts(Utc::now()) }));
     }
 

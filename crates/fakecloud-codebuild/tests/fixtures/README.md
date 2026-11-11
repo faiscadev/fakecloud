@@ -30,3 +30,10 @@ parameter (`/fc-cb-rec/sec`), then disabled.
 Every resource was deleted afterwards (project, role and inline policy,
 secret, parameter) and its absence confirmed; the key was disabled and
 scheduled for deletion (7 days).
+
+Not recorded: a build batch (`StartBuildBatch`) with an unresolvable variable.
+`CreateProject` with a `buildBatchConfig` (and without one) refused a freshly
+created service role with `InvalidInputException` "Invalid service role" for
+several minutes, so no batch ran; fakecloud fails such a batch in
+`DOWNLOAD_BATCHSPEC` before any container starts, which is not checked
+against AWS.

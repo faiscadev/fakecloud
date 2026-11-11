@@ -978,15 +978,26 @@ fn settle_if_stuck(record: &mut Value, status_key: &str, complete_key: &str) -> 
 
 /// Build the ordered phase list of a settled (successful) build.
 fn settled_phases(start: DateTime<Utc>, end: DateTime<Utc>) -> Value {
+    // Recorded (tests/fixtures/env-var-resolution-failures.json): SUBMITTED
+    // and QUEUED carry no `contexts`, PROVISIONING and FINALIZING one empty
+    // context; the other phases are not recorded.
     let phase = |t: &str| {
-        json!({
+        let mut p = json!({
             "phaseType": t,
             "phaseStatus": "SUCCEEDED",
             "startTime": ts(start),
             "endTime": ts(end),
             "durationInSeconds": 0,
-            "contexts": [],
-        })
+        });
+        let contexts = match t {
+            "SUBMITTED" | "QUEUED" => None,
+            "PROVISIONING" | "FINALIZING" => Some(json!([crate::runtime::empty_context()])),
+            _ => Some(json!([])),
+        };
+        if let Some(contexts) = contexts {
+            p["contexts"] = contexts;
+        }
+        p
     };
     json!([
         phase("SUBMITTED"),
@@ -1555,7 +1566,6 @@ impl CodeBuildService {
                     "startTime": ts(now),
                     "endTime": ts(now),
                     "durationInSeconds": 0,
-                    "contexts": [],
                 },
                 { "phaseType": "QUEUED", "startTime": ts(now) },
             ]),
@@ -1647,7 +1657,7 @@ impl CodeBuildService {
         build.insert("buildComplete".into(), json!(false));
         build.insert(
             "phases".into(),
-            json!([{ "phaseType": "SUBMITTED", "phaseStatus": "SUCCEEDED", "startTime": ts(now), "endTime": ts(now), "durationInSeconds": 0, "contexts": [] }]),
+            json!([{ "phaseType": "SUBMITTED", "phaseStatus": "SUCCEEDED", "startTime": ts(now), "endTime": ts(now), "durationInSeconds": 0 }]),
         );
         let build = Value::Object(build);
         st.builds.insert(new_id.clone(), build.clone());

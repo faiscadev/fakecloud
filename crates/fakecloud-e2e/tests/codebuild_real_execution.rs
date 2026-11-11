@@ -501,34 +501,47 @@ async fn unresolvable_env_vars_fail_download_source() {
         let build_id = start.build_value().unwrap().id().unwrap().to_string();
         let build = wait_complete(&cb, &build_id).await;
         assert_eq!(build.build_status(), Some(&StatusType::Failed));
-        let phases: Vec<(&str, Option<&str>)> = build
-            .phases()
+        // The raw phases, so a missing `contexts` key is told apart from an
+        // empty one: the recorded objects, timestamps aside.
+        let raw: serde_json::Value = reqwest::Client::new()
+            .post(s.endpoint())
+            .header("x-amz-target", "CodeBuild_20161006.BatchGetBuilds")
+            .header("content-type", "application/x-amz-json-1.1")
+            .body(serde_json::json!({ "ids": [build_id] }).to_string())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let build = &raw["builds"][0];
+        assert_eq!(build["buildStatus"], "FAILED");
+        assert_eq!(build["currentPhase"], "COMPLETED");
+        let phases: Vec<serde_json::Value> = build["phases"]
+            .as_array()
+            .unwrap()
             .iter()
             .map(|p| {
-                (
-                    p.phase_type().unwrap().as_str(),
-                    p.phase_status().map(|s| s.as_str()),
-                )
+                let mut p = p.as_object().unwrap().clone();
+                p.retain(|k, _| matches!(k.as_str(), "phaseType" | "phaseStatus" | "contexts"));
+                serde_json::Value::Object(p)
             })
             .collect();
+        let empty = serde_json::json!([{ "statusCode": "", "message": "" }]);
         assert_eq!(
-            phases,
-            [
-                ("SUBMITTED", Some("SUCCEEDED")),
-                ("QUEUED", Some("SUCCEEDED")),
-                ("PROVISIONING", Some("SUCCEEDED")),
-                ("DOWNLOAD_SOURCE", Some("FAILED")),
-                ("FINALIZING", Some("SUCCEEDED")),
-                ("COMPLETED", None),
-            ]
+            serde_json::Value::Array(phases),
+            serde_json::json!([
+                { "phaseType": "SUBMITTED", "phaseStatus": "SUCCEEDED" },
+                { "phaseType": "QUEUED", "phaseStatus": "SUCCEEDED" },
+                { "phaseType": "PROVISIONING", "phaseStatus": "SUCCEEDED", "contexts": empty },
+                {
+                    "phaseType": "DOWNLOAD_SOURCE",
+                    "phaseStatus": "FAILED",
+                    "contexts": [{ "statusCode": status_code, "message": message }],
+                },
+                { "phaseType": "FINALIZING", "phaseStatus": "SUCCEEDED", "contexts": empty },
+                { "phaseType": "COMPLETED" },
+            ])
         );
-        let download = build
-            .phases()
-            .iter()
-            .find(|p| p.phase_type().map(|t| t.as_str()) == Some("DOWNLOAD_SOURCE"))
-            .unwrap();
-        let context = &download.contexts()[0];
-        assert_eq!(context.status_code(), Some(status_code));
-        assert_eq!(context.message(), Some(message));
     }
 }
