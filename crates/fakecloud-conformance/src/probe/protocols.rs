@@ -261,6 +261,13 @@ pub(super) fn probe_rest(
     } else {
         None
     };
+    // restJson1 names the error in `x-amzn-ErrorType`, which the SDKs read
+    // before the body; Lambda's error bodies carry no code at all.
+    let rest_json_error_type = resp
+        .headers()
+        .get("x-amzn-errortype")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let body = resp.text().map_err(|e| e.to_string())?;
     let body = if body.is_empty() {
         if let Some(code) = head_error_code {
@@ -271,5 +278,57 @@ pub(super) fn probe_rest(
     } else {
         body
     };
+    let body = match rest_json_error_type {
+        Some(error_type) if status >= 400 => with_rest_json_error_type(body, &error_type),
+        _ => body,
+    };
     Ok((status, body))
+}
+
+/// The classifier reads the error code from the body, so a restJson1 error
+/// whose body has no `__type` / `code` gets the `x-amzn-ErrorType` header's
+/// code (the part before any `:`) as `__type`, which is what the SDKs
+/// resolve for it.
+pub(super) fn with_rest_json_error_type(body: String, error_type: &str) -> String {
+    let code = error_type.split(':').next().unwrap_or(error_type).trim();
+    if code.is_empty() {
+        return body;
+    }
+    let mut value = if body.trim().is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(v @ serde_json::Value::Object(_)) => v,
+            _ => return body,
+        }
+    };
+    let obj = value.as_object_mut().expect("object checked above");
+    if ["__type", "code", "Code"]
+        .iter()
+        .any(|k| obj.contains_key(*k))
+    {
+        return body;
+    }
+    obj.insert("__type".to_string(), serde_json::json!(code));
+    value.to_string()
+}
+
+#[cfg(test)]
+mod rest_json_error_type_tests {
+    use super::with_rest_json_error_type;
+
+    #[test]
+    fn header_code_fills_a_body_without_one() {
+        let body = r#"{"Type":"User","Message":"Function not found: f"}"#.to_string();
+        let out: serde_json::Value = serde_json::from_str(&with_rest_json_error_type(
+            body,
+            "ResourceNotFoundException:http://internal.amazon.com/coral/",
+        ))
+        .unwrap();
+        assert_eq!(out["__type"], "ResourceNotFoundException");
+        assert_eq!(out["Message"], "Function not found: f");
+        // A body that already names its code is left as it is.
+        let named = r#"{"__type":"X","message":"m"}"#.to_string();
+        assert_eq!(with_rest_json_error_type(named.clone(), "Y"), named);
+    }
 }

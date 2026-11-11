@@ -1627,6 +1627,8 @@ struct ErrorEnvelope {
     /// An S3 Control request (`s3-control` host, served by the `s3`
     /// handler): its errors use S3 Control's un-namespaced `<ErrorResponse>`.
     s3_control: bool,
+    /// A REST-JSON service whose errors use Lambda's body shape.
+    lambda_body: bool,
 }
 
 impl ErrorEnvelope {
@@ -1643,6 +1645,8 @@ impl ErrorEnvelope {
             s3_control: detected.protocol == AwsProtocol::Rest
                 && detected.service == "s3"
                 && protocol::is_s3_control_host(headers),
+            lambda_body: detected.protocol == AwsProtocol::RestJson
+                && fakecloud_aws::error::uses_lambda_error_body(&detected.service),
         }
     }
 }
@@ -1653,6 +1657,7 @@ impl From<AwsProtocol> for ErrorEnvelope {
             protocol,
             rest_xml_namespace: None,
             s3_control: false,
+            lambda_body: false,
         }
     }
 }
@@ -1710,6 +1715,9 @@ fn build_error_response_with_fields(
             request_id,
             extra_fields,
         ),
+        (AwsProtocol::RestJson, _) if envelope.lambda_body => {
+            fakecloud_aws::error::lambda_json_error_response(status, code, message, extra_fields)
+        }
         (AwsProtocol::Json | AwsProtocol::RestJson, _) => {
             fakecloud_aws::error::json_error_response_with_fields(
                 status,
@@ -1746,6 +1754,13 @@ fn build_error_response_with_fields(
     }
     if let Ok(v) = http::HeaderValue::from_str(&safe_message) {
         builder = builder.header("x-amz-error-message", v);
+    }
+    // restJson1 services name the error in `x-amzn-ErrorType`, the header
+    // the SDKs read first (Lambda's bodies carry no code at all).
+    if envelope.protocol == AwsProtocol::RestJson {
+        if let Ok(v) = http::HeaderValue::from_str(&safe_code) {
+            builder = builder.header("x-amzn-errortype", v);
+        }
     }
     if envelope.protocol == AwsProtocol::RpcV2Cbor {
         builder = builder.header(
@@ -2975,6 +2990,57 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(ct.contains("xml"));
+    }
+
+    /// Lambda answers an error with its code in `x-amzn-ErrorType` and a
+    /// body shaped by the error's Smithy members, as recorded; other
+    /// restJson1 services keep their body but get the header too.
+    #[tokio::test]
+    async fn lambda_errors_carry_x_amzn_errortype_and_lambdas_body() {
+        let detected = protocol::DetectedRequest {
+            service: "lambda".to_string(),
+            action: String::new(),
+            protocol: AwsProtocol::RestJson,
+        };
+        let resp = build_error_response(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            "Function not found: f",
+            "req-3",
+            ErrorEnvelope::for_request(&detected, &http::HeaderMap::new()),
+        );
+        assert_eq!(
+            resp.headers()["x-amzn-errortype"],
+            "ResourceNotFoundException"
+        );
+        assert_eq!(resp.headers()["content-type"], "application/json");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"Type": "User", "Message": "Function not found: f"})
+        );
+
+        let other = protocol::DetectedRequest {
+            service: "apigateway".to_string(),
+            action: String::new(),
+            protocol: AwsProtocol::RestJson,
+        };
+        let resp = build_error_response(
+            StatusCode::NOT_FOUND,
+            "NotFoundException",
+            "Invalid API identifier specified",
+            "req-4",
+            ErrorEnvelope::for_request(&other, &http::HeaderMap::new()),
+        );
+        assert_eq!(resp.headers()["x-amzn-errortype"], "NotFoundException");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["__type"], "NotFoundException");
     }
 
     fn rest_detected(service: &str) -> protocol::DetectedRequest {
