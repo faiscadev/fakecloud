@@ -1601,10 +1601,14 @@ async fn run_map_iterations(
 /// Build a MapRun ARN for a distributed Map running inside `execution_arn`.
 /// `arn:aws:states:R:A:execution:SM:Exec` -> `arn:aws:states:R:A:mapRun:SM/Exec:<label>`.
 fn map_run_arn_for(execution_arn: &str) -> Option<String> {
-    let (prefix, tail) = execution_arn.split_once(":execution:")?;
-    // `tail` is `StateMachineName:ExecutionName`; the MapRun ARN joins them with
-    // a slash and appends a unique label.
-    let sm_exec = tail.replacen(':', "/", 1);
+    // `tail` is `StateMachineName:ExecutionName` (an EXPRESS ARN adds a
+    // trailing `:<id>`); the MapRun ARN joins the two names with a slash and
+    // appends a unique label.
+    let (prefix, tail) = execution_arn
+        .split_once(":execution:")
+        .or_else(|| execution_arn.split_once(":express:"))?;
+    let mut names = tail.splitn(3, ':');
+    let sm_exec = format!("{}/{}", names.next()?, names.next()?);
     let label = uuid::Uuid::new_v4();
     Some(format!("{prefix}:mapRun:{sm_exec}:{label}"))
 }
@@ -2083,10 +2087,7 @@ async fn invoke_resource(
                 region,
                 timeout_seconds,
                 true,
-                crate::sdk_protocol::execution_principal(
-                    &execution_role_arn(shared_state, execution_arn),
-                    execution_arn,
-                ),
+                execution_principal(shared_state, execution_arn),
                 execution_arn,
             )
             .await;
@@ -2109,10 +2110,7 @@ async fn invoke_resource(
             region,
             timeout_seconds,
             false,
-            crate::sdk_protocol::execution_principal(
-                &execution_role_arn(shared_state, execution_arn),
-                execution_arn,
-            ),
+            execution_principal(shared_state, execution_arn),
             execution_arn,
         )
         .await;
@@ -2136,10 +2134,7 @@ async fn invoke_resource(
                 region,
                 timeout_seconds,
                 true,
-                crate::sdk_protocol::execution_principal(
-                    &execution_role_arn(shared_state, execution_arn),
-                    execution_arn,
-                ),
+                execution_principal(shared_state, execution_arn),
                 execution_arn,
             )
             .await;
@@ -2172,6 +2167,22 @@ fn execution_role_arn(state: &SharedStepFunctionsState, execution_arn: &str) -> 
         .and_then(|s| s.executions.get(execution_arn))
         .map(|exec| exec.role_arn.clone())
         .unwrap_or_default()
+}
+
+/// The assumed-role identity an execution's Tasks call AWS as: its state
+/// machine's role, with the execution's name as the session.
+fn execution_principal(
+    state: &SharedStepFunctionsState,
+    execution_arn: &str,
+) -> Option<fakecloud_core::auth::Principal> {
+    let accounts = state.read();
+    let exec = accounts
+        .by_arn(execution_arn)
+        .and_then(|s| s.executions.get(execution_arn));
+    crate::sdk_protocol::execution_principal(
+        exec.map_or("", |e| e.role_arn.as_str()),
+        exec.map_or("", |e| e.name.as_str()),
+    )
 }
 
 /// The region a Step Functions ARN names, or `fallback` (the server region)

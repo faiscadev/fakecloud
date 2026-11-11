@@ -370,6 +370,26 @@ impl StepFunctionsState {
     ) -> String {
         execution_arn(region, &self.account_id, state_machine_name, execution_name)
     }
+
+    /// The ARN for a new execution of a `machine_type` state machine: the
+    /// name-keyed `execution:` ARN for STANDARD, a fresh `express:` ARN for
+    /// EXPRESS (see [`express_execution_arn`]).
+    pub fn new_execution_arn(
+        &self,
+        region: &str,
+        machine_type: StateMachineType,
+        state_machine_name: &str,
+        execution_name: &str,
+    ) -> String {
+        match machine_type {
+            StateMachineType::Standard => {
+                self.execution_arn(region, state_machine_name, execution_name)
+            }
+            StateMachineType::Express => {
+                express_execution_arn(region, &self.account_id, state_machine_name, execution_name)
+            }
+        }
+    }
 }
 
 /// A Step Functions ARN (`arn:<partition>:states:<region>:<account>:<resource>`)

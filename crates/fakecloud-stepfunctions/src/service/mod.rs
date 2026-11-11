@@ -1467,27 +1467,6 @@ fn camel_to_details_key(event_type: &str) -> String {
     }
 }
 
-/// An EXPRESS execution ARN no stored execution uses yet. The id is a UUID,
-/// so the loop only guards against a collision in principle.
-fn unused_express_arn(
-    state: &StepFunctionsState,
-    region: &str,
-    state_machine_name: &str,
-    execution_name: &str,
-) -> String {
-    loop {
-        let arn = crate::state::express_execution_arn(
-            region,
-            &state.account_id,
-            state_machine_name,
-            execution_name,
-        );
-        if !state.executions.contains_key(&arn) {
-            return arn;
-        }
-    }
-}
-
 /// Compare two StartExecution inputs for STANDARD idempotency. A missing input
 /// defaults to `{}` (AWS's default execution input). Comparison is structural
 /// (parsed JSON), so insignificant whitespace differences still dedup; inputs
@@ -1615,6 +1594,7 @@ pub fn start_execution_from_delivery(
 
     let sm_name = sm.name.clone();
     let sm_role_arn = sm.role_arn.clone();
+    let sm_type = sm.machine_type;
     let definition = sm.definition.clone();
     // No request in this delivery path; the execution inherits the region its
     // state machine ARN was minted in (the request region at CreateStateMachine).
@@ -1623,7 +1603,7 @@ pub fn start_execution_from_delivery(
         .nth(3)
         .unwrap_or("us-east-1")
         .to_string();
-    let exec_arn = st.execution_arn(&region, &sm_name, &execution_name);
+    let exec_arn = st.new_execution_arn(&region, sm_type, &sm_name, &execution_name);
 
     let now = Utc::now();
     let execution = Execution {
@@ -2910,6 +2890,42 @@ mod tests {
         let state = accounts.by_arn(a).unwrap();
         assert_eq!(state.executions[a].name, "same-name");
         assert_eq!(state.executions[b].name, "same-name");
+    }
+
+    #[tokio::test]
+    async fn delivered_express_executions_get_express_arns() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_express_sm(&svc, "delivered-express");
+        start_execution_from_delivery(&svc.state, &None, &None, &None, &arn, "{}");
+        start_execution_from_delivery(&svc.state, &None, &None, &None, &arn, "{}");
+
+        let accounts = svc.state.read();
+        let state = accounts.by_arn(&arn).unwrap();
+        let arns: Vec<_> = state
+            .executions
+            .keys()
+            .filter(|k| k.contains("delivered-express"))
+            .collect();
+        assert_eq!(arns.len(), 2);
+        for exec_arn in arns {
+            assert!(
+                exec_arn.starts_with(
+                    "arn:aws:states:us-east-1:123456789012:express:delivered-express:"
+                ),
+                "{exec_arn}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn start_sync_execution_rejects_a_malformed_arn() {
+        let svc = StepFunctionsService::new(make_state());
+        let req = make_request(
+            "StartSyncExecution",
+            &json!({"stateMachineArn": "foo"}).to_string(),
+        );
+        let err = expect_err(svc.start_sync_execution(&req).await);
+        assert!(err.to_string().contains("InvalidArn"), "{err}");
     }
 
     #[tokio::test]

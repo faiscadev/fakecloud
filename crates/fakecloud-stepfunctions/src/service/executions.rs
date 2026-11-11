@@ -47,19 +47,19 @@ impl StepFunctionsService {
         let sm_type = sm.machine_type;
         let definition = sm.definition.clone();
         // EXPRESS names can be reused immediately and StartExecution is never
-        // idempotent for them: every call starts a new execution with its own
-        // ARN, so there is no collision to handle.
-        let exec_arn = if sm_type == crate::state::StateMachineType::Express {
-            unused_express_arn(state, &req.region, &sm_name, &execution_name)
-        } else {
-            state.execution_arn(&req.region, &sm_name, &execution_name)
-        };
+        // idempotent for them: every call gets its own ARN, so only STANDARD
+        // has collisions to handle.
+        let exec_arn = state.new_execution_arn(&req.region, sm_type, &sm_name, &execution_name);
 
-        // Handle STANDARD name collisions. StartExecution is idempotent while
-        // the execution runs: re-issuing the same name AND the same input
-        // returns the existing executionArn with HTTP 200, while a different
-        // input or a closed execution is a 400 ExecutionAlreadyExists.
-        if let Some(existing) = state.executions.get(&exec_arn) {
+        // STANDARD StartExecution is idempotent while the execution runs:
+        // re-issuing the same name AND the same input returns the existing
+        // executionArn with HTTP 200, while a different input or a closed
+        // execution is a 400 ExecutionAlreadyExists.
+        let existing = match sm_type {
+            crate::state::StateMachineType::Standard => state.executions.get(&exec_arn),
+            crate::state::StateMachineType::Express => None,
+        };
+        if let Some(existing) = existing {
             let same_input = existing.status == ExecutionStatus::Running
                 && execution_input_matches(existing.input.as_deref(), input.as_deref());
             if same_input {
@@ -425,6 +425,7 @@ impl StepFunctionsService {
             .as_str()
             .ok_or_else(|| missing("stateMachineArn"))?
             .to_string();
+        validate_arn(&sm_arn)?;
         let exec_name = body["name"].as_str().map(str::to_string);
         if let Some(name) = &exec_name {
             validate_name(name)?;
@@ -456,7 +457,12 @@ impl StepFunctionsService {
             // its own id, so concurrent starts (and reused names) never
             // overwrite each other (bug-audit 2026-05-28, 4.2).
             let exec_name = exec_name.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let exec_arn = unused_express_arn(state, &req.region, &sm.name, &exec_name);
+            let exec_arn = state.new_execution_arn(
+                &req.region,
+                crate::state::StateMachineType::Express,
+                &sm.name,
+                &exec_name,
+            );
             let execution = Execution {
                 execution_arn: exec_arn.clone(),
                 state_machine_arn: sm_arn.clone(),
