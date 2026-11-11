@@ -1730,6 +1730,7 @@ fn cmd_check(
         &current_by_service,
         flake_margin,
     ));
+    regressions.extend(baseline_totals_drift(&baseline));
 
     if let Some(path) = markdown_summary_out {
         let baseline_passed: HashMap<String, usize> = baseline
@@ -1750,7 +1751,9 @@ fn cmd_check(
     }
 
     if regressions.is_empty() {
-        println!("\nConformance check PASSED (every variant passes, results match the baseline exactly)");
+        println!(
+            "\nConformance check PASSED (every variant passes, results match the baseline exactly)"
+        );
         println!(
             "  baseline: {}/{} ({:.1}%)",
             baseline.variants_passed,
@@ -1819,7 +1822,12 @@ fn baseline_drift(
                         c.passed - b.passed
                     ));
                 }
-                if c.total != b.total {
+                // A drop within the margin may take the variant total with it
+                // (identifier variants are built from seeded values), so the
+                // margin covers a total that shrank by no more than it.
+                let total_drop_within_margin =
+                    c.total < b.total && b.total - c.total <= flake_margin;
+                if c.total != b.total && !total_drop_within_margin {
                     drift.push(format!(
                         "{name}: {} -> {} variants generated (baseline is stale)",
                         b.total, c.total
@@ -1828,6 +1836,29 @@ fn baseline_drift(
             }
             (None, None) => {}
         }
+    }
+    drift
+}
+
+/// The baseline's top-level totals must be the sums of its per-service
+/// entries: `scripts/check-doc-counts.sh` and every public surface quote the
+/// top-level numbers, so a per-service edit that left them behind would pass
+/// the per-service ratchet while the published counts go stale.
+fn baseline_totals_drift(baseline: &Baseline) -> Vec<String> {
+    let passed: usize = baseline.per_service.values().map(|s| s.passed).sum();
+    let total: usize = baseline.per_service.values().map(|s| s.total).sum();
+    let mut drift = Vec::new();
+    if baseline.variants_passed != passed {
+        drift.push(format!(
+            "baseline variants_passed is {} but its services sum to {passed}",
+            baseline.variants_passed
+        ));
+    }
+    if baseline.total_variants != total {
+        drift.push(format!(
+            "baseline total_variants is {} but its services sum to {total}",
+            baseline.total_variants
+        ));
     }
     drift
 }
@@ -1937,6 +1968,47 @@ mod tests {
         assert_eq!(
             baseline_drift(&baseline, &current, 2),
             vec!["gained: 10 -> 11 variants passing (gained 1; baseline is stale)"]
+        );
+    }
+
+    #[test]
+    fn a_drop_within_the_margin_may_take_the_total_with_it() {
+        let baseline = HashMap::from([("svc".to_string(), sb(10, 10))]);
+        let shrunk = HashMap::from([("svc", sb(8, 8))]);
+        assert!(baseline_drift(&baseline, &shrunk, 2).is_empty());
+        assert_eq!(
+            baseline_drift(&baseline, &shrunk, 1),
+            vec![
+                "svc: 10 -> 8 variants passing (lost 2; margin 1)",
+                "svc: 10 -> 8 variants generated (baseline is stale)",
+            ]
+        );
+        // A grown total is never covered by the margin.
+        let grown = HashMap::from([("svc", sb(10, 11))]);
+        assert_eq!(
+            baseline_drift(&baseline, &grown, 5),
+            vec!["svc: 10 -> 11 variants generated (baseline is stale)"]
+        );
+    }
+
+    #[test]
+    fn top_level_totals_must_be_the_per_service_sums() {
+        let mut baseline = Baseline {
+            variants_passed: 15,
+            total_variants: 15,
+            per_service: HashMap::from([
+                ("a".to_string(), sb(10, 10)),
+                ("b".to_string(), sb(5, 5)),
+            ]),
+        };
+        assert!(baseline_totals_drift(&baseline).is_empty());
+        baseline.per_service.insert("b".to_string(), sb(6, 6));
+        assert_eq!(
+            baseline_totals_drift(&baseline),
+            vec![
+                "baseline variants_passed is 15 but its services sum to 16",
+                "baseline total_variants is 15 but its services sum to 16",
+            ]
         );
     }
 

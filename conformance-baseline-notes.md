@@ -20,10 +20,13 @@ cargo run -p fakecloud-conformance -- run --services <service>
 
 If the pass count or the variant total moved and the change is real (not
 gaming), update the per-service entry in `conformance-baseline.json` to the
-new exact counts (or run `cargo run -p fakecloud-conformance --
-update-baseline`), sync the surfaces `scripts/check-doc-counts.sh` checks,
-and commit alongside the change that moved them.
-`FAKECLOUD_CONFORMANCE_FLAKE_MARGIN` relaxes drops only, never gains.
+new exact counts with `cargo run -p fakecloud-conformance --
+update-baseline` (a hand edit must also update the top-level
+`variants_passed` / `total_variants`, which `check` verifies are the
+per-service sums), sync the surfaces `scripts/check-doc-counts.sh` checks,
+and commit alongside the change that moved them. A new service adds its
+baseline entry in the same PR.
+`FAKECLOUD_CONFORMANCE_FLAKE_MARGIN` relaxes drops only (a service's passed count, and its variant total shrinking with it), never gains.
 
 ## Past flake notes
 
