@@ -241,6 +241,35 @@ pub(crate) fn policy_decision(
     extra: &[(&str, &str)],
 ) -> Decision {
     let mut keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Forms that can only deny: when an assumed-role caller's role path is
+    // unknown (the role is not in fakecloud's IAM, or was deleted), a Deny
+    // naming that role under any path applies, failing closed, while an
+    // Allow still needs the exact role ARN.
+    let mut deny_only: Vec<Principal> = Vec::new();
+    if let KeyCaller::ViaService {
+        account,
+        caller_arn: Some(arn),
+        caller_role_arn: None,
+        ..
+    } = caller
+    {
+        if let Some(role) = arn
+            .split_once(":assumed-role/")
+            .and_then(|(_, rest)| rest.split('/').next())
+        {
+            deny_only = pathed_role_principals(policy, account, role)
+                .into_iter()
+                .map(|role_arn| Principal {
+                    arn: role_arn,
+                    user_id: account.to_string(),
+                    account_id: account.to_string(),
+                    principal_type: PrincipalType::Unknown,
+                    source_identity: None,
+                    tags: None,
+                })
+                .collect();
+        }
+    }
     let principals: Vec<Principal> = match caller {
         KeyCaller::Direct { principal, account } => {
             keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
@@ -319,7 +348,7 @@ pub(crate) fn policy_decision(
     // applies when its Principal names any of them. A Deny that applies to
     // any form denies, whatever another form is allowed; otherwise any
     // Allow allows; otherwise nothing grants it (implicit deny).
-    let decisions = principals.iter().map(|principal| {
+    let evaluate = |principal: &Principal| {
         let request = EvalRequest {
             principal,
             action: action.to_string(),
@@ -330,16 +359,56 @@ pub(crate) fn policy_decision(
             },
         };
         evaluate_resource_policy_only(&document, &request)
-    });
+    };
+    if deny_only
+        .iter()
+        .any(|principal| evaluate(principal) == Decision::ExplicitDeny)
+    {
+        return Decision::ExplicitDeny;
+    }
     let mut decision = Decision::ImplicitDeny;
-    for d in decisions {
-        match d {
+    for principal in &principals {
+        match evaluate(principal) {
             Decision::ExplicitDeny => return Decision::ExplicitDeny,
             Decision::Allow => decision = Decision::Allow,
             Decision::ImplicitDeny => {}
         }
     }
     decision
+}
+
+/// The role ARNs `policy` names as an `AWS` principal for the role `role`
+/// of `account` under any path (`arn:<p>:iam::<account>:role/<path>/<role>`
+/// and the path-less form).
+fn pathed_role_principals(policy: &str, account: &str, role: &str) -> Vec<String> {
+    let Ok(doc) = serde_json::from_str::<Value>(policy) else {
+        return Vec::new();
+    };
+    let statements = match &doc["Statement"] {
+        Value::Array(items) => items.clone(),
+        single @ Value::Object(_) => vec![single.clone()],
+        _ => Vec::new(),
+    };
+    let mut arns = Vec::new();
+    for statement in &statements {
+        let aws = &statement["Principal"]["AWS"];
+        let named: Vec<&str> = match aws {
+            Value::String(s) => vec![s.as_str()],
+            Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        for arn in named {
+            let Some((prefix, path_and_name)) = arn.split_once(":role/") else {
+                continue;
+            };
+            let names_account = prefix.ends_with(&format!(":iam::{account}"));
+            let names_role = path_and_name.rsplit('/').next() == Some(role);
+            if names_account && names_role && !arns.iter().any(|a| a == arn) {
+                arns.push(arn.to_string());
+            }
+        }
+    }
+    arns
 }
 
 /// Whether the key policy `policy` of the key `key_arn` lets `caller`

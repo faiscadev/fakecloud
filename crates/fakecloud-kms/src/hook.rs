@@ -609,24 +609,18 @@ fn authorize(
         KmsCaller::OnBehalfOf {
             service_principal,
             caller_arn,
-        } => {
-            let key_account = parse_kms_arn(&key.arn).map(|(_, account, _)| account);
-            if key.key_manager != "AWS" && key_account == Some(account_id) {
-                return Ok(());
-            }
-            (
-                crate::aws_managed::KeyCaller::ViaService {
-                    service_principal,
-                    region,
-                    account: account_id,
-                    caller_arn,
-                    caller_role_arn: role_arn,
-                },
-                // KMS names the identity the service acted for (its
-                // forwarded credentials).
-                format!("User: {}", caller_arn.unwrap_or(&root)),
-            )
-        }
+        } => (
+            crate::aws_managed::KeyCaller::ViaService {
+                service_principal,
+                region,
+                account: account_id,
+                caller_arn,
+                caller_role_arn: role_arn,
+            },
+            // KMS names the identity the service acted for (its
+            // forwarded credentials).
+            format!("User: {}", caller_arn.unwrap_or(&root)),
+        ),
         KmsCaller::Service {
             service_principal,
             source_arn,
@@ -652,7 +646,13 @@ fn authorize(
         .collect();
     let decision =
         crate::aws_managed::policy_decision(&key.policy, &key.arn, &caller, action, &context, &[]);
-    if decision.is_allow() {
+    let explicit_deny = decision == fakecloud_iam::evaluator::Decision::ExplicitDeny;
+    // A customer key of the caller's own account is left to IAM (see above),
+    // except that an explicit Deny in its key policy always wins.
+    let key_account = parse_kms_arn(&key.arn).map(|(_, account, _)| account);
+    let own_customer_key =
+        !service_caller && key.key_manager != "AWS" && key_account == Some(account_id);
+    if decision.is_allow() || (own_customer_key && !explicit_deny) {
         return Ok(());
     }
     // A grant on the key lets an identity of the caller's account use it for
@@ -676,6 +676,11 @@ fn authorize(
     let message = if service_caller {
         format!(
             "{who} is not authorized to perform: {action} on this resource because the resource does not exist in this Region, no resource-based policies allow access, or a resource-based policy explicitly denies access"
+        )
+    } else if explicit_deny {
+        format!(
+            "{who} is not authorized to perform: {action} on resource: {} with an explicit deny in a resource-based policy",
+            key.arn
         )
     } else {
         format!(
@@ -2289,6 +2294,138 @@ mod tests {
                 (account == "111111111111" && role == "app")
                     .then(|| "arn:aws:iam::111111111111:role/team/app".to_string())
             },
+        ));
+        hook.encrypt(
+            "111111111111",
+            "us-east-1",
+            &key,
+            b"x",
+            caller,
+            HashMap::new(),
+        )
+        .unwrap();
+    }
+
+    /// A same-account customer key is left to IAM, except that an explicit
+    /// key-policy Deny of the caller wins: a Deny on a role refuses its
+    /// sessions; the default key policy changes nothing.
+    #[test]
+    fn same_account_key_policy_deny_refuses_the_caller() {
+        let a = "111111111111";
+        let (state, _) = crate::test_support::kms_hook(a);
+        let hook = KmsServiceHook::new(state.clone(), Default::default());
+        let own_key = |name: &str, statements: &str| {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(a);
+            let arn = mint_aws_managed_key(s, "us-east-1", name);
+            let key = s.keys.get_mut(key_id_from_arn(&arn)).unwrap();
+            key.key_manager = "CUSTOMER".into();
+            key.policy = format!(r#"{{"Version":"2012-10-17","Statement":[{statements}]}}"#);
+            arn
+        };
+        let root_allow = format!(
+            r#"{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{a}:root"}},"Action":"kms:*","Resource":"*"}}"#
+        );
+        let denied = own_key(
+            "denied",
+            &format!(
+                r#"{root_allow},{{"Effect":"Deny","Principal":{{"AWS":"arn:aws:iam::{a}:role/app"}},"Action":"kms:*","Resource":"*"}}"#
+            ),
+        );
+        let default = own_key("default", &root_allow);
+        let session = format!("arn:aws:sts::{a}:assumed-role/app/s1");
+        let other = format!("arn:aws:iam::{a}:user/u");
+        let via = |arn| KmsCaller::via_for("sqs.amazonaws.com", Some(arn));
+        let ctx = HashMap::new();
+
+        let err = hook
+            .encrypt(a, "us-east-1", &denied, b"x", via(&session), ctx.clone())
+            .unwrap_err();
+        assert_eq!(err.kind, KmsErrorKind::AccessDenied);
+        assert_eq!(
+            err.message,
+            format!(
+                "User: {session} is not authorized to perform: kms:GenerateDataKey on resource: {denied} with an explicit deny in a resource-based policy"
+            )
+        );
+        // Another identity of the account, and the default policy, are
+        // still governed by IAM alone.
+        hook.encrypt(a, "us-east-1", &denied, b"x", via(&other), ctx.clone())
+            .unwrap();
+        hook.encrypt(a, "us-east-1", &default, b"x", via(&session), ctx.clone())
+            .unwrap();
+        // A same-account key whose policy leaves the caller undecided is
+        // still IAM's (no implicit-deny refusal).
+        let silent = own_key(
+            "silent",
+            r#"{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::999999999999:root"},"Action":"kms:*","Resource":"*"}"#,
+        );
+        hook.encrypt(a, "us-east-1", &silent, b"x", via(&session), ctx)
+            .unwrap();
+    }
+
+    /// When an assumed-role caller's role path is unknown (no resolver, or
+    /// the role is not in IAM), a Deny naming the role under a path still
+    /// applies, while an Allow naming it under a path does not.
+    #[test]
+    fn unknown_role_paths_fail_closed_for_deny_only() {
+        let deny_pathed = r#"{"Effect":"Deny","Principal":{"AWS":"arn:aws:iam::111111111111:role/team/app"},"Action":"kms:*","Resource":"*"}"#;
+        let allow_root = r#"{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111111111111:root"},"Action":"kms:*","Resource":"*"}"#;
+        let allow_pathed = r#"{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111111111111:role/team/app"},"Action":"kms:*","Resource":"*"}"#;
+        let caller = KmsCaller::via_for(
+            "sqs.amazonaws.com",
+            Some("arn:aws:sts::111111111111:assumed-role/app/s1"),
+        );
+        let (hook, _, key) = key_in_b_with(&format!("{allow_root},{deny_pathed}"));
+        assert_eq!(
+            hook.encrypt(
+                "111111111111",
+                "us-east-1",
+                &key,
+                b"x",
+                caller,
+                HashMap::new()
+            )
+            .unwrap_err()
+            .kind,
+            KmsErrorKind::AccessDenied
+        );
+        // A resolver that does not know the role is the same as none.
+        let (_, state, key) = key_in_b_with(&format!("{allow_root},{deny_pathed}"));
+        let hook = KmsServiceHook::new(state, Default::default())
+            .with_role_arn_resolver(Arc::new(|_, _| None));
+        assert_eq!(
+            hook.encrypt(
+                "111111111111",
+                "us-east-1",
+                &key,
+                b"x",
+                caller,
+                HashMap::new()
+            )
+            .unwrap_err()
+            .kind,
+            KmsErrorKind::AccessDenied
+        );
+        // An Allow naming a pathed role does not admit a session whose path
+        // is unknown.
+        let (hook, _, key) = key_in_b_with(allow_pathed);
+        assert_eq!(
+            hook.encrypt(
+                "111111111111",
+                "us-east-1",
+                &key,
+                b"x",
+                caller,
+                HashMap::new()
+            )
+            .unwrap_err()
+            .kind,
+            KmsErrorKind::AccessDenied
+        );
+        // The same Deny naming another role name does not apply.
+        let (hook, _, key) = key_in_b_with(&format!(
+            r#"{allow_root},{{"Effect":"Deny","Principal":{{"AWS":"arn:aws:iam::111111111111:role/team/other"}},"Action":"kms:*","Resource":"*"}}"#
         ));
         hook.encrypt(
             "111111111111",
