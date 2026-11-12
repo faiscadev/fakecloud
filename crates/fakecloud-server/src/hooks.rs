@@ -4,6 +4,9 @@ use std::sync::Arc;
 
 pub(crate) struct KmsHookAdapter {
     pub(crate) inner: fakecloud_kms::hook::KmsServiceHook,
+    /// The organization of a caller's account (`aws:PrincipalOrgID`), set
+    /// once Organizations state exists.
+    pub(crate) org_resolver: Arc<std::sync::OnceLock<Arc<dyn fakecloud_core::auth::ScpResolver>>>,
     /// Shared KMS state, snapshotted after the hook mints an `aws/<service>`
     /// AWS-managed key on first use, so the key survives a restart and the
     /// corresponding ciphertext stays decryptable.
@@ -18,23 +21,55 @@ impl KmsHookAdapter {
     ) -> Self {
         Self {
             inner: fakecloud_kms::hook::KmsServiceHook::new(state.clone(), usage),
+            org_resolver: Arc::new(std::sync::OnceLock::new()),
             state,
             snapshot_store: std::sync::OnceLock::new(),
         }
     }
 
-    /// Resolve assumed-role callers' roles to their IAM ARNs (with paths)
-    /// from `iam`, for key policies and grants naming a pathed role.
+    /// Resolve calling identities from `iam` (an assumed-role session's role
+    /// ARN with its path and `<role id>:<session>` id, a user's id, their
+    /// tags) and from Organizations once [`Self::set_org_resolver`] wires it,
+    /// for the request context key policies and grants are evaluated with.
     pub(crate) fn with_iam(mut self, iam: fakecloud_iam::SharedIamState) -> Self {
-        self.inner = self
-            .inner
-            .with_role_arn_resolver(Arc::new(move |account, role| {
-                iam.read()
-                    .get(account)
-                    .and_then(|state| state.roles.get(role))
-                    .map(|role| role.arn.clone())
-            }));
+        let org = self.org_resolver.clone();
+        self.inner = self.inner.with_caller_resolver(Arc::new(move |arn: &str| {
+            let tags = |tags: &[fakecloud_iam::Tag]| -> std::collections::HashMap<String, String> {
+                tags.iter()
+                    .map(|t| (t.key.clone(), t.value.clone()))
+                    .collect()
+            };
+            let account = fakecloud_aws::arn::account_of(arn).unwrap_or_default();
+            let mut facts = fakecloud_kms::hook::CallerFacts {
+                org: org.get().and_then(|r| r.principal_org(account)),
+                ..Default::default()
+            };
+            let iam = iam.read();
+            let Some(state) = iam.get(account) else {
+                return facts;
+            };
+            if let Some((_, role_name)) = fakecloud_kms::hook::assumed_role_parts(arn) {
+                if let Some(role) = state.roles.get(role_name) {
+                    let session = arn.rsplit('/').next().unwrap_or_default();
+                    facts.role_arn = Some(role.arn.clone());
+                    facts.user_id = Some(format!("{}:{session}", role.role_id));
+                    facts.tags = Some(tags(&role.tags));
+                }
+            } else if let Some(rest) = arn.split_once(":user/").map(|(_, rest)| rest) {
+                let name = rest.rsplit('/').next().unwrap_or(rest);
+                if let Some(user) = state.users.get(name) {
+                    facts.user_id = Some(user.user_id.clone());
+                    facts.tags = Some(tags(&user.tags));
+                }
+            }
+            facts
+        }));
         self
+    }
+
+    /// Wire Organizations for `aws:PrincipalOrgID` / `aws:PrincipalOrgPaths`.
+    pub(crate) fn set_org_resolver(&self, resolver: Arc<dyn fakecloud_core::auth::ScpResolver>) {
+        let _ = self.org_resolver.set(resolver);
     }
 
     pub(crate) fn set_snapshot_store(&self, store: Arc<dyn fakecloud_persistence::SnapshotStore>) {

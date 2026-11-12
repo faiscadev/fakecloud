@@ -34,6 +34,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use crate::hook::CallerFacts;
 use fakecloud_core::auth::{InternalCaller, Principal, PrincipalType};
 use fakecloud_iam::evaluator::{
     evaluate_resource_policy_only, Decision, EvalRequest, PolicyDocument, RequestContext,
@@ -160,9 +161,9 @@ pub(crate) enum KeyCaller<'a> {
         region: &'a str,
         account: &'a str,
         caller_arn: Option<&'a str>,
-        /// For an assumed-role `caller_arn`, the role's IAM ARN (with its
-        /// path) when known.
-        caller_role_arn: Option<&'a str>,
+        /// What IAM and Organizations know about `caller_arn` (its role's
+        /// IAM ARN with path, `aws:userid`, tags, organization).
+        facts: Option<&'a crate::hook::CallerFacts>,
     },
     /// A service principal acting itself (SES writing received mail to S3)
     /// for its resource `source_arn` owned by `source_account`. Only a
@@ -249,14 +250,15 @@ pub(crate) fn policy_decision(
     if let KeyCaller::ViaService {
         account,
         caller_arn: Some(arn),
-        caller_role_arn: None,
+        facts,
         ..
     } = caller
     {
-        if let Some(role) = arn
+        let role_known = facts.is_some_and(|f| f.role_arn.is_some());
+        let role = arn
             .split_once(":assumed-role/")
-            .and_then(|(_, rest)| rest.split('/').next())
-        {
+            .and_then(|(_, rest)| rest.split('/').next());
+        if let (false, Some(role)) = (role_known, role) {
             deny_only = pathed_role_principals(policy, account, role)
                 .into_iter()
                 .map(|role_arn| Principal {
@@ -270,9 +272,24 @@ pub(crate) fn policy_decision(
                 .collect();
         }
     }
+    // The global keys AWS sets from the calling identity (`aws:PrincipalArn`,
+    // `aws:PrincipalAccount`, `aws:PrincipalType`, `aws:userid`,
+    // `aws:PrincipalTag/*`, `aws:PrincipalOrgID`, ...): guard statements
+    // such as `Deny ... ArnNotLike aws:PrincipalArn` would otherwise match
+    // every caller, a negated operator on a missing key being true.
+    let mut base = RequestContext::default();
     let principals: Vec<Principal> = match caller {
         KeyCaller::Direct { principal, account } => {
             keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
+            base = principal_context(
+                &principal.arn,
+                account,
+                &CallerFacts {
+                    user_id: Some(principal.user_id.clone()),
+                    tags: principal.tags.clone(),
+                    ..Default::default()
+                },
+            );
             vec![(*principal).clone()]
         }
         KeyCaller::ViaService {
@@ -280,16 +297,25 @@ pub(crate) fn policy_decision(
             region,
             account,
             caller_arn,
-            caller_role_arn,
+            facts,
         } => {
             keys.insert(
                 "kms:ViaService".to_string(),
                 vec![via_service(service_principal, region)],
             );
             keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
+            let none = CallerFacts::default();
+            let facts = facts.unwrap_or(&none);
             match caller_arn {
-                Some(arn) => caller_principals(arn, *caller_role_arn, account),
-                None => vec![account_root(account, region)],
+                Some(arn) => {
+                    base = principal_context(arn, account, facts);
+                    caller_principals(arn, facts.role_arn.as_deref(), account)
+                }
+                None => {
+                    let root = account_root(account, region);
+                    base = principal_context(&root.arn, account, facts);
+                    vec![root]
+                }
             }
         }
         KeyCaller::Service {
@@ -348,15 +374,18 @@ pub(crate) fn policy_decision(
     // applies when its Principal names any of them. A Deny that applies to
     // any form denies, whatever another form is allowed; otherwise any
     // Allow allows; otherwise nothing grants it (implicit deny).
+    let mut service_keys = base.service_keys.clone();
+    service_keys.extend(keys);
+    let context = RequestContext {
+        service_keys,
+        ..base
+    };
     let evaluate = |principal: &Principal| {
         let request = EvalRequest {
             principal,
             action: action.to_string(),
             resource: key_arn.to_string(),
-            context: RequestContext {
-                service_keys: keys.clone(),
-                ..Default::default()
-            },
+            context: context.clone(),
         };
         evaluate_resource_policy_only(&document, &request)
     };
@@ -375,6 +404,57 @@ pub(crate) fn policy_decision(
         }
     }
     decision
+}
+
+/// The request context a key policy sees for the calling identity `arn` of
+/// `account`, as AWS fills it: `aws:PrincipalArn` (for an assumed-role
+/// session, its role's IAM ARN: with its path when known, else path-less),
+/// `aws:PrincipalAccount`, `aws:PrincipalType` (fakecloud-core's labels:
+/// `User`, `AssumedRole`, `Account`, ...), `aws:userid`, `aws:username` for
+/// an IAM user, `aws:PrincipalTag/*`, `aws:PrincipalOrgID` /
+/// `aws:PrincipalOrgPaths`, and `aws:PrincipalIsAWSService` `false`. What
+/// `facts` does not know stays absent.
+fn principal_context(arn: &str, account: &str, facts: &CallerFacts) -> RequestContext {
+    let principal_type = PrincipalType::from_arn(arn);
+    let principal_arn = match crate::hook::assumed_role_parts(arn) {
+        Some((role_account, role)) => facts.role_arn.clone().unwrap_or_else(|| {
+            let partition = arn
+                .strip_prefix("arn:")
+                .and_then(|rest| rest.split(':').next())
+                .unwrap_or("aws");
+            format!("arn:{partition}:iam::{role_account}:role/{role}")
+        }),
+        None => arn.to_string(),
+    };
+    let user_id = facts
+        .user_id
+        .clone()
+        .or_else(|| (principal_type == PrincipalType::Root).then(|| account.to_string()));
+    let username = (principal_type == PrincipalType::User)
+        .then(|| arn.rsplit_once(":user/").map(|(_, rest)| rest))
+        .flatten()
+        .map(|rest| rest.rsplit('/').next().unwrap_or(rest).to_string());
+    let mut service_keys = BTreeMap::new();
+    service_keys.insert(
+        "aws:PrincipalIsAWSService".to_string(),
+        vec!["false".to_string()],
+    );
+    if let Some((org_id, paths)) = &facts.org {
+        service_keys.insert("aws:principalorgid".to_string(), vec![org_id.clone()]);
+        service_keys.insert("aws:principalorgpaths".to_string(), vec![paths.clone()]);
+    }
+    RequestContext {
+        aws_username: username,
+        aws_userid: user_id,
+        aws_principal_arn: Some(principal_arn),
+        aws_principal_account: Some(account.to_string()),
+        aws_principal_type: Some(
+            fakecloud_core::dispatch::principal_type_label(principal_type).to_string(),
+        ),
+        principal_tags: facts.tags.clone(),
+        service_keys,
+        ..Default::default()
+    }
 }
 
 /// The role ARNs `policy` names as an `AWS` principal for the role `role`
@@ -543,7 +623,7 @@ mod tests {
                 region: "us-east-1",
                 account,
                 caller_arn: None,
-                caller_role_arn: None,
+                facts: None,
             },
             action,
             &BTreeMap::new(),

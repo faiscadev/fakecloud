@@ -701,6 +701,13 @@ async fn main() {
     let organizations_state: SharedOrganizationsState = Arc::new(parking_lot::RwLock::new(
         fakecloud_organizations::OrganizationsRegistry::default(),
     ));
+    // Key policies evaluated through the KMS hook see the caller's
+    // organization (`aws:PrincipalOrgID`).
+    kms_hook_adapter.set_org_resolver(
+        fakecloud_organizations::resolver::OrganizationsScpResolver::shared(
+            organizations_state.clone(),
+        ),
+    );
     let scheduler_state: fakecloud_scheduler::SharedSchedulerState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,

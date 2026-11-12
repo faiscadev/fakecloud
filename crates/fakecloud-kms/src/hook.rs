@@ -68,13 +68,41 @@ pub type SharedKmsUsageState = Arc<RwLock<KmsUsageState>>;
 pub struct KmsServiceHook {
     state: SharedKmsState,
     usage: SharedKmsUsageState,
-    role_arn: Option<RoleArnResolver>,
+    caller_facts: Option<CallerResolver>,
 }
 
 /// The ARN (path included) of the IAM role `role_name` in `account_id`, as
 /// IAM holds it: an assumed-role session ARN names its role without the
 /// role's path, which a key policy or grant naming the role includes.
 pub type RoleArnResolver = Arc<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
+
+/// What IAM and Organizations know about a calling identity (an IAM user or
+/// assumed-role session ARN), for the request context a key policy is
+/// evaluated with. Every field is optional: what is unknown stays absent.
+#[derive(Debug, Clone, Default)]
+pub struct CallerFacts {
+    /// For an assumed-role session, the role's IAM ARN with its path.
+    pub role_arn: Option<String>,
+    /// `aws:userid`: the user's `AIDA...` id, or `<role id>:<session>`.
+    pub user_id: Option<String>,
+    /// `aws:PrincipalTag/*`: the user's or role's tags.
+    pub tags: Option<HashMap<String, String>>,
+    /// `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` of the caller's
+    /// account.
+    pub org: Option<(String, String)>,
+}
+
+/// Resolves a calling identity ARN to its [`CallerFacts`].
+pub type CallerResolver = Arc<dyn Fn(&str) -> CallerFacts + Send + Sync>;
+
+/// The account and role name of an assumed-role session ARN
+/// (`arn:<p>:sts::<account>:assumed-role/<role>/<session>`).
+pub fn assumed_role_parts(arn: &str) -> Option<(&str, &str)> {
+    let (prefix, rest) = arn.split_once(":assumed-role/")?;
+    let account = prefix.rsplit(':').next()?;
+    let role = rest.split('/').next()?;
+    Some((account, role))
+}
 
 /// Why a hook call failed; see [`fakecloud_core::delivery::KmsError`].
 pub type KmsHookError = KmsError;
@@ -141,31 +169,40 @@ impl KmsServiceHook {
         Self {
             state,
             usage,
-            role_arn: None,
+            caller_facts: None,
         }
     }
 
-    /// Resolve an assumed-role caller's role to its IAM ARN (with its path)
-    /// when key policies and grants are evaluated; without it the role is
-    /// named path-less, as its session ARN names it.
-    pub fn with_role_arn_resolver(mut self, resolver: RoleArnResolver) -> Self {
-        self.role_arn = Some(resolver);
+    /// Resolve calling identities to what IAM and Organizations know about
+    /// them ([`CallerFacts`]) when key policies and grants are evaluated;
+    /// without it only what the caller's ARN itself says is known (an
+    /// assumed-role session's role is named path-less, as its ARN names it).
+    pub fn with_caller_resolver(mut self, resolver: CallerResolver) -> Self {
+        self.caller_facts = Some(resolver);
         self
     }
 
-    /// The IAM ARN of the role behind an assumed-role `caller`, when known.
-    fn caller_role_arn(&self, caller: KmsCaller<'_>) -> Option<String> {
-        let KmsCaller::OnBehalfOf {
-            caller_arn: Some(arn),
-            ..
-        } = caller
-        else {
-            return None;
-        };
-        let (prefix, rest) = arn.split_once(":assumed-role/")?;
-        let account = prefix.rsplit(':').next()?;
-        let role = rest.split('/').next()?;
-        (self.role_arn.as_ref()?)(account, role)
+    /// [`Self::with_caller_resolver`] knowing only assumed-role callers'
+    /// roles (their IAM ARNs, with paths).
+    pub fn with_role_arn_resolver(self, resolver: RoleArnResolver) -> Self {
+        self.with_caller_resolver(Arc::new(move |arn: &str| CallerFacts {
+            role_arn: assumed_role_parts(arn).and_then(|(account, role)| resolver(account, role)),
+            ..Default::default()
+        }))
+    }
+
+    /// What is known about the identity a service acts for (`caller`).
+    fn caller_facts(&self, caller: KmsCaller<'_>) -> CallerFacts {
+        match (caller, &self.caller_facts) {
+            (
+                KmsCaller::OnBehalfOf {
+                    caller_arn: Some(arn),
+                    ..
+                },
+                Some(resolve),
+            ) => resolve(arn),
+            _ => CallerFacts::default(),
+        }
     }
 
     /// Encrypt `plaintext` under `key_id` (raw id, ARN, alias, or
@@ -207,7 +244,7 @@ impl KmsServiceHook {
         encryption_context: HashMap<String, String>,
     ) -> Result<String, KmsError> {
         let owner = key_owner_account(account_id, key_id);
-        let role_arn = self.caller_role_arn(caller);
+        let facts = self.caller_facts(caller);
         let (key_arn, _) = self
             .resolve_or_provision(account_id, region, key_id)
             .map_err(|err| missing_key_refusal(err, caller, &format!("kms:{operation}")))?;
@@ -231,7 +268,7 @@ impl KmsServiceHook {
                 &state.grants,
                 account_id,
                 caller,
-                role_arn.as_deref(),
+                &facts,
                 &format!("kms:{operation}"),
                 &encryption_context,
             )?;
@@ -279,7 +316,7 @@ impl KmsServiceHook {
     ) -> Result<Vec<u8>, KmsError> {
         let (key_ref, plaintext) =
             self.open_envelope(account_id, ciphertext_b64, &encryption_context)?;
-        let role_arn = self.caller_role_arn(caller);
+        let facts = self.caller_facts(caller);
 
         let key_arn = {
             let mas = self.state.read();
@@ -298,7 +335,7 @@ impl KmsServiceHook {
                 &owner_state.grants,
                 account_id,
                 caller,
-                role_arn.as_deref(),
+                &facts,
                 "kms:Decrypt",
                 &encryption_context,
             )?;
@@ -334,7 +371,7 @@ impl KmsServiceHook {
         encryption_context: &HashMap<String, String>,
     ) -> Result<String, KmsError> {
         let owner = key_owner_account(account_id, key_id);
-        let role_arn = self.caller_role_arn(caller);
+        let facts = self.caller_facts(caller);
         let (key_arn, _) = self
             .resolve_or_provision(account_id, region, key_id)
             .map_err(|err| {
@@ -362,7 +399,7 @@ impl KmsServiceHook {
                 &owner_state.grants,
                 account_id,
                 caller,
-                role_arn.as_deref(),
+                &facts,
                 action,
                 encryption_context,
             )?;
@@ -594,10 +631,11 @@ fn authorize(
     grants: &[crate::state::KmsGrant],
     account_id: &str,
     caller: KmsCaller<'_>,
-    role_arn: Option<&str>,
+    facts: &CallerFacts,
     action: &str,
     encryption_context: &HashMap<String, String>,
 ) -> Result<(), KmsError> {
+    let role_arn = facts.role_arn.as_deref();
     let caller_arn = match caller {
         KmsCaller::OnBehalfOf { caller_arn, .. } => Some(caller_arn),
         KmsCaller::Service { .. } => None,
@@ -615,7 +653,7 @@ fn authorize(
                 region,
                 account: account_id,
                 caller_arn,
-                caller_role_arn: role_arn,
+                facts: Some(facts),
             },
             // KMS names the identity the service acted for (its
             // forwarded credentials).
@@ -2426,6 +2464,151 @@ mod tests {
         // The same Deny naming another role name does not apply.
         let (hook, _, key) = key_in_b_with(&format!(
             r#"{allow_root},{{"Effect":"Deny","Principal":{{"AWS":"arn:aws:iam::111111111111:role/team/other"}},"Action":"kms:*","Resource":"*"}}"#
+        ));
+        hook.encrypt(
+            "111111111111",
+            "us-east-1",
+            &key,
+            b"x",
+            caller,
+            HashMap::new(),
+        )
+        .unwrap();
+    }
+
+    /// A key of account A (the caller's own) with `statements` and the hook.
+    fn own_key_with(statements: &str) -> (KmsServiceHook, SharedKmsState, String) {
+        let a = "111111111111";
+        let (state, _) = crate::test_support::kms_hook(a);
+        let hook = KmsServiceHook::new(state.clone(), Default::default());
+        let arn = {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(a);
+            let arn = mint_aws_managed_key(s, "us-east-1", "guarded");
+            let key = s.keys.get_mut(key_id_from_arn(&arn)).unwrap();
+            key.key_manager = "CUSTOMER".into();
+            key.policy = format!(r#"{{"Version":"2012-10-17","Statement":[{statements}]}}"#);
+            arn
+        };
+        (hook, state, arn)
+    }
+
+    const ROOT_ALLOW: &str = r#"{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111111111111:root"},"Action":"kms:*","Resource":"*"}"#;
+
+    /// Guard statements keyed on the caller's global keys see the real
+    /// caller: an `ArnNotLike aws:PrincipalArn` Deny admits the listed role
+    /// (`aws:PrincipalArn` of a session is its role) and refuses any other
+    /// identity, as AWS does, instead of matching every caller for want of
+    /// the key.
+    #[test]
+    fn principal_arn_guard_deny_admits_the_listed_role() {
+        let guard = r#"{"Effect":"Deny","Principal":"*","Action":"kms:*","Resource":"*","Condition":{"ArnNotLike":{"aws:PrincipalArn":["arn:aws:iam::111111111111:role/app*"]}}}"#;
+        let (hook, _, key) = own_key_with(&format!("{ROOT_ALLOW},{guard}"));
+        let via = |arn| KmsCaller::via_for("sqs.amazonaws.com", Some(arn));
+        hook.encrypt(
+            "111111111111",
+            "us-east-1",
+            &key,
+            b"x",
+            via("arn:aws:sts::111111111111:assumed-role/app-worker/s1"),
+            HashMap::new(),
+        )
+        .unwrap();
+        let err = hook
+            .encrypt(
+                "111111111111",
+                "us-east-1",
+                &key,
+                b"x",
+                via("arn:aws:iam::111111111111:user/other"),
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, KmsErrorKind::AccessDenied);
+        // The default policy alone admits both.
+        let (hook, _, key) = own_key_with(ROOT_ALLOW);
+        for caller in [
+            "arn:aws:sts::111111111111:assumed-role/app-worker/s1",
+            "arn:aws:iam::111111111111:user/other",
+        ] {
+            hook.encrypt(
+                "111111111111",
+                "us-east-1",
+                &key,
+                b"x",
+                via(caller),
+                HashMap::new(),
+            )
+            .unwrap();
+        }
+    }
+
+    /// A `StringNotEquals aws:PrincipalAccount` guard on another account's
+    /// key admits the account it lists and refuses any other, and an
+    /// `aws:PrincipalOrgID` guard admits callers of that organization (from
+    /// the caller resolver) and refuses callers in none.
+    #[test]
+    fn account_and_org_guards_see_the_caller() {
+        let (state, _) = crate::test_support::kms_hook("111111111111");
+        let key = {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create("222222222222");
+            let arn = mint_aws_managed_key(s, "us-east-1", "shared");
+            let key = s.keys.get_mut(key_id_from_arn(&arn)).unwrap();
+            key.key_manager = "CUSTOMER".into();
+            key.policy = r#"{"Version":"2012-10-17","Statement":[
+                {"Effect":"Allow","Principal":{"AWS":["111111111111","333333333333"]},"Action":"kms:*","Resource":"*"},
+                {"Effect":"Deny","Principal":"*","Action":"kms:*","Resource":"*","Condition":{"StringNotEquals":{"aws:PrincipalAccount":["111111111111"]}}}]}"#
+                .to_string();
+            arn
+        };
+        let hook = KmsServiceHook::new(state.clone(), Default::default());
+        let via = |arn| KmsCaller::via_for("sqs.amazonaws.com", Some(arn));
+        hook.encrypt(
+            "111111111111",
+            "us-east-1",
+            &key,
+            b"x",
+            via("arn:aws:iam::111111111111:user/u"),
+            HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            hook.encrypt(
+                "333333333333",
+                "us-east-1",
+                &key,
+                b"x",
+                via("arn:aws:iam::333333333333:user/u"),
+                HashMap::new(),
+            )
+            .unwrap_err()
+            .kind,
+            KmsErrorKind::AccessDenied
+        );
+
+        let org_guard = r#"{"Effect":"Deny","Principal":"*","Action":"kms:*","Resource":"*","Condition":{"StringNotEquals":{"aws:PrincipalOrgID":"o-example"}}}"#;
+        let (hook, state, key) = own_key_with(&format!("{ROOT_ALLOW},{org_guard}"));
+        let caller = via("arn:aws:iam::111111111111:user/u");
+        assert_eq!(
+            hook.encrypt(
+                "111111111111",
+                "us-east-1",
+                &key,
+                b"x",
+                caller,
+                HashMap::new()
+            )
+            .unwrap_err()
+            .kind,
+            KmsErrorKind::AccessDenied,
+            "a caller in no organization fails the org guard"
+        );
+        let hook = KmsServiceHook::new(state, Default::default()).with_caller_resolver(Arc::new(
+            |_arn: &str| CallerFacts {
+                org: Some(("o-example".to_string(), "o-example/r-root/".to_string())),
+                ..Default::default()
+            },
         ));
         hook.encrypt(
             "111111111111",
