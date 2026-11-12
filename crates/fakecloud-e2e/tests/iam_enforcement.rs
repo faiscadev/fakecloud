@@ -4735,3 +4735,117 @@ async fn s3_create_bucket_with_an_unreadable_tag_set_is_refused() {
         .await
         .is_err());
 }
+
+/// Broken aws-chunked framing is refused only after the bucket's existence
+/// and the caller's authorization, as recorded on S3 (anonymous, body
+/// `zz;garbage\r\nabc\r\n`): a missing bucket is 404 NoSuchBucket, an
+/// anonymous PutObject 403 AccessDenied, an anonymous `?tagging` 400
+/// InvalidRequest for its streaming `x-amz-content-sha256`. A signed caller
+/// without permission is AccessDenied, one with it InvalidChunkSizeError, and
+/// nothing is written.
+#[tokio::test]
+async fn s3_broken_aws_chunked_framing_comes_after_bucket_and_authorization() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket()
+        .bucket("framed-order")
+        .send()
+        .await
+        .unwrap();
+    boot.put_object()
+        .bucket("framed-order")
+        .key("k")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"v"))
+        .send()
+        .await
+        .unwrap();
+    let broken = |host: Option<&str>, path: &str| {
+        let request = reqwest::Client::new()
+            .put(format!("{}{path}", server.endpoint()))
+            .header("content-encoding", "aws-chunked")
+            .header("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+            .header("x-amz-decoded-content-length", "3")
+            .body("zz;garbage\r\nabc\r\n");
+        match host {
+            Some(host) => request.header("host", host),
+            None => request,
+        }
+    };
+    // An unsigned path-style request names no service, and one to a bucket
+    // that does not exist is not S3's to claim locally; the virtual-hosted
+    // host is S3's.
+    let missing = Some("framed-order-missing.s3.us-east-1.amazonaws.com");
+    for (host, path, status, code) in [
+        (missing, "/k", 404, "NoSuchBucket"),
+        (missing, "/k?tagging", 404, "NoSuchBucket"),
+        (None, "/framed-order/k", 403, "AccessDenied"),
+        (None, "/framed-order/k?tagging", 400, "InvalidRequest"),
+    ] {
+        let resp = broken(host, path).send().await.unwrap();
+        let got = resp.status().as_u16();
+        let body = resp.text().await.unwrap();
+        assert_eq!(got, status, "{path}: {body}");
+        assert!(
+            body.contains(&format!("<Code>{code}</Code>")),
+            "{path}: {body}"
+        );
+        if code == "InvalidRequest" {
+            assert!(
+                body.contains("The value of x-amz-content-sha256 header is invalid."),
+                "{body}"
+            );
+        }
+    }
+
+    // Signed: the SDK's request, its body replaced by the broken framing.
+    let (akid, secret) = bootstrap_user(&server, "brokenframer").await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let tag = || {
+        use aws_sdk_s3::types::{Tag, Tagging};
+        s3.put_object_tagging()
+            .bucket("framed-order")
+            .key("k")
+            .tagging(
+                Tagging::builder()
+                    .tag_set(Tag::builder().key("env").value("prod").build().unwrap())
+                    .build()
+                    .unwrap(),
+            )
+            .customize()
+            .mutate_request(|r| {
+                frame_aws_chunked(r);
+                let framed = b"zz;garbage\r\nabc\r\n";
+                r.headers_mut()
+                    .insert("content-length", framed.len().to_string());
+                *r.body_mut() = aws_smithy_types::body::SdkBody::from(&framed[..]);
+            })
+            .send()
+    };
+    let code_of = |err: &aws_sdk_s3::error::SdkError<
+        aws_sdk_s3::operation::put_object_tagging::PutObjectTaggingError,
+        aws_smithy_runtime_api::http::Response,
+    >| {
+        let raw = err.raw_response().unwrap();
+        String::from_utf8_lossy(raw.body().bytes().unwrap()).to_string()
+    };
+    let err = tag().await.unwrap_err();
+    assert!(code_of(&err).contains("<Code>AccessDenied</Code>"));
+    attach_inline_policy(
+        &server,
+        "brokenframer",
+        "Tag",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Action":"s3:PutObjectTagging","Resource":"arn:aws:s3:::framed-order/*"}]}"#,
+    )
+    .await;
+    let err = tag().await.unwrap_err();
+    assert!(code_of(&err).contains("<Code>InvalidChunkSizeError</Code>"));
+    let tags = boot
+        .get_object_tagging()
+        .bucket("framed-order")
+        .key("k")
+        .send()
+        .await
+        .unwrap();
+    assert!(tags.tag_set().is_empty(), "nothing is written");
+}

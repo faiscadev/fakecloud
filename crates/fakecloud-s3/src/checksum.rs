@@ -850,11 +850,16 @@ pub(crate) fn verify_buffered(
 /// The request becomes the unframed request it is equivalent to:
 /// `aws-chunked` leaves `Content-Encoding`, and the trailing checksum the
 /// `x-amz-trailer` header announces becomes that checksum's header, checked
-/// later exactly as a header value is. A trailing value that is no digest of
-/// its algorithm is refused here, with the trailing-header message. Headers
-/// that do not parse are left as they are, for the handler to refuse as
-/// before, and so is an announced trailer that never came (the handler
-/// answers it as a missing trailer).
+/// later exactly as a header value is. Headers that do not parse are left as
+/// they are, for the handler to refuse as before, and so is an announced
+/// trailer that never came (the handler answers it as a missing trailer).
+///
+/// All or nothing: a body whose framing is broken, or whose trailing value
+/// is no digest of its algorithm (refused with the trailing-header message),
+/// leaves the request exactly as it was, still framed. Its error is S3's to
+/// return only once the bucket's existence and the caller's authorization
+/// have been judged (recorded: NoSuchBucket and AccessDenied come first), so
+/// the handler unframes again at that point and gets the same error.
 pub(crate) fn deframe_buffered(
     headers: &mut HeaderMap,
     body: &mut bytes::Bytes,
@@ -869,50 +874,58 @@ pub(crate) fn deframe_buffered(
             "Malformed aws-chunked request body",
         )
     })?;
-    *body = decoded.payload.into();
+    let mut unframed = headers.clone();
     let encoding = fakecloud_core::service::strip_aws_chunked_encoding(
-        headers
+        unframed
             .get("content-encoding")
             .and_then(|v| v.to_str().ok()),
     );
     match encoding.and_then(|e| http::HeaderValue::from_str(&e).ok()) {
-        Some(value) => headers.insert("content-encoding", value),
-        None => headers.remove("content-encoding"),
+        Some(value) => unframed.insert("content-encoding", value),
+        None => unframed.remove("content-encoding"),
     };
     // A `STREAMING-...` payload hash names the framing, whose chunk
     // signatures were the payload's assertion; the unframed body asserts no
     // hash of its own.
-    headers.insert(
+    unframed.insert(
         "x-amz-content-sha256",
         http::HeaderValue::from_static("UNSIGNED-PAYLOAD"),
     );
-    let Ok(ChecksumHeaders {
-        trailer: Some(algorithm),
-        ..
-    }) = ChecksumHeaders::parse(headers)
-    else {
-        return Ok(());
+    let trailer = match ChecksumHeaders::parse(&unframed) {
+        Ok(ChecksumHeaders {
+            trailer: Some(algorithm),
+            ..
+        }) => decoded
+            .trailers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(algorithm.header_name()))
+            .map(|(_, value)| (algorithm, value)),
+        _ => None,
     };
-    let Some((_, value)) = decoded
-        .trailers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(algorithm.header_name()))
-    else {
-        return Ok(());
-    };
-    let invalid = || {
-        invalid_request(format!(
-            "Value for {} trailing header is invalid.",
-            algorithm.header_name()
-        ))
-    };
-    if decode(algorithm, value).is_none() {
-        return Err(invalid());
+    if let Some((algorithm, value)) = trailer {
+        let invalid = || {
+            invalid_request(format!(
+                "Value for {} trailing header is invalid.",
+                algorithm.header_name()
+            ))
+        };
+        if decode(algorithm, value).is_none() {
+            return Err(invalid());
+        }
+        let value = http::HeaderValue::from_str(value).map_err(|_| invalid())?;
+        unframed.remove("x-amz-trailer");
+        unframed.insert(algorithm.header_name(), value);
     }
-    let value = http::HeaderValue::from_str(value).map_err(|_| invalid())?;
-    headers.remove("x-amz-trailer");
-    headers.insert(algorithm.header_name(), value);
+    *headers = unframed;
+    *body = decoded.payload.into();
     Ok(())
+}
+
+/// Whether a request's body is still `aws-chunked` framed, buffered: one
+/// [`deframe_buffered`] could not unframe. Nothing may read its body before
+/// the handler refuses it.
+pub(crate) fn still_framed(headers: &HeaderMap) -> bool {
+    fakecloud_core::service::is_aws_chunked(headers)
 }
 
 /// Verify the integrity headers of a small, fully buffered request body (the

@@ -5920,6 +5920,7 @@ async fn aws_chunked_tag_sets_are_read_unframed_before_authorization() {
     ] {
         let mut req = make_request(Method::PUT, path, &[("tagging", "")], framed.as_bytes());
         *req.body_stream.lock() = None;
+        req.access_key_id = Some("AKIDEXAMPLE".to_string());
         for (name, value) in [
             ("content-encoding", "aws-chunked"),
             ("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"),
@@ -5939,20 +5940,66 @@ async fn aws_chunked_tag_sets_are_read_unframed_before_authorization() {
     let resp = svc.handle(get).await.unwrap();
     assert!(String::from_utf8_lossy(resp.body.expect_bytes()).contains("<Key>env</Key>"));
 
-    // A body whose framing is broken is refused before anything reads it.
-    let mut req = make_request(
-        Method::PUT,
-        "/chunked-tags/k",
-        &[("tagging", "")],
-        b"zz\r\n",
-    );
-    *req.body_stream.lock() = None;
-    req.headers
-        .insert("content-encoding", "aws-chunked".parse().unwrap());
-    assert_eq!(
-        svc.prepare_request(&mut req).unwrap_err().code(),
-        "InvalidChunkSizeError"
-    );
+    // Broken framing (recorded on S3, body "zz;garbage\r\nabc\r\n"): the
+    // request stays framed and nothing before the handler reads its body; a
+    // missing bucket is NoSuchBucket, a signed request to an existing one
+    // InvalidChunkSizeError, with nothing written.
+    let broken = |path: &str, signed: bool| {
+        let mut req = make_request(
+            Method::PUT,
+            path,
+            &[("tagging", "")],
+            b"zz;garbage\r\nabc\r\n",
+        );
+        *req.body_stream.lock() = None;
+        if signed {
+            req.access_key_id = Some("AKIDEXAMPLE".to_string());
+        }
+        for (name, value) in [
+            ("content-encoding", "aws-chunked"),
+            ("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"),
+            ("x-amz-decoded-content-length", "3"),
+        ] {
+            req.headers.insert(name, value.parse().unwrap());
+        }
+        svc.prepare_request(&mut req).unwrap();
+        assert!(crate::checksum::still_framed(&req.headers));
+        assert_eq!(&req.body[..], b"zz;garbage\r\nabc\r\n");
+        req
+    };
+    for signed in [true, false] {
+        for path in ["/no-such-bucket/k", "/no-such-bucket"] {
+            let req = broken(path, signed);
+            // Anonymous: NoSuchBucket before authorization too (recorded).
+            match svc.validate_before_authorization(&req) {
+                Ok(()) => assert!(signed, "{path}"),
+                Err(err) => {
+                    assert!(!signed, "{path}");
+                    assert_eq!(err.code(), "NoSuchBucket");
+                }
+            }
+            assert_aws_err(svc.handle(req).await, "NoSuchBucket");
+        }
+    }
+    for path in ["/chunked-tags/k", "/chunked-tags"] {
+        let req = broken(path, true);
+        // Authorized (tags evaluated as none), then refused for the framing.
+        svc.validate_before_authorization(&req).unwrap();
+        assert_aws_err(svc.handle(req).await, "InvalidChunkSizeError");
+        // Anonymous: the streaming payload declaration itself is refused,
+        // after the bucket's existence and before authorization.
+        let req = broken(path, false);
+        let err = svc.validate_before_authorization(&req).unwrap_err();
+        assert_eq!(err.code(), "InvalidRequest");
+        assert_eq!(
+            err.message(),
+            "The value of x-amz-content-sha256 header is invalid."
+        );
+        assert_aws_err(svc.handle(req).await, "InvalidRequest");
+    }
+    let get = make_request(Method::GET, "/chunked-tags/k", &[("tagging", "")], b"");
+    let resp = svc.handle(get).await.unwrap();
+    assert!(String::from_utf8_lossy(resp.body.expect_bytes()).contains("<Value>prod</Value>"));
 }
 
 #[tokio::test]
@@ -12316,8 +12363,14 @@ mod flexible_checksums {
             ("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"),
             ("x-amz-trailer", "x-amz-checksum-crc32"),
         ];
+        // Signed: an anonymous request declaring a streaming payload for
+        // PutBucketTagging is refused for the declaration itself.
+        let signed = |mut req: AwsRequest| {
+            req.access_key_id = Some("AKIDEXAMPLE".to_string());
+            req
+        };
         let wrong = checksum(ChecksumAlgorithm::Crc32, b"other");
-        let req = with_headers(
+        let req = signed(with_headers(
             make_request(
                 Method::PUT,
                 "/hb",
@@ -12325,10 +12378,10 @@ mod flexible_checksums {
                 frame(&wrong).as_bytes(),
             ),
             &headers,
-        );
+        ));
         assert_aws_err(svc.handle(req).await, "BadDigest");
         let good = checksum(ChecksumAlgorithm::Crc32, xml.as_bytes());
-        let req = with_headers(
+        let req = signed(with_headers(
             make_request(
                 Method::PUT,
                 "/hb",
@@ -12336,7 +12389,7 @@ mod flexible_checksums {
                 frame(&good).as_bytes(),
             ),
             &headers,
-        );
+        ));
         svc.handle(req).await.unwrap();
         // The handler saw the decoded XML, not the framing.
         let tags = svc.state.read().default_ref().buckets["hb"].tags.clone();

@@ -825,10 +825,6 @@ impl AwsService for S3Service {
                 req.body = fakecloud_core::service::drain_request_stream(stream).await?;
             }
         }
-        // Dispatch already prepared the request; a direct call has not. A
-        // no-op the second time.
-        self.prepare_request(&mut req)?;
-
         // Access point data plane: resolve alias -> bucket before routing.
         access_points::resolve_access_point(self, &mut req)?;
 
@@ -897,6 +893,40 @@ impl AwsService for S3Service {
         let caller_account = req.account_id.as_str();
         let owner_account = bucket.and_then(|b| self.bucket_owner_account(b));
         let account_id = owner_account.as_deref().unwrap_or(caller_account);
+
+        // The payload's own refusals come once the bucket is known to exist
+        // and the caller is authorized (dispatch has run), as recorded on S3:
+        // a missing bucket is NoSuchBucket and an unauthorized caller
+        // AccessDenied whatever the framing. A request to a missing bucket is
+        // left to answer NoSuchBucket (CreateBucket creates its bucket).
+        if !is_control
+            && (bucket.is_none()
+                || owner_account.is_some()
+                || op == Some(route::S3Op::CreateBucket))
+        {
+            if let Some(error) = op.and_then(|op| streaming_payload_refused(&req, op)) {
+                return Err(self.refuse(&req, error.into()));
+            }
+            // Dispatch unframed an aws-chunked body already
+            // (`prepare_request`); one still framed here is broken, and this
+            // returns its error. A direct call is unframed here.
+            if req.body_stream.lock().is_none() {
+                let mut body = std::mem::take(&mut req.body);
+                let unframed = crate::checksum::deframe_buffered(&mut req.headers, &mut body);
+                req.body = body;
+                if let Err(error) = unframed {
+                    return Err(self.refuse(&req, error.into()));
+                }
+            }
+        } else if let Some(b) = bucket.filter(|_| {
+            !is_control
+                && req.body_stream.lock().is_none()
+                && crate::checksum::still_framed(&req.headers)
+        }) {
+            // A body still framed to a missing bucket: NoSuchBucket, before
+            // anything reads the body (recorded, PutObject and ?tagging).
+            return Err(no_such_bucket(b));
+        }
 
         if let Some(op) = op.filter(|_| !is_control && bucket.is_some()) {
             request_checks::check_request(&req, key.as_deref(), op)?;
@@ -1408,23 +1438,21 @@ impl AwsService for S3Service {
         if request.body_stream.lock().is_some() {
             return Ok(());
         }
-        let mut body = std::mem::take(&mut request.body);
-        let deframed = crate::checksum::deframe_buffered(&mut request.headers, &mut body);
-        request.body = body;
-        deframed.map_err(|error| {
-            // A bucket-addressed refusal carries the bucket's CORS headers
-            // and access log record, as every other one does.
-            let reaches_bucket = !fakecloud_core::protocol::is_s3_control_host(&request.headers)
-                && request.method != Method::OPTIONS
-                && !request.raw_path.starts_with("//");
-            self.refuse(
-                request,
-                route::Refusal {
-                    error,
-                    reaches_bucket,
-                },
-            )
-        })
+        // A request refused for declaring a streaming payload keeps the
+        // declaration it is refused for.
+        if classify_request(request)
+            .ok()
+            .and_then(|op| streaming_payload_refused(request, op))
+            .is_some()
+        {
+            return Ok(());
+        }
+        // A body that cannot be unframed stays framed (`still_framed`): S3
+        // answers a missing bucket and an unauthorized caller before the
+        // framing (recorded), so the handler refuses it after both, and
+        // nothing reads it in between.
+        let _ = crate::checksum::deframe_buffered(&mut request.headers, &mut request.body);
+        Ok(())
     }
 
     fn validate_before_authorization(&self, request: &AwsRequest) -> Result<(), AwsServiceError> {
@@ -1447,6 +1475,35 @@ impl AwsService for S3Service {
         let op = classify_request(request).map_err(|refusal| self.refuse(request, refusal))?;
         if let Some(error) = self.missing_upload(request, op) {
             return Err(self.refuse(request, error.into()));
+        }
+        let bucket = request.path_segments.first();
+        let bucket_exists = bucket.is_some_and(|b| self.bucket_owner_account(b).is_some());
+        // An anonymous request to a bucket that does not exist is
+        // NoSuchBucket, not AccessDenied (recorded, PutObject and ?tagging).
+        // An access-point alias is resolved by the handler, not here.
+        let via_access_point = request
+            .headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|h| h.to_ascii_lowercase().contains("s3-accesspoint"));
+        if let Some(b) = bucket.filter(|_| {
+            !bucket_exists
+                && !via_access_point
+                && is_anonymous(request)
+                && op != route::S3Op::CreateBucket
+        }) {
+            return Err(no_such_bucket(b));
+        }
+        if bucket_exists {
+            if let Some(error) = streaming_payload_refused(request, op) {
+                return Err(self.refuse(request, error.into()));
+            }
+        }
+        // A body still framed could not be unframed (`prepare_request`): its
+        // error comes after authorization, from the handler, and its tag set
+        // is evaluated as none (the request fails and writes nothing).
+        if crate::checksum::still_framed(&request.headers) {
+            return Ok(());
         }
         // A tag set the handler cannot read is refused before its request
         // tags are evaluated, so IAM never judges a partial or misread set.
@@ -1670,6 +1727,39 @@ impl S3Service {
 pub(crate) fn request_key(req: &AwsRequest) -> Option<String> {
     req.path_segments.first()?;
     key_of_raw_path(&req.raw_path)
+}
+
+/// A request that presents no credentials (and is no in-process service
+/// principal).
+fn is_anonymous(req: &AwsRequest) -> bool {
+    req.access_key_id.is_none() && req.principal.is_none()
+}
+
+/// An anonymous request that declares a streaming payload
+/// (`x-amz-content-sha256: STREAMING-...`) for an operation whose payload is
+/// no streaming blob: 400 InvalidRequest, after the bucket's existence and
+/// before authorization (recorded for an anonymous PutObjectTagging; an
+/// anonymous PutObject with the same header goes on to AccessDenied, so the
+/// upload operations take it). Signed requests are not judged here: nothing
+/// recorded says how S3 treats one.
+fn streaming_payload_refused(req: &AwsRequest, op: route::S3Op) -> Option<AwsServiceError> {
+    let streaming = req
+        .headers
+        .get("x-amz-content-sha256")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().starts_with("STREAMING-"));
+    let anonymous = is_anonymous(req);
+    let takes_streaming_payload = matches!(
+        op,
+        route::S3Op::PutObject | route::S3Op::UploadPart | route::S3Op::PutObjectAnnotation
+    );
+    (streaming && anonymous && !takes_streaming_payload).then(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidRequest",
+            "The value of x-amz-content-sha256 header is invalid.",
+        )
+    })
 }
 
 /// [`request_key`] from the raw path alone, for a request not yet built
@@ -1985,7 +2075,8 @@ fn s3_request_tags(
         // Tags come in the XML body, read by the parser the handler stores
         // them with (`tags::read_tag_set`). A body it cannot read is refused
         // before authorization (`validate_before_authorization`), so no
-        // partial tag set is ever evaluated.
+        // partial tag set is ever evaluated; a body whose aws-chunked framing
+        // is broken has none, and is refused after authorization.
         "PutBucketTagging" | "PutObjectTagging" => {
             let body = std::str::from_utf8(&request.body).unwrap_or("");
             let tags = tags::read_tag_set(body, "Tagging", "TagSet").unwrap_or_default();
