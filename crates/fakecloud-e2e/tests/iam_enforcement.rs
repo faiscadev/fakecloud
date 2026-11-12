@@ -2195,6 +2195,26 @@ async fn s3_put_object_tagging_request_tags_reach_iam() {
     };
     assert!(is_access_denied(tag("evil").await));
     tag("good").await.unwrap();
+
+    // Recorded on S3: a repeated key in `x-amz-tagging` is InvalidArgument.
+    let err = boot
+        .put_object()
+        .bucket("tagged")
+        .key("dup")
+        .tagging("a=1&a=2")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap_err();
+    let err = err.into_service_error();
+    assert_eq!(err.meta().code(), Some("InvalidArgument"));
+    assert_eq!(
+        err.meta().message(),
+        Some(
+            "The header 'x-amz-tagging' shall be encoded as UTF-8 then URLEncoded URL query \
+             parameters without tag name duplicates."
+        )
+    );
 }
 
 /// The website error document is an object read of its own: a caller not

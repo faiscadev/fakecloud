@@ -1067,6 +1067,9 @@ async fn post_object_ignores_fields_after_the_file() {
             || text.contains("Bucket POST must contain a field named 'key'."),
         "{text}"
     );
+    // Recorded on S3: `<ArgumentName>key</ArgumentName><ArgumentValue></ArgumentValue>`.
+    assert!(text.contains("<ArgumentName>key</ArgumentName>"), "{text}");
+    assert!(text.contains("<ArgumentValue></ArgumentValue>"), "{text}");
 }
 
 /// SSE-KMS under a form upload uses the key as the policy's signer: a key

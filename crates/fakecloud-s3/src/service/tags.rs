@@ -182,9 +182,9 @@ pub(crate) fn validate_object_tags(tags: &[(String, String)]) -> Result<(), AwsS
 
 /// An object's tag set from the `x-amz-tagging` header (PutObject,
 /// CopyObject with REPLACE, CreateMultipartUpload): URL-encoded query
-/// parameters. Recorded on S3: an empty key is InvalidArgument (the message
-/// below, which also names duplicates), otherwise the tags are checked as
-/// any object tag set.
+/// parameters. Recorded on S3 (PutObject, 2026-11-12): an empty key (`=1`)
+/// and a repeated one (`a=1&a=2`) are both InvalidArgument with the message
+/// below; otherwise the tags are checked as any object tag set.
 pub(crate) fn parse_tagging_header(value: &str) -> Result<Vec<(String, String)>, AwsServiceError> {
     let tags = super::parse_url_encoded_tags(value);
     let mut seen = std::collections::HashSet::new();

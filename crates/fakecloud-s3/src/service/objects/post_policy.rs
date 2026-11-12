@@ -498,8 +498,8 @@ impl S3Service {
         let form = parse_multipart_form(&content_type, req.body.clone()).await?;
 
         let key_field = form.field_lower("key").ok_or_else(|| {
-            // S3's own wording: a `key` sent after the file is ignored,
-            // hence the hint about field order.
+            // Recorded on S3 (a `key` only after the file, 2026-11-12): this
+            // message, `ArgumentName` key and an empty `ArgumentValue`.
             AwsServiceError::aws_error_with_fields(
                 StatusCode::BAD_REQUEST,
                 "InvalidArgument",
