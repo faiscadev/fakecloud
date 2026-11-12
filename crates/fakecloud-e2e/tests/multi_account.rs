@@ -712,3 +712,120 @@ async fn s3_replication_to_another_account_requires_bucket_policy() {
         Some(&aws_sdk_s3::types::ReplicationStatus::Failed)
     );
 }
+
+// ======================================================================
+// KMS: a resource in one account encrypted under another account's key
+// ======================================================================
+
+/// A customer key in account B whose key policy grants account A (or, with
+/// `grant_a` false, only B itself). Returns the key ARN.
+async fn key_in_b(kms_b: &aws_sdk_kms::Client, grant_a: bool) -> String {
+    let grantee = if grant_a { ACCOUNT_A } else { ACCOUNT_B };
+    let policy = format!(
+        r#"{{"Version":"2012-10-17","Statement":[
+            {{"Sid":"Owner","Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{ACCOUNT_B}:root"}},"Action":"kms:*","Resource":"*"}},
+            {{"Sid":"Use","Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{grantee}:root"}},"Action":["kms:Encrypt","kms:Decrypt","kms:GenerateDataKey*","kms:DescribeKey"],"Resource":"*"}}]}}"#
+    );
+    kms_b
+        .create_key()
+        .policy(policy)
+        .send()
+        .await
+        .unwrap()
+        .key_metadata
+        .unwrap()
+        .arn
+        .unwrap()
+}
+
+/// An SQS queue and a secret in account A can use a customer key of account
+/// B by its ARN when B's key policy grants A (the values round-trip); a key
+/// whose policy grants only B refuses A, and nothing is stored.
+#[tokio::test]
+async fn resources_use_another_accounts_key_when_its_policy_allows() {
+    let server = start().await;
+    let (a_akid, a_secret) = server.create_admin(ACCOUNT_A, "admin-a").await;
+    let (b_akid, b_secret) = server.create_admin(ACCOUNT_B, "admin-b").await;
+    let a_cfg = config_with(&server, &a_akid, &a_secret).await;
+    let b_cfg = config_with(&server, &b_akid, &b_secret).await;
+    let kms_b = aws_sdk_kms::Client::new(&b_cfg);
+    let shared = key_in_b(&kms_b, true).await;
+    let private = key_in_b(&kms_b, false).await;
+    assert!(shared.contains(&format!(":{ACCOUNT_B}:key/")), "{shared}");
+
+    let sqs = SqsClient::new(&a_cfg);
+    let mut urls = Vec::new();
+    for (name, key) in [("cross-ok", &shared), ("cross-refused", &private)] {
+        urls.push(
+            sqs.create_queue()
+                .queue_name(name)
+                .attributes(aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId, key)
+                .send()
+                .await
+                .unwrap()
+                .queue_url
+                .unwrap(),
+        );
+    }
+    sqs.send_message()
+        .queue_url(&urls[0])
+        .message_body("hello")
+        .send()
+        .await
+        .unwrap();
+    let got = sqs
+        .receive_message()
+        .queue_url(&urls[0])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.messages()[0].body(), Some("hello"));
+    let err = sqs
+        .send_message()
+        .queue_url(&urls[1])
+        .message_body("hello")
+        .send()
+        .await
+        .expect_err("a key whose policy does not grant A refuses it");
+    assert_eq!(
+        aws_sdk_sqs::error::ProvideErrorMetadata::code(&err),
+        Some("KMS.AccessDeniedException"),
+        "{err:?}"
+    );
+
+    let secrets = aws_sdk_secretsmanager::Client::new(&a_cfg);
+    secrets
+        .create_secret()
+        .name("cross")
+        .kms_key_id(&shared)
+        .secret_string("s3cret")
+        .send()
+        .await
+        .unwrap();
+    let value = secrets
+        .get_secret_value()
+        .secret_id("cross")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(value.secret_string(), Some("s3cret"));
+    let err = secrets
+        .create_secret()
+        .name("cross-refused")
+        .kms_key_id(&private)
+        .secret_string("s3cret")
+        .send()
+        .await
+        .expect_err("a key whose policy does not grant A refuses it");
+    assert_eq!(
+        aws_sdk_secretsmanager::error::ProvideErrorMetadata::code(&err),
+        Some("AccessDeniedException"),
+        "{err:?}"
+    );
+    assert!(secrets
+        .describe_secret()
+        .secret_id("cross-refused")
+        .send()
+        .await
+        .is_err());
+}

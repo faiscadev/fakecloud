@@ -81,9 +81,11 @@ impl KmsHookAdapter {
         region: &str,
         key_id: &str,
     ) -> Result<String, fakecloud_core::delivery::KmsError> {
+        // A key ARN or alias ARN resolves in the account it names.
+        let owner = fakecloud_kms::hook::key_owner_account(account_id, key_id);
         let (arn, minted) = self
             .inner
-            .resolve_key_arn_tracked(account_id, region, key_id, "")?;
+            .resolve_key_arn_tracked(owner, region, key_id, "")?;
         if minted {
             self.persist_minted_key();
         }
