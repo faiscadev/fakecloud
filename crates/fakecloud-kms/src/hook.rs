@@ -640,6 +640,14 @@ fn authorize(
         KmsCaller::OnBehalfOf { caller_arn, .. } => Some(caller_arn),
         KmsCaller::Service { .. } => None,
     };
+    // The caller's own account, which a service acting for it on a resource
+    // of another account (a bucket or queue of the key's account) passes as
+    // `account_id`: the key policy, the own-key shortcut and the grantee
+    // forms all judge the caller.
+    let account_id = caller_arn
+        .flatten()
+        .and_then(fakecloud_aws::arn::account_of)
+        .unwrap_or(account_id);
     let region = parse_kms_arn(&key.arn).map_or("us-east-1", |(r, _, _)| r);
     let partition = fakecloud_aws::arn::partition_for(region);
     let root = format!("arn:{partition}:iam::{account_id}:root");
@@ -2619,6 +2627,57 @@ mod tests {
             HashMap::new(),
         )
         .unwrap();
+    }
+
+    /// A service acting in the key's own account (an S3 bucket or SQS queue
+    /// of 222222222222 with a key of 222222222222) for a caller of
+    /// 111111111111: the key policy sees the caller's account, so neither an
+    /// Allow naming only the key's account nor an `aws:PrincipalAccount`
+    /// guard admits the foreign caller, while a caller of 222222222222 is
+    /// admitted by both.
+    #[test]
+    fn foreign_caller_is_judged_by_its_own_account() {
+        let owner = "222222222222";
+        let (state, _) = crate::test_support::kms_hook(owner);
+        let mint = |policy: &str| {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(owner);
+            let arn = mint_aws_managed_key(s, "us-east-1", &format!("k{}", policy.len()));
+            let key = s.keys.get_mut(key_id_from_arn(&arn)).unwrap();
+            key.key_manager = "CUSTOMER".into();
+            key.policy = policy.to_string();
+            arn
+        };
+        let account_allow = mint(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::222222222222:root"},"Action":"kms:*","Resource":"*"}]}"#,
+        );
+        let guarded = mint(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"kms:*","Resource":"*"},{"Effect":"Deny","Principal":"*","Action":"kms:*","Resource":"*","Condition":{"StringNotEquals":{"aws:PrincipalAccount":"222222222222","kms:CallerAccount":"222222222222"}}}]}"#,
+        );
+        let hook = KmsServiceHook::new(state.clone(), Default::default());
+        let via = |arn| KmsCaller::via_for("s3.amazonaws.com", Some(arn));
+        for key in [&account_allow, &guarded] {
+            let err = hook
+                .encrypt(
+                    owner,
+                    "us-east-1",
+                    key,
+                    b"x",
+                    via("arn:aws:iam::111111111111:user/u"),
+                    HashMap::new(),
+                )
+                .unwrap_err();
+            assert_eq!(err.kind, KmsErrorKind::AccessDenied, "{key}");
+            hook.encrypt(
+                owner,
+                "us-east-1",
+                key,
+                b"x",
+                via("arn:aws:iam::222222222222:user/u"),
+                HashMap::new(),
+            )
+            .unwrap();
+        }
     }
 
     #[test]

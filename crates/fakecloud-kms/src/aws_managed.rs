@@ -204,6 +204,12 @@ pub(crate) fn account_root(account: &str, region: &str) -> Principal {
 /// role's IAM ARN with its path, when known, else
 /// `arn:<p>:iam::<account>:role/<role>`. An account-root or bare-account
 /// principal in the policy matches either by account.
+/// The account of the calling identity `arn`, `fallback` when the ARN names
+/// none.
+fn caller_account<'a>(arn: &'a str, fallback: &'a str) -> &'a str {
+    fakecloud_aws::arn::account_of(arn).unwrap_or(fallback)
+}
+
 fn caller_principals(arn: &str, role_arn: Option<&str>, account: &str) -> Vec<Principal> {
     let principal = |arn: String, principal_type: PrincipalType| Principal {
         arn,
@@ -254,6 +260,7 @@ pub(crate) fn policy_decision(
         ..
     } = caller
     {
+        let account = caller_account(arn, account);
         let role_known = facts.is_some_and(|f| f.role_arn.is_some());
         let role = arn
             .split_once(":assumed-role/")
@@ -280,6 +287,7 @@ pub(crate) fn policy_decision(
     let mut base = RequestContext::default();
     let principals: Vec<Principal> = match caller {
         KeyCaller::Direct { principal, account } => {
+            let account = caller_account(&principal.arn, account);
             keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
             base = principal_context(
                 &principal.arn,
@@ -303,6 +311,10 @@ pub(crate) fn policy_decision(
                 "kms:ViaService".to_string(),
                 vec![via_service(service_principal, region)],
             );
+            // The caller's own account, not the account of the resource the
+            // service acts on (an S3 bucket, an SQS queue), which may be
+            // the key's.
+            let account = caller_arn.map_or(*account, |arn| caller_account(arn, account));
             keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
             let none = CallerFacts::default();
             let facts = facts.unwrap_or(&none);
