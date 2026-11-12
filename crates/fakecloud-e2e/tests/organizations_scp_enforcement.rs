@@ -502,6 +502,9 @@ fn read_grant(bucket: &str, principals: &[&str]) -> serde_json::Value {
 /// (`AccessDeniedException`).
 const S3_DENIED: &str = "AccessDenied";
 const JSON_DENIED: &str = "AccessDeniedException";
+/// SQS's code as SDKs read it: the awsQuery `AccessDenied` that its JSON
+/// errors carry in `x-amzn-query-error`.
+const SQS_DENIED: &str = "AccessDenied";
 
 /// Assert `result` is the service's IAM refusal (`code`) whose message
 /// names the SCP the way AWS does (`reason`).
@@ -840,7 +843,7 @@ async fn scp_caps_member_account_root() {
     .await;
     assert_scp_denied(
         read_queue().await,
-        JSON_DENIED,
+        SQS_DENIED,
         "with an explicit deny in a service control policy",
         "member root reading its queue",
     );
@@ -865,7 +868,7 @@ async fn scp_caps_member_account_root() {
     .await;
     assert_scp_denied(
         read_queue().await,
-        JSON_DENIED,
+        SQS_DENIED,
         "because no service control policy allows the sqs:GetQueueAttributes action",
         "member root reading its queue",
     );
@@ -1016,7 +1019,7 @@ async fn principal_arn_of_a_role_session_is_its_role() {
             .queue_name("not-admin")
             .send()
             .await,
-        JSON_DENIED,
+        SQS_DENIED,
         "with an explicit deny in a service control policy",
         "B's admin user is not the Admin role",
     );
@@ -1074,7 +1077,14 @@ async fn denial_names_the_scp_only_when_it_is_the_cause() {
         .send()
         .await
         .expect_err("the identity policy denies");
-    assert_eq!(err.code(), Some(JSON_DENIED), "{err:?}");
+    assert_eq!(err.code(), Some(SQS_DENIED), "{err:?}");
+    // The JSON body keeps SQS's JSON error type.
+    let body = err
+        .raw_response()
+        .and_then(|r| r.body().bytes())
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .unwrap_or_default();
+    assert!(body.contains("AccessDeniedException"), "{body}");
     let message = err.message().unwrap_or_default();
     assert!(
         message.starts_with(&format!(
@@ -1089,7 +1099,7 @@ async fn denial_names_the_scp_only_when_it_is_the_cause() {
             .queue_name("q")
             .send()
             .await,
-        JSON_DENIED,
+        SQS_DENIED,
         "because no service control policy allows the sqs:CreateQueue action",
         "only the SCPs refuse B's admin",
     );

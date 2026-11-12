@@ -418,11 +418,9 @@ impl StsService {
         let assumed_role_arn =
             super::format_assumed_role_arn(partition, &account_id, role_name, role_session_name);
         let assumed_role_id_str = format!("{}:{}", role_id, role_session_name);
-        // The role's IAM ARN (path included), which the session records.
-        let session_role_arn = accounts
-            .get(&account_id)
-            .and_then(|s| super::role_for_arn(s, role_arn).map(|r| r.arn.clone()))
-            .unwrap_or_else(|| role_arn.to_string());
+        // The IAM ARN (path included) of the role evaluated below, which the
+        // session records.
+        let session_role_arn;
 
         // Decode the JWT for trust-policy enforcement and to figure out
         // which OIDC provider vouched for the assertion. We never verify
@@ -522,7 +520,10 @@ impl StsService {
         // never assumable via web identity, so we don't replicate the
         // SLR shortcut from `assume_role`.
         let target_state = accounts.get_or_create(&account_id);
-        if let Some(role) = target_state.roles.get(role_name).cloned() {
+        // Matched on the full ARN, path included: an ARN with the wrong path
+        // names no role, as on AWS (see `role_for_arn`).
+        if let Some(role) = super::role_for_arn(target_state, role_arn).cloned() {
+            session_role_arn = role.arn.clone();
             let trust_doc = PolicyDocument::parse(&role.assume_role_policy_document);
             let caller_principal = federated_principal(&federated_provider, &account_id);
             let mut context = RequestContext {
@@ -764,11 +765,9 @@ impl StsService {
         let assumed_role_arn =
             super::format_assumed_role_arn(partition, &account_id, role_name, &role_session_name);
         let assumed_role_id_str = format!("{}:{}", role_id, role_session_name);
-        // The role's IAM ARN (path included), which the session records.
-        let session_role_arn = accounts
-            .get(&account_id)
-            .and_then(|s| super::role_for_arn(s, role_arn).map(|r| r.arn.clone()))
-            .unwrap_or_else(|| role_arn.to_string());
+        // The IAM ARN (path included) of the role evaluated below, which the
+        // session records.
+        let session_role_arn;
 
         // When the named SAML provider IS registered and its metadata declares
         // an audience (`entityID`), the assertion must carry a *matching*
@@ -799,7 +798,10 @@ impl StsService {
         // action is `sts:AssumeRoleWithSAML`. Trust policies typically
         // gate on `saml:aud` / `saml:iss` plus `aws:FederatedProvider`.
         let target_state = accounts.get_or_create(&account_id);
-        if let Some(role) = target_state.roles.get(role_name).cloned() {
+        // Matched on the full ARN, path included: an ARN with the wrong path
+        // names no role, as on AWS (see `role_for_arn`).
+        if let Some(role) = super::role_for_arn(target_state, role_arn).cloned() {
+            session_role_arn = role.arn.clone();
             let trust_doc = PolicyDocument::parse(&role.assume_role_policy_document);
             let caller_principal = federated_principal(&saml_provider_arn, &account_id);
             let mut context = RequestContext {

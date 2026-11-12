@@ -48,7 +48,7 @@ Three modes, in order of aggressiveness:
 
 - **`off`** (default): policies are stored but never consulted. Zero behavior change from unconfigured fakecloud.
 - **`soft`**: policies are evaluated and each deny is logged on the `fakecloud::iam::audit` tracing target, but the request is allowed through. Useful for onboarding: you can see which statements would fire without breaking your test suite.
-- **`strict`**: policies are evaluated and denied requests fail with the service's access-denied error before the service handler runs: `AccessDenied` for S3, IAM and STS, `AuthorizationError` for SNS, `AccessDeniedException` for the others.
+- **`strict`**: policies are evaluated and denied requests fail with the service's access-denied error before the service handler runs, by protocol: `AccessDenied` on the awsQuery protocol (IAM, STS, ELBv2, SQS's query path, ...) and for S3, `AccessDeniedException` on the JSON and REST protocols, and SNS's `AuthorizationError`. On SQS's JSON path the body keeps `AccessDeniedException` and `x-amzn-query-error: AccessDenied;Sender` carries the awsQuery code, so SDKs report `AccessDenied`, as for SQS's other errors.
 
 Filter the audit events with `RUST_LOG=fakecloud::iam::audit=warn`.
 

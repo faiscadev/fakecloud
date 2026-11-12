@@ -192,6 +192,7 @@ pub fn mint_session_credentials(
     {
         let mut accounts = iam.write();
         let state = accounts.get_or_create(&account_id);
+        let session_role_arn = state.minted_session_role_arn(role_arn);
         state.credential_identities.insert(
             creds.access_key_id.clone(),
             CredentialIdentity {
@@ -214,9 +215,10 @@ pub fn mint_session_credentials(
                 mfa_present: false,
                 issued_at,
                 federated_provider: None,
-                // The session keeps its role's ARN whether or not the role
-                // exists in IAM (the default `role/fakecloud` never does).
-                role_arn: Some(role_arn.to_string()),
+                // The real ARN of the role whose policies the session gets
+                // when it exists; the configured one otherwise (the default
+                // `role/fakecloud` never does).
+                role_arn: Some(session_role_arn),
             },
         );
     }
@@ -585,6 +587,53 @@ mod tests {
     fn temp_cred_count(iam: &SharedIamState, account: &str) -> usize {
         let mut accounts = iam.write();
         accounts.get_or_create(account).sts_temp_credentials.len()
+    }
+
+    /// The session records the real ARN of the role whose policies it gets,
+    /// whatever path the configured ARN gives; the configured ARN when no
+    /// such role exists (the zero-config `role/fakecloud`).
+    #[test]
+    fn minted_session_records_the_real_role_arn() {
+        let iam = shared();
+        iam.write().get_or_create("123456789012").roles.insert(
+            "app".into(),
+            crate::state::IamRole {
+                role_name: "app".into(),
+                role_id: "AROAAPP".into(),
+                arn: "arn:aws:iam::123456789012:role/ops/app".into(),
+                path: "/ops/".into(),
+                assume_role_policy_document: "{}".into(),
+                created_at: Utc::now(),
+                description: None,
+                max_session_duration: 3600,
+                tags: Vec::new(),
+                permissions_boundary: None,
+            },
+        );
+        let resolver = IamCredentialResolver::new(iam.clone());
+        let recorded = |configured: &str| {
+            let minted = mint_container_credentials(
+                &iam,
+                "123456789012",
+                configured,
+                DEFAULT_CONTAINER_CREDENTIALS_DURATION,
+            );
+            resolver.resolve(&minted.access_key_id).unwrap().role_arn
+        };
+        for configured in [
+            "arn:aws:iam::123456789012:role/app",
+            "arn:aws:iam::123456789012:role/ops/app",
+        ] {
+            assert_eq!(
+                recorded(configured).as_deref(),
+                Some("arn:aws:iam::123456789012:role/ops/app"),
+                "{configured}"
+            );
+        }
+        assert_eq!(
+            recorded("arn:aws:iam::123456789012:role/fakecloud").as_deref(),
+            Some("arn:aws:iam::123456789012:role/fakecloud")
+        );
     }
 
     #[test]

@@ -1004,9 +1004,7 @@ async fn dispatch_inner(
                                         scp_cause(decision, ceiling)
                                             .and_then(|d| scp_denial_reason(d, &action_string))
                                     });
-                                    return build_error_response(
-                                        StatusCode::FORBIDDEN,
-                                        access_denied_code(&detected.service),
+                                    return access_denied_response(
                                         &not_authorized_message(
                                             &principal.arn,
                                             &action_string,
@@ -1015,7 +1013,8 @@ async fn dispatch_inner(
                                             Some(&encoded),
                                         ),
                                         &request_id,
-                                        error_envelope,
+                                        &detected,
+                                        &aws_request.headers,
                                     );
                                 }
                                 // Soft mode: audit log already emitted; fall
@@ -2338,9 +2337,7 @@ fn authorize_root_scps(
         );
         if config.iam_mode.is_strict() {
             let action = iam_action.action_string();
-            return Some(build_error_response(
-                StatusCode::FORBIDDEN,
-                access_denied_code(&detected.service),
+            return Some(access_denied_response(
                 &not_authorized_message(
                     &principal.arn,
                     &action,
@@ -2349,7 +2346,8 @@ fn authorize_root_scps(
                     None,
                 ),
                 request_id,
-                ErrorEnvelope::for_request(detected, &aws_request.headers),
+                detected,
+                &aws_request.headers,
             ));
         }
     }
@@ -2414,17 +2412,51 @@ fn not_authorized_message(
     message
 }
 
-/// The error code `service` answers a caller its policies don't authorize
-/// with: `AccessDenied` for S3 and the awsQuery IAM and STS APIs,
-/// `AuthorizationError` for SNS (its declared 403), `AccessDeniedException`
-/// for the others (the awsJson / restJson services' declared code; kept for
-/// the rest, whose exact code fakecloud has no recording of).
-fn access_denied_code(service: &str) -> &'static str {
-    match service {
-        "s3" | "iam" | "sts" => "AccessDenied",
-        "sns" => "AuthorizationError",
+/// The error code a caller its policies don't authorize is answered with,
+/// by the request's protocol: `AccessDenied` on the awsQuery protocol (IAM,
+/// STS, SQS's query path, ELBv2, ...) and for S3, `AccessDeniedException` on
+/// the JSON and REST protocols (their declared code), except SNS, whose
+/// declared 403 is `AuthorizationError`.
+fn access_denied_code(service: &str, protocol: AwsProtocol) -> &'static str {
+    match (service, protocol) {
+        ("sns", _) => "AuthorizationError",
+        ("s3", _) | (_, AwsProtocol::Query) => "AccessDenied",
         _ => "AccessDeniedException",
     }
+}
+
+/// Services that answer the JSON protocol `awsQueryCompatible`: their JSON
+/// errors carry the awsQuery code in `x-amzn-query-error`, which SDKs report
+/// as the error's code.
+const QUERY_COMPATIBLE_JSON_SERVICES: &[&str] = &["sqs"];
+
+/// The strict-mode refusal of a request its caller is not authorized for,
+/// shaped as the service answers it (see [`access_denied_code`]). On the
+/// JSON path of an awsQuery-compatible service (SQS), the body keeps the
+/// JSON `AccessDeniedException` and `x-amzn-query-error: AccessDenied;Sender`
+/// carries the awsQuery code, as SQS does for its own errors.
+fn access_denied_response(
+    message: &str,
+    request_id: &str,
+    detected: &protocol::DetectedRequest,
+    headers: &http::HeaderMap,
+) -> Response<Body> {
+    let mut resp = build_error_response(
+        StatusCode::FORBIDDEN,
+        access_denied_code(&detected.service, detected.protocol),
+        message,
+        request_id,
+        ErrorEnvelope::for_request(detected, headers),
+    );
+    if detected.protocol == AwsProtocol::Json
+        && QUERY_COMPATIBLE_JSON_SERVICES.contains(&detected.service.as_str())
+    {
+        resp.headers_mut().insert(
+            "x-amzn-query-error",
+            http::HeaderValue::from_static("AccessDenied;Sender"),
+        );
+    }
+    resp
 }
 
 /// The strict-mode refusal of an operation with no IAM action mapping,
@@ -2435,15 +2467,14 @@ fn unmapped_action_denial(
     request_id: &str,
     detected: &protocol::DetectedRequest,
 ) -> Response<Body> {
-    build_error_response(
-        StatusCode::FORBIDDEN,
-        access_denied_code(&detected.service),
+    access_denied_response(
         &format!(
             "User: {} is not authorized to perform: {}: no IAM action mapping exists for this operation, so it cannot be authorized under strict IAM enforcement",
             principal.arn, aws_request.action,
         ),
         request_id,
-        ErrorEnvelope::for_request(detected, &aws_request.headers),
+        detected,
+        &aws_request.headers,
     )
 }
 
@@ -2542,9 +2573,7 @@ fn authorize_root_cross_account(
             "cross-account root request denied: the resource policy does not grant the action"
         );
         if config.iam_mode.is_strict() {
-            return Some(build_error_response(
-                StatusCode::FORBIDDEN,
-                access_denied_code(&detected.service),
+            return Some(access_denied_response(
                 &format!(
                     "User: {} is not authorized to perform: {} on resource: {} because no resource-based policy allows the {} action",
                     principal.arn,
@@ -2553,7 +2582,8 @@ fn authorize_root_cross_account(
                     iam_action.action_string(),
                 ),
                 request_id,
-                ErrorEnvelope::for_request(detected, &aws_request.headers),
+                detected,
+                &aws_request.headers,
             ));
         }
     }
@@ -4281,11 +4311,56 @@ mod tests {
         assert_eq!(scp_cause(ExplicitDeny, ImplicitDeny), None);
         assert_eq!(scp_cause(ImplicitDeny, Allow), None);
         assert_eq!(scp_cause(ExplicitDeny, Allow), None);
-        assert_eq!(access_denied_code("s3"), "AccessDenied");
-        assert_eq!(access_denied_code("sts"), "AccessDenied");
-        assert_eq!(access_denied_code("iam"), "AccessDenied");
-        assert_eq!(access_denied_code("sns"), "AuthorizationError");
-        assert_eq!(access_denied_code("kms"), "AccessDeniedException");
+        // The denial code follows the protocol: awsQuery `AccessDenied`,
+        // JSON/REST `AccessDeniedException`, with S3 and SNS their own.
+        assert_eq!(access_denied_code("s3", AwsProtocol::Rest), "AccessDenied");
+        assert_eq!(
+            access_denied_code("sts", AwsProtocol::Query),
+            "AccessDenied"
+        );
+        assert_eq!(
+            access_denied_code("iam", AwsProtocol::Query),
+            "AccessDenied"
+        );
+        assert_eq!(
+            access_denied_code("elasticloadbalancing", AwsProtocol::Query),
+            "AccessDenied"
+        );
+        assert_eq!(
+            access_denied_code("sqs", AwsProtocol::Query),
+            "AccessDenied"
+        );
+        assert_eq!(
+            access_denied_code("sqs", AwsProtocol::Json),
+            "AccessDeniedException"
+        );
+        assert_eq!(
+            access_denied_code("sns", AwsProtocol::Query),
+            "AuthorizationError"
+        );
+        assert_eq!(
+            access_denied_code("kms", AwsProtocol::Json),
+            "AccessDeniedException"
+        );
+        assert_eq!(
+            access_denied_code("lambda", AwsProtocol::Rest),
+            "AccessDeniedException"
+        );
+        // SQS's JSON path carries the awsQuery code in `x-amzn-query-error`.
+        let detected = |service: &str, protocol| protocol::DetectedRequest {
+            service: service.to_string(),
+            action: "SendMessage".to_string(),
+            protocol,
+        };
+        let headers = http::HeaderMap::new();
+        let sqs_json =
+            access_denied_response("m", "r", &detected("sqs", AwsProtocol::Json), &headers);
+        assert_eq!(
+            sqs_json.headers()["x-amzn-query-error"],
+            "AccessDenied;Sender"
+        );
+        let kms = access_denied_response("m", "r", &detected("kms", AwsProtocol::Json), &headers);
+        assert!(kms.headers().get("x-amzn-query-error").is_none());
         let explicit = scp_denial_reason(IamDecision::ExplicitDeny, "s3:GetObject");
         let implicit = scp_denial_reason(IamDecision::ImplicitDeny, "s3:GetObject");
         let user = "arn:aws:iam::222222222222:user/u";

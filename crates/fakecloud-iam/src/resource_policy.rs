@@ -38,14 +38,11 @@ impl ResourcePolicyProvider for StsResourcePolicyProvider {
             return None;
         }
         let account_id = parts[4];
-        let resource = parts[5];
-        let role_name = resource.strip_prefix("role/")?;
-        // Strip path if present: role/path/to/name -> name
-        let role_name = role_name.rsplit('/').next().unwrap_or(role_name);
-
         let accounts = self.state.read();
         let state = accounts.get(account_id)?;
-        let role = state.roles.get(role_name)?;
+        // Matched on the full ARN, path included: an ARN with the wrong path
+        // names no role.
+        let role = state.role_by_arn(resource_arn)?;
         Some(role.assume_role_policy_document.clone())
     }
 }
@@ -110,6 +107,17 @@ mod tests {
         let provider = StsResourcePolicyProvider::new(state);
         assert_eq!(
             provider.resource_policy("sts", "arn:aws:iam::222222222222:role/missing"),
+            None
+        );
+    }
+
+    /// A role ARN with the wrong path names no role.
+    #[test]
+    fn returns_none_for_a_role_arn_with_another_path() {
+        let state = make_state_with_role("222222222222", "my-role", "{}");
+        let provider = StsResourcePolicyProvider::new(state);
+        assert_eq!(
+            provider.resource_policy("sts", "arn:aws:iam::222222222222:role/ops/my-role"),
             None
         );
     }

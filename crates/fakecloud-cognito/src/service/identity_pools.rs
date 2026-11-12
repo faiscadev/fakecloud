@@ -858,6 +858,9 @@ impl CognitoIdentityService {
         {
             let mut accounts = self.iam_state.write();
             let target_state = accounts.get_or_create(&target_account);
+            // The real ARN of the role whose policies the session gets, so
+            // a `CustomRoleArn` with another path cannot name it otherwise.
+            let session_role_arn = target_state.minted_session_role_arn(&role_arn);
             target_state.credential_identities.insert(
                 creds.access_key_id.clone(),
                 CredentialIdentity {
@@ -880,7 +883,7 @@ impl CognitoIdentityService {
                     mfa_present: false,
                     issued_at: Utc::now(),
                     federated_provider: Some("cognito-identity.amazonaws.com".to_string()),
-                    role_arn: Some(role_arn.clone()),
+                    role_arn: Some(session_role_arn),
                 },
             );
         }

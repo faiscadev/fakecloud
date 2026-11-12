@@ -142,11 +142,7 @@ pub(super) fn role_for_arn<'a>(
     state: &'a IamState,
     role_arn: &str,
 ) -> Option<&'a crate::state::IamRole> {
-    fn resource(arn: &str) -> Option<&str> {
-        arn.split_once(":role/").map(|(_, r)| r)
-    }
-    let role = state.roles.get(assumed_role_name(role_arn))?;
-    (resource(&role.arn).is_some() && resource(&role.arn) == resource(role_arn)).then_some(role)
+    state.role_by_arn(role_arn)
 }
 
 /// Format the assumed-role principal ARN
@@ -1654,6 +1650,82 @@ mod tests {
         let resp = svc.handle(req).await.expect("existing role should succeed");
         let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
         assert!(body.contains("<AccessKeyId>"));
+    }
+
+    /// Move the role `name` under the `/ops/` path, returning its new ARN.
+    fn move_role_under_ops(state: &SharedIamState, name: &str) -> String {
+        let mut accounts = state.write();
+        let role = accounts
+            .get_or_create("123456789012")
+            .roles
+            .get_mut(name)
+            .unwrap();
+        role.path = "/ops/".to_string();
+        role.arn = format!("arn:aws:iam::123456789012:role/ops/{name}");
+        role.arn.clone()
+    }
+
+    /// The role ARN the only session minted so far recorded.
+    fn recorded_role_arn(state: &SharedIamState) -> Option<String> {
+        let accounts = state.read();
+        let creds = &accounts.get("123456789012").unwrap().sts_temp_credentials;
+        assert_eq!(creds.len(), 1);
+        creds.values().next().unwrap().role_arn.clone()
+    }
+
+    /// Web identity and SAML match the role on its full ARN, as AssumeRole
+    /// does: a RoleArn with another path than the real role's names no role
+    /// and is refused, and the session records the real role's ARN.
+    #[tokio::test]
+    async fn federated_assume_matches_the_role_path() {
+        let web_trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRoleWithWebIdentity"}]}"#;
+        let saml_trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"arn:aws:iam::123456789012:saml-provider/idp"},"Action":"sts:AssumeRoleWithSAML"}]}"#;
+        let assertion = make_saml_assertion();
+        let web = |role_arn: &str| {
+            sts_request(
+                "AssumeRoleWithWebIdentity",
+                vec![
+                    ("RoleArn", role_arn),
+                    ("RoleSessionName", "web-session"),
+                    ("WebIdentityToken", "fake-jwt-token"),
+                ],
+            )
+        };
+        let saml = |role_arn: &str| {
+            sts_request(
+                "AssumeRoleWithSAML",
+                vec![
+                    ("RoleArn", role_arn),
+                    (
+                        "PrincipalArn",
+                        "arn:aws:iam::123456789012:saml-provider/idp",
+                    ),
+                    ("SAMLAssertion", &assertion),
+                ],
+            )
+        };
+        for (trust, request) in [
+            (web_trust, &web as &dyn Fn(&str) -> AwsRequest),
+            (saml_trust, &saml),
+        ] {
+            let (svc, state) = make_sts_service();
+            register_saml_provider_in_state(&state, "arn:aws:iam::123456789012:saml-provider/idp");
+            let pathless = create_role_in_state_with_trust(&state, "Admin", trust);
+            let real = move_role_under_ops(&state, "Admin");
+            let err = match svc.handle(request(&pathless)).await {
+                Err(e) => e,
+                Ok(_) => panic!("{pathless} names no role"),
+            };
+            assert_eq!(err.status(), StatusCode::FORBIDDEN);
+            assert!(state
+                .read()
+                .get("123456789012")
+                .unwrap()
+                .sts_temp_credentials
+                .is_empty());
+            svc.handle(request(&real)).await.expect("the real role ARN");
+            assert_eq!(recorded_role_arn(&state).as_deref(), Some(real.as_str()));
+        }
     }
 
     #[tokio::test]

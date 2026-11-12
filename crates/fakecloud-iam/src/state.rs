@@ -707,6 +707,36 @@ impl IamState {
         })
     }
 
+    /// The role `role_arn` names, matched on its full `role/<path><name>`
+    /// resource rather than the name alone: IAM role ARNs carry the role's
+    /// path, and an ARN with the wrong path names no role (AWS refuses to
+    /// assume it), even though a role with that name exists under another
+    /// path.
+    pub fn role_by_arn(&self, role_arn: &str) -> Option<&IamRole> {
+        fn resource(arn: &str) -> Option<&str> {
+            arn.split_once(":role/").map(|(_, r)| r)
+        }
+        let requested = resource(role_arn)?;
+        let name = requested.rsplit('/').next()?;
+        let role = self.roles.get(name)?;
+        (resource(&role.arn) == Some(requested)).then_some(role)
+    }
+
+    /// The role ARN a session minted for the configured `role_arn` records
+    /// (outside STS, which refuses an ARN naming no role): the ARN of the
+    /// role whose policies the session gets, a role of that name being
+    /// looked up by name whatever path `role_arn` gives, so the session's
+    /// `aws:PrincipalArn` is always that role's; `role_arn` itself when no
+    /// such role exists (the zero-config credentials role).
+    pub fn minted_session_role_arn(&self, role_arn: &str) -> String {
+        let name = role_arn
+            .split_once(":role/")
+            .and_then(|(_, r)| r.rsplit('/').next());
+        name.and_then(|n| self.roles.get(n))
+            .map(|role| role.arn.clone())
+            .unwrap_or_else(|| role_arn.to_string())
+    }
+
     /// For an assumed-role session `principal_arn` of this account, the IAM
     /// ARN (path included) of the role it assumed: the role as IAM holds it,
     /// else the ARN a live session of it recorded when minted (a deleted
