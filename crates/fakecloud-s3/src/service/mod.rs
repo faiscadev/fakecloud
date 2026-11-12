@@ -21,6 +21,9 @@ mod annotations;
 mod buckets;
 pub(crate) mod config;
 mod control_tags;
+mod iam_actions;
+#[rustfmt::skip]
+mod iam_reference;
 mod lock;
 use crate::state::ObjectLockSettings;
 use lock::has_object_lock_headers;
@@ -1886,241 +1889,87 @@ impl AwsService for S3Service {
         true
     }
 
-    /// S3 resources are either:
-    /// - Bucket ARN (`arn:aws:s3:::bucket`) for bucket-level actions
-    /// - Object ARN (`arn:aws:s3:::bucket/key`) for object-level actions
-    /// - Wildcard (`*`) for `ListBuckets` which doesn't target a specific
-    ///   resource
-    ///
-    /// S3 ARNs notably omit the account id and region — this is the one
-    /// AWS service that carries neither in its ARN, because bucket names
-    /// are globally unique.
+    /// The request's primary authorization: the operation's own required
+    /// action (see [`AwsService::iam_actions_for`] for the full set).
     fn iam_action_for(&self, request: &AwsRequest) -> Option<fakecloud_core::auth::IamAction> {
-        // S3 doesn't set `request.action` — the handler dispatches on
-        // method + path + query params directly. Re-derive the action
-        // name here so enforcement can match against IAM policies the
-        // same way the real service would.
+        self.iam_actions_for(request).into_iter().next()
+    }
+
+    /// Every IAM authorization an S3 request needs, under S3's policy action
+    /// names (not its operation names: `ListObjectsV2` is `s3:ListBucket`,
+    /// `HeadObject` is `s3:GetObject`, ...; see [`iam_actions`]). Dispatch
+    /// requires every one, so a request that also sets an ACL, tags, Object
+    /// Lock settings or bypasses governance retention needs those permissions
+    /// too, a copy needs the source read, and DeleteObjects needs the delete
+    /// on each key.
+    ///
+    /// Resources are the bucket ARN (`arn:aws:s3:::bucket`) for bucket-level
+    /// actions, the object ARN (`arn:aws:s3:::bucket/key`) for object-level
+    /// ones and `*` for account-level ones (`s3:ListAllMyBuckets`), by the
+    /// action's resource type in the service authorization reference. S3
+    /// ARNs carry neither account nor region, since bucket names are global.
+    fn iam_actions_for(&self, request: &AwsRequest) -> Vec<fakecloud_core::auth::IamAction> {
+        if let Some(action) = control_iam_action(request) {
+            return vec![action];
+        }
+        // S3 doesn't set `request.action` -- the handler dispatches on
+        // method + path + query params directly -- so the operation is
+        // re-derived here.
+        let Some(op) = s3_operation(request) else {
+            return Vec::new();
+        };
         let bucket = request.path_segments.first().map(|s| s.as_str());
         let key = if request.path_segments.len() > 1 {
             Some(request.path_segments[1..].join("/"))
         } else {
             None
         };
-        // S3 Control access-point management (host `s3-control...`, path
-        // `/v20180820/accesspoint[/name]`) is authorized under the dedicated
-        // s3:CreateAccessPoint / GetAccessPoint / DeleteAccessPoint /
-        // ListAccessPoints actions — NOT the object-level GetObject/PutObject/
-        // DeleteObject the generic method-based detection would pick, which made
-        // access-point policies ineffective.
-        let is_control = fakecloud_core::protocol::is_s3_control_host(&request.headers)
-            && request.path_segments.first().map(|s| s.as_str()) == Some("v20180820");
-        // S3 Control resource tagging is authorized as s3:TagResource /
-        // UntagResource / ListTagsForResource on the tagged resource's ARN.
-        if is_control && request.path_segments.get(1).map(|s| s.as_str()) == Some("tags") {
-            let action = match request.method.as_str() {
-                "GET" => Some("ListTagsForResource"),
-                "POST" => Some("TagResource"),
-                "DELETE" => Some("UntagResource"),
-                _ => None,
-            };
-            if let Some(action) = action {
-                let resource = control_tags::resource_arn_from_path(request)
-                    .unwrap_or_else(|| "*".to_string());
-                return Some(fakecloud_core::auth::IamAction {
-                    service: "s3",
-                    action,
-                    resource,
-                });
-            }
-        }
-        if is_control && request.path_segments.get(1).map(|s| s.as_str()) == Some("accesspoint") {
-            let has_name = request.path_segments.get(2).is_some();
-            let ap_action = match (request.method.as_str(), has_name) {
-                ("PUT", true) => Some("CreateAccessPoint"),
-                ("GET", true) => Some("GetAccessPoint"),
-                ("DELETE", true) => Some("DeleteAccessPoint"),
-                ("GET", false) => Some("ListAccessPoints"),
-                _ => None,
-            };
-            if let Some(action) = ap_action {
-                let resource = request
-                    .path_segments
-                    .get(2)
-                    .map(|name| {
-                        Arn::s3_access_point(&request.region, &request.account_id, name).to_string()
-                    })
-                    .unwrap_or_else(|| "*".to_string());
-                return Some(fakecloud_core::auth::IamAction {
-                    service: "s3",
-                    action,
-                    resource,
-                });
-            }
-        }
-        let action = s3_detect_action(
-            request.method.as_str(),
-            bucket,
-            key.as_deref(),
-            &request.query_params,
-        )?;
-        // RenameObject is a directory-bucket (S3 Express One Zone) Zonal
-        // endpoint operation, which has no IAM action of its own: it runs on
-        // the session `CreateSession` opened ("CreateSession enables access
-        // for all object level operations", user guide, "Authorizing Regional
-        // endpoint API operations with IAM"), so it is authorized as
-        // `s3express:CreateSession` on the bucket, for a ReadWrite session
-        // (see `iam_condition_keys_for`).
-        let action = if action == "RenameObject" {
-            "CreateSession"
-        } else {
-            action
-        };
-        // A handful of S3-adjacent ops are authorized under sibling IAM
-        // service prefixes, not `s3:`. Select the right prefix so a policy
-        // targeting the real action string actually matches.
-        let service = match action {
-            "CreateSession" | "ListAllMyDirectoryBuckets" => "s3express",
-            "WriteGetObjectResponse" => "s3-object-lambda",
-            _ => "s3",
-        };
         // Every ARN S3 returns for a bucket carries the bucket's own region's
         // partition, so policies written against those ARNs must match here.
         let bucket_region = bucket.and_then(|b| self.bucket_region(b));
         let region = bucket_region.as_deref().unwrap_or(&request.region);
-        let resource = match (action, bucket) {
-            // A directory bucket's ARN is in the `s3express` namespace and
-            // names its region and owning account:
-            // `arn:aws:s3express:<region>:<account>:bucket/<name>`.
-            ("CreateSession", Some(bucket)) => {
-                let owner = self
-                    .state
-                    .read()
-                    .find_account(|s| s.buckets.contains_key(bucket))
-                    .map_or_else(|| request.account_id.clone(), str::to_string);
-                Arn::regional("s3express", region, &owner, &format!("bucket/{bucket}")).to_string()
-            }
-            _ => s3_resource_for(region, action, bucket, key.as_deref()),
-        };
-        Some(fakecloud_core::auth::IamAction {
-            service,
-            action,
-            resource,
-        })
-    }
-
-    /// Tagging a bucket at create time needs `s3:TagResource` as well as
-    /// `s3:CreateBucket` — the S3 model says so on
-    /// `CreateBucketConfiguration$Tags` ("You must have the
-    /// `s3:TagResource` permission to create a general purpose bucket with
-    /// tags"). Dispatch requires every returned action to be allowed, so a
-    /// principal granted only `s3:CreateBucket` can still create an untagged
-    /// bucket but not a tagged one, as on AWS.
-    fn iam_actions_for(&self, request: &AwsRequest) -> Vec<fakecloud_core::auth::IamAction> {
-        let Some(action) = self.iam_action_for(request) else {
-            return Vec::new();
-        };
-        if action.service == "s3" && action.action == "CreateBucket" {
-            // A create that also configures the bucket needs the permission for
-            // each thing it configures, as on AWS: dispatch requires every
-            // returned action to be allowed, so a principal holding only
-            // `s3:CreateBucket` can still create a plain bucket. This matters
-            // more now that these settings PERSIST -- a bucket created
-            // `public-read` by a caller with no `s3:PutBucketAcl` used to lose
-            // the grant on restart, and now keeps it.
-            let mut extra = Vec::new();
-            let body = std::str::from_utf8(&request.body).unwrap_or("");
-            if !create_bucket_configuration_tags(body).is_empty() {
-                extra.push("TagResource");
-            }
-            // Per the CreateBucket permissions in the vendored model: an ACL set
-            // to public-read, public-read-write, authenticated-read "or any
-            // other custom ACLs" needs s3:PutBucketAcl, while "if you set the
-            // ACL to private, or if you don't specify any ACLs, only the
-            // s3:CreateBucket permission is required". Judged by the grants the
-            // request resolves to, so the two spellings of an owner-only ACL
-            // agree -- and so a least-privilege caller that always sends
-            // `--acl private` is not refused.
-            let reaches_past_owner = request
-                .headers
-                .get("x-amz-acl")
-                .and_then(|v| v.to_str().ok())
-                // Blank counts as absent here too. It resolves to owner-only today
-                // only because `canned_acl_grants` falls through to the owner for
-                // any unrecognized value -- so without this, an arm that ever made
-                // an unknown value resolve past the owner would silently start
-                // demanding `s3:PutBucketAcl` for an empty header.
-                .filter(|acl| !acl.trim().is_empty())
-                .is_some_and(|acl| acl_reaches_past_owner(acl, &request.account_id));
-            if reaches_past_owner || has_grant_headers(&request.headers) {
-                extra.push("PutBucketAcl");
-            }
-            // Presence, but blank counts as absent -- the same rule the ACL
-            // headers and the condition keys follow. Otherwise a blank value
-            // demands a permission whose condition key is deliberately not
-            // emitted, so a `StringEquals`-gated Allow 403s a request the handler
-            // would have answered with a 400.
-            if request
-                .headers
-                .get("x-amz-object-ownership")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| !v.trim().is_empty())
-            {
-                extra.push("PutBucketOwnershipControls");
-            }
-            if request
-                .headers
-                .get("x-amz-bucket-object-lock-enabled")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.eq_ignore_ascii_case("true"))
-            {
-                // Object lock forces versioning on, so AWS wants both.
-                extra.push("PutBucketObjectLockConfiguration");
-                extra.push("PutBucketVersioning");
-            }
-            if !extra.is_empty() {
-                let mut actions = Vec::with_capacity(extra.len() + 1);
-                let resource = action.resource.clone();
-                actions.push(action);
-                for name in extra {
-                    actions.push(fakecloud_core::auth::IamAction {
-                        service: "s3",
-                        action: name,
-                        resource: resource.clone(),
-                    });
+        iam_actions::required(op, request)
+            .into_iter()
+            .filter_map(|need| match need {
+                iam_actions::Need::Own(service, action) => {
+                    let resource = if service == "s3express" && action == "CreateSession" {
+                        match bucket {
+                            Some(bucket) => self.directory_bucket_arn(request, region, bucket),
+                            None => "*".to_string(),
+                        }
+                    } else {
+                        s3_resource_for(region, action, bucket, key.as_deref())
+                    };
+                    Some(fakecloud_core::auth::IamAction {
+                        service,
+                        action,
+                        resource,
+                    })
                 }
-                return actions;
-            }
-        }
-        // A replication configuration names the role S3 assumes to copy
-        // objects, so AWS also requires `iam:PassRole` on it.
-        let pass_role = if action.service == "s3" && action.action == "PutBucketReplication" {
-            replication_role_arn(&request.body)
-        } else {
-            None
-        };
-        let mut actions = vec![action];
-        if let Some(role) = pass_role {
-            actions.push(fakecloud_core::auth::IamAction::pass_role(role));
-        }
-        // CopyObject and UploadPartCopy also read the source object, which AWS
-        // authorizes as s3:GetObject (s3:GetObjectVersion for a versioned
-        // source) on the SOURCE object -- evaluated against the source
-        // bucket's owner and bucket policy, so copying out of another
-        // account's bucket needs that bucket's grant.
-        if let Some(source) = self.copy_source_read_action(request) {
-            actions.push(source);
-        }
-        actions.extend(governance_bypass_actions(request, &actions[0]));
-        actions.extend(object_lock_header_actions(request, &actions[0]));
-        actions
+                iam_actions::Need::Key(action, object_key) => {
+                    Some(fakecloud_core::auth::IamAction {
+                        service: "s3",
+                        action,
+                        resource: s3_resource_for(region, action, bucket, Some(&object_key)),
+                    })
+                }
+                // CopyObject and UploadPartCopy also read the source object --
+                // evaluated against the source bucket's owner and bucket
+                // policy, so copying out of another account's bucket needs
+                // that bucket's grant.
+                iam_actions::Need::CopySource => self.copy_source_read_action(request),
+                iam_actions::Need::PassRole(role) => {
+                    Some(fakecloud_core::auth::IamAction::pass_role(role))
+                }
+            })
+            .collect()
     }
 
     /// CreateBucket creates in the caller's account: a name another account
     /// owns is authorized against the caller's own policies and then answered
     /// `BucketAlreadyExists`, not refused by that account's bucket policy.
     fn iam_resource_in_caller_account(&self, request: &AwsRequest) -> bool {
-        self.iam_action_for(request)
-            .is_some_and(|a| a.service == "s3" && a.action == "CreateBucket")
+        s3_operation(request) == Some("CreateBucket") && control_iam_action(request).is_none()
     }
 
     fn iam_condition_keys_for(
@@ -2169,14 +2018,116 @@ impl AwsService for S3Service {
             .map(|m| m.into_iter().collect::<std::collections::HashMap<_, _>>())
     }
 
+    /// `aws:RequestTag/*` comes from the request, not the action: AWS builds
+    /// one request context for the whole request, so every action a request
+    /// needs (CreateBucket's `s3:TagResource`, a tagged PutObject's
+    /// `s3:PutObjectTagging`) sees the same tags.
     fn request_tags_from(
         &self,
         request: &AwsRequest,
         action: &str,
     ) -> Option<std::collections::HashMap<String, String>> {
-        s3_request_tags(request, action)
+        let op = if control_tags::is_control_tags_request(request) {
+            action
+        } else {
+            s3_operation(request).unwrap_or(action)
+        };
+        s3_request_tags(request, op)
             .map(|m| m.into_iter().collect::<std::collections::HashMap<_, _>>())
     }
+}
+
+impl S3Service {
+    /// A directory bucket's ARN, in the `s3express` namespace and naming its
+    /// region and owning account: `arn:aws:s3express:<region>:<account>:bucket/<name>`.
+    fn directory_bucket_arn(&self, request: &AwsRequest, region: &str, bucket: &str) -> String {
+        let owner = self
+            .state
+            .read()
+            .find_account(|s| s.buckets.contains_key(bucket))
+            .map_or_else(|| request.account_id.clone(), str::to_string);
+        Arn::regional("s3express", region, &owner, &format!("bucket/{bucket}")).to_string()
+    }
+}
+
+/// The S3 API operation a (non-S3-Control) request invokes, by method, path,
+/// sub-resource query keys and the copy-source header.
+fn s3_operation(request: &AwsRequest) -> Option<&'static str> {
+    let bucket = request.path_segments.first().map(|s| s.as_str());
+    let key = if request.path_segments.len() > 1 {
+        Some(request.path_segments[1..].join("/"))
+    } else {
+        None
+    };
+    let op = s3_detect_action(
+        request.method.as_str(),
+        bucket,
+        key.as_deref(),
+        &request.query_params,
+    )?;
+    let copy = request.headers.contains_key("x-amz-copy-source");
+    Some(match op {
+        "PutObject" if copy => "CopyObject",
+        "UploadPart" if copy => "UploadPartCopy",
+        other => other,
+    })
+}
+
+/// The authorization of an S3 Control request fakecloud serves: access-point
+/// management and resource tagging. `None` for any other request.
+fn control_iam_action(request: &AwsRequest) -> Option<fakecloud_core::auth::IamAction> {
+    // S3 Control access-point management (host `s3-control...`, path
+    // `/v20180820/accesspoint[/name]`) is authorized under the dedicated
+    // s3:CreateAccessPoint / GetAccessPoint / DeleteAccessPoint /
+    // ListAccessPoints actions — NOT the object-level GetObject/PutObject/
+    // DeleteObject the generic method-based detection would pick, which made
+    // access-point policies ineffective.
+    let is_control = fakecloud_core::protocol::is_s3_control_host(&request.headers)
+        && request.path_segments.first().map(|s| s.as_str()) == Some("v20180820");
+    // S3 Control resource tagging is authorized as s3:TagResource /
+    // UntagResource / ListTagsForResource on the tagged resource's ARN.
+    if is_control && request.path_segments.get(1).map(|s| s.as_str()) == Some("tags") {
+        let action = match request.method.as_str() {
+            "GET" => Some("ListTagsForResource"),
+            "POST" => Some("TagResource"),
+            "DELETE" => Some("UntagResource"),
+            _ => None,
+        };
+        if let Some(action) = action {
+            let resource =
+                control_tags::resource_arn_from_path(request).unwrap_or_else(|| "*".to_string());
+            return Some(fakecloud_core::auth::IamAction {
+                service: "s3",
+                action,
+                resource,
+            });
+        }
+    }
+    if is_control && request.path_segments.get(1).map(|s| s.as_str()) == Some("accesspoint") {
+        let has_name = request.path_segments.get(2).is_some();
+        let ap_action = match (request.method.as_str(), has_name) {
+            ("PUT", true) => Some("CreateAccessPoint"),
+            ("GET", true) => Some("GetAccessPoint"),
+            ("DELETE", true) => Some("DeleteAccessPoint"),
+            ("GET", false) => Some("ListAccessPoints"),
+            _ => None,
+        };
+        if let Some(action) = ap_action {
+            let resource = request
+                .path_segments
+                .get(2)
+                .map(|name| {
+                    Arn::s3_access_point(&request.region, &request.account_id, name).to_string()
+                })
+                .unwrap_or_else(|| "*".to_string());
+            return Some(fakecloud_core::auth::IamAction {
+                service: "s3",
+                action,
+                resource,
+            });
+        }
+    }
+    None
 }
 
 /// The top-level `<Role>` of a PutBucketReplication body: the role S3
@@ -2191,8 +2142,9 @@ fn replication_role_arn(body: &[u8]) -> Option<String> {
 
 /// Extract service-specific IAM condition keys from an S3 request.
 ///
-/// `ListObjects` / `ListObjectsV2` expose `s3:prefix`, `s3:delimiter` and
-/// `s3:max-keys` from their query params, and any request carrying the ACL,
+/// `s3:ListBucket` / `s3:ListBucketVersions` expose `s3:prefix`, `s3:delimiter`
+/// and `s3:max-keys` from their query params, a request naming a version
+/// exposes `s3:versionid`, and any request carrying the ACL,
 /// object-ownership or object-lock headers exposes the matching `s3:x-amz-*`
 /// keys. An action with nothing to expose returns an empty map, so the
 /// evaluator's safe-fail semantics treat a policy condition on an unknown key
@@ -2284,8 +2236,15 @@ fn s3_condition_keys(
             out.insert(format!("s3:{header}"), vec![value.to_string()]);
         }
     }
-    if matches!(action, "ListObjects" | "ListObjectsV2") {
-        // Both list variants share the same query param shape.
+    // `s3:versionid` is defined on the `*Version*` actions a request naming a
+    // version is authorized under.
+    if let Some(version) = query.get("versionId").filter(|v| !v.trim().is_empty()) {
+        out.insert("s3:versionid".to_string(), vec![version.clone()]);
+    }
+    // The listing keys of `s3:ListBucket` (ListObjects, ListObjectsV2) and
+    // `s3:ListBucketVersions` (ListObjectVersions), which share the query
+    // shape.
+    if matches!(action, "ListBucket" | "ListBucketVersions") {
         if let Some(prefix) = query.get("prefix") {
             out.insert("s3:prefix".to_string(), vec![prefix.clone()]);
         }
@@ -2363,16 +2322,19 @@ fn s3_bucket_or_object_tags(
     }
 }
 
-/// Extract tags from an S3 request body/headers.
+/// Extract tags from an S3 request body/headers, by the operation `op` the
+/// request invokes (or, for S3 Control tagging, its action).
 ///
 /// S3 sends tags via:
-/// - `x-amz-tagging` header (URL-encoded `key=value&...`) on PutObject
+/// - `x-amz-tagging` header (URL-encoded `key=value&...`) on PutObject,
+///   CopyObject and CreateMultipartUpload
 /// - XML body on PutBucketTagging / PutObjectTagging
+/// - `CreateBucketConfiguration` on CreateBucket
 fn s3_request_tags(
     request: &AwsRequest,
-    action: &str,
+    op: &str,
 ) -> Option<std::collections::BTreeMap<String, String>> {
-    match action {
+    match op {
         "PutObject" | "CopyObject" | "CreateMultipartUpload" => {
             // Tags come via x-amz-tagging header
             if let Some(tagging) = request.headers.get("x-amz-tagging") {
@@ -2389,8 +2351,7 @@ fn s3_request_tags(
             Some(tags.into_iter().collect())
         }
         // S3 Control TagResource carries its tags in a `<TagResourceRequest>`
-        // body. (CreateBucket also authorizes `s3:TagResource` for the tags
-        // in its CreateBucketConfiguration; that falls to the arm below.)
+        // body.
         "TagResource" if control_tags::is_control_tags_request(request) => {
             let body = std::str::from_utf8(&request.body).unwrap_or("");
             Some(parse_tagging_xml(body).into_iter().collect())
@@ -2405,15 +2366,7 @@ fn s3_request_tags(
         // evaluated against the same tags -- AWS builds one request context for
         // the whole request, so an `aws:RequestTag/*` guardrail that permits the
         // create must not then deny the ACL or object-lock action it implies.
-        // The extra names are harmless on their own operations: a real
-        // PutBucketAcl body is not a `CreateBucketConfiguration`, so it yields
-        // the same empty map the catch-all arm would.
-        "CreateBucket"
-        | "TagResource"
-        | "PutBucketAcl"
-        | "PutBucketOwnershipControls"
-        | "PutBucketObjectLockConfiguration"
-        | "PutBucketVersioning" => {
+        "CreateBucket" => {
             let body = std::str::from_utf8(&request.body).unwrap_or("");
             let tags = create_bucket_configuration_tags(body);
             Some(tags.into_iter().collect())
@@ -2422,18 +2375,15 @@ fn s3_request_tags(
     }
 }
 
-/// Derive the IAM action name from an S3 REST request. Handles the
-/// common cases (GetObject, PutObject, DeleteObject, ListObjectsV2,
-/// CreateBucket, ...) plus a subset of sub-resource operations
-/// (`?acl`, `?tagging`, `?versioning`, `?policy`, `?cors`, `?website`,
-/// `?lifecycle`, `?encryption`, `?logging`, `?notification`, `?replication`,
-/// `?ownershipControls`, `?publicAccessBlock`, `?accelerate`, `?inventory`,
-/// `?object-lock`, `?uploads`, `?uploadId`).
+/// Derive the S3 API operation (not the IAM action: see [`iam_actions`]) an
+/// S3 REST request invokes, from its method, path and sub-resource query
+/// keys. PutObject and UploadPart also stand for CopyObject and UploadPartCopy
+/// here, which only the `x-amz-copy-source` header tells apart
+/// ([`s3_operation`]).
 ///
-/// Returns `None` for requests that don't map to a known action — the
-/// dispatch layer then skips enforcement for that request rather than
-/// guessing (and a warn log fires via the "service is iam_enforceable
-/// but has no mapping" branch in dispatch.rs).
+/// Returns `None` for requests that don't map to a known operation, which
+/// strict enforcement refuses (the "service is iam_enforceable but has no
+/// mapping" branch in dispatch.rs).
 fn s3_detect_action(
     method: &str,
     bucket: Option<&str>,
@@ -2456,7 +2406,7 @@ fn s3_detect_action(
             // denied a policy that only granted the s3express action (bug-hunt
             // 2026-06-24, 5.5).
             "GET" if query.get("x-id").map(|s| s.as_str()) == Some("ListDirectoryBuckets") => {
-                Some("ListAllMyDirectoryBuckets")
+                Some("ListDirectoryBuckets")
             }
             "GET" => Some("ListBuckets"),
             _ => None,
@@ -2568,7 +2518,7 @@ fn s3_detect_action(
         // object data, so AWS authorizes it with `s3:GetObject`. Previously
         // unmapped -> `_ => None` -> enforcement skipped entirely.
         if has("select-type") && is_post {
-            return Some("GetObject");
+            return Some("SelectObjectContent");
         }
     }
 
@@ -2752,14 +2702,12 @@ fn s3_detect_action(
             return Some("UpdateBucketMetadataJournalTableConfiguration");
         }
         if has("abac") {
-            // PUT  -> PutBucketAbacConfiguration
-            // GET  -> GetBucketAbacConfiguration (previously fell through to
-            //         the plain `GET bucket` arm and was IAM-evaluated as
-            //         s3:ListObjects — a policy on the ABAC config was never
-            //         honored).
+            // GET previously fell through to the plain `GET bucket` arm and
+            // was authorized as a listing, so a policy on the ABAC
+            // configuration was never honored.
             return Some(match method {
-                "PUT" => "PutBucketAbacConfiguration",
-                "GET" => "GetBucketAbacConfiguration",
+                "PUT" => "PutBucketAbac",
+                "GET" => "GetBucketAbac",
                 _ => return None,
             });
         }
@@ -2789,26 +2737,17 @@ fn s3_detect_action(
         }
     }
 
-    // GET on an object with `?torrent` is GetObjectTorrent, which AWS
-    // authorizes as `s3:GetObject` on the object ("Required permissions for
-    // Amazon S3 API operations": GetObjectTorrent, (Required) s3:GetObject;
-    // the service authorization reference maps the operation to that action
-    // too), not under the legacy `s3:GetObjectTorrent` action name.
+    // GET on an object with `?torrent` is GetObjectTorrent (authorized as
+    // `s3:GetObject`).
     if is_get && has_key && has("torrent") {
-        return Some("GetObject");
+        return Some("GetObjectTorrent");
     }
 
     // Plain bucket/object methods.
     match (method, has_key) {
         ("GET", true) => Some("GetObject"),
-        ("PUT", true) => {
-            // CopyObject uses x-amz-copy-source but we don't have headers
-            // handy here — treat both PutObject and CopyObject as PutObject
-            // for IAM purposes; CopyObject additionally requires
-            // s3:GetObject on the source but that's evaluated per-request
-            // by real AWS, not on the PUT call itself.
-            Some("PutObject")
-        }
+        // CopyObject too, told apart by its header in `s3_operation`.
+        ("PUT", true) => Some("PutObject"),
         ("DELETE", true) => Some("DeleteObject"),
         ("HEAD", true) => Some("HeadObject"),
         ("GET", false) => {
@@ -2825,58 +2764,23 @@ fn s3_detect_action(
     }
 }
 
-/// Build the S3 resource ARN for an action. Returns `*` for
-/// `ListBuckets` (account-scoped), a bucket ARN for bucket-level
-/// configuration actions, or an object ARN for object-level actions.
-fn s3_resource_for(
-    region: &str,
-    action: &'static str,
-    bucket: Option<&str>,
-    key: Option<&str>,
-) -> String {
-    // Object-level actions work on `bucket/key`.
-    const OBJECT_ACTIONS: &[&str] = &[
-        "PutObject",
-        "GetObject",
-        "DeleteObject",
-        "HeadObject",
-        "CopyObject",
-        "GetObjectAttributes",
-        "RestoreObject",
-        "PutObjectTagging",
-        "GetObjectTagging",
-        "DeleteObjectTagging",
-        "PutObjectAcl",
-        "GetObjectAcl",
-        "PutObjectRetention",
-        "GetObjectRetention",
-        "PutObjectLegalHold",
-        "GetObjectLegalHold",
-        "CreateMultipartUpload",
-        "UploadPart",
-        "UploadPartCopy",
-        "CompleteMultipartUpload",
-        "AbortMultipartUpload",
-        "ListParts",
-        // An object-level operation of its own (the user guide's example
-        // policy grants it on `bucket/*`). SelectObjectContent and
-        // GetObjectTorrent are authorized as GetObject, above; RenameObject
-        // as `s3express:CreateSession` on the bucket.
-        "UpdateObjectEncryption",
-    ];
-    if action == "ListBuckets" {
-        return "*".to_string();
-    }
-    let Some(bucket) = bucket else {
+/// Build the resource ARN an S3 policy action is authorized on, by the
+/// action's resource type in the service authorization reference: the object
+/// ARN (`bucket/key`, `bucket/*` with no key) for object actions, `*` for
+/// account actions (`s3:ListAllMyBuckets`) or a request naming no bucket, and
+/// the bucket ARN otherwise.
+fn s3_resource_for(region: &str, action: &str, bucket: Option<&str>, key: Option<&str>) -> String {
+    use iam_reference::ResourceKind;
+    let kind = iam_actions::resource_kind(action);
+    let Some(bucket) = bucket.filter(|_| kind != Some(ResourceKind::Account)) else {
         return "*".to_string();
     };
-    if OBJECT_ACTIONS.contains(&action) {
+    if kind == Some(ResourceKind::Object) {
         match key {
             Some(k) if !k.is_empty() => Arn::s3_in(region, &format!("{bucket}/{k}")).to_string(),
             _ => Arn::s3_in(region, &format!("{bucket}/*")).to_string(),
         }
     } else {
-        // Bucket-level actions (ListObjectsV2, GetBucketTagging, ...).
         Arn::s3_in(region, bucket).to_string()
     }
 }
@@ -4704,67 +4608,122 @@ pub(crate) fn governance_bypass_requested(req: &AwsRequest) -> bool {
         .is_some_and(|s| s.eq_ignore_ascii_case("true"))
 }
 
-/// The `s3:BypassGovernanceRetention` checks a request asking to bypass
-/// GOVERNANCE retention must also pass. The S3 model documents the header on
-/// DeleteObject / DeleteObjects as "To use this header, you must have the
-/// `s3:BypassGovernanceRetention` permission", and PutObjectRetention takes the
-/// same header. The permission is evaluated on the addressed object.
-/// DeleteObjects is not covered here: AWS authorizes it per key and reports a
-/// denied key as an `<Error>` entry in a 200 response, which an all-or-nothing
-/// request-level check cannot express.
-fn governance_bypass_actions(
-    request: &AwsRequest,
-    primary: &fakecloud_core::auth::IamAction,
-) -> Vec<fakecloud_core::auth::IamAction> {
-    if primary.service != "s3" || !governance_bypass_requested(request) {
-        return Vec::new();
-    }
-    let bypass = |resource: String| fakecloud_core::auth::IamAction {
-        service: "s3",
-        action: "BypassGovernanceRetention",
-        resource,
-    };
-    match primary.action {
-        "DeleteObject" | "PutObjectRetention" => vec![bypass(primary.resource.clone())],
-        _ => Vec::new(),
-    }
-}
-
-/// The extra permissions a write that sets an object's lock must hold. The S3
-/// model documents the PutObject / CopyObject / CreateMultipartUpload lock
-/// headers as needing `s3:PutObjectRetention` (mode, retain-until date) and
-/// `s3:PutObjectLegalHold` (legal hold), evaluated on the object written --
-/// the destination for a copy.
-fn object_lock_header_actions(
-    request: &AwsRequest,
-    primary: &fakecloud_core::auth::IamAction,
-) -> Vec<fakecloud_core::auth::IamAction> {
-    if primary.service != "s3"
-        || !matches!(
-            primary.action,
-            "PutObject" | "CopyObject" | "CreateMultipartUpload"
-        )
-    {
-        return Vec::new();
-    }
-    let present = |name: &str| request.headers.contains_key(name);
-    let mut actions = Vec::new();
-    if present("x-amz-object-lock-mode") || present("x-amz-object-lock-retain-until-date") {
-        actions.push(fakecloud_core::auth::IamAction {
-            service: "s3",
-            action: "PutObjectRetention",
-            resource: primary.resource.clone(),
-        });
-    }
-    if present("x-amz-object-lock-legal-hold") {
-        actions.push(fakecloud_core::auth::IamAction {
-            service: "s3",
-            action: "PutObjectLegalHold",
-            resource: primary.resource.clone(),
-        });
-    }
-    actions
-}
+/// Every operation [`s3_operation`] can return, which [`iam_actions`] must
+/// map.
+#[cfg(test)]
+const IAM_MAPPED_OPERATIONS: &[&str] = &[
+    "ListBuckets",
+    "ListDirectoryBuckets",
+    "WriteGetObjectResponse",
+    "CreateMultipartUpload",
+    "CompleteMultipartUpload",
+    "UploadPart",
+    "UploadPartCopy",
+    "AbortMultipartUpload",
+    "ListParts",
+    "ListMultipartUploads",
+    "GetObjectAnnotation",
+    "ListObjectAnnotations",
+    "PutObjectAnnotation",
+    "DeleteObjectAnnotation",
+    "GetObjectTagging",
+    "PutObjectTagging",
+    "DeleteObjectTagging",
+    "GetObjectAcl",
+    "PutObjectAcl",
+    "GetObjectRetention",
+    "PutObjectRetention",
+    "GetObjectLegalHold",
+    "PutObjectLegalHold",
+    "GetObjectAttributes",
+    "RestoreObject",
+    "RenameObject",
+    "UpdateObjectEncryption",
+    "SelectObjectContent",
+    "UpdateBucketMetadataAnnotationTableConfiguration",
+    "GetBucketTagging",
+    "PutBucketTagging",
+    "DeleteBucketTagging",
+    "GetBucketAcl",
+    "PutBucketAcl",
+    "GetBucketVersioning",
+    "PutBucketVersioning",
+    "GetBucketCors",
+    "PutBucketCors",
+    "DeleteBucketCors",
+    "GetBucketPolicy",
+    "PutBucketPolicy",
+    "DeleteBucketPolicy",
+    "GetBucketWebsite",
+    "PutBucketWebsite",
+    "DeleteBucketWebsite",
+    "GetBucketLifecycleConfiguration",
+    "PutBucketLifecycleConfiguration",
+    "DeleteBucketLifecycle",
+    "GetBucketEncryption",
+    "PutBucketEncryption",
+    "DeleteBucketEncryption",
+    "GetBucketLogging",
+    "PutBucketLogging",
+    "GetBucketNotificationConfiguration",
+    "PutBucketNotificationConfiguration",
+    "GetBucketReplication",
+    "PutBucketReplication",
+    "DeleteBucketReplication",
+    "GetBucketOwnershipControls",
+    "PutBucketOwnershipControls",
+    "DeleteBucketOwnershipControls",
+    "GetPublicAccessBlock",
+    "PutPublicAccessBlock",
+    "DeletePublicAccessBlock",
+    "GetBucketAccelerateConfiguration",
+    "PutBucketAccelerateConfiguration",
+    "GetBucketInventoryConfiguration",
+    "PutBucketInventoryConfiguration",
+    "DeleteBucketInventoryConfiguration",
+    "GetBucketAnalyticsConfiguration",
+    "ListBucketAnalyticsConfigurations",
+    "PutBucketAnalyticsConfiguration",
+    "DeleteBucketAnalyticsConfiguration",
+    "GetBucketIntelligentTieringConfiguration",
+    "ListBucketIntelligentTieringConfigurations",
+    "PutBucketIntelligentTieringConfiguration",
+    "DeleteBucketIntelligentTieringConfiguration",
+    "GetBucketMetricsConfiguration",
+    "ListBucketMetricsConfigurations",
+    "PutBucketMetricsConfiguration",
+    "DeleteBucketMetricsConfiguration",
+    "GetBucketRequestPayment",
+    "PutBucketRequestPayment",
+    "GetBucketPolicyStatus",
+    "GetBucketMetadataConfiguration",
+    "CreateBucketMetadataConfiguration",
+    "DeleteBucketMetadataConfiguration",
+    "GetBucketMetadataTableConfiguration",
+    "CreateBucketMetadataTableConfiguration",
+    "DeleteBucketMetadataTableConfiguration",
+    "UpdateBucketMetadataInventoryTableConfiguration",
+    "UpdateBucketMetadataJournalTableConfiguration",
+    "PutBucketAbac",
+    "GetBucketAbac",
+    "CreateSession",
+    "GetObjectLockConfiguration",
+    "PutObjectLockConfiguration",
+    "GetBucketLocation",
+    "DeleteObjects",
+    "ListObjectVersions",
+    "GetObjectTorrent",
+    "GetObject",
+    "PutObject",
+    "CopyObject",
+    "DeleteObject",
+    "HeadObject",
+    "ListObjectsV2",
+    "ListObjects",
+    "CreateBucket",
+    "DeleteBucket",
+    "HeadBucket",
+];
 
 #[cfg(test)]
 mod tests;
@@ -4807,8 +4766,12 @@ mod partition_tests {
             "arn:aws-cn:s3:::b/k"
         );
         assert_eq!(
-            s3_resource_for("us-east-1", "ListObjectsV2", Some("b"), None),
+            s3_resource_for("us-east-1", "ListBucket", Some("b"), None),
             "arn:aws:s3:::b"
+        );
+        assert_eq!(
+            s3_resource_for("us-east-1", "ListAllMyBuckets", None, None),
+            "*"
         );
     }
 
@@ -4823,7 +4786,22 @@ mod partition_tests {
         );
         let query = HashMap::from([("torrent".to_string(), String::new())]);
         let torrent = s3_detect_action("GET", Some("b"), Some("k"), &query);
-        assert_eq!(torrent, Some("GetObject"));
+        assert_eq!(torrent, Some("GetObjectTorrent"));
+        // ListParts and AbortMultipartUpload act on the upload's object;
+        // ListMultipartUploads on the bucket.
+        assert_eq!(
+            s3_resource_for(
+                "us-east-1",
+                "ListMultipartUploadParts",
+                Some("b"),
+                Some("k")
+            ),
+            "arn:aws:s3:::b/k",
+        );
+        assert_eq!(
+            s3_resource_for("us-east-1", "ListBucketMultipartUploads", Some("b"), None),
+            "arn:aws:s3:::b",
+        );
     }
 
     #[test]
@@ -4986,7 +4964,7 @@ mod partition_tests {
             b"<CreateBucketConfiguration><Tags><Tag><Key>team</Key>\
               <Value>core</Value></Tag></Tags></CreateBucketConfiguration>",
         );
-        let tags = s3_request_tags(&create, "TagResource").unwrap();
+        let tags = s3_request_tags(&create, "CreateBucket").unwrap();
         assert_eq!(tags.get("team").map(String::as_str), Some("core"));
     }
 
@@ -5097,7 +5075,7 @@ mod s3_detect_action_tests {
             Some("key"),
             &q(&[("select", ""), ("select-type", "2")]),
         );
-        assert_eq!(action, Some("GetObject"));
+        assert_eq!(action, Some("SelectObjectContent"));
     }
 
     #[test]
@@ -5144,9 +5122,10 @@ mod s3_detect_action_tests {
 
     #[test]
     fn list_directory_buckets_is_distinct_from_list_buckets() {
-        // GET /?x-id=ListDirectoryBuckets -> s3express action, not ListBuckets.
+        // GET /?x-id=ListDirectoryBuckets is its own operation (authorized as
+        // s3express:ListAllMyDirectoryBuckets), not ListBuckets.
         let dir = s3_detect_action("GET", None, None, &q(&[("x-id", "ListDirectoryBuckets")]));
-        assert_eq!(dir, Some("ListAllMyDirectoryBuckets"));
+        assert_eq!(dir, Some("ListDirectoryBuckets"));
         // Plain GET / is still ListBuckets.
         let plain = s3_detect_action("GET", None, None, &q(&[]));
         assert_eq!(plain, Some("ListBuckets"));
@@ -5193,13 +5172,13 @@ mod s3_detect_action_tests {
     fn get_bucket_abac_not_misdetected_as_list_objects() {
         // GET /bucket?abac — previously fell through to ListObjects.
         let action = s3_detect_action("GET", Some("bucket"), None, &q(&[("abac", "")]));
-        assert_eq!(action, Some("GetBucketAbacConfiguration"));
+        assert_eq!(action, Some("GetBucketAbac"));
     }
 
     #[test]
     fn put_bucket_abac_still_detected() {
         let action = s3_detect_action("PUT", Some("bucket"), None, &q(&[("abac", "")]));
-        assert_eq!(action, Some("PutBucketAbacConfiguration"));
+        assert_eq!(action, Some("PutBucketAbac"));
     }
 }
 
@@ -5270,6 +5249,121 @@ mod s3_iam_service_prefix_tests {
             action.action_string(),
             "s3-object-lambda:WriteGetObjectResponse"
         );
+    }
+
+    /// The full authorization set of requests whose operation and policy
+    /// action names differ, with each action's resource.
+    #[test]
+    fn requests_are_authorized_under_policy_action_names() {
+        let svc = make_service();
+        let pairs = |r: &AwsRequest| -> Vec<(String, String)> {
+            svc.iam_actions_for(r)
+                .into_iter()
+                .map(|a| (a.action_string(), a.resource))
+                .collect()
+        };
+        let one = |action: &str, resource: &str| vec![(action.to_string(), resource.to_string())];
+        assert_eq!(
+            pairs(&req(Method::GET, "/", &[])),
+            one("s3:ListAllMyBuckets", "*")
+        );
+        assert_eq!(
+            pairs(&req(Method::GET, "/b", &[("list-type", "2")])),
+            one("s3:ListBucket", "arn:aws:s3:::b")
+        );
+        assert_eq!(
+            pairs(&req(Method::HEAD, "/b", &[])),
+            one("s3:ListBucket", "arn:aws:s3:::b")
+        );
+        assert_eq!(
+            pairs(&req(Method::GET, "/b", &[("versions", "")])),
+            one("s3:ListBucketVersions", "arn:aws:s3:::b")
+        );
+        assert_eq!(
+            pairs(&req(Method::GET, "/b", &[("uploads", "")])),
+            one("s3:ListBucketMultipartUploads", "arn:aws:s3:::b")
+        );
+        assert_eq!(
+            pairs(&req(Method::GET, "/b/k", &[("uploadId", "u")])),
+            one("s3:ListMultipartUploadParts", "arn:aws:s3:::b/k")
+        );
+        assert_eq!(
+            pairs(&req(Method::HEAD, "/b/dir/k", &[])),
+            one("s3:GetObject", "arn:aws:s3:::b/dir/k")
+        );
+        assert_eq!(
+            pairs(&req(Method::GET, "/b/k", &[("versionId", "v1")])),
+            one("s3:GetObjectVersion", "arn:aws:s3:::b/k")
+        );
+        assert_eq!(
+            pairs(&req(Method::DELETE, "/b", &[("lifecycle", "")])),
+            one("s3:PutLifecycleConfiguration", "arn:aws:s3:::b")
+        );
+        assert_eq!(
+            pairs(&req(Method::POST, "/b/k", &[("uploads", "")])),
+            one("s3:PutObject", "arn:aws:s3:::b/k")
+        );
+
+        // CopyObject: the destination write, then the source read on the
+        // source object (its version's read for a versioned source).
+        let mut copy = req(Method::PUT, "/dst/new", &[]);
+        copy.headers
+            .insert("x-amz-copy-source", "/src/old%20key".parse().unwrap());
+        copy.headers
+            .insert("x-amz-tagging", "team=a".parse().unwrap());
+        assert_eq!(
+            pairs(&copy),
+            vec![
+                (
+                    "s3:PutObject".to_string(),
+                    "arn:aws:s3:::dst/new".to_string()
+                ),
+                (
+                    "s3:GetObject".to_string(),
+                    "arn:aws:s3:::src/old key".to_string()
+                ),
+                (
+                    "s3:PutObjectTagging".to_string(),
+                    "arn:aws:s3:::dst/new".to_string()
+                ),
+            ]
+        );
+        // The tagged copy's request tags reach every action it needs.
+        assert_eq!(
+            svc.request_tags_from(&copy, "PutObjectTagging")
+                .unwrap()
+                .get("team")
+                .map(String::as_str),
+            Some("a")
+        );
+        let mut part_copy = req(
+            Method::PUT,
+            "/dst/new",
+            &[("partNumber", "1"), ("uploadId", "u")],
+        );
+        part_copy
+            .headers
+            .insert("x-amz-copy-source", "src/k?versionId=v9".parse().unwrap());
+        assert_eq!(
+            pairs(&part_copy),
+            vec![
+                (
+                    "s3:PutObject".to_string(),
+                    "arn:aws:s3:::dst/new".to_string()
+                ),
+                (
+                    "s3:GetObjectVersion".to_string(),
+                    "arn:aws:s3:::src/k".to_string()
+                ),
+            ]
+        );
+
+        // A PutObjectTagging body is not read as request tags of a PutObject.
+        let mut put = req(Method::PUT, "/b/k", &[]);
+        put.body = bytes::Bytes::from_static(
+            b"<Tagging><TagSet><Tag><Key>x</Key><Value>y</Value></Tag></TagSet></Tagging>",
+        );
+        assert!(svc.request_tags_from(&put, "PutObject").unwrap().is_empty());
     }
 
     #[test]

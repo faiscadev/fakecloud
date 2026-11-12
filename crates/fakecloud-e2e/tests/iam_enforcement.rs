@@ -1282,11 +1282,264 @@ async fn s3_get_object_resource_scoped() {
     assert!(format!("{err:?}").contains("AccessDenied"));
 }
 
+/// Whether an S3 call was refused with 403 (HEAD responses carry no error
+/// code, so the status is what tells).
+fn is_access_denied<T, E>(result: Result<T, aws_sdk_s3::error::SdkError<E>>) -> bool {
+    matches!(&result, Err(e) if e.raw_response().map(|r| r.status().as_u16()) == Some(403))
+}
+
+/// S3 is authorized under its policy action names, not its operation names:
+/// `s3:ListBucket` covers ListObjectsV2, ListObjects and HeadBucket,
+/// `s3:ListAllMyBuckets` covers ListBuckets, and a policy naming the
+/// operations (`s3:ListObjectsV2`, `s3:ListBuckets`, `s3:HeadBucket`, which
+/// are not actions) grants none of them.
+#[tokio::test]
+async fn s3_listing_is_authorized_under_policy_action_names() {
+    let server = start_strict().await;
+    let boot = sdk_config_with(&server, "test", "test").await;
+    path_style_s3(&boot)
+        .create_bucket()
+        .bucket("listed")
+        .send()
+        .await
+        .unwrap();
+
+    let (akid, secret) = bootstrap_user(&server, "lister").await;
+    attach_inline_policy(
+        &server,
+        "lister",
+        "List",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::listed"},
+            {"Effect":"Allow","Action":"s3:ListAllMyBuckets","Resource":"*"}
+        ]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    s3.list_objects_v2().bucket("listed").send().await.unwrap();
+    s3.list_objects().bucket("listed").send().await.unwrap();
+    s3.head_bucket().bucket("listed").send().await.unwrap();
+    let buckets = s3.list_buckets().send().await.unwrap();
+    assert!(buckets.buckets().iter().any(|b| b.name() == Some("listed")));
+    // s3:ListBucket does not cover the version listing.
+    assert!(is_access_denied(
+        s3.list_object_versions().bucket("listed").send().await
+    ));
+
+    let (akid, secret) = bootstrap_user(&server, "opnames").await;
+    attach_inline_policy(
+        &server,
+        "opnames",
+        "OperationNames",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Action":["s3:ListObjectsV2","s3:ListObjects","s3:HeadBucket","s3:ListBuckets"],
+            "Resource":"*"}]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    assert!(is_access_denied(
+        s3.list_objects_v2().bucket("listed").send().await
+    ));
+    assert!(is_access_denied(
+        s3.list_objects().bucket("listed").send().await
+    ));
+    assert!(is_access_denied(
+        s3.head_bucket().bucket("listed").send().await
+    ));
+    assert!(is_access_denied(s3.list_buckets().send().await));
+}
+
+/// CopyObject needs `s3:GetObject` on the source object and `s3:PutObject` on
+/// the destination; either alone is refused.
+#[tokio::test]
+async fn s3_copy_object_needs_source_read_and_destination_write() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    for bucket in ["copy-src", "copy-dst"] {
+        boot.create_bucket().bucket(bucket).send().await.unwrap();
+    }
+    boot.put_object()
+        .bucket("copy-src")
+        .key("orig.txt")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"payload"))
+        .send()
+        .await
+        .unwrap();
+
+    let copy = |s3: aws_sdk_s3::Client, key: &'static str| async move {
+        s3.copy_object()
+            .bucket("copy-dst")
+            .key(key)
+            .copy_source("copy-src/orig.txt")
+            .send()
+            .await
+    };
+    for (user, statements, allowed) in [
+        (
+            "copier",
+            r#"{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::copy-src/orig.txt"},
+               {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::copy-dst/*"}"#,
+            true,
+        ),
+        (
+            "writeonly",
+            r#"{"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::copy-dst/*"}"#,
+            false,
+        ),
+        (
+            "readonly",
+            r#"{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::copy-src/*"}"#,
+            false,
+        ),
+        (
+            // Not a policy action: grants nothing.
+            "opname",
+            r#"{"Effect":"Allow","Action":"s3:CopyObject","Resource":"*"}"#,
+            false,
+        ),
+    ] {
+        let (akid, secret) = bootstrap_user(&server, user).await;
+        attach_inline_policy(
+            &server,
+            user,
+            "Copy",
+            &format!(r#"{{"Version":"2012-10-17","Statement":[{statements}]}}"#),
+        )
+        .await;
+        let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+        let result = copy(s3, "copied.txt").await;
+        if allowed {
+            result.unwrap();
+        } else {
+            assert!(is_access_denied(result), "{user} must be refused");
+        }
+    }
+    let got = boot
+        .get_object()
+        .bucket("copy-dst")
+        .key("copied.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        &got.body.collect().await.unwrap().into_bytes()[..],
+        b"payload"
+    );
+}
+
+/// Reading a specific version is `s3:GetObjectVersion` (`s3:GetObject` is not
+/// enough, nor needed), and a PutObject that sets tags also needs
+/// `s3:PutObjectTagging`.
+#[tokio::test]
+async fn s3_versioned_reads_and_tagged_writes_need_their_actions() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("vers").send().await.unwrap();
+    boot.put_bucket_versioning()
+        .bucket("vers")
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let first = boot
+        .put_object()
+        .bucket("vers")
+        .key("doc")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"v1"))
+        .send()
+        .await
+        .unwrap();
+    let v1 = first.version_id().unwrap().to_string();
+    boot.put_object()
+        .bucket("vers")
+        .key("doc")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"v2"))
+        .send()
+        .await
+        .unwrap();
+
+    let (akid, secret) = bootstrap_user(&server, "reader").await;
+    attach_inline_policy(
+        &server,
+        "reader",
+        "Read",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":["s3:GetObject","s3:PutObject"],"Resource":"arn:aws:s3:::vers/*"}
+        ]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    s3.get_object()
+        .bucket("vers")
+        .key("doc")
+        .send()
+        .await
+        .unwrap();
+    assert!(is_access_denied(
+        s3.get_object()
+            .bucket("vers")
+            .key("doc")
+            .version_id(&v1)
+            .send()
+            .await
+    ));
+    assert!(is_access_denied(
+        s3.head_object()
+            .bucket("vers")
+            .key("doc")
+            .version_id(&v1)
+            .send()
+            .await
+    ));
+    let put = |tagging: Option<&'static str>| {
+        let mut req = s3
+            .put_object()
+            .bucket("vers")
+            .key("tagged")
+            .body(aws_sdk_s3::primitives::ByteStream::from_static(b"t"));
+        if let Some(t) = tagging {
+            req = req.tagging(t);
+        }
+        req.send()
+    };
+    put(None).await.unwrap();
+    assert!(is_access_denied(put(Some("team=a")).await));
+
+    attach_inline_policy(
+        &server,
+        "reader",
+        "Read",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":["s3:GetObjectVersion","s3:PutObject","s3:PutObjectTagging"],
+             "Resource":"arn:aws:s3:::vers/*"}
+        ]}"#,
+    )
+    .await;
+    let got = s3
+        .get_object()
+        .bucket("vers")
+        .key("doc")
+        .version_id(&v1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(&got.body.collect().await.unwrap().into_bytes()[..], b"v1");
+    // The current version is s3:GetObject, which this policy no longer grants.
+    assert!(is_access_denied(
+        s3.get_object().bucket("vers").key("doc").send().await
+    ));
+    put(Some("team=a")).await.unwrap();
+}
+
 #[tokio::test]
 async fn s3_list_objects_v2_prefix_condition_key() {
-    // A policy that only allows ListObjectsV2 when `s3:prefix` starts
-    // with "logs/" must let `prefix=logs/2026/` through and deny
-    // `prefix=secrets/`.
+    // A policy that only allows listing (`s3:ListBucket`, which authorizes
+    // ListObjectsV2) when `s3:prefix` starts with "logs/" must let
+    // `prefix=logs/2026/` through and deny `prefix=secrets/`.
     let server = start_strict().await;
     let boot = sdk_config_with(&server, "test", "test").await;
     let s3_boot = aws_sdk_s3::Client::new(&boot);
@@ -1304,7 +1557,7 @@ async fn s3_list_objects_v2_prefix_condition_key() {
         "AllowListLogs",
         r#"{"Version":"2012-10-17","Statement":[{
             "Effect":"Allow",
-            "Action":"s3:ListObjectsV2",
+            "Action":"s3:ListBucket",
             "Resource":"arn:aws:s3:::prefixed",
             "Condition":{"StringLike":{"s3:prefix":"logs/*"}}
         }]}"#,
