@@ -70,39 +70,7 @@ impl KmsService {
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
 
         let (ciphertext_b64, echoed_alg) = if key.key_spec.starts_with("RSA_") {
-            // Asymmetric ENCRYPT_DECRYPT (RSA): real RSA-OAEP under the key's
-            // public half, so the ciphertext round-trips through external RSA
-            // tooling and KMS Decrypt -- not the symmetric AES blob the old code
-            // returned regardless of key type and key spec.
-            let alg = requested_alg.unwrap_or("RSAES_OAEP_SHA_256");
-            if alg != "RSAES_OAEP_SHA_1" && alg != "RSAES_OAEP_SHA_256" {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidKeyUsageException",
-                    format!(
-                        "Algorithm '{alg}' is incompatible with the key spec '{}'.",
-                        key.key_spec
-                    ),
-                ));
-            }
-            let pub_der = key.asymmetric_public_key_der.as_ref().ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "KMSInternalException",
-                    "asymmetric public key missing",
-                )
-            })?;
-            let raw = super::asym::rsa_oaep_wrap(pub_der, alg, &plaintext_bytes).map_err(|e| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidKeyUsageException",
-                    format!("RSA encrypt failed: {e}"),
-                )
-            })?;
-            let raw_b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
-            let envelope = format!("fakecloud-rsa:{}:{}:{}", key.key_id, alg, raw_b64);
-            let env_b64 = base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
-            (env_b64, alg.to_string())
+            rsa_encrypt(key, requested_alg, &plaintext_bytes)?
         } else {
             // Symmetric key: only SYMMETRIC_DEFAULT is valid.
             if let Some(alg) = requested_alg {
@@ -116,13 +84,8 @@ impl KmsService {
                     ));
                 }
             }
-            let ct = build_encrypt_ciphertext(
-                state,
-                key,
-                sealed_key_ref(req, key),
-                &plaintext_bytes,
-                &ec_aad,
-            );
+            let ct =
+                build_encrypt_ciphertext(state, sealed_key_ref(key), &plaintext_bytes, &ec_aad);
             (ct, "SYMMETRIC_DEFAULT".to_string())
         };
 
@@ -167,63 +130,23 @@ impl KmsService {
 
         let accounts = self.state.read();
         let empty = KmsState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
-        let decoded = decode_ciphertext_envelope(state, &req.region, ciphertext_b64, &ec_aad)?;
-
-        // For ciphertext produced by an asymmetric (RSA) KMS key, AWS requires
-        // the caller to supply the EncryptionAlgorithm and it must match the
-        // algorithm recorded in the ciphertext envelope. An omitted algorithm
-        // defaults to SYMMETRIC_DEFAULT, which never matches an RSA envelope,
-        // so both an omitted and a mismatched algorithm surface as
-        // InvalidCiphertextException. Symmetric decrypt is unaffected.
-        if decoded.encryption_algorithm != "SYMMETRIC_DEFAULT" {
-            let requested = body["EncryptionAlgorithm"]
-                .as_str()
-                .unwrap_or("SYMMETRIC_DEFAULT");
-            if requested != decoded.encryption_algorithm {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidCiphertextException",
-                    "The specified EncryptionAlgorithm does not match the algorithm used to produce the ciphertext.",
-                ));
-            }
-        }
-
-        // When the caller supplies KeyId for a symmetric decrypt, AWS
-        // validates it identifies the same CMK that produced the blob and
-        // returns IncorrectKeyException otherwise (1.5). For symmetric keys
-        // KeyId is optional (AWS recovers it from the blob), but if present
-        // it must match. We resolve the caller KeyId (raw id / key ARN /
-        // alias / alias ARN) to its key ARN and compare against the
-        // producing key's ARN.
-        if let Some(caller_key_id) = body["KeyId"].as_str().filter(|s| !s.is_empty()) {
-            let resolved = Self::resolve_key_id_with_state(state, &req.region, caller_key_id)
-                .and_then(|id| state.keys.get(&id))
-                .map(|k| k.arn.clone());
-            match resolved {
-                Some(arn) if arn == decoded.source_arn => {}
-                Some(_) => {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "IncorrectKeyException",
-                        "The key ID in the request does not identify a CMK that can perform this operation.",
-                    ));
-                }
-                None => {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "NotFoundException",
-                        crate::hook::not_found_message(&req.account_id, &req.region, caller_key_id),
-                    ));
-                }
-            }
-        }
+        let requested_alg = body["EncryptionAlgorithm"].as_str();
+        let (decoded, source_key) = open_ciphertext(
+            &accounts,
+            &empty,
+            req,
+            ciphertext_b64,
+            &ec_aad,
+            body["KeyId"].as_str().filter(|s| !s.is_empty()),
+            requested_alg,
+        )?;
+        require_matching_algorithm(&decoded, requested_alg)?;
 
         // Gate Decrypt on the source key's policy (AWS-managed keys) and
         // lifecycle state. AWS rejects Decrypt against a key in any state
         // other than `Enabled`.
-        if let Some((_, source_key)) = crate::hook::stored_key(state, "", &decoded.source_arn) {
+        if let Some(source_key) = source_key {
             Self::authorize_direct_key_use(
                 req,
                 source_key,
@@ -299,13 +222,28 @@ impl KmsService {
 
         let accounts = self.state.read();
         let empty = KmsState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let source_ec_aad = canonical_encryption_context(&body["SourceEncryptionContext"])?;
         let dest_ec_aad = canonical_encryption_context(&body["DestinationEncryptionContext"])?;
-        let decoded =
-            decode_ciphertext_envelope(state, &req.region, ciphertext_b64, &source_ec_aad)?;
+        // The source and destination keys may be in different accounts (the
+        // caller's or others', each named by its key or alias ARN): each is
+        // looked up, and opens or seals, in its own account.
+        let source_alg = body["SourceEncryptionAlgorithm"].as_str();
+        let (decoded, source_key) = open_ciphertext(
+            &accounts,
+            &empty,
+            req,
+            ciphertext_b64,
+            &source_ec_aad,
+            body["SourceKeyId"].as_str().filter(|s| !s.is_empty()),
+            source_alg,
+        )?;
+        require_matching_algorithm(&decoded, source_alg)?;
 
-        let dest_resolved = Self::resolve_key_id_with_state(state, &req.region, dest_key_id)
+        let dest_state = accounts
+            .get(crate::hook::key_owner_account(&req.account_id, dest_key_id))
+            .unwrap_or(&empty);
+        let dest_key = Self::resolve_key_id_with_state(dest_state, &req.region, dest_key_id)
+            .and_then(|id| dest_state.keys.get(&id))
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -313,19 +251,9 @@ impl KmsService {
                     crate::hook::not_found_message(&req.account_id, &req.region, dest_key_id),
                 )
             })?;
-
-        let dest_key = state.keys.get(&dest_resolved).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "KMSInternalException",
-                "Key state became inconsistent",
-            )
-        })?;
         // ReEncrypt is authorized as `kms:ReEncryptFrom` on the source key
         // and `kms:ReEncryptTo` on the destination key.
-        let source_key =
-            crate::hook::stored_key(state, "", &decoded.source_arn).map(|(_, key)| key);
-        let same_key = if source_key.is_some_and(|k| k.key_id == dest_key.key_id) {
+        let same_key = if source_key.is_some_and(|k| k.arn == dest_key.arn) {
             "true"
         } else {
             "false"
@@ -375,68 +303,23 @@ impl KmsService {
             .decode(&decoded.plaintext_b64)
             .unwrap_or_default();
         let (new_ciphertext_b64, dest_algorithm) = if dest_key.key_spec.starts_with("RSA_") {
-            // Asymmetric destination: produce a real RSA-OAEP ciphertext under
-            // the destination key's public half, mirroring the Encrypt path,
-            // rather than the symmetric AES blob the old code emitted for every
-            // destination. The echoed DestinationEncryptionAlgorithm reflects
-            // the algorithm actually used.
-            let alg = body["DestinationEncryptionAlgorithm"]
-                .as_str()
-                .unwrap_or("RSAES_OAEP_SHA_256");
-            if alg != "RSAES_OAEP_SHA_1" && alg != "RSAES_OAEP_SHA_256" {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidKeyUsageException",
-                    format!(
-                        "Algorithm '{alg}' is incompatible with the key spec '{}'.",
-                        dest_key.key_spec
-                    ),
-                ));
-            }
-            let pub_der = dest_key.asymmetric_public_key_der.as_ref().ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "KMSInternalException",
-                    "asymmetric public key missing",
-                )
-            })?;
-            let raw = super::asym::rsa_oaep_wrap(pub_der, alg, &plaintext_bytes).map_err(|e| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidKeyUsageException",
-                    format!("RSA re-encrypt failed: {e}"),
-                )
-            })?;
-            let raw_b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
-            let envelope = format!("fakecloud-rsa:{}:{}:{}", dest_key.key_id, alg, raw_b64);
-            let env_b64 = base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
-            (env_b64, alg.to_string())
-        } else if let Some(ref material) = dest_key.imported_material_bytes {
-            // Imported-key path: keep the legacy XOR envelope so consumers
-            // that already round-trip via key material can still decrypt.
-            let xored: Vec<u8> = plaintext_bytes
-                .iter()
-                .enumerate()
-                .map(|(i, b)| b ^ material[i % material.len()])
-                .collect();
-            let xored_b64 = base64::engine::general_purpose::STANDARD.encode(&xored);
-            let envelope = format!("fakecloud-imported:{}:{xored_b64}", dest_key.key_id);
-            (
-                base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes()),
-                "SYMMETRIC_DEFAULT".to_string(),
-            )
-        } else {
-            // Default path: wrap the recovered plaintext under the
-            // destination key with the AWS-shaped binary blob, binding
-            // the caller's DestinationEncryptionContext into the AAD.
-            let blob = crate::blob::encode_with_context(
-                &state.master_key_bytes,
-                sealed_key_ref(req, dest_key),
+            // Asymmetric destination: a real RSA-OAEP ciphertext under the
+            // destination key's public half, as Encrypt produces.
+            rsa_encrypt(
+                dest_key,
+                body["DestinationEncryptionAlgorithm"].as_str(),
                 &plaintext_bytes,
-                &dest_ec_aad,
-            );
+            )?
+        } else {
+            // Sealed under the destination key, in its account, binding the
+            // caller's DestinationEncryptionContext into the AAD.
             (
-                base64::engine::general_purpose::STANDARD.encode(&blob),
+                build_encrypt_ciphertext(
+                    dest_state,
+                    sealed_key_ref(dest_key),
+                    &plaintext_bytes,
+                    &dest_ec_aad,
+                ),
                 "SYMMETRIC_DEFAULT".to_string(),
             )
         };
@@ -505,7 +388,7 @@ impl KmsService {
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let blob = crate::blob::encode_with_context(
             &state.master_key_bytes,
-            sealed_key_ref(req, key),
+            sealed_key_ref(key),
             &data_key_bytes,
             &ec_aad,
         );
@@ -571,7 +454,7 @@ impl KmsService {
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let blob = crate::blob::encode_with_context(
             &state.master_key_bytes,
-            sealed_key_ref(req, key),
+            sealed_key_ref(key),
             &data_key_bytes,
             &ec_aad,
         );
@@ -1162,7 +1045,7 @@ impl KmsService {
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let blob = crate::blob::encode_with_context(
             &state.master_key_bytes,
-            sealed_key_ref(req, key),
+            sealed_key_ref(key),
             &private_key_bytes,
             &ec_aad,
         );
@@ -1232,7 +1115,7 @@ impl KmsService {
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let blob = crate::blob::encode_with_context(
             &state.master_key_bytes,
-            sealed_key_ref(req, key),
+            sealed_key_ref(key),
             &private_key_bytes,
             &ec_aad,
         );
@@ -1348,6 +1231,208 @@ impl KmsService {
             .unwrap(),
         ))
     }
+}
+
+/// For a ciphertext an asymmetric (RSA) key produced, AWS requires the
+/// request's EncryptionAlgorithm to be the one that produced it. An omitted
+/// algorithm defaults to SYMMETRIC_DEFAULT, which never matches, so both an
+/// omitted and a mismatched algorithm are InvalidCiphertextException.
+/// Symmetric ciphertexts are unaffected.
+fn require_matching_algorithm(
+    decoded: &DecodedCiphertext,
+    requested: Option<&str>,
+) -> Result<(), AwsServiceError> {
+    if decoded.encryption_algorithm != "SYMMETRIC_DEFAULT"
+        && requested.unwrap_or("SYMMETRIC_DEFAULT") != decoded.encryption_algorithm
+    {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidCiphertextException",
+            "The specified EncryptionAlgorithm does not match the algorithm used to produce the ciphertext.",
+        ));
+    }
+    Ok(())
+}
+
+/// Encrypt `plaintext` under an RSA `ENCRYPT_DECRYPT` key with RSA-OAEP
+/// (`RSAES_OAEP_SHA_256` by default), returning the base64 ciphertext and
+/// the algorithm. The ciphertext is the raw RSA-OAEP output, as AWS returns
+/// it: it carries no metadata naming the key, so external RSA tooling holding
+/// the public key produces the same kind of ciphertext, and `Decrypt` /
+/// `ReEncrypt` need the key named (`KeyId` / `SourceKeyId`) to open it.
+fn rsa_encrypt(
+    key: &KmsKey,
+    requested_alg: Option<&str>,
+    plaintext: &[u8],
+) -> Result<(String, String), AwsServiceError> {
+    let alg = requested_alg.unwrap_or("RSAES_OAEP_SHA_256");
+    if alg != "RSAES_OAEP_SHA_1" && alg != "RSAES_OAEP_SHA_256" {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidKeyUsageException",
+            format!(
+                "Algorithm '{alg}' is incompatible with the key spec '{}'.",
+                key.key_spec
+            ),
+        ));
+    }
+    let pub_der = key.asymmetric_public_key_der.as_ref().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "KMSInternalException",
+            "asymmetric public key missing",
+        )
+    })?;
+    let raw = super::asym::rsa_oaep_wrap(pub_der, alg, plaintext).map_err(|e| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidKeyUsageException",
+            format!("RSA encrypt failed: {e}"),
+        )
+    })?;
+    Ok((
+        base64::engine::general_purpose::STANDARD.encode(&raw),
+        alg.to_string(),
+    ))
+}
+
+/// The check every key that opens a ciphertext passes, whether the request
+/// named it or the ciphertext did: an `ENCRYPT_DECRYPT` key. Its state and
+/// the request's algorithm are checked by the callers, on whichever key
+/// [`open_ciphertext`] returns ([`require_usable_key_state`],
+/// [`require_matching_algorithm`]), so both paths share them too.
+fn require_decrypting_key(key: &KmsKey) -> Result<(), AwsServiceError> {
+    if key.key_usage != "ENCRYPT_DECRYPT" {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidKeyUsageException",
+            format!(
+                "The operation failed because the KMS key {} is not enabled for the requested operation. The key usage must be ENCRYPT_DECRYPT but is {}.",
+                key.arn, key.key_usage
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Open the ciphertext a `Decrypt` (or the source of a `ReEncrypt`) names,
+/// as AWS opens it, returning what it opens to and the key that opens it.
+///
+/// `key_ref` is the request's `KeyId` (`SourceKeyId`) and `algorithm` its
+/// `EncryptionAlgorithm` (`SourceEncryptionAlgorithm`). The key is looked up
+/// in the account it names: a key or alias ARN of another account in that
+/// account, anything else in the request's (its key's account once routed,
+/// see `KmsService::cross_account_key_owner`); with no `key_ref`, the
+/// account of the key the ciphertext names. A symmetric ciphertext names its
+/// key, so `KeyId` is optional and, when given, must identify that key
+/// (`IncorrectKeyException`). An RSA ciphertext names no key ("This parameter
+/// is required only when the ciphertext was encrypted under an asymmetric
+/// KMS key", Decrypt API reference): without `KeyId` it is not a ciphertext
+/// KMS can open (`InvalidCiphertextException`), and with it, it is opened
+/// with that key's private half under `algorithm`. The textual
+/// `fakecloud-rsa:` envelope earlier builds produced names its key, so it
+/// still opens without `KeyId`, and with one only if it names that key.
+fn open_ciphertext<'a>(
+    accounts: &'a fakecloud_core::multi_account::MultiAccountState<KmsState>,
+    empty: &'a KmsState,
+    req: &AwsRequest,
+    ciphertext_b64: &str,
+    ec_aad: &[u8],
+    key_ref: Option<&str>,
+    algorithm: Option<&str>,
+) -> Result<(DecodedCiphertext, Option<&'a KmsKey>), AwsServiceError> {
+    let embedded = ciphertext_key_ref(ciphertext_b64);
+    let account = key_ref
+        .or(embedded.as_deref())
+        .map_or(req.account_id.as_str(), |r| {
+            crate::hook::key_owner_account(&req.account_id, r)
+        });
+    let state = accounts.get(account).unwrap_or(empty);
+    let incorrect_key = || {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "IncorrectKeyException",
+            "The key ID in the request does not identify a CMK that can perform this operation.",
+        )
+    };
+
+    let Some(key_ref) = key_ref else {
+        // A raw RSA ciphertext names no key and is not an envelope, so it
+        // fails here (InvalidCiphertextException), as on AWS. A ciphertext
+        // of the textual RSA envelope earlier builds produced names its key,
+        // and keeps opening by it, so ciphertexts persisted before still
+        // decrypt after an upgrade (authorized on that key like any other).
+        let decoded = decode_ciphertext_envelope(state, &req.region, ciphertext_b64, ec_aad)?;
+        let key = crate::hook::stored_key(state, "", &decoded.source_arn).map(|(_, key)| key);
+        if let Some(key) = key {
+            require_decrypting_key(key)?;
+        }
+        return Ok((decoded, key));
+    };
+
+    let key = KmsService::resolve_key_id_with_state(state, &req.region, key_ref)
+        .and_then(|id| state.keys.get(&id))
+        .ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                crate::hook::not_found_message(&req.account_id, &req.region, key_ref),
+            )
+        })?;
+    require_decrypting_key(key)?;
+
+    if key.key_spec.starts_with("RSA_") {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(ciphertext_b64)
+            .map_err(|_| invalid_ciphertext())?;
+        let requested = algorithm.unwrap_or("SYMMETRIC_DEFAULT");
+        // A textual RSA envelope earlier builds produced: opened as before,
+        // by the key it names, which must be this one.
+        if bytes.starts_with(RSA_ENVELOPE_PREFIX.as_bytes()) {
+            let decoded = decode_ciphertext_envelope(state, &req.region, ciphertext_b64, ec_aad)?;
+            if decoded.source_arn != key.arn {
+                return Err(incorrect_key());
+            }
+            return Ok((decoded, Some(key)));
+        }
+        if requested != "RSAES_OAEP_SHA_1" && requested != "RSAES_OAEP_SHA_256" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidCiphertextException",
+                "The specified EncryptionAlgorithm does not match the algorithm used to produce the ciphertext.",
+            ));
+        }
+        let priv_der = key
+            .asymmetric_private_key_der
+            .as_ref()
+            .ok_or_else(invalid_ciphertext)?;
+        let plaintext = super::asym::rsa_oaep_unwrap(priv_der, requested, &bytes)
+            .map_err(|_| invalid_ciphertext())?;
+        return Ok((
+            DecodedCiphertext {
+                source_arn: key.arn.clone(),
+                plaintext_b64: base64::engine::general_purpose::STANDARD.encode(&plaintext),
+                encryption_algorithm: requested.to_string(),
+            },
+            Some(key),
+        ));
+    }
+
+    // A symmetric ciphertext names the key that sealed it: one naming
+    // another key (of any account) is not this key's.
+    if let Some(sealed_by) = embedded
+        .as_deref()
+        .and_then(|embedded| ciphertext_key_arn(accounts, req, embedded))
+    {
+        if sealed_by != key.arn {
+            return Err(incorrect_key());
+        }
+    }
+    let decoded = decode_ciphertext_envelope(state, &req.region, ciphertext_b64, ec_aad)?;
+    if decoded.source_arn != key.arn || decoded.encryption_algorithm != "SYMMETRIC_DEFAULT" {
+        return Err(incorrect_key());
+    }
+    Ok((decoded, Some(key)))
 }
 
 /// Real ECDH shared-secret derivation for KMS KEY_AGREEMENT keys. `priv_der`

@@ -1549,13 +1549,8 @@ impl SsmService {
         let all_params: Vec<&SsmParameter> = state
             .parameters
             .values()
-            .filter(|p| {
-                // Exclude /aws/ prefix params from user queries unless explicitly targeted
-                if !targets_aws_prefix && p.name.starts_with("/aws/") {
-                    return false;
-                }
-                true
-            })
+            // Exclude /aws/ prefix params from user queries unless explicitly targeted
+            .filter(|p| targets_aws_prefix || !p.name.starts_with("/aws/"))
             .filter(|p| apply_parameter_filters(p, param_filters.as_ref()))
             .filter(|p| apply_old_filters(p, old_filters.as_ref()))
             .collect();

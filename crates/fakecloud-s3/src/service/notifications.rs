@@ -388,10 +388,7 @@ pub(crate) fn event_matches(event_name: &str, filter: &str) -> bool {
         }
     }
     // s3:* matches everything
-    if filter == "s3:*" {
-        return true;
-    }
-    false
+    filter == "s3:*"
 }
 
 /// Everything a reader needs to describe a single S3 object-level event.

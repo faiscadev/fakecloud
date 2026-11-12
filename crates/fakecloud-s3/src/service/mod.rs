@@ -1963,6 +1963,18 @@ impl AwsService for S3Service {
             key.as_deref(),
             &request.query_params,
         )?;
+        // RenameObject is a directory-bucket (S3 Express One Zone) Zonal
+        // endpoint operation, which has no IAM action of its own: it runs on
+        // the session `CreateSession` opened ("CreateSession enables access
+        // for all object level operations", user guide, "Authorizing Regional
+        // endpoint API operations with IAM"), so it is authorized as
+        // `s3express:CreateSession` on the bucket, for a ReadWrite session
+        // (see `iam_condition_keys_for`).
+        let action = if action == "RenameObject" {
+            "CreateSession"
+        } else {
+            action
+        };
         // A handful of S3-adjacent ops are authorized under sibling IAM
         // service prefixes, not `s3:`. Select the right prefix so a policy
         // targeting the real action string actually matches.
@@ -1975,7 +1987,20 @@ impl AwsService for S3Service {
         // partition, so policies written against those ARNs must match here.
         let bucket_region = bucket.and_then(|b| self.bucket_region(b));
         let region = bucket_region.as_deref().unwrap_or(&request.region);
-        let resource = s3_resource_for(region, action, bucket, key.as_deref());
+        let resource = match (action, bucket) {
+            // A directory bucket's ARN is in the `s3express` namespace and
+            // names its region and owning account:
+            // `arn:aws:s3express:<region>:<account>:bucket/<name>`.
+            ("CreateSession", Some(bucket)) => {
+                let owner = self
+                    .state
+                    .read()
+                    .find_account(|s| s.buckets.contains_key(bucket))
+                    .map_or_else(|| request.account_id.clone(), str::to_string);
+                Arn::regional("s3express", region, &owner, &format!("bucket/{bucket}")).to_string()
+            }
+            _ => s3_resource_for(region, action, bucket, key.as_deref()),
+        };
         Some(fakecloud_core::auth::IamAction {
             service,
             action,
@@ -2111,6 +2136,21 @@ impl AwsService for S3Service {
             );
         }
         let mut keys = s3_condition_keys(action.action, &request.query_params, &request.headers);
+        // `s3express:SessionMode`: the session a CreateSession asks for
+        // (`x-amz-create-session-mode`, ReadWrite by default), and ReadWrite
+        // for a Zonal write authorized as one (RenameObject).
+        if action.service == "s3express" && action.action == "CreateSession" {
+            let mode = if request.query_params.contains_key("session") {
+                request
+                    .headers
+                    .get("x-amz-create-session-mode")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("ReadWrite")
+            } else {
+                "ReadWrite"
+            };
+            keys.insert("s3express:SessionMode".to_string(), vec![mode.to_string()]);
+        }
         // S3 Control UntagResource: `aws:TagKeys` lists the keys being removed.
         if action.action == "UntagResource" && control_tags::is_control_tags_request(request) {
             keys.insert(
@@ -2749,12 +2789,13 @@ fn s3_detect_action(
         }
     }
 
-    // GET on an object with `?torrent` is GetObjectTorrent, authorized under
-    // s3:GetObjectTorrent -- not s3:GetObject. Without this arm a policy that
-    // allows GetObject but not GetObjectTorrent would wrongly permit it
-    // (bug-audit 2026-06-20, 5.3).
+    // GET on an object with `?torrent` is GetObjectTorrent, which AWS
+    // authorizes as `s3:GetObject` on the object ("Required permissions for
+    // Amazon S3 API operations": GetObjectTorrent, (Required) s3:GetObject;
+    // the service authorization reference maps the operation to that action
+    // too), not under the legacy `s3:GetObjectTorrent` action name.
     if is_get && has_key && has("torrent") {
-        return Some("GetObjectTorrent");
+        return Some("GetObject");
     }
 
     // Plain bucket/object methods.
@@ -2817,13 +2858,11 @@ fn s3_resource_for(
         "CompleteMultipartUpload",
         "AbortMultipartUpload",
         "ListParts",
-        // Object-level operations of their own: UpdateObjectEncryption (the
-        // user guide's example policy grants it on `bucket/*`), RenameObject
-        // (on the destination key) and GetObjectTorrent. SelectObjectContent
-        // is authorized as GetObject, above.
+        // An object-level operation of its own (the user guide's example
+        // policy grants it on `bucket/*`). SelectObjectContent and
+        // GetObjectTorrent are authorized as GetObject, above; RenameObject
+        // as `s3express:CreateSession` on the bucket.
         "UpdateObjectEncryption",
-        "RenameObject",
-        "GetObjectTorrent",
     ];
     if action == "ListBuckets" {
         return "*".to_string();
@@ -4773,20 +4812,18 @@ mod partition_tests {
         );
     }
 
-    /// UpdateObjectEncryption, RenameObject and GetObjectTorrent act on an
-    /// object, so they are authorized on `bucket/key`, not the bucket.
+    /// UpdateObjectEncryption acts on an object, so it is authorized on
+    /// `bucket/key`, not the bucket; GetObjectTorrent is `s3:GetObject` on
+    /// the object.
     #[test]
     fn object_level_operations_are_authorized_on_the_object() {
-        for action in ["UpdateObjectEncryption", "RenameObject", "GetObjectTorrent"] {
-            assert_eq!(
-                s3_resource_for("us-east-1", action, Some("b"), Some("k")),
-                "arn:aws:s3:::b/k",
-                "{action}"
-            );
-        }
+        assert_eq!(
+            s3_resource_for("us-east-1", "UpdateObjectEncryption", Some("b"), Some("k")),
+            "arn:aws:s3:::b/k",
+        );
         let query = HashMap::from([("torrent".to_string(), String::new())]);
         let torrent = s3_detect_action("GET", Some("b"), Some("k"), &query);
-        assert_eq!(torrent, Some("GetObjectTorrent"));
+        assert_eq!(torrent, Some("GetObject"));
     }
 
     #[test]
@@ -5236,19 +5273,59 @@ mod s3_iam_service_prefix_tests {
     }
 
     #[test]
-    fn get_object_torrent_maps_to_its_own_action() {
-        // GET object with `?torrent` must authorize under s3:GetObjectTorrent,
-        // not s3:GetObject (bug-audit 2026-06-20, 5.3).
+    fn get_object_torrent_is_authorized_as_get_object() {
+        // "Required permissions for Amazon S3 API operations": GetObjectTorrent
+        // requires s3:GetObject (on the object).
         let svc = make_service();
         let action = svc
             .iam_action_for(&req(Method::GET, "/mybucket/key.txt", &[("torrent", "")]))
             .expect("must be mapped");
-        assert_eq!(action.action, "GetObjectTorrent");
-        // A plain GET still maps to GetObject.
-        let plain = svc
-            .iam_action_for(&req(Method::GET, "/mybucket/key.txt", &[]))
-            .expect("must be mapped");
-        assert_eq!(plain.action, "GetObject");
+        assert_eq!(action.action_string(), "s3:GetObject");
+        assert_eq!(action.resource, "arn:aws:s3:::mybucket/key.txt");
+    }
+
+    /// RenameObject (a directory-bucket Zonal operation) runs on a
+    /// CreateSession session, so it is authorized as `s3express:CreateSession`
+    /// on the bucket's `s3express` ARN, for a ReadWrite session; CreateSession
+    /// itself is authorized on that ARN with the mode it asks for.
+    #[test]
+    fn rename_object_is_authorized_as_a_read_write_session() {
+        let svc = make_service();
+        let mut rename = req(
+            Method::PUT,
+            "/b--use1-az4--x-s3/new",
+            &[("renameObject", "")],
+        );
+        rename.headers.insert(
+            "x-amz-rename-source",
+            "b--use1-az4--x-s3/old".parse().unwrap(),
+        );
+        let action = svc.iam_action_for(&rename).expect("must be mapped");
+        assert_eq!(action.action_string(), "s3express:CreateSession");
+        assert_eq!(
+            action.resource,
+            "arn:aws:s3express:us-east-1:123456789012:bucket/b--use1-az4--x-s3"
+        );
+        let keys = svc.iam_condition_keys_for(&rename, &action);
+        assert_eq!(
+            keys.get("s3express:SessionMode"),
+            Some(&vec!["ReadWrite".to_string()])
+        );
+
+        let mut session = req(Method::GET, "/b--use1-az4--x-s3", &[("session", "")]);
+        session
+            .headers
+            .insert("x-amz-create-session-mode", "ReadOnly".parse().unwrap());
+        let action = svc.iam_action_for(&session).expect("must be mapped");
+        assert_eq!(
+            action.resource,
+            "arn:aws:s3express:us-east-1:123456789012:bucket/b--use1-az4--x-s3"
+        );
+        let keys = svc.iam_condition_keys_for(&session, &action);
+        assert_eq!(
+            keys.get("s3express:SessionMode"),
+            Some(&vec!["ReadOnly".to_string()])
+        );
     }
 }
 

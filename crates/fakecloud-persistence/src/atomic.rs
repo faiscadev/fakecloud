@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-fn tmp_path(path: &Path) -> PathBuf {
+pub(crate) fn tmp_path(path: &Path) -> PathBuf {
     // Unique temp name per write. A fixed `<path>.tmp` let two concurrent
     // writers to the same path (e.g. the KMS snapshot_lock-guarded save and the
     // lock-free auto-provision snapshot hook firing from another worker)

@@ -1,0 +1,36 @@
+== both-grantees
+Request: {"GranteePrincipal": "arn:aws:iam::123456789012:user/grantee", "GranteeServicePrincipal": "sqs.amazonaws.com", "RetiringPrincipal": "arn:aws:iam::123456789012:user/grantee", "Constraints": {"SourceArn": "arn:aws:sqs:us-east-1:123456789012:queue"}}
+HTTP 400 ValidationException
+Cannot specify both GranteePrincipal and GranteeServicePrincipal.
+== no-grantee
+Request: {}
+HTTP 400 ValidationException
+Must include either GranteePrincipal or GranteeServicePrincipal.
+== service-grantee-without-source-arn
+Request: {"GranteeServicePrincipal": "sqs.amazonaws.com", "RetiringPrincipal": "arn:aws:iam::123456789012:user/grantee"}
+HTTP 400 ValidationException
+Must include SourceArn constraint when GranteeServicePrincipal is supplied.
+== service-grantee-without-retiring-principal
+Request: {"GranteeServicePrincipal": "sqs.amazonaws.com", "Constraints": {"SourceArn": "arn:aws:sqs:us-east-1:123456789012:queue"}}
+HTTP 400 ValidationException
+RetiringServicePrincipal or RetiringPrincipal must be specified when GranteeServicePrincipal is supplied.
+== both-retiring-principals
+Request: {"GranteePrincipal": "arn:aws:iam::123456789012:user/grantee", "RetiringPrincipal": "arn:aws:iam::123456789012:user/grantee", "RetiringServicePrincipal": "sqs.amazonaws.com"}
+HTTP 400 ValidationException
+Cannot specify both RetiringPrincipal and RetiringServicePrincipal.
+== source-arn-without-account
+Request: {"GranteeServicePrincipal": "sqs.amazonaws.com", "Constraints": {"SourceArn": "arn:aws:s3:::fc-nonexistent-probe-bucket"}}
+HTTP 400 ValidationException
+1 validation error detected: Value 'arn:aws:s3:::fc-nonexistent-probe-bucket' at 'constraints.sourceArn' failed to satisfy constraint: Member must satisfy regular expression pattern: ^arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$
+== service-grantee-retiring-user
+Request: {"GranteeServicePrincipal": "sqs.amazonaws.com", "RetiringPrincipal": "arn:aws:iam::123456789012:user/grantee", "Constraints": {"SourceArn": "arn:aws:sqs:us-east-1:123456789012:queue"}}
+HTTP 400 NotFoundException
+Key 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000' does not exist
+== service-grantee-retiring-service-with-context
+Request: {"GranteeServicePrincipal": "sqs.amazonaws.com", "RetiringServicePrincipal": "sqs.amazonaws.com", "Constraints": {"SourceArn": "arn:aws:sqs:us-east-1:123456789012:queue", "EncryptionContextSubset": {"k": "v"}}}
+HTTP 400 NotFoundException
+Key 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000' does not exist
+== role-grantee-with-source-arn
+Request: {"GranteePrincipal": "arn:aws:iam::123456789012:role/grantee", "Constraints": {"SourceArn": "arn:aws:sqs:us-east-1:123456789012:queue"}}
+HTTP 400 NotFoundException
+Key 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000' does not exist

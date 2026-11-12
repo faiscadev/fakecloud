@@ -917,15 +917,16 @@ fn imported_key_material_encrypt_decrypt_roundtrip() {
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     let ciphertext = body["CiphertextBlob"].as_str().unwrap().to_string();
 
-    // Verify ciphertext uses the imported envelope
+    // The ciphertext is a symmetric blob naming its key, like any other
+    // symmetric key's, and never holds the plaintext.
     let ct_bytes = base64::engine::general_purpose::STANDARD
         .decode(&ciphertext)
         .unwrap();
-    let envelope = String::from_utf8(ct_bytes).unwrap();
-    assert!(
-        envelope.starts_with("fakecloud-imported:"),
-        "Imported key should use fakecloud-imported envelope"
+    assert_eq!(
+        crate::blob::embedded_key_id(&ct_bytes),
+        Some(format!("arn:aws:kms:us-east-1:123456789012:key/{key_id}"))
     );
+    assert!(ct_bytes.windows(plaintext.len()).all(|w| w != plaintext));
 
     // Decrypt
     let req = make_request("Decrypt", json!({ "CiphertextBlob": ciphertext }));
@@ -3262,24 +3263,30 @@ fn encrypt_rsa_key_uses_real_oaep_and_roundtrips() {
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(body["EncryptionAlgorithm"], "RSAES_OAEP_SHA_256");
     let ciphertext = body["CiphertextBlob"].as_str().unwrap().to_string();
-    let env = String::from_utf8(
-        base64::engine::general_purpose::STANDARD
-            .decode(&ciphertext)
-            .unwrap(),
-    )
-    .unwrap();
-    assert!(
-        env.starts_with("fakecloud-rsa:"),
-        "RSA key must use the RSA envelope, got {env}"
-    );
+    // The raw RSA-OAEP output, as AWS returns it: one modulus long, and
+    // opened by the private half outside KMS too.
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(&ciphertext)
+        .unwrap();
+    assert_eq!(raw.len(), 256);
+    {
+        let accounts = svc.state.read();
+        let key = &accounts.get("123456789012").unwrap().keys[&key_id];
+        let priv_der = key.asymmetric_private_key_der.as_ref().unwrap();
+        assert_eq!(
+            asym::rsa_oaep_unwrap(priv_der, "RSAES_OAEP_SHA_256", &raw).unwrap(),
+            plaintext
+        );
+    }
 
-    // AWS requires the caller to supply EncryptionAlgorithm when decrypting
-    // ciphertext produced by an asymmetric KMS key.
+    // AWS requires the caller to name the key and supply EncryptionAlgorithm
+    // when decrypting ciphertext produced by an asymmetric KMS key.
     let resp = svc
         .decrypt(&make_request(
             "Decrypt",
             json!({
                 "CiphertextBlob": ciphertext,
+                "KeyId": key_id,
                 "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
             }),
         ))
@@ -3323,6 +3330,7 @@ fn asymmetric_decrypt_wrong_algorithm_is_rejected() {
         "Decrypt",
         json!({
             "CiphertextBlob": ciphertext.clone(),
+            "KeyId": key_id,
             "EncryptionAlgorithm": "RSAES_OAEP_SHA_1",
         }),
     )) {
@@ -3333,10 +3341,33 @@ fn asymmetric_decrypt_wrong_algorithm_is_rejected() {
     // Omitted algorithm (defaults to SYMMETRIC_DEFAULT) -> also rejected.
     match svc.decrypt(&make_request(
         "Decrypt",
-        json!({ "CiphertextBlob": ciphertext.clone() }),
+        json!({ "CiphertextBlob": ciphertext.clone(), "KeyId": key_id }),
     )) {
         Err(e) => assert_eq!(e.code(), "InvalidCiphertextException"),
         Ok(_) => panic!("an omitted EncryptionAlgorithm must be rejected for asymmetric"),
+    }
+
+    // An RSA ciphertext names no key, so without KeyId it is not one KMS can
+    // open, whatever the algorithm.
+    match svc.decrypt(&make_request(
+        "Decrypt",
+        json!({
+            "CiphertextBlob": ciphertext.clone(),
+            "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+        }),
+    )) {
+        Err(e) => assert_eq!(e.code(), "InvalidCiphertextException"),
+        Ok(_) => panic!("an RSA ciphertext needs its KeyId"),
+    }
+
+    // Naming a symmetric key instead: the bytes are no symmetric ciphertext.
+    let symmetric = create_key_with_opts(&svc, json!({}));
+    match svc.decrypt(&make_request(
+        "Decrypt",
+        json!({ "CiphertextBlob": ciphertext.clone(), "KeyId": symmetric }),
+    )) {
+        Err(e) => assert_eq!(e.code(), "InvalidCiphertextException"),
+        Ok(_) => panic!("another key must not open the ciphertext"),
     }
 
     // Correct algorithm -> succeeds.
@@ -3345,6 +3376,7 @@ fn asymmetric_decrypt_wrong_algorithm_is_rejected() {
             "Decrypt",
             json!({
                 "CiphertextBlob": ciphertext,
+                "KeyId": key_id,
                 "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
             }),
         ))
@@ -4969,6 +5001,448 @@ async fn keys_of_another_account_are_used_by_their_arn() {
     assert_eq!(err.code(), "NotFoundException");
 }
 
+/// The ARN of a new key of `account` created with `body`.
+async fn key_arn_in(svc: &KmsService, account: &str, body: Value) -> String {
+    json_of(svc, request_as(account, "CreateKey", body)).await["KeyMetadata"]["Arn"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// `ReEncrypt` takes a source and a destination key in different accounts
+/// (the caller's and others', each named by its ARN): the ciphertext is
+/// opened by the source key in its account and resealed under the
+/// destination key in its, so the destination's account, or the caller,
+/// decrypts it without naming a key; the same holds when neither key is the
+/// caller's.
+#[tokio::test]
+async fn re_encrypt_moves_ciphertext_between_accounts() {
+    let svc = make_service();
+    let (a, b, c) = ("111111111111", "222222222222", "333333333333");
+    let key_a = key_arn_in(&svc, a, json!({})).await;
+    let key_b = key_arn_in(&svc, b, json!({})).await;
+    let key_c = key_arn_in(&svc, c, json!({})).await;
+    let plaintext = base64::engine::general_purpose::STANDARD.encode(b"moving");
+    let decrypt = |account: &str, blob: &str, context: Value| {
+        request_as(
+            account,
+            "Decrypt",
+            json!({"CiphertextBlob": blob, "EncryptionContext": context}),
+        )
+    };
+
+    // The caller's own key to another account's.
+    let sealed = json_of(
+        &svc,
+        request_as(
+            a,
+            "Encrypt",
+            json!({"KeyId": key_a, "Plaintext": plaintext, "EncryptionContext": {"s": "1"}}),
+        ),
+    )
+    .await;
+    let moved = json_of(
+        &svc,
+        request_as(
+            a,
+            "ReEncrypt",
+            json!({
+                "CiphertextBlob": sealed["CiphertextBlob"],
+                "SourceEncryptionContext": {"s": "1"},
+                "DestinationKeyId": key_b,
+                "DestinationEncryptionContext": {"d": "2"},
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(moved["SourceKeyId"], json!(key_a));
+    assert_eq!(moved["KeyId"], json!(key_b));
+    let blob = moved["CiphertextBlob"].as_str().unwrap().to_string();
+    assert_eq!(ciphertext_key_ref(&blob).as_deref(), Some(key_b.as_str()));
+    for account in [a, b] {
+        let opened = json_of(&svc, decrypt(account, &blob, json!({"d": "2"}))).await;
+        assert_eq!(opened["Plaintext"], json!(plaintext), "{account}");
+        assert_eq!(opened["KeyId"], json!(key_b));
+    }
+
+    // Another account's key back to the caller's own.
+    let back = json_of(
+        &svc,
+        request_as(
+            a,
+            "ReEncrypt",
+            json!({
+                "CiphertextBlob": blob,
+                "SourceKeyId": key_b,
+                "SourceEncryptionContext": {"d": "2"},
+                "DestinationKeyId": key_a,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(back["SourceKeyId"], json!(key_b));
+    let blob_a = back["CiphertextBlob"].as_str().unwrap().to_string();
+    let opened = json_of(&svc, decrypt(a, &blob_a, json!({}))).await;
+    assert_eq!(opened["Plaintext"], json!(plaintext));
+    assert_eq!(opened["KeyId"], json!(key_a));
+
+    // Between two accounts, neither the caller's.
+    let in_b = json_of(
+        &svc,
+        request_as(
+            a,
+            "Encrypt",
+            json!({"KeyId": key_b, "Plaintext": plaintext}),
+        ),
+    )
+    .await;
+    let to_c = json_of(
+        &svc,
+        request_as(
+            a,
+            "ReEncrypt",
+            json!({"CiphertextBlob": in_b["CiphertextBlob"], "DestinationKeyId": key_c}),
+        ),
+    )
+    .await;
+    assert_eq!(to_c["SourceKeyId"], json!(key_b));
+    assert_eq!(to_c["KeyId"], json!(key_c));
+    let blob_c = to_c["CiphertextBlob"].as_str().unwrap();
+    for account in [a, c] {
+        let opened = json_of(&svc, decrypt(account, blob_c, json!({}))).await;
+        assert_eq!(opened["Plaintext"], json!(plaintext), "{account}");
+    }
+
+    // A SourceKeyId naming another key than the one that sealed the
+    // ciphertext is IncorrectKeyException.
+    let err = svc
+        .handle(request_as(
+            a,
+            "ReEncrypt",
+            json!({
+                "CiphertextBlob": in_b["CiphertextBlob"],
+                "SourceKeyId": key_c,
+                "DestinationKeyId": key_a,
+            }),
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "IncorrectKeyException");
+}
+
+/// A symmetric ciphertext names its key by ARN whoever sealed it, so one the
+/// key's own account sealed (Encrypt, GenerateDataKey) is decrypted from
+/// another account it is handed to without naming the key.
+#[tokio::test]
+async fn own_account_ciphertexts_open_from_other_accounts() {
+    let svc = make_service();
+    let (owner, other) = ("111111111111", "222222222222");
+    let key = key_arn_in(&svc, owner, json!({})).await;
+    let plaintext = base64::engine::general_purpose::STANDARD.encode(b"handed over");
+    let sealed = json_of(
+        &svc,
+        request_as(
+            owner,
+            "Encrypt",
+            json!({"KeyId": key, "Plaintext": plaintext}),
+        ),
+    )
+    .await;
+    let data_key = json_of(
+        &svc,
+        request_as(
+            owner,
+            "GenerateDataKey",
+            json!({"KeyId": key, "KeySpec": "AES_256"}),
+        ),
+    )
+    .await;
+    let encrypted = json!(plaintext);
+    for (blob, expected) in [
+        (&sealed["CiphertextBlob"], &encrypted),
+        (&data_key["CiphertextBlob"], &data_key["Plaintext"]),
+    ] {
+        let blob = blob.as_str().unwrap();
+        assert_eq!(ciphertext_key_ref(blob).as_deref(), Some(key.as_str()));
+        let opened = json_of(
+            &svc,
+            request_as(other, "Decrypt", json!({"CiphertextBlob": blob})),
+        )
+        .await;
+        assert_eq!(&opened["Plaintext"], expected);
+        assert_eq!(opened["KeyId"], json!(key));
+    }
+}
+
+/// A symmetric key with imported material seals like any symmetric key: its
+/// ciphertext names it, so a caller of another account decrypts what it
+/// encrypted under the key without naming it, the encryption context binds,
+/// and deleting the material leaves the key PendingImport, which refuses the
+/// decrypt.
+#[tokio::test]
+async fn imported_material_ciphertexts_name_their_key_across_accounts() {
+    let svc = make_service();
+    let owner = "123456789012";
+    let other = "222222222222";
+    let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
+    import_external_material(&svc, &key_id, b"my-secret-aes-key-material!12345");
+    let key_arn = format!("arn:aws:kms:us-east-1:{owner}:key/{key_id}");
+    let plaintext = base64::engine::general_purpose::STANDARD.encode(b"imported");
+    let sealed = json_of(
+        &svc,
+        request_as(
+            other,
+            "Encrypt",
+            json!({"KeyId": key_arn, "Plaintext": plaintext, "EncryptionContext": {"k": "v"}}),
+        ),
+    )
+    .await;
+    let blob = sealed["CiphertextBlob"].as_str().unwrap().to_string();
+    assert_eq!(ciphertext_key_ref(&blob).as_deref(), Some(key_arn.as_str()));
+    let decrypt = |context: Value| {
+        request_as(
+            other,
+            "Decrypt",
+            json!({"CiphertextBlob": blob, "EncryptionContext": context}),
+        )
+    };
+    let opened = json_of(&svc, decrypt(json!({"k": "v"}))).await;
+    assert_eq!(opened["Plaintext"], json!(plaintext));
+    assert_eq!(opened["KeyId"], json!(key_arn));
+    let err = svc.handle(decrypt(json!({}))).await.err().unwrap();
+    assert_eq!(err.code(), "InvalidCiphertextException");
+
+    svc.delete_imported_key_material(&make_request(
+        "DeleteImportedKeyMaterial",
+        json!({"KeyId": key_id}),
+    ))
+    .unwrap();
+    let err = svc.handle(decrypt(json!({"k": "v"}))).await.err().unwrap();
+    assert_eq!(err.code(), "KMSInvalidStateException");
+}
+
+/// An RSA ciphertext names no key: `Decrypt` and `ReEncrypt` open it only
+/// with the key named (`KeyId` / `SourceKeyId`) and its algorithm, from the
+/// key's own account or another; without the key it is
+/// InvalidCiphertextException. `ReEncrypt` into an RSA key yields a raw
+/// RSA-OAEP ciphertext of that key.
+#[tokio::test]
+async fn rsa_ciphertexts_are_opened_by_the_key_named() {
+    let svc = make_service();
+    let (owner, other) = ("111111111111", "222222222222");
+    let rsa = key_arn_in(
+        &svc,
+        owner,
+        json!({"KeySpec": "RSA_2048", "KeyUsage": "ENCRYPT_DECRYPT"}),
+    )
+    .await;
+    let symmetric = key_arn_in(&svc, other, json!({})).await;
+    let plaintext = base64::engine::general_purpose::STANDARD.encode(b"asymmetric");
+    let alg = "RSAES_OAEP_SHA_1";
+    let sealed = json_of(
+        &svc,
+        request_as(
+            other,
+            "Encrypt",
+            json!({"KeyId": rsa, "Plaintext": plaintext, "EncryptionAlgorithm": alg}),
+        ),
+    )
+    .await;
+    let blob = sealed["CiphertextBlob"].as_str().unwrap().to_string();
+    assert_eq!(ciphertext_key_ref(&blob), None);
+
+    for account in [other, owner] {
+        let opened = json_of(
+            &svc,
+            request_as(
+                account,
+                "Decrypt",
+                json!({"CiphertextBlob": blob, "KeyId": rsa, "EncryptionAlgorithm": alg}),
+            ),
+        )
+        .await;
+        assert_eq!(opened["Plaintext"], json!(plaintext), "{account}");
+        assert_eq!(opened["KeyId"], json!(rsa));
+        assert_eq!(opened["EncryptionAlgorithm"], json!(alg));
+        let err = svc
+            .handle(request_as(
+                account,
+                "Decrypt",
+                json!({"CiphertextBlob": blob, "EncryptionAlgorithm": alg}),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "InvalidCiphertextException", "{account}");
+    }
+
+    let err = svc
+        .handle(request_as(
+            other,
+            "ReEncrypt",
+            json!({
+                "CiphertextBlob": blob,
+                "SourceEncryptionAlgorithm": alg,
+                "DestinationKeyId": symmetric,
+            }),
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "InvalidCiphertextException");
+    let moved = json_of(
+        &svc,
+        request_as(
+            other,
+            "ReEncrypt",
+            json!({
+                "CiphertextBlob": blob,
+                "SourceKeyId": rsa,
+                "SourceEncryptionAlgorithm": alg,
+                "DestinationKeyId": symmetric,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(moved["SourceKeyId"], json!(rsa));
+    assert_eq!(moved["SourceEncryptionAlgorithm"], json!(alg));
+    let opened = json_of(
+        &svc,
+        request_as(
+            other,
+            "Decrypt",
+            json!({"CiphertextBlob": moved["CiphertextBlob"]}),
+        ),
+    )
+    .await;
+    assert_eq!(opened["Plaintext"], json!(plaintext));
+
+    // Back into the RSA key: a raw RSA-OAEP ciphertext of it.
+    let back = json_of(
+        &svc,
+        request_as(
+            other,
+            "ReEncrypt",
+            json!({
+                "CiphertextBlob": moved["CiphertextBlob"],
+                "DestinationKeyId": rsa,
+                "DestinationEncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+            }),
+        ),
+    )
+    .await;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(back["CiphertextBlob"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(raw.len(), 256);
+    let opened = json_of(
+        &svc,
+        request_as(
+            owner,
+            "Decrypt",
+            json!({
+                "CiphertextBlob": back["CiphertextBlob"],
+                "KeyId": rsa,
+                "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(opened["Plaintext"], json!(plaintext));
+}
+
+/// A `fakecloud-rsa:<key id>:<algorithm>:<raw>` ciphertext earlier builds
+/// produced (and may have persisted) names its key, so it keeps opening
+/// without `KeyId` after an upgrade, authorized on that key; its algorithm
+/// must still match, and a `KeyId` naming another key is
+/// IncorrectKeyException.
+#[test]
+fn legacy_rsa_envelopes_open_without_a_key_id() {
+    let svc = make_service();
+    let rsa = json!({"KeySpec": "RSA_2048", "KeyUsage": "ENCRYPT_DECRYPT"});
+    let key_id = create_key_with_opts(&svc, rsa.clone());
+    let other = create_key_with_opts(&svc, rsa);
+    let pub_der = {
+        let accounts = svc.state.read();
+        accounts.get("123456789012").unwrap().keys[&key_id]
+            .asymmetric_public_key_der
+            .clone()
+            .unwrap()
+    };
+    let raw = asym::rsa_oaep_wrap(&pub_der, "RSAES_OAEP_SHA_256", b"persisted").unwrap();
+    let envelope = format!(
+        "fakecloud-rsa:{key_id}:RSAES_OAEP_SHA_256:{}",
+        base64::engine::general_purpose::STANDARD.encode(&raw)
+    );
+    let blob = base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+    let decrypt = |extra: Value| {
+        let mut body = json!({"CiphertextBlob": blob});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        svc.decrypt(&make_request("Decrypt", body))
+    };
+
+    let opened = body_json(decrypt(json!({"EncryptionAlgorithm": "RSAES_OAEP_SHA_256"})).unwrap());
+    assert_eq!(
+        opened["Plaintext"],
+        json!(base64::engine::general_purpose::STANDARD.encode(b"persisted"))
+    );
+    assert_eq!(
+        opened["KeyId"],
+        json!(format!("arn:aws:kms:us-east-1:123456789012:key/{key_id}"))
+    );
+    decrypt(json!({"KeyId": key_id, "EncryptionAlgorithm": "RSAES_OAEP_SHA_256"}))
+        .expect("naming its key");
+    let err = decrypt(json!({})).err().unwrap();
+    assert_eq!(err.code(), "InvalidCiphertextException");
+    let err = decrypt(json!({"KeyId": other, "EncryptionAlgorithm": "RSAES_OAEP_SHA_256"}))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "IncorrectKeyException");
+
+    // An envelope naming a signing key is refused as a KeyId naming it is.
+    let signing = create_key_with_opts(
+        &svc,
+        json!({"KeySpec": "RSA_2048", "KeyUsage": "SIGN_VERIFY"}),
+    );
+    let signing_pub = {
+        let accounts = svc.state.read();
+        accounts.get("123456789012").unwrap().keys[&signing]
+            .asymmetric_public_key_der
+            .clone()
+            .unwrap()
+    };
+    let raw = asym::rsa_oaep_wrap(&signing_pub, "RSAES_OAEP_SHA_256", b"x").unwrap();
+    let signing_blob = base64::engine::general_purpose::STANDARD.encode(
+        format!(
+            "fakecloud-rsa:{signing}:RSAES_OAEP_SHA_256:{}",
+            base64::engine::general_purpose::STANDARD.encode(&raw)
+        )
+        .as_bytes(),
+    );
+    for key_id in [None, Some(signing.as_str())] {
+        let mut body = json!({
+            "CiphertextBlob": signing_blob,
+            "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+        });
+        if let Some(key_id) = key_id {
+            body["KeyId"] = json!(key_id);
+        }
+        let err = svc.decrypt(&make_request("Decrypt", body)).err().unwrap();
+        assert_eq!(err.code(), "InvalidKeyUsageException", "{key_id:?}");
+    }
+
+    // Authorized on the key the envelope names.
+    let req = make_request("Decrypt", json!({"CiphertextBlob": blob}));
+    let action = svc.iam_action_for(&req).unwrap();
+    assert_eq!(
+        action.resource,
+        format!("arn:aws:kms:us-east-1:123456789012:key/{key_id}")
+    );
+}
+
 /// `ReEncrypt` is authorized as `kms:ReEncryptFrom` on the source key with
 /// the source context and `kms:ReEncryptTo` on the destination key with the
 /// destination context; a `Decrypt` naming no key is authorized on the key
@@ -5023,6 +5497,148 @@ fn re_encrypt_and_decrypt_authorize_the_keys_they_use() {
     assert!(!to.contains_key("kms:encryptioncontext:s"));
 }
 
+/// Every `CreateGrant` recorded against KMS
+/// (`tests/fixtures/create-grant/refusals.txt`) is answered with the
+/// recorded status, code and message: the principal and `SourceArn`
+/// refusals come before the key lookup, so the recordings made against a
+/// missing key replay as they were.
+#[test]
+fn create_grant_refusals_match_the_recordings() {
+    let svc = make_service();
+    let recording = include_str!("../tests/fixtures/create-grant/refusals.txt");
+    let mut cases = 0;
+    for block in recording.split("== ").filter(|b| !b.trim().is_empty()) {
+        let mut lines = block.lines();
+        let name = lines.next().unwrap().trim();
+        let request = lines.next().unwrap().strip_prefix("Request: ").unwrap();
+        let status = lines.next().unwrap().strip_prefix("HTTP ").unwrap();
+        let (status, code) = status.split_once(' ').unwrap();
+        let message = lines.next().unwrap();
+        let mut body: Value = serde_json::from_str(request).unwrap();
+        body["KeyId"] =
+            json!("arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000");
+        body["Operations"] = json!(["Decrypt"]);
+        let err = svc
+            .create_grant(&make_request("CreateGrant", body))
+            .err()
+            .unwrap_or_else(|| panic!("{name}: accepted"));
+        assert_eq!(err.status().as_str(), status, "{name}");
+        assert_eq!(err.code(), code, "{name}");
+        assert_eq!(err.message(), message, "{name}");
+        cases += 1;
+    }
+    assert_eq!(cases, 9);
+}
+
+/// `CreateGrant` takes exactly one of `GranteePrincipal` and
+/// `GranteeServicePrincipal`, at most one retiring principal of either kind,
+/// and a grant to a service principal needs a `SourceArn` constraint and a
+/// retiring principal. `ListGrants` shows a service grantee as
+/// `GranteeServicePrincipal` and filters by either grantee kind (not both);
+/// `ListRetirableGrants` lists by `RetiringServicePrincipal` too.
+#[test]
+fn grants_to_service_principals() {
+    let svc = make_service();
+    let key = create_key(&svc);
+    let user = "arn:aws:iam::123456789012:user/u";
+    let source = json!({"SourceArn": "arn:aws:ses:us-east-1:123456789012:receipt-rule-set/s"});
+    let create = |extra: Value| {
+        let mut body = json!({"KeyId": key, "Operations": ["GenerateDataKey"]});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        svc.create_grant(&make_request("CreateGrant", body))
+    };
+    let refused = |extra: Value| {
+        let err = create(extra.clone()).err().expect("refused");
+        assert_eq!(err.code(), "ValidationException", "{extra}");
+    };
+    refused(json!({}));
+    refused(json!({"GranteePrincipal": user, "GranteeServicePrincipal": "ses.amazonaws.com"}));
+    refused(json!({
+        "GranteePrincipal": user,
+        "RetiringPrincipal": user,
+        "RetiringServicePrincipal": "ses.amazonaws.com",
+    }));
+    refused(json!({"GranteeServicePrincipal": "ses.amazonaws.com", "RetiringPrincipal": user}));
+    refused(json!({"GranteeServicePrincipal": "ses.amazonaws.com", "Constraints": source}));
+
+    let service_grant = body_json(
+        create(json!({
+            "GranteeServicePrincipal": "ses.amazonaws.com",
+            "RetiringServicePrincipal": "ses.amazonaws.com",
+            "Constraints": source,
+        }))
+        .unwrap(),
+    )["GrantId"]
+        .clone();
+    let user_grant =
+        body_json(create(json!({"GranteePrincipal": user})).unwrap())["GrantId"].clone();
+
+    let list = |filter: Value| {
+        let mut body = json!({"KeyId": key});
+        body.as_object_mut()
+            .unwrap()
+            .extend(filter.as_object().unwrap().clone());
+        svc.list_grants(&make_request("ListGrants", body))
+    };
+    let all = body_json(list(json!({})).unwrap());
+    let grants = all["Grants"].as_array().unwrap();
+    let by_id = |id: &Value| grants.iter().find(|g| g["GrantId"] == *id).unwrap().clone();
+    let service = by_id(&service_grant);
+    assert_eq!(service["GranteeServicePrincipal"], "ses.amazonaws.com");
+    assert_eq!(service["RetiringServicePrincipal"], "ses.amazonaws.com");
+    assert!(service.get("GranteePrincipal").is_none());
+    assert_eq!(service["Constraints"], source);
+    assert_eq!(by_id(&user_grant)["GranteePrincipal"], user);
+
+    let ids = |filter: Value| -> Vec<Value> {
+        body_json(list(filter).unwrap())["Grants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["GrantId"].clone())
+            .collect()
+    };
+    assert_eq!(
+        ids(json!({"GranteeServicePrincipal": "ses.amazonaws.com"})),
+        vec![service_grant.clone()]
+    );
+    assert_eq!(ids(json!({"GranteePrincipal": user})), vec![user_grant]);
+    assert_eq!(
+        list(json!({"GranteePrincipal": user, "GranteeServicePrincipal": "ses.amazonaws.com"}))
+            .err()
+            .unwrap()
+            .code(),
+        "ValidationException"
+    );
+
+    let retirable = body_json(
+        svc.list_retirable_grants(&make_request(
+            "ListRetirableGrants",
+            json!({"RetiringServicePrincipal": "ses.amazonaws.com"}),
+        ))
+        .unwrap(),
+    );
+    let retirable: Vec<&Value> = retirable["Grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| &g["GrantId"])
+        .collect();
+    assert_eq!(retirable, vec![&service_grant]);
+    for bad in [String::new(), "s".repeat(129)] {
+        let err = svc
+            .list_retirable_grants(&make_request(
+                "ListRetirableGrants",
+                json!({"RetiringServicePrincipal": bad}),
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "InvalidArnException");
+    }
+}
+
 /// Encryption-context grant constraints are refused for an operation that
 /// takes no encryption context (DescribeKey, RetireGrant and CreateGrant
 /// excepted) and on a key other than a symmetric encryption key.
@@ -5067,7 +5683,7 @@ fn create_grant_refuses_context_constraints_on_operations_without_a_context() {
     create(
         &symmetric,
         json!(["Sign"]),
-        json!({"SourceArn": "arn:aws:s3:::bucket"}),
+        json!({"SourceArn": "arn:aws:sqs:us-east-1:123456789012:queue"}),
     )
     .expect("SourceArn constraint");
     // Constraints on an asymmetric key are refused whatever the operations.

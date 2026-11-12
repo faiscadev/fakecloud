@@ -1255,8 +1255,14 @@ impl S3Store for DiskS3Store {
                                 && !referenced.contains(name)
                             {
                                 Self::remove_stale_body(&path);
-                            } else if crate::atomic::is_temp_file_name(name) && path.is_file() {
-                                // A write that never reached its rename.
+                            } else if (crate::atomic::is_temp_file_name(name)
+                                || name.ends_with(".bin.tmp"))
+                                && path.is_file()
+                            {
+                                // A write that never reached its rename (a
+                                // multipart completion's concatenated body
+                                // was `<body>.bin.tmp` before it took a
+                                // unique temp name).
                                 Self::remove_stale_body(&path);
                             } else if name.ends_with(".annotations") && path.is_dir() {
                                 Self::remove_temp_files_in(&path);
@@ -1818,22 +1824,7 @@ impl S3Store for DiskS3Store {
                 Ok(_) => {}
                 Err(e) if e.raw_os_error() == Some(libc_exdev()) => {
                     // Cross-device rename: fall back to streaming copy then remove source.
-                    {
-                        let mut input = std::fs::File::open(&only)?;
-                        let tmp = {
-                            let mut os = bin_path.as_os_str().to_owned();
-                            os.push(".tmp");
-                            PathBuf::from(os)
-                        };
-                        let mut out = std::fs::OpenOptions::new()
-                            .write(true)
-                            .create(true)
-                            .truncate(true)
-                            .open(&tmp)?;
-                        std::io::copy(&mut input, &mut out)?;
-                        out.sync_all()?;
-                        std::fs::rename(&tmp, &bin_path)?;
-                    }
+                    crate::atomic::write_atomic_copy_from_file(&only, &bin_path)?;
                     let _ = std::fs::remove_file(&only);
                 }
                 Err(e) => return Err(e.into()),
@@ -1849,13 +1840,11 @@ impl S3Store for DiskS3Store {
             }
             sz
         } else {
-            let tmp = {
-                let mut os = bin_path.as_os_str().to_owned();
-                os.push(".tmp");
-                PathBuf::from(os)
-            };
-            let mut total: u64 = 0;
-            {
+            // A temp name the load recognizes (`crate::atomic::is_temp_file_name`),
+            // so a crash before the rename leaves nothing the next load keeps.
+            let tmp = crate::atomic::tmp_path(&bin_path);
+            let concatenate = || -> std::io::Result<u64> {
+                let mut total: u64 = 0;
                 let mut out = std::fs::OpenOptions::new()
                     .write(true)
                     .create(true)
@@ -1864,12 +1853,20 @@ impl S3Store for DiskS3Store {
                 for n in &part_numbers {
                     let part_path = self.mpu_part_bin(bucket, upload_id, *n);
                     let mut input = std::fs::File::open(&part_path)?;
-                    let copied = std::io::copy(&mut input, &mut out)?;
-                    total += copied;
+                    total += std::io::copy(&mut input, &mut out)?;
                 }
                 out.sync_all()?;
-            }
-            std::fs::rename(&tmp, &bin_path)?;
+                drop(out);
+                std::fs::rename(&tmp, &bin_path)?;
+                Ok(total)
+            };
+            let total = match concatenate() {
+                Ok(total) => total,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e.into());
+                }
+            };
             if let Some(parent) = bin_path.parent() {
                 if let Ok(dir_handle) = std::fs::File::open(parent) {
                     let _ = dir_handle.sync_all();
@@ -2567,6 +2564,60 @@ mod disk_tests {
             loaded_annotations(&store),
             vec![("a".to_string(), b"note".to_vec())]
         );
+    }
+
+    /// A multipart completion concatenates its parts into a temp file the
+    /// load recognizes, so a crash before its rename leaves nothing behind
+    /// after the next load; the fixed `<body>.bin.tmp` name earlier builds
+    /// used is cleared too. A completed upload leaves no temp file.
+    #[test]
+    fn load_removes_multipart_completion_temp_files() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_with_object(&tmp);
+        store
+            .mpu_create("b", "up", &sample_mpu_init("up", "k2"))
+            .unwrap();
+        for (n, body) in [(1u32, &b"AAAA"[..]), (2, &b"BB"[..])] {
+            store
+                .mpu_put_part(
+                    "b",
+                    "up",
+                    n,
+                    BodySource::Bytes(Bytes::copy_from_slice(body)),
+                    "e",
+                    None,
+                )
+                .unwrap();
+        }
+        store
+            .mpu_complete("b", "up", "k2", None, &sample_meta("k2", 6))
+            .unwrap();
+        let (dir, bin_path, _) = store.object_paths("b", "k2", None);
+        let names = |dir: &std::path::Path| -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .collect();
+            names.sort();
+            names
+        };
+        assert!(
+            names(&dir).iter().all(|n| !n.ends_with(".tmp")),
+            "{:?}",
+            names(&dir)
+        );
+
+        let interrupted = crate::atomic::tmp_path(&bin_path);
+        let mut legacy = bin_path.as_os_str().to_owned();
+        legacy.push(".tmp");
+        let legacy = PathBuf::from(legacy);
+        for path in [&interrupted, &legacy] {
+            std::fs::write(path, b"AAAAB").unwrap();
+        }
+        assert_eq!(reloaded_body(&tmp), b"abc");
+        assert!(!interrupted.exists(), "{}", interrupted.display());
+        assert!(!legacy.exists(), "{}", legacy.display());
+        assert_eq!(std::fs::read(&bin_path).unwrap(), b"AAAABB");
     }
 
     /// Deleting a resealed object removes the file its sidecar names (and a

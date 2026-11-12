@@ -183,6 +183,26 @@ pub(crate) enum KeyCaller<'a> {
     },
 }
 
+/// The names a service principal acting itself in `region` answers to: the
+/// one it calls with, its regional form (`ses.us-east-1.amazonaws.com`) and
+/// its global one (`ses.amazonaws.com`), and the regional form in the
+/// partition's DNS suffix.
+pub(crate) fn service_principal_forms(service_principal: &str, region: &str) -> Vec<String> {
+    let name = service_principal.split('.').next().unwrap_or_default();
+    let suffix = fakecloud_aws::endpoint::dns_suffix_for_region(region);
+    let mut forms = vec![service_principal.to_string()];
+    for alt in [
+        format!("{name}.{region}.amazonaws.com"),
+        format!("{name}.amazonaws.com"),
+        format!("{name}.{region}.{suffix}"),
+    ] {
+        if !forms.contains(&alt) {
+            forms.push(alt);
+        }
+    }
+    forms
+}
+
 /// The principal of a request that carries no resolved identity: the
 /// account's root user, which is who an unsigned / IAM-off request acts as.
 pub(crate) fn account_root(account: &str, region: &str) -> Principal {
@@ -324,31 +344,17 @@ pub(crate) fn policy_decision_with_orgs(
             source_arn,
             source_account,
             ..
-        } => {
-            let name = service_principal.split('.').next().unwrap_or_default();
-            let suffix = fakecloud_aws::endpoint::dns_suffix_for_region(region);
-            let mut forms = vec![service_principal.to_string()];
-            for alt in [
-                format!("{name}.{region}.amazonaws.com"),
-                format!("{name}.amazonaws.com"),
-                format!("{name}.{region}.{suffix}"),
-            ] {
-                if !forms.contains(&alt) {
-                    forms.push(alt);
+        } => service_principal_forms(service_principal, region)
+            .into_iter()
+            .map(|service| {
+                InternalCaller::Service {
+                    service,
+                    source_arn: source_arn.to_string(),
+                    source_account: source_account.to_string(),
                 }
-            }
-            forms
-                .into_iter()
-                .map(|service| {
-                    InternalCaller::Service {
-                        service,
-                        source_arn: source_arn.to_string(),
-                        source_account: source_account.to_string(),
-                    }
-                    .principal()
-                })
-                .collect()
-        }
+                .principal()
+            })
+            .collect(),
     };
     let document = PolicyDocument::parse(policy);
     // One request whose principal is every form of the caller: a statement
