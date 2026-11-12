@@ -326,7 +326,7 @@ impl DynamoDbService {
             Err(_) => return,
         };
         if matches!(operation, TableKmsOp::Read) {
-            let _ = hook.decrypt(account_id, &envelope, ddb, ctx);
+            let _ = hook.decrypt_in_region(account_id, region, &envelope, ddb, ctx);
         }
     }
 

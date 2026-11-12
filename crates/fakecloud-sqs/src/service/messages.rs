@@ -89,8 +89,9 @@ impl SqsService {
         }
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("aws:sqs:arn".to_string(), queue_arn.to_string());
-        match hook.decrypt(
+        match hook.decrypt_in_region(
             account_id,
+            fakecloud_aws::arn::region_of(queue_arn).unwrap_or_default(),
             ciphertext,
             fakecloud_core::delivery::KmsCaller::via_for("sqs.amazonaws.com", caller_arn),
             ctx,

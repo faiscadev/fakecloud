@@ -464,8 +464,9 @@ fn open_batch(
                 "aws:sqs:arn".to_string(),
                 msg.sealing_queue(queue_arn).to_string(),
             );
-            let bytes = hook.decrypt(
+            let bytes = hook.decrypt_in_region(
                 account_id,
+                fakecloud_aws::arn::region_of(queue_arn).unwrap_or_default(),
                 &msg.body,
                 fakecloud_core::delivery::KmsCaller::via("sqs.amazonaws.com"),
                 ctx,

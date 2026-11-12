@@ -545,6 +545,34 @@ pub trait IamPolicyEvaluator: Send + Sync {
     ) -> IamDecision {
         IamDecision::ImplicitDeny
     }
+
+    /// Evaluate only the ceilings that cap a permission which does not come
+    /// from the caller's identity policies (a KMS grant naming the caller):
+    /// the SCP chain (`scps`, `None` when SCPs do not apply), the session
+    /// policies (`session_policies`, empty for none) and, when
+    /// `with_boundary`, the principal's permissions boundary (for an
+    /// assumed-role session, its role's). `Allow` when every present layer
+    /// allows, so with no layer at all the permission stands; an explicit
+    /// Deny in any layer is `ExplicitDeny`.
+    ///
+    /// AWS caps a resource-based grant to a role ARN by an implicit deny in
+    /// the role's permissions boundary or the session policy, but not one to
+    /// a role session or IAM user ARN (IAM user guide, "Permissions
+    /// boundaries for IAM entities"); SCPs cap every member-account request.
+    ///
+    /// The default implementation returns [`IamDecision::ImplicitDeny`] so
+    /// evaluators that don't support it never silently grant.
+    fn evaluate_ceiling(
+        &self,
+        _principal: &Principal,
+        _action: &IamAction,
+        _context: &ConditionContext,
+        _session_policies: &[String],
+        _scps: Option<&[String]>,
+        _with_boundary: bool,
+    ) -> IamDecision {
+        IamDecision::ImplicitDeny
+    }
 }
 
 /// The AWS-owned principal a request is made as when fakecloud itself issues
@@ -754,6 +782,70 @@ pub trait ResourcePolicyProvider: Send + Sync {
     fn public_acl_allows(&self, _service: &str, _resource_arn: &str, _action: &str) -> bool {
         false
     }
+
+    /// Whether a **grant** on `action.resource` lets `principal` perform
+    /// `action` as `request` asks it. Grants are KMS's third authorization
+    /// mechanism next to key policies and IAM policies: they only add
+    /// permission, so dispatch consults this only when the policies left the
+    /// request implicitly denied, never over an explicit Deny. The provider
+    /// checks the grant's operations and constraints against the request
+    /// (its encryption context, say). Default `None`: no grants.
+    fn grant_authorization(
+        &self,
+        _service: &str,
+        _request: &crate::service::AwsRequest,
+        _action: &IamAction,
+        _principal: &Principal,
+    ) -> Option<GrantAuthorization> {
+        None
+    }
+
+    /// Whether the resource policy takes part in authorizing `action` at
+    /// all. KMS's `RetireGrant` is the exception: `kms:RetireGrant` is not
+    /// effective in a key policy, so the grant itself decides who may retire
+    /// it, plus the identity policies of the key's own account. Dispatch then
+    /// evaluates the request with no resource policy. Default `true`.
+    fn resource_policy_applies(&self, _service: &str, _action: &IamAction) -> bool {
+        true
+    }
+}
+
+/// How a grant matched the caller (see
+/// [`ResourcePolicyProvider::grant_authorization`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrantAuthorization {
+    /// The grant names the calling identity itself (its user or session
+    /// ARN): it authorizes the request without an IAM policy, in the key's
+    /// account or another, within the caller's SCP ceiling.
+    Grantee,
+    /// The grant names the role an assumed-role session assumed. As for
+    /// [`Self::Grantee`], but the session's session policies also cap it:
+    /// they limit what is granted to the role.
+    GranteeRole,
+    /// The grant names the caller's account (its root). Like a key policy
+    /// statement naming an account, that only lets the account delegate:
+    /// the caller's own IAM policies must also allow the action.
+    Account,
+}
+
+impl GrantAuthorization {
+    /// Rank for picking the strongest of several matches: a grant naming
+    /// the exact caller needs the fewest further checks.
+    fn strength(self) -> u8 {
+        match self {
+            GrantAuthorization::Grantee => 2,
+            GrantAuthorization::GranteeRole => 1,
+            GrantAuthorization::Account => 0,
+        }
+    }
+
+    /// The stronger of two matches.
+    pub fn strongest(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(if b.strength() > a.strength() { b } else { a }),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
 /// Failure mode for IAM PassRole trust-policy validation.
@@ -907,6 +999,29 @@ impl ResourcePolicyProvider for MultiResourcePolicyProvider {
         self.providers
             .iter()
             .any(|p| p.public_acl_allows(service, resource_arn, action))
+    }
+
+    /// The strongest match any sub-provider reports: a grant naming the
+    /// caller itself over one naming its account.
+    fn grant_authorization(
+        &self,
+        service: &str,
+        request: &crate::service::AwsRequest,
+        action: &IamAction,
+        principal: &Principal,
+    ) -> Option<GrantAuthorization> {
+        self.providers.iter().fold(None, |found, provider| {
+            GrantAuthorization::strongest(
+                found,
+                provider.grant_authorization(service, request, action, principal),
+            )
+        })
+    }
+
+    fn resource_policy_applies(&self, service: &str, action: &IamAction) -> bool {
+        self.providers
+            .iter()
+            .all(|p| p.resource_policy_applies(service, action))
     }
 }
 
@@ -1343,6 +1458,131 @@ mod tests {
             None
         );
         assert_eq!(m.resource_policy("iam", "arn:aws:iam::123:role/r"), None);
+    }
+
+    /// A provider answering every grant query with a fixed match.
+    struct GrantingProvider(Option<GrantAuthorization>);
+
+    impl ResourcePolicyProvider for GrantingProvider {
+        fn resource_policy(&self, _service: &str, _resource_arn: &str) -> Option<String> {
+            None
+        }
+
+        fn grant_authorization(
+            &self,
+            _service: &str,
+            _request: &crate::service::AwsRequest,
+            _action: &IamAction,
+            _principal: &Principal,
+        ) -> Option<GrantAuthorization> {
+            self.0
+        }
+    }
+
+    #[test]
+    fn multi_provider_reports_the_strongest_grant_match() {
+        let request = crate::service::AwsRequest {
+            service: "kms".into(),
+            action: "Encrypt".into(),
+            region: "us-east-1".into(),
+            account_id: "111111111111".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        };
+        let action = IamAction {
+            service: "kms",
+            action: "Encrypt",
+            resource: "arn:aws:kms:us-east-1:111111111111:key/k".into(),
+        };
+        let principal = Principal {
+            arn: "arn:aws:iam::111111111111:user/u".into(),
+            user_id: "AIDA".into(),
+            account_id: "111111111111".into(),
+            principal_type: PrincipalType::User,
+            source_identity: None,
+            tags: None,
+        };
+        let ask = |children: Vec<Option<GrantAuthorization>>| {
+            MultiResourcePolicyProvider::new(
+                children
+                    .into_iter()
+                    .map(|g| Arc::new(GrantingProvider(g)) as Arc<dyn ResourcePolicyProvider>)
+                    .collect(),
+            )
+            .grant_authorization("kms", &request, &action, &principal)
+        };
+        assert_eq!(ask(vec![]), None);
+        assert_eq!(ask(vec![None, None]), None);
+        assert_eq!(
+            ask(vec![Some(GrantAuthorization::Account), None]),
+            Some(GrantAuthorization::Account)
+        );
+        assert_eq!(
+            ask(vec![
+                Some(GrantAuthorization::Account),
+                Some(GrantAuthorization::Grantee)
+            ]),
+            Some(GrantAuthorization::Grantee)
+        );
+        assert_eq!(
+            ask(vec![
+                Some(GrantAuthorization::Grantee),
+                Some(GrantAuthorization::GranteeRole),
+                Some(GrantAuthorization::Account)
+            ]),
+            Some(GrantAuthorization::Grantee)
+        );
+        assert_eq!(
+            ask(vec![
+                Some(GrantAuthorization::Account),
+                Some(GrantAuthorization::GranteeRole)
+            ]),
+            Some(GrantAuthorization::GranteeRole)
+        );
+        // The default answers no grant, and keeps the resource policy.
+        assert_eq!(
+            fake("kms", "x", "doc").grant_authorization("kms", &request, &action, &principal),
+            None
+        );
+        assert!(fake("kms", "x", "doc").resource_policy_applies("kms", &action));
+    }
+
+    /// A provider that keeps resource policies out of one action.
+    struct NoPolicyFor(&'static str);
+
+    impl ResourcePolicyProvider for NoPolicyFor {
+        fn resource_policy(&self, _service: &str, _resource_arn: &str) -> Option<String> {
+            None
+        }
+
+        fn resource_policy_applies(&self, _service: &str, action: &IamAction) -> bool {
+            action.action != self.0
+        }
+    }
+
+    #[test]
+    fn multi_provider_drops_the_resource_policy_when_any_child_does() {
+        let multi = MultiResourcePolicyProvider::new(vec![
+            fake("s3", "arn:aws:s3:::b", "doc"),
+            Arc::new(NoPolicyFor("RetireGrant")),
+        ]);
+        let action = |action: &'static str| IamAction {
+            service: "kms",
+            action,
+            resource: "arn:aws:kms:us-east-1:111111111111:key/k".into(),
+        };
+        assert!(!multi.resource_policy_applies("kms", &action("RetireGrant")));
+        assert!(multi.resource_policy_applies("kms", &action("Decrypt")));
     }
 
     #[test]

@@ -244,8 +244,19 @@ impl KmsState {
 
     /// Resolve a key id, key ARN, alias name or alias ARN to the stored key
     /// id. Aliases are regional: an alias name resolves in `region` (the
-    /// caller's region), an alias ARN in the region it names.
+    /// caller's region), an alias ARN in the region it names, and so does a
+    /// bare key id: a multi-Region key's replica in `region` before the
+    /// primary sharing its id.
     pub fn resolve_key_id(&self, region: &str, key_id_or_arn: &str) -> Option<String> {
+        // A bare key id names the key in `region`: for a multi-Region key,
+        // the replica there (stored as "{region}:{id}"), not the primary
+        // that shares its id.
+        if !region.is_empty() && !key_id_or_arn.contains(':') {
+            let scoped = format!("{region}:{key_id_or_arn}");
+            if self.keys.contains_key(&scoped) {
+                return Some(scoped);
+            }
+        }
         // Direct key ID
         if self.keys.contains_key(key_id_or_arn) {
             return Some(key_id_or_arn.to_string());

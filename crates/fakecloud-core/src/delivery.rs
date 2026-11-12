@@ -931,6 +931,21 @@ pub trait KmsHook: Send + Sync {
         encryption_context: std::collections::HashMap<String, String>,
     ) -> Result<Vec<u8>, KmsError>;
 
+    /// [`KmsHook::decrypt`] for a call the service makes in `region` (the
+    /// region of the resource whose data it decrypts): a ciphertext of a
+    /// multi-Region key is opened by the related key of that region, under
+    /// that key's policy and grants. The default ignores the region.
+    fn decrypt_in_region(
+        &self,
+        account_id: &str,
+        _region: &str,
+        ciphertext_b64: &str,
+        caller: KmsCaller<'_>,
+        encryption_context: std::collections::HashMap<String, String>,
+    ) -> Result<Vec<u8>, KmsError> {
+        self.decrypt(account_id, ciphertext_b64, caller, encryption_context)
+    }
+
     /// Whether `caller` may use `key_id` for every one of `actions`
     /// (`kms:CreateGrant`, ...) with `encryption_context`, as a service
     /// checks a key when a resource is configured with it (DynamoDB

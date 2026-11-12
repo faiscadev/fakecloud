@@ -4872,3 +4872,371 @@ fn iam_condition_keys_carry_caller_account_and_encryption_context() {
     );
     assert!(!keys.contains_key("kms:viaservice"));
 }
+
+/// `make_request` as a user of `account`.
+fn request_as(account: &str, action: &str, body: Value) -> AwsRequest {
+    let mut req = make_request(action, body);
+    req.account_id = account.to_string();
+    req.principal = Some(fakecloud_core::auth::Principal {
+        arn: format!("arn:aws:iam::{account}:user/u"),
+        user_id: "AIDAEXAMPLE".to_string(),
+        account_id: account.to_string(),
+        principal_type: fakecloud_core::auth::PrincipalType::User,
+        source_identity: None,
+        tags: None,
+    });
+    req
+}
+
+async fn json_of(svc: &KmsService, req: AwsRequest) -> Value {
+    let resp = svc.handle(req).await.expect("request succeeds");
+    serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+}
+
+/// A key of another account, named by its key or alias ARN, is served from
+/// that account: a ciphertext sealed by the other account's caller names
+/// the key by its ARN, so that caller's `Decrypt` without a `KeyId` finds
+/// it, and so does the key owner's. A bare key id stays the caller's own.
+#[tokio::test]
+async fn keys_of_another_account_are_used_by_their_arn() {
+    let svc = make_service();
+    let owner = "111111111111";
+    let other = "222222222222";
+    let key_arn = json_of(&svc, request_as(owner, "CreateKey", json!({}))).await["KeyMetadata"]
+        ["Arn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    svc.handle(request_as(
+        owner,
+        "CreateAlias",
+        json!({"AliasName": "alias/shared", "TargetKeyId": key_arn}),
+    ))
+    .await
+    .unwrap();
+    let alias_arn = format!("arn:aws:kms:us-east-1:{owner}:alias/shared");
+    let plaintext = base64::engine::general_purpose::STANDARD.encode(b"secret");
+    for key_ref in [&key_arn, &alias_arn] {
+        let sealed = json_of(
+            &svc,
+            request_as(
+                other,
+                "Encrypt",
+                json!({"KeyId": key_ref, "Plaintext": plaintext, "EncryptionContext": {"k": "v"}}),
+            ),
+        )
+        .await;
+        assert_eq!(sealed["KeyId"], json!(key_arn));
+        let blob = sealed["CiphertextBlob"].as_str().unwrap();
+        assert_eq!(ciphertext_key_ref(blob).as_deref(), Some(key_arn.as_str()));
+        for account in [other, owner] {
+            let opened = json_of(
+                &svc,
+                request_as(
+                    account,
+                    "Decrypt",
+                    json!({"CiphertextBlob": blob, "EncryptionContext": {"k": "v"}}),
+                ),
+            )
+            .await;
+            assert_eq!(opened["Plaintext"], json!(plaintext), "{account}");
+            assert_eq!(opened["KeyId"], json!(key_arn));
+        }
+    }
+    // DescribeKey and the grant operations take the key ARN.
+    let described = json_of(
+        &svc,
+        request_as(other, "DescribeKey", json!({"KeyId": key_arn})),
+    )
+    .await;
+    assert_eq!(described["KeyMetadata"]["Arn"], json!(key_arn));
+    // A bare key id or alias name names the caller's own key.
+    let key_id = key_arn.rsplit('/').next().unwrap();
+    for key_ref in [key_id, "alias/shared"] {
+        let err = svc
+            .handle(request_as(other, "DescribeKey", json!({"KeyId": key_ref})))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "NotFoundException", "{key_ref}");
+    }
+    // Key management is never served across accounts.
+    let err = svc
+        .handle(request_as(other, "DisableKey", json!({"KeyId": key_arn})))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "NotFoundException");
+}
+
+/// `ReEncrypt` is authorized as `kms:ReEncryptFrom` on the source key with
+/// the source context and `kms:ReEncryptTo` on the destination key with the
+/// destination context; a `Decrypt` naming no key is authorized on the key
+/// its ciphertext names.
+#[test]
+fn re_encrypt_and_decrypt_authorize_the_keys_they_use() {
+    let svc = make_service();
+    let source = create_key(&svc);
+    let destination = create_key(&svc);
+    let sealed = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({"KeyId": source, "Plaintext": "aGk=", "EncryptionContext": {"s": "1"}}),
+        ))
+        .unwrap();
+    let sealed: Value = serde_json::from_slice(sealed.body.expect_bytes()).unwrap();
+    let blob = sealed["CiphertextBlob"].as_str().unwrap();
+    let arn_of = |id: &str| format!("arn:aws:kms:us-east-1:123456789012:key/{id}");
+
+    let decrypt = make_request("Decrypt", json!({"CiphertextBlob": blob}));
+    assert_eq!(
+        svc.iam_action_for(&decrypt).unwrap().resource,
+        arn_of(&source)
+    );
+
+    let req = make_request(
+        "ReEncrypt",
+        json!({
+            "CiphertextBlob": blob,
+            "SourceEncryptionContext": {"s": "1"},
+            "DestinationKeyId": destination,
+            "DestinationEncryptionContext": {"d": "2"},
+        }),
+    );
+    let actions = svc.iam_actions_for(&req);
+    let shape: Vec<(&str, String)> = actions
+        .iter()
+        .map(|a| (a.action, a.resource.clone()))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            ("ReEncryptFrom", arn_of(&source)),
+            ("ReEncryptTo", arn_of(&destination)),
+        ]
+    );
+    let from = svc.iam_condition_keys_for(&req, &actions[0]);
+    assert_eq!(from["kms:encryptioncontext:s"], vec!["1".to_string()]);
+    assert!(!from.contains_key("kms:encryptioncontext:d"));
+    let to = svc.iam_condition_keys_for(&req, &actions[1]);
+    assert_eq!(to["kms:encryptioncontext:d"], vec!["2".to_string()]);
+    assert!(!to.contains_key("kms:encryptioncontext:s"));
+}
+
+/// Encryption-context grant constraints are refused for an operation that
+/// takes no encryption context (DescribeKey, RetireGrant and CreateGrant
+/// excepted) and on a key other than a symmetric encryption key.
+#[test]
+fn create_grant_refuses_context_constraints_on_operations_without_a_context() {
+    let svc = make_service();
+    let symmetric = create_key(&svc);
+    let create = |key: &str, operations: Value, constraints: Value| {
+        svc.create_grant(&make_request(
+            "CreateGrant",
+            json!({
+                "KeyId": key,
+                "GranteePrincipal": "arn:aws:iam::123456789012:user/u",
+                "Operations": operations,
+                "Constraints": constraints,
+            }),
+        ))
+    };
+    let subset = json!({"EncryptionContextSubset": {"k": "v"}});
+    let equals = json!({"EncryptionContextEquals": {"k": "v"}});
+    for constraints in [&subset, &equals] {
+        create(
+            &symmetric,
+            json!([
+                "Decrypt",
+                "Encrypt",
+                "DescribeKey",
+                "RetireGrant",
+                "CreateGrant"
+            ]),
+            constraints.clone(),
+        )
+        .expect("context operations plus DescribeKey/RetireGrant/CreateGrant");
+        for op in ["GetPublicKey", "Sign", "GenerateMac"] {
+            let err = create(&symmetric, json!(["Decrypt", op]), constraints.clone())
+                .err()
+                .unwrap();
+            assert_eq!(err.code(), "ValidationException", "{op}");
+        }
+    }
+    // A SourceArn constraint alone is not an encryption-context constraint.
+    create(
+        &symmetric,
+        json!(["Sign"]),
+        json!({"SourceArn": "arn:aws:s3:::bucket"}),
+    )
+    .expect("SourceArn constraint");
+    // Constraints on an asymmetric key are refused whatever the operations.
+    let rsa = create_key_with_opts(
+        &svc,
+        json!({"KeySpec": "RSA_2048", "KeyUsage": "ENCRYPT_DECRYPT"}),
+    );
+    let err = create(&rsa, json!(["Decrypt"]), subset).err().unwrap();
+    assert_eq!(err.code(), "ValidationException");
+    create(&rsa, json!(["Decrypt"]), Value::Null).expect("an unconstrained grant");
+}
+
+/// A bare key id names the key in the request's region, so the replica of a
+/// multi-Region key in its region, and a multi-Region ciphertext is opened
+/// (and authorized, its grants included) as the related key of the region
+/// of the Decrypt call; a non-multi-Region key and the primary region are
+/// unaffected.
+#[test]
+fn multi_region_bare_ids_and_ciphertexts_resolve_in_the_call_region() {
+    use fakecloud_core::auth::{GrantAuthorization, IamAction, ResourcePolicyProvider};
+    let svc = make_service();
+    let key_id = create_key_with_opts(&svc, json!({ "MultiRegion": true }));
+    svc.replicate_key(&make_request(
+        "ReplicateKey",
+        json!({"KeyId": key_id, "ReplicaRegion": "us-west-2"}),
+    ))
+    .unwrap();
+    let primary_arn = format!("arn:aws:kms:us-east-1:123456789012:key/{key_id}");
+    let replica_arn = format!("arn:aws:kms:us-west-2:123456789012:key/{key_id}");
+    let in_region = |region: &str, action: &str, body: Value| {
+        let mut req = make_request(action, body);
+        req.region = region.to_string();
+        req
+    };
+    let json_of =
+        |resp: AwsResponse| -> Value { serde_json::from_slice(resp.body.expect_bytes()).unwrap() };
+
+    // Encrypt with the bare id in the replica's region uses the replica.
+    let sealed = json_of(
+        svc.encrypt(&in_region(
+            "us-west-2",
+            "Encrypt",
+            json!({"KeyId": key_id, "Plaintext": "aGk="}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(sealed["KeyId"], json!(replica_arn));
+    let blob = sealed["CiphertextBlob"].as_str().unwrap().to_string();
+    // Decrypting names the related key of the call's region, and so does
+    // the resource IAM authorizes.
+    for (region, arn) in [("us-west-2", &replica_arn), ("us-east-1", &primary_arn)] {
+        let req = in_region(region, "Decrypt", json!({"CiphertextBlob": blob}));
+        assert_eq!(&svc.iam_action_for(&req).unwrap().resource, arn, "{region}");
+        let opened = json_of(svc.decrypt(&req).unwrap());
+        assert_eq!(&opened["KeyId"], &json!(arn), "{region}");
+    }
+
+    // A grant created with the bare id in the replica's region is the
+    // replica's: it authorizes a Decrypt in that region, not in the
+    // primary's, and a grant on the primary does not cover the replica.
+    let grantee = "arn:aws:iam::123456789012:user/grantee";
+    let grant = |region: &str| {
+        svc.create_grant(&in_region(
+            region,
+            "CreateGrant",
+            json!({"KeyId": key_id, "GranteePrincipal": grantee, "Operations": ["Decrypt"]}),
+        ))
+        .unwrap();
+    };
+    let provider = crate::resource_policy::KmsResourcePolicyProvider::new(svc.state.clone());
+    let principal = fakecloud_core::auth::Principal {
+        arn: grantee.to_string(),
+        user_id: "AIDAGRANTEE".to_string(),
+        account_id: "123456789012".to_string(),
+        principal_type: fakecloud_core::auth::PrincipalType::User,
+        source_identity: None,
+        tags: None,
+    };
+    let granted = |region: &str| {
+        let req = in_region(region, "Decrypt", json!({"CiphertextBlob": blob}));
+        let action: IamAction = svc.iam_action_for(&req).unwrap();
+        provider.grant_authorization("kms", &req, &action, &principal)
+    };
+    grant("us-east-1");
+    assert_eq!(granted("us-east-1"), Some(GrantAuthorization::Grantee));
+    assert_eq!(granted("us-west-2"), None, "the primary's grant");
+    grant("us-west-2");
+    assert_eq!(granted("us-west-2"), Some(GrantAuthorization::Grantee));
+
+    // A key that is not multi-Region resolves by its bare id as before.
+    let plain = create_key(&svc);
+    let described = json_of(
+        svc.describe_key(&in_region(
+            "us-east-1",
+            "DescribeKey",
+            json!({"KeyId": plain}),
+        ))
+        .unwrap(),
+    );
+    assert!(described["KeyMetadata"]["Arn"]
+        .as_str()
+        .unwrap()
+        .ends_with(&plain));
+}
+
+/// ListGrants and ListRetirableGrants name each grant's key by its ARN, as
+/// AWS does: a replica's grant by the replica's ARN, never the internal
+/// "<region>:<id>" it is stored under.
+#[test]
+fn listed_grants_name_their_key_by_its_arn() {
+    let svc = make_service();
+    let key_id = create_key_with_opts(&svc, json!({ "MultiRegion": true }));
+    svc.replicate_key(&make_request(
+        "ReplicateKey",
+        json!({"KeyId": key_id, "ReplicaRegion": "us-west-2"}),
+    ))
+    .unwrap();
+    let in_region = |region: &str, action: &str, body: Value| {
+        let mut req = make_request(action, body);
+        req.region = region.to_string();
+        req
+    };
+    let retiring = "arn:aws:iam::123456789012:user/retirer";
+    for region in ["us-east-1", "us-west-2"] {
+        svc.create_grant(&in_region(
+            region,
+            "CreateGrant",
+            json!({
+                "KeyId": key_id,
+                "GranteePrincipal": "arn:aws:iam::123456789012:user/u",
+                "RetiringPrincipal": retiring,
+                "Operations": ["Decrypt"],
+            }),
+        ))
+        .unwrap();
+    }
+    let arn_in = |region: &str| format!("arn:aws:kms:{region}:123456789012:key/{key_id}");
+    for region in ["us-east-1", "us-west-2"] {
+        let listed: Value = serde_json::from_slice(
+            svc.list_grants(&in_region(region, "ListGrants", json!({"KeyId": key_id})))
+                .unwrap()
+                .body
+                .expect_bytes(),
+        )
+        .unwrap();
+        let ids: Vec<&str> = listed["Grants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["KeyId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![arn_in(region).as_str()], "{region}");
+    }
+    let retirable: Value = serde_json::from_slice(
+        svc.list_retirable_grants(&make_request(
+            "ListRetirableGrants",
+            json!({"RetiringPrincipal": retiring}),
+        ))
+        .unwrap()
+        .body
+        .expect_bytes(),
+    )
+    .unwrap();
+    let mut ids: Vec<String> = retirable["Grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["KeyId"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec![arn_in("us-east-1"), arn_in("us-west-2")]);
+}

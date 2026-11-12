@@ -48,8 +48,13 @@ pub(crate) fn canonical_encryption_context(
 /// (see [`canonical_encryption_context`]). When the supplied EC
 /// doesn't match what was bound at encrypt time, `crate::blob::decode_with_context`
 /// fails AEAD verification and we surface `InvalidCiphertextException`.
+///
+/// `region` is the region of the call: a blob a multi-Region key sealed
+/// names the key by its bare id, and is opened by the related key of that
+/// region (its replica there, else the primary), as AWS decrypts it.
 pub(crate) fn decode_ciphertext_envelope(
     state: &KmsState,
+    region: &str,
     ciphertext_b64: &str,
     encryption_context_aad: &[u8],
 ) -> Result<DecodedCiphertext, AwsServiceError> {
@@ -64,13 +69,17 @@ pub(crate) fn decode_ciphertext_envelope(
         &ciphertext_bytes,
         encryption_context_aad,
     ) {
-        let key = state.keys.get(&decoded.key_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotFoundException",
-                format!("Key '{}' does not exist", decoded.key_id),
-            )
-        })?;
+        // A blob sealed for a caller of another account names the key by
+        // its ARN (see `sealed_key_ref`); a bare id is the key of `region`.
+        let key = crate::hook::related_key(state, region, &decoded.key_id)
+            .map(|(_, key)| key)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotFoundException",
+                    format!("Key '{}' does not exist", decoded.key_id),
+                )
+            })?;
         return Ok(DecodedCiphertext {
             source_arn: key.arn.clone(),
             plaintext_b64: base64::engine::general_purpose::STANDARD.encode(&decoded.plaintext),
@@ -269,24 +278,74 @@ pub(crate) fn kms_resource_for(
         return "*".to_string();
     }
 
-    // All remaining operations carry a KeyId parameter.
+    // All remaining operations carry a KeyId parameter, which may name a key
+    // of another account by its key or alias ARN. A Decrypt naming no key
+    // uses the key its ciphertext names.
     let body = request.json_body();
-    if let Some(key_id_input) = body["KeyId"].as_str() {
-        let accts = state.read();
-        let empty = KmsState::new(&request.account_id, &request.region);
-        let s = accts.get(&request.account_id).unwrap_or(&empty);
-        if let Some(key_id) =
-            KmsService::resolve_key_id_with_state(s, &request.region, key_id_input)
-        {
-            if let Some(key) = s.keys.get(&key_id) {
-                return key.arn.clone();
-            }
+    let accts = state.read();
+    // A RetireGrant naming its grant by token (which it uses first) is on
+    // the key of that grant.
+    if action == "RetireGrant" {
+        if let Some(token) = body["GrantToken"].as_str() {
+            return grant_by_token(&accts, request, token)
+                .and_then(|(account, grant)| {
+                    let state = accts.get(account)?;
+                    state.keys.get(&grant.key_id).map(|key| key.arn.clone())
+                })
+                .unwrap_or_else(|| "*".to_string());
         }
     }
     // Key not found or no KeyId — fall back to wildcard. The handler
     // will return NotFoundException anyway; this avoids blocking the
     // request at the IAM layer with a confusing error.
-    "*".to_string()
+    match body["KeyId"].as_str() {
+        Some(key_ref) => key_arn_for_ref(&accts, request, key_ref),
+        None if action == "Decrypt" => body["CiphertextBlob"]
+            .as_str()
+            .and_then(ciphertext_key_ref)
+            .and_then(|key_ref| ciphertext_key_arn(&accts, request, &key_ref)),
+        None => None,
+    }
+    .unwrap_or_else(|| "*".to_string())
+}
+
+/// The grant whose token is `token`, and the account holding it: the
+/// caller's own account first, then any other (a grant on another account's
+/// key lives in that account).
+pub(crate) fn grant_by_token<'a>(
+    accounts: &'a fakecloud_core::multi_account::MultiAccountState<KmsState>,
+    request: &AwsRequest,
+    token: &str,
+) -> Option<(&'a str, &'a crate::state::KmsGrant)> {
+    let find = |state: &'a KmsState| state.grants.iter().find(|g| g.grant_token == token);
+    let caller = caller_account(request);
+    if let Some((account, state)) = accounts.iter().find(|(account, _)| *account == caller) {
+        if let Some(grant) = find(state) {
+            return Some((account, grant));
+        }
+    }
+    accounts
+        .iter()
+        .find_map(|(account, state)| find(state).map(|grant| (account, grant)))
+}
+
+/// The two authorizations `ReEncrypt` needs: `kms:ReEncryptFrom` on the key
+/// that sealed the ciphertext (its `SourceKeyId`, else the key the
+/// ciphertext names) and `kms:ReEncryptTo` on `DestinationKeyId`.
+pub(crate) fn re_encrypt_resources(state: &SharedKmsState, request: &AwsRequest) -> [String; 2] {
+    let body = request.json_body();
+    let accts = state.read();
+    let source = match body["SourceKeyId"].as_str() {
+        Some(key_ref) => key_arn_for_ref(&accts, request, key_ref),
+        None => body["CiphertextBlob"]
+            .as_str()
+            .and_then(ciphertext_key_ref)
+            .and_then(|key_ref| ciphertext_key_arn(&accts, request, &key_ref)),
+    };
+    let destination = body["DestinationKeyId"]
+        .as_str()
+        .and_then(|key_ref| key_arn_for_ref(&accts, request, key_ref));
+    [source, destination].map(|arn| arn.unwrap_or_else(|| "*".to_string()))
 }
 
 /// The policy a key gets when created without one; `key_arn` supplies the
@@ -455,15 +514,15 @@ pub(crate) fn decode_plaintext(plaintext_b64: &str) -> Result<Vec<u8>, AwsServic
 /// shapes: when imported key material is present, XOR the plaintext
 /// against the material so the ciphertext is deterministic in the
 /// imported key; otherwise the fakecloud envelope just wraps the
-/// original base64 plaintext under a fixed prefix.
+/// original base64 plaintext under a fixed prefix. `embedded` is the key
+/// reference the blob names (see [`sealed_key_ref`]).
 pub(crate) fn build_encrypt_ciphertext(
     state: &KmsState,
     key: &KmsKey,
-    plaintext_b64: &str,
+    embedded: &str,
     plaintext_bytes: &[u8],
     encryption_context_aad: &[u8],
 ) -> String {
-    let _ = plaintext_b64;
     if let Some(ref material) = key.imported_material_bytes {
         // Imported key material path: legacy XOR envelope wrapped in the
         // textual `fakecloud-imported:<key>:<b64>` form, base64-encoded for
@@ -484,11 +543,80 @@ pub(crate) fn build_encrypt_ciphertext(
     // real SDKs and does not leak plaintext to anyone inspecting the bytes.
     let blob = crate::blob::encode_with_context(
         &state.master_key_bytes,
-        &key.key_id,
+        embedded,
         plaintext_bytes,
         encryption_context_aad,
     );
     base64::engine::general_purpose::STANDARD.encode(&blob)
+}
+
+/// The account a request is made by: the calling principal's, which differs
+/// from `req.account_id` when the request uses a key of another account (the
+/// request is then served in the key's account; see
+/// `KmsService::cross_account_key_owner`).
+pub(crate) fn caller_account(req: &AwsRequest) -> &str {
+    req.principal
+        .as_ref()
+        .map_or(req.account_id.as_str(), |p| p.account_id.as_str())
+}
+
+/// The key reference a ciphertext sealed for `req` under `key` names: the key
+/// id, or the key ARN when the caller belongs to another account than the
+/// key, so that the caller's own `Decrypt`, which names no key, finds the
+/// key's account (as a hook-sealed blob does).
+pub(crate) fn sealed_key_ref<'a>(req: &AwsRequest, key: &'a KmsKey) -> &'a str {
+    match parse_kms_arn(&key.arn) {
+        Some((_, account, _)) if account != caller_account(req) => &key.arn,
+        _ => &key.key_id,
+    }
+}
+
+/// The ARN of the key `key_ref` (key id, key ARN, alias name or alias ARN)
+/// names for `request`: a key or alias ARN of another account is looked up
+/// in that account, anything else in the caller's.
+pub(crate) fn key_arn_for_ref(
+    accounts: &fakecloud_core::multi_account::MultiAccountState<KmsState>,
+    request: &AwsRequest,
+    key_ref: &str,
+) -> Option<String> {
+    let owner = crate::hook::key_owner_account(&request.account_id, key_ref);
+    let state = accounts.get(owner)?;
+    let key_id = KmsService::resolve_key_id_with_state(state, &request.region, key_ref)?;
+    state.keys.get(&key_id).map(|key| key.arn.clone())
+}
+
+/// The ARN of the key that opens a ciphertext naming `key_ref` for
+/// `request`: in the account the reference names, the related key of the
+/// request's region (see [`crate::hook::related_key`]).
+pub(crate) fn ciphertext_key_arn(
+    accounts: &fakecloud_core::multi_account::MultiAccountState<KmsState>,
+    request: &AwsRequest,
+    key_ref: &str,
+) -> Option<String> {
+    let owner = crate::hook::key_owner_account(&request.account_id, key_ref);
+    let state = accounts.get(owner)?;
+    crate::hook::related_key(state, &request.region, key_ref).map(|(_, key)| key.arn.clone())
+}
+
+/// The key reference a ciphertext names: the id or ARN an AWS-shaped blob
+/// embeds, or the key id of a textual envelope.
+pub(crate) fn ciphertext_key_ref(ciphertext_b64: &str) -> Option<String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(ciphertext_b64)
+        .ok()?;
+    if let Some(key_ref) = crate::blob::embedded_key_id(&bytes) {
+        return Some(key_ref);
+    }
+    let envelope = String::from_utf8(bytes).ok()?;
+    [
+        FAKE_ENVELOPE_PREFIX,
+        IMPORTED_ENVELOPE_PREFIX,
+        RSA_ENVELOPE_PREFIX,
+    ]
+    .iter()
+    .find_map(|prefix| envelope.strip_prefix(prefix))
+    .and_then(|rest| rest.split(':').next())
+    .map(str::to_string)
 }
 
 /// Reject empty/undecodable base64 for `Verify`'s Message and Signature.
@@ -806,12 +934,12 @@ pub(crate) fn fmt_enum_set(items: &[String]) -> String {
 /// A grant as the API reports it. `IssuingAccount` is the account root in the
 /// partition of the granted key (`region`'s, if the key is gone).
 pub(crate) fn grant_to_json(grant: &KmsGrant, state: &KmsState, region: &str) -> Value {
-    let partition = state
-        .keys
-        .get(&grant.key_id)
-        .map_or_else(|| partition_for(region), |k| partition_of(&k.arn));
+    let key = state.keys.get(&grant.key_id);
+    let partition = key.map_or_else(|| partition_for(region), |k| partition_of(&k.arn));
+    // ListGrants / ListRetirableGrants name the key by its ARN, as AWS does;
+    // the id a grant stores is internal (a replica's is "<region>:<id>").
     let mut v = json!({
-        "KeyId": grant.key_id,
+        "KeyId": key.map_or(grant.key_id.as_str(), |k| k.arn.as_str()),
         "GrantId": grant.grant_id,
         "GranteePrincipal": grant.grantee_principal,
         "Operations": grant.operations,

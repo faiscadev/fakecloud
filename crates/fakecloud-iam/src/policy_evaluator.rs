@@ -98,6 +98,39 @@ impl IamPolicyEvaluator for IamPolicyEvaluatorImpl {
         ))
     }
 
+    fn evaluate_ceiling(
+        &self,
+        principal: &Principal,
+        action: &IamAction,
+        context: &ConditionContext,
+        session_policies: &[String],
+        scps: Option<&[String]>,
+        with_boundary: bool,
+    ) -> IamDecision {
+        let session = parse_session_policies(session_policies);
+        let scp_docs = parse_scp_policies(scps, principal);
+        let boundary = with_boundary
+            .then(|| {
+                let states = self.state.read();
+                states
+                    .get(&principal.account_id)
+                    .and_then(|state| evaluator::collect_boundary_policies(state, principal))
+            })
+            .flatten();
+        let request = EvalRequest {
+            principal,
+            action: action.action_string(),
+            resource: action.resource.clone(),
+            context: context.clone(),
+        };
+        decision_to_core(evaluator::evaluate_ceiling(
+            boundary.as_deref(),
+            session.as_deref(),
+            scp_docs.as_deref(),
+            &request,
+        ))
+    }
+
     fn evaluate_anonymous(
         &self,
         action: &IamAction,
@@ -264,6 +297,73 @@ mod tests {
             }],
         );
         Arc::new(RwLock::new(mas))
+    }
+
+    /// The ceiling a grant is capped by: the SCPs, session policies and (when
+    /// asked) the permissions boundary alone, with no identity policy needed,
+    /// and no layer at all leaving it be.
+    #[test]
+    fn ceiling_evaluates_only_scps_session_policies_and_boundary() {
+        let state = setup();
+        {
+            let mut mas = state.write();
+            let s = mas.get_or_create("123456789012");
+            let boundary_arn = "arn:aws:iam::123456789012:policy/S3Only";
+            insert_managed_policy(
+                s,
+                boundary_arn,
+                r#"{"Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#,
+            );
+            s.users.get_mut("alice").unwrap().permissions_boundary = Some(boundary_arn.to_string());
+        }
+        let eval = IamPolicyEvaluatorImpl::new(state);
+        let action = IamAction {
+            service: "kms",
+            action: "Decrypt",
+            resource: "arn:aws:kms:us-east-1:111111111111:key/k".into(),
+        };
+        let ceiling_with = |session: &[String], scps: Option<&[String]>, boundary: bool| {
+            eval.evaluate_ceiling(
+                &principal(),
+                &action,
+                &ConditionContext::default(),
+                session,
+                scps,
+                boundary,
+            )
+        };
+        // The boundary (s3 only) caps the grant only when asked.
+        assert_eq!(ceiling_with(&[], None, true), IamDecision::ImplicitDeny);
+        let ceiling =
+            |session: &[String], scps: Option<&[String]>| ceiling_with(session, scps, false);
+        let allow_kms =
+            r#"{"Statement":[{"Effect":"Allow","Action":"kms:*","Resource":"*"}]}"#.to_string();
+        let allow_s3 =
+            r#"{"Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#.to_string();
+        let deny_decrypt =
+            r#"{"Statement":[{"Effect":"Deny","Action":"kms:Decrypt","Resource":"*"}]}"#
+                .to_string();
+        assert_eq!(ceiling(&[], None), IamDecision::Allow);
+        assert_eq!(
+            ceiling(&[], Some(std::slice::from_ref(&allow_kms))),
+            IamDecision::Allow
+        );
+        assert_eq!(
+            ceiling(&[], Some(std::slice::from_ref(&allow_s3))),
+            IamDecision::ImplicitDeny
+        );
+        assert_eq!(
+            ceiling(&[], Some(&[allow_kms.clone(), deny_decrypt.clone()])),
+            IamDecision::ExplicitDeny
+        );
+        assert_eq!(
+            ceiling(std::slice::from_ref(&allow_kms), None),
+            IamDecision::Allow
+        );
+        assert_eq!(
+            ceiling(std::slice::from_ref(&allow_s3), None),
+            IamDecision::ImplicitDeny
+        );
     }
 
     #[test]

@@ -9936,6 +9936,98 @@ fn sse_kms_put(path: &str, key_id: Option<&str>) -> AwsRequest {
     req
 }
 
+/// Every write records the ARN of the key that sealed the object, resolved
+/// in the bucket's region: a bare multi-Region key id in a replica's region
+/// names the replica, so PutObject, CopyObject and UpdateObjectEncryption
+/// all store the replica's ARN (which every reader then decrypts in), and
+/// the body reads back.
+#[tokio::test]
+async fn sse_kms_writes_record_the_key_arn_of_the_buckets_region() {
+    let kms: fakecloud_kms::SharedKmsState = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let hook = fakecloud_kms::hook::KmsServiceHook::new(kms.clone(), Default::default());
+    // A multi-Region customer key in us-east-1 and its us-west-2 replica.
+    let primary_arn = hook
+        .resolve_key_arn("123456789012", "us-east-1", "aws/s3", "s3.amazonaws.com")
+        .unwrap();
+    let key_id = primary_arn.rsplit('/').next().unwrap().to_string();
+    let replica_arn = format!("arn:aws:kms:us-west-2:123456789012:key/{key_id}");
+    {
+        let mut accounts = kms.write();
+        let s = accounts.get_or_create("123456789012");
+        let key = s.keys.get_mut(&key_id).unwrap();
+        key.key_manager = "CUSTOMER".into();
+        key.multi_region = true;
+        let mut replica = key.clone();
+        replica.arn = replica_arn.clone();
+        s.keys.insert(format!("us-west-2:{key_id}"), replica);
+    }
+    let svc = make_service()
+        .with_kms(kms.clone())
+        .with_kms_hook(Arc::new(hook));
+    {
+        let mut mas = svc.state.write();
+        mas.default_mut().buckets.insert(
+            "west".to_string(),
+            S3Bucket::new("west", "us-west-2", "owner"),
+        );
+    }
+    let in_west = |mut req: AwsRequest| {
+        req.region = "us-west-2".to_string();
+        req
+    };
+    let stored = |key: &str| {
+        svc.state.read().default_ref().buckets["west"].objects[key]
+            .sse_kms_key_id
+            .clone()
+    };
+
+    svc.handle(in_west(sse_kms_put("/west/put.txt", Some(&key_id))))
+        .await
+        .expect("PutObject under the bare multi-Region id");
+    assert_eq!(stored("put.txt").as_deref(), Some(replica_arn.as_str()));
+
+    let mut copy = sse_kms_put("/west/copy.txt", Some(&key_id));
+    copy.headers
+        .insert("x-amz-copy-source", "/west/put.txt".parse().unwrap());
+    svc.handle(in_west(copy))
+        .await
+        .expect("CopyObject under the bare multi-Region id");
+    assert_eq!(stored("copy.txt").as_deref(), Some(replica_arn.as_str()));
+    let resp = svc
+        .handle(in_west(make_request(
+            Method::GET,
+            "/west/copy.txt",
+            &[],
+            b"",
+        )))
+        .await
+        .expect("the copy reads back");
+    assert_eq!(resp.body.expect_bytes(), b"secret body");
+
+    // UpdateObjectEncryption with the bare id, from SSE-S3.
+    svc.handle(in_west(make_request(
+        Method::PUT,
+        "/west/plain.txt",
+        &[],
+        b"plain",
+    )))
+    .await
+    .unwrap();
+    let mut update = make_request(Method::PUT, "/west/plain.txt", &[], b"");
+    update
+        .headers
+        .insert("x-amz-server-side-encryption", "aws:kms".parse().unwrap());
+    update.headers.insert(
+        "x-amz-server-side-encryption-aws-kms-key-id",
+        key_id.parse().unwrap(),
+    );
+    svc.update_object_encryption("123456789012", &in_west(update), "west", "plain.txt")
+        .expect("UpdateObjectEncryption under the bare multi-Region id");
+    assert_eq!(stored("plain.txt").as_deref(), Some(replica_arn.as_str()));
+}
+
 #[tokio::test]
 async fn cross_account_put_with_the_callers_key_arn_encrypts_under_that_key() {
     let (svc, kms) = kms_service_with_foreign_bucket(fakecloud_core::auth::IamMode::Strict);

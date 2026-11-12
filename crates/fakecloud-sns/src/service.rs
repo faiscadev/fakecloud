@@ -124,7 +124,7 @@ impl SnsService {
         // service would emit at fan-out time. A decrypt failure here
         // means the topic's CMK is unusable for delivery — also
         // fail-closed so callers don't silently lose audit records.
-        hook.decrypt(account_id, &envelope, sns, ctx)
+        hook.decrypt_in_region(account_id, region, &envelope, sns, ctx)
             .map_err(|err| {
                 tracing::warn!(topic = %topic_arn, error = %err, "SNS SSE-KMS decrypt failed");
                 sns_kms_error(&err)

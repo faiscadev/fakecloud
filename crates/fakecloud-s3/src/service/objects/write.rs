@@ -864,6 +864,15 @@ impl S3Service {
         // stored body is a fresh envelope with the destination's encryption
         // context (its object ARN, or bucket ARN under an S3 Bucket Key),
         // under a key in the destination bucket's region.
+        // The destination records the ARN of the key it is sealed under, as
+        // PutObject does (resolved in the destination bucket's region, so a
+        // bare multi-Region key id there names its replica), whatever form
+        // the request named it in; readers then find the key by that ARN.
+        let new_kms = if crate::side_effects::is_sse_kms(new_sse.as_deref()) {
+            self.resolve_object_kms_key(account_id, &dest_region, new_kms)
+        } else {
+            new_kms
+        };
         let dest_stored_bytes =
             if crate::side_effects::is_sse_kms(new_sse.as_deref()) && self.kms_hook.is_some() {
                 self.encrypt_object_body(

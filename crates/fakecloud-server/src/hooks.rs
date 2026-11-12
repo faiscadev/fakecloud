@@ -269,6 +269,23 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
             .decrypt(account_id, ciphertext_b64, caller, encryption_context)
     }
 
+    fn decrypt_in_region(
+        &self,
+        account_id: &str,
+        region: &str,
+        ciphertext_b64: &str,
+        caller: fakecloud_core::delivery::KmsCaller<'_>,
+        encryption_context: std::collections::HashMap<String, String>,
+    ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+        self.inner.decrypt_in_region(
+            account_id,
+            Some(region),
+            ciphertext_b64,
+            caller,
+            encryption_context,
+        )
+    }
+
     fn is_ciphertext(&self, account_id: &str, stored: &str) -> bool {
         fakecloud_core::delivery::KmsHook::is_ciphertext(&self.inner, account_id, stored)
     }
