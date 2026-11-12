@@ -824,8 +824,27 @@ pub fn session_role_arn(state: &IamState, principal: &Principal) -> Option<Strin
     if principal.principal_type != PrincipalType::AssumedRole {
         return None;
     }
-    let name = role_name_from_assumed_role_arn(&principal.arn)?;
-    state.roles.get(name).map(|role| role.arn.clone())
+    state.session_role_arn(&principal.arn)
+}
+
+/// The role ARN of the assumed-role session `principal` for a request whose
+/// context is `context`: its `aws:PrincipalArn` when dispatch set it from
+/// the session's credential (which records the ARN at mint time), else
+/// [`session_role_arn`].
+pub(crate) fn request_role_arn(
+    state: &IamState,
+    principal: &Principal,
+    context: &RequestContext,
+) -> Option<String> {
+    if principal.principal_type != PrincipalType::AssumedRole {
+        return None;
+    }
+    context
+        .aws_principal_arn
+        .as_ref()
+        .filter(|arn| arn.contains(":role/"))
+        .cloned()
+        .or_else(|| session_role_arn(state, principal))
 }
 
 /// [`session_role_arn`] as a function over the shared IAM state, for
@@ -847,10 +866,18 @@ pub fn session_role_resolver(state: crate::state::SharedIamState) -> SessionRole
 /// from the session: it names the role, or has a `NotPrincipal` statement.
 /// Otherwise only account-wide entries could match the role, and those
 /// match the session alike.
+///
+/// A role-derived Allow comes only from `Principal` elements: an `Allow`
+/// with `NotPrincipal` that excludes the session must not let it in through
+/// its role. For `NotPrincipal` the role counts only in Deny statements,
+/// which exclude a session only when both its role and session ARN are
+/// listed.
 struct ResourcePolicyDecision<'p, 'r, 'a> {
     policy: &'p PolicyDocument,
     request: &'r EvalRequest<'a>,
-    role: Option<Principal>,
+    /// The role as a principal, with the policy as it applies to the role
+    /// (no `Allow` + `NotPrincipal` statements).
+    role: Option<(Principal, PolicyDocument)>,
     caller: Decision,
     role_decision: Decision,
 }
@@ -866,13 +893,27 @@ impl<'p, 'r, 'a> ResourcePolicyDecision<'p, 'r, 'a> {
         // principal.
         let role = role_arn
             .filter(|arn| policy_distinguishes_role(policy, arn))
-            .map(|arn| Principal {
-                arn: arn.to_string(),
-                user_id: request.principal.user_id.clone(),
-                account_id: request.principal.account_id.clone(),
-                principal_type: PrincipalType::Unknown,
-                source_identity: None,
-                tags: request.principal.tags.clone(),
+            .map(|arn| {
+                let principal = Principal {
+                    arn: arn.to_string(),
+                    user_id: request.principal.user_id.clone(),
+                    account_id: request.principal.account_id.clone(),
+                    principal_type: PrincipalType::Unknown,
+                    source_identity: None,
+                    tags: request.principal.tags.clone(),
+                };
+                let as_role = PolicyDocument {
+                    statements: policy
+                        .statements
+                        .iter()
+                        .filter(|s| {
+                            !(s.effect == Effect::Allow
+                                && matches!(s.principal, PrincipalPattern::NotPrincipal(_)))
+                        })
+                        .cloned()
+                        .collect(),
+                };
+                (principal, as_role)
             });
         let mut decision = Self {
             policy,
@@ -899,7 +940,7 @@ impl<'p, 'r, 'a> ResourcePolicyDecision<'p, 'r, 'a> {
     /// `specific` leaves out the account-wide entries (`"AWS": "*"`, the
     /// account root).
     fn evaluate_role(&self, specific: bool) -> Decision {
-        let Some(role) = self.role.as_ref() else {
+        let Some((role, role_policy)) = self.role.as_ref() else {
             return Decision::ImplicitDeny;
         };
         let as_role = EvalRequest {
@@ -908,7 +949,7 @@ impl<'p, 'r, 'a> ResourcePolicyDecision<'p, 'r, 'a> {
             resource: self.request.resource.clone(),
             context: self.request.context.clone(),
         };
-        evaluate_inner_scoped(std::slice::from_ref(self.policy), &as_role, true, specific)
+        evaluate_inner_scoped(std::slice::from_ref(role_policy), &as_role, true, specific)
     }
 
     /// Whether the caller's or the role's decision is `decision`.

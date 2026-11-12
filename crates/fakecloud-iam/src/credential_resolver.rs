@@ -53,7 +53,11 @@ impl CredentialResolver for IamCredentialResolver {
                     source_identity: None,
                     tags: lookup.principal_tags.map(|m| m.into_iter().collect()),
                 };
-                let role_arn = crate::evaluator::session_role_arn(account_state, &principal);
+                // The ARN the session recorded when minted; sessions persisted
+                // before it was recorded look their role up.
+                let role_arn = lookup
+                    .role_arn
+                    .or_else(|| crate::evaluator::session_role_arn(account_state, &principal));
                 return Some(ResolvedCredential {
                     secret_access_key: lookup.secret_access_key,
                     session_token: lookup.session_token,
@@ -161,6 +165,7 @@ mod tests {
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider: None,
+                role_arn: None,
             },
         );
         let resolver = IamCredentialResolver::new(shared(state));
@@ -170,8 +175,40 @@ mod tests {
             PrincipalType::AssumedRole
         );
         assert_eq!(resolved.session_token.as_deref(), Some("temp-token"));
-        // The role `ops` does not exist, so its ARN is unknown.
+        // The role `ops` does not exist and the session (as one persisted
+        // before sessions recorded it) names no role ARN: it is unknown.
         assert_eq!(resolved.role_arn, None);
+    }
+
+    /// A session keeps the role ARN recorded when it was minted, whether or
+    /// not the role is in IAM: the zero-config credentials role is never
+    /// created, and a session outlives its role's deletion.
+    #[test]
+    fn session_keeps_its_recorded_role_arn() {
+        use crate::state::StsTempCredential;
+        let mut state = IamState::new("123456789012");
+        state.sts_temp_credentials.insert(
+            "FSIAZERO".to_string(),
+            StsTempCredential {
+                access_key_id: "FSIAZERO".into(),
+                secret_access_key: "s".into(),
+                session_token: "t".into(),
+                principal_arn: "arn:aws:sts::123456789012:assumed-role/fakecloud/fakecloud".into(),
+                user_id: "AROAZERO:fakecloud".into(),
+                account_id: "123456789012".into(),
+                expiration: Utc::now() + chrono::Duration::minutes(30),
+                session_policies: Vec::new(),
+                mfa_present: false,
+                issued_at: Utc::now(),
+                federated_provider: None,
+                role_arn: Some("arn:aws:iam::123456789012:role/fakecloud".into()),
+            },
+        );
+        let resolver = IamCredentialResolver::new(shared(state));
+        assert_eq!(
+            resolver.resolve("FSIAZERO").unwrap().role_arn.as_deref(),
+            Some("arn:aws:iam::123456789012:role/fakecloud")
+        );
     }
 
     #[test]
@@ -324,6 +361,7 @@ mod tests {
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider: None,
+                role_arn: None,
             },
         );
         let resolver = IamCredentialResolver::new(shared(state));

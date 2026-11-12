@@ -93,7 +93,7 @@ impl IamPolicyEvaluator for IamPolicyEvaluatorImpl {
             session.as_deref(),
             scp_docs.as_deref(),
             resource_policy.as_ref(),
-            evaluator::session_role_arn(state, principal).as_deref(),
+            evaluator::request_role_arn(state, principal, context).as_deref(),
             &request,
             resource_account_id,
         ))
@@ -878,6 +878,45 @@ mod tests {
             ),
             IamDecision::ImplicitDeny
         );
+    }
+
+    /// A session whose role is not in IAM (deleted, or never created) still
+    /// carries the role ARN recorded on its credential, which dispatch sets
+    /// as `aws:PrincipalArn`: a Deny naming that role reaches the session.
+    #[test]
+    fn deny_naming_a_deleted_role_reaches_its_session() {
+        const ROLE_ARN: &str = "arn:aws:iam::123456789012:role/gone";
+        let session = Principal {
+            arn: "arn:aws:sts::123456789012:assumed-role/gone/s1".into(),
+            user_id: "AROAGONE:s1".into(),
+            account_id: "123456789012".into(),
+            principal_type: PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        };
+        let policy = format!(
+            r#"{{"Statement":[{{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"*"}},{{"Effect":"Deny","Principal":{{"AWS":"{ROLE_ARN}"}},"Action":"s3:GetObject","Resource":"*"}}]}}"#
+        );
+        let eval = IamPolicyEvaluatorImpl::new(setup());
+        let decide = |context: &ConditionContext| {
+            eval.evaluate_with_resource_policy(
+                &session,
+                &s3_get_object_action(),
+                context,
+                Some(&policy),
+                "123456789012",
+                &[],
+                None,
+            )
+        };
+        let with_role = ConditionContext {
+            aws_principal_arn: Some(ROLE_ARN.into()),
+            ..Default::default()
+        };
+        assert_eq!(decide(&with_role), IamDecision::ExplicitDeny);
+        // Without the recorded ARN the role is unknown, and only the
+        // wildcard grant applies.
+        assert_eq!(decide(&ConditionContext::default()), IamDecision::Allow);
     }
 
     /// A same-account bucket policy naming a role (by its ARN, path

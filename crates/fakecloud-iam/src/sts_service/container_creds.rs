@@ -214,6 +214,9 @@ pub fn mint_session_credentials(
                 mfa_present: false,
                 issued_at,
                 federated_provider: None,
+                // The session keeps its role's ARN whether or not the role
+                // exists in IAM (the default `role/fakecloud` never does).
+                role_arn: Some(role_arn.to_string()),
             },
         );
     }

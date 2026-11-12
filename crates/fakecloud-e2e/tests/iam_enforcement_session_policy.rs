@@ -139,8 +139,8 @@ async fn session_policy_caps_assumed_role_permissions() {
     let err = iam.list_users().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("AccessDeniedException"),
-        "expected AccessDeniedException, got {msg}"
+        msg.contains(r#"code: Some("AccessDenied")"#),
+        "expected AccessDenied, got {msg}"
     );
 }
 
@@ -168,8 +168,8 @@ async fn session_policy_explicit_deny_wins() {
     let err = sts.get_caller_identity().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("AccessDeniedException"),
-        "expected AccessDeniedException, got {msg}"
+        msg.contains(r#"code: Some("AccessDenied")"#),
+        "expected AccessDenied, got {msg}"
     );
 }
 
@@ -264,7 +264,7 @@ async fn get_federation_token_session_policy_restricts() {
     let err = iam_fed.list_users().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("AccessDeniedException"),
-        "expected AccessDeniedException, got {msg}"
+        msg.contains(r#"code: Some("AccessDenied")"#),
+        "expected AccessDenied, got {msg}"
     );
 }

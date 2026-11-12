@@ -122,6 +122,7 @@ impl StsService {
         // sts:RoleSessionName, aws:MultiFactorAuthPresent, plus the
         // standard caller-identity keys.
         let role_id;
+        let role_iam_arn;
         if let Some(role) = role {
             // Service-linked roles (`/aws-service-role/<service>/...`)
             // are only assumable by the matching service principal,
@@ -251,6 +252,7 @@ impl StsService {
             }
 
             role_id = role.role_id.clone();
+            role_iam_arn = role.arn.clone();
         } else {
             // AssumeRole against a role that does not exist must be denied
             // rather than fall through to credential minting with no trust
@@ -304,6 +306,7 @@ impl StsService {
                 // Plain AssumeRole does not federate — `aws:FederatedProvider`
                 // stays absent for the resulting session.
                 federated_provider: None,
+                role_arn: Some(role_iam_arn),
             },
         );
 
@@ -415,6 +418,11 @@ impl StsService {
         let assumed_role_arn =
             super::format_assumed_role_arn(partition, &account_id, role_name, role_session_name);
         let assumed_role_id_str = format!("{}:{}", role_id, role_session_name);
+        // The role's IAM ARN (path included), which the session records.
+        let session_role_arn = accounts
+            .get(&account_id)
+            .and_then(|s| super::role_for_arn(s, role_arn).map(|r| r.arn.clone()))
+            .unwrap_or_else(|| role_arn.to_string());
 
         // Decode the JWT for trust-policy enforcement and to figure out
         // which OIDC provider vouched for the assertion. We never verify
@@ -623,6 +631,7 @@ impl StsService {
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider,
+                role_arn: Some(session_role_arn),
             },
         );
 
@@ -755,6 +764,11 @@ impl StsService {
         let assumed_role_arn =
             super::format_assumed_role_arn(partition, &account_id, role_name, &role_session_name);
         let assumed_role_id_str = format!("{}:{}", role_id, role_session_name);
+        // The role's IAM ARN (path included), which the session records.
+        let session_role_arn = accounts
+            .get(&account_id)
+            .and_then(|s| super::role_for_arn(s, role_arn).map(|r| r.arn.clone()))
+            .unwrap_or_else(|| role_arn.to_string());
 
         // When the named SAML provider IS registered and its metadata declares
         // an audience (`entityID`), the assertion must carry a *matching*
@@ -866,6 +880,7 @@ impl StsService {
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider,
+                role_arn: Some(session_role_arn),
             },
         );
 
@@ -1062,6 +1077,7 @@ impl StsService {
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider: None,
+                role_arn: None,
             },
         );
 
@@ -1141,6 +1157,7 @@ impl StsService {
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider: None,
+                role_arn: None,
             },
         );
 

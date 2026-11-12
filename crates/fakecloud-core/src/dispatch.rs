@@ -993,21 +993,20 @@ async fn dispatch_inner(
                                     // When the SCPs are what refused the
                                     // request, AWS says so.
                                     let scp_reason = scps.as_deref().and_then(|scps| {
-                                        scp_denial_reason(
-                                            evaluator.evaluate_ceiling(
-                                                principal,
-                                                iam_action,
-                                                &condition_context,
-                                                &[],
-                                                Some(scps),
-                                                false,
-                                            ),
-                                            &action_string,
-                                        )
+                                        let ceiling = evaluator.evaluate_ceiling(
+                                            principal,
+                                            iam_action,
+                                            &condition_context,
+                                            &[],
+                                            Some(scps),
+                                            false,
+                                        );
+                                        scp_cause(decision, ceiling)
+                                            .and_then(|d| scp_denial_reason(d, &action_string))
                                     });
                                     return build_error_response(
                                         StatusCode::FORBIDDEN,
-                                        "AccessDeniedException",
+                                        access_denied_code(&detected.service),
                                         &not_authorized_message(
                                             &principal.arn,
                                             &action_string,
@@ -2341,7 +2340,7 @@ fn authorize_root_scps(
             let action = iam_action.action_string();
             return Some(build_error_response(
                 StatusCode::FORBIDDEN,
-                "AccessDeniedException",
+                access_denied_code(&detected.service),
                 &not_authorized_message(
                     &principal.arn,
                     &action,
@@ -2373,6 +2372,23 @@ fn scp_denial_reason(decision: crate::auth::IamDecision, action: &str) -> Option
     }
 }
 
+/// The SCP ceiling's decision when the SCP layer itself caused a denial
+/// whose overall decision was `decision`: an SCP that explicitly denies, or
+/// one that doesn't allow when nothing else explicitly denied (an explicit
+/// Deny elsewhere is the cause then). `None` when the SCPs are not the
+/// cause.
+fn scp_cause(
+    decision: crate::auth::IamDecision,
+    ceiling: crate::auth::IamDecision,
+) -> Option<crate::auth::IamDecision> {
+    use crate::auth::IamDecision;
+    match (decision, ceiling) {
+        (_, IamDecision::ExplicitDeny) => Some(IamDecision::ExplicitDeny),
+        (IamDecision::ImplicitDeny, IamDecision::ImplicitDeny) => Some(IamDecision::ImplicitDeny),
+        _ => None,
+    }
+}
+
 /// The message of an `AccessDeniedException` for `principal_arn`:
 /// `User: <arn> is not authorized to perform: <action> on resource:
 /// <resource>`, then the `reason` the request was refused when one is known
@@ -2398,6 +2414,19 @@ fn not_authorized_message(
     message
 }
 
+/// The error code `service` answers a caller its policies don't authorize
+/// with: `AccessDenied` for S3 and the awsQuery IAM and STS APIs,
+/// `AuthorizationError` for SNS (its declared 403), `AccessDeniedException`
+/// for the others (the awsJson / restJson services' declared code; kept for
+/// the rest, whose exact code fakecloud has no recording of).
+fn access_denied_code(service: &str) -> &'static str {
+    match service {
+        "s3" | "iam" | "sts" => "AccessDenied",
+        "sns" => "AuthorizationError",
+        _ => "AccessDeniedException",
+    }
+}
+
 /// The strict-mode refusal of an operation with no IAM action mapping,
 /// which cannot be authorized.
 fn unmapped_action_denial(
@@ -2408,7 +2437,7 @@ fn unmapped_action_denial(
 ) -> Response<Body> {
     build_error_response(
         StatusCode::FORBIDDEN,
-        "AccessDeniedException",
+        access_denied_code(&detected.service),
         &format!(
             "User: {} is not authorized to perform: {}: no IAM action mapping exists for this operation, so it cannot be authorized under strict IAM enforcement",
             principal.arn, aws_request.action,
@@ -2515,7 +2544,7 @@ fn authorize_root_cross_account(
         if config.iam_mode.is_strict() {
             return Some(build_error_response(
                 StatusCode::FORBIDDEN,
-                "AccessDeniedException",
+                access_denied_code(&detected.service),
                 &format!(
                     "User: {} is not authorized to perform: {} on resource: {} because no resource-based policy allows the {} action",
                     principal.arn,
@@ -4244,6 +4273,19 @@ mod tests {
     fn denial_messages_name_the_scp_when_it_refused() {
         use crate::auth::IamDecision;
         assert_eq!(scp_denial_reason(IamDecision::Allow, "s3:GetObject"), None);
+        // The SCP layer is named only when it caused the denial: its own
+        // explicit Deny, or not allowing when nothing else explicitly denied.
+        use IamDecision::{Allow, ExplicitDeny, ImplicitDeny};
+        assert_eq!(scp_cause(ExplicitDeny, ExplicitDeny), Some(ExplicitDeny));
+        assert_eq!(scp_cause(ImplicitDeny, ImplicitDeny), Some(ImplicitDeny));
+        assert_eq!(scp_cause(ExplicitDeny, ImplicitDeny), None);
+        assert_eq!(scp_cause(ImplicitDeny, Allow), None);
+        assert_eq!(scp_cause(ExplicitDeny, Allow), None);
+        assert_eq!(access_denied_code("s3"), "AccessDenied");
+        assert_eq!(access_denied_code("sts"), "AccessDenied");
+        assert_eq!(access_denied_code("iam"), "AccessDenied");
+        assert_eq!(access_denied_code("sns"), "AuthorizationError");
+        assert_eq!(access_denied_code("kms"), "AccessDeniedException");
         let explicit = scp_denial_reason(IamDecision::ExplicitDeny, "s3:GetObject");
         let implicit = scp_denial_reason(IamDecision::ImplicitDeny, "s3:GetObject");
         let user = "arn:aws:iam::222222222222:user/u";
@@ -4445,7 +4487,7 @@ mod tests {
             )
             .await;
             assert!(
-                explicit.contains("<Code>AccessDeniedException</Code>")
+                explicit.contains("<Code>AccessDenied</Code>")
                     && explicit.contains(&format!(
                         "<Message>User: arn:aws:iam::222222222222:root is not authorized to perform: s3:GetObject on resource: arn:aws:s3:::{bucket}/key with an explicit deny in a service control policy</Message>"
                     )),
@@ -4457,7 +4499,7 @@ mod tests {
             )
             .await;
             assert!(
-                implicit.contains("<Code>AccessDeniedException</Code>")
+                implicit.contains("<Code>AccessDenied</Code>")
                     && implicit.contains(&format!(
                         "<Message>User: arn:aws:iam::222222222222:root is not authorized to perform: s3:GetObject on resource: arn:aws:s3:::{bucket}/key because no service control policy allows the s3:GetObject action</Message>"
                     )),
@@ -4517,7 +4559,7 @@ mod tests {
         )
         .await;
         assert!(
-            refused.contains("<Code>AccessDeniedException</Code>")
+            refused.contains("<Code>AccessDenied</Code>")
                 && refused.contains("no IAM action mapping exists for this operation"),
             "{refused}"
         );

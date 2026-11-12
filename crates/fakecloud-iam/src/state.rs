@@ -248,6 +248,14 @@ pub struct StsTempCredential {
     /// GetSessionToken / GetFederationToken.
     #[serde(default)]
     pub federated_provider: Option<String>,
+    /// For a role session, the IAM ARN (path included) of the role it
+    /// assumed, recorded when the session is minted: the session's
+    /// `aws:PrincipalArn`, which it keeps whether or not the role exists
+    /// in IAM (a deleted role, the zero-config credentials role). `None`
+    /// for other sessions, and for sessions persisted before the field
+    /// existed (the role is then looked up by name).
+    #[serde(default)]
+    pub role_arn: Option<String>,
 }
 
 /// Default for [`StsTempCredential::issued_at`] when deserializing
@@ -290,6 +298,8 @@ pub struct SecretLookup {
     /// always `None` for IAM user keys, plain AssumeRole, GetSessionToken,
     /// and GetFederationToken.
     pub federated_provider: Option<String>,
+    /// [`StsTempCredential::role_arn`]; `None` for IAM user keys.
+    pub role_arn: Option<String>,
 }
 
 /// Convert a `Vec<Tag>` to a `BTreeMap<String, String>`.
@@ -582,6 +592,7 @@ impl IamState {
                             mfa_present: false,
                             token_issued_at: None,
                             federated_provider: None,
+                            role_arn: None,
                         });
                     }
                 }
@@ -605,6 +616,7 @@ impl IamState {
                     mfa_present: temp.mfa_present,
                     token_issued_at: Some(temp.issued_at),
                     federated_provider: temp.federated_provider.clone(),
+                    role_arn: temp.role_arn.clone(),
                 });
             }
             // Keep the expired entry for a while: a later request with it must
@@ -667,6 +679,7 @@ impl IamState {
                             mfa_present: false,
                             token_issued_at: None,
                             federated_provider: None,
+                            role_arn: None,
                         });
                     }
                 }
@@ -690,7 +703,24 @@ impl IamState {
             mfa_present: temp.mfa_present,
             token_issued_at: Some(temp.issued_at),
             federated_provider: temp.federated_provider.clone(),
+            role_arn: temp.role_arn.clone(),
         })
+    }
+
+    /// For an assumed-role session `principal_arn` of this account, the IAM
+    /// ARN (path included) of the role it assumed: the role as IAM holds it,
+    /// else the ARN a live session of it recorded when minted (a deleted
+    /// role, or one never created, like the zero-config credentials role).
+    pub fn session_role_arn(&self, principal_arn: &str) -> Option<String> {
+        let (_, rest) = principal_arn.split_once(":assumed-role/")?;
+        let name = rest.split('/').next()?;
+        if let Some(role) = self.roles.get(name) {
+            return Some(role.arn.clone());
+        }
+        self.sts_temp_credentials
+            .values()
+            .find(|t| t.principal_arn == principal_arn)
+            .and_then(|t| t.role_arn.clone())
     }
 
     /// Resolve role tags from an assumed-role principal ARN.
@@ -827,6 +857,7 @@ mod tests {
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider: None,
+                role_arn: None,
             },
         );
         let lookup = state.credential_secret("FSIATEMPKEY").unwrap();
@@ -855,6 +886,7 @@ mod tests {
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider: None,
+                role_arn: None,
             },
         );
         assert!(state.credential_secret("FSIAOLD").is_none());
@@ -875,6 +907,7 @@ mod tests {
             mfa_present: false,
             issued_at: Utc::now(),
             federated_provider: None,
+            role_arn: None,
         }
     }
 
@@ -937,6 +970,7 @@ mod tests {
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider: None,
+                role_arn: None,
             },
         );
         assert!(state.credential_secret_readonly("FSIAOLD").is_none());

@@ -83,6 +83,7 @@ impl StsService {
                 // GetFederationToken yields a federated user, not a federated
                 // provider — `aws:FederatedProvider` stays absent.
                 federated_provider: None,
+                role_arn: None,
             },
         );
 

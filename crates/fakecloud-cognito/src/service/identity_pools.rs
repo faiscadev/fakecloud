@@ -880,6 +880,7 @@ impl CognitoIdentityService {
                     mfa_present: false,
                     issued_at: Utc::now(),
                     federated_provider: Some("cognito-identity.amazonaws.com".to_string()),
+                    role_arn: Some(role_arn.clone()),
                 },
             );
         }

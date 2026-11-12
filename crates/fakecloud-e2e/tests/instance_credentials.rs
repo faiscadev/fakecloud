@@ -107,6 +107,57 @@ async fn credentials_endpoint_creds_are_usable() {
     );
 }
 
+/// The zero-config session's `aws:PrincipalArn` is the default role's ARN,
+/// though that role is never created in IAM: a bucket policy granting
+/// `Principal: "*"` on `ArnEquals aws:PrincipalArn` that role grants it
+/// under strict enforcement.
+#[tokio::test]
+async fn credentials_endpoint_session_principal_arn_is_the_role() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let root = helpers::root_s3_client(&server).await;
+    root.create_bucket()
+        .bucket("zero-config")
+        .send()
+        .await
+        .unwrap();
+    root.put_object()
+        .bucket("zero-config")
+        .key("k")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap();
+    root.put_bucket_policy()
+        .bucket("zero-config")
+        .policy(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::zero-config/*","Condition":{"ArnEquals":{"aws:PrincipalArn":"arn:aws:iam::123456789012:role/fakecloud"}}}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let creds = fetch_credentials(server.endpoint()).await;
+    let conf = sdk_config_with_temp(
+        server.endpoint(),
+        creds["AccessKeyId"].as_str().unwrap(),
+        creds["SecretAccessKey"].as_str().unwrap(),
+        creds["Token"].as_str().unwrap(),
+    )
+    .load()
+    .await;
+    let s3 = aws_sdk_s3::Client::from_conf(
+        aws_sdk_s3::config::Builder::from(&conf)
+            .force_path_style(true)
+            .build(),
+    );
+    s3.get_object()
+        .bucket("zero-config")
+        .key("k")
+        .send()
+        .await
+        .expect("the bucket policy grants the role/fakecloud session");
+}
+
 /// The minted credentials pass cryptographic SigV4 verification when the server
 /// runs with `--verify-sigv4` — proving they are genuinely registered, not just
 /// waved through because verification is off.

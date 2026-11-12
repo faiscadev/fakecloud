@@ -125,8 +125,8 @@ async fn principal_tag_condition_denies_non_matching_user() {
     let sts = StsClient::new(&cfg);
     let err = sts.get_caller_identity().send().await.unwrap_err();
     assert!(
-        format!("{err:?}").contains("AccessDeniedException"),
-        "expected AccessDeniedException"
+        format!("{err:?}").contains(r#"code: Some("AccessDenied")"#),
+        "expected STS's AccessDenied"
     );
 }
 
@@ -153,8 +153,8 @@ async fn principal_tag_condition_denies_user_with_no_tags() {
     let sts = StsClient::new(&cfg);
     let err = sts.get_caller_identity().send().await.unwrap_err();
     assert!(
-        format!("{err:?}").contains("AccessDeniedException"),
-        "expected AccessDeniedException"
+        format!("{err:?}").contains(r#"code: Some("AccessDenied")"#),
+        "expected STS's AccessDenied"
     );
 }
 
@@ -182,8 +182,8 @@ async fn principal_tag_case_sensitive_key() {
     // Tag key mismatch: "team" != "Team" -> condition fails -> denied
     let err = sts.get_caller_identity().send().await.unwrap_err();
     assert!(
-        format!("{err:?}").contains("AccessDeniedException"),
-        "expected AccessDeniedException — tag keys are case-sensitive"
+        format!("{err:?}").contains(r#"code: Some("AccessDenied")"#),
+        "expected STS's AccessDenied: tag keys are case-sensitive"
     );
 }
 

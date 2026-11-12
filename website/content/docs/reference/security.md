@@ -48,7 +48,7 @@ Three modes, in order of aggressiveness:
 
 - **`off`** (default): policies are stored but never consulted. Zero behavior change from unconfigured fakecloud.
 - **`soft`**: policies are evaluated and each deny is logged on the `fakecloud::iam::audit` tracing target, but the request is allowed through. Useful for onboarding: you can see which statements would fire without breaking your test suite.
-- **`strict`**: policies are evaluated and denied requests fail with a protocol-correct `AccessDeniedException` before the service handler runs.
+- **`strict`**: policies are evaluated and denied requests fail with the service's access-denied error before the service handler runs: `AccessDenied` for S3, IAM and STS, `AuthorizationError` for SNS, `AccessDeniedException` for the others.
 
 Filter the audit events with `RUST_LOG=fakecloud::iam::audit=warn`.
 
@@ -204,7 +204,7 @@ The resource's owning account is parsed from the ARN. S3 ARNs have an empty acco
 | `"Principal": {"AWS": "arn:aws:iam::ACCOUNT:root"}` | Any principal whose account ID is `ACCOUNT` |
 | `"Principal": {"AWS": "ACCOUNT"}` | 12-digit account ID shorthand, equivalent to `...:root` |
 | `"Principal": {"AWS": "arn:aws:iam::ACCOUNT:user/alice"}` | Exact principal ARN match |
-| `"Principal": {"AWS": "arn:aws:iam::ACCOUNT:role/path/app"}` | Every session of that role (the role's ARN with its path, as IAM holds it), in every resource policy fakecloud evaluates for a caller, role trust policies and EventBridge bus policies included. Under `NotPrincipal` a role session is excluded only when both the role ARN and the session ARN are listed, as on AWS. A session's `aws:PrincipalArn` is likewise its role's ARN, not the session ARN |
+| `"Principal": {"AWS": "arn:aws:iam::ACCOUNT:role/path/app"}` | Every session of that role (the role's ARN with its path, as recorded when the session was minted), in the resource policies IAM enforcement evaluates, in role trust policies and in EventBridge bus policies. (The cross-account checks SSM parameters, ECR repositories and Secrets Manager secrets make on their own evaluate the policy as the caller account's root, so there only account-root and `*` grants apply.) Under `NotPrincipal` a role session is excluded only when both the role ARN and the session ARN are listed, as on AWS. A session's `aws:PrincipalArn` is likewise its role's ARN, not the session ARN |
 | `"Principal": {"AWS": [...]}` | List form — any entry matches |
 | `"Principal": {"Service": "events.amazonaws.com"}` | Matches the service principal itself when fakecloud makes a request as that service (CloudFront fetching an S3 origin through an origin access control, see below), and an assumed-role session of a service-linked role for that service (path `aws-service-role/<service>/`) |
 | `"Principal": {"Federated": "<provider>"}` | Matches a federated session minted by `AssumeRoleWithSAML` / `AssumeRoleWithWebIdentity` whose provider ARN equals `<provider>`. Used by IAM role trust policies. |
@@ -278,7 +278,7 @@ SCP-specific rules:
 - **Empty chain denies.** If `FullAWSAccess` is detached from the root and no other SCP grants the action up the path, the principal is denied. This matches AWS's allow-list ceiling semantics — SCPs are not deny lists.
 - **Resource policies don't reach past them.** SCPs are evaluated before any resource-based policy, and SCPs that don't allow the action are a final deny. A bucket, queue, topic, key or table policy (or a KMS grant, on a direct KMS call) naming a member-account principal, in its own account or another, gives it nothing its SCPs don't allow. SCPs attach to the caller's account: a resource's own organization's SCPs never apply to callers from outside it. Not yet capped: the KMS key use a service makes on the caller's behalf (S3 SSE-KMS, SQS, SNS, DynamoDB encryption).
 - **Root user included.** A member account's root user (`arn:aws:iam::<account>:root`) needs no identity policy, but its SCPs still cap it, in its own account and across accounts; an operation fakecloud cannot map to an IAM action fails closed for it under `strict`, as for any other principal. The management account's root is exempt like the rest of the management account, and the reserved `test*` identity bypasses enforcement entirely.
-- **Denials name the SCP.** When the SCPs are what refused a request, the `AccessDeniedException` message says so, as AWS does: `User: <arn> is not authorized to perform: <action> on resource: <resource> with an explicit deny in a service control policy`, or `... because no service control policy allows the <action> action`.
+- **Denials name the SCP.** When the SCP layer itself refused a request (an SCP's explicit deny, or SCPs that don't allow the action when nothing else explicitly denied it), the denial's message says so, as AWS does: `User: <arn> is not authorized to perform: <action> on resource: <resource> with an explicit deny in a service control policy`, or `... because no service control policy allows the <action> action`.
 
 Audit logs emit on `fakecloud::iam::audit` when an SCP layer produces an `ExplicitDeny` or caps the intersection to `ImplicitDeny`, so tests can inspect the decision path.
 
@@ -311,7 +311,7 @@ AWS_ACCESS_KEY_ID=<alice-akid> AWS_SECRET_ACCESS_KEY=<alice-secret> \
 # ...but not anyone else.
 AWS_ACCESS_KEY_ID=<alice-akid> AWS_SECRET_ACCESS_KEY=<alice-secret> \
   aws --endpoint-url http://localhost:4566 iam get-user --user-name root
-# -> AccessDeniedException
+# -> AccessDenied
 ```
 
 ## Image supply-chain (cosign + Trivy)

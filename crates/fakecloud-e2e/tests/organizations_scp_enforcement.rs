@@ -18,6 +18,7 @@ use aws_credential_types::Credentials;
 use aws_sdk_iam::Client as IamClient;
 use aws_sdk_kms::Client as KmsClient;
 use aws_sdk_organizations::Client as OrgsClient;
+use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_sqs::Client as SqsClient;
@@ -497,14 +498,23 @@ fn read_grant(bucket: &str, principals: &[&str]) -> serde_json::Value {
     })
 }
 
-/// Assert `result` is fakecloud's IAM refusal (`AccessDeniedException`)
-/// whose message names the SCP the way AWS does (`reason`).
-fn assert_scp_denied<E>(result: Result<impl std::fmt::Debug, E>, reason: &str, what: &str)
-where
+/// The access-denied code of S3 (`AccessDenied`) and of the JSON services
+/// (`AccessDeniedException`).
+const S3_DENIED: &str = "AccessDenied";
+const JSON_DENIED: &str = "AccessDeniedException";
+
+/// Assert `result` is the service's IAM refusal (`code`) whose message
+/// names the SCP the way AWS does (`reason`).
+fn assert_scp_denied<E>(
+    result: Result<impl std::fmt::Debug, E>,
+    code: &str,
+    reason: &str,
+    what: &str,
+) where
     E: aws_sdk_s3::error::ProvideErrorMetadata + std::fmt::Debug,
 {
     let err = result.expect_err(what);
-    assert_eq!(err.code(), Some("AccessDeniedException"), "{what}: {err:?}");
+    assert_eq!(err.code(), Some(code), "{what}: {err:?}");
     let message = err.message().unwrap_or_default();
     assert!(
         message.starts_with("User: ") && message.contains(&format!(" {reason}")),
@@ -671,21 +681,25 @@ async fn scp_caps_resource_policy_grants_to_member_principals() {
         }
         assert_scp_denied(
             b_reads_a().await,
+            S3_DENIED,
             &reason("s3:GetObject"),
             &format!("{ceiling}: cross-account bucket read"),
         );
         assert_scp_denied(
             encrypt(&b_cfg, &a_key_arn).await,
+            JSON_DENIED,
             &reason("kms:Encrypt"),
             &format!("{ceiling}: cross-account key use"),
         );
         assert_scp_denied(
             reader_reads_b().await,
+            S3_DENIED,
             &reason("s3:GetObject"),
             &format!("{ceiling}: same-account bucket read"),
         );
         assert_scp_denied(
             encrypt(&reader_cfg, &b_key_arn).await,
+            JSON_DENIED,
             &reason("kms:Encrypt"),
             &format!("{ceiling}: same-account key use"),
         );
@@ -826,11 +840,13 @@ async fn scp_caps_member_account_root() {
     .await;
     assert_scp_denied(
         read_queue().await,
+        JSON_DENIED,
         "with an explicit deny in a service control policy",
         "member root reading its queue",
     );
     assert_scp_denied(
         read_bucket_policy().await,
+        S3_DENIED,
         "with an explicit deny in a service control policy",
         "member root reading its bucket policy",
     );
@@ -849,11 +865,13 @@ async fn scp_caps_member_account_root() {
     .await;
     assert_scp_denied(
         read_queue().await,
+        JSON_DENIED,
         "because no service control policy allows the sqs:GetQueueAttributes action",
         "member root reading its queue",
     );
     assert_scp_denied(
         read_bucket_policy().await,
+        S3_DENIED,
         "because no service control policy allows the s3:GetBucketPolicy action",
         "member root reading its bucket policy",
     );
@@ -960,6 +978,21 @@ async fn principal_arn_of_a_role_session_is_its_role() {
         .send()
         .await
         .expect("the bucket policy grants the Reader role's sessions");
+    // A session outlives its role's deletion, and keeps the role's ARN as
+    // its `aws:PrincipalArn`.
+    IamClient::new(&b_cfg)
+        .delete_role()
+        .role_name("Reader")
+        .send()
+        .await
+        .unwrap();
+    path_style_s3(&reader)
+        .get_object()
+        .bucket("scp-principal-arn")
+        .key("k")
+        .send()
+        .await
+        .expect("the deleted role's session keeps its PrincipalArn");
 
     attach_root_scp(
         &OrgsClient::new(&a_cfg),
@@ -983,7 +1016,81 @@ async fn principal_arn_of_a_role_session_is_its_role() {
             .queue_name("not-admin")
             .send()
             .await,
+        JSON_DENIED,
         "with an explicit deny in a service control policy",
         "B's admin user is not the Admin role",
+    );
+}
+
+/// The denial names the SCP only when the SCP layer is the cause: an
+/// identity policy's explicit Deny is, even when the SCPs don't allow the
+/// action either.
+#[tokio::test]
+async fn denial_names_the_scp_only_when_it_is_the_cause() {
+    let server = start().await;
+    let (root_id, a_cfg, b_cfg) = org_with_member(&server).await;
+    let iam_b = IamClient::new(&b_cfg);
+    iam_b
+        .create_user()
+        .user_name("denied")
+        .send()
+        .await
+        .unwrap();
+    iam_b
+        .put_user_policy()
+        .user_name("denied")
+        .policy_name("deny-sqs")
+        .policy_document(
+            r#"{"Version":"2012-10-17","Statement":[
+                {"Effect":"Allow","Action":"*","Resource":"*"},
+                {"Effect":"Deny","Action":"sqs:CreateQueue","Resource":"*"}
+            ]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    let key = iam_b
+        .create_access_key()
+        .user_name("denied")
+        .send()
+        .await
+        .unwrap();
+    let key = key.access_key().unwrap();
+    let denied_cfg = config_with(&server, key.access_key_id(), key.secret_access_key()).await;
+    // An allow-list SCP that leaves out SQS.
+    let orgs = OrgsClient::new(&a_cfg);
+    detach_root_scp(&orgs, &root_id, "p-FullAWSAccess").await;
+    attach_root_scp(
+        &orgs,
+        &root_id,
+        "AllowAllButSqs",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","NotAction":"sqs:*","Resource":"*"}]}"#,
+    )
+    .await;
+
+    let err = SqsClient::new(&denied_cfg)
+        .create_queue()
+        .queue_name("q")
+        .send()
+        .await
+        .expect_err("the identity policy denies");
+    assert_eq!(err.code(), Some(JSON_DENIED), "{err:?}");
+    let message = err.message().unwrap_or_default();
+    assert!(
+        message.starts_with(&format!(
+            "User: arn:aws:iam::{ACCOUNT_B}:user/denied is not authorized to perform: sqs:CreateQueue on resource: "
+        )) && !message.contains("service control policy"),
+        "{message}"
+    );
+    // B's admin, whom only the SCPs refuse, is told so.
+    assert_scp_denied(
+        SqsClient::new(&b_cfg)
+            .create_queue()
+            .queue_name("q")
+            .send()
+            .await,
+        JSON_DENIED,
+        "because no service control policy allows the sqs:CreateQueue action",
+        "only the SCPs refuse B's admin",
     );
 }

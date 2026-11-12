@@ -2241,6 +2241,47 @@ fn resource_policy_for_role_applies_role_statements_to_sessions() {
     );
 }
 
+/// An `Allow` whose `NotPrincipal` excludes the session does not let it in
+/// through its role: a role-derived Allow comes only from `Principal`.
+#[test]
+fn not_principal_allow_does_not_grant_the_excluded_session_through_its_role() {
+    const ROLE: &str = "arn:aws:iam::123456789012:role/app";
+    const SESSION: &str = "arn:aws:sts::123456789012:assumed-role/app/s1";
+    let session = principal_assumed_role(SESSION);
+    let r = req(&session, "s3:GetObject", "arn:aws:s3:::bucket/key");
+    let policy = doc(json!({"Statement": [{
+        "Effect": "Allow", "NotPrincipal": {"AWS": SESSION},
+        "Action": "s3:GetObject", "Resource": "*"
+    }]}));
+    assert_eq!(
+        evaluate_resource_policy_for_role(&policy, Some(ROLE), &r),
+        Decision::ImplicitDeny
+    );
+    assert_eq!(
+        evaluate_with_resource_policy_for_role(
+            &[],
+            None,
+            None,
+            None,
+            Some(&policy),
+            Some(ROLE),
+            &r,
+            "123456789012",
+        ),
+        Decision::ImplicitDeny
+    );
+    // Another session of the role is not excluded and is granted.
+    let other = principal_assumed_role("arn:aws:sts::123456789012:assumed-role/app/s2");
+    assert_eq!(
+        evaluate_resource_policy_for_role(
+            &policy,
+            Some(ROLE),
+            &req(&other, "s3:GetObject", "arn:aws:s3:::bucket/key")
+        ),
+        Decision::Allow
+    );
+}
+
 /// A KMS key policy naming the role is a direct grant to its sessions, but
 /// one the role's boundary and the session's policies limit.
 #[test]

@@ -88,8 +88,8 @@ async fn sts_get_caller_identity_denied_without_policy() {
     let err = sts.get_caller_identity().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("AccessDeniedException"),
-        "expected AccessDeniedException, got {msg}"
+        msg.contains(r#"code: Some("AccessDenied")"#),
+        "expected STS's AccessDenied, got {msg}"
     );
 }
 
@@ -376,7 +376,7 @@ async fn sts_explicit_deny_beats_allow_all() {
     let sts = StsClient::new(&cfg);
     let err = sts.get_caller_identity().send().await.unwrap_err();
     let msg = format!("{err:?}");
-    assert!(msg.contains("AccessDeniedException"), "got {msg}");
+    assert!(msg.contains(r#"code: Some("AccessDenied")"#), "got {msg}");
 }
 
 #[tokio::test]
@@ -427,7 +427,7 @@ async fn iam_get_user_resource_scoped_policy() {
 
     // Bob -> alice: denied because resource doesn't match.
     let err = iam.get_user().user_name("alice").send().await.unwrap_err();
-    assert!(format!("{err:?}").contains("AccessDeniedException"));
+    assert!(format!("{err:?}").contains(r#"code: Some("AccessDenied")"#));
 }
 
 #[tokio::test]
@@ -584,7 +584,8 @@ async fn sns_publish_denied_without_policy() {
         .send()
         .await
         .unwrap_err();
-    assert!(format!("{err:?}").contains("AccessDeniedException"));
+    // SNS's declared 403.
+    assert!(format!("{err:?}").contains(r#"code: Some("AuthorizationError")"#));
 }
 
 #[tokio::test]
@@ -1403,8 +1404,8 @@ async fn sns_subscribe_protocol_condition_key() {
         .await
         .unwrap_err();
     assert!(
-        format!("{err:?}").contains("AccessDenied"),
-        "expected AccessDenied for email protocol, got {err:?}"
+        format!("{err:?}").contains(r#"code: Some("AuthorizationError")"#),
+        "expected AuthorizationError for email protocol, got {err:?}"
     );
 }
 
@@ -1462,7 +1463,7 @@ async fn condition_string_equals_username_denies_other_user() {
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
     let err = sts.get_caller_identity().send().await.unwrap_err();
-    assert!(format!("{err:?}").contains("AccessDeniedException"));
+    assert!(format!("{err:?}").contains(r#"code: Some("AccessDenied")"#));
 }
 
 #[tokio::test]
@@ -1512,7 +1513,7 @@ async fn condition_ip_address_non_matching_cidr_denies() {
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
     let err = sts.get_caller_identity().send().await.unwrap_err();
-    assert!(format!("{err:?}").contains("AccessDeniedException"));
+    assert!(format!("{err:?}").contains(r#"code: Some("AccessDenied")"#));
 }
 
 #[tokio::test]
@@ -1536,7 +1537,7 @@ async fn condition_date_less_than_past_deadline_denies() {
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
     let err = sts.get_caller_identity().send().await.unwrap_err();
-    assert!(format!("{err:?}").contains("AccessDeniedException"));
+    assert!(format!("{err:?}").contains(r#"code: Some("AccessDenied")"#));
 }
 
 #[tokio::test]
@@ -1560,7 +1561,7 @@ async fn condition_bool_secure_transport_deny_fires_over_http() {
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
     let err = sts.get_caller_identity().send().await.unwrap_err();
-    assert!(format!("{err:?}").contains("AccessDeniedException"));
+    assert!(format!("{err:?}").contains(r#"code: Some("AccessDenied")"#));
 }
 
 // ======================================================================
@@ -1984,8 +1985,8 @@ async fn topic_policy_explicit_deny_beats_identity_allow() {
         .await
         .unwrap_err();
     assert!(
-        format!("{err:?}").contains("AccessDeniedException"),
-        "expected AccessDeniedException, got {err:?}"
+        format!("{err:?}").contains(r#"code: Some("AuthorizationError")"#),
+        "expected SNS's AuthorizationError, got {err:?}"
     );
 }
 
@@ -2047,8 +2048,8 @@ async fn topic_policy_service_principal_does_not_grant_user() {
         .await
         .unwrap_err();
     assert!(
-        format!("{err:?}").contains("AccessDeniedException"),
-        "expected AccessDeniedException, got {err:?}"
+        format!("{err:?}").contains(r#"code: Some("AuthorizationError")"#),
+        "expected SNS's AuthorizationError, got {err:?}"
     );
 }
 
@@ -2084,8 +2085,8 @@ async fn topic_policy_condition_block_gates_access() {
         .await
         .unwrap_err();
     assert!(
-        format!("{err:?}").contains("AccessDeniedException"),
-        "expected AccessDeniedException, got {err:?}"
+        format!("{err:?}").contains(r#"code: Some("AuthorizationError")"#),
+        "expected SNS's AuthorizationError, got {err:?}"
     );
 }
 
