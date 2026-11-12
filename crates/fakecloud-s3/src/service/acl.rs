@@ -6,7 +6,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::persistence::object_meta_snapshot;
 
 use super::{
-    build_acl_xml, canned_acl_grants_for_object, no_such_key, parse_acl_xml, s3_xml, S3Service,
+    build_acl_xml, canned_acl_grants_for_object, no_such_bucket, no_such_key, parse_acl_xml,
+    s3_xml, S3Service,
 };
 
 impl S3Service {
@@ -20,9 +21,12 @@ impl S3Service {
         let accts = self.state.read();
         let __empty = crate::state::S3State::new(account_id, "us-east-1");
         let state = accts.get(account_id).unwrap_or(&__empty);
-        // GetObjectAcl only declares NoSuchKey per the Smithy model;
-        // collapse missing-bucket into NoSuchKey for strict conformance.
-        let b = state.buckets.get(bucket).ok_or_else(|| no_such_key(key))?;
+        // A missing bucket is `NoSuchBucket`, as for GetObject (S3 common
+        // error), though the model declares only NoSuchKey.
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
         let obj = b.objects.get(key).ok_or_else(|| no_such_key(key))?;
 
         // With ACLs disabled the bucket owner owns every object, and reading an
@@ -73,12 +77,12 @@ impl S3Service {
         let pab = self.pab_flags(account_id, bucket);
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
-        // PutObjectAcl only declares NoSuchKey per the Smithy model;
-        // collapse missing-bucket into NoSuchKey for strict conformance.
+        // A missing bucket is `NoSuchBucket`, as for GetObject (S3 common
+        // error), though the model declares only NoSuchKey.
         let b = state
             .buckets
             .get_mut(bucket)
-            .ok_or_else(|| no_such_key(key))?;
+            .ok_or_else(|| no_such_bucket(bucket))?;
         let owner_id = b.acl_owner_id.clone();
         let obj = b.objects.get_mut(key).ok_or_else(|| no_such_key(key))?;
 

@@ -101,15 +101,27 @@ async fn unsigned(req: reqwest::RequestBuilder) -> (u16, String, String) {
 
 /// An unsigned path-style request for a bucket that does not exist is still an
 /// S3 request on S3's endpoint: S3 answers it exactly as it answers the signed
-/// request (`NoSuchBucket`; `GetObject` reports `NoSuchKey`, the error its
-/// model declares), instead of the apigateway catch-all ("Stage not found").
+/// request (`NoSuchBucket` naming the bucket, as recorded against real S3;
+/// HEAD is a bare 404), instead of the apigateway catch-all ("Stage not
+/// found").
 #[tokio::test]
 async fn anonymous_request_to_missing_bucket_is_answered_by_s3() {
     let server = TestServer::start().await;
     let http = reqwest::Client::new();
     let base = server.endpoint();
     for (req, code) in [
-        (http.get(format!("{base}/ghostbucket/x.txt")), "NoSuchKey"),
+        (
+            http.get(format!("{base}/ghostbucket/x.txt")),
+            "NoSuchBucket",
+        ),
+        (
+            http.get(format!("{base}/ghostbucket/x.txt?attributes")),
+            "NoSuchBucket",
+        ),
+        (
+            http.get(format!("{base}/ghostbucket/x.txt?acl")),
+            "NoSuchBucket",
+        ),
         (http.head(format!("{base}/ghostbucket/x.txt")), ""),
         (
             http.put(format!("{base}/ghostbucket/x.txt")).body("hi"),
@@ -123,11 +135,76 @@ async fn anonymous_request_to_missing_bucket_is_answered_by_s3() {
     ] {
         let (status, content_type, body) = unsigned(req).await;
         assert_eq!(status, 404, "{body}");
-        if !code.is_empty() {
+        if code.is_empty() {
+            assert!(body.is_empty(), "{body}");
+        } else {
             assert!(content_type.contains("xml"), "{content_type}: {body}");
             assert!(body.contains(&format!("<Code>{code}</Code>")), "{body}");
+            assert!(
+                body.contains("<BucketName>ghostbucket</BucketName>"),
+                "{body}"
+            );
         }
     }
+}
+
+/// A signed GetObject (and GetObjectAttributes / GetObjectAcl) on a missing
+/// bucket is `NoSuchBucket` too, as real S3 answers.
+#[tokio::test]
+async fn signed_object_reads_on_missing_bucket_are_no_such_bucket() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    let get = s3
+        .get_object()
+        .bucket("ghostbucket")
+        .key("x.txt")
+        .send()
+        .await
+        .unwrap_err();
+    let get = get.raw_response().unwrap();
+    assert_eq!(get.status().as_u16(), 404);
+    let body = std::str::from_utf8(get.body().bytes().unwrap()).unwrap();
+    assert!(body.contains("<Code>NoSuchBucket</Code>"), "{body}");
+    assert!(
+        body.contains("<Message>The specified bucket does not exist</Message>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<BucketName>ghostbucket</BucketName>"),
+        "{body}"
+    );
+
+    let attrs = s3
+        .get_object_attributes()
+        .bucket("ghostbucket")
+        .key("x.txt")
+        .object_attributes(aws_sdk_s3::types::ObjectAttributes::Etag)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        aws_sdk_s3::error::ProvideErrorMetadata::code(&attrs),
+        Some("NoSuchBucket")
+    );
+    let acl = s3
+        .get_object_acl()
+        .bucket("ghostbucket")
+        .key("x.txt")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        aws_sdk_s3::error::ProvideErrorMetadata::code(&acl),
+        Some("NoSuchBucket")
+    );
+    let head = s3
+        .head_object()
+        .bucket("ghostbucket")
+        .key("x.txt")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(head.raw_response().unwrap().status().as_u16(), 404);
 }
 
 /// IAM strict mode: an anonymous request for a missing bucket reaches S3's

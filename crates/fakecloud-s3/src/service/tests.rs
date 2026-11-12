@@ -2361,13 +2361,26 @@ fn bucket_ownership_controls_put_get_delete_round_trip() {
 
 #[test]
 fn get_object_nonexistent_bucket() {
-    // GetObject's Smithy `errors` declares NoSuchKey + InvalidObjectState;
-    // missing-bucket collapses into NoSuchKey for strict conformance.
+    // Real S3 (us-east-1) answers NoSuchBucket, naming the bucket, for every
+    // object read on a missing bucket.
     let svc = make_service();
     let req = make_request(Method::GET, "/no-bucket/key", &[], b"");
     assert_aws_err(
         svc.get_object("123456789012", &req, "no-bucket", "key"),
-        "NoSuchKey",
+        "NoSuchBucket",
+    );
+    let err = svc
+        .get_object("123456789012", &req, "no-bucket", "key")
+        .err()
+        .unwrap();
+    assert_eq!(err.message(), "The specified bucket does not exist");
+    assert_aws_err(
+        svc.get_object_attributes("123456789012", &req, "no-bucket", "key"),
+        "NoSuchBucket",
+    );
+    assert_aws_err(
+        svc.get_object_acl("123456789012", &req, "no-bucket", "key"),
+        "NoSuchBucket",
     );
 }
 
@@ -2735,12 +2748,12 @@ fn get_object_attributes_nonexistent_key() {
 
 #[test]
 fn get_object_attributes_nonexistent_bucket() {
-    // GetObjectAttributes only declares NoSuchKey in its Smithy `errors`.
+    // NoSuchBucket (an S3 common error) though the model declares only NoSuchKey.
     let svc = make_service();
     let req = make_request(Method::GET, "/nope/key", &[("attributes", "")], b"");
     assert_aws_err(
         svc.get_object_attributes("123456789012", &req, "nope", "key"),
-        "NoSuchKey",
+        "NoSuchBucket",
     );
 }
 
@@ -2901,12 +2914,12 @@ fn get_object_acl_default() {
 
 #[test]
 fn get_object_acl_nonexistent_bucket() {
-    // GetObjectAcl only declares NoSuchKey in its Smithy `errors`.
+    // NoSuchBucket (an S3 common error) though the model declares only NoSuchKey.
     let svc = make_service();
     let req = make_request(Method::GET, "/nope/key", &[("acl", "")], b"");
     assert_aws_err(
         svc.get_object_acl("123456789012", &req, "nope", "key"),
-        "NoSuchKey",
+        "NoSuchBucket",
     );
 }
 
@@ -6462,13 +6475,12 @@ fn get_object_key_not_found() {
 
 #[test]
 fn get_object_bucket_not_found() {
-    // Strict conformance: GetObject's Smithy `errors` excludes NoSuchBucket,
-    // so missing-bucket collapses to NoSuchKey.
+    // NoSuchBucket, as real S3 answers (see get_object_nonexistent_bucket).
     let svc = make_service();
     let req = make_request(Method::GET, "/ghost/k", &[], b"");
     assert_aws_err(
         svc.get_object("123456789012", &req, "ghost", "k"),
-        "NoSuchKey",
+        "NoSuchBucket",
     );
 }
 
@@ -6696,9 +6708,10 @@ fn put_object_acl_bucket_not_found() {
     let svc = make_service();
     let mut req = make_request(Method::PUT, "/ghost/k", &[("acl", "")], b"");
     req.headers.insert("x-amz-acl", "private".parse().unwrap());
-    assert!(svc
-        .put_object_acl("123456789012", &req, "ghost", "k")
-        .is_err());
+    assert_aws_err(
+        svc.put_object_acl("123456789012", &req, "ghost", "k"),
+        "NoSuchBucket",
+    );
 }
 
 #[tokio::test]

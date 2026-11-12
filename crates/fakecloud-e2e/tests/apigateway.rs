@@ -1401,10 +1401,8 @@ async fn unsigned_requests_split_between_api_invocations_and_s3() {
     assert!(!body.contains("NoSuchBucket"), "{body}");
 
     // Not a stage of any API: S3 path-style.
-    // (S3's GetObject reports a missing bucket as `NoSuchKey`, the error its
-    // model declares.)
     for (req, code) in [
-        (http.get(format!("{base}/dev/items")), "NoSuchKey"),
+        (http.get(format!("{base}/dev/items")), "NoSuchBucket"),
         (http.get(format!("{base}/dev")), "NoSuchBucket"),
         (
             http.put(format!("{base}/no-such-bucket/k")).body("x"),
