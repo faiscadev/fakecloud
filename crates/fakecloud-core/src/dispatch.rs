@@ -411,13 +411,16 @@ async fn dispatch_inner(
     // the request (credential resolution, authorization, the bucket), as S3
     // does.
     if detected.service == "s3" && pinned.is_none() {
-        if let Some(message) = s3_sigv2_query_auth_error(&parts.headers, &query_params) {
-            return build_error_response(
+        if let Some((message, fields)) =
+            s3_sigv2_query_auth_error(&parts.headers, &query_params, chrono::Utc::now())
+        {
+            return build_error_response_with_fields(
                 StatusCode::FORBIDDEN,
                 "AccessDenied",
                 &message,
                 &request_id,
                 AwsProtocol::Rest,
+                &fields,
             );
         }
     }
@@ -631,13 +634,32 @@ async fn dispatch_inner(
                     ErrorEnvelope::for_request(&detected, &parts.headers),
                 );
             }
-            Err(fakecloud_aws::sigv4::SigV4Error::PresignedUrlExpired { .. }) => {
-                return build_error_response(
+            Err(fakecloud_aws::sigv4::SigV4Error::PresignedUrlExpired {
+                signed,
+                server,
+                expires_secs,
+            }) => {
+                // S3's error document names the lifetime, the expiry and the
+                // server's clock, as for an expired SigV2 URL.
+                let fields = if detected.service == "s3" {
+                    vec![
+                        ("X-Amz-Expires".to_string(), expires_secs.to_string()),
+                        (
+                            "Expires".to_string(),
+                            s3_error_time(signed + chrono::Duration::seconds(expires_secs)),
+                        ),
+                        ("ServerTime".to_string(), s3_error_time(server)),
+                    ]
+                } else {
+                    Vec::new()
+                };
+                return build_error_response_with_fields(
                     StatusCode::FORBIDDEN,
                     "AccessDenied",
                     "Request has expired",
                     &request_id,
                     ErrorEnvelope::for_request(&detected, &parts.headers),
+                    &fields,
                 );
             }
             Err(fakecloud_aws::sigv4::SigV4Error::InvalidPresignExpires(_)) => {
@@ -1172,7 +1194,7 @@ async fn dispatch_inner(
                                 return build_error_response(
                                     StatusCode::FORBIDDEN,
                                     "AccessDenied",
-                                    "Access Denied",
+                                    anonymous_denied_message(&detected.service, iam_action),
                                     &request_id,
                                     error_envelope,
                                 );
@@ -2160,17 +2182,26 @@ fn has_s3_query_auth(headers: &http::HeaderMap, query_params: &HashMap<String, S
             .is_none_or(|service| service == "s3")
 }
 
-/// The error S3 answers before anything else for malformed SigV2 query
-/// authentication, as recorded against us-east-1: an incomplete parameter set
-/// (`AWSAccessKeyId` / `Signature` / `Expires`, any missing) or an `Expires`
-/// that is not a representable epoch-seconds value (`9999999999` is
-/// rejected; the bound applied is a 32-bit signed time). Both are 403
-/// `AccessDenied`. Requests with an `Authorization` header, or with no SigV2
-/// parameter, are not SigV2 query authentication.
+/// The `AccessDenied` S3 answers before anything else (credential lookup
+/// included) for SigV2 query authentication it cannot accept, as recorded
+/// against us-east-1, with the extra `<Error>` elements it carries:
+///
+/// - an incomplete parameter set (`AWSAccessKeyId` / `Signature` / `Expires`,
+///   any missing): "Query-string authentication requires the Signature,
+///   Expires and AWSAccessKeyId parameters";
+/// - an `Expires` that is not a 32-bit signed epoch-seconds value
+///   (`2147483647` passes; `2147483648`, `9999999999`, `abc` do not):
+///   "Invalid date (should be seconds since epoch): <value>";
+/// - an `Expires` in the past (`-1` included): "Request has expired", with
+///   `<Expires>` (the expiry) and `<ServerTime>` (now), both ISO-8601 UTC.
+///
+/// Requests with an `Authorization` header, or with no SigV2 parameter, are
+/// not SigV2 query authentication.
 fn s3_sigv2_query_auth_error(
     headers: &http::HeaderMap,
     query_params: &HashMap<String, String>,
-) -> Option<String> {
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<(String, Vec<(String, String)>)> {
     if headers.contains_key(http::header::AUTHORIZATION)
         || !(query_params.contains_key("AWSAccessKeyId") || query_params.contains_key("Signature"))
     {
@@ -2181,18 +2212,45 @@ fn s3_sigv2_query_auth_error(
         query_params.get("Signature"),
         query_params.get("Expires"),
     ) else {
-        return Some(
+        return Some((
             "Query-string authentication requires the Signature, Expires and AWSAccessKeyId \
              parameters"
                 .to_string(),
-        );
+            Vec::new(),
+        ));
     };
-    match expires.parse::<i32>() {
-        Ok(secs) if secs >= 0 => None,
-        _ => Some(format!(
-            "Invalid date (should be seconds since epoch): {expires}"
-        )),
+    let Ok(secs) = expires.parse::<i32>() else {
+        return Some((
+            format!("Invalid date (should be seconds since epoch): {expires}"),
+            Vec::new(),
+        ));
+    };
+    let expiry = chrono::DateTime::from_timestamp(i64::from(secs), 0)?;
+    (expiry < now).then(|| {
+        (
+            "Request has expired".to_string(),
+            vec![
+                ("Expires".to_string(), s3_error_time(expiry)),
+                ("ServerTime".to_string(), s3_error_time(now)),
+            ],
+        )
+    })
+}
+
+/// The `AccessDenied` message for an anonymous request authorization refused.
+/// S3 refuses an anonymous `CreateBucket` outright with its own message
+/// (recorded in us-east-1); everything else is S3's generic "Access Denied".
+fn anonymous_denied_message(service: &str, action: &crate::auth::IamAction) -> &'static str {
+    if service == "s3" && action.service == "s3" && action.action == "CreateBucket" {
+        "Anonymous users cannot invoke this API. Please authenticate."
+    } else {
+        "Access Denied"
     }
+}
+
+/// A timestamp as S3 writes it in an error document (`1969-12-31T23:59:59Z`).
+fn s3_error_time(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn anonymous_s3_bucket(uri: &http::Uri, config: &DispatchConfig) -> Option<String> {
@@ -4215,6 +4273,10 @@ mod tests {
                 .collect()
         };
         let none = http::HeaderMap::new();
+        let now = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let message = |headers: &http::HeaderMap, pairs: &[(&str, &str)]| {
+            s3_sigv2_query_auth_error(headers, &q(pairs), now).map(|(m, _)| m)
+        };
         let incomplete = "Query-string authentication requires the Signature, Expires and \
                           AWSAccessKeyId parameters";
         for pairs in [
@@ -4222,10 +4284,7 @@ mod tests {
             &[("AWSAccessKeyId", "AKID"), ("Expires", "1700000000")][..],
             &[("Signature", "x")][..],
         ] {
-            assert_eq!(
-                s3_sigv2_query_auth_error(&none, &q(pairs)).as_deref(),
-                Some(incomplete)
-            );
+            assert_eq!(message(&none, pairs).as_deref(), Some(incomplete));
         }
         let full = |expires: &str| {
             s3_sigv2_query_auth_error(
@@ -4235,30 +4294,64 @@ mod tests {
                     ("Signature", "x"),
                     ("Expires", expires),
                 ]),
+                now,
             )
         };
+        // Recorded: 2147483647 is accepted; anything past i32, or not a
+        // number, is an invalid date.
+        assert_eq!(full("2147483647"), None);
+        for bad in [
+            "2147483648",
+            "4294967295",
+            "4294967296",
+            "9999999999",
+            "abc",
+        ] {
+            assert_eq!(
+                full(bad),
+                Some((
+                    format!("Invalid date (should be seconds since epoch): {bad}"),
+                    Vec::new()
+                )),
+                "{bad}"
+            );
+        }
+        // Recorded: -1 (or any past time) has expired, naming both times.
         assert_eq!(
-            full("9999999999").as_deref(),
-            Some("Invalid date (should be seconds since epoch): 9999999999")
+            full("-1"),
+            Some((
+                "Request has expired".to_string(),
+                vec![
+                    ("Expires".to_string(), "1969-12-31T23:59:59Z".to_string()),
+                    ("ServerTime".to_string(), "2027-01-15T08:00:00Z".to_string()),
+                ]
+            ))
         );
         assert_eq!(
-            full("soon").as_deref(),
-            Some("Invalid date (should be seconds since epoch): soon")
+            full("1700000000").map(|(m, _)| m).as_deref(),
+            Some("Request has expired")
         );
-        assert_eq!(full("2000000000"), None);
         // Not SigV2 query authentication.
-        assert_eq!(
-            s3_sigv2_query_auth_error(&none, &q(&[("Expires", "x")])),
-            None
-        );
+        assert_eq!(message(&none, &[("Expires", "x")]), None);
         let mut signed = http::HeaderMap::new();
         signed.insert(
             http::header::AUTHORIZATION,
             "AWS4-HMAC-SHA256 x".parse().unwrap(),
         );
+        assert_eq!(message(&signed, &[("Signature", "x")]), None);
+
+        let action = |service: &'static str, action: &'static str| crate::auth::IamAction {
+            service,
+            action,
+            resource: "arn:aws:s3:::b".to_string(),
+        };
         assert_eq!(
-            s3_sigv2_query_auth_error(&signed, &q(&[("Signature", "x")])),
-            None
+            anonymous_denied_message("s3", &action("s3", "CreateBucket")),
+            "Anonymous users cannot invoke this API. Please authenticate."
+        );
+        assert_eq!(
+            anonymous_denied_message("s3", &action("s3", "GetObject")),
+            "Access Denied"
         );
     }
 

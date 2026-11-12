@@ -229,9 +229,24 @@ async fn anonymous_request_to_missing_bucket_iam_strict_is_no_such_bucket() {
             "{body}"
         );
     }
+}
+
+/// IAM strict mode: S3 refuses an anonymous CreateBucket outright with its own
+/// message (recorded in us-east-1), and creates nothing.
+#[tokio::test]
+async fn anonymous_create_bucket_iam_strict_is_refused() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let http = reqwest::Client::new();
+    let base = server.endpoint();
     let (status, _, body) = unsigned(http.put(format!("{base}/ghostbucket"))).await;
     assert_eq!(status, 403, "{body}");
     assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+    assert!(
+        body.contains(
+            "<Message>Anonymous users cannot invoke this API. Please authenticate.</Message>"
+        ),
+        "{body}"
+    );
     // The bucket was not created by the denied anonymous PUT.
     let s3 = helpers::root_s3_client(&server).await;
     assert!(s3.head_bucket().bucket("ghostbucket").send().await.is_err());
@@ -559,4 +574,117 @@ async fn anonymous_get_explicit_deny_overrides_public_acl() {
         403,
         "explicit Deny must override the public-read ACL"
     );
+}
+
+/// An expired SigV2 query string (recorded: `Expires=-1`) is 403
+/// `AccessDenied` "Request has expired", naming the expiry and the server's
+/// clock; the last valid 32-bit time is accepted and reaches S3.
+#[tokio::test]
+async fn expired_sigv2_query_auth_is_request_has_expired() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let base = server.endpoint();
+    let (status, _, body) = unsigned(http.get(format!(
+        "{base}/ghostbucket/k?AWSAccessKeyId=AKID&Signature=sig&Expires=-1"
+    )))
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+    assert!(
+        body.contains("<Message>Request has expired</Message>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<Expires>1969-12-31T23:59:59Z</Expires>"),
+        "{body}"
+    );
+    assert!(body.contains("<ServerTime>20"), "{body}");
+
+    let (status, _, body) = unsigned(http.get(format!(
+        "{base}/ghostbucket/k?AWSAccessKeyId=AKID&Signature=sig&Expires=2147483648"
+    )))
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(
+        body.contains("Invalid date (should be seconds since epoch): 2147483648"),
+        "{body}"
+    );
+    let (status, _, body) = unsigned(http.get(format!(
+        "{base}/ghostbucket/k?AWSAccessKeyId=AKID&Signature=sig&Expires=2147483647"
+    )))
+    .await;
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("<Code>NoSuchBucket</Code>"), "{body}");
+}
+
+/// Under `--verify-sigv4` an expired SigV4 presigned S3 URL is 403
+/// `AccessDenied` "Request has expired" carrying S3's `X-Amz-Expires`,
+/// `Expires` and `ServerTime` elements.
+#[tokio::test]
+async fn expired_sigv4_presign_names_its_lifetime_and_times() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_VERIFY_SIGV4", "true")]).await;
+    let iam = aws_sdk_iam::Client::new(&helpers::root_config(&server).await);
+    iam.create_user()
+        .user_name("presigner")
+        .send()
+        .await
+        .unwrap();
+    let key = iam
+        .create_access_key()
+        .user_name("presigner")
+        .send()
+        .await
+        .unwrap();
+    let key = key.access_key().unwrap();
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(
+            key.access_key_id(),
+            key.secret_access_key(),
+            None,
+            None,
+            "presigner",
+        ))
+        .load()
+        .await;
+    let s3 = aws_sdk_s3::Client::from_conf(
+        aws_sdk_s3::config::Builder::from(&config)
+            .force_path_style(true)
+            .build(),
+    );
+    let signed_at = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    let presigned = s3
+        .get_object()
+        .bucket("probe")
+        .key("k")
+        .presigned(
+            aws_sdk_s3::presigning::PresigningConfig::builder()
+                .start_time(signed_at)
+                .expires_in(std::time::Duration::from_secs(60))
+                .build()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, _, body) = unsigned(reqwest::Client::new().get(presigned.uri())).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+    assert!(
+        body.contains("<Message>Request has expired</Message>"),
+        "{body}"
+    );
+    assert!(body.contains("<X-Amz-Expires>60</X-Amz-Expires>"), "{body}");
+    let expiry =
+        chrono::Timelike::with_nanosecond(&chrono::DateTime::<chrono::Utc>::from(signed_at), 0)
+            .unwrap()
+            + chrono::Duration::seconds(60);
+    assert!(
+        body.contains(&format!(
+            "<Expires>{}</Expires>",
+            expiry.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        )),
+        "{body}"
+    );
+    assert!(body.contains("<ServerTime>20"), "{body}");
 }
