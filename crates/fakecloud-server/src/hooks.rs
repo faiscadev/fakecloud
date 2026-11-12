@@ -23,6 +23,20 @@ impl KmsHookAdapter {
         }
     }
 
+    /// Resolve assumed-role callers' roles to their IAM ARNs (with paths)
+    /// from `iam`, for key policies and grants naming a pathed role.
+    pub(crate) fn with_iam(mut self, iam: fakecloud_iam::SharedIamState) -> Self {
+        self.inner = self
+            .inner
+            .with_role_arn_resolver(Arc::new(move |account, role| {
+                iam.read()
+                    .get(account)
+                    .and_then(|state| state.roles.get(role))
+                    .map(|role| role.arn.clone())
+            }));
+        self
+    }
+
     pub(crate) fn set_snapshot_store(&self, store: Arc<dyn fakecloud_persistence::SnapshotStore>) {
         let _ = self.snapshot_store.set(store);
     }

@@ -514,10 +514,9 @@ async fn main() {
     // The hook's snapshot store is set below once kms_snapshot_store is
     // initialized (depends on the persistence config). The OnceLock wiring
     // lets us hand the same Arc to all services up-front.
-    let kms_hook_adapter = Arc::new(KmsHookAdapter::new(
-        kms_state.clone(),
-        kms_usage_state.clone(),
-    ));
+    let kms_hook_adapter = Arc::new(
+        KmsHookAdapter::new(kms_state.clone(), kms_usage_state.clone()).with_iam(iam_state.clone()),
+    );
     let kms_hook_for_services: Arc<dyn fakecloud_core::delivery::KmsHook> =
         kms_hook_adapter.clone();
     let cloudformation_state = Arc::new(parking_lot::RwLock::new(

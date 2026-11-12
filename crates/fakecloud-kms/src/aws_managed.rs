@@ -36,7 +36,7 @@ use std::sync::OnceLock;
 
 use fakecloud_core::auth::{InternalCaller, Principal, PrincipalType};
 use fakecloud_iam::evaluator::{
-    evaluate_resource_policy_only, EvalRequest, PolicyDocument, RequestContext,
+    evaluate_resource_policy_only, Decision, EvalRequest, PolicyDocument, RequestContext,
 };
 use serde_json::Value;
 
@@ -160,6 +160,9 @@ pub(crate) enum KeyCaller<'a> {
         region: &'a str,
         account: &'a str,
         caller_arn: Option<&'a str>,
+        /// For an assumed-role `caller_arn`, the role's IAM ARN (with its
+        /// path) when known.
+        caller_role_arn: Option<&'a str>,
     },
     /// A service principal acting itself (SES writing received mail to S3)
     /// for its resource `source_arn` owned by `source_account`. Only a
@@ -195,11 +198,12 @@ pub(crate) fn account_root(account: &str, region: &str) -> Principal {
 
 /// The principals a key policy can name for the calling identity `arn` of
 /// `account`: the identity itself, and for an assumed-role session
-/// (`arn:<p>:sts::<account>:assumed-role/<role>/<session>`) also its role
-/// (`arn:<p>:iam::<account>:role/<role>`), which a policy names to grant
-/// every session of the role. An account-root or bare-account principal in
-/// the policy matches either by account.
-fn caller_principals(arn: &str, account: &str) -> Vec<Principal> {
+/// (`arn:<p>:sts::<account>:assumed-role/<role>/<session>`) also its role,
+/// which a policy names to grant every session of the role: `role_arn`, the
+/// role's IAM ARN with its path, when known, else
+/// `arn:<p>:iam::<account>:role/<role>`. An account-root or bare-account
+/// principal in the policy matches either by account.
+fn caller_principals(arn: &str, role_arn: Option<&str>, account: &str) -> Vec<Principal> {
     let principal = |arn: String, principal_type: PrincipalType| Principal {
         arn,
         user_id: account.to_string(),
@@ -215,25 +219,27 @@ fn caller_principals(arn: &str, account: &str) -> Vec<Principal> {
             .strip_prefix("arn:")
             .and_then(|p| p.split(':').next())
             .unwrap_or("aws");
-        principals.push(principal(
-            format!("arn:{partition}:iam::{account}:role/{role}"),
-            PrincipalType::Unknown,
-        ));
+        let role_arn = role_arn
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("arn:{partition}:iam::{account}:role/{role}"));
+        principals.push(principal(role_arn, PrincipalType::Unknown));
     }
     principals
 }
 
-/// Whether the key policy `policy` of the key `key_arn` lets `caller`
-/// perform `action` (`kms:Encrypt`, ...) with `encryption_context`. `extra`
-/// carries operation-specific keys (`kms:ReEncryptOnSameKey`).
-pub(crate) fn policy_allows(
+/// The key policy `policy` of the key `key_arn`'s decision on `caller`
+/// performing `action` (`kms:Encrypt`, ...) with `encryption_context`:
+/// an explicit Deny, an Allow, or neither (implicit deny, which a grant may
+/// still turn into an allow). `extra` carries operation-specific keys
+/// (`kms:ReEncryptOnSameKey`).
+pub(crate) fn policy_decision(
     policy: &str,
     key_arn: &str,
     caller: &KeyCaller<'_>,
     action: &str,
     encryption_context: &BTreeMap<String, String>,
     extra: &[(&str, &str)],
-) -> bool {
+) -> Decision {
     let mut keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let principals: Vec<Principal> = match caller {
         KeyCaller::Direct { principal, account } => {
@@ -245,6 +251,7 @@ pub(crate) fn policy_allows(
             region,
             account,
             caller_arn,
+            caller_role_arn,
         } => {
             keys.insert(
                 "kms:ViaService".to_string(),
@@ -252,7 +259,7 @@ pub(crate) fn policy_allows(
             );
             keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
             match caller_arn {
-                Some(arn) => caller_principals(arn, account),
+                Some(arn) => caller_principals(arn, *caller_role_arn, account),
                 None => vec![account_root(account, region)],
             }
         }
@@ -308,7 +315,11 @@ pub(crate) fn policy_allows(
         keys.insert((*k).to_string(), vec![(*v).to_string()]);
     }
     let document = PolicyDocument::parse(policy);
-    principals.iter().any(|principal| {
+    // One request whose principal is every form of the caller: a statement
+    // applies when its Principal names any of them. A Deny that applies to
+    // any form denies, whatever another form is allowed; otherwise any
+    // Allow allows; otherwise nothing grants it (implicit deny).
+    let decisions = principals.iter().map(|principal| {
         let request = EvalRequest {
             principal,
             action: action.to_string(),
@@ -318,8 +329,30 @@ pub(crate) fn policy_allows(
                 ..Default::default()
             },
         };
-        evaluate_resource_policy_only(&document, &request).is_allow()
-    })
+        evaluate_resource_policy_only(&document, &request)
+    });
+    let mut decision = Decision::ImplicitDeny;
+    for d in decisions {
+        match d {
+            Decision::ExplicitDeny => return Decision::ExplicitDeny,
+            Decision::Allow => decision = Decision::Allow,
+            Decision::ImplicitDeny => {}
+        }
+    }
+    decision
+}
+
+/// Whether the key policy `policy` of the key `key_arn` lets `caller`
+/// perform `action` (see [`policy_decision`]).
+pub(crate) fn policy_allows(
+    policy: &str,
+    key_arn: &str,
+    caller: &KeyCaller<'_>,
+    action: &str,
+    encryption_context: &BTreeMap<String, String>,
+    extra: &[(&str, &str)],
+) -> bool {
+    policy_decision(policy, key_arn, caller, action, encryption_context, extra).is_allow()
 }
 
 #[cfg(test)]
@@ -441,6 +474,7 @@ mod tests {
                 region: "us-east-1",
                 account,
                 caller_arn: None,
+                caller_role_arn: None,
             },
             action,
             &BTreeMap::new(),
