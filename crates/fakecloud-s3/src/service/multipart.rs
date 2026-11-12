@@ -780,8 +780,14 @@ impl S3Service {
             };
             // An SSE-KMS source is stored as an envelope: the part is copied
             // from its plaintext, as S3 copies object data, not ciphertext.
-            let src_kms = crate::side_effects::is_sse_kms(src_obj.sse_algorithm.as_deref())
-                .then(|| (src_owner.clone(), src_obj.sse_kms_key_id.clone()));
+            let src_kms =
+                crate::side_effects::is_sse_kms(src_obj.sse_algorithm.as_deref()).then(|| {
+                    (
+                        src_owner.clone(),
+                        src_obj.sse_kms_key_id.clone(),
+                        src_obj.bucket_key_enabled == Some(true),
+                    )
+                });
             (
                 crate::body_io::ObjectBodyHandle::open(&src_obj.body).map_err(super::io_to_aws)?,
                 upload_algorithm,
@@ -793,10 +799,18 @@ impl S3Service {
         // handle a range is read from.
         let mut src_handle = Some(src_handle);
         let src_plaintext = match src_kms.filter(|_| self.kms_hook.is_some()) {
-            Some((owner, kms_key)) => {
+            Some((owner, kms_key, bucket_key)) => {
                 let handle = src_handle.take().expect("handle not yet consumed");
                 let raw = super::run_blocking_io(|| handle.read_all()).map_err(super::io_to_aws)?;
-                Some(self.decrypt_object_body(req, &owner, src_bucket, &raw, kms_key.as_deref())?)
+                Some(self.decrypt_object_body(
+                    req,
+                    &owner,
+                    src_bucket,
+                    src_key,
+                    bucket_key,
+                    &raw,
+                    kms_key.as_deref(),
+                )?)
             }
             None => None,
         };
@@ -1209,6 +1223,8 @@ impl S3Service {
                 account_id,
                 &bucket_region,
                 bucket,
+                key,
+                upload.bucket_key_enabled == Some(true),
                 &data,
                 upload.sse_kms_key_id.as_deref(),
             )?)

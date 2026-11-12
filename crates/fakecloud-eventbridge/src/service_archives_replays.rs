@@ -410,12 +410,21 @@ impl EventBridgeService {
         )
         .to_string();
 
+        // `Destination.FilterArns` limits the replay to those rules (kept in
+        // the stored destination, which DescribeReplay returns as given).
+        let filter_arns: Option<Vec<String>> =
+            input.destination["FilterArns"].as_array().map(|arns| {
+                arns.iter()
+                    .filter_map(|a| a.as_str().map(str::to_string))
+                    .collect()
+            });
         let events_to_deliver = collect_replay_events_with_targets(
             state,
             &archive_name,
             &bus_name,
             input.event_start_time,
             input.event_end_time,
+            filter_arns.as_deref(),
             &req.account_id,
             &req.region,
         );
@@ -450,16 +459,28 @@ impl EventBridgeService {
                 "resources": event.resources,
                 "replay-name": arn,
             });
-            let event_str = event_json.to_string();
-
-            for target in targets {
-                self.deliver_replay_event_to_target(
+            // A replayed event is delivered through the rule that matches it
+            // exactly as PutEvents delivers (same target types, input
+            // shaping, dead-letter handling and `Invocations` counting): one
+            // dispatch path, so the two cannot drift.
+            let ctx = EventDispatchContext {
+                state: &self.state,
+                delivery: &self.delivery,
+                lambda_state: self.lambda_state.as_ref(),
+                logs_state: self.logs_state.as_ref(),
+                logs_persist: self.logs_persist.as_ref(),
+                container_runtime: &self.container_runtime,
+                account_id: &req.account_id,
+                region: &req.region,
+            };
+            for (rule_arn, target) in targets {
+                dispatch_event_target(
+                    &ctx,
                     &target,
-                    &event,
                     &event_json,
-                    &event_str,
-                    &req.account_id,
-                    &req.region,
+                    &event.event_id,
+                    &event.detail_type,
+                    Some(&rule_arn),
                 );
             }
         }
@@ -469,124 +490,6 @@ impl EventBridgeService {
             "ReplayStartTime": now.timestamp() as f64,
             "State": "STARTING",
         })))
-    }
-
-    pub(super) fn deliver_replay_event_to_target(
-        &self,
-        target: &EventTarget,
-        event: &PutEvent,
-        event_json: &Value,
-        event_str: &str,
-        account_id: &str,
-        region: &str,
-    ) {
-        let target_arn = &target.arn;
-        let body_str = if let Some(ref transformer) = target.input_transformer {
-            // Replay does not track which rule matched, so the rule-arn
-            // reserved variable is left unresolved here.
-            apply_input_transformer(transformer, event_json, None)
-        } else if let Some(ref input) = target.input {
-            input.clone()
-        } else if let Some(ref input_path) = target.input_path {
-            resolve_json_path(event_json, input_path)
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| event_str.to_string())
-        } else {
-            event_str.to_string()
-        };
-
-        if target_arn.contains(":sqs:") {
-            let group_id = target
-                .sqs_parameters
-                .as_ref()
-                .and_then(|p| p["MessageGroupId"].as_str())
-                .map(|s| s.to_string());
-            if group_id.is_some() {
-                self.delivery.send_to_sqs_with_attrs(
-                    target_arn,
-                    &body_str,
-                    &HashMap::new(),
-                    group_id.as_deref(),
-                    None,
-                );
-            } else {
-                self.delivery
-                    .send_to_sqs(target_arn, &body_str, &HashMap::new());
-            }
-        } else if target_arn.contains(":sns:") {
-            self.delivery
-                .publish_to_sns(target_arn, &body_str, Some(&event.detail_type));
-        } else if target_arn.contains(":lambda:") {
-            let mut accounts = self.state.write();
-            let state = accounts.get_or_create(account_id);
-            state
-                .lambda_invocations
-                .push(crate::state::LambdaInvocation {
-                    function_arn: target_arn.clone(),
-                    payload: body_str.clone(),
-                    timestamp: Utc::now(),
-                });
-            drop(accounts);
-            if let Some(ref ls) = self.lambda_state {
-                crate::service::helpers::record_lambda_invocation(
-                    ls,
-                    target_arn,
-                    account_id,
-                    region,
-                    &body_str,
-                    Utc::now(),
-                );
-            }
-            invoke_lambda_async(
-                &self.delivery,
-                &self.container_runtime,
-                &self.lambda_state,
-                target_arn,
-                &body_str,
-            );
-        } else if target_arn.contains(":logs:") {
-            let mut accounts = self.state.write();
-            let state = accounts.get_or_create(account_id);
-            state.log_deliveries.push(crate::state::LogDelivery {
-                log_group_arn: target_arn.clone(),
-                payload: body_str.clone(),
-                timestamp: Utc::now(),
-            });
-            drop(accounts);
-            if let Some(ref log_state) = self.logs_state {
-                deliver_to_logs_and_persist(
-                    log_state,
-                    self.logs_persist.as_ref(),
-                    target_arn,
-                    &body_str,
-                    Utc::now(),
-                );
-            }
-        } else if target_arn.contains(":states:") {
-            self.delivery
-                .start_stepfunctions_execution(target_arn, &body_str);
-            let mut accounts = self.state.write();
-            let state = accounts.get_or_create(account_id);
-            state
-                .step_function_executions
-                .push(crate::state::StepFunctionExecution {
-                    state_machine_arn: target_arn.clone(),
-                    payload: body_str.clone(),
-                    timestamp: Utc::now(),
-                });
-        } else if target_arn.starts_with("https://") || target_arn.starts_with("http://") {
-            let url = target_arn.clone();
-            let payload = body_str.clone();
-            tokio::spawn(async move {
-                let client = reqwest::Client::new();
-                let _ = client
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .body(payload)
-                    .send()
-                    .await;
-            });
-        }
     }
 
     pub(super) fn describe_replay(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {

@@ -260,6 +260,8 @@ impl S3Service {
                 account_id,
                 &bucket_region,
                 bucket,
+                key,
+                bucket_key_enabled == Some(true),
                 &Bytes::from(bytes),
                 sse_kms_key_id.as_deref(),
             )?;
@@ -833,6 +835,8 @@ impl S3Service {
                 req,
                 &src_account,
                 src_bucket,
+                src_key,
+                src_obj.bucket_key_enabled == Some(true),
                 &raw_src_bytes,
                 src_obj.sse_kms_key_id.as_deref(),
             )?
@@ -857,9 +861,9 @@ impl S3Service {
         let new_checksum_val =
             reusable.unwrap_or_else(|| crate::checksum::checksum(new_checksum_algo, &src_bytes));
         // Re-encrypt for the destination if it lands as SSE-KMS, so the
-        // stored body is a fresh envelope with the dest's encryption
-        // context (bucket arn), under a key in the destination bucket's
-        // region.
+        // stored body is a fresh envelope with the destination's encryption
+        // context (its object ARN, or bucket ARN under an S3 Bucket Key),
+        // under a key in the destination bucket's region.
         let dest_stored_bytes =
             if crate::side_effects::is_sse_kms(new_sse.as_deref()) && self.kms_hook.is_some() {
                 self.encrypt_object_body(
@@ -867,6 +871,8 @@ impl S3Service {
                     account_id,
                     &dest_region,
                     dest_bucket,
+                    dest_key,
+                    new_bke == Some(true),
                     &src_bytes,
                     new_kms.as_deref(),
                 )?

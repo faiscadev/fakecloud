@@ -1,0 +1,149 @@
+# Service-principal deliveries into an SQS queue encrypted with alias/aws/sqs whose queue
+# policy allows sns/events/s3 (us-east-1, 2026-11-11). All resources deleted afterwards.
+### queue
+$ aws sqs create-queue --queue-name fc-svcp-0b86a341 --attributes {"KmsMasterKeyId": "alias/aws/sqs", "Policy": "{\"Version\": \"2012-10-17\", \"Statement\": [{\"Effect\": \"Allow\", \"Principal\": {\"Service\": [\"sns.amazonaws.com\", \"events.amazonaws.com\", \"s3.amazonaws.com\"]}, \"Action\": \"sqs:SendMessage\", \"Resource\": \"arn:aws:sqs:us-east-1:123456789012:fc-svcp-0b86a341\", \"Condition\": {\"StringEquals\": {\"aws:SourceAccount\": \"123456789012\"}}}]}"}
+{
+    "QueueUrl": "https://sqs.us-east-1.amazonaws.com/123456789012/fc-svcp-0b86a341"
+}
+[exit 0]
+### SNS
+$ aws sns create-topic --name fc-svcp-0b86a341
+{
+    "TopicArn": "arn:aws:sns:us-east-1:123456789012:fc-svcp-0b86a341"
+}
+[exit 0]
+$ aws sns subscribe --topic-arn arn:aws:sns:us-east-1:123456789012:fc-svcp-0b86a341 --protocol sqs --notification-endpoint arn:aws:sqs:us-east-1:123456789012:fc-svcp-0b86a341 --attributes RawMessageDelivery=true
+{
+    "SubscriptionArn": "arn:aws:sns:us-east-1:123456789012:fc-svcp-0b86a341:9aa43c08-75cd-47c6-9c14-f150e392d6c4"
+}
+[exit 0]
+$ aws sns publish --topic-arn arn:aws:sns:us-east-1:123456789012:fc-svcp-0b86a341 --message from-sns
+{
+    "MessageId": "24b4e527-3ffc-5a20-9de8-86490fa651e7"
+}
+[exit 0]
+### EventBridge
+$ aws events put-rule --name fc-svcp-0b86a341 --event-pattern {"source":["fc.svcp"]}
+{
+    "RuleArn": "arn:aws:events:us-east-1:123456789012:rule/fc-svcp-0b86a341"
+}
+[exit 0]
+$ aws events put-targets --rule fc-svcp-0b86a341 --targets Id=q,Arn=arn:aws:sqs:us-east-1:123456789012:fc-svcp-0b86a341
+{
+    "FailedEntryCount": 0,
+    "FailedEntries": []
+}
+[exit 0]
+$ aws events put-events --entries [{"Source":"fc.svcp","DetailType":"t","Detail":"{}"}]
+{
+    "FailedEntryCount": 0,
+    "Entries": [
+        {
+            "EventId": "beff3d4e-abb4-9573-0530-28e8c0e290d3"
+        }
+    ]
+}
+[exit 0]
+### S3
+$ aws s3api create-bucket --bucket fc-svcp-0b86a341
+{
+    "Location": "/fc-svcp-0b86a341"
+}
+[exit 0]
+$ aws s3api put-bucket-notification-configuration --bucket fc-svcp-0b86a341 --notification-configuration {"QueueConfigurations":[{"QueueArn":"arn:aws:sqs:us-east-1:123456789012:fc-svcp-0b86a341","Events":["s3:ObjectCreated:*"]}]}
+
+An error occurred (InvalidArgument) when calling the PutBucketNotificationConfiguration operation: Unable to validate the following destination configurations
+[exit 254]
+$ aws s3api put-object --bucket fc-svcp-0b86a341 --key k --body body.bin
+{
+    "ETag": "\"9dd4e461268c8034f5c8564e155c67a6\"",
+    "ChecksumCRC64NVME": "Lb1nAmRU5LE=",
+    "ChecksumType": "FULL_OBJECT",
+    "ServerSideEncryption": "AES256"
+}
+[exit 0]
+### receive after 20s
+$ aws sqs receive-message --queue-url https://sqs.us-east-1.amazonaws.com/123456789012/fc-svcp-0b86a341 --max-number-of-messages 10 --wait-time-seconds 5
+[exit 0]
+$ aws sqs get-queue-attributes --queue-url https://sqs.us-east-1.amazonaws.com/123456789012/fc-svcp-0b86a341 --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+{
+    "Attributes": {
+        "ApproximateNumberOfMessages": "0",
+        "ApproximateNumberOfMessagesNotVisible": "0"
+    }
+}
+[exit 0]
+
+### Producer-side observations (S3 wire body, CloudWatch metrics a few minutes later)
+### S3 wire
+2026-11-11 05:59:10,329 - MainThread - urllib3.connectionpool - DEBUG - https://fc-svcp-0b86a341.s3.us-east-1.amazonaws.com:443 "PUT /?notification HTTP/1.1" 400 None
+2026-11-11 05:59:10,332 - MainThread - botocore.hooks - DEBUG - Event before-parse.s3.PutBucketNotificationConfiguration: calling handler <function _handle_200_error at 0x10b904540>
+--
+2026-11-11 05:59:10,332 - MainThread - botocore.parsers - DEBUG - Response body:
+b'<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>InvalidArgument</Code><Message>Unable to validate the following destination configurations</Message><ArgumentName1>arn:aws:sqs:us-east-1:123456789012:fc-svcp-0b86a341</ArgumentName1><ArgumentValue1>The message to the SSE queue could not be encrypted using KMS</ArgumentValue1><RequestId>NAQF7Z4N10GS5CN0</RequestId><HostId>WJDTUBWQPgjiPA9CYPDMYulzC3+ZQGh0qh8zv6OwpTsTSXb6IaBI1iApyuEJbaeretNYxjqEOIQheVBrkJDhSIyDHwH7lhrc</HostId></Error>'
+$ aws cloudwatch get-metric-statistics --namespace AWS/SNS --metric-name NumberOfMessagesPublished --dimensions Name=TopicName,Value=fc-svcp-0b86a341 --start-time 2026-11-11T08:47:30Z --end-time 2026-11-11T09:02:30Z --period 60 --statistics Sum
+{
+    "Label": "NumberOfMessagesPublished",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-11T08:58:00+00:00",
+            "Sum": 1.0,
+            "Unit": "Count"
+        }
+    ]
+}
+[exit 0]
+$ aws cloudwatch get-metric-statistics --namespace AWS/SNS --metric-name NumberOfNotificationsDelivered --dimensions Name=TopicName,Value=fc-svcp-0b86a341 --start-time 2026-11-11T08:47:30Z --end-time 2026-11-11T09:02:30Z --period 60 --statistics Sum
+{
+    "Label": "NumberOfNotificationsDelivered",
+    "Datapoints": []
+}
+[exit 0]
+$ aws cloudwatch get-metric-statistics --namespace AWS/SNS --metric-name NumberOfNotificationsFailed --dimensions Name=TopicName,Value=fc-svcp-0b86a341 --start-time 2026-11-11T08:47:30Z --end-time 2026-11-11T09:02:30Z --period 60 --statistics Sum
+{
+    "Label": "NumberOfNotificationsFailed",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-11T08:58:00+00:00",
+            "Sum": 1.0,
+            "Unit": "Count"
+        }
+    ]
+}
+[exit 0]
+$ aws cloudwatch get-metric-statistics --namespace AWS/Events --metric-name TriggeredRules --dimensions Name=RuleName,Value=fc-svcp-0b86a341 --start-time 2026-11-11T08:47:30Z --end-time 2026-11-11T09:02:30Z --period 60 --statistics Sum
+{
+    "Label": "TriggeredRules",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-11T08:58:00+00:00",
+            "Sum": 1.0,
+            "Unit": "Count"
+        }
+    ]
+}
+[exit 0]
+$ aws cloudwatch get-metric-statistics --namespace AWS/Events --metric-name Invocations --dimensions Name=RuleName,Value=fc-svcp-0b86a341 --start-time 2026-11-11T08:47:30Z --end-time 2026-11-11T09:02:30Z --period 60 --statistics Sum
+{
+    "Label": "Invocations",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-11T08:57:00+00:00",
+            "Sum": 1.0,
+            "Unit": "Count"
+        }
+    ]
+}
+[exit 0]
+$ aws cloudwatch get-metric-statistics --namespace AWS/Events --metric-name FailedInvocations --dimensions Name=RuleName,Value=fc-svcp-0b86a341 --start-time 2026-11-11T08:47:30Z --end-time 2026-11-11T09:02:30Z --period 60 --statistics Sum
+{
+    "Label": "FailedInvocations",
+    "Datapoints": [
+        {
+            "Timestamp": "2026-11-11T08:57:00+00:00",
+            "Sum": 1.0,
+            "Unit": "Count"
+        }
+    ]
+}
+[exit 0]

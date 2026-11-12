@@ -1,0 +1,25 @@
+{
+  "alias": "alias/aws/dynamodb",
+  "describe_key": {
+    "AWSAccountId": "123456789012",
+    "KeyId": "e889f10a-f0c3-4b96-acae-9e54fdeb5d48",
+    "Arn": "arn:aws:kms:us-east-1:123456789012:key/e889f10a-f0c3-4b96-acae-9e54fdeb5d48",
+    "CreationDate": "2026-11-11T03:56:29.822000-03:00",
+    "Enabled": true,
+    "Description": "Default key that protects my DynamoDB data when no other key is defined",
+    "KeyUsage": "ENCRYPT_DECRYPT",
+    "KeyState": "Enabled",
+    "Origin": "AWS_KMS",
+    "KeyManager": "AWS",
+    "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+    "KeySpec": "SYMMETRIC_DEFAULT",
+    "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+    ],
+    "MultiRegion": false
+  },
+  "get_key_policy": {
+    "PolicyName": "default",
+    "Policy": "{\n  \"Version\" : \"2012-10-17\",\n  \"Id\" : \"auto-dynamodb-3\",\n  \"Statement\" : [ {\n    \"Sid\" : \"Allow access through Amazon DynamoDB for all principals in the account that are authorized to use Amazon DynamoDB\",\n    \"Effect\" : \"Allow\",\n    \"Principal\" : {\n      \"AWS\" : \"*\"\n    },\n    \"Action\" : [ \"kms:Encrypt\", \"kms:Decrypt\", \"kms:ReEncrypt*\", \"kms:GenerateDataKey*\", \"kms:CreateGrant\", \"kms:DescribeKey\" ],\n    \"Resource\" : \"*\",\n    \"Condition\" : {\n      \"StringEquals\" : {\n        \"kms:CallerAccount\" : \"123456789012\"\n      },\n      \"StringLike\" : {\n        \"kms:ViaService\" : \"dynamodb.*.amazonaws.com\"\n      }\n    }\n  }, {\n    \"Sid\" : \"Allow direct access to key metadata to the account\",\n    \"Effect\" : \"Allow\",\n    \"Principal\" : {\n      \"AWS\" : \"arn:aws:iam::123456789012:root\"\n    },\n    \"Action\" : [ \"kms:Describe*\", \"kms:Get*\", \"kms:List*\", \"kms:RevokeGrant\" ],\n    \"Resource\" : \"*\"\n  }, {\n    \"Sid\" : \"Allow DynamoDB to directly describe the key\",\n    \"Effect\" : \"Allow\",\n    \"Principal\" : {\n      \"Service\" : \"dynamodb.amazonaws.com\"\n    },\n    \"Action\" : [ \"kms:Describe*\", \"kms:Get*\", \"kms:List*\" ],\n    \"Resource\" : \"*\"\n  } ]\n}"
+  }
+}

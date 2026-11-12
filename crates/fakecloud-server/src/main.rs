@@ -514,10 +514,9 @@ async fn main() {
     // The hook's snapshot store is set below once kms_snapshot_store is
     // initialized (depends on the persistence config). The OnceLock wiring
     // lets us hand the same Arc to all services up-front.
-    let kms_hook_adapter = Arc::new(KmsHookAdapter::new(
-        kms_state.clone(),
-        kms_usage_state.clone(),
-    ));
+    let kms_hook_adapter = Arc::new(
+        KmsHookAdapter::new(kms_state.clone(), kms_usage_state.clone()).with_iam(iam_state.clone()),
+    );
     let kms_hook_for_services: Arc<dyn fakecloud_core::delivery::KmsHook> =
         kms_hook_adapter.clone();
     let cloudformation_state = Arc::new(parking_lot::RwLock::new(
@@ -702,6 +701,13 @@ async fn main() {
     let organizations_state: SharedOrganizationsState = Arc::new(parking_lot::RwLock::new(
         fakecloud_organizations::OrganizationsRegistry::default(),
     ));
+    // Key policies evaluated through the KMS hook see the caller's
+    // organization (`aws:PrincipalOrgID`).
+    kms_hook_adapter.set_org_resolver(
+        fakecloud_organizations::resolver::OrganizationsScpResolver::shared(
+            organizations_state.clone(),
+        ),
+    );
     let scheduler_state: fakecloud_scheduler::SharedSchedulerState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -1240,8 +1246,18 @@ async fn main() {
                 lambda_durable.clone(),
             )) as Arc<dyn fakecloud_core::delivery::LambdaDelivery>
         });
+    // CloudWatch state must be constructed before the SNS / EventBridge /
+    // Logs deliveries so they can publish their AWS/* metrics (SNS delivery
+    // failures, EventBridge failed invocations, Logs metric filters) into it.
+    let cloudwatch_state: fakecloud_cloudwatch::SharedCloudWatchState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new()),
+    );
     let delivery_for_sns = {
-        let mut bus = DeliveryBus::new().with_sqs(sqs_delivery.clone());
+        let mut bus = DeliveryBus::new()
+            .with_sqs(sqs_delivery.clone())
+            .with_cloudwatch_metrics(Arc::new(fakecloud_cloudwatch::CloudwatchDeliveryImpl::new(
+                cloudwatch_state.clone(),
+            )));
         if let Some(ref ld) = lambda_delivery {
             bus = bus.with_lambda(ld.clone());
         }
@@ -1384,6 +1400,9 @@ async fn main() {
     let delivery_for_eb = {
         let mut bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
+            .with_cloudwatch_metrics(Arc::new(fakecloud_cloudwatch::CloudwatchDeliveryImpl::new(
+                cloudwatch_state.clone(),
+            )))
             .with_sns(sns_delivery.clone())
             .with_kinesis(kinesis_delivery_for_eb.clone())
             .with_stepfunctions(sfn_delivery_for_eb);
@@ -1430,11 +1449,6 @@ async fn main() {
         }
         Arc::new(bus)
     };
-    // CloudWatch state must be constructed before logs delivery so
-    // CloudWatch Logs metric filters can publish data points into it.
-    let cloudwatch_state: fakecloud_cloudwatch::SharedCloudWatchState = Arc::new(
-        parking_lot::RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new()),
-    );
     // Step 4: Logs delivery (subscription filters can push to SQS, Lambda, and Kinesis;
     // metric filters publish CloudWatch metric data points)
     let kinesis_delivery = fakecloud_kinesis::delivery::KinesisDeliveryImpl::with_dirty_flag(
@@ -6545,6 +6559,7 @@ async fn main() {
         .with_logs(logs_state.clone())
         .with_s3(s3_delivery_for_codebuild)
         .with_secret_stores(ssm_state_for_codebuild, secretsmanager_state_for_codebuild)
+        .with_kms_hook(kms_hook_for_services.clone())
         .with_backend_autodetect();
     if let Some(store) = codebuild_snapshot_store {
         codebuild_service = codebuild_service.with_snapshot_store(store);
@@ -8349,6 +8364,7 @@ async fn main() {
                 let s3_for_inbound = s3_introspection_state.clone();
                 let s3_store_for_inbound = s3_store_for_inbound.clone();
                 let kms_hook_for_inbound = kms_hook_for_services.clone();
+                let kms_for_ses_s3 = kms_hook_for_services.clone();
                 let delivery_for_inbound = {
                     let mut bus = DeliveryBus::new();
                     let sns_fanout_bus = {
@@ -8407,7 +8423,13 @@ async fn main() {
                         format!("{header_block}\r\n{}", body.body)
                     };
                     // Execute actions for real
-                    for (_rule, action) in &actions {
+                    let active_rule_set = ss
+                        .read()
+                        .default_ref()
+                        .active_receipt_rule_set
+                        .clone()
+                        .unwrap_or_default();
+                    for (rule, action) in &actions {
                         match action {
                             fakecloud_ses::ReceiptAction::S3 {
                                 bucket_name,
@@ -8419,43 +8441,47 @@ async fn main() {
                                 let key = format!("{prefix}{message_id}");
                                 let now = chrono::Utc::now();
                                 let data = bytes::Bytes::from(augmented_body.clone());
-                                let size = data.len() as u64;
-                                let etag = format!("{:x}", md5::Md5::digest(&data));
-                                // Encrypt via KMS when KmsKeyArn is configured.
-                                let (body_bytes, sse_algorithm, sse_kms_key_id) =
-                                    if let Some(kms_key) = kms_key_arn {
-                                        let account_id = ss.read().default_account_id().to_string();
-                                        let mut ctx = std::collections::HashMap::new();
-                                        ctx.insert(
-                                            "aws:s3:arn".to_string(),
-                                            fakecloud_aws::arn::Arn::s3(bucket_name).to_string(),
-                                        );
-                                        match delivery_for_inbound.kms_encrypt(
-                                            &account_id,
-                                            &region_for_inbound,
-                                            kms_key,
-                                            &data,
-                                            "s3.amazonaws.com",
-                                            ctx,
-                                        ) {
-                                            Ok(envelope) => {
-                                                let enc_bytes =
-                                                    bytes::Bytes::from(envelope.into_bytes());
-                                                (enc_bytes, Some("aws:kms".to_string()), Some(kms_key.clone()))
-                                            }
-                                            Err(err) => {
-                                                tracing::warn!(
-                                                    bucket = %bucket_name,
-                                                    key = %key,
-                                                    error = %err,
-                                                    "SES inbound: KMS encrypt failed, storing plaintext"
-                                                );
-                                                (data.clone(), None, None)
-                                            }
+                                // With a KmsKeyArn, SES encrypts the message
+                                // itself, client-side (S3 encryption client
+                                // envelope in the object's metadata), calling
+                                // KMS as SES; the object is not SSE-encrypted.
+                                // A key KMS refuses SES fails the action.
+                                let (body_bytes, metadata) = if let Some(kms_key) = kms_key_arn {
+                                    let account_id = ss.read().default_account_id().to_string();
+                                    let key_region = kms_key
+                                        .split(':')
+                                        .nth(3)
+                                        .filter(|r| !r.is_empty())
+                                        .unwrap_or(&region_for_inbound)
+                                        .to_string();
+                                    match fakecloud_ses::s3_action::seal(
+                                        kms_for_ses_s3.as_ref(),
+                                        &account_id,
+                                        &key_region,
+                                        kms_key,
+                                        &active_rule_set,
+                                        rule,
+                                        &message_id,
+                                        &data,
+                                    ) {
+                                        Ok(sealed) => {
+                                            (bytes::Bytes::from(sealed.body), sealed.metadata)
                                         }
-                                    } else {
-                                        (data.clone(), None, None)
-                                    };
+                                        Err(err) => {
+                                            tracing::warn!(
+                                                bucket = %bucket_name,
+                                                key = %key,
+                                                error = %err,
+                                                "SES inbound: KMS refused the S3 action's key, email not stored"
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                } else {
+                                    (data.clone(), std::collections::BTreeMap::new())
+                                };
+                                let size = body_bytes.len() as u64;
+                                let etag = format!("{:x}", md5::Md5::digest(&body_bytes));
                                 let obj = fakecloud_s3::S3Object {
                                     key: key.clone(),
                                     content_type: "text/plain".to_string(),
@@ -8463,17 +8489,16 @@ async fn main() {
                                     size,
                                     last_modified: now,
                                     storage_class: "STANDARD".to_string(),
-                                    sse_algorithm,
-                                    sse_kms_key_id,
-                                    // S3's default checksum, over the
-                                    // plaintext even when the stored body is a
-                                    // KMS envelope.
+                                    metadata,
+                                    // S3's default checksum, over the stored
+                                    // body (the sealed message, when SES
+                                    // encrypted it client-side).
                                     checksum_algorithm: Some(
                                         fakecloud_s3::checksum::DEFAULT_ALGORITHM,
                                     ),
                                     checksum_value: Some(fakecloud_s3::checksum::checksum(
                                         fakecloud_s3::checksum::DEFAULT_ALGORITHM,
-                                        &data,
+                                        &body_bytes,
                                     )),
                                     checksum_type: Some(
                                         fakecloud_s3::checksum::ChecksumType::FullObject,
@@ -8974,9 +8999,20 @@ async fn main() {
                                 let info = |msg: &fakecloud_sqs::SqsMessage, in_flight| {
                                     types::SqsMessageInfo {
                                         message_id: msg.message_id.clone(),
-                                        body: fakecloud_sqs::plaintext_body(&msg.body, |ct| {
-                                            kms.inner.peek_plaintext(account_id, ct)
-                                        }),
+                                        // Decrypted exactly when ReceiveMessage
+                                        // would: a body the queue sealed.
+                                        body: fakecloud_sqs::plaintext_body(
+                                            msg,
+                                            &queue.arn,
+                                            &queue.attributes,
+                                            |ct, sealing_queue| {
+                                                let ctx = std::collections::HashMap::from([(
+                                                    "aws:sqs:arn".to_string(),
+                                                    sealing_queue.to_string(),
+                                                )]);
+                                                kms.inner.peek_plaintext(account_id, ct, &ctx)
+                                            },
+                                        ),
                                         stored_body: msg.body.clone(),
                                         receive_count: msg.receive_count as u64,
                                         in_flight,

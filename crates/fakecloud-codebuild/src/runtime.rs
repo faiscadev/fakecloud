@@ -191,6 +191,10 @@ pub struct BuildJob {
     /// PARAMETER_STORE/SECRETS_MANAGER already resolved by the service), merged
     /// with the buildspec `env.variables` at run time.
     pub base_env: Vec<(String, String)>,
+    /// A `PARAMETER_STORE` / `SECRETS_MANAGER` variable the service could not
+    /// resolve (missing, or not decryptable): the build fails in
+    /// `DOWNLOAD_SOURCE` with it before any command runs.
+    pub env_error: Option<crate::service::EnvResolveError>,
     /// The buildspec text (inline `source.buildspec` or `buildspecOverride`).
     pub buildspec: Option<String>,
     pub source_version: Option<String>,
@@ -798,21 +802,30 @@ impl PhaseTimer {
     }
 }
 
+/// The phases a build passes before provisioning. Recorded
+/// (`tests/fixtures/env-var-resolution-failures.json`): `SUBMITTED` and
+/// `QUEUED` carry no `contexts`.
 fn submitted_queued(now: DateTime<Utc>, is_batch: bool) -> Vec<Value> {
     let mut phases = vec![json!({
         "phaseType": "SUBMITTED", "phaseStatus": "SUCCEEDED",
         "startTime": ts(now), "endTime": ts(now),
-        "durationInSeconds": 0, "contexts": [],
+        "durationInSeconds": 0,
     })];
     // Single builds pass through QUEUED; a build batch downloads the batch spec.
     if !is_batch {
         phases.push(json!({
             "phaseType": "QUEUED", "phaseStatus": "SUCCEEDED",
             "startTime": ts(now), "endTime": ts(now),
-            "durationInSeconds": 0, "contexts": [],
+            "durationInSeconds": 0,
         }));
     }
     phases
+}
+
+/// The context a successful `PROVISIONING` / `FINALIZING` phase of a single
+/// build carries (recorded: one entry, both fields empty).
+pub(crate) fn empty_context() -> Value {
+    json!({ "statusCode": "", "message": "" })
 }
 
 // ---------------------------------------------------------------------------
@@ -857,6 +870,15 @@ pub async fn run_build(job: BuildJob) {
         _ => Buildspec::default(),
     };
 
+    // A build batch whose variables cannot be resolved fails before any
+    // container runs (not recorded; a single build is, below).
+    if let (true, Some(err)) = (job.is_batch, &job.env_error) {
+        let t = PhaseTimer::start("DOWNLOAD_BATCHSPEC");
+        phases.push(t.finish("FAILED", vec![env_error_context(err)]));
+        finalize(&job, &guard, phases, "FAILED").await;
+        return;
+    }
+
     let image = resolve_image(job.image.as_deref());
     let cli = job.backend.cli.clone();
 
@@ -873,7 +895,13 @@ pub async fn run_build(job: BuildJob) {
         Ok(id) => {
             guard.set_container(&id);
             job.running.lock().insert(job.build_id.clone(), id.clone());
-            phases.push(prov.finish("SUCCEEDED", vec![]));
+            // A batch's DOWNLOAD_BATCHSPEC is not recorded.
+            let contexts = if job.is_batch {
+                vec![]
+            } else {
+                vec![empty_context()]
+            };
+            phases.push(prov.finish("SUCCEEDED", contexts));
             id
         }
         Err(e) => {
@@ -892,6 +920,18 @@ pub async fn run_build(job: BuildJob) {
         // source is the (already-provided) buildspec, so this is a real,
         // immediate success rather than a fabricated one.
         let dl = PhaseTimer::start("DOWNLOAD_SOURCE");
+        // Recorded (tests/fixtures/env-var-resolution-failures.json): a
+        // PARAMETER_STORE / SECRETS_MANAGER variable that is missing or
+        // cannot be decrypted fails DOWNLOAD_SOURCE after provisioning
+        // succeeded; FINALIZING still runs and the build is FAILED.
+        if let Some(err) = &job.env_error {
+            phases.push(dl.finish("FAILED", vec![env_error_context(err)]));
+            let fin = PhaseTimer::start("FINALIZING");
+            phases.push(fin.finish("SUCCEEDED", vec![empty_context()]));
+            finalize(&job, &guard, phases, "FAILED").await;
+            kill_container(&cli, &container).await;
+            return;
+        }
         phases.push(dl.finish("SUCCEEDED", vec![]));
         job.set_phases(&phases, "DOWNLOAD_SOURCE");
     } else {
@@ -1033,7 +1073,7 @@ pub async fn run_build(job: BuildJob) {
         }));
     } else {
         let fin = PhaseTimer::start("FINALIZING");
-        phases.push(fin.finish("SUCCEEDED", vec![]));
+        phases.push(fin.finish("SUCCEEDED", vec![empty_context()]));
         phases.push(json!({ "phaseType": "COMPLETED", "endTime": ts(Utc::now()) }));
     }
 
@@ -1054,7 +1094,12 @@ pub async fn run_build(job: BuildJob) {
     job.running.lock().remove(&job.build_id);
 }
 
-/// Settle a build that failed before/at provisioning.
+/// The phase context of a variable the build could not resolve.
+fn env_error_context(err: &crate::service::EnvResolveError) -> Value {
+    json!({ "statusCode": err.status_code, "message": err.message })
+}
+
+/// Settle a build that failed before running its commands.
 async fn finalize(job: &BuildJob, guard: &BuildGuard, mut phases: Vec<Value>, status: &str) {
     if !job.is_batch {
         phases.push(json!({ "phaseType": "COMPLETED", "endTime": ts(Utc::now()) }));

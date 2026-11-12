@@ -1384,15 +1384,19 @@ fn failed_export_reports_failure_on_describe() {
 struct EnvelopeKms;
 
 impl fakecloud_core::delivery::KmsHook for EnvelopeKms {
+    fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+        stored.starts_with("enc:")
+    }
+
     fn encrypt(
         &self,
         _account_id: &str,
         _region: &str,
         key_id: &str,
         plaintext: &[u8],
-        _service_principal: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
         use base64::Engine as _;
         Ok(format!(
             "enc:{key_id}:{}",
@@ -1404,17 +1408,27 @@ impl fakecloud_core::delivery::KmsHook for EnvelopeKms {
         &self,
         _account_id: &str,
         ciphertext_b64: &str,
-        _service_principal: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
         use base64::Engine as _;
         let (_, data) = ciphertext_b64
             .strip_prefix("enc:")
             .and_then(|r| r.split_once(':'))
-            .ok_or("not an envelope")?;
+            .ok_or_else(|| {
+                fakecloud_core::delivery::KmsError::new(
+                    fakecloud_core::delivery::KmsErrorKind::InvalidCiphertext,
+                    "not an envelope",
+                )
+            })?;
         base64::engine::general_purpose::STANDARD
             .decode(data)
-            .map_err(|e| e.to_string())
+            .map_err(|e| {
+                fakecloud_core::delivery::KmsError::new(
+                    fakecloud_core::delivery::KmsErrorKind::InvalidCiphertext,
+                    e.to_string(),
+                )
+            })
     }
 }
 
@@ -1545,15 +1559,19 @@ fn export_objects_take_the_requested_encryption() {
 struct DenyingKms;
 
 impl fakecloud_core::delivery::KmsHook for DenyingKms {
+    fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+        stored.starts_with("envelope-under-")
+    }
+
     fn encrypt(
         &self,
         _account_id: &str,
         _region: &str,
         key_id: &str,
         _plaintext: &[u8],
-        _service_principal: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
         Ok(format!("envelope-under-{key_id}"))
     }
 
@@ -1561,10 +1579,13 @@ impl fakecloud_core::delivery::KmsHook for DenyingKms {
         &self,
         _account_id: &str,
         _ciphertext_b64: &str,
-        _service_principal: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<Vec<u8>, String> {
-        Err("kms key is disabled".to_string())
+    ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+        Err(fakecloud_core::delivery::KmsError::new(
+            fakecloud_core::delivery::KmsErrorKind::Disabled,
+            "kms key is disabled",
+        ))
     }
 }
 
@@ -9176,15 +9197,19 @@ fn a_search_schema_element_missing_a_member_is_rejected() {
 struct CountingKmsHook(std::sync::atomic::AtomicUsize, SharedDynamoDbState);
 
 impl fakecloud_core::delivery::KmsHook for CountingKmsHook {
+    fn is_ciphertext(&self, _account_id: &str, _stored: &str) -> bool {
+        true
+    }
+
     fn encrypt(
         &self,
         _: &str,
         _: &str,
         _: &str,
         _: &[u8],
-        _: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _: HashMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
         Ok(String::new())
     }
 
@@ -9192,9 +9217,9 @@ impl fakecloud_core::delivery::KmsHook for CountingKmsHook {
         &self,
         _: &str,
         _: &str,
-        _: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _: HashMap<String, String>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
         Ok(Vec::new())
     }
 

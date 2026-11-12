@@ -49,14 +49,14 @@ async fn sns_encrypted_topic_publish_records_kms_usage() {
     assert!(
         sns_records.iter().any(|r| {
             r["operation"].as_str() == Some("GenerateDataKey")
-                && r["encryptionContext"]["aws:sns:arn"].as_str() == Some(topic_arn.as_str())
+                && r["encryptionContext"]["aws:sns:topicArn"].as_str() == Some(topic_arn.as_str())
         }),
         "expected GenerateDataKey bound to topic arn, got: {sns_records:?}"
     );
     assert!(
         sns_records.iter().any(|r| {
             r["operation"].as_str() == Some("Decrypt")
-                && r["encryptionContext"]["aws:sns:arn"].as_str() == Some(topic_arn.as_str())
+                && r["encryptionContext"]["aws:sns:topicArn"].as_str() == Some(topic_arn.as_str())
         }),
         "expected paired Decrypt bound to topic arn, got: {sns_records:?}"
     );

@@ -1,4 +1,5 @@
 pub mod api;
+pub mod aws_managed;
 pub mod blob;
 pub mod hook;
 pub mod quota;

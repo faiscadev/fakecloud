@@ -116,6 +116,9 @@ pub struct CodeBuildService {
     ssm_state: Option<SharedSsmState>,
     /// Secrets Manager state for resolving `SECRETS_MANAGER`-typed env vars.
     secrets_state: Option<SharedSecretsManagerState>,
+    /// Decrypts `SecureString` parameters and secret values a build's
+    /// environment names.
+    kms_hook: Option<Arc<dyn fakecloud_core::delivery::KmsHook>>,
 }
 
 impl CodeBuildService {
@@ -130,6 +133,7 @@ impl CodeBuildService {
             running: Arc::new(Mutex::new(HashMap::new())),
             ssm_state: None,
             secrets_state: None,
+            kms_hook: None,
         }
     }
 
@@ -173,6 +177,11 @@ impl CodeBuildService {
 
     /// Wire SSM + Secrets Manager so `PARAMETER_STORE` / `SECRETS_MANAGER`
     /// build environment variables resolve into the container (like AWS).
+    pub fn with_kms_hook(mut self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
+        self.kms_hook = Some(hook);
+        self
+    }
+
     pub fn with_secret_stores(
         mut self,
         ssm: SharedSsmState,
@@ -969,15 +978,26 @@ fn settle_if_stuck(record: &mut Value, status_key: &str, complete_key: &str) -> 
 
 /// Build the ordered phase list of a settled (successful) build.
 fn settled_phases(start: DateTime<Utc>, end: DateTime<Utc>) -> Value {
+    // Recorded (tests/fixtures/env-var-resolution-failures.json): SUBMITTED
+    // and QUEUED carry no `contexts`, PROVISIONING and FINALIZING one empty
+    // context; the other phases are not recorded.
     let phase = |t: &str| {
-        json!({
+        let mut p = json!({
             "phaseType": t,
             "phaseStatus": "SUCCEEDED",
             "startTime": ts(start),
             "endTime": ts(end),
             "durationInSeconds": 0,
-            "contexts": [],
-        })
+        });
+        let contexts = match t {
+            "SUBMITTED" | "QUEUED" => None,
+            "PROVISIONING" | "FINALIZING" => Some(json!([crate::runtime::empty_context()])),
+            _ => Some(json!([])),
+        };
+        if let Some(contexts) = contexts {
+            p["contexts"] = contexts;
+        }
+        p
     };
     json!([
         phase("SUBMITTED"),
@@ -1049,24 +1069,33 @@ fn settle_command_execution(record: &mut Value) -> bool {
 /// Resolve a CodeBuild environment variable's `value` for a given `type` into
 /// the actual string injected into the container. `PLAINTEXT` is verbatim;
 /// `PARAMETER_STORE` reads the named SSM parameter; `SECRETS_MANAGER` reads the
-/// named secret (with an optional `:json-key` selector). A miss yields an empty
-/// string so the container env still carries the (empty) variable, matching a
-/// dereference of a missing value. A name resolves in the build's `region`; a
-/// full ARN in the account and region it names.
+/// named secret (with an optional `:json-key` selector). A name resolves in
+/// the build's `region`; a full ARN in the account and region it names.
+///
+/// A parameter or secret that does not exist, or whose value cannot be
+/// decrypted (KMS refuses its key), is an [`EnvResolveError`]: the build fails
+/// in `DOWNLOAD_SOURCE` with it instead of running with the variable empty.
+/// Recorded (`tests/fixtures/env-var-resolution-failures.json`): a parameter
+/// is `Decrypted Variables Error` "parameter does not exist: <value>" whether
+/// it is missing or under a disabled key (CodeBuild reads it with
+/// `GetParameters`, which lists both as invalid); a secret is
+/// `Secrets Manager Error` "<code>: <message>" of `GetSecretValue`.
 fn resolve_env_value(
     ssm: Option<&SharedSsmState>,
     secrets: Option<&SharedSecretsManagerState>,
+    kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
     account: &str,
     region: &str,
     ty: &str,
     value: &str,
-) -> String {
-    match ty {
+) -> Result<String, EnvResolveError> {
+    Ok(match ty {
         "PARAMETER_STORE" => {
             let Some(ssm) = ssm else {
-                return String::new();
+                return Ok(String::new());
             };
             let accounts = ssm.read();
+            let missing = || EnvResolveError::parameter_does_not_exist(value);
             // arn:<partition>:ssm:<region>:<account>:parameter/<name>
             let parameter_arn_name = arn_resource(value, "ssm")
                 .and_then(|_| value.splitn(6, ':').nth(5))
@@ -1080,18 +1109,27 @@ fn resolve_env_value(
                 None => (account, region, value),
             };
             let Some(st) = accounts.regional(account, region) else {
-                return String::new();
+                return Err(missing());
             };
             let name = value.trim_start_matches('/');
-            st.parameters
+            // A SecureString is stored encrypted; the build gets its
+            // plaintext.
+            match st
+                .parameters
                 .get(&format!("/{name}"))
                 .or_else(|| st.parameters.get(name))
-                .map(|p| p.value.clone())
-                .unwrap_or_default()
+            {
+                Some(p) if p.param_type == "SecureString" => {
+                    fakecloud_ssm::plaintext_parameter_value(kms_hook, account, &p.arn, &p.value)
+                        .map_err(|_| missing())?
+                }
+                Some(p) => p.value.clone(),
+                None => return Err(missing()),
+            }
         }
         "SECRETS_MANAGER" => {
             let Some(secrets) = secrets else {
-                return String::new();
+                return Ok(String::new());
             };
             // CodeBuild's `value` can be a bare secret name, `name:json-key`, a
             // full secret ARN, or `arn:...:secret:name-suffix:json-key`. A secret
@@ -1107,22 +1145,49 @@ fn resolve_env_value(
             } else {
                 (account, region)
             };
+            let not_found = || {
+                EnvResolveError::secrets_manager(
+                    "ResourceNotFoundException",
+                    "Secrets Manager can't find the specified secret.",
+                )
+            };
             let Some(st) = accounts.regional(account, region) else {
-                return String::new();
+                return Err(not_found());
             };
             let Some(secret) = find_secret(st, &secret_ref) else {
-                return String::new();
+                return Err(not_found());
             };
+            // The rest of GetSecretValue's refusals (not recorded through
+            // CodeBuild; Secrets Manager's own messages).
+            if secret.deleted {
+                return Err(EnvResolveError::secrets_manager(
+                    "InvalidRequestException",
+                    "You can't perform this operation on the secret because it was marked for deletion.",
+                ));
+            }
             let Some(vid) = secret.current_version_id.as_ref() else {
-                return String::new();
+                return Err(EnvResolveError::secrets_manager(
+                    "ResourceNotFoundException",
+                    "Secrets Manager can't find the specified secret value for staging label: AWSCURRENT",
+                ));
             };
-            let Some(raw) = secret
+            let Some(stored) = secret
                 .versions
                 .get(vid)
                 .and_then(|v| v.secret_string.clone())
             else {
-                return String::new();
+                return Ok(String::new());
             };
+            // Secret values are stored encrypted; the build gets the
+            // plaintext.
+            let raw = fakecloud_secretsmanager::value::plaintext_secret_string(
+                kms_hook,
+                account,
+                &secret.arn,
+                vid,
+                stored,
+            )
+            .map_err(|err| EnvResolveError::secrets_manager(err.code(), &err.message()))?;
             match json_key {
                 Some(key) => serde_json::from_str::<Value>(&raw)
                     .ok()
@@ -1133,6 +1198,34 @@ fn resolve_env_value(
         }
         // PLAINTEXT (and any unknown type) -> verbatim.
         _ => value.to_string(),
+    })
+}
+
+/// Why a build's environment variable could not be resolved: the
+/// `DOWNLOAD_SOURCE` phase context a build that fails over it reports
+/// (`statusCode` names the store, `message` its error).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvResolveError {
+    pub status_code: &'static str,
+    pub message: String,
+}
+
+impl EnvResolveError {
+    /// A `PARAMETER_STORE` variable naming `value`, missing or not
+    /// decryptable.
+    fn parameter_does_not_exist(value: &str) -> Self {
+        Self {
+            status_code: "Decrypted Variables Error",
+            message: format!("parameter does not exist: {value}"),
+        }
+    }
+
+    /// A `SECRETS_MANAGER` variable `GetSecretValue` refused with `code`.
+    fn secrets_manager(code: &str, message: &str) -> Self {
+        Self {
+            status_code: "Secrets Manager Error",
+            message: format!("{code}: {message}"),
+        }
     }
 }
 
@@ -1318,14 +1411,17 @@ impl CodeBuildService {
             .and_then(Value::as_i64)
             .filter(|m| *m > 0)
             .unwrap_or(60);
-        let base_env = self.collect_base_env(
+        let (base_env, env_error) = match self.collect_base_env(
             account,
             build_value,
             build_id,
             build_arn,
             build_number,
             source_version.as_deref(),
-        );
+        ) {
+            Ok(env) => (env, None),
+            Err(err) => (Vec::new(), Some(err)),
+        };
         let job = BuildJob {
             backend,
             state: self.state.clone(),
@@ -1343,6 +1439,7 @@ impl CodeBuildService {
             is_batch,
             image,
             base_env,
+            env_error,
             buildspec,
             source_version,
             cw_logs,
@@ -1364,7 +1461,7 @@ impl CodeBuildService {
         build_arn: &str,
         build_number: i64,
         source_version: Option<&str>,
-    ) -> Vec<(String, String)> {
+    ) -> Result<Vec<(String, String)>, EnvResolveError> {
         let sv = source_version.unwrap_or("");
         let mut env = vec![
             ("CODEBUILD_BUILD_ID".to_string(), build_id.to_string()),
@@ -1396,15 +1493,16 @@ impl CodeBuildService {
                 let resolved = resolve_env_value(
                     self.ssm_state.as_ref(),
                     self.secrets_state.as_ref(),
+                    self.kms_hook.as_deref(),
                     account,
                     region,
                     ty,
                     value,
-                );
+                )?;
                 env.push((name.to_string(), resolved));
             }
         }
-        env
+        Ok(env)
     }
 
     /// Handle on this service's live build containers.
@@ -1468,7 +1566,6 @@ impl CodeBuildService {
                     "startTime": ts(now),
                     "endTime": ts(now),
                     "durationInSeconds": 0,
-                    "contexts": [],
                 },
                 { "phaseType": "QUEUED", "startTime": ts(now) },
             ]),
@@ -1560,7 +1657,7 @@ impl CodeBuildService {
         build.insert("buildComplete".into(), json!(false));
         build.insert(
             "phases".into(),
-            json!([{ "phaseType": "SUBMITTED", "phaseStatus": "SUCCEEDED", "startTime": ts(now), "endTime": ts(now), "durationInSeconds": 0, "contexts": [] }]),
+            json!([{ "phaseType": "SUBMITTED", "phaseStatus": "SUCCEEDED", "startTime": ts(now), "endTime": ts(now), "durationInSeconds": 0 }]),
         );
         let build = Value::Object(build);
         st.builds.insert(new_id.clone(), build.clone());
@@ -3767,6 +3864,7 @@ mod tests {
                     secret_binary: None,
                     stages: vec!["AWSCURRENT".to_string()],
                     created_at: Utc::now(),
+                    kms_key_ids: Vec::new(),
                 },
             );
             st.secrets.insert(
@@ -3789,6 +3887,7 @@ mod tests {
                     rotation_lambda_arn: None,
                     rotation_rules: None,
                     last_rotated_at: None,
+                    rotation_failed_at: None,
                     resource_policy: None,
                     replica_regions: Vec::new(),
                     replica_settings: BTreeMap::new(),
@@ -3803,11 +3902,37 @@ mod tests {
         resolve_env_value(
             None,
             Some(state),
+            None,
             "000000000000",
             "us-east-1",
             "SECRETS_MANAGER",
             value,
         )
+        .unwrap()
+    }
+
+    /// The failure a `SECRETS_MANAGER` reference to no secret fails the
+    /// build with (recorded in tests/fixtures/env-var-resolution-failures.json).
+    fn assert_secret_not_found(state: &SharedSecretsManagerState, value: &str) {
+        let err = resolve_env_value(
+            None,
+            Some(state),
+            None,
+            "000000000000",
+            "us-east-1",
+            "SECRETS_MANAGER",
+            value,
+        )
+        .expect_err("a missing secret fails the build");
+        assert_eq!(
+            err,
+            EnvResolveError {
+                status_code: "Secrets Manager Error",
+                message:
+                    "ResourceNotFoundException: Secrets Manager can't find the specified secret."
+                        .to_string(),
+            }
+        );
     }
 
     #[test]
@@ -3951,7 +4076,7 @@ mod tests {
         );
         // `prod` is not a partial ARN of `prod-config-XyZ123`.
         let st = secrets_state(&[prod_config]);
-        assert_eq!(resolve_secret(&st, partial), "");
+        assert_secret_not_found(&st, partial);
     }
 
     #[test]
@@ -3961,26 +4086,197 @@ mod tests {
             "arn:aws:secretsmanager:us-east-1:000000000000:secret:prod-AbCdEf",
             "PROD",
         )]);
-        assert_eq!(
-            resolve_secret(
-                &st,
-                "arn:aws:secretsmanager:us-east-1:000000000000:secret:prod-config"
-            ),
-            ""
+        assert_secret_not_found(
+            &st,
+            "arn:aws:secretsmanager:us-east-1:000000000000:secret:prod-config",
         );
         // Same name, different region: not the same secret.
-        assert_eq!(
-            resolve_secret(
-                &st,
-                "arn:aws:secretsmanager:eu-west-1:000000000000:secret:prod-AbCdEf"
-            ),
-            ""
+        assert_secret_not_found(
+            &st,
+            "arn:aws:secretsmanager:eu-west-1:000000000000:secret:prod-AbCdEf",
         );
     }
 
+    /// A missing secret fails the build, with or without a json key
+    /// (recorded), instead of running with the variable empty.
     #[test]
-    fn resolve_secret_missing_yields_empty() {
+    fn resolve_secret_missing_fails_the_build() {
         let st = secrets_state(&[]);
-        assert_eq!(resolve_secret(&st, "nope"), "");
+        assert_secret_not_found(&st, "fc-does-not-exist-secret");
+        assert_secret_not_found(&st, "fc-does-not-exist-secret:password");
+    }
+
+    /// A missing parameter fails the build with the recorded context.
+    #[test]
+    fn resolve_parameter_missing_fails_the_build() {
+        let ssm: SharedSsmState = Arc::new(RwLock::new(MultiAccountState::new(
+            "000000000000",
+            "us-east-1",
+            "",
+        )));
+        let err = resolve_env_value(
+            Some(&ssm),
+            None,
+            None,
+            "000000000000",
+            "us-east-1",
+            "PARAMETER_STORE",
+            "/fc/does-not-exist",
+        )
+        .expect_err("a missing parameter fails the build");
+        assert_eq!(
+            err,
+            EnvResolveError {
+                status_code: "Decrypted Variables Error",
+                message: "parameter does not exist: /fc/does-not-exist".to_string(),
+            }
+        );
+    }
+
+    /// A KMS hook whose key is disabled: every stored `ENC:` value is a
+    /// ciphertext that no longer opens.
+    struct DisabledKeyKms;
+    impl fakecloud_core::delivery::KmsHook for DisabledKeyKms {
+        fn encrypt(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            _key_id: &str,
+            _plaintext: &[u8],
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
+            _ctx: std::collections::HashMap<String, String>,
+        ) -> Result<String, fakecloud_core::delivery::KmsError> {
+            unreachable!()
+        }
+        fn decrypt(
+            &self,
+            _account_id: &str,
+            _ciphertext_b64: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
+            _ctx: std::collections::HashMap<String, String>,
+        ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::Disabled,
+                "key is disabled",
+            ))
+        }
+        fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+            stored.starts_with("ENC:")
+        }
+    }
+
+    /// A SecureString parameter whose key KMS refuses fails resolution with
+    /// SSM's error, never resolves to an empty variable.
+    #[tokio::test]
+    async fn resolve_secure_parameter_kms_refusal_is_an_error_not_empty() {
+        struct SealingKms;
+        impl fakecloud_core::delivery::KmsHook for SealingKms {
+            fn encrypt(
+                &self,
+                _account_id: &str,
+                _region: &str,
+                _key_id: &str,
+                plaintext: &[u8],
+                _caller: fakecloud_core::delivery::KmsCaller<'_>,
+                _ctx: std::collections::HashMap<String, String>,
+            ) -> Result<String, fakecloud_core::delivery::KmsError> {
+                Ok(format!("ENC:{}", String::from_utf8_lossy(plaintext)))
+            }
+            fn decrypt(
+                &self,
+                _account_id: &str,
+                _ciphertext_b64: &str,
+                _caller: fakecloud_core::delivery::KmsCaller<'_>,
+                _ctx: std::collections::HashMap<String, String>,
+            ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+                unreachable!()
+            }
+            fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+                stored.starts_with("ENC:")
+            }
+        }
+
+        let ssm: SharedSsmState = Arc::new(RwLock::new(MultiAccountState::new(
+            "000000000000",
+            "us-east-1",
+            "",
+        )));
+        let svc = fakecloud_ssm::SsmService::new(ssm.clone()).with_kms_hook(Arc::new(SealingKms));
+        let mut put = req(
+            "PutParameter",
+            json!({"Name": "/db/password", "Value": "hunter2", "Type": "SecureString"}),
+        );
+        put.service = "ssm".to_string();
+        svc.handle(put).await.unwrap();
+
+        let err = resolve_env_value(
+            Some(&ssm),
+            None,
+            Some(&DisabledKeyKms),
+            "000000000000",
+            "us-east-1",
+            "PARAMETER_STORE",
+            "/db/password",
+        )
+        .expect_err("a SecureString KMS refuses must not resolve");
+        // Recorded: a SecureString under a disabled key reads as missing.
+        assert_eq!(
+            err,
+            EnvResolveError {
+                status_code: "Decrypted Variables Error",
+                message: "parameter does not exist: /db/password".to_string(),
+            }
+        );
+    }
+
+    /// A secret that exists but does not decrypt fails resolution (and so
+    /// the build's provisioning) with Secrets Manager's error; the build
+    /// never runs with the variable empty.
+    #[test]
+    fn resolve_secret_kms_refusal_is_an_error_not_empty() {
+        let st = secrets_state(&[(
+            "db",
+            "arn:aws:secretsmanager:us-east-1:000000000000:secret:db-A1b2C3",
+            "ENC:sealed",
+        )]);
+        let err = resolve_env_value(
+            None,
+            Some(&st),
+            Some(&DisabledKeyKms),
+            "000000000000",
+            "us-east-1",
+            "SECRETS_MANAGER",
+            "db",
+        )
+        .expect_err("a secret KMS refuses must not resolve");
+        assert_eq!(err.status_code, "Secrets Manager Error");
+        // Recorded: GetSecretValue's DecryptionFailure, KMS's message after
+        // "Secrets Manager can't decrypt the secret value: ".
+        assert!(
+            err.message.starts_with(
+                "DecryptionFailure: Secrets Manager can't decrypt the secret value: key is disabled (Service: AWSKMS; Status Code: 400; Error Code: DisabledException; Request ID: "
+            ),
+            "{}",
+            err.message
+        );
+        // A value stored before encryption still resolves as stored.
+        let st = secrets_state(&[(
+            "plain",
+            "arn:aws:secretsmanager:us-east-1:000000000000:secret:plain-A1b2C3",
+            "hunter2",
+        )]);
+        assert_eq!(
+            resolve_env_value(
+                None,
+                Some(&st),
+                Some(&DisabledKeyKms),
+                "000000000000",
+                "us-east-1",
+                "SECRETS_MANAGER",
+                "plain",
+            )
+            .unwrap(),
+            "hunter2"
+        );
     }
 }

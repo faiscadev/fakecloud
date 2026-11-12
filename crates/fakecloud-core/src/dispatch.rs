@@ -2288,7 +2288,7 @@ fn aws_username_from_principal(principal: &Principal) -> Option<String> {
 
 /// AWS's `aws:PrincipalType` uses PascalCase identifiers, distinct from
 /// the lowercase ones [`PrincipalType::as_str`] returns for ARNs.
-fn principal_type_label(t: PrincipalType) -> &'static str {
+pub fn principal_type_label(t: PrincipalType) -> &'static str {
     match t {
         PrincipalType::User => "User",
         PrincipalType::AssumedRole => "AssumedRole",

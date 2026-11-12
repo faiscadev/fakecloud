@@ -386,8 +386,12 @@ fn put_delivered_object_guarded<G>(
                 account_id,
                 &bucket_region,
                 bucket,
+                &key,
+                chosen.bucket_key_enabled == Some(true),
                 &body,
                 key_id.as_deref(),
+                // The producing service writes with its own access.
+                None,
             )
             .map_err(|e| format!("failed to encrypt object {key} for bucket {bucket}: {e}"))?;
             // The object records the key's ARN, as S3 does (the
@@ -1591,6 +1595,7 @@ mod tests {
     impl fakecloud_core::delivery::SqsDelivery for SqsRecorder {
         fn deliver_to_queue(
             &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
             queue_arn: &str,
             message_body: &str,
             _attributes: &std::collections::HashMap<String, String>,
@@ -1606,15 +1611,19 @@ mod tests {
     struct ReadableKms;
 
     impl fakecloud_core::delivery::KmsHook for ReadableKms {
+        fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+            stored.starts_with("enc:")
+        }
+
         fn encrypt(
             &self,
             _account_id: &str,
             _region: &str,
             key_id: &str,
             plaintext: &[u8],
-            _service_principal: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _encryption_context: std::collections::HashMap<String, String>,
-        ) -> Result<String, String> {
+        ) -> Result<String, fakecloud_core::delivery::KmsError> {
             Ok(format!(
                 "enc:{key_id}:{}",
                 String::from_utf8_lossy(plaintext)
@@ -1625,13 +1634,21 @@ mod tests {
             &self,
             _account_id: &str,
             ciphertext_b64: &str,
-            _service_principal: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _encryption_context: std::collections::HashMap<String, String>,
-        ) -> Result<Vec<u8>, String> {
-            let rest = ciphertext_b64
-                .strip_prefix("enc:")
-                .ok_or("not an envelope")?;
-            let (_, plaintext) = rest.split_once(':').ok_or("not an envelope")?;
+        ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+            let rest = ciphertext_b64.strip_prefix("enc:").ok_or_else(|| {
+                fakecloud_core::delivery::KmsError::new(
+                    fakecloud_core::delivery::KmsErrorKind::InvalidCiphertext,
+                    "not an envelope",
+                )
+            })?;
+            let (_, plaintext) = rest.split_once(':').ok_or_else(|| {
+                fakecloud_core::delivery::KmsError::new(
+                    fakecloud_core::delivery::KmsErrorKind::InvalidCiphertext,
+                    "not an envelope",
+                )
+            })?;
             Ok(plaintext.as_bytes().to_vec())
         }
 
@@ -1674,6 +1691,7 @@ mod tests {
         impl fakecloud_core::delivery::SqsDelivery for NotificationLockProbe {
             fn deliver_to_queue(
                 &self,
+                _sender: fakecloud_core::delivery::DeliverySender<'_>,
                 queue_arn: &str,
                 message_body: &str,
                 _attributes: &std::collections::HashMap<String, String>,
@@ -2122,15 +2140,19 @@ mod tests {
     struct DenyingKms;
 
     impl fakecloud_core::delivery::KmsHook for DenyingKms {
+        fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+            stored.starts_with("envelope-under-")
+        }
+
         fn encrypt(
             &self,
             _account_id: &str,
             _region: &str,
             key_id: &str,
             _plaintext: &[u8],
-            _service_principal: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _encryption_context: std::collections::HashMap<String, String>,
-        ) -> Result<String, String> {
+        ) -> Result<String, fakecloud_core::delivery::KmsError> {
             Ok(format!("envelope-under-{key_id}"))
         }
 
@@ -2138,10 +2160,13 @@ mod tests {
             &self,
             _account_id: &str,
             _ciphertext_b64: &str,
-            _service_principal: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _encryption_context: std::collections::HashMap<String, String>,
-        ) -> Result<Vec<u8>, String> {
-            Err("kms key is disabled".to_string())
+        ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::Disabled,
+                "kms key is disabled",
+            ))
         }
     }
 

@@ -8,8 +8,9 @@ impl SqsService {
     /// when no hook is wired or the queue isn't encrypted.
     ///
     /// Fail-closed: if the hook errors (key denied, key not found), this
-    /// returns `Err` so SendMessage / SendMessageBatch abort with a 500
-    /// rather than silently storing plaintext on an "encrypted" queue.
+    /// returns SQS's `KMS.*` error (see [`kms_error`]) so SendMessage /
+    /// SendMessageBatch abort rather than silently storing plaintext on an
+    /// "encrypted" queue.
     /// Real AWS surfaces KMS errors back to the caller; fakecloud
     /// matching that behavior is what makes tests catch broken key
     /// policies before they hit prod.
@@ -19,6 +20,7 @@ impl SqsService {
         queue_arn: &str,
         kms_key_id: Option<&str>,
         plaintext: &str,
+        caller_arn: Option<&str>,
     ) -> Result<String, AwsServiceError> {
         let Some(hook) = &self.kms_hook else {
             return Ok(plaintext.to_string());
@@ -30,24 +32,18 @@ impl SqsService {
         ctx.insert("aws:sqs:arn".to_string(), queue_arn.to_string());
         // The key (or alias) lives in the queue's region.
         let region = fakecloud_aws::arn::region_of(queue_arn).unwrap_or(&self.region);
-        match hook.encrypt(
+        hook.encrypt(
             account_id,
             region,
             key,
             plaintext.as_bytes(),
-            "sqs.amazonaws.com",
+            fakecloud_core::delivery::KmsCaller::via_for("sqs.amazonaws.com", caller_arn),
             ctx,
-        ) {
-            Ok(envelope) => Ok(envelope),
-            Err(err) => {
-                tracing::warn!(queue = %queue_arn, error = %err, "SQS SSE-KMS encrypt failed");
-                Err(AwsServiceError::aws_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "KMS.InternalFailureException",
-                    format!("Failed to encrypt SQS message via KMS: {err}"),
-                ))
-            }
-        }
+        )
+        .map_err(|err| {
+            tracing::warn!(queue = %queue_arn, error = %err, "SQS SSE-KMS encrypt failed");
+            kms_error(&err)
+        })
     }
 
     /// Decrypt a stored SQS body via the KMS hook.
@@ -71,16 +67,20 @@ impl SqsService {
     /// as-is — same end-result the caller would see if the body had
     /// been written through SendMessage on an unencrypted queue.
     ///
-    /// Hook errors on a body that *does* look like an envelope
-    /// surface as 500 `KMS.InternalFailureException` so callers don't
-    /// silently see the raw ciphertext envelope when KMS access is
-    /// broken.
+    /// Hook errors on a body that *does* look like an envelope surface as
+    /// SQS's `KMS.*` errors (see [`kms_error`]) so callers don't silently
+    /// see the raw ciphertext envelope when KMS access is broken.
     pub(super) fn decrypt_message_body(
         &self,
         account_id: &str,
         queue_arn: &str,
         ciphertext: &str,
+        caller_arn: Option<&str>,
     ) -> Result<String, AwsServiceError> {
+        // SSE-SQS: sealed with SQS's own key, opened without KMS.
+        if let Some(plaintext) = crate::sse_sqs::open(queue_arn, ciphertext) {
+            return Ok(plaintext);
+        }
         let Some(hook) = &self.kms_hook else {
             return Ok(ciphertext.to_string());
         };
@@ -89,15 +89,16 @@ impl SqsService {
         }
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("aws:sqs:arn".to_string(), queue_arn.to_string());
-        match hook.decrypt(account_id, ciphertext, "sqs.amazonaws.com", ctx) {
+        match hook.decrypt(
+            account_id,
+            ciphertext,
+            fakecloud_core::delivery::KmsCaller::via_for("sqs.amazonaws.com", caller_arn),
+            ctx,
+        ) {
             Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
             Err(err) => {
                 tracing::warn!(queue = %queue_arn, error = %err, "SQS SSE-KMS decrypt failed");
-                Err(AwsServiceError::aws_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "KMS.InternalFailureException",
-                    format!("Failed to decrypt SQS message via KMS: {err}"),
-                ))
+                Err(kms_error(&err))
             }
         }
     }
@@ -264,20 +265,25 @@ impl SqsService {
                 None
             };
 
-            // At-rest encryption: encrypt the body via the KMS hook so the
-            // in-memory queue holds a fakecloud-kms envelope. The hook
-            // resolution covers both SSE-KMS (`KmsMasterKeyId` set) and
-            // SSE-SQS (`SqsManagedSseEnabled=true`, implicit
-            // `alias/aws/sqs`). `md5_of_body` keeps the plaintext digest
-            // — that's what callers verify against, and matches AWS's
-            // behavior of returning the plaintext MD5.
+            // At-rest encryption: on an SSE-KMS queue (`KmsMasterKeyId`
+            // set) encrypt the body via the KMS hook so the in-memory queue
+            // holds a fakecloud-kms envelope; an SSE-SQS queue seals it
+            // with SQS's own key and never calls KMS. `md5_of_body` keeps
+            // the plaintext digest — that's what callers verify against,
+            // and matches AWS's behavior of returning the plaintext MD5.
             let kms_key_id = Self::effective_kms_key_id(&queue.attributes);
-            let stored_body = self.encrypt_message_body(
-                &req.account_id,
-                &queue.arn,
-                kms_key_id.as_deref(),
-                &message_body,
-            )?;
+            let sse_sqs = crate::sse_sqs::enabled(&queue.attributes);
+            let stored_body = if sse_sqs {
+                crate::sse_sqs::seal(&queue.arn, &message_body)
+            } else {
+                self.encrypt_message_body(
+                    &req.account_id,
+                    &queue.arn,
+                    kms_key_id.as_deref(),
+                    &message_body,
+                    req.principal.as_ref().map(|p| p.arn.as_str()),
+                )?
+            };
             let msg = SqsMessage {
                 message_id: uuid::Uuid::new_v4().to_string(),
                 receipt_handle: None,
@@ -293,6 +299,14 @@ impl SqsService {
                 message_dedup_id: effective_dedup_id.clone(),
                 created_at: now,
                 sequence_number: sequence_number.clone(),
+                // The body is sealed (with this queue's context) when the
+                // queue is SSE-SQS, or SSE-KMS with a KMS hook wired.
+                sealed_for_queue: (sse_sqs
+                    || kms_key_id
+                        .as_deref()
+                        .is_some_and(|k| !k.is_empty() && self.kms_hook.is_some()))
+                .then(|| queue.arn.clone()),
+                seal_recorded: true,
             };
 
             let message_id = msg.message_id.clone();
@@ -459,6 +473,7 @@ impl SqsService {
                 max_messages,
                 visibility_timeout,
                 receive_request_attempt_id.as_deref(),
+                req.principal.as_ref().map(|p| p.arn.as_str()),
             )?;
 
             if !result.is_empty() || deadline.is_none() {
@@ -486,6 +501,7 @@ impl SqsService {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn try_receive_messages(
         &self,
         account_id: &str,
@@ -494,6 +510,7 @@ impl SqsService {
         max_messages: usize,
         req_visibility_timeout: Option<i64>,
         receive_request_attempt_id: Option<&str>,
+        caller_arn: Option<&str>,
     ) -> Result<Vec<SqsMessage>, AwsServiceError> {
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(account_id, region);
@@ -528,12 +545,14 @@ impl SqsService {
                         // Decrypt bodies for the replayed batch, same as the
                         // normal path below.
                         let queue_arn = queue.arn.clone();
-                        let kms_key_id = Self::effective_kms_key_id(&queue.attributes);
-                        if kms_key_id.is_some() && self.kms_hook.is_some() {
-                            for msg in replayed.iter_mut() {
-                                msg.body =
-                                    self.decrypt_message_body(account_id, &queue_arn, &msg.body)?;
-                            }
+                        let encrypted = Self::encrypted_at_rest(&queue.attributes);
+                        for msg in replayed.iter_mut().filter(|m| m.body_is_sealed(encrypted)) {
+                            msg.body = self.decrypt_message_body(
+                                account_id,
+                                msg.sealing_queue(&queue_arn),
+                                &msg.body,
+                                caller_arn,
+                            )?;
                         }
                         return Ok(replayed);
                     }
@@ -722,17 +741,28 @@ impl SqsService {
         // Capture queue-level encryption settings BEFORE the DLQ path
         // re-borrows `state.queues` mutably to push into the DLQ.
         let queue_arn = queue.arn.clone();
-        let kms_key_id = Self::effective_kms_key_id(&queue.attributes);
+        let encrypted = Self::encrypted_at_rest(&queue.attributes);
 
         // Decrypt BEFORE mutating inflight/DLQ. The previous order would
         // bump `receive_count` and stash the message in `inflight`, then
         // bail with the decrypt error — the visibility window was
         // already consumed even though the caller saw an error.
         let mut plaintext_bodies: Vec<String> = Vec::with_capacity(received.len());
-        if kms_key_id.is_some() && self.kms_hook.is_some() {
+        // Sealed bodies are opened whether or not a KMS hook is wired: an
+        // SSE-SQS body needs none (see `decrypt_message_body`).
+        {
             let mut decrypt_err = None;
             for msg in received.iter() {
-                match self.decrypt_message_body(account_id, &queue_arn, &msg.body) {
+                if !msg.body_is_sealed(encrypted) {
+                    plaintext_bodies.push(msg.body.clone());
+                    continue;
+                }
+                match self.decrypt_message_body(
+                    account_id,
+                    msg.sealing_queue(&queue_arn),
+                    &msg.body,
+                    caller_arn,
+                ) {
                     Ok(plaintext) => plaintext_bodies.push(plaintext),
                     Err(e) => {
                         decrypt_err = Some(e);
@@ -1233,7 +1263,7 @@ impl SqsService {
 
         // At-rest encryption: pre-encrypt every entry's body before
         // handing it to the per-entry helper. Encryption is queue-wide
-        // and covers both SSE-KMS and SSE-SQS modes, so a KMS failure
+        // (SSE-KMS; SSE-SQS never calls KMS), so a KMS failure
         // here aborts the whole batch (matches AWS behavior: when the
         // queue's CMK is unavailable, no entry can succeed). Skip
         // encryption for entries that won't pass per-entry validation
@@ -1259,6 +1289,7 @@ impl SqsService {
                         &queue_arn,
                         kms_key_id.as_deref(),
                         body.unwrap(),
+                        req.principal.as_ref().map(|p| p.arn.as_str()),
                     )?;
                     stored_overrides.push(Some(stored));
                 } else {

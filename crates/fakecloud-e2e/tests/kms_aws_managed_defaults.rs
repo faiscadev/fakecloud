@@ -10,8 +10,8 @@ use aws_sdk_cloudformation::types::Capability;
 use helpers::TestServer;
 
 /// `key_arn` resolves via DescribeKey to the AWS-managed key protecting
-/// `alias` (`alias/aws/<service>`): KeyManager AWS, described as that
-/// service's default key.
+/// `alias` (`alias/aws/<service>`): KeyManager AWS, and the key the alias
+/// itself resolves to.
 async fn assert_aws_managed_key(kms: &aws_sdk_kms::Client, key_arn: &str, alias: &str) {
     let meta = kms
         .describe_key()
@@ -27,10 +27,24 @@ async fn assert_aws_managed_key(kms: &aws_sdk_kms::Client, key_arn: &str, alias:
         Some("AWS"),
         "{key_arn} is not AWS-managed"
     );
-    let protected = alias.trim_start_matches("alias/");
+    let aliased = kms
+        .describe_key()
+        .key_id(alias)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("DescribeKey {alias}: {e:?}"))
+        .key_metadata
+        .and_then(|m| m.arn);
+    assert_eq!(
+        aliased.as_deref(),
+        Some(key_arn),
+        "{key_arn} is not the {alias} key"
+    );
     assert!(
-        meta.description().unwrap_or_default().contains(protected),
-        "{key_arn} is not the {alias} key: {:?}",
+        meta.description()
+            .unwrap_or_default()
+            .starts_with("Default key that protects my "),
+        "{key_arn}: {:?}",
         meta.description()
     );
 }

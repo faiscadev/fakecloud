@@ -2,8 +2,8 @@
 //! - CreateSecret with `KmsKeyId` triggers `kms:GenerateDataKey`
 //! - GetSecretValue triggers `kms:Decrypt` and returns the original
 //!   plaintext (transparent encrypt/decrypt round-trip)
-//! - Both calls land in `/_fakecloud/kms/usage` with the
-//!   secret-arn-shaped encryption context AWS uses
+//! - Both calls land in `/_fakecloud/kms/usage` with the encryption
+//!   context AWS uses (`SecretARN` + `SecretVersionId`)
 //!
 //! No KMS key is created up-front — the hook auto-provisions an
 //! `aws/secretsmanager` AWS-managed key on first use, mirroring real
@@ -58,35 +58,48 @@ async fn secretsmanager_create_get_round_trips_through_kms() {
     assert!(
         svc_records.iter().any(|r| {
             r["operation"].as_str() == Some("GenerateDataKey")
-                && r["encryptionContext"]["aws:secretsmanager:secretArn"].as_str()
-                    == Some(arn.as_str())
+                && r["encryptionContext"]["SecretARN"].as_str() == Some(arn.as_str())
+                && r["encryptionContext"]["SecretVersionId"].as_str().is_some()
         }),
         "expected GenerateDataKey record bound to secret ARN, got: {svc_records:?}"
     );
     assert!(
         svc_records.iter().any(|r| {
             r["operation"].as_str() == Some("Decrypt")
-                && r["encryptionContext"]["aws:secretsmanager:secretArn"].as_str()
-                    == Some(arn.as_str())
+                && r["encryptionContext"]["SecretARN"].as_str() == Some(arn.as_str())
+                && r["encryptionContext"]["SecretVersionId"].as_str().is_some()
         }),
         "expected Decrypt record bound to secret ARN, got: {svc_records:?}"
     );
 }
 
+/// A secret without `KmsKeyId` is still encrypted, as on AWS: under the
+/// region's AWS-managed `aws/secretsmanager` key.
 #[tokio::test]
-async fn secretsmanager_without_kms_key_does_not_record_usage() {
+async fn secretsmanager_without_kms_key_uses_the_aws_managed_key() {
     let server = TestServer::start().await;
     let secrets = server.secretsmanager_client().await;
+    let kms = server.kms_client().await;
     let http = reqwest::Client::new();
 
     secrets
         .create_secret()
-        .name("plaintext-secret")
+        .name("default-key-secret")
         .secret_string("nope")
         .send()
         .await
         .unwrap();
 
+    let managed = kms
+        .describe_key()
+        .key_id("alias/aws/secretsmanager")
+        .send()
+        .await
+        .unwrap()
+        .key_metadata
+        .unwrap()
+        .arn
+        .unwrap();
     let usage: serde_json::Value = http
         .get(format!("{}/_fakecloud/kms/usage", server.endpoint()))
         .send()
@@ -97,9 +110,10 @@ async fn secretsmanager_without_kms_key_does_not_record_usage() {
         .unwrap();
     let records = usage["records"].as_array().expect("records array");
     assert!(
-        !records
-            .iter()
-            .any(|r| r["servicePrincipal"].as_str() == Some("secretsmanager.amazonaws.com")),
-        "secret without KmsKeyId must not trigger KMS calls, got: {records:?}"
+        records.iter().any(|r| r["servicePrincipal"].as_str()
+            == Some("secretsmanager.amazonaws.com")
+            && r["operation"] == "GenerateDataKey"
+            && r["keyArn"].as_str() == Some(managed.as_str())),
+        "a secret without KmsKeyId is sealed under aws/secretsmanager, got: {records:?}"
     );
 }

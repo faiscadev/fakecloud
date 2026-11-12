@@ -450,3 +450,98 @@ async fn glob_artifacts_upload_to_s3() {
         "non-matching file must not be uploaded as an artifact"
     );
 }
+
+/// A `SECRETS_MANAGER` / `PARAMETER_STORE` variable naming nothing fails the
+/// build in `DOWNLOAD_SOURCE` after provisioning, with the phase sequence and
+/// contexts recorded from real CodeBuild
+/// (`fakecloud-codebuild/tests/fixtures/env-var-resolution-failures.json`),
+/// instead of running the commands with the variable empty.
+#[tokio::test]
+async fn unresolvable_env_vars_fail_download_source() {
+    if !require_docker_or_skip("unresolvable_env_vars_fail_download_source") {
+        return;
+    }
+    let s = TestServer::start().await;
+    let cb = aws_sdk_codebuild::Client::new(&s.aws_config().await);
+    create_project(
+        &cb,
+        "e2e-env",
+        "version: 0.2\nphases:\n  build:\n    commands:\n      - echo hi\n",
+    )
+    .await;
+
+    for (ty, value, status_code, message) in [
+        (
+            aws_sdk_codebuild::types::EnvironmentVariableType::SecretsManager,
+            "fc-does-not-exist-secret",
+            "Secrets Manager Error",
+            "ResourceNotFoundException: Secrets Manager can't find the specified secret.",
+        ),
+        (
+            aws_sdk_codebuild::types::EnvironmentVariableType::ParameterStore,
+            "/fc/does-not-exist",
+            "Decrypted Variables Error",
+            "parameter does not exist: /fc/does-not-exist",
+        ),
+    ] {
+        let start = cb
+            .start_build()
+            .project_name("e2e-env")
+            .environment_variables_override(
+                aws_sdk_codebuild::types::EnvironmentVariable::builder()
+                    .name("V")
+                    .value(value)
+                    .r#type(ty)
+                    .build()
+                    .unwrap(),
+            )
+            .send()
+            .await
+            .expect("start build");
+        let build_id = start.build_value().unwrap().id().unwrap().to_string();
+        let build = wait_complete(&cb, &build_id).await;
+        assert_eq!(build.build_status(), Some(&StatusType::Failed));
+        // The raw phases, so a missing `contexts` key is told apart from an
+        // empty one: the recorded objects, timestamps aside.
+        let raw: serde_json::Value = reqwest::Client::new()
+            .post(s.endpoint())
+            .header("x-amz-target", "CodeBuild_20161006.BatchGetBuilds")
+            .header("content-type", "application/x-amz-json-1.1")
+            .body(serde_json::json!({ "ids": [build_id] }).to_string())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let build = &raw["builds"][0];
+        assert_eq!(build["buildStatus"], "FAILED");
+        assert_eq!(build["currentPhase"], "COMPLETED");
+        let phases: Vec<serde_json::Value> = build["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                let mut p = p.as_object().unwrap().clone();
+                p.retain(|k, _| matches!(k.as_str(), "phaseType" | "phaseStatus" | "contexts"));
+                serde_json::Value::Object(p)
+            })
+            .collect();
+        let empty = serde_json::json!([{ "statusCode": "", "message": "" }]);
+        assert_eq!(
+            serde_json::Value::Array(phases),
+            serde_json::json!([
+                { "phaseType": "SUBMITTED", "phaseStatus": "SUCCEEDED" },
+                { "phaseType": "QUEUED", "phaseStatus": "SUCCEEDED" },
+                { "phaseType": "PROVISIONING", "phaseStatus": "SUCCEEDED", "contexts": empty },
+                {
+                    "phaseType": "DOWNLOAD_SOURCE",
+                    "phaseStatus": "FAILED",
+                    "contexts": [{ "statusCode": status_code, "message": message }],
+                },
+                { "phaseType": "FINALIZING", "phaseStatus": "SUCCEEDED", "contexts": empty },
+                { "phaseType": "COMPLETED" },
+            ])
+        );
+    }
+}

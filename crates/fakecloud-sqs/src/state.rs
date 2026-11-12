@@ -47,6 +47,80 @@ pub struct SqsMessage {
     pub created_at: DateTime<Utc>,
     /// FIFO sequence number
     pub sequence_number: Option<String>,
+    /// The ARN of the queue whose SSE encryption context (`aws:sqs:arn`)
+    /// the stored body was sealed with. A message keeps its body when it
+    /// moves to a dead-letter queue or is redriven, so it is decrypted with
+    /// this context, not the current queue's. `None` for a plaintext body or
+    /// one stored before this was recorded (sealed with no context).
+    #[serde(default)]
+    pub sealed_for_queue: Option<String>,
+    /// Whether `sealed_for_queue` records the body's seal: true for every
+    /// message stored now, false (the default) for one restored from a
+    /// snapshot taken before the seal was recorded, whose body was sealed by
+    /// the queue holding it if that queue encrypts.
+    #[serde(default)]
+    pub seal_recorded: bool,
+}
+
+impl SqsMessage {
+    /// The queue ARN whose encryption context opens the stored body, for a
+    /// message now held by `holder_arn`.
+    pub fn sealing_queue<'a>(&'a self, holder_arn: &'a str) -> &'a str {
+        self.sealed_for_queue.as_deref().unwrap_or(holder_arn)
+    }
+
+    /// Whether the stored body is a ciphertext to open on the way out. A
+    /// body is sealed by the queue it was sent to and keeps that seal when
+    /// it moves (dead-letter queue, redrive), so this follows the message,
+    /// not the queue holding it now: an encrypted queue's message in an
+    /// unencrypted dead-letter queue is still decrypted, and a plaintext
+    /// message in an encrypted one is not (a body that happens to be a KMS
+    /// ciphertext the sender made is delivered as sent). A message stored
+    /// before the seal was recorded falls back to its holder's encryption
+    /// (`holder_encrypted`).
+    pub fn body_is_sealed(&self, holder_encrypted: bool) -> bool {
+        self.sealed_for_queue.is_some() || (!self.seal_recorded && holder_encrypted)
+    }
+
+    /// Record the seal of a message restored from a snapshot taken before
+    /// messages recorded their own (`seal_recorded` false): its body was
+    /// sealed by the queue holding it (`holder_arn`) if that queue encrypts
+    /// (`holder_encrypted`), so that queue becomes its sealing queue. Done
+    /// on restore, before the message can move: once it is in an unencrypted
+    /// dead-letter queue its holder no longer says how it was sealed.
+    pub fn record_legacy_seal(&mut self, holder_arn: &str, holder_encrypted: bool) {
+        if self.seal_recorded {
+            return;
+        }
+        if holder_encrypted && self.sealed_for_queue.is_none() {
+            self.sealed_for_queue = Some(holder_arn.to_string());
+        }
+        self.seal_recorded = true;
+    }
+}
+
+/// Whether a queue with `attributes` encrypts at rest (SSE-KMS, or SSE-SQS,
+/// which messages stored before each recorded its own seal were sealed with
+/// under `alias/aws/sqs`).
+pub fn queue_encrypts_at_rest(attributes: &BTreeMap<String, String>) -> bool {
+    attributes
+        .get("KmsMasterKeyId")
+        .is_some_and(|k| !k.is_empty())
+        || attributes.get("SqsManagedSseEnabled").map(String::as_str) == Some("true")
+}
+
+impl SqsState {
+    /// Record the seal of every message restored from an older snapshot
+    /// (see [`SqsMessage::record_legacy_seal`]).
+    fn record_legacy_seals(&mut self) {
+        for queue in self.queues.values_mut() {
+            let encrypted = queue_encrypts_at_rest(&queue.attributes);
+            let arn = queue.arn.clone();
+            for msg in queue.messages.iter_mut().chain(queue.inflight.iter_mut()) {
+                msg.record_legacy_seal(&arn, encrypted);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,11 +360,27 @@ pub fn parse_sqs_snapshot(bytes: &[u8]) -> Result<SqsSnapshot, serde_json::Error
             state: None,
         });
     }
-    if schema_version == SQS_SNAPSHOT_SCHEMA_VERSION {
-        return serde_json::from_slice(bytes);
+    let mut snapshot = if schema_version == SQS_SNAPSHOT_SCHEMA_VERSION {
+        serde_json::from_slice(bytes)?
+    } else {
+        migrate_legacy_snapshot(serde_json::from_slice(bytes)?)
+    };
+    if let Some(accounts) = snapshot.accounts.as_mut() {
+        for (_, _, state) in accounts.iter_regional_mut() {
+            state.record_legacy_seals();
+        }
     }
-    let legacy: LegacySqsSnapshot = serde_json::from_slice(bytes)?;
-    Ok(SqsSnapshot {
+    if let Some(state) = snapshot.state.as_mut() {
+        for (_, state) in state.regions_mut() {
+            state.record_legacy_seals();
+        }
+    }
+    Ok(snapshot)
+}
+
+/// A v1 / v2 snapshot as the current schema.
+fn migrate_legacy_snapshot(legacy: LegacySqsSnapshot) -> SqsSnapshot {
+    SqsSnapshot {
         schema_version: SQS_SNAPSHOT_SCHEMA_VERSION,
         accounts: legacy.accounts.map(|a| a.into_regional()),
         state: legacy.state.map(|s| {
@@ -300,7 +390,7 @@ pub fn parse_sqs_snapshot(bytes: &[u8]) -> Result<SqsSnapshot, serde_json::Error
                 &account, &region, &endpoint, s,
             )
         }),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -431,5 +521,129 @@ mod tests {
         let snap = parse_sqs_snapshot(br#"{"schema_version": 99, "accounts": 5}"#).unwrap();
         assert_eq!(snap.schema_version, 99);
         assert!(snap.accounts.is_none());
+    }
+}
+
+#[cfg(test)]
+mod sealing_tests {
+    use super::*;
+
+    fn message(sealed_for_queue: Option<&str>) -> SqsMessage {
+        SqsMessage {
+            message_id: "m".to_string(),
+            receipt_handle: None,
+            md5_of_body: String::new(),
+            body: String::new(),
+            sent_timestamp: 0,
+            attributes: Default::default(),
+            message_attributes: Default::default(),
+            visible_at: None,
+            receive_count: 0,
+            first_received_at: None,
+            message_group_id: None,
+            message_dedup_id: None,
+            created_at: Utc::now(),
+            sequence_number: None,
+            sealed_for_queue: sealed_for_queue.map(str::to_string),
+            seal_recorded: true,
+        }
+    }
+
+    #[test]
+    fn a_body_keeps_its_seal_wherever_it_moves() {
+        let src = "arn:aws:sqs:us-east-1:123456789012:src";
+        // Sealed by an encrypted queue, now in a plain dead-letter queue.
+        assert!(message(Some(src)).body_is_sealed(false));
+        assert_eq!(message(Some(src)).sealing_queue("dlq"), src);
+        // Sent in plaintext: not sealed, even in an encrypted queue (its
+        // body may be a ciphertext the sender made).
+        assert!(!message(None).body_is_sealed(false));
+        assert!(!message(None).body_is_sealed(true));
+        // Restored from before the seal was recorded: its holder sealed it.
+        let mut legacy = message(None);
+        legacy.seal_recorded = false;
+        assert!(legacy.body_is_sealed(true));
+        assert!(!legacy.body_is_sealed(false));
+    }
+
+    fn queue(name: &str, attributes: &[(&str, &str)]) -> SqsQueue {
+        SqsQueue {
+            queue_name: name.to_string(),
+            queue_url: format!("http://localhost:4566/123456789012/{name}"),
+            arn: format!("arn:aws:sqs:us-east-1:123456789012:{name}"),
+            created_at: Utc::now(),
+            messages: VecDeque::new(),
+            inflight: Vec::new(),
+            attributes: attributes
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            is_fifo: false,
+            dedup_cache: BTreeMap::new(),
+            redrive_policy: None,
+            tags: BTreeMap::new(),
+            next_sequence_number: 0,
+            permission_labels: Vec::new(),
+            receipt_handle_map: BTreeMap::new(),
+            receive_attempt_cache: BTreeMap::new(),
+        }
+    }
+
+    /// A message restored from a snapshot taken before messages recorded
+    /// their seal gets its holder as its sealing queue when that queue
+    /// encrypts, so it stays sealed (and is decrypted) once it moves to an
+    /// unencrypted dead-letter queue instead of being delivered as its
+    /// ciphertext.
+    #[test]
+    fn restore_records_the_seal_of_messages_from_older_snapshots() {
+        use fakecloud_core::multi_account::MultiAccountState;
+        let mut accounts: fakecloud_core::multi_account::MultiRegionState<SqsState> =
+            MultiAccountState::new("123456789012", "us-east-1", "http://localhost:4566");
+        let st = accounts.regional_mut("123456789012", "us-east-1");
+        for (name, attrs) in [
+            ("kms", &[("KmsMasterKeyId", "alias/app")][..]),
+            ("sse-sqs", &[("SqsManagedSseEnabled", "true")][..]),
+            ("plain", &[][..]),
+        ] {
+            let mut q = queue(name, attrs);
+            let mut pending = message(None);
+            pending.message_id = format!("{name}-pending");
+            q.messages.push_back(pending);
+            let mut inflight = message(None);
+            inflight.message_id = format!("{name}-inflight");
+            q.inflight.push(inflight);
+            st.queues.insert(q.queue_url.clone(), q);
+        }
+        // Serialize as an older build did: no `seal_recorded` on messages.
+        let mut json = serde_json::to_value(SqsSnapshot {
+            schema_version: SQS_SNAPSHOT_SCHEMA_VERSION,
+            accounts: Some(accounts),
+            state: None,
+        })
+        .unwrap();
+        fn strip(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    map.remove("seal_recorded");
+                    map.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        strip(&mut json);
+
+        let snap = parse_sqs_snapshot(&serde_json::to_vec(&json).unwrap()).unwrap();
+        let accounts = snap.accounts.unwrap();
+        let st = accounts.regional("123456789012", "us-east-1").unwrap();
+        for q in st.queues.values() {
+            let expected = (q.queue_name != "plain").then(|| q.arn.clone());
+            for m in q.messages.iter().chain(q.inflight.iter()) {
+                assert!(m.seal_recorded, "{}", m.message_id);
+                assert_eq!(m.sealed_for_queue, expected, "{}", m.message_id);
+                // Its seal now follows it into an unencrypted queue.
+                assert_eq!(m.body_is_sealed(false), expected.is_some());
+            }
+        }
     }
 }

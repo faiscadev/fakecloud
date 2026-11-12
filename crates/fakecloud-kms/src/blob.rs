@@ -107,6 +107,26 @@ pub struct Decoded {
     pub plaintext: Vec<u8>,
 }
 
+/// Whether `blob` has the shape of a fakecloud KMS blob (version header and
+/// room for the fixed fields), whether or not it opens.
+pub fn is_envelope(blob: &[u8]) -> bool {
+    blob.len() >= VERSION_HEADER.len() + 8 + 12 + 4 + 16
+        && blob[..VERSION_HEADER.len()] == VERSION_HEADER
+}
+
+/// The key reference in a fakecloud KMS blob's header (a key id, or the key
+/// ARN when the key lives in another account than the one that sealed it),
+/// read without opening the blob. `None` when `blob` is not an envelope.
+pub fn embedded_key_id(blob: &[u8]) -> Option<String> {
+    if !is_envelope(blob) {
+        return None;
+    }
+    let start = VERSION_HEADER.len();
+    let len = u64::from_be_bytes(blob.get(start..start + 8)?.try_into().ok()?);
+    let end = (start + 8).checked_add(usize::try_from(len).ok()?)?;
+    String::from_utf8(blob.get(start + 8..end)?.to_vec()).ok()
+}
+
 /// Decode an AWS-shaped fakecloud KMS blob back to its plaintext.
 /// Returns `None` if the bytes don't carry the version header or fail
 /// any structural check (including AEAD verification under the supplied

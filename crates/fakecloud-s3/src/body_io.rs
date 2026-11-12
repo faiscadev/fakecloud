@@ -45,6 +45,10 @@ struct KmsSource {
     hook: Option<std::sync::Arc<dyn fakecloud_core::delivery::KmsHook>>,
     owner_account: String,
     bucket: String,
+    /// The object's key and whether it uses an S3 Bucket Key: together they
+    /// name its encryption context.
+    object_key: String,
+    bucket_key: bool,
     key_id: Option<String>,
 }
 
@@ -64,6 +68,8 @@ impl ObjectReader {
                     .and_then(|e| e.kms_hook.clone()),
                 owner_account: owner_account.to_string(),
                 bucket: bucket.to_string(),
+                object_key: obj.key.clone(),
+                bucket_key: obj.bucket_key_enabled == Some(true),
                 key_id: obj.sse_kms_key_id.clone(),
             });
         Ok(Self {
@@ -93,13 +99,16 @@ impl ObjectReader {
                 kms.hook.as_ref(),
                 &kms.owner_account,
                 &kms.bucket,
+                &kms.object_key,
+                kms.bucket_key,
                 &stored,
                 kms.key_id.as_deref(),
+                None,
             )
             .map_err(|reason| ObjectReadError::Kms {
                 location: self.location,
                 key_id: kms.key_id,
-                reason,
+                reason: reason.to_string(),
             }),
         }
     }

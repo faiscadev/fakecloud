@@ -35,7 +35,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -49,6 +49,7 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        Self::authorize_direct_key_use(req, key, "kms:Encrypt", &body["EncryptionContext"], &[])?;
         require_usable_key_state(key)?;
 
         // Encrypt is only valid for ENCRYPT_DECRYPT keys. A SIGN_VERIFY /
@@ -207,16 +208,24 @@ impl KmsService {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "NotFoundException",
-                        format!("Key '{caller_key_id}' does not exist"),
+                        crate::hook::not_found_message(&req.account_id, &req.region, caller_key_id),
                     ));
                 }
             }
         }
 
-        // Gate Decrypt on the source key's lifecycle state. AWS rejects
-        // Decrypt against a key in any state other than `Enabled`.
+        // Gate Decrypt on the source key's policy (AWS-managed keys) and
+        // lifecycle state. AWS rejects Decrypt against a key in any state
+        // other than `Enabled`.
         if let Some(key_id_only) = decoded.source_arn.rsplit('/').next() {
             if let Some(source_key) = state.keys.get(key_id_only) {
+                Self::authorize_direct_key_use(
+                    req,
+                    source_key,
+                    "kms:Decrypt",
+                    &body["EncryptionContext"],
+                    &[],
+                )?;
                 require_usable_key_state(source_key)?;
             }
         }
@@ -296,7 +305,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{dest_key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, dest_key_id),
                 )
             })?;
 
@@ -307,6 +316,35 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        // ReEncrypt is authorized as `kms:ReEncryptFrom` on the source key
+        // and `kms:ReEncryptTo` on the destination key.
+        let source_key = decoded
+            .source_arn
+            .rsplit('/')
+            .next()
+            .and_then(|id| state.keys.get(id));
+        let same_key = if source_key.is_some_and(|k| k.key_id == dest_key.key_id) {
+            "true"
+        } else {
+            "false"
+        };
+        let same = [("kms:ReEncryptOnSameKey", same_key)];
+        if let Some(source_key) = source_key {
+            Self::authorize_direct_key_use(
+                req,
+                source_key,
+                "kms:ReEncryptFrom",
+                &body["SourceEncryptionContext"],
+                &same,
+            )?;
+        }
+        Self::authorize_direct_key_use(
+            req,
+            dest_key,
+            "kms:ReEncryptTo",
+            &body["DestinationEncryptionContext"],
+            &same,
+        )?;
         require_usable_key_state(dest_key)?;
 
         // The destination CMK must be an encryption key. Re-encrypting into a
@@ -429,7 +467,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -443,6 +481,13 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        Self::authorize_direct_key_use(
+            req,
+            key,
+            "kms:GenerateDataKey",
+            &body["EncryptionContext"],
+            &[],
+        )?;
         require_usable_key_state(key)?;
         require_key_usage_encrypt_decrypt(key)?;
 
@@ -490,7 +535,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -504,6 +549,13 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        Self::authorize_direct_key_use(
+            req,
+            key,
+            "kms:GenerateDataKeyWithoutPlaintext",
+            &body["EncryptionContext"],
+            &[],
+        )?;
         require_usable_key_state(key)?;
         require_key_usage_encrypt_decrypt(key)?;
 
@@ -588,7 +640,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -602,6 +654,7 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        Self::authorize_direct_key_use(req, key, "kms:Sign", &Value::Null, &[])?;
         require_usable_key_state(key)?;
 
         // Validate key usage
@@ -709,7 +762,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -724,6 +777,7 @@ impl KmsService {
             )
         })?;
 
+        Self::authorize_direct_key_use(req, key, "kms:Verify", &Value::Null, &[])?;
         require_usable_key_state(key)?;
         validate_key_usage_signing(key, &resolved)?;
         validate_signing_algorithm(key, signing_algorithm)?;
@@ -796,7 +850,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -855,7 +909,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -870,6 +924,7 @@ impl KmsService {
             )
         })?;
 
+        Self::authorize_direct_key_use(req, key, "kms:GenerateMac", &Value::Null, &[])?;
         require_usable_key_state(key)?;
 
         // Validate key usage
@@ -952,7 +1007,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -967,6 +1022,7 @@ impl KmsService {
             )
         })?;
 
+        Self::authorize_direct_key_use(req, key, "kms:VerifyMac", &Value::Null, &[])?;
         require_usable_key_state(key)?;
 
         // Validate key usage
@@ -1072,7 +1128,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -1086,6 +1142,13 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        Self::authorize_direct_key_use(
+            req,
+            key,
+            "kms:GenerateDataKeyPair",
+            &body["EncryptionContext"],
+            &[],
+        )?;
         require_usable_key_state(key)?;
         require_key_usage_encrypt_decrypt(key)?;
 
@@ -1135,7 +1198,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -1149,6 +1212,13 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        Self::authorize_direct_key_use(
+            req,
+            key,
+            "kms:GenerateDataKeyPairWithoutPlaintext",
+            &body["EncryptionContext"],
+            &[],
+        )?;
         require_usable_key_state(key)?;
         require_key_usage_encrypt_decrypt(key)?;
 
@@ -1204,7 +1274,7 @@ impl KmsService {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotFoundException",
-                    format!("Key '{key_id}' does not exist"),
+                    crate::hook::not_found_message(&req.account_id, &req.region, &key_id),
                 )
             })?;
 
@@ -1219,6 +1289,7 @@ impl KmsService {
             )
         })?;
 
+        Self::authorize_direct_key_use(req, key, "kms:DeriveSharedSecret", &Value::Null, &[])?;
         require_usable_key_state(key)?;
 
         // Key must be asymmetric (KEY_AGREEMENT usage)

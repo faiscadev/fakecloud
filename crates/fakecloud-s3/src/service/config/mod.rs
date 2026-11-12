@@ -874,7 +874,7 @@ impl S3Service {
         // outside the write lock, so the encrypt/decrypt hooks (which
         // re-enter KMS state) don't deadlock against an outstanding
         // S3 write lock.
-        let (existing_bytes, old_alg, old_kms_key_id, body_handle, bucket_region) = {
+        let (existing_bytes, old_alg, old_kms_key_id, body_handle, bucket_region, bucket_key) = {
             let accts = self.state.read();
             let __empty = crate::state::S3State::new(account_id, "us-east-1");
             let state = accts.get(account_id).unwrap_or(&__empty);
@@ -904,6 +904,7 @@ impl S3Service {
                 obj.sse_kms_key_id.clone(),
                 obj.body.clone(),
                 b.region.clone(),
+                obj.bucket_key_enabled == Some(true),
             )
         };
 
@@ -915,6 +916,8 @@ impl S3Service {
                 req,
                 account_id,
                 bucket,
+                key,
+                bucket_key,
                 &existing_bytes,
                 old_kms_key_id.as_deref(),
             )?
@@ -927,6 +930,8 @@ impl S3Service {
                 account_id,
                 &bucket_region,
                 bucket,
+                key,
+                bucket_key,
                 &plaintext,
                 new_kms_key_id.as_deref(),
             )?

@@ -167,7 +167,7 @@ impl SqsLambdaPoller {
         // would re-deliver the same batch and the function would be
         // invoked twice for one message — duplicates that real AWS
         // doesn't produce inside a single visibility window.
-        let (messages, account_id, queue_encrypted) = {
+        let (messages, previous_visibility, hidden_until, account_id, queue_encrypted) = {
             let mut sqs_mas = self.sqs_state.write();
             // The queue lives in the account and region its ARN names.
             let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) else {
@@ -200,6 +200,7 @@ impl SqsLambdaPoller {
                     == Some("true");
 
             let mut batch = Vec::new();
+            let mut previous_visibility = Vec::new();
             let limit = mapping.batch_size.min(10) as usize;
 
             for msg in queue.messages.iter_mut() {
@@ -216,11 +217,12 @@ impl SqsLambdaPoller {
                 // batch may still get filtered out below — the count
                 // is bumped only when delivery actually fails (see the
                 // ack/fail block).
+                previous_visibility.push((msg.message_id.clone(), msg.visible_at));
                 msg.visible_at = Some(visible_at);
                 batch.push(msg.clone());
             }
 
-            (batch, acct, encrypted)
+            (batch, previous_visibility, visible_at, acct, encrypted)
         };
 
         if messages.is_empty() {
@@ -249,34 +251,37 @@ impl SqsLambdaPoller {
         // before delivering the event payload, and the function code
         // sees plaintext. Without this, every consumer on a
         // managed-SSE queue would receive opaque envelope bytes.
-        // Cross-service deliveries (SNS / EventBridge) write plaintext
-        // directly; the helper detects that and passes it through.
-        let messages = if let (true, Some(hook)) = (queue_encrypted, self.kms_hook.as_ref()) {
-            messages
-                .into_iter()
-                .map(|mut msg| {
-                    if !looks_like_fakecloud_envelope(&msg.body) {
-                        return msg;
-                    }
-                    let mut ctx = HashMap::new();
-                    ctx.insert("aws:sqs:arn".to_string(), mapping.queue_arn.clone());
-                    match hook.decrypt(&account_id, &msg.body, "sqs.amazonaws.com", ctx) {
-                        Ok(bytes) => {
-                            msg.body = String::from_utf8_lossy(&bytes).to_string();
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                queue = %mapping.queue_arn,
-                                error = %err,
-                                "SQS->Lambda poller: KMS decrypt failed; delivering opaque body"
-                            );
-                        }
-                    }
-                    msg
-                })
-                .collect::<Vec<_>>()
-        } else {
-            messages
+        // Whether a body is sealed follows the message (it keeps its seal
+        // in a dead-letter queue), not the queue it is polled from.
+        //
+        // The event source mapping reads the queue with ReceiveMessage, and
+        // on AWS a body KMS will not open fails that ReceiveMessage itself
+        // (`KMS.DisabledException` etc.): nothing is received, so no
+        // message of the poll becomes in flight, none reaches the function
+        // (not even as ciphertext), and no receive count moves -- the
+        // message never approaches `maxReceiveCount` and stays in the queue
+        // until KMS opens it again. The poll is undone the same way here:
+        // the batch's visibility goes back to what it was before the poll.
+        let messages = match open_batch(
+            self.kms_hook.as_deref(),
+            &account_id,
+            &mapping.queue_arn,
+            queue_encrypted,
+            messages,
+        ) {
+            Ok(messages) => messages,
+            Err(err) => {
+                tracing::warn!(
+                    queue = %mapping.queue_arn,
+                    error = %err,
+                    "SQS->Lambda poller: KMS refused a message body; nothing received"
+                );
+                let mut sqs_mas = self.sqs_state.write();
+                if let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) {
+                    undo_poll(sqs, &mapping.queue_arn, &previous_visibility, hidden_until);
+                }
+                return;
+            }
         };
 
         // Build SQS-shaped event records, filter, then mark visible-at
@@ -422,6 +427,74 @@ impl SqsLambdaPoller {
             timestamp: now,
             source: "aws:sqs".to_string(),
         });
+    }
+}
+
+/// The polled `messages` of `queue_arn` with their at-rest bodies opened,
+/// or the KMS failure of the first sealed body KMS will not open: like the
+/// ReceiveMessage the poll stands for, one such body fails the whole poll.
+fn open_batch(
+    hook: Option<&dyn KmsHook>,
+    account_id: &str,
+    queue_arn: &str,
+    queue_encrypted: bool,
+    messages: Vec<fakecloud_sqs::SqsMessage>,
+) -> Result<Vec<fakecloud_sqs::SqsMessage>, fakecloud_core::delivery::KmsError> {
+    messages
+        .into_iter()
+        .map(|mut msg| {
+            if !msg.body_is_sealed(queue_encrypted) {
+                return Ok(msg);
+            }
+            // SSE-SQS: sealed with SQS's own key, opened without KMS.
+            if let Some(plaintext) =
+                fakecloud_sqs::sse_sqs::open(msg.sealing_queue(queue_arn), &msg.body)
+            {
+                msg.body = plaintext;
+                return Ok(msg);
+            }
+            let Some(hook) = hook else {
+                return Ok(msg);
+            };
+            if !looks_like_fakecloud_envelope(&msg.body) {
+                return Ok(msg);
+            }
+            let mut ctx = HashMap::new();
+            ctx.insert(
+                "aws:sqs:arn".to_string(),
+                msg.sealing_queue(queue_arn).to_string(),
+            );
+            let bytes = hook.decrypt(
+                account_id,
+                &msg.body,
+                fakecloud_core::delivery::KmsCaller::via("sqs.amazonaws.com"),
+                ctx,
+            )?;
+            msg.body = String::from_utf8_lossy(&bytes).to_string();
+            Ok(msg)
+        })
+        .collect()
+}
+
+/// Undo a poll that received nothing: each polled message still hidden by
+/// it (`hidden_until`) gets back the visibility it had before the poll
+/// (`previous`). Receive counts were never touched.
+fn undo_poll(
+    sqs: &mut fakecloud_sqs::SqsState,
+    queue_arn: &str,
+    previous: &[(String, Option<DateTime<Utc>>)],
+    hidden_until: DateTime<Utc>,
+) {
+    let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == queue_arn) else {
+        return;
+    };
+    for msg in queue.messages.iter_mut() {
+        if msg.visible_at != Some(hidden_until) {
+            continue;
+        }
+        if let Some((_, before)) = previous.iter().find(|(id, _)| *id == msg.message_id) {
+            msg.visible_at = *before;
+        }
     }
 }
 
@@ -715,6 +788,119 @@ mod tests {
         );
     }
 
+    /// A KMS hook whose key is disabled: no sealed body opens.
+    struct DisabledKeyKms;
+    impl KmsHook for DisabledKeyKms {
+        fn encrypt(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            _key_id: &str,
+            _plaintext: &[u8],
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
+            _ctx: HashMap<String, String>,
+        ) -> Result<String, fakecloud_core::delivery::KmsError> {
+            unreachable!()
+        }
+        fn decrypt(
+            &self,
+            _account_id: &str,
+            _ciphertext_b64: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
+            _ctx: HashMap<String, String>,
+        ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::Disabled,
+                "key is disabled",
+            ))
+        }
+        fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+            looks_like_fakecloud_envelope(stored)
+        }
+    }
+
+    /// On AWS a body KMS will not open fails the mapping's ReceiveMessage:
+    /// nothing is received, so the function is not invoked (with the
+    /// ciphertext or with the other messages of the poll), no receive count
+    /// moves (the message never reaches `maxReceiveCount`), and no message
+    /// is left in flight.
+    /// An SSE-SQS body (sealed with SQS's own key) reaches the function as
+    /// plaintext, with no KMS hook involved at all.
+    #[tokio::test]
+    async fn sse_sqs_bodies_reach_the_function_in_plaintext_without_kms() {
+        let (poller, sqs_state, _lambda_state) = build_states();
+        {
+            let mut sqs = sqs_state.write();
+            let queue = sqs
+                .default_regional_mut()
+                .queues
+                .values_mut()
+                .next()
+                .unwrap();
+            let arn = queue.arn.clone();
+            let msg = &mut queue.messages[0];
+            msg.body = fakecloud_sqs::sse_sqs::seal(&arn, "hello");
+            msg.sealed_for_queue = Some(arn);
+        }
+        let invocations = Arc::new(Mutex::new(Vec::<String>::new()));
+        let delivery: Arc<dyn LambdaDelivery> = Arc::new(RecordingLambda {
+            invocations: invocations.clone(),
+        });
+        let poller = poller.with_lambda_delivery(delivery);
+        poller.poll(&mut BatchingState::default()).await;
+        let invocations = invocations.lock().unwrap();
+        assert_eq!(invocations.len(), 1);
+        let event: serde_json::Value = serde_json::from_str(&invocations[0]).unwrap();
+        assert_eq!(event["Records"][0]["body"], "hello");
+    }
+
+    #[tokio::test]
+    async fn a_body_kms_refuses_fails_the_whole_poll_and_counts_nothing() {
+        let (poller, sqs_state, _lambda_state) = build_states();
+        {
+            let mut sqs = sqs_state.write();
+            let queue = sqs
+                .default_regional_mut()
+                .queues
+                .values_mut()
+                .next()
+                .unwrap();
+            let mut sealed = queue.messages[0].clone();
+            sealed.message_id = "msg-sealed".to_string();
+            sealed.body = "fakecloud-kms:sealed".to_string();
+            sealed.sealed_for_queue = Some(queue.arn.clone());
+            queue.messages.push_back(sealed);
+            queue.redrive_policy = Some(fakecloud_sqs::RedrivePolicy {
+                dead_letter_target_arn: format!("arn:aws:sqs:{REGION}:{ACCOUNT}:dlq"),
+                max_receive_count: 1,
+            });
+        }
+        let invocations = Arc::new(Mutex::new(Vec::<String>::new()));
+        let delivery: Arc<dyn LambdaDelivery> = Arc::new(RecordingLambda {
+            invocations: invocations.clone(),
+        });
+        let poller = poller
+            .with_lambda_delivery(delivery)
+            .with_kms_hook(Arc::new(DisabledKeyKms));
+        for _ in 0..3 {
+            poller.poll(&mut BatchingState::default()).await;
+        }
+        assert!(invocations.lock().unwrap().is_empty());
+        let sqs = sqs_state.read();
+        let queue = sqs
+            .default_regional()
+            .unwrap()
+            .queues
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(queue.messages.len(), 2, "both messages stay in the queue");
+        for msg in &queue.messages {
+            assert_eq!(msg.receive_count, 0, "{}", msg.message_id);
+            assert_eq!(msg.visible_at, None, "{} is not in flight", msg.message_id);
+        }
+    }
+
     #[test]
     fn exhausted_failed_message_moves_to_the_dead_letter_queue() {
         let (_, sqs_state, _) = build_states();
@@ -785,6 +971,8 @@ mod tests {
                 message_dedup_id: None,
                 created_at: Utc::now(),
                 sequence_number: None,
+                sealed_for_queue: None,
+                seal_recorded: true,
             }]),
             inflight: Vec::new(),
             attributes: attrs,
@@ -897,6 +1085,8 @@ mod tests {
                 message_dedup_id: None,
                 created_at: Utc::now(),
                 sequence_number: None,
+                sealed_for_queue: None,
+                seal_recorded: true,
             });
         }
 

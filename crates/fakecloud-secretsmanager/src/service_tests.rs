@@ -2242,12 +2242,19 @@ fn test_check_version_idempotency() {
             secret_binary: None,
             stages: vec!["AWSCURRENT".to_string()],
             created_at: Utc::now(),
+            kms_key_ids: Vec::new(),
         },
     );
 
     // Not found
     assert!(matches!(
-        check_secret_version_idempotency(&versions, "v2", None, &Some("x".to_string()), &None),
+        check_secret_version_idempotency(
+            &versions,
+            "v2",
+            (None, None),
+            &Some("x".to_string()),
+            &None
+        ),
         VersionIdempotency::NotFound
     ));
 
@@ -2256,7 +2263,7 @@ fn test_check_version_idempotency() {
         check_secret_version_idempotency(
             &versions,
             "v1",
-            Some("hello".to_string()),
+            (Some("hello".to_string()), None),
             &Some("hello".to_string()),
             &None
         ),
@@ -2268,7 +2275,7 @@ fn test_check_version_idempotency() {
         check_secret_version_idempotency(
             &versions,
             "v1",
-            Some("hello".to_string()),
+            (Some("hello".to_string()), None),
             &Some("different".to_string()),
             &None
         ),
@@ -2324,6 +2331,7 @@ fn test_filter_name_prefix() {
         rotation_lambda_arn: None,
         rotation_rules: None,
         last_rotated_at: None,
+        rotation_failed_at: None,
         resource_policy: None,
         replica_regions: Vec::new(),
         replica_settings: BTreeMap::new(),
@@ -2353,6 +2361,7 @@ fn test_filter_tag_value() {
         rotation_lambda_arn: None,
         rotation_rules: None,
         last_rotated_at: None,
+        rotation_failed_at: None,
         resource_policy: None,
         replica_regions: Vec::new(),
         replica_settings: BTreeMap::new(),
@@ -2382,6 +2391,7 @@ fn test_filter_all_searches_name_desc_tags() {
         rotation_lambda_arn: None,
         rotation_rules: None,
         last_rotated_at: None,
+        rotation_failed_at: None,
         resource_policy: None,
         replica_regions: Vec::new(),
         replica_settings: BTreeMap::new(),
@@ -2644,23 +2654,26 @@ impl fakecloud_core::delivery::KmsHook for PrefixKmsHook {
         _region: &str,
         _key_id: &str,
         plaintext: &[u8],
-        _service_principal: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _ctx: std::collections::HashMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
         Ok(format!("ENC:{}", String::from_utf8_lossy(plaintext)))
     }
     fn decrypt(
         &self,
         _account_id: &str,
         ciphertext_b64: &str,
-        _service_principal: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
         _ctx: std::collections::HashMap<String, String>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
         Ok(ciphertext_b64
             .strip_prefix("ENC:")
             .unwrap_or(ciphertext_b64)
             .as_bytes()
             .to_vec())
+    }
+    fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+        stored.starts_with("ENC:")
     }
 }
 
@@ -3522,6 +3535,7 @@ async fn list_secret_version_ids_honors_include_deprecated() {
                 secret_binary: None,
                 stages: vec![],
                 created_at: Utc::now(),
+                kms_key_ids: Vec::new(),
             },
         );
     }
@@ -3688,7 +3702,7 @@ async fn read_secret_value_resolves_names_in_the_caller_region_and_arns_in_their
     )
     .await;
     let read = |region: &str, id: &str| {
-        crate::value::read_secret_value(&state, None, "123456789012", region, id, None, None)
+        crate::value::read_secret_value(&state, None, "123456789012", region, id, None, None, None)
     };
     assert_eq!(
         read("us-east-1", "app").unwrap().secret_string.as_deref(),
@@ -3991,6 +4005,7 @@ fn test_secret(name: &str) -> Secret {
         rotation_lambda_arn: None,
         rotation_rules: None,
         last_rotated_at: None,
+        rotation_failed_at: None,
         resource_policy: None,
         replica_regions: Vec::new(),
         replica_settings: BTreeMap::new(),
@@ -4105,4 +4120,473 @@ async fn rotation_runs_every_step_when_each_succeeds() {
     };
     run_rotation_steps(&bus, &inv).await;
     assert_eq!(lambda.steps.lock().len(), 4);
+}
+
+/// A service over real KMS state, and that state.
+fn with_real_kms() -> (
+    SecretsManagerService,
+    fakecloud_kms::SharedKmsState,
+    SharedSecretsManagerState,
+) {
+    let state = make_state();
+    let (kms, hook) = fakecloud_kms::test_support::kms_hook("123456789012");
+    (
+        SecretsManagerService::new(state.clone()).with_kms_hook(hook),
+        kms,
+        state,
+    )
+}
+
+async fn secret_value(svc: &SecretsManagerService, id: &str) -> Value {
+    let req = make_request(
+        "GetSecretValue",
+        &serde_json::json!({ "SecretId": id }).to_string(),
+    );
+    serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap()
+}
+
+/// A secret created without `KmsKeyId` is stored encrypted under the
+/// region's AWS-managed `aws/secretsmanager` key, created on that first use,
+/// and reads back as its plaintext; `DescribeSecret` reports no key.
+#[tokio::test]
+async fn secrets_without_a_key_use_aws_secretsmanager() {
+    let (svc, kms, state) = with_real_kms();
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name":"plain","SecretString":"hunter2"}"#,
+    ))
+    .await
+    .unwrap();
+    let stored = {
+        let accounts = state.read();
+        let s = &accounts.default_regional().unwrap().secrets["plain"];
+        s.versions[s.current_version_id.as_ref().unwrap()]
+            .secret_string
+            .clone()
+            .unwrap()
+    };
+    assert_ne!(stored, "hunter2");
+    assert!(kms
+        .read()
+        .get("123456789012")
+        .unwrap()
+        .alias("us-east-1", "alias/aws/secretsmanager")
+        .is_some());
+    assert_eq!(secret_value(&svc, "plain").await["SecretString"], "hunter2");
+    let req = make_request("DescribeSecret", r#"{"SecretId":"plain"}"#);
+    let described: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
+    assert!(described.get("KmsKeyId").is_none(), "{described}");
+}
+
+/// Secrets stored in plaintext by an older fakecloud (no key, or before the
+/// hook existed) still read back.
+#[tokio::test]
+async fn plaintext_secrets_from_old_snapshots_still_read() {
+    let (svc, _kms, state) = with_real_kms();
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name":"old","SecretString":"placeholder"}"#,
+    ))
+    .await
+    .unwrap();
+    {
+        let mut accounts = state.write();
+        let s = accounts
+            .default_regional_mut()
+            .secrets
+            .get_mut("old")
+            .unwrap();
+        let vid = s.current_version_id.clone().unwrap();
+        s.versions.get_mut(&vid).unwrap().secret_string = Some("from-old-snapshot".to_string());
+    }
+    assert_eq!(
+        secret_value(&svc, "old").await["SecretString"],
+        "from-old-snapshot"
+    );
+}
+
+/// Rotation stages the current value as a new version; each version's
+/// ciphertext is bound to its own version id, so the copy is re-sealed and
+/// still reads back.
+#[tokio::test]
+async fn rotated_versions_are_resealed() {
+    let (svc, _kms, _state) = with_real_kms();
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name":"rot","SecretString":"value-1"}"#,
+    ))
+    .await
+    .unwrap();
+    let before = secret_value(&svc, "rot").await;
+    svc.handle(make_request(
+        "RotateSecret",
+        r#"{"SecretId":"rot","RotationRules":{"AutomaticallyAfterDays":30}}"#,
+    ))
+    .await
+    .unwrap();
+    let after = secret_value(&svc, "rot").await;
+    assert_ne!(after["VersionId"], before["VersionId"]);
+    assert_eq!(after["SecretString"], "value-1");
+}
+
+/// A KMS hook with named keys that can be disabled: a value is sealed as
+/// `ENC:<key>:<plaintext>` and opens only while its key is enabled. A key
+/// starting `alias/missing` does not exist.
+#[derive(Clone, Default)]
+struct KeyedKms {
+    disabled: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
+}
+
+impl KeyedKms {
+    fn disable(&self, key: &str) {
+        self.disabled.lock().insert(key.to_string());
+    }
+
+    fn check(&self, key: &str) -> Result<(), fakecloud_core::delivery::KmsError> {
+        use fakecloud_core::delivery::{KmsError, KmsErrorKind};
+        if key.starts_with("alias/missing") {
+            return Err(KmsError::new(
+                KmsErrorKind::NotFound,
+                format!("{key} is not found."),
+            ));
+        }
+        if self.disabled.lock().contains(key) {
+            return Err(KmsError::new(
+                KmsErrorKind::Disabled,
+                format!("{key} is disabled."),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl fakecloud_core::delivery::KmsHook for KeyedKms {
+    fn encrypt(
+        &self,
+        _account_id: &str,
+        _region: &str,
+        key_id: &str,
+        plaintext: &[u8],
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
+        _ctx: HashMap<String, String>,
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
+        self.check(key_id)?;
+        Ok(format!(
+            "ENC:{key_id}:{}",
+            String::from_utf8_lossy(plaintext)
+        ))
+    }
+    fn decrypt(
+        &self,
+        _account_id: &str,
+        ciphertext_b64: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
+        _ctx: HashMap<String, String>,
+    ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+        let (key, plaintext) = ciphertext_b64
+            .strip_prefix("ENC:")
+            .and_then(|rest| rest.split_once(':'))
+            .expect("a KeyedKms ciphertext");
+        self.check(key)?;
+        Ok(plaintext.as_bytes().to_vec())
+    }
+    fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+        stored.starts_with("ENC:")
+    }
+    fn authorize_key_use(
+        &self,
+        _account_id: &str,
+        _region: &str,
+        key_id: &str,
+        _caller: fakecloud_core::delivery::KmsCaller<'_>,
+        _actions: &[&str],
+        _encryption_context: &HashMap<String, String>,
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
+        self.check(key_id)?;
+        Ok(key_id.to_string())
+    }
+}
+
+async fn call(
+    svc: &SecretsManagerService,
+    action: &str,
+    body: Value,
+) -> Result<Value, AwsServiceError> {
+    let resp = svc.handle(make_request(action, &body.to_string())).await?;
+    Ok(serde_json::from_slice(resp.body.expect_bytes()).unwrap())
+}
+
+/// RotateSecret does its KMS work before changing anything: a value KMS
+/// will not re-seal fails the call with the secret, its rotation
+/// configuration included, as it was.
+#[tokio::test]
+async fn rotate_secret_kms_refusal_changes_nothing() {
+    let state = make_state();
+    let kms = KeyedKms::default();
+    let svc = SecretsManagerService::new(state.clone()).with_kms_hook(Arc::new(kms.clone()));
+    call(
+        &svc,
+        "CreateSecret",
+        json!({"Name": "rot", "SecretString": "v1", "KmsKeyId": "k1"}),
+    )
+    .await
+    .unwrap();
+    let before = state
+        .read()
+        .default_regional()
+        .unwrap()
+        .secrets
+        .get("rot")
+        .unwrap()
+        .clone();
+    kms.disable("k1");
+
+    for body in [
+        // In-place rotation (no Lambda).
+        json!({"SecretId": "rot", "RotationRules": {"AutomaticallyAfterDays": 7}}),
+        // RotateImmediately=false with a Lambda stages a testSecret copy.
+        json!({
+            "SecretId": "rot",
+            "RotationLambdaARN": "arn:aws:lambda:us-east-1:123456789012:function:rotator",
+            "RotationRules": {"AutomaticallyAfterDays": 7},
+            "RotateImmediately": false,
+        }),
+    ] {
+        let err = call(&svc, "RotateSecret", body).await.unwrap_err();
+        assert_eq!(err.code(), "DecryptionFailure");
+        let accounts = state.read();
+        let after = accounts
+            .default_regional()
+            .unwrap()
+            .secrets
+            .get("rot")
+            .unwrap();
+        assert_eq!(after.rotation_enabled, None);
+        assert!(after.rotation_rules.is_none());
+        assert_eq!(after.rotation_lambda_arn, None);
+        assert_eq!(after.last_changed_at, before.last_changed_at);
+        assert_eq!(after.versions.len(), before.versions.len());
+        assert_eq!(after.current_version_id, before.current_version_id);
+    }
+}
+
+/// UpdateSecret with only a KmsKeyId on a secret holding no value yet still
+/// checks the key, refusing one KMS would refuse as CreateSecret does.
+#[tokio::test]
+async fn update_secret_kms_key_is_checked_without_versions() {
+    let state = make_state();
+    let kms = KeyedKms::default();
+    kms.disable("k-off");
+    let svc = SecretsManagerService::new(state.clone()).with_kms_hook(Arc::new(kms));
+    call(&svc, "CreateSecret", json!({"Name": "empty"}))
+        .await
+        .unwrap();
+
+    let err = call(
+        &svc,
+        "UpdateSecret",
+        json!({"SecretId": "empty", "KmsKeyId": "alias/missing-key"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), "InvalidParameterException");
+    assert!(
+        err.message()
+            .starts_with("The operation failed because of an invalid KMS key: "),
+        "{}",
+        err.message()
+    );
+    // The same refusal CreateSecret gives the key.
+    let create_err = call(
+        &svc,
+        "CreateSecret",
+        json!({"Name": "other", "SecretString": "v", "KmsKeyId": "alias/missing-key"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(create_err.code(), err.code());
+    // Identical up to the request id KMS mints per call.
+    let upto_request_id = |m: &str| m.split("; Request ID:").next().unwrap().to_string();
+    assert_eq!(
+        upto_request_id(&create_err.message()),
+        upto_request_id(&err.message())
+    );
+
+    let err = call(
+        &svc,
+        "UpdateSecret",
+        json!({"SecretId": "empty", "KmsKeyId": "k-off"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), "EncryptionFailure");
+    let kms_key_id = |state: &SharedSecretsManagerState| {
+        state
+            .read()
+            .default_regional()
+            .unwrap()
+            .secrets
+            .get("empty")
+            .unwrap()
+            .kms_key_id
+            .clone()
+    };
+    assert_eq!(kms_key_id(&state), None, "a refused key changes nothing");
+
+    call(
+        &svc,
+        "UpdateSecret",
+        json!({"SecretId": "empty", "KmsKeyId": "k1"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(kms_key_id(&state).as_deref(), Some("k1"));
+}
+
+/// Replication holds what a KmsKeyId change keeps readable: once the
+/// staged versions are under a new key, refusing the old one does not fail
+/// the replicas over a version that only holds a custom label (it keeps the
+/// copy the replica already has, or is left out of a new replica). A staged
+/// version that cannot be opened still fails the replica.
+#[tokio::test]
+async fn replicas_follow_the_staged_versions_after_a_key_change() {
+    let state = make_state();
+    let kms = KeyedKms::default();
+    let svc = SecretsManagerService::new(state.clone()).with_kms_hook(Arc::new(kms.clone()));
+    call(
+        &svc,
+        "CreateSecret",
+        json!({"Name": "r", "SecretString": "v1", "KmsKeyId": "k1"}),
+    )
+    .await
+    .unwrap();
+    let custom = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+    call(
+        &svc,
+        "PutSecretValue",
+        json!({
+            "SecretId": "r",
+            "SecretString": "custom",
+            "VersionStages": ["CUSTOM"],
+            "ClientRequestToken": custom,
+        }),
+    )
+    .await
+    .unwrap();
+    call(
+        &svc,
+        "ReplicateSecretToRegions",
+        json!({"SecretId": "r", "AddReplicaRegions": [{"Region": "us-west-2"}]}),
+    )
+    .await
+    .unwrap();
+    call(
+        &svc,
+        "UpdateSecret",
+        json!({"SecretId": "r", "KmsKeyId": "k2"}),
+    )
+    .await
+    .unwrap();
+    kms.disable("k1");
+
+    let status = |state: &SharedSecretsManagerState, region: &str| {
+        state
+            .read()
+            .regional("123456789012", "us-east-1")
+            .unwrap()
+            .secrets
+            .get("r")
+            .unwrap()
+            .replica_settings
+            .get(region)
+            .unwrap()
+            .status
+            .clone()
+    };
+    let replica = |state: &SharedSecretsManagerState, region: &str| {
+        state
+            .read()
+            .regional("123456789012", region)
+            .unwrap()
+            .secrets
+            .get("r")
+            .cloned()
+    };
+
+    // A later change still replicates.
+    call(
+        &svc,
+        "UpdateSecret",
+        json!({"SecretId": "r", "Description": "after"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status(&state, "us-west-2"), "InSync");
+    let west = replica(&state, "us-west-2").unwrap();
+    assert_eq!(west.description.as_deref(), Some("after"));
+    assert_eq!(west.versions.len(), 2, "the replica keeps its custom copy");
+    assert_eq!(west.versions[custom].stages, ["CUSTOM".to_string()]);
+
+    // A new replica holds the staged version only.
+    call(
+        &svc,
+        "ReplicateSecretToRegions",
+        json!({"SecretId": "r", "AddReplicaRegions": [{"Region": "us-east-2"}]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status(&state, "us-east-2"), "InSync");
+    let east2 = replica(&state, "us-east-2").unwrap();
+    assert_eq!(east2.versions.len(), 1);
+    assert!(!east2.versions.contains_key(custom));
+
+    // The staged version's key refused: that fails the replica.
+    kms.disable("k2");
+    call(
+        &svc,
+        "UpdateSecret",
+        json!({"SecretId": "r", "Description": "later"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status(&state, "us-west-2"), "Failed");
+}
+
+/// A GetSecretValue KMS refuses does not count as an access: only a read
+/// that returned the value stamps LastAccessedDate.
+#[tokio::test]
+async fn refused_read_does_not_stamp_last_accessed() {
+    let state = make_state();
+    let kms = KeyedKms::default();
+    let svc = SecretsManagerService::new(state.clone()).with_kms_hook(Arc::new(kms.clone()));
+    call(
+        &svc,
+        "CreateSecret",
+        json!({"Name": "s", "SecretString": "v1", "KmsKeyId": "k1"}),
+    )
+    .await
+    .unwrap();
+    let last_accessed = |state: &SharedSecretsManagerState| {
+        state
+            .read()
+            .default_regional()
+            .unwrap()
+            .secrets
+            .get("s")
+            .unwrap()
+            .last_accessed_at
+    };
+    kms.disable("k1");
+    let err = call(&svc, "GetSecretValue", json!({"SecretId": "s"}))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "DecryptionFailure");
+    assert_eq!(last_accessed(&state), None);
+
+    kms.disabled.lock().clear();
+    call(&svc, "GetSecretValue", json!({"SecretId": "s"}))
+        .await
+        .unwrap();
+    assert!(last_accessed(&state).is_some());
 }

@@ -5368,6 +5368,7 @@ dependencies = [
 name = "fakecloud-e2e"
 version = "0.51.0"
 dependencies = [
+ "aes-gcm",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-acm",
@@ -6033,6 +6034,7 @@ dependencies = [
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
+ "fakecloud-iam",
  "fakecloud-persistence",
  "hmac 0.12.1",
  "http 1.4.0",
@@ -6693,6 +6695,7 @@ dependencies = [
  "fakecloud-aws",
  "fakecloud-core",
  "fakecloud-iam",
+ "fakecloud-kms",
  "fakecloud-persistence",
  "http 1.4.0",
  "parking_lot",
@@ -6773,6 +6776,7 @@ dependencies = [
 name = "fakecloud-ses"
 version = "0.51.0"
 dependencies = [
+ "aes-gcm",
  "async-trait",
  "base64 0.22.1",
  "bytes",
@@ -6847,11 +6851,13 @@ dependencies = [
 name = "fakecloud-sqs"
 version = "0.51.0"
 dependencies = [
+ "aes-gcm",
  "async-trait",
  "base64 0.22.1",
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
+ "fakecloud-kms",
  "fakecloud-persistence",
  "http 1.4.0",
  "md-5 0.10.6",

@@ -3,29 +3,25 @@
 use super::*;
 
 impl SqsService {
-    /// Resolve the effective at-rest encryption key id for a queue.
-    ///
-    /// Real AWS SQS exposes two SSE modes that are mutually exclusive at
-    /// the API level but flow through the same KMS audit trail:
-    ///
-    /// - **SSE-KMS**: customer or AWS-managed CMK supplied via
-    ///   `KmsMasterKeyId`. Wins when set to a non-empty value.
-    /// - **SSE-SQS**: AWS-managed `alias/aws/sqs` key, implicit when
-    ///   `SqsManagedSseEnabled=true` (the default since May 2023). The
-    ///   alias is provisioned on first use by the KMS hook.
-    ///
-    /// Returns `None` when neither attribute selects a key — in that
-    /// case the body is stored as plaintext (matches a queue with
-    /// `SqsManagedSseEnabled=false` and no KMS key).
+    /// The KMS key a queue seals message bodies with: its `KmsMasterKeyId`
+    /// (SSE-KMS). SSE-SQS (`SqsManagedSseEnabled=true`, the default) uses
+    /// SQS-owned keys and never calls KMS: no `aws/sqs` key is created and
+    /// no key policy is consulted, so a service principal can deliver to
+    /// such a queue with no KMS permission (recorded: an SNS topic feeding
+    /// an SSE-SQS queue delivers, and the queue reports no
+    /// `KmsMasterKeyId`). Its bodies are stored as sent.
     pub(super) fn effective_kms_key_id(attributes: &BTreeMap<String, String>) -> Option<String> {
-        if let Some(k) = attributes.get("KmsMasterKeyId") {
-            if !k.is_empty() {
-                return Some(k.clone());
-            }
-        }
-        if attributes.get("SqsManagedSseEnabled").map(String::as_str) == Some("true") {
-            return Some("alias/aws/sqs".to_string());
-        }
-        None
+        attributes
+            .get("KmsMasterKeyId")
+            .filter(|k| !k.is_empty())
+            .cloned()
+    }
+
+    /// Whether a queue encrypts at rest (SSE-KMS or SSE-SQS). Used only for
+    /// messages stored before each recorded its own seal (see
+    /// [`SqsMessage::body_is_sealed`]): those were sealed by the queue
+    /// holding them, SSE-SQS ones under `alias/aws/sqs`.
+    pub(super) fn encrypted_at_rest(attributes: &BTreeMap<String, String>) -> bool {
+        crate::state::queue_encrypts_at_rest(attributes)
     }
 }

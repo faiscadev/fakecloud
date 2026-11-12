@@ -1,5 +1,6 @@
 //! SES receipt rule action polish (X6):
-//! - S3Action with KmsKeyArn encrypts the stored object via KMS.
+//! - S3Action with KmsKeyArn encrypts the stored object client-side, as SES,
+//!   under a customer key whose policy grants SES.
 //! - LambdaAction with InvocationType=RequestResponse invokes synchronously.
 //! - WorkmailAction is parsed, serialized, and recorded in actions executed.
 
@@ -34,7 +35,23 @@ async fn ses_receipt_rule_s3_kms_workmail_lambda_request_response() {
     let http = reqwest::Client::new();
 
     // ── Prerequisites ──
-    let key = kms.create_key().send().await.unwrap();
+    // SES uses a customer managed key only when its policy grants SES (SES
+    // developer guide, "Give SES permission to use your AWS KMS key").
+    let policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:root"}, "Action": "kms:*", "Resource": "*"},
+            {"Effect": "Allow", "Principal": {"Service": "ses.amazonaws.com"},
+             "Action": ["kms:Encrypt", "kms:GenerateDataKey*"], "Resource": "*",
+             "Condition": {"StringEquals": {"aws:SourceAccount": "123456789012"}}}
+        ]
+    });
+    let key = kms
+        .create_key()
+        .policy(policy.to_string())
+        .send()
+        .await
+        .unwrap();
     let key_arn = key.key_metadata.unwrap().arn.unwrap();
 
     s3.create_bucket().bucket("inbound").send().await.unwrap();
@@ -163,22 +180,39 @@ async fn ses_receipt_rule_s3_kms_workmail_lambda_request_response() {
         .send()
         .await
         .unwrap();
+    // Stored client-side encrypted (not SSE-KMS): the envelope is in the object's
+    // metadata, and the account opens it with KMS Decrypt + AES-GCM.
+    assert_eq!(
+        got.server_side_encryption().map(|e| e.as_str()),
+        Some("AES256"),
+        "SES encrypts client-side; the bucket default SSE-S3 applies as to any object"
+    );
+    let meta = got.metadata().cloned().unwrap_or_default();
+    assert_eq!(meta.get("x-amz-wrap-alg").map(String::as_str), Some("kms"));
     let obj_body = got.body.collect().await.unwrap().into_bytes();
-    let s = String::from_utf8_lossy(&obj_body);
-    assert!(
-        s.contains("Hello world"),
-        "S3 object should decrypt transparently on GetObject, got: {s}"
-    );
-    assert_eq!(
-        got.server_side_encryption.unwrap().as_str(),
-        "aws:kms",
-        "SSE algorithm should be aws:kms"
-    );
-    assert_eq!(
-        got.ssekms_key_id.unwrap(),
-        key_arn,
-        "SSE KMS key ID should match"
-    );
+    assert!(!String::from_utf8_lossy(&obj_body).contains("Hello world"));
+    let matdesc: std::collections::HashMap<String, String> =
+        serde_json::from_str(&meta["x-amz-matdesc"]).unwrap();
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut decrypt = kms
+        .decrypt()
+        .ciphertext_blob(aws_sdk_kms::primitives::Blob::new(
+            b64.decode(&meta["x-amz-key-v2"]).unwrap(),
+        ));
+    for (k, v) in &matdesc {
+        decrypt = decrypt.encryption_context(k, v);
+    }
+    let data_key = decrypt.send().await.unwrap();
+    assert_eq!(data_key.key_id(), Some(key_arn.as_str()));
+    use aes_gcm::aead::{Aead, KeyInit};
+    let cipher =
+        aes_gcm::Aes256Gcm::new_from_slice(data_key.plaintext().unwrap().as_ref()).unwrap();
+    let iv = b64.decode(&meta["x-amz-iv"]).unwrap();
+    let mail = cipher
+        .decrypt(aes_gcm::Nonce::from_slice(&iv), obj_body.as_ref())
+        .unwrap();
+    assert!(String::from_utf8_lossy(&mail).contains("Hello world"));
 
     // ── Lambda: the RequestResponse path is exercised inline above.
     // We verify the action type appears in actionsExecuted; whether the

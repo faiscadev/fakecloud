@@ -10,7 +10,7 @@ mod maintenance;
 mod misc;
 mod ops;
 mod parameters;
-pub use parameters::{param_arn, read_parameter_value, ParameterValue};
+pub use parameters::{param_arn, plaintext_parameter_value, read_parameter_value, ParameterValue};
 pub(crate) use patches::default_baseline_os;
 mod patches;
 mod resource_sync;

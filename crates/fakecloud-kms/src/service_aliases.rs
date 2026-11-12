@@ -161,16 +161,6 @@ impl KmsService {
         let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
         let marker = body["Marker"].as_str();
 
-        // Mirror real AWS: every account/region already carries the
-        // AWS-managed service aliases (`alias/aws/<service>`). Provision any
-        // missing ones so the listing — and `data.aws_kms_alias` on top of
-        // it — resolves them even before any KMS operation has touched them.
-        {
-            let mut accounts = self.state.write();
-            let state = accounts.get_or_create(&req.account_id);
-            crate::hook::ensure_default_managed_aliases(state, &req.region);
-        }
-
         let accounts = self.state.read();
         let empty = KmsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -182,8 +172,12 @@ impl KmsService {
             key_id_filter.and_then(|kid| Self::resolve_alias_target(state, &req.region, kid));
 
         // Aliases are regional: list only the request region's, in
-        // AliasName order.
-        let all_aliases: Vec<Value> = state
+        // AliasName order. AWS also lists the predefined AWS-managed aliases
+        // of every account (recorded: `alias/aws/dynamodb`, `alias/aws/rds`,
+        // ...) before their service first uses them, without a target key;
+        // the key exists from its first use (see `crate::aws_managed`). A
+        // KeyId filter only matches aliases with a target.
+        let mut entries: BTreeMap<String, Value> = state
             .aliases_in(&req.region)
             .filter(|a| match (&resolved_filter, key_id_filter) {
                 (Some(r), _) => a.target_key_id == *r,
@@ -196,13 +190,26 @@ impl KmsService {
                     .keys
                     .get(&a.target_key_id)
                     .map_or(a.target_key_id.as_str(), |k| k.key_id.as_str());
-                json!({
-                    "AliasName": a.alias_name,
-                    "AliasArn": a.alias_arn,
-                    "TargetKeyId": target,
-                })
+                (
+                    a.alias_name.clone(),
+                    json!({
+                        "AliasName": a.alias_name,
+                        "AliasArn": a.alias_arn,
+                        "TargetKeyId": target,
+                    }),
+                )
             })
             .collect();
+        if key_id_filter.is_none() {
+            for service in crate::aws_managed::predefined() {
+                let name = format!("alias/aws/{service}");
+                if state.alias(&req.region, &name).is_none() {
+                    let arn = kms_alias_arn(&req.region, &req.account_id, &name);
+                    entries.insert(name.clone(), json!({"AliasName": name, "AliasArn": arn}));
+                }
+            }
+        }
+        let all_aliases: Vec<Value> = entries.into_values().collect();
 
         // Real Limit/Marker pagination (mirrors ListGrants): the marker is the
         // AliasName of the last item on the previous page. all_aliases is in

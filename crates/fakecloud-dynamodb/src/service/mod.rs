@@ -320,19 +320,13 @@ impl DynamoDbService {
         );
         // The key (or alias) lives in the table's region.
         let region = fakecloud_aws::arn::region_of(table_arn).unwrap_or(&self.region);
-        let envelope = match hook.encrypt(
-            account_id,
-            region,
-            key,
-            b"ddb-item",
-            "dynamodb.amazonaws.com",
-            ctx.clone(),
-        ) {
+        let ddb = fakecloud_core::delivery::KmsCaller::via("dynamodb.amazonaws.com");
+        let envelope = match hook.encrypt(account_id, region, key, b"ddb-item", ddb, ctx.clone()) {
             Ok(env) => env,
             Err(_) => return,
         };
         if matches!(operation, TableKmsOp::Read) {
-            let _ = hook.decrypt(account_id, &envelope, "dynamodb.amazonaws.com", ctx);
+            let _ = hook.decrypt(account_id, &envelope, ddb, ctx);
         }
     }
 

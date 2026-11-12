@@ -926,7 +926,14 @@ pub(crate) fn invoke_sqs_send_message(
             )
         })?;
 
-    delivery.send_to_sqs(&queue_arn, &message_body, &HashMap::new());
+    // The state machine sends with its execution role, an identity of the
+    // account.
+    delivery.send_to_sqs(
+        fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+        &queue_arn,
+        &message_body,
+        &HashMap::new(),
+    );
 
     Ok(json!({
         "MessageId": uuid::Uuid::new_v4().to_string(),

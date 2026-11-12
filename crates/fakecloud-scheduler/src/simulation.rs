@@ -201,10 +201,18 @@ mod tests {
         calls: Mutex<Vec<(String, String)>>,
     }
     impl SqsDelivery for Recorder {
-        fn deliver_to_queue(&self, _a: &str, _b: &str, _c: &HashMap<String, String>) {}
+        fn deliver_to_queue(
+            &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
+            _a: &str,
+            _b: &str,
+            _c: &HashMap<String, String>,
+        ) {
+        }
 
         fn try_deliver_to_queue_with_attrs(
             &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
             arn: &str,
             body: &str,
             _a: &HashMap<String, SqsMessageAttribute>,

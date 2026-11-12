@@ -1,0 +1,25 @@
+{
+  "alias": "alias/aws/timestream",
+  "describe_key": {
+    "AWSAccountId": "123456789012",
+    "KeyId": "4e4347ab-3cd1-4ca3-bbdf-6c3c3e4f40a8",
+    "Arn": "arn:aws:kms:us-east-1:123456789012:key/4e4347ab-3cd1-4ca3-bbdf-6c3c3e4f40a8",
+    "CreationDate": "2026-11-11T03:59:26.549000-03:00",
+    "Enabled": true,
+    "Description": "Default key that protects my Timestream data when no other key is defined",
+    "KeyUsage": "ENCRYPT_DECRYPT",
+    "KeyState": "Enabled",
+    "Origin": "AWS_KMS",
+    "KeyManager": "AWS",
+    "CustomerMasterKeySpec": "SYMMETRIC_DEFAULT",
+    "KeySpec": "SYMMETRIC_DEFAULT",
+    "EncryptionAlgorithms": [
+      "SYMMETRIC_DEFAULT"
+    ],
+    "MultiRegion": false
+  },
+  "get_key_policy": {
+    "PolicyName": "default",
+    "Policy": "{\n  \"Version\" : \"2012-10-17\",\n  \"Id\" : \"auto-timestream-1\",\n  \"Statement\" : [ {\n    \"Sid\" : \"Allow access through Amazon Timestream for all principals in the account that are authorized to use Amazon Timestream\",\n    \"Effect\" : \"Allow\",\n    \"Principal\" : {\n      \"AWS\" : \"*\"\n    },\n    \"Action\" : [ \"kms:Encrypt\", \"kms:Decrypt\", \"kms:ReEncrypt*\", \"kms:GenerateDataKey*\", \"kms:CreateGrant\", \"kms:DescribeKey\" ],\n    \"Resource\" : \"*\",\n    \"Condition\" : {\n      \"StringEquals\" : {\n        \"kms:CallerAccount\" : \"123456789012\",\n        \"kms:ViaService\" : \"timestream.us-east-1.amazonaws.com\"\n      }\n    }\n  }, {\n    \"Sid\" : \"Allow direct access to key metadata to the account\",\n    \"Effect\" : \"Allow\",\n    \"Principal\" : {\n      \"AWS\" : \"arn:aws:iam::123456789012:root\"\n    },\n    \"Action\" : [ \"kms:Describe*\", \"kms:Get*\", \"kms:List*\", \"kms:RevokeGrant\" ],\n    \"Resource\" : \"*\"\n  }, {\n    \"Sid\" : \"Allow the Timestream Service to describe the key directly\",\n    \"Effect\" : \"Allow\",\n    \"Principal\" : {\n      \"Service\" : \"timestream.amazonaws.com\"\n    },\n    \"Action\" : [ \"kms:Describe*\", \"kms:Get*\", \"kms:List*\" ],\n    \"Resource\" : \"*\"\n  } ]\n}"
+  }
+}

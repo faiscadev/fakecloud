@@ -1755,6 +1755,7 @@ fn make_service_with_sqs_recorder() -> (
     impl SqsDelivery for RecordingSqsDelivery {
         fn deliver_to_queue(
             &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
             queue_arn: &str,
             message_body: &str,
             _attributes: &HashMap<String, String>,
@@ -4507,4 +4508,228 @@ fn update_archive_pattern_updates_managed_rule_and_archiving() {
         .unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(body["EventCount"], 1);
+}
+
+/// A replay delivers to every target type PutEvents does, through the same
+/// dispatch: a Kinesis target gets the replayed event (with its
+/// `replay-name`), and the replay counts in the rule's `Invocations`.
+#[test]
+fn start_replay_delivers_to_a_kinesis_target_and_counts_invocations() {
+    type Records = Arc<parking_lot::Mutex<Vec<(String, String)>>>;
+    struct RecordingKinesis(Records);
+    impl fakecloud_core::delivery::KinesisDelivery for RecordingKinesis {
+        fn put_record(&self, stream_arn: &str, data: &str, _partition_key: &str) {
+            self.0
+                .lock()
+                .push((stream_arn.to_string(), data.to_string()));
+        }
+    }
+    type Metrics = Arc<parking_lot::Mutex<Vec<String>>>;
+    struct RecordingMetrics(Metrics);
+    impl fakecloud_core::delivery::CloudwatchDelivery for RecordingMetrics {
+        fn put_metric(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            _namespace: &str,
+            metric_name: &str,
+            _value: f64,
+            _unit: Option<&str>,
+            _dimensions: std::collections::BTreeMap<String, String>,
+            _timestamp_ms: i64,
+        ) {
+            self.0.lock().push(metric_name.to_string());
+        }
+    }
+
+    let records: Records = Arc::default();
+    let metrics: Metrics = Arc::default();
+    let state = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let delivery = Arc::new(
+        DeliveryBus::new()
+            .with_kinesis(Arc::new(RecordingKinesis(records.clone())))
+            .with_cloudwatch_metrics(Arc::new(RecordingMetrics(metrics.clone()))),
+    );
+    let svc = EventBridgeService::new(state, delivery);
+    let stream_arn = "arn:aws:kinesis:us-east-1:123456789012:stream/replayed";
+    svc.put_rule(&make_request(
+        "PutRule",
+        json!({"Name": "r", "EventPattern": r#"{"source": ["my.app"]}"#}),
+    ))
+    .unwrap();
+    svc.put_targets(&make_request(
+        "PutTargets",
+        json!({"Rule": "r", "Targets": [{"Id": "k", "Arn": stream_arn}]}),
+    ))
+    .unwrap();
+    let archive = svc
+        .create_archive(&make_request(
+            "CreateArchive",
+            json!({
+                "ArchiveName": "a",
+                "EventSourceArn": "arn:aws:events:us-east-1:123456789012:event-bus/default"
+            }),
+        ))
+        .unwrap();
+    let archive_arn = serde_json::from_slice::<Value>(archive.body.expect_bytes()).unwrap()
+        ["ArchiveArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    svc.put_events(&make_request(
+        "PutEvents",
+        json!({"Entries": [{"Source": "my.app", "DetailType": "T", "Detail": "{}"}]}),
+    ))
+    .unwrap();
+    assert_eq!(records.lock().len(), 1);
+    records.lock().clear();
+    metrics.lock().clear();
+
+    svc.start_replay(&make_request(
+        "StartReplay",
+        json!({
+            "ReplayName": "rp",
+            "EventSourceArn": archive_arn,
+            "Destination": {"Arn": "arn:aws:events:us-east-1:123456789012:event-bus/default"},
+            "EventStartTime": 0.0,
+            "EventEndTime": (chrono::Utc::now().timestamp() + 3600) as f64
+        }),
+    ))
+    .unwrap();
+    let records = records.lock();
+    assert_eq!(
+        records.len(),
+        1,
+        "the replayed event reaches the Kinesis target"
+    );
+    assert_eq!(records[0].0, stream_arn);
+    let event: Value = serde_json::from_str(&records[0].1).unwrap();
+    assert_eq!(
+        event["replay-name"],
+        "arn:aws:events:us-east-1:123456789012:replay/rp"
+    );
+    assert_eq!(*metrics.lock(), vec!["Invocations".to_string()]);
+}
+
+/// `Destination.FilterArns` limits a replay to the rules it names: another
+/// matching rule receives nothing, and DescribeReplay returns the filter.
+#[test]
+fn start_replay_filter_arns_limit_the_rules_replayed_to() {
+    let (svc, messages) = make_service_with_sqs_recorder();
+    let mut rule_arns = Vec::new();
+    for name in ["kept", "skipped"] {
+        let resp = svc
+            .put_rule(&make_request(
+                "PutRule",
+                json!({"Name": name, "EventPattern": r#"{"source": ["my.app"]}"#}),
+            ))
+            .unwrap();
+        rule_arns.push(
+            serde_json::from_slice::<Value>(resp.body.expect_bytes()).unwrap()["RuleArn"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+        svc.put_targets(&make_request(
+            "PutTargets",
+            json!({"Rule": name, "Targets": [{
+                "Id": "q",
+                "Arn": format!("arn:aws:sqs:us-east-1:123456789012:{name}")
+            }]}),
+        ))
+        .unwrap();
+    }
+    let archive = svc
+        .create_archive(&make_request(
+            "CreateArchive",
+            json!({
+                "ArchiveName": "a",
+                "EventSourceArn": "arn:aws:events:us-east-1:123456789012:event-bus/default"
+            }),
+        ))
+        .unwrap();
+    let archive_arn = serde_json::from_slice::<Value>(archive.body.expect_bytes()).unwrap()
+        ["ArchiveArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    svc.put_events(&make_request(
+        "PutEvents",
+        json!({"Entries": [{"Source": "my.app", "DetailType": "T", "Detail": "{}"}]}),
+    ))
+    .unwrap();
+    assert_eq!(messages.lock().len(), 2);
+    messages.lock().clear();
+
+    let destination = json!({
+        "Arn": "arn:aws:events:us-east-1:123456789012:event-bus/default",
+        "FilterArns": [rule_arns[0]]
+    });
+    svc.start_replay(&make_request(
+        "StartReplay",
+        json!({
+            "ReplayName": "rp",
+            "EventSourceArn": archive_arn,
+            "Destination": destination,
+            "EventStartTime": 0.0,
+            "EventEndTime": (chrono::Utc::now().timestamp() + 3600) as f64
+        }),
+    ))
+    .unwrap();
+    let delivered = messages.lock().clone();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].0, "arn:aws:sqs:us-east-1:123456789012:kept");
+
+    let described = svc
+        .describe_replay(&make_request("DescribeReplay", json!({"ReplayName": "rp"})))
+        .unwrap();
+    let described: Value = serde_json::from_slice(described.body.expect_bytes()).unwrap();
+    assert_eq!(
+        described["Destination"]["FilterArns"],
+        json!([rule_arns[0]])
+    );
+
+    // An empty filter selects no rule.
+    messages.lock().clear();
+    svc.start_replay(&make_request(
+        "StartReplay",
+        json!({
+            "ReplayName": "rp-empty",
+            "EventSourceArn": archive_arn,
+            "Destination": {
+                "Arn": "arn:aws:events:us-east-1:123456789012:event-bus/default",
+                "FilterArns": []
+            },
+            "EventStartTime": 0.0,
+            "EventEndTime": (chrono::Utc::now().timestamp() + 3600) as f64
+        }),
+    ))
+    .unwrap();
+    assert!(messages.lock().is_empty());
+
+    // A filter that is not a list of strings is refused, not dropped.
+    for filter in [
+        json!([1]),
+        json!("arn:aws:events:us-east-1:123456789012:rule/kept"),
+    ] {
+        let err = match svc.start_replay(&make_request(
+            "StartReplay",
+            json!({
+                "ReplayName": "rp-bad",
+                "EventSourceArn": archive_arn,
+                "Destination": {
+                    "Arn": "arn:aws:events:us-east-1:123456789012:event-bus/default",
+                    "FilterArns": filter
+                },
+                "EventStartTime": 0.0,
+                "EventEndTime": (chrono::Utc::now().timestamp() + 3600) as f64
+            }),
+        )) {
+            Err(e) => e,
+            Ok(_) => panic!("a mistyped FilterArns must be refused"),
+        };
+        assert_eq!(err.code(), "SerializationException");
+    }
 }

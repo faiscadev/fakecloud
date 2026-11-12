@@ -26,17 +26,33 @@ pub(crate) fn looks_like_fakecloud_envelope(body: &str) -> bool {
     }
 }
 
-/// The plaintext of a stored message body, for introspection. An SSE body
-/// (one that passes the same envelope check ReceiveMessage applies) is
-/// unsealed by `unseal`; anything else, or an envelope `unseal` cannot open,
-/// is returned as stored.
-pub fn plaintext_body(stored: &str, unseal: impl FnOnce(&str) -> Option<Vec<u8>>) -> String {
-    if !looks_like_fakecloud_envelope(stored) {
-        return stored.to_string();
+/// The plaintext of `msg`'s stored body, for introspection, held by the
+/// queue `holder_arn` with `holder_attributes`. A body ReceiveMessage would
+/// decrypt (sealed, see [`crate::SqsMessage::body_is_sealed`], and an
+/// envelope) is unsealed by `unseal(ciphertext, sealing_queue_arn)`;
+/// anything else (a plaintext body, even one that happens to look like a
+/// KMS ciphertext), or an envelope `unseal` cannot open, is returned as
+/// stored.
+pub fn plaintext_body(
+    msg: &crate::SqsMessage,
+    holder_arn: &str,
+    holder_attributes: &BTreeMap<String, String>,
+    unseal: impl FnOnce(&str, &str) -> Option<Vec<u8>>,
+) -> String {
+    let stored = &msg.body;
+    if !msg.body_is_sealed(crate::state::queue_encrypts_at_rest(holder_attributes)) {
+        return stored.clone();
     }
-    unseal(stored)
+    // SSE-SQS: sealed with SQS's own key, opened without KMS.
+    if let Some(plaintext) = crate::sse_sqs::open(msg.sealing_queue(holder_arn), stored) {
+        return plaintext;
+    }
+    if !looks_like_fakecloud_envelope(stored) {
+        return stored.clone();
+    }
+    unseal(stored, msg.sealing_queue(holder_arn))
         .map(|p| String::from_utf8_lossy(&p).into_owned())
-        .unwrap_or_else(|| stored.to_string())
+        .unwrap_or_else(|| stored.clone())
 }
 
 /// Validate DelaySeconds (0–900), VisibilityTimeout (0–43200), and
@@ -391,11 +407,21 @@ pub(crate) fn process_batch_send_entry(
         None
     };
 
+    // A pre-encrypted (SSE-KMS) body is sealed with this queue's encryption
+    // context; on an SSE-SQS queue the body is sealed with SQS's own key.
+    let (stored_body, sealed_for_queue) = match stored_body_override {
+        Some(sealed) => (sealed, Some(queue.arn.clone())),
+        None if crate::sse_sqs::enabled(&queue.attributes) => (
+            crate::sse_sqs::seal(&queue.arn, &message_body),
+            Some(queue.arn.clone()),
+        ),
+        None => (message_body, None),
+    };
     let msg = SqsMessage {
         message_id: uuid::Uuid::new_v4().to_string(),
         receipt_handle: None,
         md5_of_body: md5_of_body.clone(),
-        body: stored_body_override.unwrap_or(message_body),
+        body: stored_body,
         sent_timestamp: cfg.now.timestamp_millis(),
         attributes: system_attributes,
         message_attributes,
@@ -406,6 +432,8 @@ pub(crate) fn process_batch_send_entry(
         message_dedup_id: effective_dedup_id.clone(),
         created_at: cfg.now,
         sequence_number: sequence_number.clone(),
+        sealed_for_queue,
+        seal_recorded: true,
     };
     let message_id = msg.message_id.clone();
 
@@ -1455,6 +1483,31 @@ pub(crate) fn missing_param(name: &str) -> AwsServiceError {
     )
 }
 
+/// SQS's error for a failed KMS call on an encrypted queue: SendMessage,
+/// SendMessageBatch and ReceiveMessage declare `KmsAccessDenied`,
+/// `KmsDisabled`, `KmsInvalidKeyUsage`, `KmsInvalidState` and `KmsNotFound`
+/// with the awsQuery codes `KMS.AccessDeniedException` etc. (HTTP 400), and
+/// relay KMS's message with the AWS SDK's service suffix (recorded:
+/// `SendMessage` to a queue whose key is `alias/aws/s3`, or a missing alias).
+/// A ciphertext KMS cannot open is reported as the key's invalid state; a
+/// KMS-side failure as 500 `KMS.InternalFailureException`.
+pub(crate) fn kms_error(err: &fakecloud_core::delivery::KmsError) -> AwsServiceError {
+    let (status, code) = err.kind.sqs_code();
+    if status != 400 {
+        return AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            code,
+            err.relayed_message(),
+        );
+    }
+    AwsServiceError::aws_error_with_headers(
+        StatusCode::BAD_REQUEST,
+        code,
+        err.relayed_message(),
+        vec![("x-amzn-query-error".to_string(), format!("{code};Sender"))],
+    )
+}
+
 pub(crate) fn queue_not_found() -> AwsServiceError {
     // AWS SQS uses the awsQueryError-renamed wire code
     // `AWS.SimpleQueueService.NonExistentQueue` for the `QueueDoesNotExist`
@@ -1753,23 +1806,70 @@ mod envelope_tests {
         assert!(looks_like_fakecloud_envelope(&b64));
     }
 
-    /// Only envelope-shaped bodies reach `unseal`; one it cannot open, and
-    /// every plain body, read back as stored.
+    /// Only a sealed, envelope-shaped body reaches `unseal` (with the queue
+    /// that sealed it), as ReceiveMessage decrypts; one it cannot open, a
+    /// plain body, and an envelope-looking body sent in plaintext read back
+    /// as stored.
     #[test]
-    fn plaintext_body_unseals_only_envelopes() {
+    fn plaintext_body_unseals_only_sealed_envelopes() {
+        use std::collections::BTreeMap;
         let mut blob = vec![0x01, 0x02, 0x02, 0x00];
         blob.extend_from_slice(&[0u8; 32]);
         let sealed = base64::engine::general_purpose::STANDARD.encode(&blob);
+        let message = |body: &str, sealed_for: Option<&str>| crate::SqsMessage {
+            message_id: "m".to_string(),
+            receipt_handle: None,
+            md5_of_body: String::new(),
+            body: body.to_string(),
+            sent_timestamp: 0,
+            attributes: BTreeMap::new(),
+            message_attributes: BTreeMap::new(),
+            visible_at: None,
+            receive_count: 0,
+            first_received_at: None,
+            message_group_id: None,
+            message_dedup_id: None,
+            created_at: chrono::Utc::now(),
+            sequence_number: None,
+            sealed_for_queue: sealed_for.map(str::to_string),
+            seal_recorded: true,
+        };
+        let plain_queue = BTreeMap::new();
+        let src = "arn:aws:sqs:us-east-1:123456789012:src";
+        // Sealed by `src`, now held by a plain dead-letter queue.
         assert_eq!(
-            plaintext_body(&sealed, |ct| {
-                assert_eq!(ct, sealed);
-                Some(b"hello".to_vec())
-            }),
+            plaintext_body(
+                &message(&sealed, Some(src)),
+                "dlq",
+                &plain_queue,
+                |ct, q| {
+                    assert_eq!((ct, q), (sealed.as_str(), src));
+                    Some(b"hello".to_vec())
+                }
+            ),
             "hello"
         );
-        assert_eq!(plaintext_body(&sealed, |_| None), sealed);
         assert_eq!(
-            plaintext_body("plain", |_| panic!("plain body must not be unsealed")),
+            plaintext_body(&message(&sealed, Some(src)), "dlq", &plain_queue, |_, _| {
+                None
+            }),
+            sealed
+        );
+        // Sent in plaintext into an encrypted queue: shown as sent.
+        let encrypted = BTreeMap::from([("KmsMasterKeyId".to_string(), "alias/app".to_string())]);
+        assert_eq!(
+            plaintext_body(&message(&sealed, None), src, &encrypted, |_, _| panic!(
+                "a plaintext body must not be unsealed"
+            )),
+            sealed
+        );
+        assert_eq!(
+            plaintext_body(
+                &message("plain", Some(src)),
+                src,
+                &encrypted,
+                |_, _| panic!("plain body must not be unsealed")
+            ),
             "plain"
         );
     }

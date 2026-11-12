@@ -77,6 +77,11 @@ pub enum SqsDeliveryError {
     /// The target could not take the delivery right now (e.g. a service's
     /// delivery not wired yet at startup).
     TargetUnavailable(String),
+    /// The queue is encrypted and KMS refused to encrypt the message for the
+    /// sender (e.g. an AWS service principal delivering into a queue under
+    /// the AWS-managed `aws/sqs` key, whose policy admits only callers of
+    /// the account).
+    Kms(KmsError),
 }
 
 impl std::fmt::Display for SqsDeliveryError {
@@ -87,16 +92,69 @@ impl std::fmt::Display for SqsDeliveryError {
             Self::InvalidParameter(msg) => write!(f, "invalid parameter: {msg}"),
             Self::AccessDenied(msg) => write!(f, "access denied: {msg}"),
             Self::TargetUnavailable(msg) => write!(f, "target unavailable: {msg}"),
+            Self::Kms(err) => write!(f, "KMS refused the delivery: {err}"),
         }
     }
 }
 
 impl std::error::Error for SqsDeliveryError {}
 
+impl SqsDeliveryError {
+    /// The message a service that relays SQS's failure reports (an
+    /// EventBridge dead-letter message's `ERROR_MESSAGE`), recorded in the
+    /// `aws-managed-keys` fixtures (`eventbridge-sqs-target-failures.json`):
+    /// for a KMS refusal, KMS's relayed message wrapped in SQS's own AWS SDK
+    /// service suffix; for a missing queue, SQS's `NonExistentQueue`. The
+    /// other variants are not recorded and report their description.
+    pub fn relayed_message(&self) -> String {
+        match self {
+            Self::QueueNotFound(_) => format!(
+                "The specified queue does not exist or you do not have access to it. (Service: AmazonSQS; Status Code: 400; Error Code: AWS.SimpleQueueService.NonExistentQueue; Request ID: {}; Proxy: null)",
+                uuid::Uuid::new_v4()
+            ),
+            Self::Kms(err) => {
+                let (status, code) = err.kind.sqs_code();
+                format!(
+                    "{} (Service: AmazonSQS; Status Code: {status}; Error Code: {code}; Request ID: {}; Proxy: null)",
+                    err.relayed_message(),
+                    uuid::Uuid::new_v4()
+                )
+            }
+            other => other.to_string(),
+        }
+    }
+}
+
+/// Who sends a message into an SQS queue through the delivery bus, which
+/// decides how SQS calls KMS for an encrypted queue.
+///
+/// AWS services deliver in one of two ways. SNS (topic subscriptions), S3
+/// (event notifications) and EventBridge (rule targets) send as their own
+/// service principal, so the queue's key policy must name that principal
+/// for SQS to encrypt the message; the AWS-managed `aws/sqs` key's policy
+/// admits only callers of the account, so these deliveries fail (recorded).
+/// Scheduler, Pipes, Step Functions, API Gateway and Lambda destinations
+/// send with an IAM role of the account (or the caller's identity), which
+/// `aws/sqs` admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliverySender<'a> {
+    /// An AWS service principal (`sns.amazonaws.com`) acting for its
+    /// resource `source_arn` owned by `source_account`.
+    Service {
+        principal: &'a str,
+        source_arn: &'a str,
+        source_account: &'a str,
+    },
+    /// An IAM identity of the queue's account: the role a service acts as,
+    /// or the caller, named by ARN when known.
+    Identity { arn: Option<&'a str> },
+}
+
 /// Trait for delivering messages to SQS queues.
 pub trait SqsDelivery: Send + Sync {
     fn deliver_to_queue(
         &self,
+        sender: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         attributes: &HashMap<String, String>,
@@ -105,6 +163,7 @@ pub trait SqsDelivery: Send + Sync {
     /// Deliver with message attributes and FIFO fields
     fn deliver_to_queue_with_attrs(
         &self,
+        sender: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         message_attributes: &HashMap<String, SqsMessageAttribute>,
@@ -113,7 +172,21 @@ pub trait SqsDelivery: Send + Sync {
     ) {
         // Default implementation: fall back to simple delivery
         let _ = (message_attributes, message_group_id, message_dedup_id);
-        self.deliver_to_queue(queue_arn, message_body, &HashMap::new());
+        self.deliver_to_queue(sender, queue_arn, message_body, &HashMap::new());
+    }
+
+    /// Whether the queue would take a message from `sender` as far as its
+    /// encryption goes, without delivering one: the check a producer makes
+    /// when it validates a destination (S3 sends a test event when a bucket
+    /// notification configuration names the queue). A queue that does not
+    /// exist (or is not encrypted) passes.
+    fn check_sender(
+        &self,
+        sender: DeliverySender<'_>,
+        queue_arn: &str,
+    ) -> Result<(), SqsDeliveryError> {
+        let _ = (sender, queue_arn);
+        Ok(())
     }
 
     /// The stored ARN of the queue a QueueUrl (`<endpoint>/<account>/<name>`)
@@ -132,8 +205,10 @@ pub trait SqsDelivery: Send + Sync {
     /// fire-and-forget semantics of `deliver_to_queue`); the real SQS
     /// impl overrides this to actually look up the queue and report
     /// `QueueNotFound` so the caller can route to a DLQ.
+    #[allow(clippy::too_many_arguments)]
     fn try_deliver_to_queue_with_attrs(
         &self,
+        sender: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         message_attributes: &HashMap<String, SqsMessageAttribute>,
@@ -141,6 +216,7 @@ pub trait SqsDelivery: Send + Sync {
         message_dedup_id: Option<&str>,
     ) -> Result<(), SqsDeliveryError> {
         self.deliver_to_queue_with_attrs(
+            sender,
             queue_arn,
             message_body,
             message_attributes,
@@ -575,33 +651,303 @@ pub enum KmsKeyUnusable {
     AccessDenied(String),
 }
 
+/// Who a cross-service KMS call is made as, which decides what the key
+/// policy sees.
+///
+/// AWS services use KMS in one of two ways, and key policies are written for
+/// each: most (S3 SSE-KMS, SQS, SNS, DynamoDB, Secrets Manager, SSM) call KMS
+/// *on behalf of* the caller of their own API, with the caller's identity,
+/// and KMS adds `kms:ViaService = <service>.<region>.amazonaws.com` (the
+/// AWS-managed `aws/<service>` keys only allow that); a few (SES writing
+/// received mail to S3, Lambda for durable executions) call KMS *as their
+/// service principal*, which a key policy must name in a `"Service"`
+/// principal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KmsCaller<'a> {
+    /// The service identified by `service_principal` (`s3.amazonaws.com`)
+    /// acting for a caller of its API in the request's account.
+    OnBehalfOf {
+        service_principal: &'a str,
+        /// The ARN of the caller the service acts for (an IAM user or
+        /// assumed role of the account), whom KMS names in a refusal.
+        /// `None` when the service knows no identity (the account itself).
+        caller_arn: Option<&'a str>,
+    },
+    /// The service principal itself (`ses.us-east-1.amazonaws.com`) acting
+    /// for its resource `source_arn` owned by `source_account` (the
+    /// `aws:SourceArn` / `aws:SourceAccount` of the request).
+    Service {
+        service_principal: &'a str,
+        source_arn: &'a str,
+        source_account: &'a str,
+        /// The service that makes the KMS call on the principal's behalf,
+        /// when it is not the principal's own (SQS encrypting a message SNS
+        /// delivers: `sqs.amazonaws.com`); it sets `kms:ViaService`.
+        via_service: Option<&'a str>,
+    },
+}
+
+impl<'a> KmsCaller<'a> {
+    /// A service calling KMS on behalf of the account, with no known caller
+    /// identity (see [`KmsCaller::OnBehalfOf`]).
+    pub fn via(service_principal: &'a str) -> Self {
+        KmsCaller::OnBehalfOf {
+            service_principal,
+            caller_arn: None,
+        }
+    }
+
+    /// A service calling KMS on behalf of the caller `caller_arn` of its API.
+    pub fn via_for(service_principal: &'a str, caller_arn: Option<&'a str>) -> Self {
+        KmsCaller::OnBehalfOf {
+            service_principal,
+            caller_arn,
+        }
+    }
+
+    /// The service principal the call is recorded under.
+    pub fn service_principal(&self) -> &'a str {
+        match self {
+            KmsCaller::OnBehalfOf {
+                service_principal, ..
+            }
+            | KmsCaller::Service {
+                service_principal, ..
+            } => service_principal,
+        }
+    }
+}
+
+/// Why a cross-service KMS call failed, as KMS reports it: the KMS error
+/// code ([`KmsErrorKind::code`]) and KMS's message. Each consuming service
+/// maps it onto the error its own API declares (SQS `KMS.AccessDeniedException`,
+/// SNS `KMSAccessDenied`, S3 `AccessDenied`, ...).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KmsError {
+    pub kind: KmsErrorKind,
+    pub message: String,
+}
+
+/// The KMS failure classes a consuming service distinguishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KmsErrorKind {
+    /// No key with that id, ARN or alias (`NotFoundException`).
+    NotFound,
+    /// The key is disabled (`DisabledException`).
+    Disabled,
+    /// The key is in a state that cannot be used, such as `PendingDeletion`
+    /// (`KMSInvalidStateException`).
+    InvalidState,
+    /// The key policy does not allow the call (`AccessDeniedException`).
+    AccessDenied,
+    /// The key's usage or spec does not allow the operation
+    /// (`InvalidKeyUsageException`).
+    InvalidKeyUsage,
+    /// The ciphertext is malformed, was sealed under another key or another
+    /// encryption context (`InvalidCiphertextException`).
+    InvalidCiphertext,
+    /// No KMS is wired, or KMS failed internally (`KMSInternalException`).
+    Internal,
+}
+
+impl KmsErrorKind {
+    /// The KMS error code (`__type`) of this failure.
+    pub fn code(self) -> &'static str {
+        match self {
+            KmsErrorKind::NotFound => "NotFoundException",
+            KmsErrorKind::Disabled => "DisabledException",
+            KmsErrorKind::InvalidState => "KMSInvalidStateException",
+            KmsErrorKind::AccessDenied => "AccessDeniedException",
+            KmsErrorKind::InvalidKeyUsage => "InvalidKeyUsageException",
+            KmsErrorKind::InvalidCiphertext => "InvalidCiphertextException",
+            KmsErrorKind::Internal => "KMSInternalException",
+        }
+    }
+
+    /// The HTTP status KMS answers this failure with.
+    pub fn status(self) -> u16 {
+        match self {
+            KmsErrorKind::Internal => 500,
+            _ => 400,
+        }
+    }
+
+    /// The awsQuery error code and HTTP status SQS answers a send or receive
+    /// with when KMS fails this way for an encrypted queue (`KmsAccessDenied`
+    /// etc., declared by SendMessage / SendMessageBatch / ReceiveMessage). A
+    /// ciphertext KMS cannot open is the key's invalid state.
+    pub fn sqs_code(self) -> (u16, &'static str) {
+        match self {
+            KmsErrorKind::AccessDenied => (400, "KMS.AccessDeniedException"),
+            KmsErrorKind::Disabled => (400, "KMS.DisabledException"),
+            KmsErrorKind::InvalidKeyUsage => (400, "KMS.InvalidKeyUsageException"),
+            KmsErrorKind::InvalidState | KmsErrorKind::InvalidCiphertext => {
+                (400, "KMS.InvalidStateException")
+            }
+            KmsErrorKind::NotFound => (400, "KMS.NotFoundException"),
+            KmsErrorKind::Internal => (500, "KMS.InternalFailureException"),
+        }
+    }
+}
+
+impl KmsError {
+    pub fn new(kind: KmsErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// KMS's `NotFoundException` for a key reference (key id, key ARN, alias
+    /// name or alias ARN) that resolves to nothing; see
+    /// [`kms_not_found_message`].
+    pub fn not_found(account_id: &str, region: &str, key_ref: &str) -> Self {
+        Self::new(
+            KmsErrorKind::NotFound,
+            kms_not_found_message(account_id, region, key_ref),
+        )
+    }
+
+    /// No KMS hook is wired.
+    pub fn not_configured() -> Self {
+        Self::new(KmsErrorKind::Internal, "KMS hook not configured")
+    }
+
+    /// KMS's message with the suffix the AWS service SDKs append when a
+    /// service relays a KMS failure in its own error (recorded from SQS
+    /// `SendMessage`, SNS `Publish`, SSM `PutParameter`):
+    /// `<message> (Service: AWSKMS; Status Code: 400; Error Code:
+    /// AccessDeniedException; Request ID: <id>; Proxy: null)`.
+    pub fn relayed_message(&self) -> String {
+        format!(
+            "{} (Service: AWSKMS; Status Code: {}; Error Code: {}; Request ID: {}; Proxy: null)",
+            self.message,
+            self.kind.status(),
+            self.kind.code(),
+            uuid::Uuid::new_v4()
+        )
+    }
+}
+
+/// KMS's `NotFoundException` message for a key reference that resolves to
+/// nothing (recorded through SQS, SNS, S3, SSM, Secrets Manager and the KMS
+/// API): an alias is named by its ARN ("Alias arn:...:alias/x is not
+/// found."), a key by its key ARN ("Key 'arn:...:key/<id>' does not
+/// exist"). A reference with no region or account takes `region` and
+/// `account_id`.
+pub fn kms_not_found_message(account_id: &str, region: &str, key_ref: &str) -> String {
+    let parsed = fakecloud_aws::arn::arn_resource(key_ref, "kms").and_then(|rest| {
+        let (r, after) = rest.split_once(':')?;
+        let (a, res) = after.split_once(':')?;
+        Some((r, a, res))
+    });
+    let (ref_region, ref_account, resource) = parsed.unwrap_or((region, account_id, key_ref));
+    let ref_region = if ref_region.is_empty() {
+        region
+    } else {
+        ref_region
+    };
+    let account = if ref_account.is_empty() {
+        account_id
+    } else {
+        ref_account
+    };
+    if resource.starts_with("alias/") {
+        format!(
+            "Alias {} is not found.",
+            fakecloud_aws::arn::Arn::regional("kms", ref_region, account, resource)
+        )
+    } else {
+        let id = resource.strip_prefix("key/").unwrap_or(resource);
+        format!(
+            "Key '{}' does not exist",
+            fakecloud_aws::arn::Arn::regional("kms", ref_region, account, &format!("key/{id}"))
+        )
+    }
+}
+
+impl std::fmt::Display for KmsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.kind.code(), self.message)
+    }
+}
+
+impl std::error::Error for KmsError {}
+
 /// Cross-service KMS hook: services that accept a `KmsKeyId` (Secrets
 /// Manager, SSM `SecureString`, S3 SSE-KMS, SQS / SNS / DynamoDB
-/// encrypted resources) call this so that real KMS calls happen, the
-/// invocation is recorded for introspection, and the returned blob is
-/// decryptable by the public KMS API.
+/// encrypted resources, SES receipt rules) call this so that real KMS
+/// calls happen, the invocation is recorded for introspection, and the
+/// returned blob is decryptable by the public KMS API.
 ///
 /// Encryption context is the AWS-defined per-service map (e.g.
-/// `{aws:secretsmanager:secretArn: <arn>}` for Secrets Manager) and is
-/// recorded with the call so test code can assert it.
+/// `{SecretARN: <arn>, SecretVersionId: <id>}` for Secrets Manager). It is
+/// bound into the ciphertext as KMS binds it, so decrypting needs the same
+/// context, and it is recorded with the call so test code can assert it.
 pub trait KmsHook: Send + Sync {
+    /// Encrypt `plaintext` under `key_id` (the service's data-key
+    /// derivation, authorized as `kms:GenerateDataKey`).
     fn encrypt(
         &self,
         account_id: &str,
         region: &str,
         key_id: &str,
         plaintext: &[u8],
-        service_principal: &str,
+        caller: KmsCaller<'_>,
         encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<String, String>;
+    ) -> Result<String, KmsError>;
 
+    /// [`KmsHook::encrypt`] authorized and recorded as the KMS `operation`
+    /// the service really calls (`GenerateDataKey`, or `Encrypt` for SSM
+    /// parameter values). Hooks that do not distinguish operations encrypt.
+    #[allow(clippy::too_many_arguments)]
+    fn encrypt_with_operation(
+        &self,
+        _operation: &str,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        plaintext: &[u8],
+        caller: KmsCaller<'_>,
+        encryption_context: std::collections::HashMap<String, String>,
+    ) -> Result<String, KmsError> {
+        self.encrypt(
+            account_id,
+            region,
+            key_id,
+            plaintext,
+            caller,
+            encryption_context,
+        )
+    }
+
+    /// Decrypt a ciphertext a service sealed with [`KmsHook::encrypt`]
+    /// (authorized as `kms:Decrypt`).
     fn decrypt(
         &self,
         account_id: &str,
         ciphertext_b64: &str,
-        service_principal: &str,
+        caller: KmsCaller<'_>,
         encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<Vec<u8>, String>;
+    ) -> Result<Vec<u8>, KmsError>;
+
+    /// Whether `caller` may use `key_id` for every one of `actions`
+    /// (`kms:CreateGrant`, ...) with `encryption_context`, as a service
+    /// checks a key when a resource is configured with it (DynamoDB
+    /// `CreateTable` creates a grant). Resolves `key_id` and returns the
+    /// key ARN. Hooks that cannot evaluate keys accept it.
+    #[allow(clippy::too_many_arguments)]
+    fn authorize_key_use(
+        &self,
+        _account_id: &str,
+        _region: &str,
+        key_id: &str,
+        _caller: KmsCaller<'_>,
+        _actions: &[&str],
+        _encryption_context: &std::collections::HashMap<String, String>,
+    ) -> Result<String, KmsError> {
+        Ok(key_id.to_string())
+    }
 
     /// Resolve `key_id` (key id, key ARN, alias name or alias ARN) to the
     /// key's ARN, provisioning the AWS-managed `aws/<service>` key on first
@@ -636,6 +982,15 @@ pub trait KmsHook: Send + Sync {
     ) -> Result<String, KmsKeyUnusable> {
         Ok(key_id.to_string())
     }
+
+    /// Whether `stored` is a ciphertext KMS sealed for `account_id` (a
+    /// well-formed envelope), as opposed to a value a service stored in
+    /// plaintext before it encrypted at rest. A consumer that fails to
+    /// decrypt a ciphertext reports the KMS failure; only a value that is
+    /// not one reads as plaintext. Every hook must answer for its own
+    /// envelope format: a hook that said no to its own ciphertexts would
+    /// hand them out as plaintext.
+    fn is_ciphertext(&self, account_id: &str, stored: &str) -> bool;
 
     /// The ARN of the AWS-managed key for `service` (the key behind
     /// `alias/aws/<service>`) in `account_id` and `region`, minted on first
@@ -816,19 +1171,19 @@ impl DeliveryBus {
         region: &str,
         key_id: &str,
         plaintext: &[u8],
-        service_principal: &str,
+        caller: KmsCaller<'_>,
         encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, KmsError> {
         match self.kms_hook {
             Some(ref h) => h.encrypt(
                 account_id,
                 region,
                 key_id,
                 plaintext,
-                service_principal,
+                caller,
                 encryption_context,
             ),
-            None => Err("KMS hook not configured".to_string()),
+            None => Err(KmsError::not_configured()),
         }
     }
 
@@ -838,17 +1193,12 @@ impl DeliveryBus {
         &self,
         account_id: &str,
         ciphertext_b64: &str,
-        service_principal: &str,
+        caller: KmsCaller<'_>,
         encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, KmsError> {
         match self.kms_hook {
-            Some(ref h) => h.decrypt(
-                account_id,
-                ciphertext_b64,
-                service_principal,
-                encryption_context,
-            ),
-            None => Err("KMS hook not configured".to_string()),
+            Some(ref h) => h.decrypt(account_id, ciphertext_b64, caller, encryption_context),
+            None => Err(KmsError::not_configured()),
         }
     }
 
@@ -1133,21 +1483,36 @@ impl DeliveryBus {
             .queue_arn_for_url(region, queue_url)
     }
 
+    /// Whether the queue `queue_arn` would take a message from `sender` (see
+    /// [`SqsDelivery::check_sender`]). Passes when no SQS is wired.
+    pub fn check_sqs_sender(
+        &self,
+        sender: DeliverySender<'_>,
+        queue_arn: &str,
+    ) -> Result<(), SqsDeliveryError> {
+        match self.sqs_sender {
+            Some(ref s) => s.check_sender(sender, queue_arn),
+            None => Ok(()),
+        }
+    }
+
     /// Send a message to an SQS queue identified by ARN.
     pub fn send_to_sqs(
         &self,
+        from: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         attributes: &HashMap<String, String>,
     ) {
         if let Some(ref sender) = self.sqs_sender {
-            sender.deliver_to_queue(queue_arn, message_body, attributes);
+            sender.deliver_to_queue(from, queue_arn, message_body, attributes);
         }
     }
 
     /// Send a message to an SQS queue with message attributes and FIFO fields.
     pub fn send_to_sqs_with_attrs(
         &self,
+        from: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         message_attributes: &HashMap<String, SqsMessageAttribute>,
@@ -1156,6 +1521,7 @@ impl DeliveryBus {
     ) {
         if let Some(ref sender) = self.sqs_sender {
             sender.deliver_to_queue_with_attrs(
+                from,
                 queue_arn,
                 message_body,
                 message_attributes,
@@ -1171,6 +1537,7 @@ impl DeliveryBus {
     /// matching the "target unreachable" semantics Scheduler relies on.
     pub fn try_send_to_sqs_with_attrs(
         &self,
+        from: DeliverySender<'_>,
         queue_arn: &str,
         message_body: &str,
         message_attributes: &HashMap<String, SqsMessageAttribute>,
@@ -1179,6 +1546,7 @@ impl DeliveryBus {
     ) -> Result<(), SqsDeliveryError> {
         match self.sqs_sender {
             Some(ref sender) => sender.try_deliver_to_queue_with_attrs(
+                from,
                 queue_arn,
                 message_body,
                 message_attributes,
@@ -1307,6 +1675,7 @@ mod tests {
     impl SqsDelivery for MockSqs {
         fn deliver_to_queue(
             &self,
+            _sender: DeliverySender<'_>,
             _queue_arn: &str,
             _message_body: &str,
             _attributes: &HashMap<String, String>,
@@ -1372,7 +1741,12 @@ mod tests {
     fn delivery_bus_new_has_no_senders() {
         let bus = DeliveryBus::new();
         // Calling methods without senders should be no-ops
-        bus.send_to_sqs("arn:queue", "body", &HashMap::new());
+        bus.send_to_sqs(
+            DeliverySender::Identity { arn: None },
+            "arn:queue",
+            "body",
+            &HashMap::new(),
+        );
         bus.publish_to_sns("arn:topic", "msg", None);
         let _ = bus.put_event_to_eventbridge(&test_event("src", "default"));
         bus.send_to_kinesis("arn:stream", "data", "pk");
@@ -1383,7 +1757,12 @@ mod tests {
     #[test]
     fn delivery_bus_default_is_same_as_new() {
         let bus = DeliveryBus::default();
-        bus.send_to_sqs("arn:q", "b", &HashMap::new());
+        bus.send_to_sqs(
+            DeliverySender::Identity { arn: None },
+            "arn:q",
+            "b",
+            &HashMap::new(),
+        );
     }
 
     #[test]
@@ -1393,10 +1772,20 @@ mod tests {
         });
         let bus = DeliveryBus::new().with_sqs(mock.clone());
 
-        bus.send_to_sqs("arn:queue", "msg", &HashMap::new());
+        bus.send_to_sqs(
+            DeliverySender::Identity { arn: None },
+            "arn:queue",
+            "msg",
+            &HashMap::new(),
+        );
         assert_eq!(mock.call_count.load(Ordering::SeqCst), 1);
 
-        bus.send_to_sqs("arn:queue2", "msg2", &HashMap::new());
+        bus.send_to_sqs(
+            DeliverySender::Identity { arn: None },
+            "arn:queue2",
+            "msg2",
+            &HashMap::new(),
+        );
         assert_eq!(mock.call_count.load(Ordering::SeqCst), 2);
     }
 
@@ -1416,7 +1805,14 @@ mod tests {
                 binary_value: None,
             },
         );
-        bus.send_to_sqs_with_attrs("arn:q", "body", &attrs, Some("group"), Some("dedup"));
+        bus.send_to_sqs_with_attrs(
+            DeliverySender::Identity { arn: None },
+            "arn:q",
+            "body",
+            &attrs,
+            Some("group"),
+            Some("dedup"),
+        );
         assert_eq!(mock.call_count.load(Ordering::SeqCst), 1);
     }
 
@@ -1489,7 +1885,12 @@ mod tests {
             .with_kinesis(kin.clone())
             .with_stepfunctions(sfn.clone());
 
-        bus.send_to_sqs("q", "m", &HashMap::new());
+        bus.send_to_sqs(
+            DeliverySender::Identity { arn: None },
+            "q",
+            "m",
+            &HashMap::new(),
+        );
         bus.publish_to_sns("t", "m", None);
         let _ = bus.put_event_to_eventbridge(&test_event("s", "b"));
         bus.send_to_kinesis("s", "d", "k");

@@ -419,7 +419,14 @@ impl DiscardedBatch<'_> {
         let service = destination.split(':').nth(2).unwrap_or_default();
         let body = self.record(service == "s3").to_string();
         match service {
-            "sqs" => bus.send_to_sqs(destination, &body, &HashMap::new()),
+            // Lambda writes a mapping's failure record with the function's
+            // execution role, an identity of the account.
+            "sqs" => bus.send_to_sqs(
+                fakecloud_core::delivery::DeliverySender::Identity { arn: None },
+                destination,
+                &body,
+                &HashMap::new(),
+            ),
             "sns" => bus.publish_to_sns(destination, &body, None),
             "s3" => {
                 let bucket = destination.rsplit(':').next().unwrap_or_default();

@@ -1254,15 +1254,19 @@ mod tests {
     }
 
     impl fakecloud_core::delivery::KmsHook for RecordingKms {
+        fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
+            stored.starts_with("envelope:")
+        }
+
         fn encrypt(
             &self,
             _account_id: &str,
             _region: &str,
             key_id: &str,
             plaintext: &[u8],
-            _service_principal: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _encryption_context: std::collections::HashMap<String, String>,
-        ) -> Result<String, String> {
+        ) -> Result<String, fakecloud_core::delivery::KmsError> {
             self.encrypted
                 .lock()
                 .unwrap()
@@ -1274,10 +1278,13 @@ mod tests {
             &self,
             _account_id: &str,
             _ciphertext_b64: &str,
-            _service_principal: &str,
+            _caller: fakecloud_core::delivery::KmsCaller<'_>,
             _encryption_context: std::collections::HashMap<String, String>,
-        ) -> Result<Vec<u8>, String> {
-            Err("not used".into())
+        ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+            Err(fakecloud_core::delivery::KmsError::new(
+                fakecloud_core::delivery::KmsErrorKind::AccessDenied,
+                "not used",
+            ))
         }
 
         fn resolve_key_arn(

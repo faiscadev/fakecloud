@@ -725,8 +725,27 @@ impl LogsService {
         let base64_text = || base64::engine::general_purpose::STANDARD.encode(&compressed);
 
         if destination_arn.contains(":sqs:") {
-            self.delivery_bus
-                .send_to_sqs(destination_arn, &base64_text(), &HashMap::new());
+            // CloudWatch Logs delivers as its service principal, for the log
+            // group, like the AWS destinations it supports.
+            let account = fakecloud_aws::arn::account_of(destination_arn).unwrap_or_default();
+            let region = fakecloud_aws::arn::region_of(destination_arn).unwrap_or_default();
+            let group_arn = fakecloud_aws::arn::Arn::regional(
+                "logs",
+                region,
+                account,
+                &format!("log-group:{group_name}"),
+            )
+            .to_string();
+            self.delivery_bus.send_to_sqs(
+                fakecloud_core::delivery::DeliverySender::Service {
+                    principal: "logs.amazonaws.com",
+                    source_arn: &group_arn,
+                    source_account: account,
+                },
+                destination_arn,
+                &base64_text(),
+                &HashMap::new(),
+            );
         } else if destination_arn.contains(":lambda:") {
             let lambda_event = json!({
                 "awslogs": {

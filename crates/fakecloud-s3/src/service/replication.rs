@@ -598,8 +598,11 @@ pub(crate) fn replicate_through_store(
                 kms_hook,
                 source_account,
                 source_bucket,
+                &src_obj.key,
+                src_obj.bucket_key_enabled == Some(true),
                 &stored,
                 src_obj.sse_kms_key_id.as_deref(),
+                None,
             );
             let encrypted = plaintext.and_then(|p| {
                 crate::side_effects::kms_encrypt(
@@ -607,8 +610,11 @@ pub(crate) fn replicate_through_store(
                     &dest_account,
                     &dest_region,
                     &rule.dest_bucket,
+                    &replica.key,
+                    replica.bucket_key_enabled == Some(true),
                     &p,
                     Some(replica_key),
+                    None,
                 )
             });
             match encrypted {

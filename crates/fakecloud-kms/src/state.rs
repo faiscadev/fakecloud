@@ -68,6 +68,15 @@ pub struct KmsState {
     /// `alias/aws/<service>` alias targets the key recorded here for it.
     #[serde(default)]
     pub aws_managed_keys: BTreeMap<String, String>,
+    /// Whether this account's state predates the KMS hook binding each
+    /// service's encryption context into its ciphertexts. Such a snapshot
+    /// may hold service ciphertexts (SQS messages, S3 objects, secrets)
+    /// sealed with no context, which the hook keeps decrypting; state
+    /// created since never accepts a context-free ciphertext where a context
+    /// is given, as KMS does not. `false` for new state, `true` for a
+    /// snapshot written before the field existed.
+    #[serde(default)]
+    pub legacy_context_free_ciphertexts: bool,
 }
 
 /// The persisted shape of [`KmsState`]. Identical except that `aliases` may
@@ -87,6 +96,14 @@ struct KmsStateRepr {
     import_wrapping_keys: BTreeMap<String, ImportWrapEntry>,
     #[serde(default)]
     aws_managed_keys: BTreeMap<String, String>,
+    /// Missing from snapshots written before the hook bound encryption
+    /// contexts: those may hold context-free service ciphertexts.
+    #[serde(default = "legacy_ciphertexts_on_load")]
+    legacy_context_free_ciphertexts: bool,
+}
+
+fn legacy_ciphertexts_on_load() -> bool {
+    true
 }
 
 /// `aliases` as found in a snapshot: region -> name -> alias (schema 3+), or
@@ -112,12 +129,13 @@ impl From<KmsStateRepr> for KmsState {
             master_key_bytes: r.master_key_bytes,
             import_wrapping_keys: r.import_wrapping_keys,
             aws_managed_keys: r.aws_managed_keys,
+            legacy_context_free_ciphertexts: r.legacy_context_free_ciphertexts,
         };
         match r.aliases {
             PersistedAliases::Regional(aliases) => state.aliases = aliases,
             PersistedAliases::Legacy(aliases) => state.migrate_legacy_aliases(aliases),
         }
-        crate::hook::migrate_aws_lambda_key_policies(&mut state);
+        crate::hook::migrate_aws_managed_key_policies(&mut state);
         state
     }
 }
@@ -178,6 +196,7 @@ impl KmsState {
             master_key_bytes: default_master_key_bytes(),
             import_wrapping_keys: BTreeMap::new(),
             aws_managed_keys: BTreeMap::new(),
+            legacy_context_free_ciphertexts: false,
         }
     }
 
@@ -333,6 +352,9 @@ impl KmsState {
         self.grants.clear();
         self.custom_key_stores.clear();
         self.aws_managed_keys.clear();
+        // A reset starts every service afresh, so no context-free service
+        // ciphertext from before can be presented any more.
+        self.legacy_context_free_ciphertexts = false;
         // Keep the master key across resets so ciphertexts still decrypt.
     }
 }

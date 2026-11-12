@@ -196,6 +196,9 @@ impl EcsRuntime {
             secret_id,
             version_id,
             version_stage,
+            // The task's execution role reads the secret, an identity of
+            // the account.
+            None,
         )
         .map_err(|e| {
             if e.code() == "ResourceNotFoundException" {

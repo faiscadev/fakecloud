@@ -160,7 +160,13 @@ impl SnsService {
             }
         }
 
-        self.record_topic_kms_usage(&req.account_id, &topic_arn, kms_key_id.as_deref(), &message)?;
+        self.record_topic_kms_usage(
+            &req.account_id,
+            &topic_arn,
+            kms_key_id.as_deref(),
+            &message,
+            req.principal.as_ref().map(|p| p.arn.as_str()),
+        )?;
 
         // FIFO dedup (1.4). Resolve the effective dedup id: the explicit
         // MessageDeduplicationId, or the SHA-256 of the message body when
@@ -809,6 +815,41 @@ pub(crate) fn fan_out_to_subscribers(
     deliver_to_sms_subscribers(state, &subscribers.sms, ctx);
 }
 
+/// SNS delivers to SQS (subscriptions and their dead-letter queues) as its
+/// service principal, for the topic: an encrypted queue's key policy must
+/// name `sns.amazonaws.com`, so a queue under the AWS-managed `aws/sqs` key
+/// refuses it (recorded: nothing arrives, and the topic counts the failure).
+fn sns_sender(topic_arn: &str) -> fakecloud_core::delivery::DeliverySender<'_> {
+    fakecloud_core::delivery::DeliverySender::Service {
+        principal: "sns.amazonaws.com",
+        source_arn: topic_arn,
+        source_account: fakecloud_aws::arn::account_of(topic_arn).unwrap_or_default(),
+    }
+}
+
+/// Count a delivery that failed in the topic's `AWS/SNS`
+/// `NumberOfNotificationsFailed` metric (dimension `TopicName`), as SNS does
+/// (recorded for an SQS subscription whose queue's key refused SNS).
+fn record_notification_failed(delivery: &fakecloud_core::delivery::DeliveryBus, topic_arn: &str) {
+    let (Some(account), Some(region)) = (
+        fakecloud_aws::arn::account_of(topic_arn),
+        fakecloud_aws::arn::region_of(topic_arn),
+    ) else {
+        return;
+    };
+    let name = topic_arn.rsplit(':').next().unwrap_or_default();
+    delivery.put_cloudwatch_metric(
+        account,
+        region,
+        "AWS/SNS",
+        "NumberOfNotificationsFailed",
+        1.0,
+        Some("Count"),
+        [("TopicName".to_string(), name.to_string())].into(),
+        chrono::Utc::now().timestamp_millis(),
+    );
+}
+
 pub(crate) fn deliver_to_sqs_subscribers(
     delivery: &Arc<DeliveryBus>,
     subs: &[(String, bool, String, Option<String>)],
@@ -848,6 +889,7 @@ pub(crate) fn deliver_to_sqs_subscribers(
         // when the target queue is gone, instead of silently dropping (the DLQ
         // was previously honored for HTTP subscribers only).
         let result = delivery.try_send_to_sqs_with_attrs(
+            sns_sender(ctx.topic_arn),
             queue_arn,
             &body,
             &attrs,
@@ -855,9 +897,15 @@ pub(crate) fn deliver_to_sqs_subscribers(
             ctx.message_dedup_id,
         );
         if let Err(err) = result {
+            record_notification_failed(delivery, ctx.topic_arn);
             if let Some(dlq_arn) = parse_redrive_dlq(redrive_policy.as_deref()) {
                 let dlq_body = build_dlq_envelope(&body, &err.to_string(), subscription_arn);
-                delivery.send_to_sqs(&dlq_arn, &dlq_body, &HashMap::new());
+                delivery.send_to_sqs(
+                    sns_sender(ctx.topic_arn),
+                    &dlq_arn,
+                    &dlq_body,
+                    &HashMap::new(),
+                );
             } else {
                 tracing::warn!(
                     queue = %queue_arn,
@@ -921,7 +969,12 @@ pub(crate) fn deliver_to_http_subscribers(
             );
             if let Some(dlq_arn) = parse_redrive_dlq(sub.redrive_policy.as_deref()) {
                 let dlq_body = build_dlq_envelope(&body, &err, &sub.subscription_arn);
-                delivery.send_to_sqs(&dlq_arn, &dlq_body, &std::collections::HashMap::new());
+                delivery.send_to_sqs(
+                    sns_sender(&topic),
+                    &dlq_arn,
+                    &dlq_body,
+                    &std::collections::HashMap::new(),
+                );
             }
         });
     }
@@ -981,6 +1034,7 @@ pub(crate) fn deliver_to_lambda_subscribers(
     }
 
     let delivery = delivery.clone();
+    let topic_for_dlq = ctx.topic_arn.to_string();
     tokio::spawn(async move {
         for (function_arn, payload, subscription_arn, redrive_policy) in lambda_payloads {
             tracing::info!(function_arn = %function_arn, "SNS invoking Lambda function");
@@ -1006,7 +1060,12 @@ pub(crate) fn deliver_to_lambda_subscribers(
                     if let Some(dlq_arn) = parse_redrive_dlq(redrive_policy.as_deref()) {
                         let dlq_body =
                             build_dlq_envelope(&payload, &e.to_string(), &subscription_arn);
-                        delivery.send_to_sqs(&dlq_arn, &dlq_body, &HashMap::new());
+                        delivery.send_to_sqs(
+                            sns_sender(&topic_for_dlq),
+                            &dlq_arn,
+                            &dlq_body,
+                            &HashMap::new(),
+                        );
                     }
                 }
                 None => {

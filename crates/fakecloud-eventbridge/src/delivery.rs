@@ -337,7 +337,13 @@ mod tests {
     }
 
     impl SqsDelivery for Recorder {
-        fn deliver_to_queue(&self, arn: &str, body: &str, _: &HashMap<String, String>) {
+        fn deliver_to_queue(
+            &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
+            arn: &str,
+            body: &str,
+            _: &HashMap<String, String>,
+        ) {
             self.sqs
                 .lock()
                 .unwrap()
@@ -345,6 +351,7 @@ mod tests {
         }
         fn deliver_to_queue_with_attrs(
             &self,
+            _sender: fakecloud_core::delivery::DeliverySender<'_>,
             arn: &str,
             body: &str,
             _: &HashMap<String, fakecloud_core::delivery::SqsMessageAttribute>,
@@ -497,6 +504,70 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, topic_arn);
         assert_eq!(calls[0].2.as_deref(), Some("Changed"));
+    }
+
+    /// A metric put through the delivery bus: name, value and dimensions.
+    type Metric = (String, f64, BTreeMap<String, String>);
+
+    /// Records the metrics put through the delivery bus.
+    #[derive(Default)]
+    struct MetricSink(Mutex<Vec<Metric>>);
+    impl fakecloud_core::delivery::CloudwatchDelivery for MetricSink {
+        fn put_metric(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            namespace: &str,
+            metric_name: &str,
+            value: f64,
+            _unit: Option<&str>,
+            dimensions: BTreeMap<String, String>,
+            _timestamp_ms: i64,
+        ) {
+            assert_eq!(namespace, "AWS/Events");
+            self.0
+                .lock()
+                .unwrap()
+                .push((metric_name.to_string(), value, dimensions));
+        }
+    }
+
+    /// Every target a rule invokes counts once in the rule's `Invocations`,
+    /// not only SQS targets (AWS counts successful and failed invocations of
+    /// any target): an SNS, a Step Functions and a Kinesis target each count
+    /// one, dimensioned by the rule.
+    #[test]
+    fn every_target_type_counts_in_invocations() {
+        for target_arn in [
+            "arn:aws:sns:us-east-1:123456789012:t",
+            "arn:aws:states:us-east-1:123456789012:stateMachine:m",
+            "arn:aws:kinesis:us-east-1:123456789012:stream/s",
+        ] {
+            let state = make_shared();
+            {
+                let mut s_accounts = state.write();
+                let s = s_accounts.default_mut();
+                s.rules.insert(
+                    ("default".to_string(), "r".to_string()),
+                    make_rule("r", None, target_arn),
+                );
+            }
+            let sink = Arc::new(MetricSink::default());
+            let bus = Arc::new(DeliveryBus::new().with_cloudwatch_metrics(sink.clone()));
+            EventBridgeDeliveryImpl::new(state, bus)
+                .put_event(&ev("app", "Changed", r#"{}"#, "default"))
+                .unwrap();
+            let metrics = sink.0.lock().unwrap();
+            assert_eq!(
+                *metrics,
+                vec![(
+                    "Invocations".to_string(),
+                    1.0,
+                    BTreeMap::from([("RuleName".to_string(), "r".to_string())])
+                )],
+                "{target_arn}"
+            );
+        }
     }
 
     #[test]

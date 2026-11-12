@@ -45,7 +45,7 @@ Events fan out through the configuration set's event destinations exactly like a
 - **Receipt rules** — CRUD, scan rules
 - **Receipt filters** — IP filters
 - **Real inbound pipeline** — `/_fakecloud/ses/inbound` simulates receiving an email, evaluates receipt rules, and **actually executes** the configured actions:
-  - **S3 action** — writes the (header-augmented) message to the bucket
+  - **S3 action** - writes the (header-augmented) message to the bucket. With a `KmsKeyArn`, SES encrypts the message itself, client-side, as the S3 Encryption Client does: a fresh AES/GCM data key encrypts it and KMS encrypts the data key, which the object carries in its metadata (`x-amz-key-v2`, `x-amz-iv`, `x-amz-matdesc`, `x-amz-wrap-alg`, `x-amz-cek-alg`, `x-amz-tag-len`); the object is not SSE-encrypted. SES calls KMS as its service principal with the encryption context `aws:ses:source-account`, `aws:ses:rule-name`, `aws:ses:message-id`, so the AWS-managed `alias/aws/ses` key (whose policy also lets the account decrypt) or a customer key whose policy grants SES works; a key that does not grant SES stores nothing
   - **SNS action** — publishes a `Received` notification to the topic
   - **Lambda action** — invokes the function with the `aws:ses` event envelope
   - **AddHeader action** — prepends headers to the message before downstream actions see it

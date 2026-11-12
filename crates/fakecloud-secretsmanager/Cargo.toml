@@ -24,5 +24,6 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+fakecloud-kms = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true }
 bytes = { workspace = true }

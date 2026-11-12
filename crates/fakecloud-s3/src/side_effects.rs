@@ -147,14 +147,18 @@ pub fn is_sse_kms(algorithm: Option<&str>) -> bool {
 /// unless the key is an ARN naming another account. Returns the stored
 /// envelope. With no hook wired the plaintext is returned unchanged, as on
 /// the PutObject path.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn kms_encrypt(
     hook: Option<&Arc<dyn KmsHook>>,
     account_id: &str,
     region: &str,
     bucket: &str,
+    object_key: &str,
+    bucket_key: bool,
     plaintext: &[u8],
     kms_key_id: Option<&str>,
-) -> Result<Bytes, String> {
+    caller_arn: Option<&str>,
+) -> Result<Bytes, fakecloud_core::delivery::KmsError> {
     let Some(hook) = hook else {
         return Ok(Bytes::copy_from_slice(plaintext));
     };
@@ -165,8 +169,8 @@ pub(crate) fn kms_encrypt(
         region,
         key,
         plaintext,
-        "s3.amazonaws.com",
-        s3_encryption_context(bucket),
+        fakecloud_core::delivery::KmsCaller::via_for("s3.amazonaws.com", caller_arn),
+        s3_encryption_context(bucket, object_key, bucket_key),
     )
     .map(|envelope| Bytes::from(envelope.into_bytes()))
 }
@@ -174,13 +178,17 @@ pub(crate) fn kms_encrypt(
 /// Decrypt an SSE-KMS envelope stored in `bucket` (see [`kms_encrypt`]).
 /// Bytes that are not an envelope (no hook wired, or a pre-hook body) are
 /// returned unchanged.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn kms_decrypt(
     hook: Option<&Arc<dyn KmsHook>>,
     account_id: &str,
     bucket: &str,
+    object_key: &str,
+    bucket_key: bool,
     stored: &[u8],
     kms_key_id: Option<&str>,
-) -> Result<Bytes, String> {
+    caller_arn: Option<&str>,
+) -> Result<Bytes, fakecloud_core::delivery::KmsError> {
     let Some(hook) = hook else {
         return Ok(Bytes::copy_from_slice(stored));
     };
@@ -192,20 +200,26 @@ pub(crate) fn kms_decrypt(
     hook.decrypt(
         key_account,
         envelope,
-        "s3.amazonaws.com",
-        s3_encryption_context(bucket),
+        fakecloud_core::delivery::KmsCaller::via_for("s3.amazonaws.com", caller_arn),
+        s3_encryption_context(bucket, object_key, bucket_key),
     )
     .map(Bytes::from)
 }
 
-/// The encryption context S3 binds an SSE-KMS data key to.
-fn s3_encryption_context(bucket: &str) -> std::collections::HashMap<String, String> {
-    let mut ctx = std::collections::HashMap::new();
-    ctx.insert(
-        "aws:s3:arn".to_string(),
-        fakecloud_aws::arn::Arn::s3(bucket).to_string(),
-    );
-    ctx
+/// The encryption context S3 binds an SSE-KMS data key to (S3 user guide,
+/// "Encryption context"): `aws:s3:arn` is the object's ARN, or the bucket's
+/// ARN when the object uses an S3 Bucket Key.
+pub(crate) fn s3_encryption_context(
+    bucket: &str,
+    object_key: &str,
+    bucket_key: bool,
+) -> std::collections::HashMap<String, String> {
+    let arn = if bucket_key {
+        fakecloud_aws::arn::Arn::s3(bucket).to_string()
+    } else {
+        fakecloud_aws::arn::Arn::s3(&format!("{bucket}/{object_key}")).to_string()
+    };
+    [("aws:s3:arn".to_string(), arn)].into()
 }
 
 /// Resolve an SSE-KMS key reference to the key's ARN through the hook (which

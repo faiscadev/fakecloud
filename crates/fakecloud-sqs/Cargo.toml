@@ -24,6 +24,8 @@ md-5 = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
 base64 = { workspace = true }
+aes-gcm = "0.10"
 
 [dev-dependencies]
+fakecloud-kms = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }

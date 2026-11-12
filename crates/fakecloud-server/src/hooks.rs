@@ -4,6 +4,9 @@ use std::sync::Arc;
 
 pub(crate) struct KmsHookAdapter {
     pub(crate) inner: fakecloud_kms::hook::KmsServiceHook,
+    /// The organization of a caller's account (`aws:PrincipalOrgID`), set
+    /// once Organizations state exists.
+    pub(crate) org_resolver: Arc<std::sync::OnceLock<Arc<dyn fakecloud_core::auth::ScpResolver>>>,
     /// Shared KMS state, snapshotted after the hook mints an `aws/<service>`
     /// AWS-managed key on first use, so the key survives a restart and the
     /// corresponding ciphertext stays decryptable.
@@ -18,9 +21,55 @@ impl KmsHookAdapter {
     ) -> Self {
         Self {
             inner: fakecloud_kms::hook::KmsServiceHook::new(state.clone(), usage),
+            org_resolver: Arc::new(std::sync::OnceLock::new()),
             state,
             snapshot_store: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Resolve calling identities from `iam` (an assumed-role session's role
+    /// ARN with its path and `<role id>:<session>` id, a user's id, their
+    /// tags) and from Organizations once [`Self::set_org_resolver`] wires it,
+    /// for the request context key policies and grants are evaluated with.
+    pub(crate) fn with_iam(mut self, iam: fakecloud_iam::SharedIamState) -> Self {
+        let org = self.org_resolver.clone();
+        self.inner = self.inner.with_caller_resolver(Arc::new(move |arn: &str| {
+            let tags = |tags: &[fakecloud_iam::Tag]| -> std::collections::HashMap<String, String> {
+                tags.iter()
+                    .map(|t| (t.key.clone(), t.value.clone()))
+                    .collect()
+            };
+            let account = fakecloud_aws::arn::account_of(arn).unwrap_or_default();
+            let mut facts = fakecloud_kms::hook::CallerFacts {
+                org: org.get().and_then(|r| r.principal_org(account)),
+                ..Default::default()
+            };
+            let iam = iam.read();
+            let Some(state) = iam.get(account) else {
+                return facts;
+            };
+            if let Some((_, role_name)) = fakecloud_kms::hook::assumed_role_parts(arn) {
+                if let Some(role) = state.roles.get(role_name) {
+                    let session = arn.rsplit('/').next().unwrap_or_default();
+                    facts.role_arn = Some(role.arn.clone());
+                    facts.user_id = Some(format!("{}:{session}", role.role_id));
+                    facts.tags = Some(tags(&role.tags));
+                }
+            } else if let Some(rest) = arn.split_once(":user/").map(|(_, rest)| rest) {
+                let name = rest.rsplit('/').next().unwrap_or(rest);
+                if let Some(user) = state.users.get(name) {
+                    facts.user_id = Some(user.user_id.clone());
+                    facts.tags = Some(tags(&user.tags));
+                }
+            }
+            facts
+        }));
+        self
+    }
+
+    /// Wire Organizations for `aws:PrincipalOrgID` / `aws:PrincipalOrgPaths`.
+    pub(crate) fn set_org_resolver(&self, resolver: Arc<dyn fakecloud_core::auth::ScpResolver>) {
+        let _ = self.org_resolver.set(resolver);
     }
 
     pub(crate) fn set_snapshot_store(&self, store: Arc<dyn fakecloud_persistence::SnapshotStore>) {
@@ -68,12 +117,24 @@ impl KmsHookAdapter {
         account_id: &str,
         region: &str,
         key_id: &str,
-        service_principal: &str,
+        _service_principal: &str,
     ) -> Result<String, String> {
+        self.resolve_and_persist_typed(account_id, region, key_id)
+            .map_err(|e| e.to_string())
+    }
+
+    /// [`Self::resolve_and_persist`] with KMS's typed error.
+    fn resolve_and_persist_typed(
+        &self,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
+        // A key ARN or alias ARN resolves in the account it names; only the
+        // resource's own account mints an AWS-managed key on first use.
         let (arn, minted) = self
             .inner
-            .resolve_key_arn_tracked(account_id, region, key_id, service_principal)
-            .map_err(|e| e.to_string())?;
+            .resolve_key_arn_tracked(account_id, region, key_id, "")?;
         if minted {
             self.persist_minted_key();
         }
@@ -94,16 +155,12 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
     ) -> Result<String, fakecloud_core::delivery::KmsKeyUnusable> {
         use fakecloud_core::delivery::KmsKeyUnusable;
         // A key ARN names the account (and region) that owns the key.
-        let owner = key_id
-            .strip_prefix("arn:")
-            .and_then(|rest| rest.split(':').nth(3))
-            .filter(|a| !a.is_empty())
-            .unwrap_or(account_id)
-            .to_string();
-        // Resolving an `aws/<service>` alias mints the AWS-managed key on
-        // first use; persist it like every other mint.
+        let owner = fakecloud_kms::hook::key_owner_account(account_id, key_id).to_string();
+        // Resolving an `aws/<service>` alias of the resource's own account
+        // mints the AWS-managed key on first use; persist it like every other
+        // mint. Another account's alias ARN mints nothing.
         let arn = self
-            .resolve_and_persist(&owner, region, key_id, service_principal)
+            .resolve_and_persist(account_id, region, key_id, service_principal)
             .map_err(|_| KmsKeyUnusable::NotFound)?;
         let short = arn.rsplit('/').next().unwrap_or_default().to_string();
         let (state, policy) = {
@@ -157,39 +214,94 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
         region: &str,
         key_id: &str,
         plaintext: &[u8],
-        service_principal: &str,
+        caller: fakecloud_core::delivery::KmsCaller<'_>,
         encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
+        self.encrypt_with_operation(
+            "GenerateDataKey",
+            account_id,
+            region,
+            key_id,
+            plaintext,
+            caller,
+            encryption_context,
+        )
+    }
+
+    fn encrypt_with_operation(
+        &self,
+        operation: &str,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        plaintext: &[u8],
+        caller: fakecloud_core::delivery::KmsCaller<'_>,
+        encryption_context: std::collections::HashMap<String, String>,
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
         // Resolve first (minting and persisting an AWS-managed key on first
-        // use), then encrypt under the resolved key.
-        let key_arn = self.resolve_and_persist(account_id, region, key_id, service_principal)?;
-        self.inner
-            .encrypt(
-                account_id,
-                region,
-                &key_arn,
-                plaintext,
-                service_principal,
-                encryption_context,
-            )
-            .map_err(|e| e.to_string())
+        // use), then encrypt under the resolved key. A missing key is
+        // answered to the caller as KMS answers it (see
+        // `missing_key_refusal`).
+        let key_arn = self
+            .resolve_and_persist_typed(account_id, region, key_id)
+            .map_err(|err| {
+                fakecloud_kms::hook::missing_key_refusal(err, caller, &format!("kms:{operation}"))
+            })?;
+        self.inner.encrypt_with_operation(
+            operation,
+            account_id,
+            region,
+            &key_arn,
+            plaintext,
+            caller,
+            encryption_context,
+        )
     }
 
     fn decrypt(
         &self,
         account_id: &str,
         ciphertext_b64: &str,
-        service_principal: &str,
+        caller: fakecloud_core::delivery::KmsCaller<'_>,
         encryption_context: std::collections::HashMap<String, String>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
         self.inner
-            .decrypt(
-                account_id,
-                ciphertext_b64,
-                service_principal,
-                encryption_context,
-            )
-            .map_err(|e| e.to_string())
+            .decrypt(account_id, ciphertext_b64, caller, encryption_context)
+    }
+
+    fn is_ciphertext(&self, account_id: &str, stored: &str) -> bool {
+        fakecloud_core::delivery::KmsHook::is_ciphertext(&self.inner, account_id, stored)
+    }
+
+    fn authorize_key_use(
+        &self,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        caller: fakecloud_core::delivery::KmsCaller<'_>,
+        actions: &[&str],
+        encryption_context: &std::collections::HashMap<String, String>,
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
+        // Resolved here to persist a minted AWS-managed key; a missing key
+        // is answered to the caller as KMS answers it (see
+        // `missing_key_refusal`).
+        let key_arn = self
+            .resolve_and_persist_typed(account_id, region, key_id)
+            .map_err(|err| {
+                fakecloud_kms::hook::missing_key_refusal(
+                    err,
+                    caller,
+                    actions.first().copied().unwrap_or("kms:Decrypt"),
+                )
+            })?;
+        self.inner.authorize_key_use(
+            account_id,
+            region,
+            &key_arn,
+            caller,
+            actions,
+            encryption_context,
+        )
     }
 
     fn resolve_key_arn(
@@ -209,9 +321,10 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
         service: &str,
         service_principal: &str,
     ) -> Result<String, String> {
-        let (arn, minted) =
-            self.inner
-                .aws_managed_key_arn_tracked(account_id, region, service, service_principal);
+        let (arn, minted) = self
+            .inner
+            .aws_managed_key_arn_tracked(account_id, region, service, service_principal)
+            .ok_or_else(|| format!("AWS has no AWS-managed KMS key for {service}"))?;
         if minted {
             self.persist_minted_key();
         }
@@ -520,7 +633,7 @@ mod kms_hook_adapter_tests {
                 "us-east-1",
                 "alias/aws/timestream",
                 b"x",
-                principal,
+                fakecloud_core::delivery::KmsCaller::via(principal),
                 Default::default(),
             )
             .unwrap();
