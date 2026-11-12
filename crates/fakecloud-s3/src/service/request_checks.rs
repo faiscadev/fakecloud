@@ -48,33 +48,28 @@ pub(super) enum KeyPut {
     SubResource,
 }
 
-/// The object sub-resources a PUT names in its query.
-const OBJECT_SUBRESOURCES: &[&str] = &[
-    "tagging",
-    "acl",
-    "retention",
-    "legal-hold",
-    "renameObject",
-    "encryption",
-];
-
-/// Classify `req` as a PUT to an object key (`has_key`) or not.
+/// Classify `req` as a PUT to an object key (`has_key`) or not, by the one
+/// request classification ([`super::route::classify`]). A request that
+/// classification refuses is a [`KeyPut::SubResource`]: its body is drained,
+/// and the refusal is what it is answered with.
 pub(super) fn classify_key_put(req: &AwsRequest, has_key: bool) -> KeyPut {
+    use super::route::S3Op;
     if req.method != Method::PUT || !has_key {
         return KeyPut::None;
     }
-    let q = |name: &str| req.query_params.contains_key(name);
-    if q("annotation") {
-        KeyPut::Annotation
-    } else if OBJECT_SUBRESOURCES.iter().any(|name| q(name)) {
-        KeyPut::SubResource
-    } else {
-        match (q("partNumber"), q("uploadId")) {
-            (true, true) => KeyPut::UploadPart,
-            (false, false) if req.headers.contains_key("x-amz-copy-source") => KeyPut::CopyObject,
-            (false, false) => KeyPut::PutObject,
-            _ => KeyPut::SubResource,
-        }
+    let op = super::route::classify(
+        &req.method,
+        Some(""),
+        Some(""),
+        &req.query_params,
+        &req.headers,
+    );
+    match op {
+        Ok(S3Op::PutObject) => KeyPut::PutObject,
+        Ok(S3Op::CopyObject) => KeyPut::CopyObject,
+        Ok(S3Op::UploadPart | S3Op::UploadPartCopy) => KeyPut::UploadPart,
+        Ok(S3Op::PutObjectAnnotation) => KeyPut::Annotation,
+        _ => KeyPut::SubResource,
     }
 }
 

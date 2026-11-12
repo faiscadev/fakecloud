@@ -25,6 +25,8 @@ mod iam_actions;
 #[rustfmt::skip]
 mod iam_reference;
 mod lock;
+mod route;
+mod routing;
 use crate::state::ObjectLockSettings;
 use lock::has_object_lock_headers;
 mod multipart;
@@ -852,6 +854,22 @@ impl AwsService for S3Service {
             ));
         }
         let bucket = req.path_segments.first().map(|s| s.as_str());
+        // The operation, from the one classification authorization also uses
+        // (`route::classify`), so the operation dispatch authorized is the one
+        // routed below. A request S3 refuses before authorizing (conflicting
+        // sub-resources, an unsupported method) is refused here too, for when
+        // IAM enforcement is off. A CORS preflight is answered on its own.
+        let op = if req.method == Method::OPTIONS {
+            None
+        } else {
+            Some(route::classify(
+                &req.method,
+                bucket,
+                key.as_deref(),
+                &req.query_params,
+                &req.headers,
+            )?)
+        };
 
         // Bucket names are one global namespace, so a bucket-addressed request
         // is served in the account that OWNS the bucket, not the caller's: a
@@ -899,134 +917,6 @@ impl AwsService for S3Service {
                 req.body = decoded.into();
             }
         }
-
-        // Multipart upload operations (checked before main match). Held in an
-        // Option rather than returned directly so these responses still reach
-        // the shared tail below (CORS headers, access logging) — browser
-        // multipart upload is the single most common reason a bucket has a CORS
-        // config at all, so skipping it here is exactly the wrong place.
-        //
-        // Each arm carries its own access-log operation name: method + key
-        // alone cannot tell `AbortMultipartUpload` from a real object DELETE,
-        // and logging the former as `DELETE.OBJECT` would show a log consumer a
-        // live object being deleted.
-        #[allow(clippy::type_complexity)]
-        let multipart: Option<(&'static str, Result<AwsResponse, AwsServiceError>)> = 'multipart: {
-            let Some(b) = bucket else {
-                break 'multipart None;
-            };
-            // POST /{bucket}/{key}?uploads — CreateMultipartUpload
-            if req.method == Method::POST
-                && key.is_some()
-                && req.query_params.contains_key("uploads")
-            {
-                break 'multipart Some((
-                    "POST.UPLOADS",
-                    self.create_multipart_upload(account_id, &req, b, key.as_deref().unwrap()),
-                ));
-            }
-
-            // POST /{bucket}/{key}?restore
-            if req.method == Method::POST
-                && key.is_some()
-                && req.query_params.contains_key("restore")
-            {
-                break 'multipart Some((
-                    "POST.RESTORE",
-                    self.restore_object(account_id, &req, b, key.as_deref().unwrap()),
-                ));
-            }
-
-            // POST /{bucket}/{key}?uploadId=X — CompleteMultipartUpload
-            if req.method == Method::POST && key.is_some() {
-                if let Some(upload_id) = req.query_params.get("uploadId").cloned() {
-                    break 'multipart Some((
-                        "POST.UPLOAD",
-                        self.complete_multipart_upload(
-                            account_id,
-                            &req,
-                            b,
-                            key.as_deref().unwrap(),
-                            &upload_id,
-                        ),
-                    ));
-                }
-            }
-
-            // PUT /{bucket}/{key}?partNumber=N&uploadId=X — UploadPart or UploadPartCopy
-            if req.method == Method::PUT && key.is_some() {
-                if let (Some(part_num_str), Some(upload_id)) = (
-                    req.query_params.get("partNumber").cloned(),
-                    req.query_params.get("uploadId").cloned(),
-                ) {
-                    if let Ok(part_number) = part_num_str.parse::<i64>() {
-                        if req.headers.contains_key("x-amz-copy-source") {
-                            break 'multipart Some((
-                                "COPY.PART",
-                                self.upload_part_copy(
-                                    account_id,
-                                    &req,
-                                    b,
-                                    key.as_deref().unwrap(),
-                                    &upload_id,
-                                    part_number,
-                                ),
-                            ));
-                        }
-                        break 'multipart Some((
-                            "PUT.PART",
-                            self.upload_part(
-                                account_id,
-                                &req,
-                                b,
-                                key.as_deref().unwrap(),
-                                &upload_id,
-                                part_number,
-                            )
-                            .await,
-                        ));
-                    }
-                }
-            }
-
-            // DELETE /{bucket}/{key}?uploadId=X — AbortMultipartUpload
-            if req.method == Method::DELETE && key.is_some() {
-                if let Some(upload_id) = req.query_params.get("uploadId").cloned() {
-                    break 'multipart Some((
-                        "DELETE.UPLOAD",
-                        self.abort_multipart_upload(
-                            account_id,
-                            b,
-                            key.as_deref().unwrap(),
-                            &upload_id,
-                        ),
-                    ));
-                }
-            }
-
-            // GET /{bucket}?uploads — ListMultipartUploads
-            if req.method == Method::GET
-                && key.is_none()
-                && req.query_params.contains_key("uploads")
-            {
-                break 'multipart Some((
-                    "GET.UPLOADS",
-                    self.list_multipart_uploads(account_id, b, &req.query_params),
-                ));
-            }
-
-            // GET /{bucket}/{key}?uploadId=X — ListParts
-            if req.method == Method::GET && key.is_some() {
-                if let Some(upload_id) = req.query_params.get("uploadId").cloned() {
-                    break 'multipart Some((
-                        "GET.UPLOAD",
-                        self.list_parts(account_id, &req, b, key.as_deref().unwrap(), &upload_id),
-                    ));
-                }
-            }
-
-            None
-        };
 
         // Handle OPTIONS preflight requests (CORS)
         if req.method == Method::OPTIONS {
@@ -1228,453 +1118,22 @@ impl AwsService for S3Service {
         // than one `Origin` is not a single origin to allow.
         let origin_header = single_cors_header(&req.headers, "origin").map(str::to_string);
 
-        // Bucket-scoped sub-resource query params. If a request targets one
-        // of these without a bucket in the path, S3 returns an error rather
-        // than silently treating it as a top-level (service) operation.
-        // Real AWS rejects e.g. `GET /?tagging` with a routing/validation
-        // error; mirroring that prevents bucket-required ops from being
-        // accidentally answered by ListBuckets / WriteGetObjectResponse.
-        let bucket_subresources: &[&str] = &[
-            "metadataAnnotationTable",
-            "tagging",
-            "acl",
-            "versioning",
-            "cors",
-            "notification",
-            "website",
-            "accelerate",
-            "publicAccessBlock",
-            "encryption",
-            "lifecycle",
-            "logging",
-            "policy",
-            "policyStatus",
-            "replication",
-            "ownershipControls",
-            "inventory",
-            "analytics",
-            "intelligent-tiering",
-            "metrics",
-            "requestPayment",
-            "abac",
-            "metadataConfiguration",
-            "metadataTable",
-            "metadataInventoryTable",
-            "metadataJournalTable",
-            "object-lock",
-            "versions",
-            "session",
-            "retention",
-            "legal-hold",
-            "attributes",
-            "torrent",
-            "renameObject",
-            "uploads",
-            "restore",
-            "select",
-            // Bucket-required ops the earlier list missed: their query
-            // markers (e.g. `?location` for GetBucketLocation,
-            // `?delete` for DeleteObjects, `?list-type=2` for
-            // ListObjectsV2) signal a bucket op so a request with the
-            // marker but no bucket segment is malformed, not a service-
-            // level call.
-            "location",
-            "delete",
-            "list-type",
-        ];
-        if bucket.is_none()
-            && bucket_subresources
-                .iter()
-                .any(|q| req.query_params.contains_key(*q))
-        {
+        // A preflight with no bucket reaches no operation.
+        let Some(op) = op else {
             return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidBucketName",
-                "The specified bucket is not valid: bucket name is required for this operation",
+                StatusCode::METHOD_NOT_ALLOWED,
+                "MethodNotAllowed",
+                "The specified method is not allowed against this resource",
             ));
-        }
-
-        let multipart_op = multipart.as_ref().map(|(op, _)| *op);
-        let mut result = match multipart {
-            Some((_, r)) => r,
-            None => match (&req.method, bucket, key.as_deref()) {
-                // ListBuckets: GET /
-                (&Method::GET, None, None) => {
-                    if req.query_params.get("x-id").map(|s| s.as_str())
-                        == Some("ListDirectoryBuckets")
-                    {
-                        self.list_directory_buckets(caller_account, &req)
-                    } else {
-                        self.list_buckets(caller_account, &req)
-                    }
-                }
-
-                // Bucket-level operations (no key)
-                (&Method::PUT, Some(b), None) => {
-                    if req.query_params.contains_key("metadataAnnotationTable") {
-                        self.update_bucket_metadata_annotation_table_configuration(
-                            account_id, &req, b,
-                        )
-                    } else if req.query_params.contains_key("tagging") {
-                        self.put_bucket_tagging(account_id, &req, b)
-                    } else if req.query_params.contains_key("acl") {
-                        self.put_bucket_acl(account_id, &req, b)
-                    } else if req.query_params.contains_key("versioning") {
-                        self.put_bucket_versioning(account_id, &req, b)
-                    } else if req.query_params.contains_key("cors") {
-                        self.put_bucket_cors(account_id, &req, b)
-                    } else if req.query_params.contains_key("notification") {
-                        self.put_bucket_notification(account_id, &req, b)
-                    } else if req.query_params.contains_key("website") {
-                        self.put_bucket_website(account_id, &req, b)
-                    } else if req.query_params.contains_key("accelerate") {
-                        self.put_bucket_accelerate(account_id, &req, b)
-                    } else if req.query_params.contains_key("publicAccessBlock") {
-                        self.put_public_access_block(account_id, &req, b)
-                    } else if req.query_params.contains_key("encryption") {
-                        self.put_bucket_encryption(account_id, &req, b)
-                    } else if req.query_params.contains_key("lifecycle") {
-                        self.put_bucket_lifecycle(account_id, &req, b)
-                    } else if req.query_params.contains_key("logging") {
-                        self.put_bucket_logging(account_id, &req, b)
-                    } else if req.query_params.contains_key("policy") {
-                        self.put_bucket_policy(account_id, &req, b)
-                    } else if req.query_params.contains_key("object-lock") {
-                        self.put_object_lock_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("replication") {
-                        self.put_bucket_replication(account_id, &req, b)
-                    } else if req.query_params.contains_key("ownershipControls") {
-                        self.put_bucket_ownership_controls(account_id, &req, b)
-                    } else if req.query_params.contains_key("inventory") {
-                        self.put_bucket_inventory(account_id, &req, b)
-                    } else if req.query_params.contains_key("analytics") {
-                        self.put_bucket_analytics_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("intelligent-tiering") {
-                        self.put_bucket_intelligent_tiering_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("metrics") {
-                        self.put_bucket_metrics_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("requestPayment") {
-                        self.put_bucket_request_payment(account_id, &req, b)
-                    } else if req.query_params.contains_key("abac") {
-                        self.put_bucket_abac(account_id, &req, b)
-                    } else if req.query_params.contains_key("metadataInventoryTable") {
-                        self.update_bucket_metadata_inventory_table(account_id, &req, b)
-                    } else if req.query_params.contains_key("metadataJournalTable") {
-                        self.update_bucket_metadata_journal_table(account_id, &req, b)
-                    } else {
-                        self.create_bucket(caller_account, &req, b)
-                    }
-                }
-                (&Method::DELETE, Some(b), None) => {
-                    if req.query_params.contains_key("tagging") {
-                        self.delete_bucket_tagging(account_id, &req, b)
-                    } else if req.query_params.contains_key("cors") {
-                        self.delete_bucket_cors(account_id, b)
-                    } else if req.query_params.contains_key("website") {
-                        self.delete_bucket_website(account_id, b)
-                    } else if req.query_params.contains_key("publicAccessBlock") {
-                        self.delete_public_access_block(account_id, b)
-                    } else if req.query_params.contains_key("encryption") {
-                        self.delete_bucket_encryption(account_id, b)
-                    } else if req.query_params.contains_key("lifecycle") {
-                        self.delete_bucket_lifecycle(account_id, b)
-                    } else if req.query_params.contains_key("policy") {
-                        self.delete_bucket_policy(account_id, b)
-                    } else if req.query_params.contains_key("replication") {
-                        self.delete_bucket_replication(account_id, b)
-                    } else if req.query_params.contains_key("ownershipControls") {
-                        self.delete_bucket_ownership_controls(account_id, b)
-                    } else if req.query_params.contains_key("inventory") {
-                        self.delete_bucket_inventory(account_id, &req, b)
-                    } else if req.query_params.contains_key("analytics") {
-                        self.delete_bucket_analytics_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("intelligent-tiering") {
-                        self.delete_bucket_intelligent_tiering_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("metrics") {
-                        self.delete_bucket_metrics_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("metadataConfiguration") {
-                        self.delete_bucket_metadata_config(account_id, b)
-                    } else if req.query_params.contains_key("metadataTable") {
-                        self.delete_bucket_metadata_table_config(account_id, b)
-                    } else {
-                        self.delete_bucket(account_id, &req, b)
-                    }
-                }
-                (&Method::HEAD, Some(b), None) => self.head_bucket(account_id, b),
-                (&Method::GET, Some(b), None) => {
-                    if req.query_params.contains_key("tagging") {
-                        self.get_bucket_tagging(account_id, &req, b)
-                    } else if req.query_params.contains_key("location") {
-                        self.get_bucket_location(account_id, b)
-                    } else if req.query_params.contains_key("acl") {
-                        self.get_bucket_acl(account_id, &req, b)
-                    } else if req.query_params.contains_key("versioning") {
-                        self.get_bucket_versioning(account_id, b)
-                    } else if req.query_params.contains_key("versions") {
-                        self.list_object_versions(account_id, &req, b)
-                    } else if req.query_params.contains_key("object-lock") {
-                        self.get_object_lock_configuration(account_id, b)
-                    } else if req.query_params.contains_key("cors") {
-                        self.get_bucket_cors(account_id, b)
-                    } else if req.query_params.contains_key("notification") {
-                        self.get_bucket_notification(account_id, b)
-                    } else if req.query_params.contains_key("website") {
-                        self.get_bucket_website(account_id, b)
-                    } else if req.query_params.contains_key("accelerate") {
-                        self.get_bucket_accelerate(account_id, b)
-                    } else if req.query_params.contains_key("publicAccessBlock") {
-                        self.get_public_access_block(account_id, b)
-                    } else if req.query_params.contains_key("encryption") {
-                        self.get_bucket_encryption(account_id, b)
-                    } else if req.query_params.contains_key("lifecycle") {
-                        self.get_bucket_lifecycle(account_id, b)
-                    } else if req.query_params.contains_key("logging") {
-                        self.get_bucket_logging(account_id, b)
-                    } else if req.query_params.contains_key("policy") {
-                        self.get_bucket_policy(account_id, b)
-                    } else if req.query_params.contains_key("replication") {
-                        self.get_bucket_replication(account_id, b)
-                    } else if req.query_params.contains_key("ownershipControls") {
-                        self.get_bucket_ownership_controls(account_id, b)
-                    } else if req.query_params.contains_key("inventory") {
-                        if req.query_params.contains_key("id") {
-                            self.get_bucket_inventory(account_id, &req, b)
-                        } else {
-                            self.list_bucket_inventory_configurations(account_id, b)
-                        }
-                    } else if req.query_params.contains_key("analytics") {
-                        if req.query_params.contains_key("id") {
-                            self.get_bucket_analytics_config(account_id, &req, b)
-                        } else {
-                            self.list_bucket_analytics_configurations(account_id, b)
-                        }
-                    } else if req.query_params.contains_key("intelligent-tiering") {
-                        if req.query_params.contains_key("id") {
-                            self.get_bucket_intelligent_tiering_config(account_id, &req, b)
-                        } else {
-                            self.list_bucket_intelligent_tiering_configurations(account_id, b)
-                        }
-                    } else if req.query_params.contains_key("metrics") {
-                        if req.query_params.contains_key("id") {
-                            self.get_bucket_metrics_config(account_id, &req, b)
-                        } else {
-                            self.list_bucket_metrics_configurations(account_id, b)
-                        }
-                    } else if req.query_params.contains_key("requestPayment") {
-                        self.get_bucket_request_payment(account_id, b)
-                    } else if req.query_params.contains_key("abac") {
-                        self.get_bucket_abac(account_id, b)
-                    } else if req.query_params.contains_key("policyStatus") {
-                        self.get_bucket_policy_status(account_id, b)
-                    } else if req.query_params.contains_key("metadataConfiguration") {
-                        self.get_bucket_metadata_config(account_id, b)
-                    } else if req.query_params.contains_key("metadataTable") {
-                        self.get_bucket_metadata_table_config(account_id, b)
-                    } else if req.query_params.contains_key("session") {
-                        self.create_session(account_id, &req, b)
-                    } else if req.query_params.get("list-type").map(|s| s.as_str()) == Some("2") {
-                        self.list_objects_v2(account_id, &req, b)
-                    } else if req.query_params.is_empty() {
-                        // If bucket has website config and no query params, serve index document
-                        let website_config = {
-                            let accounts = self.state.read();
-                            let _empty_s3 = crate::state::S3State::new(account_id, &req.region);
-                            let state = accounts.get(account_id).unwrap_or(&_empty_s3);
-                            state
-                                .buckets
-                                .get(b)
-                                .and_then(|bkt| bkt.website_config.clone())
-                        };
-                        if let Some(ref config) = website_config {
-                            if let Some(index_doc) =
-                                extract_xml_value(config, "Suffix").or_else(|| {
-                                    extract_xml_value(config, "IndexDocument").and_then(|inner| {
-                                        let open = "<Suffix>";
-                                        let close = "</Suffix>";
-                                        let s = inner.find(open)? + open.len();
-                                        let e = inner.find(close)?;
-                                        Some(inner[s..e].trim().to_string())
-                                    })
-                                })
-                            {
-                                self.serve_website_object(account_id, &req, b, &index_doc, config)
-                            } else {
-                                self.list_objects_v1(account_id, &req, b)
-                            }
-                        } else {
-                            self.list_objects_v1(account_id, &req, b)
-                        }
-                    } else {
-                        self.list_objects_v1(account_id, &req, b)
-                    }
-                }
-
-                // Object-level operations
-                (&Method::PUT, Some(b), Some(k)) => {
-                    if req.query_params.contains_key("annotation") {
-                        self.put_object_annotation(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("tagging") {
-                        self.put_object_tagging(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("acl") {
-                        self.put_object_acl(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("retention") {
-                        self.put_object_retention(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("legal-hold") {
-                        self.put_object_legal_hold(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("renameObject") {
-                        self.rename_object(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("encryption") {
-                        self.update_object_encryption(account_id, &req, b, k)
-                    } else if req.headers.contains_key("x-amz-copy-source") {
-                        self.copy_object(account_id, &req, b, k)
-                    } else {
-                        self.put_object(account_id, &req, b, k).await
-                    }
-                }
-                (&Method::GET, Some(b), Some(k)) => {
-                    if req.query_params.contains_key("annotation") {
-                        // Both `?annotation` reads share a URI; `annotationName`
-                        // selects one annotation, its absence lists them.
-                        if req
-                            .query_params
-                            .contains_key(annotations::ANNOTATION_NAME_QUERY)
-                        {
-                            self.get_object_annotation(account_id, &req, b, k)
-                        } else {
-                            self.list_object_annotations(account_id, &req, b, k)
-                        }
-                    } else if req.query_params.contains_key("tagging") {
-                        self.get_object_tagging(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("acl") {
-                        self.get_object_acl(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("retention") {
-                        self.get_object_retention(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("legal-hold") {
-                        self.get_object_legal_hold(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("attributes") {
-                        let result = self.get_object_attributes(account_id, &req, b, k);
-                        self.hide_missing_key(&req, b, result)
-                    } else if req.query_params.contains_key("torrent") {
-                        self.get_object_torrent(account_id, &req, b, k)
-                    } else {
-                        let result = self.get_object(account_id, &req, b, k);
-                        let missing = matches!(&result, Err(e) if e.code() == "NoSuchKey");
-                        let result = self.hide_missing_key(&req, b, result);
-                        let result = self.shape_lock_headers(&req, b, k, result);
-                        // If the object is missing and the bucket has a website
-                        // config, serve its error document, with the status
-                        // the caller would get: 404, or 403 for a caller that
-                        // may not list the bucket (S3 serves the custom error
-                        // document for 4XX errors).
-                        let error_status = missing.then(|| {
-                            result
-                                .as_ref()
-                                .err()
-                                .map_or(StatusCode::NOT_FOUND, |e| e.status())
-                        });
-                        let mut return_website_error = None;
-                        if let Some(error_status) = error_status {
-                            let website_config = {
-                                let accounts = self.state.read();
-                                let _empty_s3 = crate::state::S3State::new(account_id, &req.region);
-                                let state = accounts.get(account_id).unwrap_or(&_empty_s3);
-                                state
-                                    .buckets
-                                    .get(b)
-                                    .and_then(|bkt| bkt.website_config.clone())
-                            };
-                            if let Some(ref config) = website_config {
-                                if let Some(error_key) = extract_xml_value(config, "ErrorDocument")
-                                    .and_then(|inner| {
-                                        let open = "<Key>";
-                                        let close = "</Key>";
-                                        let s = inner.find(open)? + open.len();
-                                        let e = inner.find(close)?;
-                                        Some(inner[s..e].trim().to_string())
-                                    })
-                                    .or_else(|| extract_xml_value(config, "Key"))
-                                {
-                                    // Fall through to the shared tail (CORS headers,
-                                    // access logging) rather than returning early,
-                                    // so a website error document is treated like
-                                    // any other response.
-                                    return_website_error = Some(self.serve_website_error(
-                                        account_id,
-                                        &req,
-                                        b,
-                                        &error_key,
-                                        error_status,
-                                    ));
-                                }
-                            }
-                        }
-                        return_website_error.unwrap_or(result)
-                    }
-                }
-                (&Method::DELETE, Some(b), Some(k)) => {
-                    if req.query_params.contains_key("annotation") {
-                        self.delete_object_annotation(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("tagging") {
-                        self.delete_object_tagging(account_id, &req, b, k)
-                    } else {
-                        self.delete_object(account_id, &req, b, k)
-                    }
-                }
-                (&Method::HEAD, Some(b), Some(k)) => {
-                    let result = self.head_object(account_id, &req, b, k);
-                    let result = self.hide_missing_key(&req, b, result);
-                    self.shape_lock_headers(&req, b, k, result)
-                }
-
-                // POST /{bucket}?delete — batch delete
-                (&Method::POST, Some(b), None) if req.query_params.contains_key("delete") => {
-                    self.delete_objects(account_id, &req, b)
-                }
-                (&Method::POST, Some(b), None)
-                    if req.query_params.contains_key("metadataConfiguration") =>
-                {
-                    self.create_bucket_metadata_config(account_id, &req, b)
-                }
-                (&Method::POST, Some(b), None)
-                    if req.query_params.contains_key("metadataTable") =>
-                {
-                    self.create_bucket_metadata_table_config(account_id, &req, b)
-                }
-                (&Method::POST, Some(b), Some(k))
-                    if req.query_params.get("select-type").map(|s| s.as_str()) == Some("2") =>
-                {
-                    self.select_object_content(account_id, &req, b, k)
-                }
-                (&Method::POST, Some("WriteGetObjectResponse"), None) => {
-                    self.write_get_object_response(account_id, &req)
-                }
-
-                // POST /{bucket} with a multipart/form-data body — POST Object
-                // (browser-form "POST Policy" upload, the target of boto3's
-                // `generate_presigned_post`). Guarded on Content-Type so it
-                // doesn't shadow the `?delete` / metadata-config arms above,
-                // which also match `(POST, Some(b), None)` but carry their own
-                // query-param guards.
-                (&Method::POST, Some(b), None)
-                    if req
-                        .headers
-                        .get(http::header::CONTENT_TYPE)
-                        .and_then(|v| v.to_str().ok())
-                        .is_some_and(|ct| {
-                            ct.to_ascii_lowercase().starts_with("multipart/form-data")
-                        }) =>
-                {
-                    self.post_object(account_id, &req, b).await
-                }
-
-                _ => Err(AwsServiceError::aws_error(
-                    StatusCode::METHOD_NOT_ALLOWED,
-                    "MethodNotAllowed",
-                    "The specified method is not allowed against this resource",
-                )),
-            },
         };
-
+        // Every operation that addresses a bucket (or an object in one) was
+        // classified from a path naming them, so these are only empty for the
+        // service-level listings, which use neither.
+        let b = bucket.unwrap_or_default();
+        let k = key.as_deref().unwrap_or_default();
+        let mut result = self
+            .route_operation(op, &req, caller_account, account_id, b, k)
+            .await;
         // Apply CORS headers to the response if Origin was present
         // Keyed on the raw header, not the usable value: an `Origin` that is
         // blank, unreadable, or split across conflicting lines still makes the
@@ -1747,14 +1206,14 @@ impl AwsService for S3Service {
                 Ok(resp) => resp.status.as_u16(),
                 Err(e) => e.status().as_u16(),
             };
-            let op = multipart_op
+            let operation = route::access_log_operation(Some(op))
                 .unwrap_or_else(|| logging::operation_name(&req.method, key.as_deref()));
             logging::maybe_write_access_log(
                 &self.state,
                 &self.store,
                 b_name,
                 &logging::AccessLogRequest {
-                    operation: op,
+                    operation,
                     key: key.as_deref(),
                     status: status_code,
                     request_id: &req.request_id,
@@ -1974,14 +1433,29 @@ impl AwsService for S3Service {
     }
 
     /// DeleteObjects is authorized per key by its handler, which reports a
-    /// denied key as an `AccessDenied` entry of its 200 response. Deferred
-    /// only for a request the handler is certain to route to DeleteObjects --
-    /// the guard of its arm, on the same key derivation -- AND that
-    /// authorization classifies as DeleteObjects, so no other operation can
-    /// run on a skipped check (`POST /b//?delete&uploads` addresses the key
-    /// `/` and is a CreateMultipartUpload).
+    /// denied key as an `AccessDenied` entry of its 200 response. The handler
+    /// routes on the same classification, so a request deferred here is one
+    /// it runs as DeleteObjects (`POST /b//?delete&uploads` addresses the key
+    /// `/` and is refused as conflicting).
     fn iam_authorized_by_handler(&self, request: &AwsRequest) -> bool {
-        is_delete_objects_route(request) && s3_operation(request) == Some("DeleteObjects")
+        !fakecloud_core::protocol::is_s3_control_host(&request.headers)
+            && !request.raw_path.starts_with("//")
+            && request.method != Method::OPTIONS
+            && s3_operation(request) == Some("DeleteObjects")
+    }
+
+    /// The requests S3 refuses before authorizing anything: conflicting
+    /// sub-resource parameters, a sub-resource with a method it does not
+    /// take, an invalid upload part number (see [`route`]). Every caller,
+    /// anonymous included, gets these errors rather than an AccessDenied.
+    fn validate_before_authorization(&self, request: &AwsRequest) -> Result<(), AwsServiceError> {
+        if fakecloud_core::protocol::is_s3_control_host(&request.headers)
+            || request.method == Method::OPTIONS
+            || request.raw_path.starts_with("//")
+        {
+            return Ok(());
+        }
+        classify_request(request).map(|_| ())
     }
 
     fn iam_condition_keys_for(
@@ -2166,35 +1640,23 @@ pub(crate) fn request_key(req: &AwsRequest) -> Option<String> {
     })
 }
 
-/// Whether the handler routes `req` to DeleteObjects: the guard of that arm
-/// (`POST /{bucket}?delete`, no key), on a path the handler does not refuse
-/// first, outside S3 Control.
-fn is_delete_objects_route(req: &AwsRequest) -> bool {
-    req.method == Method::POST
-        && !fakecloud_core::protocol::is_s3_control_host(&req.headers)
-        && !req.raw_path.starts_with("//")
-        && !req.path_segments.is_empty()
-        && request_key(req).is_none()
-        && req.query_params.contains_key("delete")
+/// The operation a request invokes, by the one classification the handler
+/// routes on ([`route::classify`]); `Err` is how S3 refuses it before
+/// authorizing anything.
+fn classify_request(request: &AwsRequest) -> Result<route::S3Op, AwsServiceError> {
+    route::classify(
+        &request.method,
+        request.path_segments.first().map(String::as_str),
+        request_key(request).as_deref(),
+        &request.query_params,
+        &request.headers,
+    )
 }
 
-/// The S3 API operation a (non-S3-Control) request invokes, by method, path,
-/// sub-resource query keys and the copy-source header.
+/// The name of the S3 API operation a request invokes; `None` for a request
+/// S3 refuses before authorizing it.
 fn s3_operation(request: &AwsRequest) -> Option<&'static str> {
-    let bucket = request.path_segments.first().map(|s| s.as_str());
-    let key = request_key(request);
-    let op = s3_detect_action(
-        request.method.as_str(),
-        bucket,
-        key.as_deref(),
-        &request.query_params,
-    )?;
-    let copy = request.headers.contains_key("x-amz-copy-source");
-    Some(match op {
-        "PutObject" if copy => "CopyObject",
-        "UploadPart" if copy => "UploadPartCopy",
-        other => other,
-    })
+    classify_request(request).ok().map(route::S3Op::name)
 }
 
 /// The authorization of an S3 Control request fakecloud serves: access-point
@@ -2504,393 +1966,23 @@ fn s3_request_tags(
     }
 }
 
-/// Derive the S3 API operation (not the IAM action: see [`iam_actions`]) an
-/// S3 REST request invokes, from its method, path and sub-resource query
-/// keys. PutObject and UploadPart also stand for CopyObject and UploadPartCopy
-/// here, which only the `x-amz-copy-source` header tells apart
-/// ([`s3_operation`]).
-///
-/// Returns `None` for requests that don't map to a known operation, which
-/// strict enforcement refuses (the "service is iam_enforceable but has no
-/// mapping" branch in dispatch.rs).
+/// The name of the S3 API operation (not the IAM action: see
+/// [`iam_actions`]) a request with this method, bucket, key and query
+/// invokes, by the one classification ([`route::classify`]); `None` for a
+/// request it refuses. Without the request's headers a PUT to a key is a
+/// PutObject and an upload part an UploadPart ([`s3_operation`] tells the
+/// copies apart).
+#[cfg(test)]
 fn s3_detect_action(
     method: &str,
     bucket: Option<&str>,
     key: Option<&str>,
     query: &std::collections::HashMap<String, String>,
 ) -> Option<&'static str> {
-    let has = |q: &str| query.contains_key(q);
-    let is_get = method == "GET";
-    let is_put = method == "PUT";
-    let is_post = method == "POST";
-    let is_delete = method == "DELETE";
-
-    // Service root
-    if bucket.is_none() {
-        return match method {
-            // A directory-bucket listing (`GET /?x-id=ListDirectoryBuckets`) is
-            // authorized under `s3express:ListAllMyDirectoryBuckets`, NOT
-            // `s3:ListBuckets`. Detecting it as ListBuckets let an
-            // `s3:ListBuckets` grant wrongly enumerate directory buckets and
-            // denied a policy that only granted the s3express action (bug-hunt
-            // 2026-06-24, 5.5).
-            "GET" if query.get("x-id").map(|s| s.as_str()) == Some("ListDirectoryBuckets") => {
-                Some("ListDirectoryBuckets")
-            }
-            "GET" => Some("ListBuckets"),
-            _ => None,
-        };
-    }
-
-    // WriteGetObjectResponse is an Object Lambda data-plane op routed as
-    // `POST /WriteGetObjectResponse` (the literal value occupies the bucket
-    // segment). AWS authorizes it under the separate
-    // `s3-object-lambda:WriteGetObjectResponse` action — handled in
-    // `iam_action_for`, which selects the `s3-object-lambda` service prefix
-    // for this op. Previously unmapped -> enforcement skipped.
-    if is_post && bucket == Some("WriteGetObjectResponse") && key.is_none() {
-        return Some("WriteGetObjectResponse");
-    }
-
-    let has_key = key.is_some();
-
-    // Multipart sub-resource forms
-    if has_key && is_post && has("uploads") {
-        return Some("CreateMultipartUpload");
-    }
-    if has_key && is_post && has("uploadId") {
-        return Some("CompleteMultipartUpload");
-    }
-    if has_key && is_put && has("partNumber") && has("uploadId") {
-        return Some("UploadPart");
-    }
-    if has_key && is_delete && has("uploadId") {
-        return Some("AbortMultipartUpload");
-    }
-    if has_key && is_get && has("uploadId") {
-        return Some("ListParts");
-    }
-    if !has_key && is_get && has("uploads") {
-        return Some("ListMultipartUploads");
-    }
-
-    // Sub-resource-keyed actions (?acl, ?tagging, ...). Order matters
-    // since a request can carry multiple; we pick the most specific.
-    // Object-level sub-resources come first (key present).
-    if has_key {
-        if has("annotation") {
-            return Some(match method {
-                // One URI serves both reads; `annotationName` picks a single
-                // annotation, its absence lists them.
-                "GET" if has(annotations::ANNOTATION_NAME_QUERY) => "GetObjectAnnotation",
-                "GET" => "ListObjectAnnotations",
-                "PUT" => "PutObjectAnnotation",
-                "DELETE" => "DeleteObjectAnnotation",
-                _ => return None,
-            });
-        }
-        if has("tagging") {
-            return Some(match method {
-                "GET" => "GetObjectTagging",
-                "PUT" => "PutObjectTagging",
-                "DELETE" => "DeleteObjectTagging",
-                _ => return None,
-            });
-        }
-        if has("acl") {
-            return Some(match method {
-                "GET" => "GetObjectAcl",
-                "PUT" => "PutObjectAcl",
-                _ => return None,
-            });
-        }
-        if has("retention") {
-            return Some(match method {
-                "GET" => "GetObjectRetention",
-                "PUT" => "PutObjectRetention",
-                _ => return None,
-            });
-        }
-        if has("legal-hold") {
-            return Some(match method {
-                "GET" => "GetObjectLegalHold",
-                "PUT" => "PutObjectLegalHold",
-                _ => return None,
-            });
-        }
-        // Identified by cubic on PR #399: both ?attributes and ?restore
-        // need method guards — otherwise e.g. GET /bucket/key?restore
-        // would be classified as RestoreObject (POST-only in AWS) and
-        // IAM-evaluated against s3:RestoreObject instead of s3:GetObject.
-        if has("attributes") && is_get {
-            return Some("GetObjectAttributes");
-        }
-        if has("restore") && is_post {
-            return Some("RestoreObject");
-        }
-        // RenameObject is an object-level op (`PUT /bucket/newkey?renameObject`
-        // + `x-amz-rename-source`). It carries a key, so it must be detected
-        // here — the `!has_key` arm below never sees it. Without this it fell
-        // through to `PutObject`, so a policy denying `s3:RenameObject` was
-        // silently ineffective.
-        if has("renameObject") && is_put {
-            return Some("RenameObject");
-        }
-        // UpdateObjectEncryption (`PUT /bucket/key?encryption`) changes an
-        // existing object's server-side encryption, authorized as its own
-        // action: the API reference's required permissions are
-        // `s3:UpdateObjectEncryption` plus the KMS ones.
-        if has("encryption") && is_put {
-            return Some("UpdateObjectEncryption");
-        }
-        // SelectObjectContent (`POST /bucket/key?select&select-type=2`) reads
-        // object data, so AWS authorizes it with `s3:GetObject`. Previously
-        // unmapped -> `_ => None` -> enforcement skipped entirely.
-        if has("select-type") && is_post {
-            return Some("SelectObjectContent");
-        }
-    }
-
-    // Bucket-level sub-resources (key absent).
-    if !has_key {
-        if has("metadataAnnotationTable") && method == "PUT" {
-            return Some("UpdateBucketMetadataAnnotationTableConfiguration");
-        }
-        if has("tagging") {
-            return Some(match method {
-                "GET" => "GetBucketTagging",
-                "PUT" => "PutBucketTagging",
-                "DELETE" => "DeleteBucketTagging",
-                _ => return None,
-            });
-        }
-        if has("acl") {
-            return Some(match method {
-                "GET" => "GetBucketAcl",
-                "PUT" => "PutBucketAcl",
-                _ => return None,
-            });
-        }
-        if has("versioning") {
-            return Some(match method {
-                "GET" => "GetBucketVersioning",
-                "PUT" => "PutBucketVersioning",
-                _ => return None,
-            });
-        }
-        if has("cors") {
-            return Some(match method {
-                "GET" => "GetBucketCors",
-                "PUT" => "PutBucketCors",
-                "DELETE" => "DeleteBucketCors",
-                _ => return None,
-            });
-        }
-        if has("policy") {
-            return Some(match method {
-                "GET" => "GetBucketPolicy",
-                "PUT" => "PutBucketPolicy",
-                "DELETE" => "DeleteBucketPolicy",
-                _ => return None,
-            });
-        }
-        if has("website") {
-            return Some(match method {
-                "GET" => "GetBucketWebsite",
-                "PUT" => "PutBucketWebsite",
-                "DELETE" => "DeleteBucketWebsite",
-                _ => return None,
-            });
-        }
-        if has("lifecycle") {
-            return Some(match method {
-                "GET" => "GetBucketLifecycleConfiguration",
-                "PUT" => "PutBucketLifecycleConfiguration",
-                "DELETE" => "DeleteBucketLifecycle",
-                _ => return None,
-            });
-        }
-        if has("encryption") {
-            return Some(match method {
-                "GET" => "GetBucketEncryption",
-                "PUT" => "PutBucketEncryption",
-                "DELETE" => "DeleteBucketEncryption",
-                _ => return None,
-            });
-        }
-        if has("logging") {
-            return Some(match method {
-                "GET" => "GetBucketLogging",
-                "PUT" => "PutBucketLogging",
-                _ => return None,
-            });
-        }
-        if has("notification") {
-            return Some(match method {
-                "GET" => "GetBucketNotificationConfiguration",
-                "PUT" => "PutBucketNotificationConfiguration",
-                _ => return None,
-            });
-        }
-        if has("replication") {
-            return Some(match method {
-                "GET" => "GetBucketReplication",
-                "PUT" => "PutBucketReplication",
-                "DELETE" => "DeleteBucketReplication",
-                _ => return None,
-            });
-        }
-        if has("ownershipControls") {
-            return Some(match method {
-                "GET" => "GetBucketOwnershipControls",
-                "PUT" => "PutBucketOwnershipControls",
-                "DELETE" => "DeleteBucketOwnershipControls",
-                _ => return None,
-            });
-        }
-        if has("publicAccessBlock") {
-            return Some(match method {
-                "GET" => "GetPublicAccessBlock",
-                "PUT" => "PutPublicAccessBlock",
-                "DELETE" => "DeletePublicAccessBlock",
-                _ => return None,
-            });
-        }
-        if has("accelerate") {
-            return Some(match method {
-                "GET" => "GetBucketAccelerateConfiguration",
-                "PUT" => "PutBucketAccelerateConfiguration",
-                _ => return None,
-            });
-        }
-        if has("inventory") {
-            return Some(match method {
-                "GET" => "GetBucketInventoryConfiguration",
-                "PUT" => "PutBucketInventoryConfiguration",
-                "DELETE" => "DeleteBucketInventoryConfiguration",
-                _ => return None,
-            });
-        }
-        if has("analytics") {
-            return Some(match method {
-                "GET" if has("id") => "GetBucketAnalyticsConfiguration",
-                "GET" => "ListBucketAnalyticsConfigurations",
-                "PUT" => "PutBucketAnalyticsConfiguration",
-                "DELETE" => "DeleteBucketAnalyticsConfiguration",
-                _ => return None,
-            });
-        }
-        if has("intelligent-tiering") {
-            return Some(match method {
-                "GET" if has("id") => "GetBucketIntelligentTieringConfiguration",
-                "GET" => "ListBucketIntelligentTieringConfigurations",
-                "PUT" => "PutBucketIntelligentTieringConfiguration",
-                "DELETE" => "DeleteBucketIntelligentTieringConfiguration",
-                _ => return None,
-            });
-        }
-        if has("metrics") {
-            return Some(match method {
-                "GET" if has("id") => "GetBucketMetricsConfiguration",
-                "GET" => "ListBucketMetricsConfigurations",
-                "PUT" => "PutBucketMetricsConfiguration",
-                "DELETE" => "DeleteBucketMetricsConfiguration",
-                _ => return None,
-            });
-        }
-        if has("requestPayment") {
-            return Some(match method {
-                "GET" => "GetBucketRequestPayment",
-                "PUT" => "PutBucketRequestPayment",
-                _ => return None,
-            });
-        }
-        if has("policyStatus") && is_get {
-            return Some("GetBucketPolicyStatus");
-        }
-        if has("metadataConfiguration") {
-            return Some(match method {
-                "GET" => "GetBucketMetadataConfiguration",
-                "POST" => "CreateBucketMetadataConfiguration",
-                "DELETE" => "DeleteBucketMetadataConfiguration",
-                _ => return None,
-            });
-        }
-        if has("metadataTable") {
-            return Some(match method {
-                "GET" => "GetBucketMetadataTableConfiguration",
-                "POST" => "CreateBucketMetadataTableConfiguration",
-                "DELETE" => "DeleteBucketMetadataTableConfiguration",
-                _ => return None,
-            });
-        }
-        if has("metadataInventoryTable") && is_put {
-            return Some("UpdateBucketMetadataInventoryTableConfiguration");
-        }
-        if has("metadataJournalTable") && is_put {
-            return Some("UpdateBucketMetadataJournalTableConfiguration");
-        }
-        if has("abac") {
-            // GET previously fell through to the plain `GET bucket` arm and
-            // was authorized as a listing, so a policy on the ABAC
-            // configuration was never honored.
-            return Some(match method {
-                "PUT" => "PutBucketAbac",
-                "GET" => "GetBucketAbac",
-                _ => return None,
-            });
-        }
-        if has("session") && is_get {
-            // CreateSession (S3 Express directory buckets). AWS authorizes it
-            // under the separate `s3express:CreateSession` action — handled in
-            // `iam_action_for`, which selects the `s3express` service prefix
-            // for this op. Previously fell through to the plain `GET bucket`
-            // arm and was evaluated as s3:ListObjects.
-            return Some("CreateSession");
-        }
-        if has("object-lock") {
-            return Some(match method {
-                "GET" => "GetObjectLockConfiguration",
-                "PUT" => "PutObjectLockConfiguration",
-                _ => return None,
-            });
-        }
-        if has("location") {
-            return Some("GetBucketLocation");
-        }
-        if is_post && has("delete") {
-            return Some("DeleteObjects");
-        }
-        if is_get && has("versions") {
-            return Some("ListObjectVersions");
-        }
-    }
-
-    // GET on an object with `?torrent` is GetObjectTorrent (authorized as
-    // `s3:GetObject`).
-    if is_get && has_key && has("torrent") {
-        return Some("GetObjectTorrent");
-    }
-
-    // Plain bucket/object methods.
-    match (method, has_key) {
-        ("GET", true) => Some("GetObject"),
-        // CopyObject too, told apart by its header in `s3_operation`.
-        ("PUT", true) => Some("PutObject"),
-        ("DELETE", true) => Some("DeleteObject"),
-        ("HEAD", true) => Some("HeadObject"),
-        ("GET", false) => {
-            if query.contains_key("list-type") {
-                Some("ListObjectsV2")
-            } else {
-                Some("ListObjects")
-            }
-        }
-        ("PUT", false) => Some("CreateBucket"),
-        ("DELETE", false) => Some("DeleteBucket"),
-        ("HEAD", false) => Some("HeadBucket"),
-        _ => None,
-    }
+    let method: Method = method.parse().ok()?;
+    route::classify(&method, bucket, key, query, &HeaderMap::new())
+        .ok()
+        .map(route::S3Op::name)
 }
 
 /// Build the resource ARN an S3 policy action is authorized on, by the
@@ -5405,12 +4497,23 @@ mod s3_iam_service_prefix_tests {
         assert_eq!(get.action_string(), "s3:GetObject");
         assert_eq!(get.resource, "arn:aws:s3:::b//");
         // `?delete` on a key is not DeleteObjects, so it is not left to the
-        // handler: POST /b//?delete&uploads is a CreateMultipartUpload.
+        // handler: POST /b//?delete&uploads names two resource types and is
+        // refused before authorization; ?delete alone on a key is not a POST
+        // the key takes.
         let sneaky = req(Method::POST, "/b//", &[("delete", ""), ("uploads", "")]);
         assert!(!svc.iam_authorized_by_handler(&sneaky));
+        let refused = svc.validate_before_authorization(&sneaky).unwrap_err();
         assert_eq!(
-            svc.iam_action_for(&sneaky).unwrap().action_string(),
-            "s3:PutObject"
+            refused.message(),
+            "Conflicting query string parameters: delete, uploads"
+        );
+        assert!(svc.iam_action_for(&sneaky).is_none());
+        let on_key = req(Method::POST, "/b//", &[("delete", "")]);
+        assert_eq!(
+            svc.validate_before_authorization(&on_key)
+                .unwrap_err()
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
         );
         assert!(svc.iam_authorized_by_handler(&req(Method::POST, "/b", &[("delete", "")])));
         assert!(!svc.iam_authorized_by_handler(&req(

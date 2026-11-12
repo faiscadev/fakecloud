@@ -839,6 +839,18 @@ pub trait AwsService: Send + Sync {
         self.iam_action_for(request).into_iter().collect()
     }
 
+    /// Refuse a request the service rejects before authorizing anything --
+    /// one it cannot classify into an operation, say (S3 answers conflicting
+    /// sub-resource parameters with 400 `InvalidArgument` whoever asks).
+    /// Dispatch calls it before IAM evaluation and answers `Err` as the
+    /// service's error, so such a request gets the service's error rather
+    /// than an `AccessDenied` and is never authorized as some other
+    /// operation. The handler must refuse the same requests the same way
+    /// (it runs without IAM). Default: nothing to refuse.
+    fn validate_before_authorization(&self, _request: &AwsRequest) -> Result<(), AwsServiceError> {
+        Ok(())
+    }
+
     /// Whether the handler authorizes this request itself, item by item,
     /// through [`crate::auth::request_authorizer`] -- an operation AWS
     /// authorizes per item and answers with per-item errors (S3

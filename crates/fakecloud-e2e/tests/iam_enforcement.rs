@@ -1805,13 +1805,17 @@ async fn s3_raw_path_keys_are_authorized_as_the_operation_they_run() {
     let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
     boot.create_bucket().bucket("victim").send().await.unwrap();
     let http = reqwest::Client::new();
-    for (method, query) in [
-        (reqwest::Method::POST, "delete&uploads"),
-        (reqwest::Method::POST, "delete&restore"),
-        (reqwest::Method::POST, "delete&uploadId=u"),
-        (reqwest::Method::POST, "delete&select&select-type=2"),
-        (reqwest::Method::PUT, "delete"),
-        (reqwest::Method::GET, "delete"),
+    // Two resource types are refused as conflicting (400), `?delete` on a
+    // key as a method the key does not take (405), both before
+    // authorization.
+    for (method, query, status) in [
+        (reqwest::Method::POST, "delete&uploads", 400),
+        (reqwest::Method::POST, "delete&restore", 400),
+        (reqwest::Method::POST, "delete&uploadId=u", 400),
+        (reqwest::Method::POST, "delete&select&select-type=2", 400),
+        (reqwest::Method::POST, "delete", 405),
+        (reqwest::Method::PUT, "delete", 405),
+        (reqwest::Method::GET, "delete", 405),
     ] {
         let resp = http
             .request(
@@ -1822,7 +1826,7 @@ async fn s3_raw_path_keys_are_authorized_as_the_operation_they_run() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), 403, "{method} ?{query}");
+        assert_eq!(resp.status(), status, "{method} ?{query}");
     }
     let uploads = boot
         .list_multipart_uploads()
@@ -1863,6 +1867,221 @@ async fn s3_raw_path_keys_are_authorized_as_the_operation_they_run() {
     assert!(is_access_denied(
         s3.get_object().bucket("victim").key("/").send().await
     ));
+}
+
+/// Requests S3 refuses before authorizing anything get S3's recorded errors,
+/// whoever sends them (anonymous here), and change nothing: conflicting
+/// resource-type parameters (400 InvalidArgument), a resource type with a
+/// method it does not take (405), an upload part number that is not one.
+/// Each was a way to run one operation under another's authorization.
+#[tokio::test]
+async fn s3_requests_s3_refuses_before_authorization_change_nothing() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("victim").send().await.unwrap();
+    boot.create_bucket().bucket("empty1").send().await.unwrap();
+    boot.put_object()
+        .bucket("victim")
+        .key("k")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"secret"))
+        .send()
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let tagging = "<Tagging><TagSet><Tag><Key>a</Key><Value>b</Value></Tag></TagSet></Tagging>";
+    for (method, path, body, status, code, message) in [
+        (
+            reqwest::Method::PUT,
+            "/victim/k?partNumber=x&uploadId=u&acl",
+            "",
+            400,
+            "InvalidArgument",
+            "Conflicting query string parameters: acl, partNumber, uploadId",
+        ),
+        (
+            reqwest::Method::PUT,
+            "/victim/k?partNumber=x&uploadId=u&tagging",
+            tagging,
+            400,
+            "InvalidArgument",
+            "Conflicting query string parameters: partNumber, tagging, uploadId",
+        ),
+        (
+            reqwest::Method::PUT,
+            "/victim/k?partNumber=x&uploadId=u",
+            "",
+            400,
+            "InvalidArgument",
+            "Part number must be an integer between 1 and 10000, inclusive",
+        ),
+        (
+            reqwest::Method::GET,
+            "/victim?versions&cors",
+            "",
+            400,
+            "InvalidArgument",
+            "Conflicting query string parameters: cors, versions",
+        ),
+        (
+            reqwest::Method::DELETE,
+            "/empty1?location",
+            "",
+            405,
+            "MethodNotAllowed",
+            "The specified method is not allowed against this resource.",
+        ),
+        (
+            reqwest::Method::PUT,
+            "/empty1?location",
+            "",
+            405,
+            "MethodNotAllowed",
+            "The specified method is not allowed against this resource.",
+        ),
+        (
+            reqwest::Method::POST,
+            "/victim/k?restore&uploadId=u",
+            "<RestoreRequest><Days>1</Days></RestoreRequest>",
+            400,
+            "InvalidArgument",
+            "Conflicting query string parameters: restore, uploadId",
+        ),
+        (
+            reqwest::Method::DELETE,
+            "/victim?publicAccessBlock&lifecycle",
+            "",
+            400,
+            "InvalidArgument",
+            "Conflicting query string parameters: lifecycle, publicAccessBlock",
+        ),
+    ] {
+        let resp = http
+            .request(method.clone(), format!("{}{path}", server.endpoint()))
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), status, "{method} {path}");
+        let text = resp.text().await.unwrap();
+        assert!(
+            text.contains(&format!("<Code>{code}</Code>")),
+            "{path}: {text}"
+        );
+        assert!(
+            text.contains(&format!("<Message>{message}</Message>")),
+            "{path}: {text}"
+        );
+        if status == 405 {
+            assert!(
+                text.contains(&format!("<Method>{method}</Method>")),
+                "{text}"
+            );
+            assert!(
+                text.contains("<ResourceType>LOCATION</ResourceType>"),
+                "{text}"
+            );
+        } else if code == "InvalidArgument" && message.starts_with("Conflicting") {
+            assert!(
+                text.contains("<ArgumentName>ResourceType</ArgumentName>"),
+                "{text}"
+            );
+        }
+    }
+    // Nothing changed.
+    let acl = boot
+        .get_object_acl()
+        .bucket("victim")
+        .key("k")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(acl.grants().len(), 1, "{acl:?}");
+    let tags = boot
+        .get_object_tagging()
+        .bucket("victim")
+        .key("k")
+        .send()
+        .await
+        .unwrap();
+    assert!(tags.tag_set().is_empty());
+    let buckets = boot.list_buckets().send().await.unwrap();
+    let names: Vec<_> = buckets.buckets().iter().filter_map(|b| b.name()).collect();
+    assert!(names.contains(&"empty1"), "{names:?}");
+    assert!(!names.contains(&"newbucket-x"), "{names:?}");
+}
+
+/// The website error document is an object read of its own: a caller not
+/// allowed to read it (here, anonymous with a bucket policy opening only
+/// `public/*`) gets a plain 403, never its content.
+#[tokio::test]
+async fn s3_website_error_document_needs_its_own_read() {
+    use aws_sdk_s3::types::{ErrorDocument, IndexDocument, WebsiteConfiguration};
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("site").send().await.unwrap();
+    for (key, body) in [
+        ("private/err.html", &b"PRIVATE ERROR DOC CONTENT"[..]),
+        ("public/ok.html", &b"ok"[..]),
+    ] {
+        boot.put_object()
+            .bucket("site")
+            .key(key)
+            .body(aws_sdk_s3::primitives::ByteStream::from_static(body))
+            .send()
+            .await
+            .unwrap();
+    }
+    boot.put_bucket_website()
+        .bucket("site")
+        .website_configuration(
+            WebsiteConfiguration::builder()
+                .index_document(
+                    IndexDocument::builder()
+                        .suffix("index.html")
+                        .build()
+                        .unwrap(),
+                )
+                .error_document(
+                    ErrorDocument::builder()
+                        .key("private/err.html")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    boot.delete_public_access_block()
+        .bucket("site")
+        .send()
+        .await
+        .unwrap();
+    boot.put_bucket_policy()
+        .bucket("site")
+        .policy(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",
+                "Action":"s3:GetObject","Resource":"arn:aws:s3:::site/public/*"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let ok = http
+        .get(format!("{}/site/public/ok.html", server.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+    let missing = http
+        .get(format!("{}/site/public/missing", server.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 403);
+    let text = missing.text().await.unwrap();
+    assert!(!text.contains("PRIVATE"), "{text}");
+    assert!(text.contains("<Code>AccessDenied</Code>"), "{text}");
 }
 
 /// HeadObject / GetObject return an object's retention only to a caller
@@ -2459,11 +2678,17 @@ async fn strict_mode_denies_unmapped_enforceable_action() {
         .send()
         .await
         .unwrap();
+    // S3 now classifies every request it routes, and refuses one naming a
+    // sub-resource with a method it does not take before authorizing it, as
+    // S3 does: 405 MethodNotAllowed, never served and never authorized as
+    // some other operation (fail closed).
     assert_eq!(
         resp.status(),
-        403,
-        "strict mode must deny an enforceable action with no IAM-action mapping (fail closed)"
+        405,
+        "strict mode must refuse an S3 request with no operation before authorizing it"
     );
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("<ResourceType>ACL</ResourceType>"), "{text}");
 }
 
 #[tokio::test]

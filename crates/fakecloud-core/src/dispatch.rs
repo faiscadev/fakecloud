@@ -797,6 +797,14 @@ async fn dispatch_inner(
         caller_session_policies,
         internal_caller,
     };
+    // A request the service refuses before authorizing anything gets that
+    // refusal, whoever sends it, rather than being authorized at all (as
+    // some operation it is not).
+    if enforcement.is_active(&aws_request) {
+        if let Err(err) = service.validate_before_authorization(&aws_request) {
+            return service_error_response(&err, &detected, &request_id, error_envelope);
+        }
+    }
     // A request whose handler authorizes it per item (S3 DeleteObjects, per
     // key) needs no authorization of its own here; the handler asks the
     // request's authorizer instead.
@@ -1399,49 +1407,57 @@ async fn finish_dispatch(
                 }
             }
         }
-        Err(err) => {
-            tracing::warn!(
-                service = %detected.service,
-                action = %detected.action,
-                error = %err,
-                "request failed"
-            );
-            let error_headers = err.response_headers().to_vec();
-            let mut resp = build_error_response_with_fields(
-                err.status(),
-                err.code(),
-                &err.message(),
-                &request_id,
-                error_envelope,
-                err.extra_fields(),
-            );
-            for (k, v) in &error_headers {
-                if let (Ok(name), Ok(val)) = (
-                    k.parse::<http::header::HeaderName>(),
-                    v.parse::<http::header::HeaderValue>(),
-                ) {
-                    // `Vary` combines, so two entries for it must both survive
-                    // (S3 adds its CORS value to an error that may carry its
-                    // own) — but an identical value is not worth repeating.
-                    // Everything else replaces, so a service can still override
-                    // a header this builder already set.
-                    if name == http::header::VARY {
-                        let already = resp
-                            .headers()
-                            .get_all(&name)
-                            .iter()
-                            .any(|existing| existing == val);
-                        if !already {
-                            resp.headers_mut().append(name, val);
-                        }
-                    } else {
-                        resp.headers_mut().insert(name, val);
-                    }
+        Err(err) => service_error_response(&err, &detected, &request_id, error_envelope),
+    }
+}
+
+/// The HTTP response for an error a service answered a request with.
+fn service_error_response(
+    err: &crate::service::AwsServiceError,
+    detected: &protocol::DetectedRequest,
+    request_id: &str,
+    error_envelope: ErrorEnvelope,
+) -> Response<Body> {
+    tracing::warn!(
+        service = %detected.service,
+        action = %detected.action,
+        error = %err,
+        "request failed"
+    );
+    let error_headers = err.response_headers().to_vec();
+    let mut resp = build_error_response_with_fields(
+        err.status(),
+        err.code(),
+        &err.message(),
+        request_id,
+        error_envelope,
+        err.extra_fields(),
+    );
+    for (k, v) in &error_headers {
+        if let (Ok(name), Ok(val)) = (
+            k.parse::<http::header::HeaderName>(),
+            v.parse::<http::header::HeaderValue>(),
+        ) {
+            // `Vary` combines, so two entries for it must both survive
+            // (S3 adds its CORS value to an error that may carry its
+            // own) — but an identical value is not worth repeating.
+            // Everything else replaces, so a service can still override
+            // a header this builder already set.
+            if name == http::header::VARY {
+                let already = resp
+                    .headers()
+                    .get_all(&name)
+                    .iter()
+                    .any(|existing| existing == val);
+                if !already {
+                    resp.headers_mut().append(name, val);
                 }
+            } else {
+                resp.headers_mut().insert(name, val);
             }
-            resp
         }
     }
+    resp
 }
 
 /// Frame a service response for an rpcv2Cbor caller. A service that renders
