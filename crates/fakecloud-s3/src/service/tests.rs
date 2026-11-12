@@ -10733,16 +10733,10 @@ fn copy_requests_also_need_read_on_the_source_object() {
     req.headers
         .insert("x-amz-copy-source", "theirs/doc.txt".parse().unwrap());
     let actions = svc.iam_actions_for(&req);
-    // The default annotation directive (COPY) also reads the source's
-    // annotations and writes the destination's.
-    assert_eq!(actions.len(), 4);
+    assert_eq!(actions.len(), 2);
     assert_eq!(actions[0].action, "PutObject");
     assert_eq!(actions[1].action, "GetObject");
     assert_eq!(actions[1].resource, "arn:aws:s3:::theirs/doc.txt");
-    assert_eq!(actions[2].action, "GetObjectAnnotation");
-    assert_eq!(actions[2].resource, "arn:aws:s3:::theirs/doc.txt");
-    assert_eq!(actions[3].action, "PutObjectAnnotation");
-    assert_eq!(actions[3].resource, "arn:aws:s3:::mine/copy.txt");
 
     req.headers.insert(
         "x-amz-copy-source",

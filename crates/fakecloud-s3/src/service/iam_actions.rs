@@ -42,9 +42,6 @@ pub(crate) enum Need {
     /// `s3:GetObject`, or `s3:GetObjectVersion` for a versioned source, on the
     /// source object.
     CopySource,
-    /// `s3:GetObjectAnnotation` on the copy source of a CopyObject that
-    /// copies the source's annotations.
-    CopySourceAnnotations,
     /// `iam:PassRole` on a role the request hands to S3.
     PassRole(String),
 }
@@ -201,16 +198,10 @@ pub(crate) fn required(op: &str, req: &AwsRequest) -> Vec<Need> {
         // The destination write, then the source read.
         "CopyObject" => {
             let mut needs = vec![s3("PutObject"), Need::CopySource];
-            // x-amz-object-annotation-directive: "When set to COPY [the
-            // default], you must have s3:GetObjectAnnotation permission on
-            // the source object and s3:PutObjectAnnotation permission on the
-            // destination." EXCLUDE copies none.
-            let copies_annotations = header(&req.headers, "x-amz-object-annotation-directive")
-                .is_none_or(|d| d != "EXCLUDE");
-            if copies_annotations {
-                needs.push(Need::CopySourceAnnotations);
-                needs.push(s3("PutObjectAnnotation"));
-            }
+            // Copying the source's annotations (the default COPY annotation
+            // directive) also needs s3:GetObjectAnnotation on the source and
+            // s3:PutObjectAnnotation on the destination, but only when the
+            // source has annotations, which the handler checks.
             needs.extend(copy_write_extras(&req.headers));
             needs
         }
@@ -444,7 +435,6 @@ mod tests {
                 Need::Own(svc, a) => format!("{svc}:{a}"),
                 Need::Key(a, _) => format!("s3:{a}"),
                 Need::CopySource => "s3:GetObject".to_string(),
-                Need::CopySourceAnnotations => "s3:GetObjectAnnotation".to_string(),
                 Need::PassRole(_) => "iam:PassRole".to_string(),
             })
             .collect()
@@ -512,11 +502,6 @@ mod tests {
         ("GetObjectAttributes", "s3:GetObjectAttributes"),
         ("GetObjectAttributes", "s3:GetObjectVersionAttributes"),
         ("CreateBucket", "s3:TagResource"),
-        // CopyObject's AnnotationDirective: "When set to COPY, you must have
-        // s3:GetObjectAnnotation permission on the source object and
-        // s3:PutObjectAnnotation permission on the destination."
-        ("CopyObject", "s3:GetObjectAnnotation"),
-        ("CopyObject", "s3:PutObjectAnnotation"),
         // "You need the relevant read object (or version) permission".
         ("HeadObject", "s3:GetObjectVersion"),
     ];
@@ -774,30 +759,18 @@ mod tests {
 
     #[test]
     fn copies_need_the_destination_write_and_the_source_read() {
-        // COPY, the default annotation directive, also needs the source's
-        // annotations read and the destination's written; EXCLUDE does not.
-        let annotated = vec![
-            Need::Own("s3", "PutObject"),
-            Need::CopySource,
-            Need::CopySourceAnnotations,
-            Need::Own("s3", "PutObjectAnnotation"),
-        ];
-        assert_eq!(required("CopyObject", &req(&[], &[], "")), annotated);
-        assert_eq!(
-            required(
-                "CopyObject",
-                &req(&[], &[("x-amz-object-annotation-directive", "COPY")], "")
-            ),
-            annotated
-        );
-        assert_eq!(
-            required(
-                "CopyObject",
-                &req(&[], &[("x-amz-object-annotation-directive", "EXCLUDE")], "")
-            ),
-            vec![Need::Own("s3", "PutObject"), Need::CopySource]
-        );
-        // UploadPartCopy copies no annotations.
+        // The annotation permissions a copy of an annotated source needs are
+        // the handler's to check (only it sees the source's annotations).
+        for directive in [None, Some("COPY"), Some("EXCLUDE")] {
+            let headers: Vec<_> = directive
+                .map(|d| ("x-amz-object-annotation-directive", d))
+                .into_iter()
+                .collect();
+            assert_eq!(
+                required("CopyObject", &req(&[], &headers, "")),
+                vec![Need::Own("s3", "PutObject"), Need::CopySource]
+            );
+        }
         assert_eq!(
             required("UploadPartCopy", &req(&[], &[], "")),
             vec![Need::Own("s3", "PutObject"), Need::CopySource]
@@ -809,17 +782,15 @@ mod tests {
     /// `s3:PutObjectTagging`.
     #[test]
     fn copy_tagging_needs_its_permission_only_when_replacing() {
-        let exclude = ("x-amz-object-annotation-directive", "EXCLUDE");
         let base = vec!["s3:PutObject", "s3:GetObject"];
         for directive in [None, Some("COPY")] {
-            let mut headers = vec![exclude, ("x-amz-tagging", "a=b")];
+            let mut headers = vec![("x-amz-tagging", "a=b")];
             headers.extend(directive.map(|d| ("x-amz-tagging-directive", d)));
             assert_eq!(actions("CopyObject", &req(&[], &headers, "")), base);
         }
         let replace = req(
             &[],
             &[
-                exclude,
                 ("x-amz-tagging", "a=b"),
                 ("x-amz-tagging-directive", "REPLACE"),
             ],

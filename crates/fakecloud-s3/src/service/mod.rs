@@ -458,20 +458,8 @@ impl S3Service {
         &self,
         request: &AwsRequest,
     ) -> Option<fakecloud_core::auth::IamAction> {
-        self.copy_source_action(request, "GetObject", "GetObjectVersion")
-    }
-
-    /// `s3:<plain>` (`s3:<versioned>` for a source naming a version) on the
-    /// copy source object, under the same rules as
-    /// [`Self::copy_source_read_action`].
-    fn copy_source_action(
-        &self,
-        request: &AwsRequest,
-        plain: &'static str,
-        versioned: &'static str,
-    ) -> Option<fakecloud_core::auth::IamAction> {
         if request.method != Method::PUT
-            || request.path_segments.len() < 2
+            || request_key(request).is_none()
             || fakecloud_core::protocol::is_s3_control_host(&request.headers)
         {
             return None;
@@ -486,9 +474,9 @@ impl S3Service {
             return None;
         }
         let action = if source.version_id.is_some() {
-            versioned
+            "GetObjectVersion"
         } else {
-            plain
+            "GetObject"
         };
         let region = self
             .bucket_region(src_bucket)
@@ -805,21 +793,8 @@ impl AwsService for S3Service {
         // S3 Control (`s3-control` host) shares this handler; its PUTs
         // (CreateAccessPoint, ...) carry an XML body, never object data.
         let is_control = fakecloud_core::protocol::is_s3_control_host(&req.headers);
-        // Extract the key from the RAW path (everything after the first
-        // segment), decoded exactly once. This preserves leading slashes and
-        // empty segments inside the key that `path_segments` drops, and it
-        // stays correct when an access-point alias in the first segment is
-        // rewritten to its bucket in `path_segments` (below) but not in
-        // `raw_path`.
-        let key = req.path_segments.first().and_then(|_| {
-            let rest = req.raw_path.strip_prefix('/').unwrap_or(&req.raw_path);
-            let (_, raw_key) = rest.split_once('/')?;
-            (!raw_key.is_empty()).then(|| {
-                percent_encoding::percent_decode_str(raw_key)
-                    .decode_utf8_lossy()
-                    .into_owned()
-            })
-        });
+        // The same key IAM authorized the request for (`request_key`).
+        let key = request_key(&req);
         // UploadPart requires both partNumber AND uploadId; a stray PUT
         // carrying only one of them is not an upload and gets its body
         // drained like any other.
@@ -1583,15 +1558,22 @@ impl AwsService for S3Service {
                         self.get_object_torrent(account_id, &req, b, k)
                     } else {
                         let result = self.get_object(account_id, &req, b, k);
+                        let missing = matches!(&result, Err(e) if e.code() == "NoSuchKey");
                         let result = self.hide_missing_key(&req, b, result);
                         let result = self.shape_lock_headers(&req, b, k, result);
-                        // If object not found and bucket has website config, serve error document
-                        let is_not_found = matches!(
-                            &result,
-                            Err(e) if e.code() == "NoSuchKey"
-                        );
+                        // If the object is missing and the bucket has a website
+                        // config, serve its error document, with the status
+                        // the caller would get: 404, or 403 for a caller that
+                        // may not list the bucket (S3 serves the custom error
+                        // document for 4XX errors).
+                        let error_status = missing.then(|| {
+                            result
+                                .as_ref()
+                                .err()
+                                .map_or(StatusCode::NOT_FOUND, |e| e.status())
+                        });
                         let mut return_website_error = None;
-                        if is_not_found {
+                        if let Some(error_status) = error_status {
                             let website_config = {
                                 let accounts = self.state.read();
                                 let _empty_s3 = crate::state::S3State::new(account_id, &req.region);
@@ -1616,9 +1598,13 @@ impl AwsService for S3Service {
                                     // access logging) rather than returning early,
                                     // so a website error document is treated like
                                     // any other response.
-                                    return_website_error = Some(
-                                        self.serve_website_error(account_id, &req, b, &error_key),
-                                    );
+                                    return_website_error = Some(self.serve_website_error(
+                                        account_id,
+                                        &req,
+                                        b,
+                                        &error_key,
+                                        error_status,
+                                    ));
                                 }
                             }
                         }
@@ -1938,11 +1924,7 @@ impl AwsService for S3Service {
             return Vec::new();
         };
         let bucket = request.path_segments.first().map(|s| s.as_str());
-        let key = if request.path_segments.len() > 1 {
-            Some(request.path_segments[1..].join("/"))
-        } else {
-            None
-        };
+        let key = request_key(request);
         // Every ARN S3 returns for a bucket carries the bucket's own region's
         // partition, so policies written against those ARNs must match here.
         let bucket_region = bucket.and_then(|b| self.bucket_region(b));
@@ -1977,11 +1959,6 @@ impl AwsService for S3Service {
                 // policy, so copying out of another account's bucket needs
                 // that bucket's grant.
                 iam_actions::Need::CopySource => self.copy_source_read_action(request),
-                // The doc names s3:GetObjectAnnotation for the source, whether
-                // or not it names a version.
-                iam_actions::Need::CopySourceAnnotations => {
-                    self.copy_source_action(request, "GetObjectAnnotation", "GetObjectAnnotation")
-                }
                 iam_actions::Need::PassRole(role) => {
                     Some(fakecloud_core::auth::IamAction::pass_role(role))
                 }
@@ -1997,9 +1974,14 @@ impl AwsService for S3Service {
     }
 
     /// DeleteObjects is authorized per key by its handler, which reports a
-    /// denied key as an `AccessDenied` entry of its 200 response.
+    /// denied key as an `AccessDenied` entry of its 200 response. Deferred
+    /// only for a request the handler is certain to route to DeleteObjects --
+    /// the guard of its arm, on the same key derivation -- AND that
+    /// authorization classifies as DeleteObjects, so no other operation can
+    /// run on a skipped check (`POST /b//?delete&uploads` addresses the key
+    /// `/` and is a CreateMultipartUpload).
     fn iam_authorized_by_handler(&self, request: &AwsRequest) -> bool {
-        s3_operation(request) == Some("DeleteObjects") && control_iam_action(request).is_none()
+        is_delete_objects_route(request) && s3_operation(request) == Some("DeleteObjects")
     }
 
     fn iam_condition_keys_for(
@@ -2166,15 +2148,41 @@ impl S3Service {
     }
 }
 
+/// The object key a request addresses: the RAW path after the bucket
+/// segment, decoded exactly once, `None` when empty. It keeps the leading,
+/// trailing and repeated slashes `path_segments` drops (`/b//` addresses the
+/// key `/`, `/b/k/` the key `k/`), and stays right when an access-point alias
+/// in the first segment is rewritten to its bucket in `path_segments` but not
+/// in `raw_path`. The one derivation both authorization and routing use, so
+/// the operation dispatch authorizes is the operation the handler runs.
+pub(crate) fn request_key(req: &AwsRequest) -> Option<String> {
+    req.path_segments.first()?;
+    let rest = req.raw_path.strip_prefix('/').unwrap_or(&req.raw_path);
+    let (_, raw_key) = rest.split_once('/')?;
+    (!raw_key.is_empty()).then(|| {
+        percent_encoding::percent_decode_str(raw_key)
+            .decode_utf8_lossy()
+            .into_owned()
+    })
+}
+
+/// Whether the handler routes `req` to DeleteObjects: the guard of that arm
+/// (`POST /{bucket}?delete`, no key), on a path the handler does not refuse
+/// first, outside S3 Control.
+fn is_delete_objects_route(req: &AwsRequest) -> bool {
+    req.method == Method::POST
+        && !fakecloud_core::protocol::is_s3_control_host(&req.headers)
+        && !req.raw_path.starts_with("//")
+        && !req.path_segments.is_empty()
+        && request_key(req).is_none()
+        && req.query_params.contains_key("delete")
+}
+
 /// The S3 API operation a (non-S3-Control) request invokes, by method, path,
 /// sub-resource query keys and the copy-source header.
 fn s3_operation(request: &AwsRequest) -> Option<&'static str> {
     let bucket = request.path_segments.first().map(|s| s.as_str());
-    let key = if request.path_segments.len() > 1 {
-        Some(request.path_segments[1..].join("/"))
-    } else {
-        None
-    };
+    let key = request_key(request);
     let op = s3_detect_action(
         request.method.as_str(),
         bucket,
@@ -5372,6 +5380,46 @@ mod s3_iam_service_prefix_tests {
         );
     }
 
+    /// The key comes from the raw path, as the handler routes it: repeated,
+    /// leading and trailing slashes are part of it.
+    #[test]
+    fn keys_are_derived_from_the_raw_path() {
+        let svc = make_service();
+        for (path, key) in [
+            ("/b", None),
+            ("/b/", None),
+            ("/b//", Some("/")),
+            ("/b/k/", Some("k/")),
+            ("/b/a//c", Some("a//c")),
+            ("/b/a%2Fb", Some("a/b")),
+        ] {
+            assert_eq!(
+                request_key(&req(Method::GET, path, &[])).as_deref(),
+                key,
+                "{path}"
+            );
+        }
+        // `/b//` addresses the key `/`: a GET of it is GetObject on that key,
+        // not a listing of the bucket.
+        let get = svc.iam_action_for(&req(Method::GET, "/b//", &[])).unwrap();
+        assert_eq!(get.action_string(), "s3:GetObject");
+        assert_eq!(get.resource, "arn:aws:s3:::b//");
+        // `?delete` on a key is not DeleteObjects, so it is not left to the
+        // handler: POST /b//?delete&uploads is a CreateMultipartUpload.
+        let sneaky = req(Method::POST, "/b//", &[("delete", ""), ("uploads", "")]);
+        assert!(!svc.iam_authorized_by_handler(&sneaky));
+        assert_eq!(
+            svc.iam_action_for(&sneaky).unwrap().action_string(),
+            "s3:PutObject"
+        );
+        assert!(svc.iam_authorized_by_handler(&req(Method::POST, "/b", &[("delete", "")])));
+        assert!(!svc.iam_authorized_by_handler(&req(
+            Method::POST,
+            "/b",
+            &[("delete", ""), ("metadataConfiguration", "")]
+        )));
+    }
+
     /// The full authorization set of requests whose operation and policy
     /// action names differ, with each action's resource.
     #[test]
@@ -5449,14 +5497,6 @@ mod s3_iam_service_prefix_tests {
                 (
                     "s3:GetObject".to_string(),
                     "arn:aws:s3:::src/old key".to_string()
-                ),
-                (
-                    "s3:GetObjectAnnotation".to_string(),
-                    "arn:aws:s3:::src/old key".to_string()
-                ),
-                (
-                    "s3:PutObjectAnnotation".to_string(),
-                    "arn:aws:s3:::dst/new".to_string()
                 ),
                 (
                     "s3:PutObjectTagging".to_string(),

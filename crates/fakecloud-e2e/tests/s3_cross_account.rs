@@ -349,12 +349,7 @@ async fn cross_account_copy_needs_read_on_the_source_bucket() {
     owner
         .put_bucket_policy()
         .bucket("xacct-src")
-        // A copy also reads the source's annotations (the default
-        // annotation directive is COPY).
-        .policy(grant_account_b(
-            "xacct-src",
-            &["s3:GetObject", "s3:GetObjectAnnotation"],
-        ))
+        .policy(grant_account_b("xacct-src", &["s3:GetObject"]))
         .send()
         .await
         .unwrap();

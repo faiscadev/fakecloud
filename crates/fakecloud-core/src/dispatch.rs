@@ -1629,20 +1629,26 @@ fn streaming_route(
     if method == http::Method::PUT {
         // An object upload needs a bucket AND a key. Resolve the request the
         // way routing will (bucket from the Host header for virtual-hosted,
-        // straight from the path otherwise), then split it the way the request
-        // builder builds `path_segments` -- on '/', dropping empty segments.
+        // straight from the path otherwise), then take the key the way S3
+        // does (`fakecloud_s3`'s `request_key`): everything after the bucket
+        // segment of the raw path, so `PUT /<bucket>//` uploads the key `/`.
         // Anything that leaves no key is a bucket-level operation:
         // `PUT /<bucket>`, `PUT /<bucket>/` (the form the AWS SDKs actually
-        // send for CreateBucket), `PUT /<bucket>//`, and the virtual-hosted
-        // equivalents. Streaming those left the body unbuffered, so everything
-        // that runs before the handler -- IAM enforcement above all -- saw an
-        // empty body and could not read `CreateBucketConfiguration` (no
-        // `aws:RequestTag` from a create-time tag set, for one).
+        // send for CreateBucket), and the virtual-hosted equivalents.
+        // Streaming those left the body unbuffered, so everything that runs
+        // before the handler -- IAM enforcement above all -- saw an empty body
+        // and could not read `CreateBucketConfiguration` (no `aws:RequestTag`
+        // from a create-time tag set, for one). A path with an empty bucket
+        // segment (`//...`) is refused by the handler and not streamed.
         let host_bucket = protocol::parse_routing_host_from_headers(headers)
             .filter(|h| h.service == "s3")
             .and_then(|h| h.bucket);
         let routed = s3_routing_path(path, host_bucket.as_deref());
-        let has_key = routed.split('/').filter(|seg| !seg.is_empty()).count() >= 2;
+        let rest = routed.strip_prefix('/').unwrap_or(&routed);
+        let has_key = matches!(
+            rest.split_once('/'),
+            Some((bucket, key)) if !bucket.is_empty() && !key.is_empty()
+        );
         if !has_key {
             return None;
         }
@@ -4082,11 +4088,12 @@ mod tests {
     }
 
     #[test]
-    fn streaming_route_path_style_doubled_slash_skipped() {
-        // Routing filters empty path segments, so `PUT /<bucket>//` is a
-        // bucket-level operation, not an object upload with a "/" key. The
-        // streaming gate has to agree, or the body goes unbuffered for a
-        // request the handler reads as CreateBucket / PutBucketTagging.
+    fn streaming_route_path_style_doubled_slash_is_the_slash_key() {
+        // S3 takes the key from the raw path, so `PUT /<bucket>//` uploads
+        // the key "/". The streaming gate has to agree with the handler (and
+        // with IAM, which authorizes it as s3:PutObject on `<bucket>//`), or
+        // the upload arrives without the body stream it reads. An empty
+        // bucket segment is no upload.
         let headers = s3_sigv4_headers();
         assert_eq!(
             streaming_route(
@@ -4095,6 +4102,10 @@ mod tests {
                 &headers,
                 &HashMap::new()
             ),
+            Some(("s3", "")),
+        );
+        assert_eq!(
+            streaming_route(&http::Method::PUT, "//key", &headers, &HashMap::new()),
             None,
         );
     }

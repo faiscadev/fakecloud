@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// Whether a CopyObject copies the source's annotations: under the
+/// annotation directive COPY, the default; EXCLUDE starts the copy without.
+fn copies_annotations(req: &AwsRequest) -> bool {
+    req.headers
+        .get("x-amz-object-annotation-directive")
+        .and_then(|v| v.to_str().ok())
+        .is_none_or(|v| v != "EXCLUDE")
+}
+
 impl S3Service {
     pub(crate) async fn put_object(
         &self,
@@ -778,6 +787,28 @@ impl S3Service {
             .map_err(crate::service::io_to_aws)?;
         drop(accts_r);
 
+        // Copying annotations (the default COPY directive) needs
+        // s3:GetObjectAnnotation on the source and s3:PutObjectAnnotation on
+        // the destination (CopyObject API reference, AnnotationDirective) --
+        // but only when there are annotations to copy: recorded against S3
+        // (us-east-1, 2026-11-12), a caller holding only s3:GetObject and
+        // s3:PutObject copies a source without annotations under the default
+        // directives. Only the request handler knows the source has any, so
+        // this is checked here, before anything is written (and with the
+        // state lock released, as the check reads bucket policies).
+        if copies_annotations(req) && !src_obj.annotations.is_empty() {
+            let may_read = self.caller_may(req, "GetObjectAnnotation", src_bucket, Some(src_key));
+            let may_write = may_read
+                && self.caller_may(req, "PutObjectAnnotation", dest_bucket, Some(dest_key));
+            if !may_write {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::FORBIDDEN,
+                    "AccessDenied",
+                    "Access Denied",
+                ));
+            }
+        }
+
         // Phase 2 (no lock): read, decrypt, checksum, re-encrypt, and stage
         // the destination body next to the store.
         //
@@ -888,12 +919,7 @@ impl S3Service {
         // Annotations follow the annotation directive: COPY (the default)
         // carries every annotation of the source version over, EXCLUDE starts
         // the copy without any.
-        let copies_annotations = req
-            .headers
-            .get("x-amz-object-annotation-directive")
-            .and_then(|v| v.to_str().ok())
-            .is_none_or(|v| v != "EXCLUDE");
-        let dest_annotations = if copies_annotations {
+        let dest_annotations = if copies_annotations(req) {
             src_obj.annotations.clone()
         } else {
             Default::default()

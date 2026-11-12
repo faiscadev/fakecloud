@@ -25,23 +25,31 @@ impl S3Service {
                 })
                 .or_else(|| extract_xml_value(website_config, "Key"))
             {
-                return self.serve_website_error(account_id, req, bucket, &error_key);
+                return self.serve_website_error(
+                    account_id,
+                    req,
+                    bucket,
+                    &error_key,
+                    StatusCode::NOT_FOUND,
+                );
             }
         }
         result
     }
 
-    /// Serve the website error document with a 404 status.
+    /// Serve the website error document with `status` (404, or 403 for a
+    /// missing key hidden from a caller who may not list the bucket).
     pub(crate) fn serve_website_error(
         &self,
         account_id: &str,
         req: &AwsRequest,
         bucket: &str,
         error_key: &str,
+        status: StatusCode,
     ) -> Result<AwsResponse, AwsServiceError> {
         match self.get_object(account_id, req, bucket, error_key) {
             Ok(mut resp) => {
-                resp.status = StatusCode::NOT_FOUND;
+                resp.status = status;
                 Ok(resp)
             }
             Err(e) => Err(e),

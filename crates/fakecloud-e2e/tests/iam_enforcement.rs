@@ -1366,8 +1366,9 @@ async fn s3_copy_object_needs_source_read_and_destination_write() {
         .await
         .unwrap();
 
-    // The default annotation directive (COPY) also needs the source's
-    // annotations read and the destination's written.
+    // A source without annotations copies with s3:GetObject + s3:PutObject
+    // alone under the default directives (recorded against S3, us-east-1,
+    // 2026-11-12).
     let copy = |s3: aws_sdk_s3::Client, key: &'static str| async move {
         s3.copy_object()
             .bucket("copy-dst")
@@ -1379,17 +1380,9 @@ async fn s3_copy_object_needs_source_read_and_destination_write() {
     for (user, statements, allowed) in [
         (
             "copier",
-            r#"{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectAnnotation"],
-                "Resource":"arn:aws:s3:::copy-src/orig.txt"},
-               {"Effect":"Allow","Action":["s3:PutObject","s3:PutObjectAnnotation"],
-                "Resource":"arn:aws:s3:::copy-dst/*"}"#,
-            true,
-        ),
-        (
-            "noannotations",
             r#"{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::copy-src/orig.txt"},
                {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::copy-dst/*"}"#,
-            false,
+            true,
         ),
         (
             "writeonly",
@@ -1436,9 +1429,62 @@ async fn s3_copy_object_needs_source_read_and_destination_write() {
         b"payload"
     );
 
-    // Excluding annotations needs only the read and the write. A tag header
-    // under the default COPY tagging directive is ignored, so it needs no
-    // s3:PutObjectTagging; under REPLACE it does.
+    // A source WITH annotations: copying them (the default COPY annotation
+    // directive) also needs s3:GetObjectAnnotation on the source and
+    // s3:PutObjectAnnotation on the destination; EXCLUDE needs neither. The
+    // pinned SDK predates the annotation API, so the annotation is put raw.
+    let resp = reqwest::Client::new()
+        .put(format!(
+            "{}/copy-src/orig.txt?annotation&annotationName=review",
+            server.endpoint()
+        ))
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/s3/aws4_request, \
+             SignedHeaders=host, Signature=00",
+        )
+        .body("note")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    let (akid, secret) = bootstrap_user(&server, "annotcopier").await;
+    let s3_annot = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let plain = r#"{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::copy-src/*"},
+        {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::copy-dst/*"}"#;
+    attach_inline_policy(
+        &server,
+        "annotcopier",
+        "Copy",
+        &format!(r#"{{"Version":"2012-10-17","Statement":[{plain}]}}"#),
+    )
+    .await;
+    assert!(is_access_denied(
+        copy(s3_annot.clone(), "annotated.txt").await
+    ));
+    let gone = boot
+        .head_object()
+        .bucket("copy-dst")
+        .key("annotated.txt")
+        .send()
+        .await;
+    assert!(gone.is_err(), "a refused copy writes nothing");
+    attach_inline_policy(
+        &server,
+        "annotcopier",
+        "Copy",
+        &format!(
+            r#"{{"Version":"2012-10-17","Statement":[{plain},
+            {{"Effect":"Allow","Action":"s3:GetObjectAnnotation","Resource":"arn:aws:s3:::copy-src/*"}},
+            {{"Effect":"Allow","Action":"s3:PutObjectAnnotation","Resource":"arn:aws:s3:::copy-dst/*"}}]}}"#
+        ),
+    )
+    .await;
+    copy(s3_annot, "annotated.txt").await.unwrap();
+
+    // Excluding annotations needs only the read and the write, annotated
+    // source or not. A tag header under the default COPY tagging directive is
+    // ignored, so it needs no s3:PutObjectTagging; under REPLACE it does.
     let (akid, secret) = bootstrap_user(&server, "plaincopier").await;
     attach_inline_policy(
         &server,
@@ -1692,6 +1738,131 @@ async fn s3_missing_key_is_404_only_with_list_bucket() {
             .map(|r| r.status().as_u16()),
         Some(404)
     );
+}
+
+/// A website bucket serves its error document for the 403 a missing key gets
+/// without `s3:ListBucket`, with that status.
+#[tokio::test]
+async fn s3_website_error_document_keeps_the_hidden_missing_key_status() {
+    use aws_sdk_s3::types::{ErrorDocument, IndexDocument, WebsiteConfiguration};
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("site").send().await.unwrap();
+    boot.put_object()
+        .bucket("site")
+        .key("error.html")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"oops"))
+        .send()
+        .await
+        .unwrap();
+    boot.put_bucket_website()
+        .bucket("site")
+        .website_configuration(
+            WebsiteConfiguration::builder()
+                .index_document(
+                    IndexDocument::builder()
+                        .suffix("index.html")
+                        .build()
+                        .unwrap(),
+                )
+                .error_document(ErrorDocument::builder().key("error.html").build().unwrap())
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let (akid, secret) = bootstrap_user(&server, "visitor").await;
+    attach_inline_policy(
+        &server,
+        "visitor",
+        "Read",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}
+        ]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let err = s3
+        .get_object()
+        .bucket("site")
+        .key("missing.html")
+        .send()
+        .await
+        .unwrap_err();
+    let raw = err.raw_response().expect("an HTTP response");
+    assert_eq!(raw.status().as_u16(), 403);
+    assert_eq!(raw.body().bytes(), Some(&b"oops"[..]));
+}
+
+/// The key a request addresses is derived once, from the raw path, for both
+/// its authorization and its routing: `/b//` addresses the key `/`. So an
+/// object operation on such a key is authorized as that operation, and an
+/// unsigned request cannot have it authorized as something else (here,
+/// DeleteObjects, which dispatch leaves to its handler) and run unchecked.
+#[tokio::test]
+async fn s3_raw_path_keys_are_authorized_as_the_operation_they_run() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("victim").send().await.unwrap();
+    let http = reqwest::Client::new();
+    for (method, query) in [
+        (reqwest::Method::POST, "delete&uploads"),
+        (reqwest::Method::POST, "delete&restore"),
+        (reqwest::Method::POST, "delete&uploadId=u"),
+        (reqwest::Method::POST, "delete&select&select-type=2"),
+        (reqwest::Method::PUT, "delete"),
+        (reqwest::Method::GET, "delete"),
+    ] {
+        let resp = http
+            .request(
+                method.clone(),
+                format!("{}/victim//?{query}", server.endpoint()),
+            )
+            .body("<Delete><Object><Key>x</Key></Object></Delete>")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403, "{method} ?{query}");
+    }
+    let uploads = boot
+        .list_multipart_uploads()
+        .bucket("victim")
+        .send()
+        .await
+        .unwrap();
+    assert!(uploads.uploads().is_empty(), "{uploads:?}");
+    let objects = boot
+        .list_objects_v2()
+        .bucket("victim")
+        .send()
+        .await
+        .unwrap();
+    assert!(objects.contents().is_empty(), "{objects:?}");
+
+    // A signed caller allowed only s3:ListBucket cannot read the key `/`
+    // by the bucket-level route, nor one allowed only s3:GetObject on
+    // another key reach it.
+    boot.put_object()
+        .bucket("victim")
+        .key("/")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"slash"))
+        .send()
+        .await
+        .unwrap();
+    let (akid, secret) = bootstrap_user(&server, "lister2").await;
+    attach_inline_policy(
+        &server,
+        "lister2",
+        "List",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::victim"}
+        ]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    assert!(is_access_denied(
+        s3.get_object().bucket("victim").key("/").send().await
+    ));
 }
 
 /// HeadObject / GetObject return an object's retention only to a caller
