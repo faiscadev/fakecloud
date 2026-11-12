@@ -916,9 +916,39 @@ pub(crate) fn fmt_enum_set(items: &[String]) -> String {
     format!("[{}]", inner.join(", "))
 }
 
+/// The unique ID IAM gave the user or role an IAM ARN names (`AIDA...` /
+/// `AROA...`), while one by that name exists (a name is unique in its
+/// account whatever its path). `None` for any other principal.
+pub(crate) fn principal_unique_id(
+    iam: &fakecloud_iam::SharedIamState,
+    arn: &str,
+) -> Option<String> {
+    let account = fakecloud_aws::arn::account_of(arn)?;
+    let resource = fakecloud_aws::arn::arn_resource(arn, "iam")?
+        .rsplit(':')
+        .next()?;
+    let (kind, rest) = resource.split_once('/')?;
+    let name = rest.rsplit('/').next()?;
+    let accounts = iam.read();
+    let state = accounts.get(account)?;
+    match kind {
+        "role" => state.roles.get(name).map(|role| role.role_id.clone()),
+        "user" => state.users.get(name).map(|user| user.user_id.clone()),
+        _ => None,
+    }
+}
+
 /// A grant as the API reports it. `IssuingAccount` is the account root in the
-/// partition of the granted key (`region`'s, if the key is gone).
-pub(crate) fn grant_to_json(grant: &KmsGrant, state: &KmsState, region: &str) -> Value {
+/// partition of the granted key (`region`'s, if the key is gone). A grantee
+/// user or role that no longer exists under the unique ID the grant
+/// recorded (deleted, or deleted and recreated) is shown by that ID, as a
+/// policy shows a principal it can no longer resolve.
+pub(crate) fn grant_to_json(
+    grant: &KmsGrant,
+    state: &KmsState,
+    region: &str,
+    iam: Option<&fakecloud_iam::SharedIamState>,
+) -> Value {
     let key = state.keys.get(&grant.key_id);
     let partition = key.map_or_else(|| partition_for(region), |k| partition_of(&k.arn));
     // ListGrants / ListRetirableGrants name the key by its ARN, as AWS does;
@@ -933,7 +963,19 @@ pub(crate) fn grant_to_json(grant: &KmsGrant, state: &KmsState, region: &str) ->
 
     match grant.grantee_service_principal {
         Some(ref sp) => v["GranteeServicePrincipal"] = json!(sp),
-        None => v["GranteePrincipal"] = json!(grant.grantee_principal),
+        None => {
+            let gone = match (&grant.grantee_principal_id, iam) {
+                (Some(id), Some(iam)) => {
+                    principal_unique_id(iam, &grant.grantee_principal).as_ref() != Some(id)
+                }
+                _ => false,
+            };
+            v["GranteePrincipal"] = if gone {
+                json!(grant.grantee_principal_id)
+            } else {
+                json!(grant.grantee_principal)
+            };
+        }
     }
     if let Some(ref rp) = grant.retiring_principal {
         v["RetiringPrincipal"] = json!(rp);

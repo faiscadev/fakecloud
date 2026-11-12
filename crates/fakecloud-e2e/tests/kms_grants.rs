@@ -597,6 +597,77 @@ async fn session_policies_cap_a_grant_to_the_role() {
         .expect("a grant to the session itself");
 }
 
+/// A grant names its grantee role by the role's unique ID: once the role is
+/// deleted `ListGrants` shows that ID (`AROA...`) as `GranteePrincipal`, and
+/// a role recreated under the same name is a new principal whose sessions
+/// the grant does not cover, until a new grant names it.
+#[tokio::test]
+async fn a_recreated_role_does_not_inherit_its_predecessors_grants() {
+    let server = start().await;
+    let (admin_cfg, owner) = admin(&server, ACCOUNT_A).await;
+    let key = create_key(&owner, None).await;
+    let iam = aws_sdk_iam::Client::new(&admin_cfg);
+    let role_arn = role_in_a(&iam, "recreated", None).await;
+    let first_id = iam
+        .get_role()
+        .role_name("recreated")
+        .send()
+        .await
+        .unwrap()
+        .role()
+        .unwrap()
+        .role_id()
+        .to_string();
+    grant(&owner, &key, &role_arn, &[GrantOperation::Encrypt], None).await;
+    let (_, first) = session_of(&server, &admin_cfg, &role_arn).await;
+    encrypt(&first, &key, None)
+        .await
+        .expect("a session of the granted role");
+    let grantee = |owner: KmsClient| {
+        let key = key.clone();
+        async move {
+            owner
+                .list_grants()
+                .key_id(&key)
+                .send()
+                .await
+                .unwrap()
+                .grants()[0]
+                .grantee_principal()
+                .unwrap()
+                .to_string()
+        }
+    };
+    assert_eq!(grantee(owner.clone()).await, role_arn);
+
+    iam.delete_role()
+        .role_name("recreated")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(grantee(owner.clone()).await, first_id);
+
+    let recreated_arn = role_in_a(&iam, "recreated", None).await;
+    assert_eq!(recreated_arn, role_arn);
+    assert_eq!(grantee(owner.clone()).await, first_id);
+    let (_, second) = session_of(&server, &admin_cfg, &recreated_arn).await;
+    denied(
+        encrypt(&second, &key, None).await,
+        "a session of the recreated role under the old grant",
+    );
+    grant(
+        &owner,
+        &key,
+        &recreated_arn,
+        &[GrantOperation::Encrypt],
+        None,
+    )
+    .await;
+    encrypt(&second, &key, None)
+        .await
+        .expect("a new grant names the recreated role");
+}
+
 /// A role `name` of account A that A's root may assume, with `boundary` (a
 /// managed policy ARN) as its permissions boundary; its ARN.
 async fn role_in_a(iam: &aws_sdk_iam::Client, name: &str, boundary: Option<&str>) -> String {

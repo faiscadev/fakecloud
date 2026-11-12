@@ -170,7 +170,7 @@ impl ResourcePolicyProvider for KmsResourcePolicyProvider {
                 &key.arn,
                 |grant| {
                     grant.grantee_service_principal.is_none()
-                        && principal_match(&grant.grantee_principal, principal) == Some(*kind)
+                        && grantee_match(grant, principal) == Some(*kind)
                 },
                 action.action,
                 grant_request,
@@ -222,9 +222,28 @@ fn retire_grant_authorization(
         .operations
         .iter()
         .any(|op| op == "RetireGrant")
-        .then(|| principal_match(&grant.grantee_principal, principal))
+        .then(|| grantee_match(grant, principal))
         .flatten();
     GrantAuthorization::strongest(retiring, grantee)
+}
+
+/// How a grant's grantee names the caller ([`principal_match`]), while the
+/// caller is still the principal the grant was created for: a grant names an
+/// IAM user or role by the unique ID it had then, so it covers only that
+/// user (whose `aws:userid` is the ID) or that role's sessions
+/// (`<role id>:<session>`), not a user or role created later under the same
+/// name.
+fn grantee_match(
+    grant: &crate::state::KmsGrant,
+    principal: &Principal,
+) -> Option<GrantAuthorization> {
+    let kind = principal_match(&grant.grantee_principal, principal)?;
+    match (&grant.grantee_principal_id, kind) {
+        (Some(id), GrantAuthorization::Grantee | GrantAuthorization::GranteeRole) => {
+            (principal.user_id.split(':').next() == Some(id.as_str())).then_some(kind)
+        }
+        _ => Some(kind),
+    }
 }
 
 /// How a principal named in a grant (its grantee or retiring principal)
@@ -409,6 +428,7 @@ mod tests {
                     grantee_principal: grantee.to_string(),
                     retiring_principal: None,
                     grantee_service_principal: None,
+                    grantee_principal_id: None,
                     retiring_service_principal: None,
                     operations: operations.iter().map(|o| o.to_string()).collect(),
                     constraints: constraints.clone(),
@@ -473,6 +493,53 @@ mod tests {
     }
 
     const USER: &str = "arn:aws:iam::111111111111:user/alice";
+
+    /// A grant that recorded its grantee's unique ID covers only that
+    /// principal: the user with that `aws:userid`, or sessions of the role
+    /// with that ID, not a user or role recreated under the same name; a
+    /// grant without one (the grantee was unknown to IAM) matches by ARN.
+    #[test]
+    fn grants_follow_the_unique_id_of_their_grantee() {
+        let role = "arn:aws:iam::111111111111:role/app";
+        let session = "arn:aws:sts::111111111111:assumed-role/app/s";
+        let state = state_with_grants(&[(role, &["Encrypt"], None), (USER, &["Decrypt"], None)]);
+        {
+            let mut accounts = state.write();
+            let grants = &mut accounts.get_or_create(KEY_ACCOUNT).grants;
+            grants[0].grantee_principal_id = Some("AROAOLD".into());
+            grants[1].grantee_principal_id = Some("AIDAOLD".into());
+        }
+        let as_principal = |arn: &str, user_id: &str, action: &'static str| {
+            let mut caller = principal(arn);
+            caller.user_id = user_id.into();
+            KmsResourcePolicyProvider::new(state.clone()).grant_authorization(
+                "kms",
+                &request(serde_json::json!({})),
+                &IamAction {
+                    service: "kms",
+                    action,
+                    resource: key_arn(),
+                },
+                &caller,
+            )
+        };
+        assert_eq!(
+            as_principal(session, "AROAOLD:s", "Encrypt"),
+            Some(GrantAuthorization::GranteeRole)
+        );
+        assert_eq!(as_principal(session, "AROANEW:s", "Encrypt"), None);
+        assert_eq!(
+            as_principal(USER, "AIDAOLD", "Decrypt"),
+            Some(GrantAuthorization::Grantee)
+        );
+        assert_eq!(as_principal(USER, "AIDANEW", "Decrypt"), None);
+
+        state.write().get_or_create(KEY_ACCOUNT).grants[0].grantee_principal_id = None;
+        assert_eq!(
+            as_principal(session, "AROANEW:s", "Encrypt"),
+            Some(GrantAuthorization::GranteeRole)
+        );
+    }
 
     /// A grant with a `SourceArn` constraint allows its operations only on
     /// behalf of that resource, and a direct KMS API call is made on behalf
@@ -814,6 +881,7 @@ mod tests {
             grantee_principal: grantee.to_string(),
             retiring_principal: retiring.map(str::to_string),
             grantee_service_principal: None,
+            grantee_principal_id: None,
             retiring_service_principal: None,
             operations: operations.iter().map(|o| o.to_string()).collect(),
             constraints: None,
@@ -941,6 +1009,7 @@ mod tests {
                 grantee_principal: USER.into(),
                 retiring_principal: None,
                 grantee_service_principal: None,
+                grantee_principal_id: None,
                 retiring_service_principal: None,
                 operations: vec!["Decrypt".into()],
                 constraints: None,

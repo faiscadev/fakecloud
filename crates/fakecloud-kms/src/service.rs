@@ -139,6 +139,8 @@ pub struct KmsService {
     /// Service Quotas, for the customer managed key quota once the user
     /// switched its enforcement on. Without one nothing is enforced.
     quota_provider: Option<Arc<dyn fakecloud_core::quota::QuotaProvider>>,
+    /// IAM, for the unique IDs of the users and roles grants name.
+    iam: Option<fakecloud_iam::SharedIamState>,
 }
 
 impl KmsService {
@@ -148,7 +150,16 @@ impl KmsService {
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             quota_provider: None,
+            iam: None,
         }
+    }
+
+    /// Resolve the IAM users and roles grants name to their unique IDs
+    /// (`CreateGrant` records the grantee's, `ListGrants` shows it once the
+    /// principal is gone or recreated).
+    pub fn with_iam(mut self, iam: fakecloud_iam::SharedIamState) -> Self {
+        self.iam = Some(iam);
+        self
     }
 
     /// Attach Service Quotas so the customer managed key quota is enforced

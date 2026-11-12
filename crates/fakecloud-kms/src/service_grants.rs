@@ -171,6 +171,12 @@ impl KmsService {
 
         let grant_id = Uuid::new_v4().to_string();
         let grant_token = Uuid::new_v4().to_string();
+        // The grant names an IAM user or role by its unique ID, so the
+        // principal a later user or role of the same name is does not get it.
+        let grantee_principal_id = self
+            .iam
+            .as_ref()
+            .and_then(|iam| principal_unique_id(iam, &grantee_principal));
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -179,6 +185,7 @@ impl KmsService {
             grant_token: grant_token.clone(),
             key_id: resolved,
             grantee_principal,
+            grantee_principal_id,
             grantee_service_principal,
             retiring_principal,
             retiring_service_principal,
@@ -238,7 +245,7 @@ impl KmsService {
                 service_grantee_filter
                     .is_none_or(|p| g.grantee_service_principal.as_deref() == Some(p))
             })
-            .map(|g| grant_to_json(g, state, &req.region))
+            .map(|g| grant_to_json(g, state, &req.region, self.iam.as_ref()))
             .collect();
 
         Ok(AwsResponse::json(
@@ -310,7 +317,7 @@ impl KmsService {
                 Some(principal) => g.retiring_principal.as_deref() == Some(principal),
                 None => g.retiring_service_principal.as_deref() == service_principal,
             })
-            .map(|g| grant_to_json(g, state, &req.region))
+            .map(|g| grant_to_json(g, state, &req.region, self.iam.as_ref()))
             .collect();
         // Sort by GrantId so the marker (the GrantId of the last item on the
         // previous page) is a stable total-ordering key. Grants are stored in an

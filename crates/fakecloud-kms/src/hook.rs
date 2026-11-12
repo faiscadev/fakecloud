@@ -728,11 +728,21 @@ fn authorize(
         let granted = match (caller_arn, caller) {
             (Some(caller_arn), _) => {
                 let forms = grantee_forms(caller_arn, role_arn, account_id, partition);
+                // A grant naming a user or role covers the principal of the
+                // unique ID it recorded: the caller's `aws:userid` (the
+                // user's ID, or `<role id>:<session>`), when IAM knows it.
+                let caller_id = facts.user_id.as_deref().and_then(|id| id.split(':').next());
                 grant_allows(
                     grants,
                     key_storage_id,
                     &key.arn,
-                    |grant| forms.contains(&grant.grantee_principal),
+                    |grant| {
+                        forms.contains(&grant.grantee_principal)
+                            && match (&grant.grantee_principal_id, caller_id) {
+                                (Some(id), Some(caller_id)) => id == caller_id,
+                                _ => true,
+                            }
+                    },
                     action,
                     GrantRequest::Context(encryption_context),
                     None,
@@ -2198,6 +2208,7 @@ mod tests {
                     grant_token: "t".into(),
                     key_id: storage_id.clone(),
                     grantee_principal: grantee.into(),
+                    grantee_principal_id: None,
                     grantee_service_principal: service.map(str::to_string),
                     retiring_principal: Some(format!("arn:aws:iam::{acct}:root")),
                     retiring_service_principal: None,
@@ -2276,6 +2287,67 @@ mod tests {
         assert_eq!(as_user().unwrap_err().kind, KmsErrorKind::AccessDenied);
         push(&user, None, &["GenerateDataKey"], None);
         as_user().expect("an unbound grant to the user");
+    }
+
+    /// Through a service, a grant naming a role covers sessions of the role
+    /// with the unique ID it recorded (the caller's `aws:userid` as IAM
+    /// reports it), not those of a role recreated under the same name.
+    #[test]
+    fn grants_through_a_service_follow_the_grantees_unique_id() {
+        let (a, b) = ("111111111111", "222222222222");
+        let (state, _) = crate::test_support::kms_hook(a);
+        let current_id = Arc::new(parking_lot::Mutex::new("AROAOLD".to_string()));
+        let resolver_id = current_id.clone();
+        let hook = KmsServiceHook::new(state.clone(), Default::default()).with_caller_resolver(
+            Arc::new(move |arn: &str| CallerFacts {
+                user_id: Some(format!(
+                    "{}:{}",
+                    resolver_id.lock(),
+                    arn.rsplit('/').next().unwrap_or_default()
+                )),
+                ..Default::default()
+            }),
+        );
+        let key = {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(b);
+            let arn = mint_aws_managed_key(s, "us-east-1", "by-id");
+            let id = key_id_from_arn(&arn).to_string();
+            let key = s.keys.get_mut(&id).unwrap();
+            key.key_manager = "CUSTOMER".into();
+            key.policy = format!(
+                r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{b}:root"}},"Action":"kms:*","Resource":"*"}}]}}"#
+            );
+            s.grants.push(crate::state::KmsGrant {
+                grant_id: "g".into(),
+                grant_token: "t".into(),
+                key_id: id,
+                grantee_principal: format!("arn:aws:iam::{a}:role/app"),
+                grantee_principal_id: Some("AROAOLD".into()),
+                grantee_service_principal: None,
+                retiring_principal: None,
+                retiring_service_principal: None,
+                operations: vec!["GenerateDataKey".into()],
+                constraints: None,
+                name: None,
+                creation_date: 0.0,
+            });
+            arn
+        };
+        let session = format!("arn:aws:sts::{a}:assumed-role/app/s");
+        let encrypt = || {
+            hook.encrypt(
+                a,
+                "us-east-1",
+                &key,
+                b"x",
+                KmsCaller::via_for("sqs.amazonaws.com", Some(&session)),
+                HashMap::new(),
+            )
+        };
+        encrypt().expect("a session of the granted role");
+        *current_id.lock() = "AROANEW".into();
+        assert_eq!(encrypt().unwrap_err().kind, KmsErrorKind::AccessDenied);
     }
 
     /// A resource in one account encrypted under a customer key ARN of
@@ -2493,6 +2565,7 @@ mod tests {
                     grantee_principal: grantee,
                     retiring_principal: None,
                     grantee_service_principal: None,
+                    grantee_principal_id: None,
                     retiring_service_principal: None,
                     operations: operations.iter().map(|o| o.to_string()).collect(),
                     constraints,
@@ -2558,6 +2631,7 @@ mod tests {
             grantee_principal: format!("arn:aws:iam::{a}:root"),
             retiring_principal: None,
             grantee_service_principal: None,
+            grantee_principal_id: None,
             retiring_service_principal: None,
             operations: vec!["GenerateDataKey".into()],
             constraints: None,
@@ -2624,6 +2698,7 @@ mod tests {
             grantee_principal: format!("arn:aws:iam::{a}:root"),
             retiring_principal: None,
             grantee_service_principal: None,
+            grantee_principal_id: None,
             retiring_service_principal: None,
             operations: operations.iter().map(|o| o.to_string()).collect(),
             constraints: None,
@@ -2708,6 +2783,7 @@ mod tests {
                 grantee_principal: "arn:aws:iam::111111111111:root".into(),
                 retiring_principal: None,
                 grantee_service_principal: None,
+                grantee_principal_id: None,
                 retiring_service_principal: None,
                 operations: vec!["GenerateDataKey".into()],
                 constraints: None,
