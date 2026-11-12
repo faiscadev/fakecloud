@@ -1366,6 +1366,57 @@ async fn path_style_urls_pick_the_named_api_when_stages_collide() {
     }
 }
 
+/// On the shared listener an unsigned plain-host request is an API invocation
+/// only when API Gateway claims it (a deployed stage, a path-style invocation
+/// URL, an execute-api or custom-domain host); any other path is an S3
+/// path-style request, so a missing bucket answers `NoSuchBucket` instead of
+/// "Stage not found", while the invocations keep working.
+#[tokio::test]
+async fn unsigned_requests_split_between_api_invocations_and_s3() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+    let api_id = provision_mock_items_api(&client, "split").await;
+    let http = reqwest::Client::new();
+    let base = server.endpoint();
+
+    for req in [
+        http.get(format!("{base}/prod/items")),
+        http.get(format!(
+            "{base}/restapis/{api_id}/prod/_user_request_/items"
+        )),
+        http.get(format!("{base}/_aws/execute-api/{api_id}/prod/items")),
+        http.get(format!("{base}/prod/items")).header(
+            "host",
+            format!("{api_id}.execute-api.us-east-1.amazonaws.com"),
+        ),
+    ] {
+        let (status, body) = get_body(req).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body, r#"{"api":"split"}"#);
+    }
+    // An undeployed stage under an invocation URL stays API Gateway's 404.
+    let (status, body) =
+        get_body(http.get(format!("{base}/restapis/{api_id}/dev/_user_request_/items"))).await;
+    assert_eq!(status, 404, "{body}");
+    assert!(!body.contains("NoSuchBucket"), "{body}");
+
+    // Not a stage of any API: S3 path-style.
+    // (S3's GetObject reports a missing bucket as `NoSuchKey`, the error its
+    // model declares.)
+    for (req, code) in [
+        (http.get(format!("{base}/dev/items")), "NoSuchKey"),
+        (http.get(format!("{base}/dev")), "NoSuchBucket"),
+        (
+            http.put(format!("{base}/no-such-bucket/k")).body("x"),
+            "NoSuchBucket",
+        ),
+    ] {
+        let (status, body) = get_body(req).await;
+        assert_eq!(status, 404, "{body}");
+        assert!(body.contains(&format!("<Code>{code}</Code>")), "{body}");
+    }
+}
+
 #[tokio::test]
 async fn custom_domain_base_path_mapping_resolves_with_host_port() {
     // Clients reach fakecloud on a port, so the Host carries it

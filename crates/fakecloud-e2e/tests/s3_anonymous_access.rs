@@ -86,19 +86,126 @@ async fn anonymous_get_object_default_mode_serves_object() {
     assert_eq!(resp.bytes().await.unwrap().as_ref(), b"hello");
 }
 
-/// Routing only claims unsigned requests whose first path segment is an
-/// existing bucket. A request for a nonexistent bucket must still fall through
-/// to the apigateway catch-all (404), unchanged.
+/// Send an unsigned request and return its status, `Content-Type` and body.
+async fn unsigned(req: reqwest::RequestBuilder) -> (u16, String, String) {
+    let resp = req.send().await.unwrap();
+    let status = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    (status, content_type, resp.text().await.unwrap())
+}
+
+/// An unsigned path-style request for a bucket that does not exist is still an
+/// S3 request on S3's endpoint: S3 answers it exactly as it answers the signed
+/// request (`NoSuchBucket`; `GetObject` reports `NoSuchKey`, the error its
+/// model declares), instead of the apigateway catch-all ("Stage not found").
 #[tokio::test]
-async fn anonymous_get_nonexistent_bucket_falls_through() {
+async fn anonymous_request_to_missing_bucket_is_answered_by_s3() {
     let server = TestServer::start().await;
     let http = reqwest::Client::new();
-    let resp = http
-        .get(format!("{}/ghostbucket/x.txt", server.endpoint()))
+    let base = server.endpoint();
+    for (req, code) in [
+        (http.get(format!("{base}/ghostbucket/x.txt")), "NoSuchKey"),
+        (http.head(format!("{base}/ghostbucket/x.txt")), ""),
+        (
+            http.put(format!("{base}/ghostbucket/x.txt")).body("hi"),
+            "NoSuchBucket",
+        ),
+        (
+            http.get(format!("{base}/ghostbucket?list-type=2")),
+            "NoSuchBucket",
+        ),
+        (http.get(format!("{base}/ghostbucket")), "NoSuchBucket"),
+    ] {
+        let (status, content_type, body) = unsigned(req).await;
+        assert_eq!(status, 404, "{body}");
+        if !code.is_empty() {
+            assert!(content_type.contains("xml"), "{content_type}: {body}");
+            assert!(body.contains(&format!("<Code>{code}</Code>")), "{body}");
+        }
+    }
+}
+
+/// IAM strict mode: an anonymous request for a missing bucket reaches S3's
+/// anonymous authorization, which no public grant allows: `AccessDenied` in
+/// S3's XML shape, for reads and writes alike.
+#[tokio::test]
+async fn anonymous_request_to_missing_bucket_iam_strict_is_access_denied() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let http = reqwest::Client::new();
+    let base = server.endpoint();
+    for req in [
+        http.get(format!("{base}/ghostbucket/x.txt")),
+        http.put(format!("{base}/ghostbucket/x.txt")).body("hi"),
+        http.put(format!("{base}/ghostbucket")),
+    ] {
+        let (status, _, body) = unsigned(req).await;
+        assert_eq!(status, 403, "{body}");
+        assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+    }
+    // The bucket was not created by the denied anonymous PUT.
+    let s3 = helpers::root_s3_client(&server).await;
+    assert!(s3.head_bucket().bucket("ghostbucket").send().await.is_err());
+}
+
+/// Default mode: an anonymous PUT to an existing bucket writes the object, as
+/// fakecloud is permissive by default; a public-read object is then served to
+/// an anonymous GET.
+#[tokio::test]
+async fn anonymous_put_to_existing_bucket_default_mode() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    create_public_probe(&s3).await;
+    let http = reqwest::Client::new();
+    let url = format!("{}/probe/up.txt", server.endpoint());
+    let (status, _, body) = unsigned(http.put(&url).body("uploaded")).await;
+    assert_eq!(status, 200, "{body}");
+    let got = s3
+        .get_object()
+        .bucket("probe")
+        .key("up.txt")
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404);
+    assert_eq!(
+        got.body.collect().await.unwrap().into_bytes().as_ref(),
+        b"uploaded"
+    );
+    let (status, _, body) = unsigned(http.get(&url)).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "uploaded");
+
+    // The same upload addressed to S3's endpoint host (path-style and
+    // virtual-hosted) streams its body too.
+    for (host, path) in [
+        ("s3.us-east-1.amazonaws.com", "/probe/host.txt"),
+        ("probe.s3.us-east-1.amazonaws.com", "/vhost.txt"),
+    ] {
+        let (status, _, body) = unsigned(
+            http.put(format!("{}{path}", server.endpoint()))
+                .header("host", host)
+                .body("via-host"),
+        )
+        .await;
+        assert_eq!(status, 200, "{host}: {body}");
+    }
+    for key in ["host.txt", "vhost.txt"] {
+        let got = s3
+            .get_object()
+            .bucket("probe")
+            .key(key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            got.body.collect().await.unwrap().into_bytes().as_ref(),
+            b"via-host"
+        );
+    }
 }
 
 /// IAM strict mode: an anonymous GET of a private object is denied (403);

@@ -109,12 +109,15 @@ impl ApiGatewayFacade {
     /// Whether the `Host` names a v1 custom domain (its name or its regional
     /// domain name), which the v1 data plane resolves via base path mappings.
     fn host_is_v1_custom_domain(&self, req: &AwsRequest) -> bool {
-        let Some(host) = fakecloud_core::protocol::normalized_host_from_headers(&req.headers)
-        else {
+        self.headers_name_v1_custom_domain(&req.headers, &req.account_id)
+    }
+
+    fn headers_name_v1_custom_domain(&self, headers: &http::HeaderMap, account_id: &str) -> bool {
+        let Some(host) = fakecloud_core::protocol::normalized_host_from_headers(headers) else {
             return false;
         };
         let accounts = self.v1.state_handle().read();
-        let Some(state) = accounts.get(&req.account_id) else {
+        let Some(state) = accounts.get(account_id) else {
             return false;
         };
         state
@@ -124,11 +127,65 @@ impl ApiGatewayFacade {
     }
 
     fn host_is_v2_custom_domain(&self, req: &AwsRequest) -> bool {
+        self.headers_name_v2_custom_domain(&req.headers, &req.account_id)
+    }
+
+    fn headers_name_v2_custom_domain(&self, headers: &http::HeaderMap, account_id: &str) -> bool {
         let Some(lookup) = self.v2_has_domain.as_ref() else {
             return false;
         };
-        fakecloud_core::protocol::normalized_host_from_headers(&req.headers)
-            .is_some_and(|h| lookup(&req.account_id, &h))
+        fakecloud_core::protocol::normalized_host_from_headers(headers)
+            .is_some_and(|h| lookup(account_id, &h))
+    }
+
+    /// Whether any REST API (v1) or HTTP/WebSocket API (v2) in `account_id`
+    /// has a stage named `stage`.
+    fn any_api_has_stage(&self, account_id: &str, stage: &str) -> bool {
+        let v1_has = {
+            let accounts = self.v1.state_handle().read();
+            accounts
+                .get(account_id)
+                .is_some_and(|state| state.stages.values().any(|s| s.contains_key(stage)))
+        };
+        v1_has
+            || self
+                .v2_has_stage
+                .as_ref()
+                .is_some_and(|lookup| lookup(account_id, stage))
+    }
+
+    /// The rule deciding whether an unsigned request on the shared listener is
+    /// an API invocation (rather than an S3 path-style request). API Gateway
+    /// owns it when:
+    ///
+    /// - the `Host` is an execute-api endpoint (`{api-id}.execute-api...`),
+    /// - the `Host` is a v1 or v2 custom domain name,
+    /// - the path is a path-style invocation URL (`/restapis/...`,
+    ///   `/_aws/execute-api/...`), or
+    /// - the first path segment is a stage some API in the account has
+    ///   (`/{stage}/{path}` on a plain host).
+    ///
+    /// Anything else -- notably `/{bucket}/{key}` for a bucket that does not
+    /// exist -- is left to S3.
+    fn unsigned_request_is_invocation(
+        &self,
+        raw_path: &str,
+        headers: &http::HeaderMap,
+        account_id: &str,
+    ) -> bool {
+        if headers_name_execute_api(headers)
+            || self.headers_name_v1_custom_domain(headers, account_id)
+            || self.headers_name_v2_custom_domain(headers, account_id)
+        {
+            return true;
+        }
+        let segments = fakecloud_core::path::split_path_segments(raw_path);
+        match segments.first().map(String::as_str) {
+            None => false,
+            Some("restapis") => true,
+            Some("_aws") => segments.get(1).is_some_and(|s| s == "execute-api"),
+            Some(stage) => self.any_api_has_stage(account_id, stage),
+        }
     }
 
     /// Rewrite a path-style invocation URL to the canonical execute-api form:
@@ -254,7 +311,11 @@ impl ApiGatewayFacade {
 /// Whether the request's `Host` is an execute-api endpoint
 /// (`{api-id}.execute-api...`), which names the API being invoked.
 fn host_is_execute_api(req: &AwsRequest) -> bool {
-    req.headers
+    headers_name_execute_api(&req.headers)
+}
+
+fn headers_name_execute_api(headers: &http::HeaderMap) -> bool {
+    headers
         .get("host")
         .and_then(|v| v.to_str().ok())
         .and_then(|h| h.split('.').nth(1))
@@ -269,6 +330,16 @@ impl AwsService for ApiGatewayFacade {
 
     fn supported_actions(&self) -> &[&str] {
         &self.actions
+    }
+
+    fn claims_unsigned_request(
+        &self,
+        _method: &http::Method,
+        raw_path: &str,
+        headers: &http::HeaderMap,
+        account_id: &str,
+    ) -> bool {
+        self.unsigned_request_is_invocation(raw_path, headers, account_id)
     }
 
     async fn handle(&self, mut req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -478,6 +549,52 @@ mod tests {
             "zzz.execute-api.us-east-1.amazonaws.com".parse().unwrap(),
         );
         assert!(!f.plain_host_stage_owned_by_v1(&pinned));
+    }
+
+    fn host_headers(host: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("host", host.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn unsigned_invocations_are_claimed_and_s3_path_style_is_not() {
+        let f = facade()
+            .with_v2_stage_lookup(Arc::new(|_, stage| stage == "v2stage"))
+            .with_v2_domain_lookup(Arc::new(|_, host| host == "http.example.com"));
+        f.v1.state_handle()
+            .write()
+            .get_or_create(ACCOUNT)
+            .domain_names
+            .insert("rest.example.com".to_string(), serde_json::json!({}));
+        let plain = host_headers("localhost:4566");
+        let claims = |path: &str, headers: &HeaderMap| {
+            f.claims_unsigned_request(&Method::GET, path, headers, ACCOUNT)
+        };
+
+        // Documented invocation shapes on a plain host.
+        assert!(claims("/prod/items", &plain), "v1 stage");
+        assert!(claims("/v2stage/items", &plain), "v2 stage");
+        assert!(claims("/restapis/abc123/prod/_user_request_/items", &plain));
+        assert!(claims("/restapis/abc123/dev/_user_request_/items", &plain));
+        assert!(claims("/_aws/execute-api/abc123/prod/items", &plain));
+        // Host-addressed invocations, whatever the path.
+        let exec = host_headers("abc123.execute-api.us-east-1.amazonaws.com");
+        assert!(claims("/ghost-bucket/k", &exec));
+        let ls_exec = host_headers("abc123.execute-api.localhost.localstack.cloud:4566");
+        assert!(claims("/anything", &ls_exec));
+        assert!(claims("/v1/items", &host_headers("Rest.Example.com:4566")));
+        assert!(claims("/hello/one", &host_headers("http.example.com:4566")));
+
+        // S3 path-style: missing bucket, root, no matching stage, and a
+        // stage that exists only in another account.
+        assert!(!claims("/ghost-bucket/k.txt", &plain));
+        assert!(!claims("/ghost-bucket", &plain));
+        assert!(!claims("/", &plain));
+        assert!(!claims("/dev/items", &plain));
+        assert!(!claims("/_aws/other", &plain));
+        assert!(!claims("/ghost-bucket/k", &HeaderMap::new()));
+        assert!(!f.claims_unsigned_request(&Method::GET, "/prod/items", &plain, "999999999999"));
     }
 
     #[test]

@@ -34,6 +34,8 @@ A deployed stage is reachable at any of these URLs:
 - `http://localhost:4566/restapis/{api_id}/{stage}/{path}`: served by the data plane when it is not a control-plane route and `{stage}` is deployed on that API. Prefer `_user_request_` when a stage is named like a control-plane collection (`resources`, `stages`, ...).
 - `http://localhost:4566/{stage}/{path}`: a plain-host request goes to the REST API that has that stage when no HTTP API (v2) defines a stage of the same name.
 
+The plain host is also S3's path-style endpoint, so an unsigned plain-host request is an API invocation only in the shapes above: an execute-api or custom-domain `Host`, a `/restapis/...` or `/_aws/execute-api/...` URL, or a first segment that is a stage of some API in the account. An existing S3 bucket of the same name as a stage wins, and any other path (for example a bucket that does not exist) is answered by S3.
+
 fakecloud walks the resource tree, picks the matching method/integration, and dispatches:
 
 - `AWS_PROXY` — invokes the target Lambda via the same `DeliveryBus` used elsewhere; builds the v1.0 Lambda proxy event envelope (`event.version = "1.0"`, `requestContext.identity`, `multiValueHeaders`, `multiValueQueryStringParameters`, `pathParameters`, `stageVariables`, base64 body when the request content-type matches a configured `binaryMediaType`).

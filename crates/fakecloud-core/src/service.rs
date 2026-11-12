@@ -791,6 +791,26 @@ pub trait AwsService: Send + Sync {
     /// List of actions this service supports (for introspection).
     fn supported_actions(&self) -> &[&str];
 
+    /// Whether this service's data plane owns an unsigned request (no
+    /// `Authorization`, no presign parameters) that no protocol signal --
+    /// target header, `Action`, signing scope or AWS endpoint host -- routed.
+    /// `raw_path` is the undecoded wire path and `account_id` the account
+    /// the anonymous request runs in.
+    ///
+    /// On the shared listener such a request is either an S3 path-style
+    /// request (`/{bucket}/{key}` on S3's endpoint) or an invocation of a
+    /// deployed API; dispatch asks the API Gateway data plane first and
+    /// sends everything it does not claim to S3. Defaults to `false`.
+    fn claims_unsigned_request(
+        &self,
+        _method: &Method,
+        _raw_path: &str,
+        _headers: &HeaderMap,
+        _account_id: &str,
+    ) -> bool {
+        false
+    }
+
     /// Whether this service participates in opt-in IAM enforcement
     /// (`FAKECLOUD_IAM=soft|strict`).
     ///

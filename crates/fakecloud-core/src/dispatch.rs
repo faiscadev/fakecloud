@@ -219,6 +219,36 @@ async fn dispatch_inner(
             action: String::new(),
             protocol: AwsProtocol::Rest,
         }),
+        // An unsigned object upload S3 will serve -- on an S3 endpoint host,
+        // or path-style on the shared listener (routed below to S3 for an
+        // existing bucket or one API Gateway does not claim) -- streams like
+        // a signed one; buffering it left PutObject without its body stream.
+        (None, header_only)
+            if is_unsigned(&parts.headers, &query_params)
+                && is_s3_object_put(&parts.method, parts.uri.path(), &parts.headers)
+                && !protocol::is_s3_control_host(&parts.headers)
+                && match header_only {
+                    Some(d) => d.service == "s3",
+                    None => {
+                        !parts.uri.path().starts_with("/v2/")
+                            && (anonymous_s3_bucket(&parts.uri, &config).is_some()
+                                || unsigned_request_is_s3_path_style(
+                                    &parts.method,
+                                    &parts.uri,
+                                    &parts.headers,
+                                    &query_params,
+                                    &registry,
+                                    &config,
+                                ))
+                    }
+                } =>
+        {
+            Some(protocol::DetectedRequest {
+                service: "s3".to_string(),
+                action: String::new(),
+                protocol: AwsProtocol::Rest,
+            })
+        }
         _ => None,
     };
 
@@ -338,12 +368,32 @@ async fn dispatch_inner(
                         action: String::new(),
                         protocol: AwsProtocol::Rest,
                     }
+                } else if unsigned_request_is_s3_path_style(
+                    &parts.method,
+                    &parts.uri,
+                    &parts.headers,
+                    &query_params,
+                    &registry,
+                    &config,
+                ) {
+                    // Unsigned path-style request on the shared listener that
+                    // no API Gateway data plane claims: on AWS it is an S3
+                    // request to S3's endpoint, for an existing bucket or not
+                    // (`NoSuchBucket`), so S3 answers it rather than the
+                    // apigateway catch-all below ("Stage not found").
+                    protocol::DetectedRequest {
+                        service: "s3".to_string(),
+                        action: String::new(),
+                        protocol: AwsProtocol::Rest,
+                    }
                 } else if !parts.uri.path().starts_with("/_")
                     || parts.uri.path().starts_with("/_aws/execute-api/")
                 {
-                    // Requests without AWS auth that don't match any service might be
-                    // API Gateway execute API calls (plain HTTP without signatures).
-                    // Route them to apigateway service which will validate if a matching
+                    // API Gateway execute API calls: an unsigned request the
+                    // API Gateway data plane claimed above, or a signed one
+                    // whose signing scope names no REST service (an IAM-auth
+                    // API signed for `execute-api`). Route them to the
+                    // apigateway service, which validates that a matching
                     // API/stage exists. Skip special FakeCloud endpoints (/_*),
                     // except LocalStack's path-style execute-api invocation URL
                     // `/_aws/execute-api/{api-id}/{stage}/{path}`.
@@ -1465,26 +1515,7 @@ fn streaming_route(
     // SigV4 service field in the Authorization header OR via a SigV4
     // presigned URL (X-Amz-Credential .../s3/...) OR a SigV2 presigned
     // URL (AWSAccessKeyId + Signature + Expires query parameters).
-    if method == http::Method::PUT {
-        // An object upload needs a bucket AND a key. Resolve the request the
-        // way routing will (bucket from the Host header for virtual-hosted,
-        // straight from the path otherwise), then split it the way the request
-        // builder builds `path_segments` -- on '/', dropping empty segments.
-        // Anything that leaves no key is a bucket-level operation:
-        // `PUT /<bucket>`, `PUT /<bucket>/` (the form the AWS SDKs actually
-        // send for CreateBucket), `PUT /<bucket>//`, and the virtual-hosted
-        // equivalents. Streaming those left the body unbuffered, so everything
-        // that runs before the handler -- IAM enforcement above all -- saw an
-        // empty body and could not read `CreateBucketConfiguration` (no
-        // `aws:RequestTag` from a create-time tag set, for one).
-        let host_bucket = protocol::parse_routing_host_from_headers(headers)
-            .filter(|h| h.service == "s3")
-            .and_then(|h| h.bucket);
-        let routed = s3_routing_path(path, host_bucket.as_deref());
-        let has_key = routed.split('/').filter(|seg| !seg.is_empty()).count() >= 2;
-        if !has_key {
-            return None;
-        }
+    if is_s3_object_put(method, path, headers) {
         let header_s3 = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
@@ -1505,6 +1536,47 @@ fn streaming_route(
     }
 
     None
+}
+
+/// Whether a request, if it is S3's, is an object-level `PUT` (PutObject,
+/// UploadPart, UploadPartCopy, ...): one that streams its body.
+///
+/// An object upload needs a bucket AND a key. Resolve the request the way
+/// routing will (bucket from the Host header for virtual-hosted, straight from
+/// the path otherwise), then split it the way the request builder builds
+/// `path_segments` -- on '/', dropping empty segments. Anything that leaves no
+/// key is a bucket-level operation: `PUT /<bucket>`, `PUT /<bucket>/` (the form
+/// the AWS SDKs actually send for CreateBucket), `PUT /<bucket>//`, and the
+/// virtual-hosted equivalents. Streaming those left the body unbuffered, so
+/// everything that runs before the handler -- IAM enforcement above all -- saw
+/// an empty body and could not read `CreateBucketConfiguration` (no
+/// `aws:RequestTag` from a create-time tag set, for one).
+fn is_s3_object_put(method: &http::Method, path: &str, headers: &http::HeaderMap) -> bool {
+    if method != http::Method::PUT {
+        return false;
+    }
+    let host_bucket = protocol::parse_routing_host_from_headers(headers)
+        .filter(|h| h.service == "s3")
+        .and_then(|h| h.bucket);
+    let routed = s3_routing_path(path, host_bucket.as_deref());
+    routed.split('/').filter(|seg| !seg.is_empty()).count() >= 2
+}
+
+/// Whether the request carries no credential at all: no `Authorization`
+/// header and no SigV4 or SigV2 query-authentication parameter, not even an
+/// incomplete set (`AWSAccessKeyId` + `Signature` without `Expires` is a
+/// broken presign, not an anonymous request).
+fn is_unsigned(headers: &http::HeaderMap, query_params: &HashMap<String, String>) -> bool {
+    const QUERY_AUTH: &[&str] = &[
+        "X-Amz-Credential",
+        "X-Amz-Signature",
+        "AWSAccessKeyId",
+        "Signature",
+    ];
+    headers
+        .get(http::header::AUTHORIZATION)
+        .is_none_or(|v| v.as_bytes().is_empty())
+        && !QUERY_AUTH.iter().any(|k| query_params.contains_key(*k))
 }
 
 /// The SigV4 query-authentication parameters themselves. They authenticate
@@ -2042,6 +2114,33 @@ fn invalid_token_error(envelope: &ErrorEnvelope) -> (&'static str, &'static str)
             "The security token included in the request is invalid",
         )
     }
+}
+
+/// Whether a request no protocol signal routed is an unsigned S3 path-style
+/// request. It must be fully unsigned (no `Authorization`, no SigV4 or SigV2
+/// presign parameters: a signed request whose scope named no REST service is
+/// an IAM-auth API invocation signed for `execute-api`), its path must not be
+/// a fakecloud endpoint (`/_*`; no bucket name starts with `_`), and the API
+/// Gateway data plane must not claim it (execute-api or custom-domain host,
+/// path-style invocation URL, or a deployed stage as the first segment; see
+/// [`crate::service::AwsService::claims_unsigned_request`]).
+fn unsigned_request_is_s3_path_style(
+    method: &http::Method,
+    uri: &http::Uri,
+    headers: &http::HeaderMap,
+    query_params: &HashMap<String, String>,
+    registry: &ServiceRegistry,
+    config: &DispatchConfig,
+) -> bool {
+    if !is_unsigned(headers, query_params)
+        || uri.path().starts_with("/_")
+        || registry.get("s3").is_none()
+    {
+        return false;
+    }
+    !registry.get("apigateway").is_some_and(|apigw| {
+        apigw.claims_unsigned_request(method, uri.path(), headers, &config.account_id)
+    })
 }
 
 fn anonymous_s3_bucket(uri: &http::Uri, config: &DispatchConfig) -> Option<String> {
@@ -3821,6 +3920,141 @@ mod tests {
             *provider.0.lock(),
             vec!["arn:aws:s3:::my-bucket".to_string()]
         );
+    }
+
+    /// A registry with an `s3` service and an `apigateway` one that claims
+    /// unsigned requests whose first path segment is `prod` (a deployed stage).
+    fn unsigned_routing_registry(with_s3: bool) -> ServiceRegistry {
+        struct Named(&'static str);
+        #[async_trait::async_trait]
+        impl crate::service::AwsService for Named {
+            fn service_name(&self) -> &str {
+                self.0
+            }
+            async fn handle(
+                &self,
+                _req: AwsRequest,
+            ) -> Result<crate::service::AwsResponse, crate::service::AwsServiceError> {
+                unreachable!("routing only")
+            }
+            fn supported_actions(&self) -> &[&str] {
+                &[]
+            }
+            fn claims_unsigned_request(
+                &self,
+                _method: &http::Method,
+                raw_path: &str,
+                _headers: &http::HeaderMap,
+                account_id: &str,
+            ) -> bool {
+                assert_eq!(account_id, "000000000000");
+                self.0 == "apigateway" && raw_path.starts_with("/prod/")
+            }
+        }
+        let mut registry = ServiceRegistry::new();
+        registry.register(Arc::new(Named("apigateway")));
+        if with_s3 {
+            registry.register(Arc::new(Named("s3")));
+        }
+        registry
+    }
+
+    #[test]
+    fn unsigned_path_style_requests_go_to_s3_unless_api_gateway_claims_them() {
+        let registry = unsigned_routing_registry(true);
+        let cfg = DispatchConfig::new("us-east-1", "000000000000");
+        let is_s3 =
+            |method: http::Method, uri: &str, headers: &http::HeaderMap, query: &[(&str, &str)]| {
+                let query: HashMap<String, String> = query
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+                unsigned_request_is_s3_path_style(
+                    &method,
+                    &uri.parse().unwrap(),
+                    headers,
+                    &query,
+                    &registry,
+                    &cfg,
+                )
+            };
+        let none = http::HeaderMap::new();
+        // Missing bucket, any method, and the bare root (ListBuckets).
+        assert!(is_s3(http::Method::GET, "/ghost-bucket/k.txt", &none, &[]));
+        assert!(is_s3(http::Method::PUT, "/ghost-bucket/k.txt", &none, &[]));
+        assert!(is_s3(http::Method::PUT, "/ghost-bucket", &none, &[]));
+        assert!(is_s3(http::Method::GET, "/", &none, &[]));
+        // A plain query string (not a presign) keeps it unsigned.
+        assert!(is_s3(
+            http::Method::GET,
+            "/ghost-bucket",
+            &none,
+            &[("list-type", "2")]
+        ));
+        // API Gateway claims its invocation.
+        assert!(!is_s3(http::Method::GET, "/prod/items", &none, &[]));
+        // fakecloud endpoints are never S3.
+        assert!(!is_s3(http::Method::GET, "/_fakecloud/health", &none, &[]));
+        // Signed or presigned requests keep the catch-all (an IAM-auth API
+        // signed for `execute-api` must reach API Gateway).
+        let mut signed = http::HeaderMap::new();
+        signed.insert(
+            http::header::AUTHORIZATION,
+            "AWS4-HMAC-SHA256 Credential=AKID/20240101/us-east-1/execute-api/aws4_request"
+                .parse()
+                .unwrap(),
+        );
+        assert!(!is_s3(http::Method::GET, "/ghost-bucket/k", &signed, &[]));
+        assert!(!is_s3(
+            http::Method::GET,
+            "/ghost-bucket/k",
+            &none,
+            &[(
+                "X-Amz-Credential",
+                "AKID/20240101/us-east-1/execute-api/aws4_request"
+            )]
+        ));
+        assert!(!is_s3(
+            http::Method::GET,
+            "/ghost-bucket/k",
+            &none,
+            &[
+                ("AWSAccessKeyId", "AKID"),
+                ("Signature", "x"),
+                ("Expires", "1")
+            ]
+        ));
+
+        // Object-level PUTs (which stream) vs bucket-level ones.
+        assert!(is_s3_object_put(&http::Method::PUT, "/b/k", &none));
+        assert!(!is_s3_object_put(&http::Method::PUT, "/b/", &none));
+        assert!(!is_s3_object_put(&http::Method::GET, "/b/k", &none));
+        let vhost = {
+            let mut h = http::HeaderMap::new();
+            h.insert("host", "b.s3.us-east-1.amazonaws.com".parse().unwrap());
+            h
+        };
+        assert!(is_s3_object_put(&http::Method::PUT, "/k", &vhost));
+        assert!(is_unsigned(&none, &HashMap::new()));
+        assert!(!is_unsigned(&signed, &HashMap::new()));
+        // An incomplete SigV2 presign is not anonymous.
+        assert!(!is_s3(
+            http::Method::GET,
+            "/",
+            &none,
+            &[("AWSAccessKeyId", "AKID"), ("Signature", "x")]
+        ));
+
+        // Without an S3 service registered nothing is routed to it.
+        let registry = unsigned_routing_registry(false);
+        assert!(!unsigned_request_is_s3_path_style(
+            &http::Method::GET,
+            &"/ghost-bucket/k".parse().unwrap(),
+            &none,
+            &HashMap::new(),
+            &registry,
+            &cfg,
+        ));
     }
 
     #[test]
