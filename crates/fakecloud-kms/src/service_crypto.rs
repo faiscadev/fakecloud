@@ -1233,10 +1233,6 @@ impl KmsService {
     }
 }
 
-/// Real ECDH shared-secret derivation for KMS KEY_AGREEMENT keys. `priv_der`
-/// is our key's PKCS#8 private key; `peer_spki_der` is the counterparty's
-/// SubjectPublicKeyInfo. Returns the raw shared secret (the X coordinate),
-/// which is symmetric: `ecdh(a, B) == ecdh(b, A)`.
 /// For a ciphertext an asymmetric (RSA) key produced, AWS requires the
 /// request's EncryptionAlgorithm to be the one that produced it. An omitted
 /// algorithm defaults to SYMMETRIC_DEFAULT, which never matches, so both an
@@ -1314,7 +1310,9 @@ fn rsa_encrypt(
 /// is required only when the ciphertext was encrypted under an asymmetric
 /// KMS key", Decrypt API reference): without `KeyId` it is not a ciphertext
 /// KMS can open (`InvalidCiphertextException`), and with it, it is opened
-/// with that key's private half under `algorithm`.
+/// with that key's private half under `algorithm`. The textual
+/// `fakecloud-rsa:` envelope earlier builds produced names its key, so it
+/// still opens without `KeyId`, and with one only if it names that key.
 fn open_ciphertext<'a>(
     accounts: &'a fakecloud_core::multi_account::MultiAccountState<KmsState>,
     empty: &'a KmsState,
@@ -1340,13 +1338,12 @@ fn open_ciphertext<'a>(
     };
 
     let Some(key_ref) = key_ref else {
+        // A raw RSA ciphertext names no key and is not an envelope, so it
+        // fails here (InvalidCiphertextException), as on AWS. A ciphertext
+        // of the textual RSA envelope earlier builds produced names its key,
+        // and keeps opening by it, so ciphertexts persisted before still
+        // decrypt after an upgrade (authorized on that key like any other).
         let decoded = decode_ciphertext_envelope(state, &req.region, ciphertext_b64, ec_aad)?;
-        // A ciphertext of the textual RSA envelope earlier builds produced
-        // names its key, but an RSA ciphertext is opened only with the key
-        // named in the request, as on AWS.
-        if decoded.encryption_algorithm != "SYMMETRIC_DEFAULT" {
-            return Err(invalid_ciphertext());
-        }
         let key = crate::hook::stored_key(state, "", &decoded.source_arn).map(|(_, key)| key);
         return Ok((decoded, key));
     };
@@ -1425,6 +1422,10 @@ fn open_ciphertext<'a>(
     Ok((decoded, Some(key)))
 }
 
+/// Real ECDH shared-secret derivation for KMS KEY_AGREEMENT keys. `priv_der`
+/// is our key's PKCS#8 private key; `peer_spki_der` is the counterparty's
+/// SubjectPublicKeyInfo. Returns the raw shared secret (the X coordinate),
+/// which is symmetric: `ecdh(a, B) == ecdh(b, A)`.
 fn ecdh_shared_secret(
     key_spec: &str,
     priv_der: &[u8],

@@ -5352,6 +5352,65 @@ async fn rsa_ciphertexts_are_opened_by_the_key_named() {
     assert_eq!(opened["Plaintext"], json!(plaintext));
 }
 
+/// A `fakecloud-rsa:<key id>:<algorithm>:<raw>` ciphertext earlier builds
+/// produced (and may have persisted) names its key, so it keeps opening
+/// without `KeyId` after an upgrade, authorized on that key; its algorithm
+/// must still match, and a `KeyId` naming another key is
+/// IncorrectKeyException.
+#[test]
+fn legacy_rsa_envelopes_open_without_a_key_id() {
+    let svc = make_service();
+    let rsa = json!({"KeySpec": "RSA_2048", "KeyUsage": "ENCRYPT_DECRYPT"});
+    let key_id = create_key_with_opts(&svc, rsa.clone());
+    let other = create_key_with_opts(&svc, rsa);
+    let pub_der = {
+        let accounts = svc.state.read();
+        accounts.get("123456789012").unwrap().keys[&key_id]
+            .asymmetric_public_key_der
+            .clone()
+            .unwrap()
+    };
+    let raw = asym::rsa_oaep_wrap(&pub_der, "RSAES_OAEP_SHA_256", b"persisted").unwrap();
+    let envelope = format!(
+        "fakecloud-rsa:{key_id}:RSAES_OAEP_SHA_256:{}",
+        base64::engine::general_purpose::STANDARD.encode(&raw)
+    );
+    let blob = base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+    let decrypt = |extra: Value| {
+        let mut body = json!({"CiphertextBlob": blob});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        svc.decrypt(&make_request("Decrypt", body))
+    };
+
+    let opened = body_json(decrypt(json!({"EncryptionAlgorithm": "RSAES_OAEP_SHA_256"})).unwrap());
+    assert_eq!(
+        opened["Plaintext"],
+        json!(base64::engine::general_purpose::STANDARD.encode(b"persisted"))
+    );
+    assert_eq!(
+        opened["KeyId"],
+        json!(format!("arn:aws:kms:us-east-1:123456789012:key/{key_id}"))
+    );
+    decrypt(json!({"KeyId": key_id, "EncryptionAlgorithm": "RSAES_OAEP_SHA_256"}))
+        .expect("naming its key");
+    let err = decrypt(json!({})).err().unwrap();
+    assert_eq!(err.code(), "InvalidCiphertextException");
+    let err = decrypt(json!({"KeyId": other, "EncryptionAlgorithm": "RSAES_OAEP_SHA_256"}))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "IncorrectKeyException");
+
+    // Authorized on the key the envelope names.
+    let req = make_request("Decrypt", json!({"CiphertextBlob": blob}));
+    let action = svc.iam_action_for(&req).unwrap();
+    assert_eq!(
+        action.resource,
+        format!("arn:aws:kms:us-east-1:123456789012:key/{key_id}")
+    );
+}
+
 /// `ReEncrypt` is authorized as `kms:ReEncryptFrom` on the source key with
 /// the source context and `kms:ReEncryptTo` on the destination key with the
 /// destination context; a `Decrypt` naming no key is authorized on the key
