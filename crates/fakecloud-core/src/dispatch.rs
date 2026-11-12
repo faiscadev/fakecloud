@@ -788,9 +788,10 @@ async fn dispatch_inner(
     );
 
     // Opt-in IAM identity-policy enforcement. Runs before the service
-    // handler so a deny never reaches business logic. Root principals
-    // (both `test*` bypass AKIDs and the account's IAM root) are exempt,
-    // matching AWS behavior. Services that haven't opted in via
+    // handler so a deny never reaches business logic. `test*` bypass AKIDs
+    // are exempt; the account's IAM root needs no identity policy, as in
+    // AWS, but stays capped by its SCPs and, across accounts, by the
+    // resource's policy (`authorize_root`). Services that haven't opted in via
     // `iam_enforceable()` are transparently skipped — the startup log
     // lists which services are under enforcement so users always know.
     if config.iam_mode.is_enabled()
@@ -812,7 +813,7 @@ async fn dispatch_inner(
                 }
             } else if let Some(principal) = aws_request.principal.as_ref() {
                 if principal.is_root() {
-                    if let Some(denied) = authorize_root_cross_account(
+                    if let Some(denied) = authorize_root(
                         principal,
                         service.as_ref(),
                         &aws_request,
@@ -2194,6 +2195,130 @@ fn grant_authorizes(
             .is_allow(),
         None => false,
     }
+}
+
+/// Authorize a request made as an account's root user: its SCPs first, then,
+/// for a resource of another account, that resource's policy (see
+/// [`authorize_root_cross_account`]).
+///
+/// Returns the error response to send when the request is denied under
+/// strict mode; soft mode only logs.
+#[allow(clippy::too_many_arguments)]
+fn authorize_root(
+    principal: &Principal,
+    service: &dyn crate::service::AwsService,
+    aws_request: &AwsRequest,
+    evaluator: &dyn IamPolicyEvaluator,
+    config: &DispatchConfig,
+    detected: &protocol::DetectedRequest,
+    request_id: &str,
+    remote_addr: Option<SocketAddr>,
+    resolved: Option<&crate::auth::ResolvedCredential>,
+) -> Option<Response<Body>> {
+    authorize_root_scps(
+        principal,
+        service,
+        aws_request,
+        evaluator,
+        config,
+        detected,
+        request_id,
+        remote_addr,
+        resolved,
+    )
+    .or_else(|| {
+        authorize_root_cross_account(
+            principal,
+            service,
+            aws_request,
+            evaluator,
+            config,
+            detected,
+            request_id,
+            remote_addr,
+            resolved,
+        )
+    })
+}
+
+/// Cap a root-user request at the account's SCPs.
+///
+/// Root needs no identity policy in its own account, but SCPs restrict
+/// "IAM users and roles in member accounts, including the member account's
+/// root user" (Organizations user guide, "Service control policies"), and
+/// AWS evaluates them before any resource-based policy, so a resource policy
+/// granting root in another account does not reach past them either. The
+/// resolver exempts the management account (and returns nothing outside an
+/// organization), which keeps root there unrestricted.
+#[allow(clippy::too_many_arguments)]
+fn authorize_root_scps(
+    principal: &Principal,
+    service: &dyn crate::service::AwsService,
+    aws_request: &AwsRequest,
+    evaluator: &dyn IamPolicyEvaluator,
+    config: &DispatchConfig,
+    detected: &protocol::DetectedRequest,
+    request_id: &str,
+    remote_addr: Option<SocketAddr>,
+    resolved: Option<&crate::auth::ResolvedCredential>,
+) -> Option<Response<Body>> {
+    let resolver = config.scp_resolver.as_deref()?;
+    let scps = resolver.scps_for(principal)?;
+    let in_caller_account = service.iam_resource_in_caller_account(aws_request);
+    for iam_action in service.iam_actions_for(aws_request) {
+        let resource_account = config
+            .resource_policy_provider
+            .as_ref()
+            .filter(|_| !iam_action.is_pass_role() && !in_caller_account)
+            .and_then(|p| p.resource_owner_account(&detected.service, &iam_action.resource))
+            .or_else(|| parse_account_from_arn(&iam_action.resource))
+            .unwrap_or_else(|| principal.account_id.clone());
+        let mut context = principal_condition_context(
+            principal,
+            resolved,
+            service,
+            aws_request,
+            &iam_action,
+            detected,
+            remote_addr,
+        );
+        add_global_request_keys(&mut context, principal, &resource_account, Some(resolver));
+        let decision =
+            evaluator.evaluate_ceiling(principal, &iam_action, &context, &[], Some(&scps), false);
+        if decision.is_allow() {
+            continue;
+        }
+        tracing::warn!(
+            target: "fakecloud::iam::audit",
+            service = %detected.service,
+            action = %iam_action.action_string(),
+            resource = %iam_action.resource,
+            principal = %principal.arn,
+            decision = ?decision,
+            mode = %config.iam_mode,
+            request_id = %request_id,
+            "root request denied by the account's service control policies"
+        );
+        if config.iam_mode.is_strict() {
+            let action = iam_action.action_string();
+            let reason = if decision == crate::auth::IamDecision::ExplicitDeny {
+                "with an explicit deny in a service control policy".to_string()
+            } else {
+                format!("because no service control policy allows the {action} action")
+            };
+            return Some(build_error_response(
+                StatusCode::FORBIDDEN,
+                "AccessDeniedException",
+                &format!(
+                    "User: {} is not authorized to perform: {action} on resource: {} {reason}",
+                    principal.arn, iam_action.resource,
+                ),
+                request_id,
+                ErrorEnvelope::for_request(detected, &aws_request.headers),
+            ));
+        }
+    }
+    None
 }
 
 /// Authorize an account root reaching a resource ANOTHER account owns.
@@ -4014,6 +4139,233 @@ mod tests {
             assert_eq!(ctx.aws_mfa_present, Some(true));
             assert_eq!(ctx.aws_token_issue_time, Some(issued));
             assert_eq!(ctx.aws_principal_type.as_deref(), Some("Account"));
+        }
+    }
+
+    /// SCPs cap a member account's root user as they cap every principal of
+    /// the account: in its own account, and across accounts even where the
+    /// resource policy grants it. No SCPs (the management account, no
+    /// organization) leave root as it was.
+    #[tokio::test]
+    async fn root_requests_are_capped_by_scps() {
+        use crate::auth::IamAction;
+        use crate::service::{AwsResponse, AwsServiceError};
+        struct OwnerProvider;
+        impl crate::auth::ResourcePolicyProvider for OwnerProvider {
+            fn resource_policy(&self, _service: &str, _resource_arn: &str) -> Option<String> {
+                Some("granting-policy".to_string())
+            }
+            fn resource_owner_account(&self, _service: &str, resource_arn: &str) -> Option<String> {
+                let bucket = resource_arn.strip_prefix("arn:aws:s3:::")?;
+                match bucket.split('/').next()? {
+                    "own" => Some("222222222222".to_string()),
+                    _ => Some("111111111111".to_string()),
+                }
+            }
+        }
+        /// Allows what the resource policy grants; the ceiling allows when
+        /// there are SCPs and every one is `allow`, and an SCP `deny` denies
+        /// explicitly.
+        struct PolicyEvaluator(parking_lot::Mutex<Vec<ConditionContext>>);
+        impl IamPolicyEvaluator for PolicyEvaluator {
+            fn evaluate(
+                &self,
+                _: &Principal,
+                _: &IamAction,
+                _: &ConditionContext,
+                _: &[String],
+                _: Option<&[String]>,
+            ) -> crate::auth::IamDecision {
+                crate::auth::IamDecision::ImplicitDeny
+            }
+            fn evaluate_with_resource_policy(
+                &self,
+                _: &Principal,
+                _: &IamAction,
+                _: &ConditionContext,
+                _: Option<&str>,
+                _: &str,
+                _: &[String],
+                _: Option<&[String]>,
+            ) -> crate::auth::IamDecision {
+                crate::auth::IamDecision::ImplicitDeny
+            }
+            fn evaluate_resource_policy_only(
+                &self,
+                _: &Principal,
+                _: &IamAction,
+                _: &ConditionContext,
+                policy: Option<&str>,
+            ) -> crate::auth::IamDecision {
+                if policy == Some("granting-policy") {
+                    crate::auth::IamDecision::Allow
+                } else {
+                    crate::auth::IamDecision::ImplicitDeny
+                }
+            }
+            fn evaluate_ceiling(
+                &self,
+                _: &Principal,
+                _: &IamAction,
+                context: &ConditionContext,
+                session_policies: &[String],
+                scps: Option<&[String]>,
+                with_boundary: bool,
+            ) -> crate::auth::IamDecision {
+                assert!(session_policies.is_empty() && !with_boundary);
+                self.0.lock().push(context.clone());
+                let scps = scps.unwrap_or_default();
+                if scps.iter().any(|s| s == "deny") {
+                    crate::auth::IamDecision::ExplicitDeny
+                } else if !scps.is_empty() && scps.iter().all(|s| s == "allow") {
+                    crate::auth::IamDecision::Allow
+                } else {
+                    crate::auth::IamDecision::ImplicitDeny
+                }
+            }
+        }
+        struct BucketService;
+        #[async_trait::async_trait]
+        impl crate::service::AwsService for BucketService {
+            fn service_name(&self) -> &str {
+                "s3"
+            }
+            async fn handle(&self, _: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+                unreachable!()
+            }
+            fn supported_actions(&self) -> &[&str] {
+                &[]
+            }
+            fn iam_action_for(&self, request: &AwsRequest) -> Option<IamAction> {
+                Some(IamAction {
+                    service: "s3",
+                    action: "GetObject",
+                    resource: format!("arn:aws:s3:::{}", request.path_segments.join("/")),
+                })
+            }
+        }
+        struct Org(Option<Vec<String>>);
+        impl crate::auth::ScpResolver for Org {
+            fn scps_for(&self, _: &Principal) -> Option<Vec<String>> {
+                self.0.clone()
+            }
+            fn principal_org(&self, _: &str) -> Option<(String, String)> {
+                Some(("o-abc".to_string(), "o-abc/r-1/".to_string()))
+            }
+        }
+        let root = Principal {
+            arn: "arn:aws:iam::222222222222:root".to_string(),
+            user_id: "222222222222".to_string(),
+            account_id: "222222222222".to_string(),
+            principal_type: PrincipalType::Root,
+            source_identity: None,
+            tags: None,
+        };
+        let detected = protocol::DetectedRequest {
+            service: "s3".to_string(),
+            action: String::new(),
+            protocol: AwsProtocol::Rest,
+        };
+        let request = |bucket: &str| AwsRequest {
+            service: "s3".to_string(),
+            action: String::new(),
+            region: "us-east-1".to_string(),
+            account_id: "222222222222".to_string(),
+            request_id: "req".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![bucket.to_string(), "key".to_string()],
+            raw_path: format!("/{bucket}/key"),
+            raw_query: String::new(),
+            method: http::Method::GET,
+            is_query_protocol: false,
+            access_key_id: Some("ASIAROOTB".to_string()),
+            principal: Some(root.clone()),
+        };
+        let evaluator = PolicyEvaluator(parking_lot::Mutex::new(Vec::new()));
+        let run = |bucket: &str, scps: Option<&[&str]>, mode: IamMode| {
+            let mut cfg = DispatchConfig::new("us-east-1", "111111111111");
+            cfg.iam_mode = mode;
+            cfg.resource_policy_provider = Some(Arc::new(OwnerProvider));
+            cfg.scp_resolver = Some(Arc::new(Org(
+                scps.map(|s| s.iter().map(|d| d.to_string()).collect())
+            )));
+            authorize_root(
+                &root,
+                &BucketService,
+                &request(bucket),
+                &evaluator,
+                &cfg,
+                &detected,
+                "req",
+                None,
+                None,
+            )
+        };
+        async fn message(resp: Response<Body>) -> String {
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(body.to_vec()).unwrap()
+        }
+        for bucket in ["own", "granted"] {
+            // No SCPs apply (management account, no organization).
+            assert!(run(bucket, None, IamMode::Strict).is_none(), "{bucket}");
+            // SCPs allowing the action.
+            assert!(
+                run(bucket, Some(&["allow"]), IamMode::Strict).is_none(),
+                "{bucket}"
+            );
+            // An SCP denying the action, explicitly or by not allowing it.
+            let explicit = message(
+                run(bucket, Some(&["allow", "deny"]), IamMode::Strict)
+                    .expect("an SCP deny must refuse root"),
+            )
+            .await;
+            assert!(
+                explicit.contains(
+                    "User: arn:aws:iam::222222222222:root is not authorized to perform: s3:GetObject on resource: arn:aws:s3:::"
+                ) && explicit.contains("with an explicit deny in a service control policy"),
+                "{explicit}"
+            );
+            let implicit = message(
+                run(bucket, Some(&["narrow"]), IamMode::Strict)
+                    .expect("an SCP not allowing the action must refuse root"),
+            )
+            .await;
+            assert!(
+                implicit
+                    .contains("because no service control policy allows the s3:GetObject action"),
+                "{implicit}"
+            );
+            assert!(
+                run(bucket, Some(&[]), IamMode::Strict).is_some(),
+                "{bucket}"
+            );
+            // Soft mode logs and lets the request through.
+            assert!(
+                run(bucket, Some(&["deny"]), IamMode::Soft).is_none(),
+                "{bucket}"
+            );
+        }
+        // The SCPs see the request's global keys: the resource's owner and
+        // the caller's organization.
+        let contexts = evaluator.0.lock();
+        assert!(contexts
+            .iter()
+            .any(|c| c.lookup("aws:ResourceAccount") == Some(vec!["111111111111".into()])));
+        assert!(contexts
+            .iter()
+            .any(|c| c.lookup("aws:ResourceAccount") == Some(vec!["222222222222".into()])));
+        for ctx in contexts.iter() {
+            assert_eq!(ctx.lookup("aws:PrincipalOrgID"), Some(vec!["o-abc".into()]));
+            assert_eq!(
+                ctx.aws_principal_arn.as_deref(),
+                Some("arn:aws:iam::222222222222:root")
+            );
         }
     }
 }

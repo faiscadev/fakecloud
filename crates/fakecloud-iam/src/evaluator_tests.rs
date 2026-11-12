@@ -1980,6 +1980,261 @@ fn scp_caps_identity_side_of_resource_policy() {
     );
 }
 
+/// A same-account resource policy naming `principal` for `s3:PutObject`.
+fn bucket_policy_naming(principal: &str) -> PolicyDocument {
+    doc(json!({
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": principal},
+            "Action": "s3:PutObject",
+            "Resource": "arn:aws:s3:::bucket/*"
+        }]
+    }))
+}
+
+/// SCPs are evaluated before any resource-based policy: a same-account
+/// resource policy naming the caller directly (which needs no identity
+/// policy) still cannot grant past the caller's SCPs, whether they deny the
+/// action or merely do not allow it.
+#[test]
+fn scp_caps_same_account_resource_policy_grant() {
+    let alice_arn = "arn:aws:iam::123456789012:user/alice";
+    let p = principal_user(alice_arn);
+    let resource = bucket_policy_naming(alice_arn);
+    let r = req(&p, "s3:PutObject", "arn:aws:s3:::bucket/key");
+    let decide = |scps: Option<&[PolicyDocument]>| {
+        evaluate_with_resource_policy_and_gates_and_scps(
+            &[],
+            None,
+            None,
+            scps,
+            Some(&resource),
+            &r,
+            "123456789012",
+        )
+    };
+    // No organization: the resource policy grants on its own.
+    assert_eq!(decide(None), Decision::Allow);
+    assert_eq!(decide(Some(&[allow_all()])), Decision::Allow);
+    assert_eq!(decide(Some(&[deny_put_object()])), Decision::ExplicitDeny);
+    assert_eq!(decide(Some(&[allow_get_object()])), Decision::ImplicitDeny);
+    assert_eq!(decide(Some(&[])), Decision::ImplicitDeny);
+}
+
+/// The KMS same-account path: a key policy naming the caller directly is
+/// capped by the caller's SCPs like any resource-policy grant.
+#[test]
+fn scp_caps_same_account_kms_direct_grant() {
+    let alice_arn = "arn:aws:iam::123456789012:user/alice";
+    let p = principal_user(alice_arn);
+    let key_policy = doc(json!({
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": alice_arn},
+            "Action": "kms:Decrypt",
+            "Resource": "*"
+        }]
+    }));
+    let deny_decrypt = doc(json!({
+        "Statement": [
+            {"Effect": "Allow", "Action": "*", "Resource": "*"},
+            {"Effect": "Deny", "Action": "kms:Decrypt", "Resource": "*"}
+        ]
+    }));
+    let r = req(&p, "kms:Decrypt", KMS_KEY_ARN);
+    let decide = |scps: Option<&[PolicyDocument]>| {
+        evaluate_with_resource_policy_and_gates_and_scps(
+            &[],
+            None,
+            None,
+            scps,
+            Some(&key_policy),
+            &r,
+            KMS_ACCT,
+        )
+    };
+    assert_eq!(decide(None), Decision::Allow);
+    assert_eq!(decide(Some(&[deny_decrypt])), Decision::ExplicitDeny);
+    assert_eq!(decide(Some(&[allow_get_object()])), Decision::ImplicitDeny);
+}
+
+/// A resource policy naming an IAM role ARN applies to that role's
+/// sessions, and is limited by the role's permissions boundary and the
+/// session's session policies; one naming the session ARN (or an IAM user)
+/// directly is not (IAM user guide, "Policy evaluation logic").
+#[test]
+fn role_arn_grant_reaches_sessions_capped_by_boundary_and_session() {
+    const ROLE: &str = "arn:aws:iam::123456789012:role/team/app";
+    let session = principal_assumed_role("arn:aws:sts::123456789012:assumed-role/app/s1");
+    let r = req(&session, "s3:PutObject", "arn:aws:s3:::bucket/key");
+    let decide = |resource: &PolicyDocument,
+                  boundary: Option<&[PolicyDocument]>,
+                  session_policies: Option<&[PolicyDocument]>,
+                  scps: Option<&[PolicyDocument]>| {
+        evaluate_with_resource_policy_for_role(
+            &[],
+            boundary,
+            session_policies,
+            scps,
+            Some(resource),
+            Some(ROLE),
+            &r,
+            "123456789012",
+        )
+    };
+    let by_role = bucket_policy_naming(ROLE);
+    let by_session = bucket_policy_naming("arn:aws:sts::123456789012:assumed-role/app/s1");
+    let narrow = [allow_get_object()];
+
+    // The role ARN, path included, names the session.
+    assert_eq!(decide(&by_role, None, None, None), Decision::Allow);
+    // Capped by the boundary and by the session policies.
+    assert_eq!(
+        decide(&by_role, Some(&narrow), None, None),
+        Decision::ImplicitDeny
+    );
+    assert_eq!(
+        decide(&by_role, None, Some(&narrow), None),
+        Decision::ImplicitDeny
+    );
+    // A grant naming the session itself is not.
+    assert_eq!(
+        decide(&by_session, Some(&narrow), None, None),
+        Decision::Allow
+    );
+    assert_eq!(
+        decide(&by_session, None, Some(&narrow), None),
+        Decision::Allow
+    );
+    // Both are capped by the SCPs.
+    for grant in [&by_role, &by_session] {
+        assert_eq!(
+            decide(grant, None, None, Some(&narrow)),
+            Decision::ImplicitDeny
+        );
+    }
+    // Across accounts the role grant stands with the identity side, which
+    // the boundary caps.
+    let identity = [allow_all()];
+    let cross = |boundary: Option<&[PolicyDocument]>| {
+        evaluate_with_resource_policy_for_role(
+            &identity,
+            boundary,
+            None,
+            None,
+            Some(&by_role),
+            Some(ROLE),
+            &r,
+            "999999999999",
+        )
+    };
+    assert_eq!(cross(None), Decision::Allow);
+    assert_eq!(cross(Some(&narrow)), Decision::ImplicitDeny);
+
+    // Another path, role, account or partition names something else.
+    for other in [
+        "arn:aws:iam::123456789012:role/app",
+        "arn:aws:iam::123456789012:role/team/other",
+        "arn:aws:iam::999999999999:role/team/app",
+        "arn:aws-cn:iam::123456789012:role/team/app",
+    ] {
+        assert_eq!(
+            decide(&bucket_policy_naming(other), None, None, None),
+            Decision::ImplicitDeny,
+            "{other}"
+        );
+    }
+    // Without the role known, a role ARN grants nothing.
+    assert_eq!(
+        evaluate_with_resource_policy_and_gates_and_scps(
+            &[],
+            None,
+            None,
+            None,
+            Some(&by_role),
+            &r,
+            "123456789012",
+        ),
+        Decision::ImplicitDeny
+    );
+}
+
+/// A Deny naming the role reaches its sessions; one whose `NotPrincipal`
+/// lists only the session still denies it, as AWS requires the role's ARN
+/// there too.
+#[test]
+fn role_arn_deny_reaches_sessions() {
+    const ROLE: &str = "arn:aws:iam::123456789012:role/app";
+    let session = principal_assumed_role("arn:aws:sts::123456789012:assumed-role/app/s1");
+    let r = req(&session, "s3:GetObject", "arn:aws:s3:::bucket/key");
+    let identity = [allow_all()];
+    let decide = |policy: serde_json::Value| {
+        evaluate_with_resource_policy_for_role(
+            &identity,
+            None,
+            None,
+            None,
+            Some(&doc(policy)),
+            Some(ROLE),
+            &r,
+            "123456789012",
+        )
+    };
+    assert_eq!(
+        decide(json!({"Statement": [{
+            "Effect": "Deny", "Principal": {"AWS": ROLE}, "Action": "s3:*", "Resource": "*"
+        }]})),
+        Decision::ExplicitDeny
+    );
+    assert_eq!(
+        decide(json!({"Statement": [{
+            "Effect": "Deny",
+            "NotPrincipal": {"AWS": "arn:aws:sts::123456789012:assumed-role/app/s1"},
+            "Action": "s3:*", "Resource": "*"
+        }]})),
+        Decision::ExplicitDeny
+    );
+    assert_eq!(
+        decide(json!({"Statement": [{
+            "Effect": "Deny",
+            "NotPrincipal": {"AWS": [ROLE, "arn:aws:sts::123456789012:assumed-role/app/s1"]},
+            "Action": "s3:*", "Resource": "*"
+        }]})),
+        Decision::Allow
+    );
+}
+
+/// A KMS key policy naming the role is a direct grant to its sessions, but
+/// one the role's boundary and the session's policies limit.
+#[test]
+fn kms_role_arn_grant_capped_by_boundary() {
+    const ROLE: &str = "arn:aws:iam::123456789012:role/app";
+    let session = principal_assumed_role("arn:aws:sts::123456789012:assumed-role/app/s1");
+    let key_policy = doc(json!({
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": ROLE},
+            "Action": "kms:Decrypt",
+            "Resource": "*"
+        }]
+    }));
+    let r = req(&session, "kms:Decrypt", KMS_KEY_ARN);
+    let decide = |boundary: Option<&[PolicyDocument]>| {
+        evaluate_with_resource_policy_for_role(
+            &[],
+            boundary,
+            None,
+            None,
+            Some(&key_policy),
+            Some(ROLE),
+            &r,
+            KMS_ACCT,
+        )
+    };
+    assert_eq!(decide(None), Decision::Allow);
+    assert_eq!(decide(Some(&[allow_get_object()])), Decision::ImplicitDeny);
+}
+
 // --- KMS key-policy delegation (bug-audit 2026-05-28, 5.5) ----------
 
 const KMS_ACCT: &str = "123456789012";

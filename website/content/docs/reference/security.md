@@ -54,7 +54,7 @@ Filter the audit events with `RUST_LOG=fakecloud::iam::audit=warn`.
 
 ### Root is always allowed
 
-The account's IAM root identity (`arn:aws:iam::<account>:root`) and the reserved `test*` bypass AKIDs always pass enforcement, matching AWS's own behavior where root bypasses identity-based policies. The root exemption stops at the account boundary: root of one account reaching an S3 bucket or a DynamoDB table or stream that another account owns is a cross-account request, allowed only when the owner's bucket (or table/stream) policy grants it, as on AWS.
+The account's IAM root identity (`arn:aws:iam::<account>:root`) and the reserved `test*` bypass AKIDs always pass identity-policy evaluation, matching AWS's own behavior where root needs no identity-based policy. The root exemption stops at the account boundary: root of one account reaching an S3 bucket or a DynamoDB table or stream that another account owns is a cross-account request, allowed only when the owner's bucket (or table/stream) policy grants it, as on AWS. A member account's root (for example a session minted by `sts:AssumeRoot`) is also capped by the organization's SCPs, in its own account and across accounts, even where a resource policy grants it; see [Service Control Policies](#phase-6-service-control-policies-scps). The reserved `test*` identity skips SCPs too.
 
 ### Credentials that resolve to no identity
 
@@ -179,7 +179,8 @@ New services plug in by implementing `iam_condition_keys_for` on their `AwsServi
 S3 bucket policies, SNS topic policies, Lambda function policies, KMS key policies, and DynamoDB table and stream policies are fully wired into the evaluator. When enforcement is on and a resource has a policy attached, dispatch fetches it and hands it to the evaluator alongside the caller's identity policies; the evaluator combines the two using AWS's cross-account semantics:
 
 - **Explicit Deny** from either the identity policy or the resource policy wins immediately.
-- **Same-account** callers (principal account ID equals the resource's owning account): the request is allowed if the identity policy **or** the resource policy grants it.
+- **SCPs first.** A member-account caller's SCPs cap every request, whatever grants it: a resource policy (or KMS grant) can never give a principal more than its SCPs allow, in its own account or another.
+- **Same-account** callers (principal account ID equals the resource's owning account): the request is allowed if the identity policy **or** the resource policy grants it. A resource-policy grant naming the IAM user or the role session ARN itself stands on its own; one naming the role ARN is also limited by the role's permissions boundary and the session's session policies, as AWS documents.
 - **Cross-account** callers: the request is allowed only if the identity policy **and** the resource policy both grant it.
 
 The resource's owning account is parsed from the ARN. S3 ARNs have an empty account segment, so for S3 the owner is the account that holds the bucket (bucket names are global); the decision is per resource, not a global config knob.
@@ -203,6 +204,7 @@ The resource's owning account is parsed from the ARN. S3 ARNs have an empty acco
 | `"Principal": {"AWS": "arn:aws:iam::ACCOUNT:root"}` | Any principal whose account ID is `ACCOUNT` |
 | `"Principal": {"AWS": "ACCOUNT"}` | 12-digit account ID shorthand, equivalent to `...:root` |
 | `"Principal": {"AWS": "arn:aws:iam::ACCOUNT:user/alice"}` | Exact principal ARN match |
+| `"Principal": {"AWS": "arn:aws:iam::ACCOUNT:role/path/app"}` | Every session of that role (the role's ARN with its path, as IAM holds it). Under `NotPrincipal` a role session is excluded only when both the role ARN and the session ARN are listed, as on AWS |
 | `"Principal": {"AWS": [...]}` | List form — any entry matches |
 | `"Principal": {"Service": "events.amazonaws.com"}` | Matches the service principal itself when fakecloud makes a request as that service (CloudFront fetching an S3 origin through an origin access control, see below), and an assumed-role session of a service-linked role for that service (path `aws-service-role/<service>/`) |
 | `"Principal": {"Federated": "<provider>"}` | Matches a federated session minted by `AssumeRoleWithSAML` / `AssumeRoleWithWebIdentity` whose provider ARN equals `<provider>`. Used by IAM role trust policies. |
@@ -228,7 +230,7 @@ A managed policy attached to a user or role that caps the maximum permissions th
 
 - Attached via `PutUserPermissionsBoundary` / `PutRolePermissionsBoundary`, removed via `DeleteUserPermissionsBoundary` / `DeleteRolePermissionsBoundary`.
 - **Dangling boundary ARN** (the managed policy was deleted while still attached): the principal can perform no action until the boundary is removed or re-created — matches AWS behavior. Logged to `fakecloud::iam::audit` at debug level.
-- **Bypass rules:** the account root and service-linked roles (role name starts with `AWSServiceRoleFor`) are exempt from boundary evaluation. Within `evaluate_with_resource_policy`, the boundary gates only the identity side — same-account resource-policy grants stand on their own.
+- **Bypass rules:** the account root and service-linked roles (role name starts with `AWSServiceRoleFor`) are exempt from boundary evaluation. A same-account resource-policy grant naming the IAM user or the role session itself stands on its own; one naming the role ARN is capped by the role's boundary.
 
 ### Session policies
 
@@ -274,7 +276,8 @@ SCP-specific rules:
 - **Management-account exemption.** The account that called `CreateOrganization` is never constrained by SCPs, matching AWS.
 - **Service-linked role exemption.** Assumed roles whose name begins with `AWSServiceRoleFor` bypass SCP evaluation, same as permission boundaries.
 - **Empty chain denies.** If `FullAWSAccess` is detached from the root and no other SCP grants the action up the path, the principal is denied. This matches AWS's allow-list ceiling semantics — SCPs are not deny lists.
-- **Resource-policy branch untouched.** SCPs gate the identity side only. A resource policy in the resource's account has its own authority; the caller's SCPs have no reach there.
+- **Resource policies don't reach past them.** SCPs are evaluated before any resource-based policy, and SCPs that don't allow the action are a final deny. A bucket, queue, topic, key or table policy (or a KMS grant) naming a member-account principal, in its own account or another, gives it nothing its SCPs don't allow. SCPs attach to the caller's account: a resource's own organization's SCPs never apply to callers from outside it.
+- **Root user included.** A member account's root user (`arn:aws:iam::<account>:root`, e.g. a session minted by `sts:AssumeRoot`) needs no identity policy, but its SCPs still cap it, in its own account and across accounts. A denial names the SCP: `... with an explicit deny in a service control policy` or `... because no service control policy allows the <action> action`. The management account's root is exempt like the rest of the management account, and the reserved `test*` identity bypasses enforcement entirely.
 
 Audit logs emit on `fakecloud::iam::audit` when an SCP layer produces an `ExplicitDeny` or caps the intersection to `ImplicitDeny`, so tests can inspect the decision path.
 
