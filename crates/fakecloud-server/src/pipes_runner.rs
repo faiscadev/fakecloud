@@ -466,7 +466,14 @@ impl PipesRunner {
         account: &str,
         sealed: bool,
     ) -> Option<String> {
-        if !sealed || !looks_like_fakecloud_envelope(body) {
+        if !sealed {
+            return Some(body.to_string());
+        }
+        // SSE-SQS: sealed with SQS's own key, opened without KMS.
+        if let Some(plaintext) = fakecloud_sqs::sse_sqs::open(source_arn, body) {
+            return Some(plaintext);
+        }
+        if !looks_like_fakecloud_envelope(body) {
             return Some(body.to_string());
         }
         let Some(hook) = self.kms_hook.as_ref() else {

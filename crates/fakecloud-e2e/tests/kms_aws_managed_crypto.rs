@@ -1523,6 +1523,61 @@ async fn encrypted_messages_stay_readable_in_a_plain_dead_letter_queue() {
     let got = sqs.receive_message().queue_url(&dlq).send().await.unwrap();
     assert_eq!(got.messages().len(), 1);
     assert_eq!(got.messages()[0].body(), Some("secret body"));
+
+    // The same for an SSE-SQS source: its body is sealed with SQS's own key
+    // and keeps that seal in the plain dead-letter queue.
+    let sse_src = sqs
+        .create_queue()
+        .queue_name("sse-src")
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::RedrivePolicy,
+            r#"{"deadLetterTargetArn":"arn:aws:sqs:us-east-1:123456789012:dlq","maxReceiveCount":"1"}"#,
+        )
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::VisibilityTimeout,
+            "0",
+        )
+        .send()
+        .await
+        .unwrap()
+        .queue_url
+        .unwrap();
+    sqs.send_message()
+        .queue_url(&sse_src)
+        .message_body("sse-sqs body")
+        .send()
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        sqs.receive_message()
+            .queue_url(&sse_src)
+            .send()
+            .await
+            .unwrap();
+    }
+    let messages: serde_json::Value =
+        reqwest::get(format!("{}/_fakecloud/sqs/messages", server.endpoint()))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    let in_dlq = messages["queues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|q| q["queueName"] == "dlq")
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["body"] == "sse-sqs body")
+        .cloned()
+        .expect("the SSE-SQS message is in the dead-letter queue");
+    assert_ne!(in_dlq["storedBody"], "sse-sqs body", "{in_dlq}");
+    let got = sqs.receive_message().queue_url(&dlq).send().await.unwrap();
+    assert_eq!(got.messages().len(), 1);
+    assert_eq!(got.messages()[0].body(), Some("sse-sqs body"));
 }
 
 #[tokio::test]

@@ -6851,6 +6851,7 @@ dependencies = [
 name = "fakecloud-sqs"
 version = "0.51.0"
 dependencies = [
+ "aes-gcm",
  "async-trait",
  "base64 0.22.1",
  "chrono",

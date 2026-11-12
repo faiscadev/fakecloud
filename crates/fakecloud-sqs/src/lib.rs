@@ -2,6 +2,7 @@ pub mod delivery;
 pub mod resource_policy;
 pub(crate) mod service;
 pub mod simulation;
+pub mod sse_sqs;
 pub(crate) mod state;
 
 pub use service::helpers::{

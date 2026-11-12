@@ -212,6 +212,8 @@ impl SqsDelivery for SqsDeliveryImpl {
         // encryption guarantee as direct SendMessage callers; otherwise
         // SSE-KMS queues silently store plaintext from upstream services.
         let kms_key_id = queue.attributes.get("KmsMasterKeyId").cloned();
+        // An SSE-SQS queue seals the body with SQS's own key (no KMS).
+        let sse_sqs = crate::sse_sqs::enabled(&queue.attributes);
         let queue_arn_owned = queue.arn.clone();
 
         // For FIFO queues without content-based dedup, require explicit dedup ID
@@ -280,12 +282,13 @@ impl SqsDelivery for SqsDeliveryImpl {
             })
             .collect();
 
-        let sealed_for_queue = kms_key_id
-            .as_deref()
-            .filter(|k| !k.is_empty())
-            .and(self.kms_hook.as_ref())
-            .map(|_| queue_arn_owned.clone());
+        let sealed_for_queue = (sse_sqs
+            || kms_key_id
+                .as_deref()
+                .is_some_and(|k| !k.is_empty() && self.kms_hook.is_some()))
+        .then(|| queue_arn_owned.clone());
         let stored_body = match (kms_key_id.as_deref(), &self.kms_hook) {
+            _ if sse_sqs => crate::sse_sqs::seal(&queue_arn_owned, message_body),
             (Some(key), Some(hook)) if !key.is_empty() => {
                 let mut ctx = HashMap::new();
                 ctx.insert("aws:sqs:arn".to_string(), queue_arn_owned.clone());

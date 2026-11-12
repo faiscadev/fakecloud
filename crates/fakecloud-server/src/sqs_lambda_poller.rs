@@ -262,31 +262,26 @@ impl SqsLambdaPoller {
         // message never approaches `maxReceiveCount` and stays in the queue
         // until KMS opens it again. The poll is undone the same way here:
         // the batch's visibility goes back to what it was before the poll.
-        let messages = match self.kms_hook.as_deref() {
-            Some(hook) => {
-                match open_batch(
-                    hook,
-                    &account_id,
-                    &mapping.queue_arn,
-                    queue_encrypted,
-                    messages,
-                ) {
-                    Ok(messages) => messages,
-                    Err(err) => {
-                        tracing::warn!(
-                            queue = %mapping.queue_arn,
-                            error = %err,
-                            "SQS->Lambda poller: KMS refused a message body; nothing received"
-                        );
-                        let mut sqs_mas = self.sqs_state.write();
-                        if let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) {
-                            undo_poll(sqs, &mapping.queue_arn, &previous_visibility, hidden_until);
-                        }
-                        return;
-                    }
+        let messages = match open_batch(
+            self.kms_hook.as_deref(),
+            &account_id,
+            &mapping.queue_arn,
+            queue_encrypted,
+            messages,
+        ) {
+            Ok(messages) => messages,
+            Err(err) => {
+                tracing::warn!(
+                    queue = %mapping.queue_arn,
+                    error = %err,
+                    "SQS->Lambda poller: KMS refused a message body; nothing received"
+                );
+                let mut sqs_mas = self.sqs_state.write();
+                if let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) {
+                    undo_poll(sqs, &mapping.queue_arn, &previous_visibility, hidden_until);
                 }
+                return;
             }
-            None => messages,
         };
 
         // Build SQS-shaped event records, filter, then mark visible-at
@@ -439,7 +434,7 @@ impl SqsLambdaPoller {
 /// or the KMS failure of the first sealed body KMS will not open: like the
 /// ReceiveMessage the poll stands for, one such body fails the whole poll.
 fn open_batch(
-    hook: &dyn KmsHook,
+    hook: Option<&dyn KmsHook>,
     account_id: &str,
     queue_arn: &str,
     queue_encrypted: bool,
@@ -448,7 +443,20 @@ fn open_batch(
     messages
         .into_iter()
         .map(|mut msg| {
-            if !msg.body_is_sealed(queue_encrypted) || !looks_like_fakecloud_envelope(&msg.body) {
+            if !msg.body_is_sealed(queue_encrypted) {
+                return Ok(msg);
+            }
+            // SSE-SQS: sealed with SQS's own key, opened without KMS.
+            if let Some(plaintext) =
+                fakecloud_sqs::sse_sqs::open(msg.sealing_queue(queue_arn), &msg.body)
+            {
+                msg.body = plaintext;
+                return Ok(msg);
+            }
+            let Some(hook) = hook else {
+                return Ok(msg);
+            };
+            if !looks_like_fakecloud_envelope(&msg.body) {
                 return Ok(msg);
             }
             let mut ctx = HashMap::new();
@@ -816,6 +824,36 @@ mod tests {
     /// ciphertext or with the other messages of the poll), no receive count
     /// moves (the message never reaches `maxReceiveCount`), and no message
     /// is left in flight.
+    /// An SSE-SQS body (sealed with SQS's own key) reaches the function as
+    /// plaintext, with no KMS hook involved at all.
+    #[tokio::test]
+    async fn sse_sqs_bodies_reach_the_function_in_plaintext_without_kms() {
+        let (poller, sqs_state, _lambda_state) = build_states();
+        {
+            let mut sqs = sqs_state.write();
+            let queue = sqs
+                .default_regional_mut()
+                .queues
+                .values_mut()
+                .next()
+                .unwrap();
+            let arn = queue.arn.clone();
+            let msg = &mut queue.messages[0];
+            msg.body = fakecloud_sqs::sse_sqs::seal(&arn, "hello");
+            msg.sealed_for_queue = Some(arn);
+        }
+        let invocations = Arc::new(Mutex::new(Vec::<String>::new()));
+        let delivery: Arc<dyn LambdaDelivery> = Arc::new(RecordingLambda {
+            invocations: invocations.clone(),
+        });
+        let poller = poller.with_lambda_delivery(delivery);
+        poller.poll(&mut BatchingState::default()).await;
+        let invocations = invocations.lock().unwrap();
+        assert_eq!(invocations.len(), 1);
+        let event: serde_json::Value = serde_json::from_str(&invocations[0]).unwrap();
+        assert_eq!(event["Records"][0]["body"], "hello");
+    }
+
     #[tokio::test]
     async fn a_body_kms_refuses_fails_the_whole_poll_and_counts_nothing() {
         let (poller, sqs_state, _lambda_state) = build_states();

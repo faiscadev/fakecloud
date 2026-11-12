@@ -40,9 +40,14 @@ pub fn plaintext_body(
     unseal: impl FnOnce(&str, &str) -> Option<Vec<u8>>,
 ) -> String {
     let stored = &msg.body;
-    if !msg.body_is_sealed(crate::state::queue_encrypts_at_rest(holder_attributes))
-        || !looks_like_fakecloud_envelope(stored)
-    {
+    if !msg.body_is_sealed(crate::state::queue_encrypts_at_rest(holder_attributes)) {
+        return stored.clone();
+    }
+    // SSE-SQS: sealed with SQS's own key, opened without KMS.
+    if let Some(plaintext) = crate::sse_sqs::open(msg.sealing_queue(holder_arn), stored) {
+        return plaintext;
+    }
+    if !looks_like_fakecloud_envelope(stored) {
         return stored.clone();
     }
     unseal(stored, msg.sealing_queue(holder_arn))
@@ -402,13 +407,21 @@ pub(crate) fn process_batch_send_entry(
         None
     };
 
-    // A pre-encrypted body is sealed with this queue's encryption context.
-    let sealed_for_queue = stored_body_override.as_ref().map(|_| queue.arn.clone());
+    // A pre-encrypted (SSE-KMS) body is sealed with this queue's encryption
+    // context; on an SSE-SQS queue the body is sealed with SQS's own key.
+    let (stored_body, sealed_for_queue) = match stored_body_override {
+        Some(sealed) => (sealed, Some(queue.arn.clone())),
+        None if crate::sse_sqs::enabled(&queue.attributes) => (
+            crate::sse_sqs::seal(&queue.arn, &message_body),
+            Some(queue.arn.clone()),
+        ),
+        None => (message_body, None),
+    };
     let msg = SqsMessage {
         message_id: uuid::Uuid::new_v4().to_string(),
         receipt_handle: None,
         md5_of_body: md5_of_body.clone(),
-        body: stored_body_override.unwrap_or(message_body),
+        body: stored_body,
         sent_timestamp: cfg.now.timestamp_millis(),
         attributes: system_attributes,
         message_attributes,

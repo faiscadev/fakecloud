@@ -244,7 +244,7 @@ async fn sqs_unencrypted_queue_does_not_record_kms_usage() {
 /// default) encrypts with SQS-owned keys, never with KMS (recorded in
 /// `fakecloud-kms/tests/fixtures/aws-managed-keys`: such a queue reports no
 /// `KmsMasterKeyId` and service principals deliver to it freely). The body
-/// round-trips and no KMS call is made for it.
+/// is still encrypted at rest, round-trips, and no KMS call is made for it.
 #[tokio::test]
 async fn sqs_managed_sse_round_trips_without_calling_kms() {
     let server = TestServer::start().await;
@@ -268,10 +268,14 @@ async fn sqs_managed_sse_round_trips_without_calling_kms() {
         .await
         .unwrap();
 
-    // No KMS envelope at rest: SQS-owned keys are not KMS keys.
+    // Encrypted at rest with the SQS-owned key: the stored body is opaque.
     let (body, stored_body) = introspected_body(&server, "sse-managed").await;
     assert_eq!(body, "managed-sse-payload");
-    assert_eq!(stored_body, body);
+    assert_ne!(stored_body, body);
+    assert!(
+        !stored_body.contains("managed-sse-payload"),
+        "{stored_body}"
+    );
 
     // Receive must surface the original plaintext.
     let got = sqs
