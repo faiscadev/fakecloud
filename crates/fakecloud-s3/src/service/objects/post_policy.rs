@@ -337,12 +337,122 @@ fn enforce_no_extra_fields(
     Ok(())
 }
 
-/// A POST Object `tagging` field -- a `Tagging` XML document -- as the
-/// URL-encoded `key=value&...` tag set PutObject's `x-amz-tagging` carries.
-fn tagging_header(xml: &str) -> String {
+/// The PutObject request headers (`PutObjectRequest`'s `@httpHeader`
+/// members, lower-cased) a POST Object form field carries as-is. Left out:
+/// `content-type` (the form's own field, set separately), `content-length`
+/// (the file's), and `x-amz-acl` / `x-amz-tagging`, which a form sets with
+/// its `acl` and `tagging` fields.
+const PUT_OBJECT_FORM_HEADERS: &[&str] = &[
+    "cache-control",
+    "content-disposition",
+    "content-encoding",
+    "content-language",
+    "content-md5",
+    "expires",
+    "if-match",
+    "if-none-match",
+    "x-amz-checksum-crc32",
+    "x-amz-checksum-crc32c",
+    "x-amz-checksum-crc64nvme",
+    "x-amz-checksum-md5",
+    "x-amz-checksum-sha1",
+    "x-amz-checksum-sha256",
+    "x-amz-checksum-sha512",
+    "x-amz-checksum-xxhash128",
+    "x-amz-checksum-xxhash3",
+    "x-amz-checksum-xxhash64",
+    "x-amz-expected-bucket-owner",
+    "x-amz-grant-full-control",
+    "x-amz-grant-read",
+    "x-amz-grant-read-acp",
+    "x-amz-grant-write-acp",
+    "x-amz-object-lock-event-hold",
+    "x-amz-object-lock-event-hold-duration-days",
+    "x-amz-object-lock-event-hold-duration-years",
+    "x-amz-object-lock-legal-hold",
+    "x-amz-object-lock-mode",
+    "x-amz-object-lock-retain-until-date",
+    "x-amz-request-payer",
+    "x-amz-sdk-checksum-algorithm",
+    "x-amz-server-side-encryption",
+    "x-amz-server-side-encryption-aws-kms-key-id",
+    "x-amz-server-side-encryption-bucket-key-enabled",
+    "x-amz-server-side-encryption-context",
+    "x-amz-server-side-encryption-customer-algorithm",
+    "x-amz-server-side-encryption-customer-key",
+    "x-amz-server-side-encryption-customer-key-md5",
+    "x-amz-storage-class",
+    "x-amz-website-redirect-location",
+    "x-amz-write-offset-bytes",
+];
+
+fn malformed_xml() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "MalformedXML",
+        "The XML you provided was not well-formed or did not validate against our published \
+         schema",
+    )
+}
+
+/// A POST Object `tagging` field's tag set: a well-formed `Tagging` document
+/// whose every `Tag` has a key (else 400 MalformedXML), validated as any
+/// object tag set (no duplicate or `aws:` keys, at most 10 tags).
+fn tagging_document(xml: &str) -> Result<Vec<(String, String)>, AwsServiceError> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut root = None;
+    let mut depth = 0usize;
+    let mut tag_elements = 0usize;
+    loop {
+        match reader.read_event().map_err(|_| malformed_xml())? {
+            Event::Start(e) => {
+                let name = e.local_name().as_ref().to_vec();
+                if depth == 0 {
+                    if root.is_some() {
+                        return Err(malformed_xml());
+                    }
+                    root = Some(name.clone());
+                }
+                if name == b"Tag" {
+                    tag_elements += 1;
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Empty(e) if depth == 0 || e.local_name().as_ref() == b"Tag" => {
+                return Err(malformed_xml());
+            }
+            Event::Text(t) if depth == 0 && !t.iter().all(u8::is_ascii_whitespace) => {
+                return Err(malformed_xml());
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if depth != 0 || root.as_deref() != Some(b"Tagging".as_slice()) {
+        return Err(malformed_xml());
+    }
+    let tags = crate::service::parse_tagging_xml(xml);
+    if tags.len() != tag_elements {
+        return Err(malformed_xml());
+    }
+    crate::service::validate_tags(&tags)?;
+    if tags.len() > 10 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "BadRequest",
+            "Object tags cannot be greater than 10",
+        ));
+    }
+    Ok(tags)
+}
+
+/// A tag set as the URL-encoded `key=value&...` PutObject's `x-amz-tagging`
+/// carries.
+fn tagging_header(tags: &[(String, String)]) -> String {
     use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-    crate::service::parse_tagging_xml(xml)
-        .iter()
+    tags.iter()
         .map(|(k, v)| {
             format!(
                 "{}={}",
@@ -552,13 +662,15 @@ impl S3Service {
                 .parse()
                 .unwrap_or_else(|_| http::HeaderValue::from_static("binary/octet-stream")),
         );
-        // The form fields that are PutObject headers: the `x-amz-*` ones
-        // (storage class, encryption, user metadata, lock, ...) and the
-        // cache/content headers keep their names; `acl` is the canned ACL
-        // (`x-amz-acl`) and `tagging` the object's tag set as a `Tagging` XML
-        // document (POST Object API reference), which PutObject takes as the
-        // URL-encoded `x-amz-tagging`. Like every other field, these must be
-        // named by the policy's conditions (checked above).
+        // The form makes a PutObject: its fields that are PutObject's request
+        // headers keep their names (`PUT_OBJECT_FORM_HEADERS`, plus user
+        // metadata `x-amz-meta-*`); `acl` is the canned ACL (`x-amz-acl`) and
+        // `tagging` the object's tag set as a `Tagging` XML document (POST
+        // Object API reference), which PutObject takes as the URL-encoded
+        // `x-amz-tagging`. Any other field (the signature material, a copy
+        // source or directive, which PutObject has no use for) is not a
+        // header of it, though like every field it must be named by the
+        // policy's conditions (checked above).
         for f in &form.fields {
             let lower = f.name.to_ascii_lowercase();
             if lower == "acl" {
@@ -568,18 +680,14 @@ impl S3Service {
                 continue;
             }
             if lower == "tagging" {
-                if let Ok(value) = tagging_header(&f.value).parse::<http::HeaderValue>() {
+                let tags = tagging_document(&f.value)?;
+                if let Ok(value) = tagging_header(&tags).parse::<http::HeaderValue>() {
                     synth_headers.insert("x-amz-tagging", value);
                 }
                 continue;
             }
-            let forwardable = lower == "cache-control"
-                || lower == "content-disposition"
-                || lower == "content-encoding"
-                || lower == "content-language"
-                || lower == "content-md5"
-                || lower == "expires"
-                || lower.starts_with("x-amz-");
+            let forwardable = PUT_OBJECT_FORM_HEADERS.contains(&lower.as_str())
+                || lower.starts_with("x-amz-meta-");
             if !forwardable {
                 continue;
             }
@@ -641,6 +749,14 @@ impl S3Service {
             access_key_id: signer.clone(),
             principal: None,
         };
+        // A PutObject by construction: only PutObject's own headers were
+        // carried over, so no field can make it classify as anything else
+        // (a copy, say) and change its condition keys or request tags.
+        debug_assert_eq!(
+            crate::service::s3_operation(&as_put),
+            Some("PutObject"),
+            "a form upload is evaluated as a PutObject"
+        );
         let mut actions = vec!["PutObject"];
         actions.extend(
             crate::service::iam_actions::object_write_extras(&synth_headers)
@@ -777,5 +893,89 @@ impl S3Service {
                 headers,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod form_tests {
+    use super::*;
+
+    /// The headers a form field may carry are exactly PutObject's own
+    /// (`PutObjectRequest`'s `@httpHeader` members), less the three it sets
+    /// otherwise: never a copy source, a directive or the signature.
+    #[test]
+    fn form_headers_are_put_objects_request_headers() {
+        let model: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../aws-models/s3.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let members = model["shapes"]["com.amazonaws.s3#PutObjectRequest"]["members"]
+            .as_object()
+            .unwrap();
+        let mut headers: Vec<String> = members
+            .values()
+            .filter_map(|m| m["traits"]["smithy.api#httpHeader"].as_str())
+            .map(str::to_ascii_lowercase)
+            .filter(|h| {
+                !matches!(
+                    h.as_str(),
+                    "content-type" | "content-length" | "x-amz-acl" | "x-amz-tagging"
+                )
+            })
+            .collect();
+        headers.sort();
+        let mut ours: Vec<String> = PUT_OBJECT_FORM_HEADERS
+            .iter()
+            .map(|h| h.to_string())
+            .collect();
+        ours.sort();
+        assert_eq!(ours, headers);
+        assert!(!ours.iter().any(|h| h.starts_with("x-amz-copy-source")
+            || h.ends_with("-directive")
+            || matches!(
+                h.as_str(),
+                "x-amz-credential" | "x-amz-signature" | "x-amz-date"
+            )));
+    }
+
+    #[test]
+    fn tagging_fields_are_validated_documents() {
+        let tag = |k: &str, v: &str| format!("<Tag><Key>{k}</Key><Value>{v}</Value></Tag>");
+        let doc = |tags: &str| format!("<Tagging><TagSet>{tags}</TagSet></Tagging>");
+        assert_eq!(
+            tagging_document(&doc(&tag("team", "a"))).unwrap(),
+            vec![("team".to_string(), "a".to_string())]
+        );
+        for malformed in [
+            "not xml".to_string(),
+            "<Tagging><TagSet>".to_string(),
+            "<Other><TagSet></TagSet></Other>".to_string(),
+            doc("<Tag><Value>v</Value></Tag>"),
+            doc("<Tag/>"),
+        ] {
+            assert_eq!(
+                tagging_document(&malformed).unwrap_err().code(),
+                "MalformedXML",
+                "{malformed}"
+            );
+        }
+        let duplicate = doc(&format!("{}{}", tag("k", "1"), tag("k", "2")));
+        assert_eq!(
+            tagging_document(&duplicate).unwrap_err().code(),
+            "InvalidTag"
+        );
+        let system = doc(&tag("aws:x", "1"));
+        assert_eq!(tagging_document(&system).unwrap_err().code(), "InvalidTag");
+        let eleven: String = (0..11).map(|i| tag(&format!("k{i}"), "v")).collect();
+        assert_eq!(
+            tagging_document(&doc(&eleven)).unwrap_err().code(),
+            "BadRequest"
+        );
+        let ten: String = (0..10).map(|i| tag(&format!("k{i}"), "v")).collect();
+        assert_eq!(tagging_document(&doc(&ten)).unwrap().len(), 10);
     }
 }

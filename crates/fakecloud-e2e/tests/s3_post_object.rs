@@ -824,6 +824,58 @@ async fn post_object_fields_are_the_put_objects_headers_under_strict() {
     assert_eq!(tags.tag_set().len(), 1);
     assert_eq!(tags.tag_set()[0].key(), "team");
     assert_eq!(tags.tag_set()[0].value(), "a b");
+    // A field naming a copy source does not turn the upload into a copy
+    // (whose request tags would be empty): the tags are still the form's,
+    // and a Deny on them applies.
+    let (e, es) = user(
+        "noevil",
+        r#",{"Effect":"Allow","Action":"s3:PutObjectTagging","Resource":"*"},
+           {"Effect":"Deny","Action":["s3:PutObject","s3:PutObjectTagging"],"Resource":"*",
+            "Condition":{"StringEquals":{"aws:RequestTag/team":"evil"}}}"#,
+    )
+    .await;
+    let evil = "<Tagging><TagSet><Tag><Key>team</Key><Value>evil</Value></Tag></TagSet></Tagging>";
+    for fields in [
+        vec![("tagging", evil)],
+        vec![
+            ("tagging", evil),
+            ("x-amz-copy-source", "form-keys/aes.txt"),
+        ],
+    ] {
+        let denied = post(signed_form("form-keys", "evil.txt", &e, &es, &fields))
+            .await
+            .unwrap();
+        assert_eq!(
+            denied.status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "{fields:?}"
+        );
+    }
+    assert!(s3
+        .head_object()
+        .bucket("form-keys")
+        .key("evil.txt")
+        .send()
+        .await
+        .is_err());
+    // A `tagging` field is a validated Tagging document.
+    let dup = "<Tagging><TagSet><Tag><Key>k</Key><Value>1</Value></Tag>\
+               <Tag><Key>k</Key><Value>2</Value></Tag></TagSet></Tagging>";
+    for (tagging, code) in [("<Tagging><TagSet>", "MalformedXML"), (dup, "InvalidTag")] {
+        let resp = post(signed_form(
+            "form-keys",
+            "bad-tags.txt",
+            &e,
+            &es,
+            &[("tagging", tagging)],
+        ))
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST, "{tagging}");
+        let text = resp.text().await.unwrap();
+        assert!(text.contains(&format!("<Code>{code}</Code>")), "{text}");
+    }
+
     // A tag the condition does not allow is denied.
     let other = "<Tagging><TagSet><Tag><Key>team</Key><Value>z</Value></Tag></TagSet></Tagging>";
     let denied = post(signed_form(
