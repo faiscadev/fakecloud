@@ -708,13 +708,16 @@ fn authorize(
     if let Some(caller_arn) = caller_arn {
         if decision == fakecloud_iam::evaluator::Decision::ImplicitDeny
             && key.key_manager != "AWS"
-            && grant_allows(
-                grants,
-                key,
-                &grantee_forms(caller_arn, role_arn, account_id, partition),
-                action,
-                encryption_context,
-            )
+            && {
+                let forms = grantee_forms(caller_arn, role_arn, account_id, partition);
+                grant_allows(
+                    grants,
+                    key,
+                    |grantee| forms.iter().any(|form| form == grantee),
+                    action,
+                    GrantRequest::Context(encryption_context),
+                )
+            }
         {
             return Ok(());
         }
@@ -767,24 +770,72 @@ fn grantee_forms(
     forms
 }
 
-/// Whether a grant on `key` lets one of `grantees` perform `action`
-/// (`kms:GenerateDataKey`, ...) with `encryption_context`: the grant names the
-/// key, a grantee, and the operation, and its constraints
-/// (`EncryptionContextSubset` / `EncryptionContextEquals`) hold.
-fn grant_allows(
+/// What a request asks of a grant beyond its operation, for checking the
+/// grant's encryption-context constraints.
+#[derive(Clone, Copy)]
+pub(crate) enum GrantRequest<'a> {
+    /// An operation that takes an encryption context, with the one it
+    /// carries (empty when the request has none).
+    Context(&'a HashMap<String, String>),
+    /// An operation with no encryption context (`DescribeKey`,
+    /// `RetireGrant`, `GetPublicKey`, `Sign`, ...): AWS ignores
+    /// encryption-context constraints for it.
+    NoContext,
+    /// `CreateGrant`, with the constraints of the grant it creates (JSON
+    /// `null` for none) and its operations: a grant only lets its grantee
+    /// create grants for some or all of its own operations, with
+    /// constraints at least as strict as its own.
+    CreateGrant {
+        operations: &'a [String],
+        constraints: &'a serde_json::Value,
+    },
+}
+
+/// Whether a grant on `key` whose grantee principal satisfies
+/// `names_grantee` lets it perform `action` (`kms:GenerateDataKey`, ...) as
+/// `request` asks: the grant names the key, a matching grantee, and the
+/// operation, and its constraints (`EncryptionContextSubset` /
+/// `EncryptionContextEquals`) hold.
+pub(crate) fn grant_allows(
     grants: &[crate::state::KmsGrant],
     key: &KmsKey,
-    grantees: &[String],
+    names_grantee: impl Fn(&str) -> bool,
     action: &str,
-    encryption_context: &HashMap<String, String>,
+    request: GrantRequest<'_>,
 ) -> bool {
     let operation = action.strip_prefix("kms:").unwrap_or(action);
     let key_id = key_id_from_arn(&key.arn);
     grants.iter().any(|grant| {
         let names_key = grant.key_id == key_id || grant.key_id == key.arn;
-        let names_grantee = grantees.contains(&grant.grantee_principal);
         let covers = grant.operations.iter().any(|op| op == operation);
-        names_key && names_grantee && covers && grant_constraints_hold(grant, encryption_context)
+        names_key
+            && covers
+            && names_grantee(&grant.grantee_principal)
+            && match request {
+                GrantRequest::Context(context) => grant_constraints_hold(grant, context),
+                GrantRequest::NoContext => true,
+                GrantRequest::CreateGrant {
+                    operations,
+                    constraints,
+                } => {
+                    operations
+                        .iter()
+                        .all(|op| grant.operations.iter().any(|own| own == op))
+                        && child_constraints_as_strict(grant, constraints)
+                }
+            }
+    })
+}
+
+/// The pairs of the `name` encryption-context constraint in `constraints`.
+fn constraint_pairs(
+    constraints: &serde_json::Value,
+    name: &str,
+) -> Option<HashMap<String, String>> {
+    constraints.get(name)?.as_object().map(|map| {
+        map.iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+            .collect()
     })
 }
 
@@ -797,14 +848,7 @@ fn grant_constraints_hold(
     let Some(constraints) = &grant.constraints else {
         return true;
     };
-    let pairs = |name: &str| -> Option<HashMap<String, String>> {
-        constraints.get(name)?.as_object().map(|map| {
-            map.iter()
-                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
-                .collect()
-        })
-    };
-    if let Some(subset) = pairs("EncryptionContextSubset") {
+    if let Some(subset) = constraint_pairs(constraints, "EncryptionContextSubset") {
         if !subset
             .iter()
             .all(|(k, v)| encryption_context.get(k) == Some(v))
@@ -812,8 +856,38 @@ fn grant_constraints_hold(
             return false;
         }
     }
-    if let Some(equals) = pairs("EncryptionContextEquals") {
+    if let Some(equals) = constraint_pairs(constraints, "EncryptionContextEquals") {
         if &equals != encryption_context {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether a child grant with `child` constraints is at least as strict as
+/// `parent`, as AWS requires of a grant created with `CreateGrant`
+/// permission from a grant: a child may add pairs to the parent's
+/// `EncryptionContextSubset` but not remove them, and may turn it into an
+/// `EncryptionContextEquals` holding those pairs; a parent's
+/// `EncryptionContextEquals` must be kept exactly.
+fn child_constraints_as_strict(parent: &crate::state::KmsGrant, child: &serde_json::Value) -> bool {
+    let Some(parent) = &parent.constraints else {
+        return true;
+    };
+    let child_subset = constraint_pairs(child, "EncryptionContextSubset");
+    let child_equals = constraint_pairs(child, "EncryptionContextEquals");
+    let contains = |outer: &HashMap<String, String>, inner: &HashMap<String, String>| {
+        inner.iter().all(|(k, v)| outer.get(k) == Some(v))
+    };
+    if let Some(equals) = constraint_pairs(parent, "EncryptionContextEquals") {
+        if child_equals.as_ref() != Some(&equals) {
+            return false;
+        }
+    }
+    if let Some(subset) = constraint_pairs(parent, "EncryptionContextSubset") {
+        let kept = child_subset.as_ref().is_some_and(|c| contains(c, &subset))
+            || child_equals.as_ref().is_some_and(|c| contains(c, &subset));
+        if !kept {
             return false;
         }
     }

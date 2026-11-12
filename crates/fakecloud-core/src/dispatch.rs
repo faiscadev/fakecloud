@@ -913,6 +913,28 @@ async fn dispatch_inner(
                                 &caller_session_policies,
                                 scps.as_deref(),
                             );
+                            // A grant on the resource (KMS) only adds
+                            // permission: it is consulted when the policies
+                            // left the request undecided, never over an
+                            // explicit Deny.
+                            let decision = if decision == crate::auth::IamDecision::ImplicitDeny
+                                && service_resource
+                                && !in_caller_account
+                                && grant_authorizes(
+                                    config.resource_policy_provider.as_deref(),
+                                    evaluator.as_ref(),
+                                    &detected.service,
+                                    &aws_request,
+                                    iam_action,
+                                    principal,
+                                    &condition_context,
+                                    &caller_session_policies,
+                                    scps.as_deref(),
+                                ) {
+                                crate::auth::IamDecision::Allow
+                            } else {
+                                decision
+                            };
                             if !decision.is_allow() {
                                 tracing::warn!(
                                     target: "fakecloud::iam::audit",
@@ -2132,6 +2154,36 @@ fn authorize_internal_caller(
     None
 }
 
+/// Whether a grant on `action.resource` authorizes a request its policies
+/// left implicitly denied (see [`ResourcePolicyProvider::grant_authorization`]).
+/// A grant naming the caller itself authorizes it on its own, in the key's
+/// account or another; one naming the caller's account only lets the account
+/// delegate, so the caller's identity policies (with their boundary, session
+/// and SCP gates) must also allow the action.
+#[allow(clippy::too_many_arguments)]
+fn grant_authorizes(
+    provider: Option<&dyn ResourcePolicyProvider>,
+    evaluator: &dyn IamPolicyEvaluator,
+    service: &str,
+    request: &AwsRequest,
+    action: &crate::auth::IamAction,
+    principal: &Principal,
+    context: &ConditionContext,
+    session_policies: &[String],
+    scps: Option<&[String]>,
+) -> bool {
+    let Some(provider) = provider else {
+        return false;
+    };
+    match provider.grant_authorization(service, request, action, principal) {
+        Some(crate::auth::GrantAuthorization::Grantee) => true,
+        Some(crate::auth::GrantAuthorization::Account) => evaluator
+            .evaluate(principal, action, context, session_policies, scps)
+            .is_allow(),
+        None => false,
+    }
+}
+
 /// Authorize an account root reaching a resource ANOTHER account owns.
 ///
 /// Root needs no identity policy in its own account, which is why dispatch
@@ -2201,7 +2253,14 @@ fn authorize_root_cross_account(
                 &iam_action.resource,
                 iam_action.action,
             );
-        if decision.is_allow() || acl_allows {
+        // A grant naming the root or its account authorizes it: the root
+        // holds every permission of its own account, so a grant to the
+        // account needs no further IAM delegation.
+        let grant_allows = decision == crate::auth::IamDecision::ImplicitDeny
+            && provider
+                .grant_authorization(&detected.service, aws_request, &iam_action, principal)
+                .is_some();
+        if decision.is_allow() || acl_allows || grant_allows {
             continue;
         }
         tracing::warn!(
@@ -2738,6 +2797,114 @@ mod tests {
         assert_eq!(cfg.account_id, "123456789012");
         assert!(!cfg.verify_sigv4);
         assert_eq!(cfg.iam_mode, IamMode::Off);
+    }
+
+    /// An evaluator whose identity-only decision is fixed.
+    struct IdentityOnly(crate::auth::IamDecision);
+
+    impl IamPolicyEvaluator for IdentityOnly {
+        fn evaluate(
+            &self,
+            _: &Principal,
+            _: &crate::auth::IamAction,
+            _: &ConditionContext,
+            _: &[String],
+            _: Option<&[String]>,
+        ) -> crate::auth::IamDecision {
+            self.0
+        }
+
+        fn evaluate_with_resource_policy(
+            &self,
+            _: &Principal,
+            _: &crate::auth::IamAction,
+            _: &ConditionContext,
+            _: Option<&str>,
+            _: &str,
+            _: &[String],
+            _: Option<&[String]>,
+        ) -> crate::auth::IamDecision {
+            crate::auth::IamDecision::ImplicitDeny
+        }
+    }
+
+    /// A provider whose grants match every request the same way.
+    struct Grants(Option<crate::auth::GrantAuthorization>);
+
+    impl ResourcePolicyProvider for Grants {
+        fn resource_policy(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+
+        fn grant_authorization(
+            &self,
+            _: &str,
+            _: &AwsRequest,
+            _: &crate::auth::IamAction,
+            _: &Principal,
+        ) -> Option<crate::auth::GrantAuthorization> {
+            self.0
+        }
+    }
+
+    /// A grant naming the caller authorizes it on its own; one naming its
+    /// account needs the caller's identity policies to allow the action too.
+    #[test]
+    fn grants_authorize_their_grantee_and_delegate_to_its_account() {
+        use crate::auth::{GrantAuthorization, IamDecision};
+        let request = AwsRequest {
+            service: "kms".into(),
+            action: "Decrypt".into(),
+            region: "us-east-1".into(),
+            account_id: "222222222222".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        };
+        let action = crate::auth::IamAction {
+            service: "kms",
+            action: "Decrypt",
+            resource: "arn:aws:kms:us-east-1:111111111111:key/k".into(),
+        };
+        let principal = Principal {
+            arn: "arn:aws:iam::222222222222:user/u".into(),
+            user_id: "AIDA".into(),
+            account_id: "222222222222".into(),
+            principal_type: PrincipalType::User,
+            source_identity: None,
+            tags: None,
+        };
+        let authorizes =
+            |grant: Option<GrantAuthorization>, identity: IamDecision, provided: bool| {
+                let provider = Grants(grant);
+                grant_authorizes(
+                    provided.then_some(&provider as &dyn ResourcePolicyProvider),
+                    &IdentityOnly(identity),
+                    "kms",
+                    &request,
+                    &action,
+                    &principal,
+                    &ConditionContext::default(),
+                    &[],
+                    None,
+                )
+            };
+        let grantee = Some(GrantAuthorization::Grantee);
+        let account = Some(GrantAuthorization::Account);
+        assert!(authorizes(grantee, IamDecision::ImplicitDeny, true));
+        assert!(authorizes(account, IamDecision::Allow, true));
+        assert!(!authorizes(account, IamDecision::ImplicitDeny, true));
+        assert!(!authorizes(None, IamDecision::Allow, true));
+        assert!(!authorizes(grantee, IamDecision::Allow, false));
     }
 
     #[test]

@@ -241,7 +241,12 @@ impl AwsService for KmsService {
         "kms"
     }
 
-    async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn handle(&self, mut req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // A request using another account's key is served in that account
+        // (its key, its grants); the calling principal stays the caller.
+        if let Some(owner) = self.cross_account_key_owner(&req) {
+            req.account_id = owner;
+        }
         let materialized = self.materialize_aws_managed_keys(&req);
         let mutates = materialized || is_mutating_action(req.action.as_str());
         if let Some(err) = self.aws_managed_key_refusal(&req) {
@@ -335,17 +340,40 @@ impl AwsService for KmsService {
         })
     }
 
+    /// `ReEncrypt` is authorized as AWS authorizes it: `kms:ReEncryptFrom`
+    /// on the source key and `kms:ReEncryptTo` on the destination key.
+    fn iam_actions_for(&self, request: &AwsRequest) -> Vec<fakecloud_core::auth::IamAction> {
+        if request.action == "ReEncrypt" {
+            let [source, destination] = re_encrypt_resources(&self.state, request);
+            return vec![
+                fakecloud_core::auth::IamAction {
+                    service: "kms",
+                    action: "ReEncryptFrom",
+                    resource: source,
+                },
+                fakecloud_core::auth::IamAction {
+                    service: "kms",
+                    action: "ReEncryptTo",
+                    resource: destination,
+                },
+            ];
+        }
+        self.iam_action_for(request).into_iter().collect()
+    }
+
     /// `kms:CallerAccount` (the calling principal's account) on every
     /// request, and `kms:EncryptionContext:<key>` /
     /// `kms:EncryptionContextKeys` on the operations that take an
-    /// `EncryptionContext`. Key policies condition on these (the AWS-managed
+    /// encryption context (for `ReEncrypt`, the source context on
+    /// `kms:ReEncryptFrom` and the destination context on
+    /// `kms:ReEncryptTo`). Key policies condition on these (the AWS-managed
     /// keys' policies all require `kms:CallerAccount`). `kms:ViaService` is
     /// never set here: a request reaching the KMS API directly did not come
     /// through another service.
     fn iam_condition_keys_for(
         &self,
         request: &AwsRequest,
-        _action: &fakecloud_core::auth::IamAction,
+        action: &fakecloud_core::auth::IamAction,
     ) -> BTreeMap<String, Vec<String>> {
         let mut out = BTreeMap::new();
         out.insert(
@@ -353,8 +381,13 @@ impl AwsService for KmsService {
             vec![request.account_id.clone()],
         );
         let body = request.json_body();
-        if body.get("EncryptionContext").is_some() {
-            let context = crate::aws_managed::encryption_context_map(&body["EncryptionContext"]);
+        let field = match action.action {
+            "ReEncryptFrom" => "SourceEncryptionContext",
+            "ReEncryptTo" => "DestinationEncryptionContext",
+            _ => "EncryptionContext",
+        };
+        if body.get(field).is_some() {
+            let context = crate::aws_managed::encryption_context_map(&body[field]);
             out.insert(
                 "kms:encryptioncontextkeys".to_string(),
                 context.keys().cloned().collect(),
@@ -612,6 +645,76 @@ impl KmsService {
         minted
     }
 
+    /// The account owning the key a request names when it is another
+    /// account than the caller's, for the operations AWS allows on a key of
+    /// another account (recorded in the KMS developer guide, "Allowing users
+    /// in other accounts to use a KMS key"): the cryptographic operations,
+    /// `DescribeKey` and `GetPublicKey` naming the key by its key ARN or
+    /// alias ARN, and `CreateGrant`, `GetKeyRotationStatus`, `ListGrants`,
+    /// `RevokeGrant` and `RetireGrant` naming it by its key ARN. A `Decrypt`
+    /// naming no key uses the key its ciphertext names, and a `ReEncrypt` is
+    /// served in another account only when its source and destination keys
+    /// are both there. A key id or alias name is always the caller's own
+    /// account's. Whether the caller may use the key is decided by IAM
+    /// enforcement at dispatch (key policy, identity policies and grants).
+    fn cross_account_key_owner(&self, req: &AwsRequest) -> Option<String> {
+        let caller = req.principal.as_ref()?.account_id.as_str();
+        let alias_arn_allowed = match req.action.as_str() {
+            "Encrypt"
+            | "Decrypt"
+            | "ReEncrypt"
+            | "GenerateDataKey"
+            | "GenerateDataKeyWithoutPlaintext"
+            | "GenerateDataKeyPair"
+            | "GenerateDataKeyPairWithoutPlaintext"
+            | "Sign"
+            | "Verify"
+            | "GenerateMac"
+            | "VerifyMac"
+            | "DeriveSharedSecret"
+            | "GetPublicKey"
+            | "DescribeKey" => true,
+            "CreateGrant"
+            | "GetKeyRotationStatus"
+            | "ListGrants"
+            | "RevokeGrant"
+            | "RetireGrant" => false,
+            _ => return None,
+        };
+        let body = req.json_body();
+        let from_ciphertext = || body["CiphertextBlob"].as_str().and_then(ciphertext_key_ref);
+        let key_refs: Vec<String> = match req.action.as_str() {
+            "ReEncrypt" => {
+                let source = body["SourceKeyId"]
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(from_ciphertext);
+                let destination = body["DestinationKeyId"].as_str().map(str::to_string);
+                vec![source?, destination?]
+            }
+            "Decrypt" => vec![body["KeyId"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(from_ciphertext)?],
+            _ => vec![body["KeyId"].as_str()?.to_string()],
+        };
+        let accounts = self.state.read();
+        let mut owner = None;
+        for key_ref in &key_refs {
+            let (_, account, resource) = parse_kms_arn(key_ref)?;
+            let names_key = resource.starts_with("key/")
+                || (alias_arn_allowed && resource.starts_with("alias/"));
+            if !names_key || account == caller || owner.is_some_and(|o| o != account) {
+                return None;
+            }
+            accounts
+                .get(account)?
+                .resolve_key_id(&req.region, key_ref)?;
+            owner = Some(account);
+        }
+        owner.map(str::to_string)
+    }
+
     /// AWS refuses the key-management operations below on AWS-managed keys
     /// to every caller (recorded against `alias/aws/lambda`'s key): an
     /// AWS-managed key's policy grants account principals only
@@ -717,9 +820,11 @@ impl KmsService {
             }
         };
         let context = crate::aws_managed::encryption_context_map(encryption_context);
+        // The caller's own account, not the key's: an AWS-managed key's
+        // policy admits only its own account's principals.
         let caller = crate::aws_managed::KeyCaller::Direct {
             principal,
-            account: &req.account_id,
+            account: caller_account(req),
         };
         if crate::aws_managed::policy_allows(
             &key.policy,
