@@ -197,7 +197,10 @@ pub(crate) fn kms_decrypt(
     };
     let key = kms_key_id.filter(|k| !k.is_empty()).unwrap_or("aws/s3");
     let key_account = crate::service::kms_reference_account(key).unwrap_or(account_id);
-    // The object's key, in the bucket's region, which its ARN names.
+    // The object records its key's ARN, resolved in the bucket's region when
+    // it was written, so that ARN names the region to decrypt in; without
+    // one (a legacy object, the AWS-managed default) the key the ciphertext
+    // names opens it.
     hook.decrypt_in_region(
         key_account,
         fakecloud_aws::arn::region_of(key).unwrap_or_default(),

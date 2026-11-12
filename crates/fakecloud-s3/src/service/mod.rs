@@ -746,9 +746,13 @@ impl S3Service {
         let key = kms_key_id.filter(|k| !k.is_empty()).unwrap_or("aws/s3");
         let key_account = kms_reference_account(key).unwrap_or(account_id);
         let ctx = crate::side_effects::s3_encryption_context(bucket, object_key, bucket_key);
-        // The bucket's key is in the bucket's region: the region its ARN
-        // names, else the request's.
-        let region = fakecloud_aws::arn::region_of(key).unwrap_or(&req.region);
+        // The object records its key's ARN, resolved in the bucket's region
+        // when it was written (a replica's for a multi-Region key named by
+        // id there), so that ARN's region is the one to decrypt in. Without
+        // one (an object written before keys were recorded as ARNs, or the
+        // AWS-managed default), the key the ciphertext names opens it, as
+        // before; the request's region says nothing about the bucket's.
+        let region = fakecloud_aws::arn::region_of(key).unwrap_or_default();
         hook.decrypt_in_region(
             key_account,
             region,

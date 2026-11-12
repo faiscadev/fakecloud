@@ -934,12 +934,12 @@ pub(crate) fn fmt_enum_set(items: &[String]) -> String {
 /// A grant as the API reports it. `IssuingAccount` is the account root in the
 /// partition of the granted key (`region`'s, if the key is gone).
 pub(crate) fn grant_to_json(grant: &KmsGrant, state: &KmsState, region: &str) -> Value {
-    let partition = state
-        .keys
-        .get(&grant.key_id)
-        .map_or_else(|| partition_for(region), |k| partition_of(&k.arn));
+    let key = state.keys.get(&grant.key_id);
+    let partition = key.map_or_else(|| partition_for(region), |k| partition_of(&k.arn));
+    // ListGrants / ListRetirableGrants name the key by its ARN, as AWS does;
+    // the id a grant stores is internal (a replica's is "<region>:<id>").
     let mut v = json!({
-        "KeyId": grant.key_id,
+        "KeyId": key.map_or(grant.key_id.as_str(), |k| k.arn.as_str()),
         "GrantId": grant.grant_id,
         "GranteePrincipal": grant.grantee_principal,
         "Operations": grant.operations,

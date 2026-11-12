@@ -5172,3 +5172,71 @@ fn multi_region_bare_ids_and_ciphertexts_resolve_in_the_call_region() {
         .unwrap()
         .ends_with(&plain));
 }
+
+/// ListGrants and ListRetirableGrants name each grant's key by its ARN, as
+/// AWS does: a replica's grant by the replica's ARN, never the internal
+/// "<region>:<id>" it is stored under.
+#[test]
+fn listed_grants_name_their_key_by_its_arn() {
+    let svc = make_service();
+    let key_id = create_key_with_opts(&svc, json!({ "MultiRegion": true }));
+    svc.replicate_key(&make_request(
+        "ReplicateKey",
+        json!({"KeyId": key_id, "ReplicaRegion": "us-west-2"}),
+    ))
+    .unwrap();
+    let in_region = |region: &str, action: &str, body: Value| {
+        let mut req = make_request(action, body);
+        req.region = region.to_string();
+        req
+    };
+    let retiring = "arn:aws:iam::123456789012:user/retirer";
+    for region in ["us-east-1", "us-west-2"] {
+        svc.create_grant(&in_region(
+            region,
+            "CreateGrant",
+            json!({
+                "KeyId": key_id,
+                "GranteePrincipal": "arn:aws:iam::123456789012:user/u",
+                "RetiringPrincipal": retiring,
+                "Operations": ["Decrypt"],
+            }),
+        ))
+        .unwrap();
+    }
+    let arn_in = |region: &str| format!("arn:aws:kms:{region}:123456789012:key/{key_id}");
+    for region in ["us-east-1", "us-west-2"] {
+        let listed: Value = serde_json::from_slice(
+            svc.list_grants(&in_region(region, "ListGrants", json!({"KeyId": key_id})))
+                .unwrap()
+                .body
+                .expect_bytes(),
+        )
+        .unwrap();
+        let ids: Vec<&str> = listed["Grants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["KeyId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![arn_in(region).as_str()], "{region}");
+    }
+    let retirable: Value = serde_json::from_slice(
+        svc.list_retirable_grants(&make_request(
+            "ListRetirableGrants",
+            json!({"RetiringPrincipal": retiring}),
+        ))
+        .unwrap()
+        .body
+        .expect_bytes(),
+    )
+    .unwrap();
+    let mut ids: Vec<String> = retirable["Grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["KeyId"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec![arn_in("us-east-1"), arn_in("us-west-2")]);
+}

@@ -908,6 +908,16 @@ impl S3Service {
             )
         };
 
+        // The object records the ARN of the key it is sealed under (resolved
+        // in the bucket's region), as PutObject does, whatever form the
+        // request named it in.
+        let new_kms_key_id = match new_kms_key_id {
+            Some(kid) if !kid.is_empty() && new_alg.as_deref() == Some("aws:kms") => {
+                self.resolve_object_kms_key(account_id, &bucket_region, Some(kid))
+            }
+            other => other,
+        };
+
         // Same algorithm, no body work — only flip the kms key id
         // when the caller bumped that.
         let same_alg = old_alg == new_alg;
