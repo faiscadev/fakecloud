@@ -1061,6 +1061,97 @@ async fn post_object_sse_kms_uses_the_signers_identity() {
     assert!(allowed.status().is_success(), "{:?}", allowed.text().await);
 }
 
+/// A form signed by a user of account B, uploading to account A's bucket
+/// under A's customer key: the key is judged by A's key policy for B's
+/// principal, not as the bucket owner's own use of its key -- refused while
+/// the policy does not allow B (nothing stored), allowed once it does.
+#[tokio::test]
+async fn post_object_sse_kms_cross_account_signer_is_judged_by_the_key_policy() {
+    const ACCOUNT_B: &str = "222222222222";
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let root = helpers::root_config(&server).await;
+    let s3 = helpers::root_s3_client(&server).await;
+    s3.create_bucket()
+        .bucket("xacct-kms-form")
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_policy()
+        .bucket("xacct-kms-form")
+        .policy(format!(
+            r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow",
+                "Principal":{{"AWS":"arn:aws:iam::{ACCOUNT_B}:root"}},
+                "Action":"s3:PutObject","Resource":"arn:aws:s3:::xacct-kms-form/*"}}]}}"#
+        ))
+        .send()
+        .await
+        .unwrap();
+    let kms = aws_sdk_kms::Client::new(&root);
+    let key = kms.create_key().send().await.unwrap();
+    let key_meta = key.key_metadata().unwrap();
+    let key_id = key_meta.key_id().to_string();
+    let key_arn = key_meta.arn().unwrap().to_string();
+    let account_a = key_arn.split(':').nth(4).unwrap().to_string();
+    assert_ne!(account_a, ACCOUNT_B);
+
+    let (akid, secret) = server.create_admin(ACCOUNT_B, "form-signer").await;
+    let post = |key: &'static str| {
+        let form = signed_form(
+            "xacct-kms-form",
+            key,
+            &akid,
+            &secret,
+            &[
+                ("x-amz-server-side-encryption", "aws:kms"),
+                ("x-amz-server-side-encryption-aws-kms-key-id", &key_arn),
+            ],
+        );
+        reqwest::Client::new()
+            .post(format!("{}/xacct-kms-form", server.endpoint()))
+            .multipart(form)
+            .send()
+    };
+
+    // The default key policy names only account A.
+    let refused = post("refused.txt").await.unwrap();
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "{:?}",
+        refused.text().await
+    );
+    assert!(s3
+        .head_object()
+        .bucket("xacct-kms-form")
+        .key("refused.txt")
+        .send()
+        .await
+        .is_err());
+
+    kms.put_key_policy()
+        .key_id(&key_id)
+        .policy_name("default")
+        .policy(format!(
+            r#"{{"Version":"2012-10-17","Statement":[
+                {{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{account_a}:root"}},"Action":"kms:*","Resource":"*"}},
+                {{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{ACCOUNT_B}:root"}},
+                  "Action":["kms:GenerateDataKey","kms:Encrypt","kms:Decrypt"],"Resource":"*"}}]}}"#
+        ))
+        .send()
+        .await
+        .unwrap();
+    let allowed = post("allowed.txt").await.unwrap();
+    assert!(allowed.status().is_success(), "{:?}", allowed.text().await);
+    let head = s3
+        .head_object()
+        .bucket("xacct-kms-form")
+        .key("allowed.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.ssekms_key_id(), Some(key_arn.as_str()));
+}
+
 /// Under `--iam strict` a browser-form upload is authorized as the PutObject
 /// it is, on the key the form names, for the uploader whose key signed the
 /// policy -- or, for a form with no policy, anonymously on the bucket policy.
