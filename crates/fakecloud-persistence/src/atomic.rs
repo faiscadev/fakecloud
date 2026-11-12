@@ -20,6 +20,21 @@ fn tmp_path(path: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
+/// Whether `file_name` is a temp file [`tmp_path`] names
+/// (`<file>.<pid>.<seq>.tmp`): left behind only by a write that never reached
+/// its rename, so it is never anything a reader uses.
+pub(crate) fn is_temp_file_name(file_name: &str) -> bool {
+    let Some(stem) = file_name.strip_suffix(".tmp") else {
+        return false;
+    };
+    let mut parts = stem.rsplitn(3, '.');
+    let (Some(seq), Some(pid), Some(target)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    !target.is_empty() && digits(seq) && digits(pid)
+}
+
 fn fsync_parent(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -117,6 +132,29 @@ pub fn write_atomic_copy_from_file(src: &Path, dst: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exactly the names `tmp_path` gives are temp files.
+    #[test]
+    fn temp_file_names_match_tmp_path() {
+        let name = tmp_path(Path::new("/x/null.toml"))
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(is_temp_file_name(&name), "{name}");
+        for other in [
+            "null.toml",
+            "null.bin",
+            "null.bin.tmp",
+            "null.12.tmp",
+            "null.12.x.tmp",
+            ".12.3.tmp",
+            "null.12.3.tmpx",
+            "null.gen-ab-1-2.bin",
+        ] {
+            assert!(!is_temp_file_name(other), "{other}");
+        }
+    }
 
     #[test]
     fn failed_write_leaves_no_tmp() {

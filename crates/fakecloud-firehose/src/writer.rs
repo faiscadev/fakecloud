@@ -370,6 +370,20 @@ mod tests {
             }
             self.disk.put_object(bucket, key, version, body, meta)
         }
+        fn replace_object_body(
+            &self,
+            bucket: &str,
+            key: &str,
+            version: Option<&str>,
+            body: BodySource,
+            meta: &ObjectMeta,
+        ) -> StoreResult<BodyRef> {
+            if let Some(hook) = &self.commit {
+                hook()?;
+            }
+            self.disk
+                .replace_object_body(bucket, key, version, body, meta)
+        }
     }
 
     fn fixture() -> (SharedFirehoseState, SharedS3State, DeliveryBatch) {

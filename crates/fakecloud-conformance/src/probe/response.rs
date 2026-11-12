@@ -636,6 +636,12 @@ pub(super) fn operation_common_errors(
         // `InvalidCompressionFormat`: "The file is not in a supported
         // compression format").
         ("s3", "SelectObjectContent") => &["InvalidExpression", "InvalidCompressionFormat"],
+        // UpdateObjectEncryption naming a generated KMS key ARN of the
+        // bucket's account that KMS does not have: KMS's own refusal, which
+        // the model does not declare. Recorded (HTTP 400
+        // `KMS.NotFoundException` "Key '<key ARN>' does not exist", see
+        // crates/fakecloud-s3/tests/fixtures/update-object-encryption/).
+        ("s3", "UpdateObjectEncryption") => &["KMS.NotFoundException"],
         _ => &[],
     }
 }

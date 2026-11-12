@@ -1147,6 +1147,16 @@ mod tests {
         ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
             Err(StoreError::NotSupported)
         }
+        fn replace_object_body(
+            &self,
+            _bucket: &str,
+            _key: &str,
+            _version: Option<&str>,
+            _body: fakecloud_persistence::BodySource,
+            _meta: &fakecloud_persistence::ObjectMeta,
+        ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
+            Err(StoreError::NotSupported)
+        }
         fn put_object_meta(
             &self,
             _bucket: &str,

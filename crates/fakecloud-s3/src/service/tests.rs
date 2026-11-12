@@ -7093,6 +7093,727 @@ async fn put_bucket_encryption_aws_kms_without_a_key_uses_aws_s3() {
     assert_eq!(got.body.expect_bytes(), b"payload");
 }
 
+/// The stored body of `bucket/key` (the fake KMS seals as `enc:<key>:...`).
+fn stored_body(svc: &S3Service, bucket: &str, key: &str) -> String {
+    let obj = bucket_of(svc, bucket).objects[key].clone();
+    let bytes = svc.state.read().default_ref().read_body(&obj.body).unwrap();
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+/// A copy naming no SSE takes the destination bucket's default encryption
+/// (S3 API reference, CopyObject), key and Bucket Key included, also for a
+/// copy in place; with no default, a copy in place of an encrypted object
+/// lands under SSE-S3.
+#[tokio::test]
+async fn copy_without_sse_headers_takes_the_destination_default() {
+    let svc = kms_service();
+    seed_bucket(&svc, "src");
+    seed_bucket(&svc, "dst");
+    seed_bucket(&svc, "plainbucket");
+    seed_object(&svc, "src", "a", b"payload");
+    let body = b"<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>key-k</KMSMasterKeyID></ApplyServerSideEncryptionByDefault><BucketKeyEnabled>true</BucketKeyEnabled></Rule></ServerSideEncryptionConfiguration>";
+    svc.put_bucket_encryption(
+        "123456789012",
+        &make_request(Method::PUT, "/dst", &[("encryption", "")], body),
+        "dst",
+    )
+    .unwrap();
+    let copy = |to: &str, from: &str, replace_metadata: bool| {
+        let mut req = make_request(Method::PUT, to, &[], b"");
+        req.headers
+            .insert("x-amz-copy-source", from.parse().unwrap());
+        if replace_metadata {
+            req.headers
+                .insert("x-amz-metadata-directive", "REPLACE".parse().unwrap());
+        }
+        req
+    };
+
+    let resp = svc.handle(copy("/dst/b", "/src/a", false)).await.unwrap();
+    assert_eq!(resp.headers["x-amz-server-side-encryption"], "aws:kms");
+    assert_eq!(
+        resp.headers["x-amz-server-side-encryption-aws-kms-key-id"],
+        "key-k"
+    );
+    assert_eq!(
+        resp.headers["x-amz-server-side-encryption-bucket-key-enabled"],
+        "true"
+    );
+    let obj = bucket_of(&svc, "dst").objects["b"].clone();
+    assert_eq!(obj.sse_algorithm.as_deref(), Some("aws:kms"));
+    assert_eq!(obj.sse_kms_key_id.as_deref(), Some("key-k"));
+    assert_eq!(obj.bucket_key_enabled, Some(true));
+    assert_eq!(stored_body(&svc, "dst", "b"), "enc:key-k:payload");
+    let got = svc
+        .handle(make_request(Method::GET, "/dst/b", &[], b""))
+        .await
+        .unwrap();
+    assert_eq!(got.body.expect_bytes(), b"payload");
+
+    // In place: an SSE-KMS object stays under the bucket's default key.
+    svc.handle(copy("/dst/b", "/dst/b", true)).await.unwrap();
+    let obj = bucket_of(&svc, "dst").objects["b"].clone();
+    assert_eq!(obj.sse_algorithm.as_deref(), Some("aws:kms"));
+    assert_eq!(obj.sse_kms_key_id.as_deref(), Some("key-k"));
+    assert_eq!(stored_body(&svc, "dst", "b"), "enc:key-k:payload");
+
+    // In place in a bucket with no default: SSE-S3.
+    svc.handle(sse_kms_put("/plainbucket/c", Some("key-a")))
+        .await
+        .unwrap();
+    let resp = svc
+        .handle(copy("/plainbucket/c", "/plainbucket/c", true))
+        .await
+        .unwrap();
+    assert_eq!(resp.headers["x-amz-server-side-encryption"], "AES256");
+    assert_eq!(stored_body(&svc, "plainbucket", "c"), "secret body");
+
+    // Request headers still win over the default.
+    let mut explicit = copy("/dst/d", "/src/a", false);
+    explicit
+        .headers
+        .insert("x-amz-server-side-encryption", "aws:kms".parse().unwrap());
+    explicit.headers.insert(
+        "x-amz-server-side-encryption-aws-kms-key-id",
+        "key-x".parse().unwrap(),
+    );
+    svc.handle(explicit).await.unwrap();
+    assert_eq!(stored_body(&svc, "dst", "d"), "enc:key-x:payload");
+}
+
+/// UpdateObjectEncryption from one KMS key to another reseals the body
+/// under the new key, also when only the Bucket Key setting changes (an
+/// omitted `BucketKeyEnabled` is false); naming the key and setting it
+/// already has leaves the body as it is.
+#[tokio::test]
+async fn update_object_encryption_to_another_kms_key_reseals_the_body() {
+    let svc = kms_service();
+    seed_bucket(&svc, "bk");
+    let key_a = "arn:aws:kms:us-east-1:123456789012:key/key-a";
+    let key_b = "arn:aws:kms:us-east-1:123456789012:key/key-b";
+    svc.handle(sse_kms_put("/bk/o", Some(key_a))).await.unwrap();
+    assert_eq!(
+        stored_body(&svc, "bk", "o"),
+        format!("enc:{key_a}:secret body")
+    );
+    let update = |key: &str, bucket_key: Option<&str>| {
+        svc.update_object_encryption(
+            "123456789012",
+            &update_encryption_request("/bk/o", key, bucket_key),
+            "bk",
+            "o",
+        )
+    };
+    let read_back = || async {
+        let got = svc
+            .handle(make_request(Method::GET, "/bk/o", &[], b""))
+            .await
+            .unwrap();
+        got.body.expect_bytes().to_vec()
+    };
+
+    update(key_b, None).unwrap();
+    let obj = bucket_of(&svc, "bk").objects["o"].clone();
+    assert_eq!(obj.sse_kms_key_id.as_deref(), Some(key_b));
+    assert_eq!(obj.bucket_key_enabled, Some(false));
+    assert_eq!(
+        stored_body(&svc, "bk", "o"),
+        format!("enc:{key_b}:secret body")
+    );
+    assert_eq!(read_back().await, b"secret body");
+
+    // The same key again keeps the body under it.
+    update(key_b, Some("false")).unwrap();
+    assert_eq!(
+        stored_body(&svc, "bk", "o"),
+        format!("enc:{key_b}:secret body")
+    );
+
+    // Turning on an S3 Bucket Key reseals under the bucket's context.
+    update(key_b, Some("true")).unwrap();
+    let obj = bucket_of(&svc, "bk").objects["o"].clone();
+    assert_eq!(obj.bucket_key_enabled, Some(true));
+    assert_eq!(read_back().await, b"secret body");
+    // Omitting it afterwards turns it off again (it defaults to false).
+    update(key_b, None).unwrap();
+    assert_eq!(
+        bucket_of(&svc, "bk").objects["o"].bucket_key_enabled,
+        Some(false)
+    );
+    assert_eq!(read_back().await, b"secret body");
+
+    // A body naming a key another account owns is refused.
+    assert_aws_err(
+        update("arn:aws:kms:us-east-1:210987654321:key/k", None),
+        "AccessDenied",
+    );
+}
+
+/// The version ids of `bucket/key`'s history, oldest first.
+fn version_ids(svc: &S3Service, bucket: &str, key: &str) -> Vec<String> {
+    bucket_of(svc, bucket).object_versions[key]
+        .iter()
+        .filter_map(|o| o.version_id.clone())
+        .collect()
+}
+
+/// The history entry of `bucket/key` with `version`.
+fn version_of(svc: &S3Service, bucket: &str, key: &str, version: &str) -> crate::state::S3Object {
+    bucket_of(svc, bucket).object_versions[key]
+        .iter()
+        .find(|o| o.version_id.as_deref() == Some(version))
+        .unwrap()
+        .clone()
+}
+
+/// The body stored for `bucket/key` at `version`.
+fn version_body(svc: &S3Service, bucket: &str, key: &str, version: &str) -> String {
+    let obj = version_of(svc, bucket, key, version);
+    let bytes = svc.state.read().default_ref().read_body(&obj.body).unwrap();
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+/// On a versioned bucket, `versionId` names the version resealed: an older
+/// one changes in the history alone, the current one in both copies; a
+/// version id the key lacks is InvalidArgument (recorded), and a current
+/// delete marker is refused as an unencrypted source without being touched.
+#[tokio::test]
+async fn update_object_encryption_targets_the_named_version() {
+    let svc = kms_service();
+    seed_bucket(&svc, "ver");
+    enable_versioning(&svc, "ver");
+    let key_a = "arn:aws:kms:us-east-1:123456789012:key/key-a";
+    let key_b = "arn:aws:kms:us-east-1:123456789012:key/key-b";
+    svc.handle(sse_kms_put("/ver/o", Some(key_a)))
+        .await
+        .unwrap();
+    svc.handle(sse_kms_put("/ver/o", Some(key_a)))
+        .await
+        .unwrap();
+    let ids = version_ids(&svc, "ver", "o");
+    let (old, current) = (ids[0].clone(), ids[1].clone());
+    let update = |version: Option<&str>| {
+        let mut req = update_encryption_request("/ver/o", key_b, None);
+        if let Some(v) = version {
+            req.query_params.insert("versionId".into(), v.into());
+        }
+        svc.update_object_encryption("123456789012", &req, "ver", "o")
+    };
+
+    update(Some(&old)).unwrap();
+    assert_eq!(
+        version_of(&svc, "ver", "o", &old).sse_kms_key_id.as_deref(),
+        Some(key_b)
+    );
+    assert_eq!(
+        version_body(&svc, "ver", "o", &old),
+        format!("enc:{key_b}:secret body")
+    );
+    // The current version is untouched, in both copies.
+    let head = bucket_of(&svc, "ver").objects["o"].clone();
+    assert_eq!(head.version_id.as_deref(), Some(current.as_str()));
+    assert_eq!(head.sse_kms_key_id.as_deref(), Some(key_a));
+    assert_eq!(
+        version_of(&svc, "ver", "o", &current)
+            .sse_kms_key_id
+            .as_deref(),
+        Some(key_a)
+    );
+    let mut get_old = make_request(Method::GET, "/ver/o", &[("versionId", &old)], b"");
+    get_old.query_params.insert("versionId".into(), old.clone());
+    let got = svc.handle(get_old).await.unwrap();
+    assert_eq!(got.body.expect_bytes(), b"secret body");
+
+    // With no versionId, the current version: both copies agree.
+    update(None).unwrap();
+    let head = bucket_of(&svc, "ver").objects["o"].clone();
+    assert_eq!(head.sse_kms_key_id.as_deref(), Some(key_b));
+    assert_eq!(
+        version_of(&svc, "ver", "o", &current)
+            .sse_kms_key_id
+            .as_deref(),
+        Some(key_b)
+    );
+    assert_eq!(
+        version_body(&svc, "ver", "o", &current),
+        format!("enc:{key_b}:secret body")
+    );
+    assert_eq!(
+        stored_body(&svc, "ver", "o"),
+        format!("enc:{key_b}:secret body")
+    );
+
+    let err = assert_aws_err(update(Some("nonexistentversion")), "InvalidArgument");
+    assert_eq!(err.message(), "Invalid version id specified");
+
+    // A delete marker as the current version.
+    svc.handle(make_request(Method::DELETE, "/ver/o", &[], b""))
+        .await
+        .unwrap();
+    let marker = bucket_of(&svc, "ver").objects["o"].clone();
+    assert!(marker.is_delete_marker);
+    let err = assert_aws_err(update(None), "InvalidRequest");
+    assert_eq!(
+        err.message(),
+        "Unencrypted source objects are not supported."
+    );
+    let after = bucket_of(&svc, "ver").objects["o"].clone();
+    assert!(after.is_delete_marker);
+    assert_eq!(after.sse_algorithm, None);
+    assert_eq!(after.sse_kms_key_id, None);
+}
+
+/// A KMS hook like [`ReadableKms`] that, while sealing, lets another
+/// request change the object (`interleave`), as a concurrent write would
+/// between UpdateObjectEncryption's read and its commit.
+struct InterleavingKms {
+    state: SharedS3State,
+    interleave: Interleave,
+}
+
+/// What another request does to the object in [`InterleavingKms`].
+type Interleave = Box<dyn Fn(&mut crate::state::S3Object) + Send + Sync>;
+
+impl fakecloud_core::delivery::KmsHook for InterleavingKms {
+    fn is_ciphertext(&self, account_id: &str, stored: &str) -> bool {
+        ReadableKms.is_ciphertext(account_id, stored)
+    }
+
+    fn encrypt(
+        &self,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        plaintext: &[u8],
+        caller: fakecloud_core::delivery::KmsCaller<'_>,
+        encryption_context: HashMap<String, String>,
+    ) -> Result<String, fakecloud_core::delivery::KmsError> {
+        if let Some(obj) = self
+            .state
+            .write()
+            .default_mut()
+            .buckets
+            .get_mut("race")
+            .and_then(|b| b.objects.get_mut("o"))
+        {
+            (self.interleave)(obj);
+        }
+        ReadableKms.encrypt(
+            account_id,
+            region,
+            key_id,
+            plaintext,
+            caller,
+            encryption_context,
+        )
+    }
+
+    fn decrypt(
+        &self,
+        account_id: &str,
+        ciphertext_b64: &str,
+        caller: fakecloud_core::delivery::KmsCaller<'_>,
+        encryption_context: HashMap<String, String>,
+    ) -> Result<Vec<u8>, fakecloud_core::delivery::KmsError> {
+        ReadableKms.decrypt(account_id, ciphertext_b64, caller, encryption_context)
+    }
+}
+
+/// A write that replaces the object, or a legal hold placed on it, while
+/// UpdateObjectEncryption reseals it wins: the request is refused
+/// (OperationAborted / the Object Lock AccessDenied) and the object keeps
+/// what that other request gave it.
+#[tokio::test]
+async fn update_object_encryption_yields_to_a_concurrent_change() {
+    let key = "arn:aws:kms:us-east-1:123456789012:key/key-b";
+    let cases: [(&str, Interleave); 2] = [
+        (
+            "OperationAborted",
+            Box::new(|obj: &mut crate::state::S3Object| {
+                // A PutObject replaced it.
+                obj.etag = "replaced".to_string();
+                obj.last_modified = chrono::Utc::now() + chrono::Duration::seconds(1);
+                obj.sse_algorithm = Some("AES256".to_string());
+            }),
+        ),
+        (
+            "AccessDenied",
+            Box::new(|obj: &mut crate::state::S3Object| {
+                obj.lock_legal_hold = Some("ON".to_string());
+            }),
+        ),
+    ];
+    for (expected, interleave) in cases {
+        let state: SharedS3State = Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let svc = S3Service::new(state.clone(), Arc::new(DeliveryBus::new())).with_kms_hook(
+            Arc::new(InterleavingKms {
+                state: state.clone(),
+                interleave,
+            }),
+        );
+        seed_bucket(&svc, "race");
+        seed_object(&svc, "race", "o", b"payload");
+        state
+            .write()
+            .default_mut()
+            .buckets
+            .get_mut("race")
+            .unwrap()
+            .objects
+            .get_mut("o")
+            .unwrap()
+            .sse_algorithm = Some("AES256".to_string());
+        assert_aws_err(
+            svc.update_object_encryption(
+                "123456789012",
+                &update_encryption_request("/race/o", key, None),
+                "race",
+                "o",
+            ),
+            expected,
+        );
+        let obj = bucket_of(&svc, "race").objects["o"].clone();
+        assert_eq!(obj.sse_algorithm.as_deref(), Some("AES256"), "{expected}");
+        assert_eq!(obj.sse_kms_key_id, None, "{expected}");
+        assert_eq!(stored_body(&svc, "race", "o"), "payload", "{expected}");
+    }
+}
+
+/// Another UpdateObjectEncryption that commits a new key or Bucket Key
+/// setting while this one reseals wins: this one aborts rather than record
+/// its own key or flag over a body it did not seal.
+#[tokio::test]
+async fn update_object_encryption_yields_to_a_concurrent_reencryption() {
+    let other_key = "arn:aws:kms:us-east-1:123456789012:key/other";
+    let cases: [Interleave; 2] = [
+        Box::new(move |obj: &mut crate::state::S3Object| {
+            obj.sse_algorithm = Some("aws:kms".to_string());
+            obj.sse_kms_key_id = Some(other_key.to_string());
+        }),
+        Box::new(|obj: &mut crate::state::S3Object| {
+            obj.bucket_key_enabled = Some(true);
+        }),
+    ];
+    for (case, interleave) in cases.into_iter().enumerate() {
+        let state: SharedS3State = Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let svc = S3Service::new(state.clone(), Arc::new(DeliveryBus::new())).with_kms_hook(
+            Arc::new(InterleavingKms {
+                state: state.clone(),
+                interleave,
+            }),
+        );
+        seed_bucket(&svc, "race");
+        seed_object(&svc, "race", "o", b"payload");
+        let seeded_key = "arn:aws:kms:us-east-1:123456789012:key/seeded";
+        {
+            let mut mas = state.write();
+            let obj = mas
+                .default_mut()
+                .buckets
+                .get_mut("race")
+                .unwrap()
+                .objects
+                .get_mut("o")
+                .unwrap();
+            obj.sse_algorithm = Some("aws:kms".to_string());
+            obj.sse_kms_key_id = Some(seeded_key.to_string());
+            obj.body = fakecloud_persistence::BodyRef::Memory(Bytes::from(format!(
+                "enc:{seeded_key}:payload"
+            )));
+        }
+        let before = bucket_of(&svc, "race").objects["o"].clone();
+        assert_aws_err(
+            svc.update_object_encryption(
+                "123456789012",
+                &update_encryption_request(
+                    "/race/o",
+                    "arn:aws:kms:us-east-1:123456789012:key/mine",
+                    None,
+                ),
+                "race",
+                "o",
+            ),
+            "OperationAborted",
+        );
+        let obj = bucket_of(&svc, "race").objects["o"].clone();
+        // What the interleaved request committed stays; nothing of this one.
+        assert_ne!(
+            obj.sse_kms_key_id.as_deref(),
+            Some("arn:aws:kms:us-east-1:123456789012:key/mine"),
+            "case {case}"
+        );
+        assert_eq!(
+            stored_body(&svc, "race", "o"),
+            format!("enc:{seeded_key}:payload"),
+            "case {case}"
+        );
+        assert_eq!(obj.etag, before.etag, "case {case}");
+    }
+}
+
+/// A store that fails to take the resealed body leaves the object as it was
+/// in memory too: the new key and flag are applied only once persisted.
+#[test]
+fn update_object_encryption_changes_memory_only_after_the_store() {
+    let (svc, store) = make_recording_service();
+    seed_bucket(&svc, "b");
+    seed_object(&svc, "b", "k", b"payload");
+    svc.state
+        .write()
+        .default_mut()
+        .buckets
+        .get_mut("b")
+        .unwrap()
+        .objects
+        .get_mut("k")
+        .unwrap()
+        .sse_algorithm = Some("AES256".to_string());
+    *store.fail_put.lock() = Some("b/k".to_string());
+    let err = svc
+        .update_object_encryption(
+            "123456789012",
+            &update_encryption_request(
+                "/b/k",
+                "arn:aws:kms:us-east-1:123456789012:key/k",
+                Some("true"),
+            ),
+            "b",
+            "k",
+        )
+        .err()
+        .expect("the store refused the body");
+    assert_eq!(
+        err.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        err.code()
+    );
+    let obj = bucket_of(&svc, "b").objects["k"].clone();
+    assert_eq!(obj.sse_algorithm.as_deref(), Some("AES256"));
+    assert_eq!(obj.sse_kms_key_id, None);
+    assert_eq!(obj.bucket_key_enabled, None);
+    assert_eq!(stored_body(&svc, "b", "k"), "payload");
+}
+
+/// The request must carry an `ObjectEncryption` body: an empty one is
+/// MissingRequestBodyError and anything else MalformedXML (both recorded),
+/// and the SSE headers PutObject takes are no substitute; the object keeps
+/// its encryption.
+#[tokio::test]
+async fn update_object_encryption_needs_its_body() {
+    let svc = kms_service();
+    seed_bucket(&svc, "bk");
+    let key = "arn:aws:kms:us-east-1:123456789012:key/key-a";
+    svc.handle(sse_kms_put("/bk/o", Some(key))).await.unwrap();
+    let with_body = |body: &[u8]| {
+        let mut req = make_request(Method::PUT, "/bk/o", &[("encryption", "")], body);
+        req.headers
+            .insert("x-amz-server-side-encryption", "AES256".parse().unwrap());
+        svc.update_object_encryption("123456789012", &req, "bk", "o")
+    };
+    let err = assert_aws_err(with_body(b""), "MissingRequestBodyError");
+    assert_eq!(err.message(), "Request Body is empty");
+    for body in [&b"<Foo/>"[..], b"garbage"] {
+        let err = assert_aws_err(with_body(body), "MalformedXML");
+        assert_eq!(
+            err.message(),
+            "The XML you provided was not well-formed or did not validate against our published schema"
+        );
+    }
+    let obj = bucket_of(&svc, "bk").objects["o"].clone();
+    assert_eq!(obj.sse_algorithm.as_deref(), Some("aws:kms"));
+    assert_eq!(obj.sse_kms_key_id.as_deref(), Some(key));
+    assert_eq!(
+        stored_body(&svc, "bk", "o"),
+        format!("enc:{key}:secret body")
+    );
+}
+
+/// An `UpdateObjectEncryption` request in the body form the SDKs send.
+fn update_encryption_request(
+    path: &str,
+    kms_key_arn: &str,
+    bucket_key: Option<&str>,
+) -> AwsRequest {
+    let bucket_key = bucket_key
+        .map(|v| format!("<BucketKeyEnabled>{v}</BucketKeyEnabled>"))
+        .unwrap_or_default();
+    let body = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><ObjectEncryption xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><SSE-KMS><KMSKeyArn>{kms_key_arn}</KMSKeyArn>{bucket_key}</SSE-KMS></ObjectEncryption>"#
+    );
+    make_request(Method::PUT, path, &[("encryption", "")], body.as_bytes())
+}
+
+/// Each `UpdateObjectEncryption` refusal recorded against S3
+/// (`tests/fixtures/update-object-encryption/refusals.txt`) is answered with
+/// the recorded status, code and message, KMS's own refusal of a missing key
+/// included, and leaves the object as it was.
+#[tokio::test]
+async fn update_object_encryption_refusals_match_the_recordings() {
+    let kms: fakecloud_kms::SharedKmsState = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let hook = fakecloud_kms::hook::KmsServiceHook::new(kms.clone(), Default::default());
+    let svc = make_service()
+        .with_kms(kms.clone())
+        .with_kms_hook(Arc::new(hook));
+    // A key of the account, for the refusals recorded with "<an existing key>".
+    let existing_key = fakecloud_kms::hook::KmsServiceHook::new(kms, Default::default())
+        .resolve_key_arn("123456789012", "us-east-1", "aws/s3", "s3.amazonaws.com")
+        .unwrap();
+    for bucket in ["rec", "recver"] {
+        seed_bucket(&svc, bucket);
+    }
+    enable_versioning(&svc, "recver");
+    for bucket in ["rec", "recver"] {
+        let mut put = make_request(Method::PUT, &format!("/{bucket}/o"), &[], b"plain");
+        put.headers
+            .insert("x-amz-server-side-encryption", "AES256".parse().unwrap());
+        svc.handle(put).await.unwrap();
+    }
+    svc.handle(make_request(Method::DELETE, "/recver/o", &[], b""))
+        .await
+        .unwrap();
+
+    let recording = include_str!("../../tests/fixtures/update-object-encryption/refusals.txt");
+    let mut checked = 0;
+    for block in recording.split("== ").filter(|b| !b.trim().is_empty()) {
+        let lines: Vec<&str> = block.lines().collect();
+        let field = |name: &str| {
+            lines
+                .iter()
+                .find_map(|l| l.strip_prefix(&format!("{name}: ")))
+        };
+        let Some(status_line) = lines.iter().find(|l| l.starts_with("HTTP ")) else {
+            continue;
+        };
+        let bucket = if field("Setup").is_some_and(|s| s.contains("delete marker")) {
+            "recver"
+        } else {
+            "rec"
+        };
+        let path = format!("/{bucket}/o");
+        let mut req = match (field("Body"), field("KMSKeyArn")) {
+            (Some(raw), _) => {
+                let raw = if raw == "(empty)" { "" } else { raw };
+                make_request(Method::PUT, &path, &[("encryption", "")], raw.as_bytes())
+            }
+            (None, Some(arn)) => {
+                let arn = arn.replace(
+                    "arn:aws:kms:us-east-1:123456789012:key/<an existing key>",
+                    &existing_key,
+                );
+                update_encryption_request(&path, &arn, field("BucketKeyEnabled"))
+            }
+            (None, None) => panic!("{}: no request", lines[0]),
+        };
+        if let Some(version) = field("VersionId") {
+            req.query_params
+                .insert("versionId".to_string(), version.to_string());
+        }
+        let mut status_parts = status_line.split_whitespace().skip(1);
+        let status: u16 = status_parts.next().unwrap().parse().unwrap();
+        let code = status_parts.next().unwrap();
+        let message = lines.last().unwrap();
+        let err = svc
+            .update_object_encryption("123456789012", &req, bucket, "o")
+            .err()
+            .unwrap_or_else(|| panic!("{}: accepted", lines[0]));
+        assert_eq!(err.status().as_u16(), status, "{}", lines[0]);
+        assert_eq!(err.code(), code, "{}", lines[0]);
+        assert_eq!(&err.message(), message, "{}", lines[0]);
+        checked += 1;
+    }
+    assert_eq!(checked, 10);
+    let obj = bucket_of(&svc, "rec").objects["o"].clone();
+    assert_eq!(obj.sse_algorithm.as_deref(), Some("AES256"));
+    assert_eq!(obj.sse_kms_key_id, None);
+    assert_eq!(stored_body(&svc, "rec", "o"), "plain");
+    let marker = bucket_of(&svc, "recver").objects["o"].clone();
+    assert!(marker.is_delete_marker);
+    assert_eq!(marker.sse_algorithm, None);
+}
+
+/// An object under a legal hold or an unexpired retention period keeps its
+/// encryption (`AccessDenied`, the API reference's Object Lock refusal); an
+/// expired retention no longer protects it.
+#[tokio::test]
+async fn update_object_encryption_refuses_object_locked_objects() {
+    let svc = kms_service();
+    seed_bucket(&svc, "locked");
+    let key = "arn:aws:kms:us-east-1:123456789012:key/lock-key";
+    let now = chrono::Utc::now();
+    let lock = |legal_hold: Option<&str>, mode: Option<&str>, until| {
+        let mut mas = svc.state.write();
+        let obj = mas
+            .default_mut()
+            .buckets
+            .get_mut("locked")
+            .unwrap()
+            .objects
+            .get_mut("o")
+            .unwrap();
+        obj.sse_algorithm = Some("AES256".into());
+        obj.sse_kms_key_id = None;
+        obj.lock_legal_hold = legal_hold.map(str::to_string);
+        obj.lock_mode = mode.map(str::to_string);
+        obj.lock_retain_until = until;
+    };
+    seed_object(&svc, "locked", "o", b"payload");
+    for (legal_hold, mode, until) in [
+        (Some("ON"), None, None),
+        (
+            None,
+            Some("GOVERNANCE"),
+            Some(now + chrono::Duration::days(1)),
+        ),
+        (
+            None,
+            Some("COMPLIANCE"),
+            Some(now + chrono::Duration::days(1)),
+        ),
+    ] {
+        lock(legal_hold, mode, until);
+        let err = assert_aws_err(
+            svc.update_object_encryption(
+                "123456789012",
+                &update_encryption_request("/locked/o", key, None),
+                "locked",
+                "o",
+            ),
+            "AccessDenied",
+        );
+        assert!(
+            err.message().contains("protected by S3 Object Lock"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(bucket_of(&svc, "locked").objects["o"].sse_kms_key_id, None);
+    }
+    lock(
+        Some("OFF"),
+        Some("GOVERNANCE"),
+        Some(now - chrono::Duration::days(1)),
+    );
+    svc.update_object_encryption(
+        "123456789012",
+        &update_encryption_request("/locked/o", key, None),
+        "locked",
+        "o",
+    )
+    .expect("an expired retention and a released hold no longer protect it");
+    assert_eq!(
+        bucket_of(&svc, "locked").objects["o"]
+            .sse_kms_key_id
+            .as_deref(),
+        Some(key)
+    );
+}
+
 #[test]
 fn put_bucket_encryption_rejects_control_char_in_kms_key_id() {
     // Regression (bug-audit 2026-06-13 2.1): a control byte (newline) in the
@@ -7710,6 +8431,23 @@ impl fakecloud_persistence::S3Store for RecordingStore {
         }
         self.inner.put_object(bucket, key, version, body, meta)
     }
+    fn replace_object_body(
+        &self,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+        body: fakecloud_persistence::BodySource,
+        meta: &fakecloud_persistence::ObjectMeta,
+    ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
+        self.record(format!("replace_object_body:{bucket}/{key}"));
+        if self.fail_put.lock().as_deref() == Some(format!("{bucket}/{key}").as_str()) {
+            return Err(fakecloud_persistence::StoreError::Other(
+                "disk full".to_string(),
+            ));
+        }
+        self.inner
+            .replace_object_body(bucket, key, version, body, meta)
+    }
     fn put_object_meta(
         &self,
         bucket: &str,
@@ -7972,17 +8710,30 @@ fn update_object_encryption_persists_reencrypted_body() {
     let (svc, store) = make_recording_service();
     seed_bucket(&svc, "b");
     seed_object(&svc, "b", "k", b"payload");
+    svc.state
+        .write()
+        .default_mut()
+        .buckets
+        .get_mut("b")
+        .unwrap()
+        .objects
+        .get_mut("k")
+        .unwrap()
+        .sse_algorithm = Some("AES256".to_string());
 
-    let mut req = make_request(Method::PUT, "/b/k", &[("encryption", "")], b"");
-    req.headers
-        .insert("x-amz-server-side-encryption", "AES256".parse().unwrap());
-    svc.update_object_encryption("123456789012", &req, "b", "k")
-        .unwrap();
+    let key = "arn:aws:kms:us-east-1:123456789012:key/k";
+    svc.update_object_encryption(
+        "123456789012",
+        &update_encryption_request("/b/k", key, None),
+        "b",
+        "k",
+    )
+    .unwrap();
 
     // Algorithm changed -> the body path must be re-persisted, not RAM-only.
     let calls = store.calls();
     assert!(
-        calls.iter().any(|c| c == "put_object:b/k"),
+        calls.iter().any(|c| c == "replace_object_body:b/k"),
         "expected put_object to persist the re-encrypted body, got {calls:?}"
     );
     // Metadata reflects the new algorithm in memory too.
@@ -7995,7 +8746,8 @@ fn update_object_encryption_persists_reencrypted_body() {
         .objects
         .get("k")
         .unwrap();
-    assert_eq!(obj.sse_algorithm.as_deref(), Some("AES256"));
+    assert_eq!(obj.sse_algorithm.as_deref(), Some("aws:kms"));
+    assert_eq!(obj.sse_kms_key_id.as_deref(), Some(key));
 }
 
 #[test]
@@ -9682,6 +10434,72 @@ fn spool_is_empty(dir: &std::path::Path) -> bool {
     }
 }
 
+/// The annotation record files under `dir`, a disk store's root.
+fn stored_annotation_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n.to_string_lossy().ends_with(".annotations"))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// UpdateObjectEncryption reseals the same object: its annotations survive,
+/// in memory and in the disk store, which keeps them beside the body it
+/// rewrites.
+#[tokio::test]
+async fn update_object_encryption_keeps_annotations_through_a_disk_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = make_disk_service(dir.path());
+    seed_bucket(&svc, "ann");
+    let mut put = make_request(Method::PUT, "/ann/o", &[], b"annotated body");
+    put.headers
+        .insert("x-amz-server-side-encryption", "AES256".parse().unwrap());
+    svc.handle(put).await.unwrap();
+    let annotate = make_request(
+        Method::PUT,
+        "/ann/o",
+        &[("annotation", ""), ("annotationName", "review")],
+        b"looks good",
+    );
+    svc.put_object_annotation("123456789012", &annotate, "ann", "o")
+        .unwrap();
+    let before = stored_annotation_files(dir.path());
+    assert!(!before.is_empty(), "the annotation is on disk");
+
+    for key in [
+        "arn:aws:kms:us-east-1:123456789012:key/key-a",
+        "arn:aws:kms:us-east-1:123456789012:key/key-b",
+    ] {
+        svc.update_object_encryption(
+            "123456789012",
+            &update_encryption_request("/ann/o", key, None),
+            "ann",
+            "o",
+        )
+        .unwrap();
+        let obj = bucket_of(&svc, "ann").objects["o"].clone();
+        assert_eq!(obj.sse_kms_key_id.as_deref(), Some(key));
+        assert!(obj.annotations.contains_key("review"), "{key}");
+        assert_eq!(stored_annotation_files(dir.path()), before, "{key}");
+    }
+    assert_eq!(disk_body_of(&svc, "ann", "o"), b"annotated body");
+}
+
 #[tokio::test]
 async fn copy_object_writes_destination_through_disk_store() {
     let dir = tempfile::tempdir().unwrap();
@@ -10006,25 +10824,32 @@ async fn sse_kms_writes_record_the_key_arn_of_the_buckets_region() {
         .expect("the copy reads back");
     assert_eq!(resp.body.expect_bytes(), b"secret body");
 
-    // UpdateObjectEncryption with the bare id, from SSE-S3.
-    svc.handle(in_west(make_request(
-        Method::PUT,
-        "/west/plain.txt",
-        &[],
-        b"plain",
-    )))
-    .await
-    .unwrap();
-    let mut update = make_request(Method::PUT, "/west/plain.txt", &[], b"");
-    update
-        .headers
-        .insert("x-amz-server-side-encryption", "aws:kms".parse().unwrap());
-    update.headers.insert(
-        "x-amz-server-side-encryption-aws-kms-key-id",
-        key_id.parse().unwrap(),
+    // UpdateObjectEncryption takes only a full key ARN: from SSE-S3 to the
+    // replica, recorded as the replica's ARN; the bare id is refused.
+    let mut put = make_request(Method::PUT, "/west/plain.txt", &[], b"plain");
+    put.headers
+        .insert("x-amz-server-side-encryption", "AES256".parse().unwrap());
+    svc.handle(in_west(put)).await.unwrap();
+    assert_aws_err(
+        svc.update_object_encryption(
+            "123456789012",
+            &in_west(update_encryption_request("/west/plain.txt", &key_id, None)),
+            "west",
+            "plain.txt",
+        ),
+        "InvalidRequest",
     );
-    svc.update_object_encryption("123456789012", &in_west(update), "west", "plain.txt")
-        .expect("UpdateObjectEncryption under the bare multi-Region id");
+    svc.update_object_encryption(
+        "123456789012",
+        &in_west(update_encryption_request(
+            "/west/plain.txt",
+            &replica_arn,
+            None,
+        )),
+        "west",
+        "plain.txt",
+    )
+    .expect("UpdateObjectEncryption under the replica's ARN");
     assert_eq!(stored("plain.txt").as_deref(), Some(replica_arn.as_str()));
 }
 
@@ -12194,7 +13019,14 @@ impl fakecloud_core::delivery::KmsHook for ReadableKms {
                 "not an envelope",
             )
         })?;
-        let (_, plaintext) = rest.split_once(':').ok_or_else(|| {
+        // The key is a bare id or alias, or a key ARN, whose own five colons
+        // come before the one ending it.
+        let plaintext = if rest.starts_with("arn:") {
+            rest.splitn(7, ':').nth(6)
+        } else {
+            rest.split_once(':').map(|(_, plaintext)| plaintext)
+        }
+        .ok_or_else(|| {
             fakecloud_core::delivery::KmsError::new(
                 fakecloud_core::delivery::KmsErrorKind::InvalidCiphertext,
                 "not an envelope",
