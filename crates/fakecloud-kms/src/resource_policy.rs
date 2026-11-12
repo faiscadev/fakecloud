@@ -183,7 +183,7 @@ fn key_named<'a>(
     key_arn: &str,
 ) -> Option<(String, &'a crate::state::KmsKey)> {
     parse_key_id_from_arn(key_arn)?;
-    crate::hook::stored_key(state, key_arn)
+    crate::hook::stored_key(state, "", key_arn)
 }
 
 /// Who may retire a grant (KMS developer guide, "Retiring and revoking

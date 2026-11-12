@@ -548,10 +548,17 @@ pub trait IamPolicyEvaluator: Send + Sync {
 
     /// Evaluate only the ceilings that cap a permission which does not come
     /// from the caller's identity policies (a KMS grant naming the caller):
-    /// the SCP chain (`scps`, `None` when SCPs do not apply) and the session
-    /// policies (`session_policies`, empty for none). `Allow` when every
-    /// present layer allows, so with no layer at all the permission stands;
-    /// an explicit Deny in either layer is `ExplicitDeny`.
+    /// the SCP chain (`scps`, `None` when SCPs do not apply), the session
+    /// policies (`session_policies`, empty for none) and, when
+    /// `with_boundary`, the principal's permissions boundary (for an
+    /// assumed-role session, its role's). `Allow` when every present layer
+    /// allows, so with no layer at all the permission stands; an explicit
+    /// Deny in any layer is `ExplicitDeny`.
+    ///
+    /// AWS caps a resource-based grant to a role ARN by an implicit deny in
+    /// the role's permissions boundary or the session policy, but not one to
+    /// a role session or IAM user ARN (IAM user guide, "Permissions
+    /// boundaries for IAM entities"); SCPs cap every member-account request.
     ///
     /// The default implementation returns [`IamDecision::ImplicitDeny`] so
     /// evaluators that don't support it never silently grant.
@@ -562,6 +569,7 @@ pub trait IamPolicyEvaluator: Send + Sync {
         _context: &ConditionContext,
         _session_policies: &[String],
         _scps: Option<&[String]>,
+        _with_boundary: bool,
     ) -> IamDecision {
         IamDecision::ImplicitDeny
     }

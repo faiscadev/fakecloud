@@ -5079,3 +5079,96 @@ fn create_grant_refuses_context_constraints_on_operations_without_a_context() {
     assert_eq!(err.code(), "ValidationException");
     create(&rsa, json!(["Decrypt"]), Value::Null).expect("an unconstrained grant");
 }
+
+/// A bare key id names the key in the request's region, so the replica of a
+/// multi-Region key in its region, and a multi-Region ciphertext is opened
+/// (and authorized, its grants included) as the related key of the region
+/// of the Decrypt call; a non-multi-Region key and the primary region are
+/// unaffected.
+#[test]
+fn multi_region_bare_ids_and_ciphertexts_resolve_in_the_call_region() {
+    use fakecloud_core::auth::{GrantAuthorization, IamAction, ResourcePolicyProvider};
+    let svc = make_service();
+    let key_id = create_key_with_opts(&svc, json!({ "MultiRegion": true }));
+    svc.replicate_key(&make_request(
+        "ReplicateKey",
+        json!({"KeyId": key_id, "ReplicaRegion": "us-west-2"}),
+    ))
+    .unwrap();
+    let primary_arn = format!("arn:aws:kms:us-east-1:123456789012:key/{key_id}");
+    let replica_arn = format!("arn:aws:kms:us-west-2:123456789012:key/{key_id}");
+    let in_region = |region: &str, action: &str, body: Value| {
+        let mut req = make_request(action, body);
+        req.region = region.to_string();
+        req
+    };
+    let json_of =
+        |resp: AwsResponse| -> Value { serde_json::from_slice(resp.body.expect_bytes()).unwrap() };
+
+    // Encrypt with the bare id in the replica's region uses the replica.
+    let sealed = json_of(
+        svc.encrypt(&in_region(
+            "us-west-2",
+            "Encrypt",
+            json!({"KeyId": key_id, "Plaintext": "aGk="}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(sealed["KeyId"], json!(replica_arn));
+    let blob = sealed["CiphertextBlob"].as_str().unwrap().to_string();
+    // Decrypting names the related key of the call's region, and so does
+    // the resource IAM authorizes.
+    for (region, arn) in [("us-west-2", &replica_arn), ("us-east-1", &primary_arn)] {
+        let req = in_region(region, "Decrypt", json!({"CiphertextBlob": blob}));
+        assert_eq!(&svc.iam_action_for(&req).unwrap().resource, arn, "{region}");
+        let opened = json_of(svc.decrypt(&req).unwrap());
+        assert_eq!(&opened["KeyId"], &json!(arn), "{region}");
+    }
+
+    // A grant created with the bare id in the replica's region is the
+    // replica's: it authorizes a Decrypt in that region, not in the
+    // primary's, and a grant on the primary does not cover the replica.
+    let grantee = "arn:aws:iam::123456789012:user/grantee";
+    let grant = |region: &str| {
+        svc.create_grant(&in_region(
+            region,
+            "CreateGrant",
+            json!({"KeyId": key_id, "GranteePrincipal": grantee, "Operations": ["Decrypt"]}),
+        ))
+        .unwrap();
+    };
+    let provider = crate::resource_policy::KmsResourcePolicyProvider::new(svc.state.clone());
+    let principal = fakecloud_core::auth::Principal {
+        arn: grantee.to_string(),
+        user_id: "AIDAGRANTEE".to_string(),
+        account_id: "123456789012".to_string(),
+        principal_type: fakecloud_core::auth::PrincipalType::User,
+        source_identity: None,
+        tags: None,
+    };
+    let granted = |region: &str| {
+        let req = in_region(region, "Decrypt", json!({"CiphertextBlob": blob}));
+        let action: IamAction = svc.iam_action_for(&req).unwrap();
+        provider.grant_authorization("kms", &req, &action, &principal)
+    };
+    grant("us-east-1");
+    assert_eq!(granted("us-east-1"), Some(GrantAuthorization::Grantee));
+    assert_eq!(granted("us-west-2"), None, "the primary's grant");
+    grant("us-west-2");
+    assert_eq!(granted("us-west-2"), Some(GrantAuthorization::Grantee));
+
+    // A key that is not multi-Region resolves by its bare id as before.
+    let plain = create_key(&svc);
+    let described = json_of(
+        svc.describe_key(&in_region(
+            "us-east-1",
+            "DescribeKey",
+            json!({"KeyId": plain}),
+        ))
+        .unwrap(),
+    );
+    assert!(described["KeyMetadata"]["Arn"]
+        .as_str()
+        .unwrap()
+        .ends_with(&plain));
+}

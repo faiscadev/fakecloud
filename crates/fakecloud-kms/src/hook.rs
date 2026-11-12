@@ -257,7 +257,7 @@ impl KmsServiceHook {
                     not_found_message(account_id, region, key_id),
                 )
             })?;
-            let (storage_id, key) = stored_key(state, &key_arn).ok_or_else(|| {
+            let (storage_id, key) = stored_key(state, region, &key_arn).ok_or_else(|| {
                 KmsError::new(
                     KmsErrorKind::NotFound,
                     not_found_message(account_id, region, key_id),
@@ -315,6 +315,22 @@ impl KmsServiceHook {
         caller: KmsCaller<'_>,
         encryption_context: HashMap<String, String>,
     ) -> Result<Vec<u8>, KmsError> {
+        self.decrypt_in_region(account_id, None, ciphertext_b64, caller, encryption_context)
+    }
+
+    /// [`Self::decrypt`] for a call the service makes in `region`: a
+    /// ciphertext of a multi-Region key is opened by the related key of that
+    /// region (its replica there, or the primary), under that key's policy
+    /// and grants, as AWS decrypts it (KMS developer guide, "Multi-Region
+    /// keys"). `None` keeps the key the ciphertext names.
+    pub fn decrypt_in_region(
+        &self,
+        account_id: &str,
+        region: Option<&str>,
+        ciphertext_b64: &str,
+        caller: KmsCaller<'_>,
+        encryption_context: HashMap<String, String>,
+    ) -> Result<Vec<u8>, KmsError> {
         let (key_ref, plaintext) =
             self.open_envelope(account_id, ciphertext_b64, &encryption_context)?;
         let facts = self.caller_facts(caller);
@@ -327,8 +343,8 @@ impl KmsServiceHook {
             let owner_state = mas
                 .get(key_owner_account(account_id, &key_ref))
                 .ok_or_else(invalid_ciphertext)?;
-            let (storage_id, key) =
-                stored_key(owner_state, &key_ref).ok_or_else(invalid_ciphertext)?;
+            let (storage_id, key) = related_key(owner_state, region.unwrap_or(""), &key_ref)
+                .ok_or_else(invalid_ciphertext)?;
             authorize(
                 key,
                 &storage_id,
@@ -389,7 +405,7 @@ impl KmsServiceHook {
             )
         };
         let owner_state = mas.get(owner).ok_or_else(not_found)?;
-        let (storage_id, key) = stored_key(owner_state, &key_arn).ok_or_else(not_found)?;
+        let (storage_id, key) = stored_key(owner_state, region, &key_arn).ok_or_else(not_found)?;
         for action in actions {
             authorize(
                 key,
@@ -987,6 +1003,24 @@ impl fakecloud_core::delivery::KmsHook for KmsServiceHook {
         KmsServiceHook::decrypt(self, account_id, ciphertext_b64, caller, encryption_context)
     }
 
+    fn decrypt_in_region(
+        &self,
+        account_id: &str,
+        region: &str,
+        ciphertext_b64: &str,
+        caller: KmsCaller<'_>,
+        encryption_context: HashMap<String, String>,
+    ) -> Result<Vec<u8>, KmsError> {
+        KmsServiceHook::decrypt_in_region(
+            self,
+            account_id,
+            Some(region),
+            ciphertext_b64,
+            caller,
+            encryption_context,
+        )
+    }
+
     fn is_ciphertext(&self, _account_id: &str, stored: &str) -> bool {
         is_kms_ciphertext(stored)
     }
@@ -1215,13 +1249,34 @@ fn key_id_from_arn(arn: &str) -> &str {
 
 /// The key `key_ref` (a key id or key ARN) names in `state`, with the id it
 /// is stored under: a replica's ARN names the replica (`<region>:<id>`),
-/// not the primary that shares its id.
-pub(crate) fn stored_key<'a>(state: &'a KmsState, key_ref: &str) -> Option<(String, &'a KmsKey)> {
+/// not the primary that shares its id, and so does a bare key id in the
+/// replica's `region` (`""`: the key stored under the bare id).
+pub(crate) fn stored_key<'a>(
+    state: &'a KmsState,
+    region: &str,
+    key_ref: &str,
+) -> Option<(String, &'a KmsKey)> {
     let id = state
-        .resolve_key_id("", key_ref)
+        .resolve_key_id(region, key_ref)
         .unwrap_or_else(|| key_id_from_arn(key_ref).to_string());
     let key = state.keys.get(&id)?;
     Some((id, key))
+}
+
+/// The key that opens a ciphertext naming `key_ref` (a key id, or a key ARN
+/// for a key of another account) in a call made in `region`: for a
+/// multi-Region key, the related key of that region (its replica there,
+/// else the primary), whichever key of the set sealed it, as AWS decrypts
+/// it. `""` keeps the key `key_ref` names.
+pub(crate) fn related_key<'a>(
+    state: &'a KmsState,
+    region: &str,
+    key_ref: &str,
+) -> Option<(String, &'a KmsKey)> {
+    if region.is_empty() {
+        return stored_key(state, "", key_ref);
+    }
+    stored_key(state, region, key_id_from_arn(key_ref))
 }
 
 #[cfg(test)]
@@ -2361,6 +2416,88 @@ mod tests {
             .grants
             .push(grant(format!("us-west-2:{primary}")));
         encrypt(&hook).expect("the replica's own grant covers it");
+    }
+
+    /// A multi-Region ciphertext is opened by the related key of the region
+    /// the service decrypts in, under that key's grants: the primary's grant
+    /// covers a decrypt in its region but not in the replica's, where only
+    /// the replica's own grant does; with no region the key the ciphertext
+    /// names opens it.
+    #[test]
+    fn multi_region_ciphertexts_open_with_the_call_regions_key() {
+        let a = "111111111111";
+        let b = "222222222222";
+        let (state, _) = crate::test_support::kms_hook(a);
+        let hook = KmsServiceHook::new(state.clone(), Default::default());
+        let primary_arn = {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(b);
+            let arn = mint_aws_managed_key(s, "us-east-1", "multi-region-decrypt");
+            let id = key_id_from_arn(&arn).to_string();
+            let key = s.keys.get_mut(&id).unwrap();
+            key.key_manager = "CUSTOMER".into();
+            key.multi_region = true;
+            key.policy = format!(
+                r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{b}:root"}},"Action":"kms:*","Resource":"*"}}]}}"#
+            );
+            let mut replica = key.clone();
+            replica.arn = format!("arn:aws:kms:us-west-2:{b}:key/{id}");
+            s.keys.insert(format!("us-west-2:{id}"), replica);
+            arn
+        };
+        let id = key_id_from_arn(&primary_arn).to_string();
+        let grant = |key_id: String, operations: &[&str]| crate::state::KmsGrant {
+            grant_id: uuid::Uuid::new_v4().to_string(),
+            grant_token: uuid::Uuid::new_v4().to_string(),
+            key_id,
+            grantee_principal: format!("arn:aws:iam::{a}:root"),
+            retiring_principal: None,
+            operations: operations.iter().map(|o| o.to_string()).collect(),
+            constraints: None,
+            name: None,
+            creation_date: 0.0,
+        };
+        state
+            .write()
+            .get_or_create(b)
+            .grants
+            .push(grant(id.clone(), &["GenerateDataKey", "Decrypt"]));
+        let caller = KmsCaller::via_for(
+            "sqs.amazonaws.com",
+            Some("arn:aws:iam::111111111111:user/u"),
+        );
+        let sealed = hook
+            .encrypt(
+                a,
+                "us-east-1",
+                &primary_arn,
+                b"hello",
+                caller,
+                HashMap::new(),
+            )
+            .unwrap();
+        let open = |region: Option<&str>| {
+            hook.decrypt_in_region(a, region, &sealed, caller, HashMap::new())
+        };
+        assert_eq!(open(Some("us-east-1")).unwrap(), b"hello");
+        assert_eq!(open(None).unwrap(), b"hello");
+        assert_eq!(
+            open(Some("us-west-2")).unwrap_err().kind,
+            KmsErrorKind::AccessDenied,
+            "the primary's grant does not cover the replica"
+        );
+        state
+            .write()
+            .get_or_create(b)
+            .grants
+            .push(grant(format!("us-west-2:{id}"), &["Decrypt"]));
+        assert_eq!(open(Some("us-west-2")).unwrap(), b"hello");
+        // In a region holding no replica, the key stored under the id opens it.
+        assert_eq!(
+            hook.decrypt_in_region(a, Some("eu-west-1"), &sealed, caller, HashMap::new())
+                .unwrap(),
+            b"hello"
+        );
     }
 
     /// A customer key in account B with `policy` (statements as JSON

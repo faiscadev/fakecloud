@@ -2857,8 +2857,9 @@ pub(crate) fn decrypt_parameter_value(
     }
     let mut ctx = std::collections::HashMap::new();
     ctx.insert("PARAMETER_ARN".to_string(), param_arn.to_string());
-    match hook.decrypt(
+    match hook.decrypt_in_region(
         account_id,
+        fakecloud_aws::arn::region_of(param_arn).unwrap_or_default(),
         stored,
         fakecloud_core::delivery::KmsCaller::via_for("ssm.amazonaws.com", caller_arn),
         ctx,

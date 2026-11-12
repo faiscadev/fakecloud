@@ -481,8 +481,9 @@ impl PipesRunner {
         };
         let mut ctx = HashMap::new();
         ctx.insert("aws:sqs:arn".to_string(), source_arn.to_string());
-        match hook.decrypt(
+        match hook.decrypt_in_region(
             account,
+            fakecloud_aws::arn::region_of(source_arn).unwrap_or_default(),
             body,
             fakecloud_core::delivery::KmsCaller::via("sqs.amazonaws.com"),
             ctx,

@@ -48,8 +48,13 @@ pub(crate) fn canonical_encryption_context(
 /// (see [`canonical_encryption_context`]). When the supplied EC
 /// doesn't match what was bound at encrypt time, `crate::blob::decode_with_context`
 /// fails AEAD verification and we surface `InvalidCiphertextException`.
+///
+/// `region` is the region of the call: a blob a multi-Region key sealed
+/// names the key by its bare id, and is opened by the related key of that
+/// region (its replica there, else the primary), as AWS decrypts it.
 pub(crate) fn decode_ciphertext_envelope(
     state: &KmsState,
+    region: &str,
     ciphertext_b64: &str,
     encryption_context_aad: &[u8],
 ) -> Result<DecodedCiphertext, AwsServiceError> {
@@ -65,15 +70,9 @@ pub(crate) fn decode_ciphertext_envelope(
         encryption_context_aad,
     ) {
         // A blob sealed for a caller of another account names the key by
-        // its ARN (see `sealed_key_ref`).
-        let key = state
-            .keys
-            .get(&decoded.key_id)
-            .or_else(|| {
-                parse_kms_arn(&decoded.key_id)?;
-                let id = state.resolve_key_id("", &decoded.key_id)?;
-                state.keys.get(&id)
-            })
+        // its ARN (see `sealed_key_ref`); a bare id is the key of `region`.
+        let key = crate::hook::related_key(state, region, &decoded.key_id)
+            .map(|(_, key)| key)
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -296,17 +295,18 @@ pub(crate) fn kms_resource_for(
                 .unwrap_or_else(|| "*".to_string());
         }
     }
-    let key_ref = match body["KeyId"].as_str() {
-        Some(key_ref) => Some(key_ref.to_string()),
-        None if action == "Decrypt" => body["CiphertextBlob"].as_str().and_then(ciphertext_key_ref),
-        None => None,
-    };
     // Key not found or no KeyId — fall back to wildcard. The handler
     // will return NotFoundException anyway; this avoids blocking the
     // request at the IAM layer with a confusing error.
-    key_ref
-        .and_then(|key_ref| key_arn_for_ref(&accts, request, &key_ref))
-        .unwrap_or_else(|| "*".to_string())
+    match body["KeyId"].as_str() {
+        Some(key_ref) => key_arn_for_ref(&accts, request, key_ref),
+        None if action == "Decrypt" => body["CiphertextBlob"]
+            .as_str()
+            .and_then(ciphertext_key_ref)
+            .and_then(|key_ref| ciphertext_key_arn(&accts, request, &key_ref)),
+        None => None,
+    }
+    .unwrap_or_else(|| "*".to_string())
 }
 
 /// The grant whose token is `token`, and the account holding it: the
@@ -335,19 +335,17 @@ pub(crate) fn grant_by_token<'a>(
 pub(crate) fn re_encrypt_resources(state: &SharedKmsState, request: &AwsRequest) -> [String; 2] {
     let body = request.json_body();
     let accts = state.read();
-    let source = body["SourceKeyId"]
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| body["CiphertextBlob"].as_str().and_then(ciphertext_key_ref));
-    let resource = |key_ref: Option<String>| {
-        key_ref
-            .and_then(|key_ref| key_arn_for_ref(&accts, request, &key_ref))
-            .unwrap_or_else(|| "*".to_string())
+    let source = match body["SourceKeyId"].as_str() {
+        Some(key_ref) => key_arn_for_ref(&accts, request, key_ref),
+        None => body["CiphertextBlob"]
+            .as_str()
+            .and_then(ciphertext_key_ref)
+            .and_then(|key_ref| ciphertext_key_arn(&accts, request, &key_ref)),
     };
-    [
-        resource(source),
-        resource(body["DestinationKeyId"].as_str().map(str::to_string)),
-    ]
+    let destination = body["DestinationKeyId"]
+        .as_str()
+        .and_then(|key_ref| key_arn_for_ref(&accts, request, key_ref));
+    [source, destination].map(|arn| arn.unwrap_or_else(|| "*".to_string()))
 }
 
 /// The policy a key gets when created without one; `key_arn` supplies the
@@ -585,6 +583,19 @@ pub(crate) fn key_arn_for_ref(
     let state = accounts.get(owner)?;
     let key_id = KmsService::resolve_key_id_with_state(state, &request.region, key_ref)?;
     state.keys.get(&key_id).map(|key| key.arn.clone())
+}
+
+/// The ARN of the key that opens a ciphertext naming `key_ref` for
+/// `request`: in the account the reference names, the related key of the
+/// request's region (see [`crate::hook::related_key`]).
+pub(crate) fn ciphertext_key_arn(
+    accounts: &fakecloud_core::multi_account::MultiAccountState<KmsState>,
+    request: &AwsRequest,
+    key_ref: &str,
+) -> Option<String> {
+    let owner = crate::hook::key_owner_account(&request.account_id, key_ref);
+    let state = accounts.get(owner)?;
+    crate::hook::related_key(state, &request.region, key_ref).map(|(_, key)| key.arn.clone())
 }
 
 /// The key reference a ciphertext names: the id or ARN an AWS-shaped blob

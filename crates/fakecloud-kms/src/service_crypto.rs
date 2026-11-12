@@ -169,7 +169,7 @@ impl KmsService {
         let empty = KmsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
-        let decoded = decode_ciphertext_envelope(state, ciphertext_b64, &ec_aad)?;
+        let decoded = decode_ciphertext_envelope(state, &req.region, ciphertext_b64, &ec_aad)?;
 
         // For ciphertext produced by an asymmetric (RSA) KMS key, AWS requires
         // the caller to supply the EncryptionAlgorithm and it must match the
@@ -223,17 +223,15 @@ impl KmsService {
         // Gate Decrypt on the source key's policy (AWS-managed keys) and
         // lifecycle state. AWS rejects Decrypt against a key in any state
         // other than `Enabled`.
-        if let Some(key_id_only) = decoded.source_arn.rsplit('/').next() {
-            if let Some(source_key) = state.keys.get(key_id_only) {
-                Self::authorize_direct_key_use(
-                    req,
-                    source_key,
-                    "kms:Decrypt",
-                    &body["EncryptionContext"],
-                    &[],
-                )?;
-                require_usable_key_state(source_key)?;
-            }
+        if let Some((_, source_key)) = crate::hook::stored_key(state, "", &decoded.source_arn) {
+            Self::authorize_direct_key_use(
+                req,
+                source_key,
+                "kms:Decrypt",
+                &body["EncryptionContext"],
+                &[],
+            )?;
+            require_usable_key_state(source_key)?;
         }
 
         Ok(AwsResponse::json(
@@ -304,7 +302,8 @@ impl KmsService {
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let source_ec_aad = canonical_encryption_context(&body["SourceEncryptionContext"])?;
         let dest_ec_aad = canonical_encryption_context(&body["DestinationEncryptionContext"])?;
-        let decoded = decode_ciphertext_envelope(state, ciphertext_b64, &source_ec_aad)?;
+        let decoded =
+            decode_ciphertext_envelope(state, &req.region, ciphertext_b64, &source_ec_aad)?;
 
         let dest_resolved = Self::resolve_key_id_with_state(state, &req.region, dest_key_id)
             .ok_or_else(|| {
@@ -324,11 +323,8 @@ impl KmsService {
         })?;
         // ReEncrypt is authorized as `kms:ReEncryptFrom` on the source key
         // and `kms:ReEncryptTo` on the destination key.
-        let source_key = decoded
-            .source_arn
-            .rsplit('/')
-            .next()
-            .and_then(|id| state.keys.get(id));
+        let source_key =
+            crate::hook::stored_key(state, "", &decoded.source_arn).map(|(_, key)| key);
         let same_key = if source_key.is_some_and(|k| k.key_id == dest_key.key_id) {
             "true"
         } else {
@@ -371,10 +367,8 @@ impl KmsService {
 
         // Source key gate too — AWS rejects ReEncrypt when either side
         // is in a non-Enabled state.
-        if let Some(src_key_id) = decoded.source_arn.rsplit('/').next() {
-            if let Some(source_key) = state.keys.get(src_key_id) {
-                require_usable_key_state(source_key)?;
-            }
+        if let Some(source_key) = source_key {
+            require_usable_key_state(source_key)?;
         }
 
         let plaintext_bytes = base64::engine::general_purpose::STANDARD

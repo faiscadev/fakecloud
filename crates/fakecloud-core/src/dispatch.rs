@@ -2162,7 +2162,9 @@ fn authorize_internal_caller(
 /// A grant naming the caller itself authorizes it without an identity
 /// policy, in the key's account or another, but never past the caller's SCP
 /// ceiling; a grant naming the role of an assumed-role session is also
-/// capped by the session's session policies. One naming the caller's account
+/// capped by the role's permissions boundary and the session's session
+/// policies (a grant naming the user or session itself is not). One naming
+/// the caller's account
 /// only lets the account delegate, so the caller's identity policies (with
 /// their boundary, session and SCP gates) must also allow the action.
 #[allow(clippy::too_many_arguments)]
@@ -2182,10 +2184,10 @@ fn grant_authorizes(
     };
     match provider.grant_authorization(service, request, action, principal) {
         Some(crate::auth::GrantAuthorization::Grantee) => evaluator
-            .evaluate_ceiling(principal, action, context, &[], scps)
+            .evaluate_ceiling(principal, action, context, &[], scps, false)
             .is_allow(),
         Some(crate::auth::GrantAuthorization::GranteeRole) => evaluator
-            .evaluate_ceiling(principal, action, context, session_policies, scps)
+            .evaluate_ceiling(principal, action, context, session_policies, scps, true)
             .is_allow(),
         Some(crate::auth::GrantAuthorization::Account) => evaluator
             .evaluate(principal, action, context, session_policies, scps)
@@ -2818,6 +2820,7 @@ mod tests {
         identity: crate::auth::IamDecision,
         scp_allows: bool,
         session_allows: bool,
+        boundary_allows: bool,
     }
 
     impl IamPolicyEvaluator for IdentityOnly {
@@ -2839,10 +2842,12 @@ mod tests {
             _: &ConditionContext,
             session_policies: &[String],
             scps: Option<&[String]>,
+            with_boundary: bool,
         ) -> crate::auth::IamDecision {
             let scp_ok = scps.is_none() || self.scp_allows;
             let session_ok = session_policies.is_empty() || self.session_allows;
-            if scp_ok && session_ok {
+            let boundary_ok = !with_boundary || self.boundary_allows;
+            if scp_ok && session_ok && boundary_ok {
                 crate::auth::IamDecision::Allow
             } else {
                 crate::auth::IamDecision::ImplicitDeny
@@ -2942,6 +2947,7 @@ mod tests {
             identity,
             scp_allows: true,
             session_allows: true,
+            boundary_allows: true,
         };
         let authorizes =
             |grant, identity, provided| check(grant, open(identity), provided, &[], None);
@@ -2960,6 +2966,7 @@ mod tests {
             identity: IamDecision::ImplicitDeny,
             scp_allows: false,
             session_allows: true,
+            boundary_allows: true,
         };
         for grant in [grantee, role] {
             assert!(!check(grant, scp_denies(), true, &[], Some(&scps)));
@@ -2970,9 +2977,20 @@ mod tests {
             identity: IamDecision::ImplicitDeny,
             scp_allows: true,
             session_allows: false,
+            boundary_allows: true,
         };
         assert!(!check(role, session_denies(), true, &session, None));
         assert!(check(grantee, session_denies(), true, &session, None));
+        // So does the role's permissions boundary; a grant naming the user
+        // or session itself is not capped by a boundary.
+        let boundary_denies = || IdentityOnly {
+            identity: IamDecision::ImplicitDeny,
+            scp_allows: true,
+            session_allows: true,
+            boundary_allows: false,
+        };
+        assert!(!check(role, boundary_denies(), true, &[], None));
+        assert!(check(grantee, boundary_denies(), true, &[], None));
     }
 
     #[test]

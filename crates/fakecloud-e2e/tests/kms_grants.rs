@@ -525,6 +525,260 @@ async fn session_policies_cap_a_grant_to_the_role() {
         .expect("a grant to the session itself");
 }
 
+/// A role `name` of account A that A's root may assume, with `boundary` (a
+/// managed policy ARN) as its permissions boundary; its ARN.
+async fn role_in_a(iam: &aws_sdk_iam::Client, name: &str, boundary: Option<&str>) -> String {
+    let mut req = iam
+        .create_role()
+        .role_name(name)
+        .assume_role_policy_document(format!(
+            r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{ACCOUNT_A}:root"}},"Action":"sts:AssumeRole"}}]}}"#
+        ));
+    if let Some(boundary) = boundary {
+        req = req.permissions_boundary(boundary);
+    }
+    req.send().await.unwrap().role().unwrap().arn().to_string()
+}
+
+/// A KMS client signed with a fresh session of `role_arn`, assumed with
+/// `admin_cfg`'s credentials, and the session's ARN.
+async fn session_of(
+    server: &TestServer,
+    admin_cfg: &aws_config::SdkConfig,
+    role_arn: &str,
+) -> (String, KmsClient) {
+    let out = aws_sdk_sts::Client::new(admin_cfg)
+        .assume_role()
+        .role_arn(role_arn)
+        .role_session_name("bounded")
+        .send()
+        .await
+        .unwrap();
+    let creds = out.credentials().unwrap();
+    let cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(
+            creds.access_key_id(),
+            creds.secret_access_key(),
+            Some(creds.session_token().to_string()),
+            None,
+            "kms-grants-boundary",
+        ))
+        .load()
+        .await;
+    (
+        out.assumed_role_user().unwrap().arn().to_string(),
+        KmsClient::new(&cfg),
+    )
+}
+
+/// A grant to a role is capped by the role's permissions boundary, as a
+/// grant naming the role's session, or an IAM user, is not.
+#[tokio::test]
+async fn a_roles_permissions_boundary_caps_a_grant_to_the_role() {
+    let server = start().await;
+    let (admin_cfg, owner) = admin(&server, ACCOUNT_A).await;
+    let key = create_key(&owner, None).await;
+    let iam = aws_sdk_iam::Client::new(&admin_cfg);
+    let boundary = iam
+        .create_policy()
+        .policy_name("S3Only")
+        .policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap()
+        .policy()
+        .unwrap()
+        .arn()
+        .unwrap()
+        .to_string();
+
+    let open_role = role_in_a(&iam, "unbounded-role", None).await;
+    grant(&owner, &key, &open_role, &[GrantOperation::Encrypt], None).await;
+    let (_, open) = session_of(&server, &admin_cfg, &open_role).await;
+    encrypt(&open, &key, None)
+        .await
+        .expect("no boundary: the grant to the role stands");
+
+    let bounded_role = role_in_a(&iam, "bounded-role", Some(&boundary)).await;
+    grant(
+        &owner,
+        &key,
+        &bounded_role,
+        &[GrantOperation::Encrypt],
+        None,
+    )
+    .await;
+    let (session_arn, bounded) = session_of(&server, &admin_cfg, &bounded_role).await;
+    denied(
+        encrypt(&bounded, &key, None).await,
+        "the role's boundary (s3 only) caps the grant to the role",
+    );
+    grant(&owner, &key, &session_arn, &[GrantOperation::Encrypt], None).await;
+    encrypt(&bounded, &key, None)
+        .await
+        .expect("a grant to the session itself is not capped by the boundary");
+
+    // A grant naming an IAM user is not capped by the user's boundary.
+    let (user_arn, user_kms) = user(&server, &admin_cfg, "bounded-user", None).await;
+    iam.put_user_permissions_boundary()
+        .user_name("bounded-user")
+        .permissions_boundary(&boundary)
+        .send()
+        .await
+        .unwrap();
+    grant(&owner, &key, &user_arn, &[GrantOperation::Encrypt], None).await;
+    encrypt(&user_kms, &key, None)
+        .await
+        .expect("a grant to the user itself");
+}
+
+/// Each key of a multi-Region set has its own grants: a key id names the
+/// key in the request's region, and a multi-Region ciphertext is decrypted
+/// by the related key of the Decrypt call's region, under that key's grants.
+#[tokio::test]
+async fn multi_region_grants_follow_the_region_of_the_call() {
+    let server = start().await;
+    let (admin_akid, admin_secret) = server.create_admin(ACCOUNT_A, "admin-mr").await;
+    let in_region = |akid: String, secret: String, region: &'static str| {
+        let endpoint = server.endpoint().to_string();
+        async move {
+            let cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .endpoint_url(endpoint)
+                .region(aws_config::Region::new(region))
+                .credentials_provider(Credentials::new(akid, secret, None, None, "kms-mr"))
+                .load()
+                .await;
+            (KmsClient::new(&cfg), cfg)
+        }
+    };
+    let (owner_east, admin_cfg) =
+        in_region(admin_akid.clone(), admin_secret.clone(), "us-east-1").await;
+    let (owner_west, _) = in_region(admin_akid, admin_secret, "us-west-2").await;
+    let iam = aws_sdk_iam::Client::new(&admin_cfg);
+    let grantee_arn = iam
+        .create_user()
+        .user_name("mr-grantee")
+        .send()
+        .await
+        .unwrap()
+        .user()
+        .unwrap()
+        .arn()
+        .to_string();
+    let keys = iam
+        .create_access_key()
+        .user_name("mr-grantee")
+        .send()
+        .await
+        .unwrap()
+        .access_key()
+        .unwrap()
+        .clone();
+    let (grantee_east, _) = in_region(
+        keys.access_key_id().to_string(),
+        keys.secret_access_key().to_string(),
+        "us-east-1",
+    )
+    .await;
+    let (grantee_west, _) = in_region(
+        keys.access_key_id().to_string(),
+        keys.secret_access_key().to_string(),
+        "us-west-2",
+    )
+    .await;
+
+    let key_id = owner_east
+        .create_key()
+        .multi_region(true)
+        .send()
+        .await
+        .unwrap()
+        .key_metadata()
+        .unwrap()
+        .key_id()
+        .to_string();
+    owner_east
+        .replicate_key()
+        .key_id(&key_id)
+        .replica_region("us-west-2")
+        .send()
+        .await
+        .unwrap();
+    // Sealed through the replica, by its bare id in its region.
+    let sealed = encrypt(&owner_west, &key_id, None).await.unwrap();
+    assert!(sealed.key_id().unwrap().contains(":us-west-2:"));
+    let blob = sealed.ciphertext_blob().unwrap().clone();
+    // A grant made with the bare id in us-west-2 is the replica's.
+    grant(
+        &owner_west,
+        &key_id,
+        &grantee_arn,
+        &[GrantOperation::Decrypt],
+        None,
+    )
+    .await;
+    let opened = decrypt(&grantee_west, &blob, None)
+        .await
+        .expect("decrypt in the replica's region under the replica's grant");
+    assert!(opened.key_id().unwrap().contains(":us-west-2:"));
+    denied(
+        decrypt(&grantee_east, &blob, None).await,
+        "the primary has no grant: decrypt in its region is refused",
+    );
+    // A grant on the primary covers the primary's region only.
+    let primary_only = "mr-primary-only";
+    let other = iam
+        .create_user()
+        .user_name(primary_only)
+        .send()
+        .await
+        .unwrap()
+        .user()
+        .unwrap()
+        .arn()
+        .to_string();
+    let other_keys = iam
+        .create_access_key()
+        .user_name(primary_only)
+        .send()
+        .await
+        .unwrap()
+        .access_key()
+        .unwrap()
+        .clone();
+    grant(
+        &owner_east,
+        &key_id,
+        &other,
+        &[GrantOperation::Decrypt],
+        None,
+    )
+    .await;
+    let (other_east, _) = in_region(
+        other_keys.access_key_id().to_string(),
+        other_keys.secret_access_key().to_string(),
+        "us-east-1",
+    )
+    .await;
+    let (other_west, _) = in_region(
+        other_keys.access_key_id().to_string(),
+        other_keys.secret_access_key().to_string(),
+        "us-west-2",
+    )
+    .await;
+    decrypt(&other_east, &blob, None)
+        .await
+        .expect("the primary's grant, in the primary's region");
+    denied(
+        decrypt(&other_west, &blob, None).await,
+        "the primary's grant does not cover the replica",
+    );
+}
+
 /// Encryption-context constraints are refused on a grant whose operations
 /// include one that takes no encryption context.
 #[tokio::test]

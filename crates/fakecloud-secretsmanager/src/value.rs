@@ -251,8 +251,9 @@ fn open_stored(
     if !hook.is_ciphertext(account_id, stored) {
         return Ok(None);
     }
-    hook.decrypt(
+    hook.decrypt_in_region(
         account_id,
+        fakecloud_aws::arn::region_of(secret_arn).unwrap_or_default(),
         stored,
         fakecloud_core::delivery::KmsCaller::via_for("secretsmanager.amazonaws.com", caller_arn),
         secret_encryption_context(secret_arn, version_id),

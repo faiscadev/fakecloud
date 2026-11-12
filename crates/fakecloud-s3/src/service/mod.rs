@@ -746,8 +746,12 @@ impl S3Service {
         let key = kms_key_id.filter(|k| !k.is_empty()).unwrap_or("aws/s3");
         let key_account = kms_reference_account(key).unwrap_or(account_id);
         let ctx = crate::side_effects::s3_encryption_context(bucket, object_key, bucket_key);
-        hook.decrypt(
+        // The bucket's key is in the bucket's region: the region its ARN
+        // names, else the request's.
+        let region = fakecloud_aws::arn::region_of(key).unwrap_or(&req.region);
+        hook.decrypt_in_region(
             key_account,
+            region,
             envelope,
             fakecloud_core::delivery::KmsCaller::via_for(
                 "s3.amazonaws.com",

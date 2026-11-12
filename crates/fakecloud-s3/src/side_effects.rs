@@ -197,8 +197,10 @@ pub(crate) fn kms_decrypt(
     };
     let key = kms_key_id.filter(|k| !k.is_empty()).unwrap_or("aws/s3");
     let key_account = crate::service::kms_reference_account(key).unwrap_or(account_id);
-    hook.decrypt(
+    // The object's key, in the bucket's region, which its ARN names.
+    hook.decrypt_in_region(
         key_account,
+        fakecloud_aws::arn::region_of(key).unwrap_or_default(),
         envelope,
         fakecloud_core::delivery::KmsCaller::via_for("s3.amazonaws.com", caller_arn),
         s3_encryption_context(bucket, object_key, bucket_key),

@@ -507,16 +507,18 @@ pub fn evaluate_with_gates_and_scps(
     intersect_layers(identity_decision, boundary, session, scps, request)
 }
 
-/// Evaluate only the SCP and session-policy ceilings for `request`, as for a
-/// permission that does not come from an identity policy (a KMS grant naming
-/// the caller): `Allow` when every present layer allows (so with neither
-/// layer the permission stands), `ExplicitDeny` when either denies.
+/// Evaluate only the permissions-boundary, session-policy and SCP ceilings
+/// for `request`, as for a permission that does not come from an identity
+/// policy (a KMS grant naming the caller): `Allow` when every present layer
+/// allows (so with no layer the permission stands), `ExplicitDeny` when any
+/// denies.
 pub fn evaluate_ceiling(
+    boundary: Option<&[PolicyDocument]>,
     session: Option<&[PolicyDocument]>,
     scps: Option<&[PolicyDocument]>,
     request: &EvalRequest<'_>,
 ) -> Decision {
-    intersect_layers(Decision::Allow, None, session, scps, request)
+    intersect_layers(Decision::Allow, boundary, session, scps, request)
 }
 
 /// Combine an already-computed identity-side decision with the optional
