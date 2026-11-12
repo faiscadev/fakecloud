@@ -5406,6 +5406,39 @@ fn re_encrypt_and_decrypt_authorize_the_keys_they_use() {
     assert!(!to.contains_key("kms:encryptioncontext:s"));
 }
 
+/// Every `CreateGrant` recorded against KMS
+/// (`tests/fixtures/create-grant/refusals.txt`) is answered with the
+/// recorded status, code and message: the principal and `SourceArn`
+/// refusals come before the key lookup, so the recordings made against a
+/// missing key replay as they were.
+#[test]
+fn create_grant_refusals_match_the_recordings() {
+    let svc = make_service();
+    let recording = include_str!("../tests/fixtures/create-grant/refusals.txt");
+    let mut cases = 0;
+    for block in recording.split("== ").filter(|b| !b.trim().is_empty()) {
+        let mut lines = block.lines();
+        let name = lines.next().unwrap().trim();
+        let request = lines.next().unwrap().strip_prefix("Request: ").unwrap();
+        let status = lines.next().unwrap().strip_prefix("HTTP ").unwrap();
+        let (status, code) = status.split_once(' ').unwrap();
+        let message = lines.next().unwrap();
+        let mut body: Value = serde_json::from_str(request).unwrap();
+        body["KeyId"] =
+            json!("arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000");
+        body["Operations"] = json!(["Decrypt"]);
+        let err = svc
+            .create_grant(&make_request("CreateGrant", body))
+            .err()
+            .unwrap_or_else(|| panic!("{name}: accepted"));
+        assert_eq!(err.status().as_str(), status, "{name}");
+        assert_eq!(err.code(), code, "{name}");
+        assert_eq!(err.message(), message, "{name}");
+        cases += 1;
+    }
+    assert_eq!(cases, 9);
+}
+
 /// `CreateGrant` takes exactly one of `GranteePrincipal` and
 /// `GranteeServicePrincipal`, at most one retiring principal of either kind,
 /// and a grant to a service principal needs a `SourceArn` constraint and a
@@ -5559,7 +5592,7 @@ fn create_grant_refuses_context_constraints_on_operations_without_a_context() {
     create(
         &symmetric,
         json!(["Sign"]),
-        json!({"SourceArn": "arn:aws:s3:::bucket"}),
+        json!({"SourceArn": "arn:aws:sqs:us-east-1:123456789012:queue"}),
     )
     .expect("SourceArn constraint");
     // Constraints on an asymmetric key are refused whatever the operations.
