@@ -2204,6 +2204,43 @@ fn role_arn_deny_reaches_sessions() {
     );
 }
 
+/// The resource-policy-only evaluation used outside dispatch (trust
+/// policies, bus policies) applies a statement naming the caller's role to
+/// the session, Allow and Deny alike.
+#[test]
+fn resource_policy_for_role_applies_role_statements_to_sessions() {
+    const ROLE: &str = "arn:aws:iam::123456789012:role/team/app";
+    let session = principal_assumed_role("arn:aws:sts::123456789012:assumed-role/app/s1");
+    let r = req(
+        &session,
+        "sts:AssumeRole",
+        "arn:aws:iam::123456789012:role/target",
+    );
+    let allow = doc(json!({"Statement": [{
+        "Effect": "Allow", "Principal": {"AWS": ROLE}, "Action": "sts:AssumeRole"
+    }]}));
+    let deny = doc(json!({"Statement": [
+        {"Effect": "Allow", "Principal": {"AWS": "*"}, "Action": "sts:AssumeRole"},
+        {"Effect": "Deny", "Principal": {"AWS": ROLE}, "Action": "sts:AssumeRole"}
+    ]}));
+    assert_eq!(
+        evaluate_resource_policy_for_role(&allow, Some(ROLE), &r),
+        Decision::Allow
+    );
+    assert_eq!(
+        evaluate_resource_policy_for_role(&allow, None, &r),
+        Decision::ImplicitDeny
+    );
+    assert_eq!(
+        evaluate_resource_policy_for_role(&deny, Some(ROLE), &r),
+        Decision::ExplicitDeny
+    );
+    assert_eq!(
+        evaluate_resource_policy_for_role(&deny, None, &r),
+        Decision::Allow
+    );
+}
+
 /// A KMS key policy naming the role is a direct grant to its sessions, but
 /// one the role's boundary and the session's policies limit.
 #[test]

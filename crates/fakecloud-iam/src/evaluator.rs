@@ -782,11 +782,11 @@ pub fn evaluate_with_resource_policy_for_role(
     }
     let identity_allows = matches!(identity_gated, Decision::Allow);
     let allowed = if same_account {
-        identity_allows || resource.grants(false, role_ceiling_allows)
+        identity_allows || resource.grants(role_ceiling_allows)
     } else {
         // The caller's boundary and session policies already cap the
         // identity side, which must allow as well.
-        identity_allows && resource.grants(false, true)
+        identity_allows && resource.grants(true)
     };
     if allowed {
         Decision::Allow
@@ -795,72 +795,154 @@ pub fn evaluate_with_resource_policy_for_role(
     }
 }
 
-/// A resource policy's decisions on a request, for the calling principal and,
-/// for an assumed-role session, for the role it assumed (named by its IAM
-/// ARN): each with every principal entry matching, and with the account-wide
-/// entries (`"AWS": "*"`, the account root) left out (`specific`).
-struct ResourcePolicyDecision {
-    caller: Decision,
-    caller_specific: Decision,
-    role: Decision,
-    role_specific: Decision,
+/// Evaluate a resource policy alone (as [`evaluate_resource_policy_only`])
+/// for a caller that may be an assumed-role session of the role `role_arn`
+/// (its IAM ARN, path included): a statement naming the role applies to the
+/// session as one naming the session does. Every resource policy evaluated
+/// for a calling identity goes through this, so a policy naming a role
+/// grants (or denies) its sessions everywhere.
+pub fn evaluate_resource_policy_for_role(
+    policy: &PolicyDocument,
+    role_arn: Option<&str>,
+    request: &EvalRequest<'_>,
+) -> Decision {
+    let decision = ResourcePolicyDecision::new(policy, role_arn, request);
+    if decision.either_is(Decision::ExplicitDeny) {
+        Decision::ExplicitDeny
+    } else if decision.either_is(Decision::Allow) {
+        Decision::Allow
+    } else {
+        Decision::ImplicitDeny
+    }
 }
 
-impl ResourcePolicyDecision {
-    fn new(policy: &PolicyDocument, role_arn: Option<&str>, request: &EvalRequest<'_>) -> Self {
-        let policies = std::slice::from_ref(policy);
-        let caller = evaluate_inner_scoped(policies, request, true, false);
-        let caller_specific = evaluate_inner_scoped(policies, request, true, true);
-        let (role, role_specific) = match role_arn {
-            Some(role_arn) => {
-                // The role, as the principal a statement naming it matches.
-                // Its type is left unknown so that it matches no service or
-                // federated principal.
-                let role = Principal {
-                    arn: role_arn.to_string(),
-                    user_id: request.principal.user_id.clone(),
-                    account_id: request.principal.account_id.clone(),
-                    principal_type: PrincipalType::Unknown,
-                    source_identity: None,
-                    tags: request.principal.tags.clone(),
-                };
-                let as_role = EvalRequest {
-                    principal: &role,
-                    action: request.action.clone(),
-                    resource: request.resource.clone(),
-                    context: request.context.clone(),
-                };
-                (
-                    evaluate_inner_scoped(policies, &as_role, true, false),
-                    evaluate_inner_scoped(policies, &as_role, true, true),
-                )
-            }
-            None => (Decision::ImplicitDeny, Decision::ImplicitDeny),
-        };
-        Self {
-            caller,
-            caller_specific,
+/// For an assumed-role session `principal` of an account whose IAM state is
+/// `state`, the IAM ARN (path included) of the role it assumed: what a
+/// resource policy names to grant the role's sessions, and the session's
+/// `aws:PrincipalArn`.
+pub fn session_role_arn(state: &IamState, principal: &Principal) -> Option<String> {
+    if principal.principal_type != PrincipalType::AssumedRole {
+        return None;
+    }
+    let name = role_name_from_assumed_role_arn(&principal.arn)?;
+    state.roles.get(name).map(|role| role.arn.clone())
+}
+
+/// [`session_role_arn`] as a function over the shared IAM state, for
+/// services that evaluate resource policies themselves (EventBridge bus
+/// policies) without access to IAM's state.
+pub type SessionRoleResolver = std::sync::Arc<dyn Fn(&Principal) -> Option<String> + Send + Sync>;
+
+/// The [`SessionRoleResolver`] over `state`.
+pub fn session_role_resolver(state: crate::state::SharedIamState) -> SessionRoleResolver {
+    std::sync::Arc::new(move |principal: &Principal| {
+        let accounts = state.read();
+        session_role_arn(accounts.get(&principal.account_id)?, principal)
+    })
+}
+
+/// A resource policy's decisions on a request, for the calling principal
+/// and, for an assumed-role session, for the role it assumed (named by its
+/// IAM ARN). The role is evaluated only when the policy can tell it apart
+/// from the session: it names the role, or has a `NotPrincipal` statement.
+/// Otherwise only account-wide entries could match the role, and those
+/// match the session alike.
+struct ResourcePolicyDecision<'p, 'r, 'a> {
+    policy: &'p PolicyDocument,
+    request: &'r EvalRequest<'a>,
+    role: Option<Principal>,
+    caller: Decision,
+    role_decision: Decision,
+}
+
+impl<'p, 'r, 'a> ResourcePolicyDecision<'p, 'r, 'a> {
+    fn new(
+        policy: &'p PolicyDocument,
+        role_arn: Option<&str>,
+        request: &'r EvalRequest<'a>,
+    ) -> Self {
+        // The role, as the principal a statement naming it matches. Its
+        // type is left unknown so that it matches no service or federated
+        // principal.
+        let role = role_arn
+            .filter(|arn| policy_distinguishes_role(policy, arn))
+            .map(|arn| Principal {
+                arn: arn.to_string(),
+                user_id: request.principal.user_id.clone(),
+                account_id: request.principal.account_id.clone(),
+                principal_type: PrincipalType::Unknown,
+                source_identity: None,
+                tags: request.principal.tags.clone(),
+            });
+        let mut decision = Self {
+            policy,
+            request,
             role,
-            role_specific,
-        }
+            caller: Decision::ImplicitDeny,
+            role_decision: Decision::ImplicitDeny,
+        };
+        decision.caller = decision.evaluate_caller(false);
+        decision.role_decision = decision.evaluate_role(false);
+        decision
+    }
+
+    fn evaluate_caller(&self, specific: bool) -> Decision {
+        evaluate_inner_scoped(
+            std::slice::from_ref(self.policy),
+            self.request,
+            true,
+            specific,
+        )
+    }
+
+    /// The decision for the role (`ImplicitDeny` when it is not evaluated);
+    /// `specific` leaves out the account-wide entries (`"AWS": "*"`, the
+    /// account root).
+    fn evaluate_role(&self, specific: bool) -> Decision {
+        let Some(role) = self.role.as_ref() else {
+            return Decision::ImplicitDeny;
+        };
+        let as_role = EvalRequest {
+            principal: role,
+            action: self.request.action.clone(),
+            resource: self.request.resource.clone(),
+            context: self.request.context.clone(),
+        };
+        evaluate_inner_scoped(std::slice::from_ref(self.policy), &as_role, true, specific)
     }
 
     /// Whether the caller's or the role's decision is `decision`.
     fn either_is(&self, decision: Decision) -> bool {
-        self.caller == decision || self.role == decision
+        self.caller == decision || self.role_decision == decision
     }
 
     /// Whether the policy grants the request: to the caller itself, or to its
     /// role when what limits a grant to the role (`role_ceiling_allows`)
     /// allows.
-    fn grants(&self, specific: bool, role_ceiling_allows: bool) -> bool {
-        let (caller, role) = if specific {
-            (self.caller_specific, self.role_specific)
-        } else {
-            (self.caller, self.role)
-        };
-        caller == Decision::Allow || (role_ceiling_allows && role == Decision::Allow)
+    fn grants(&self, role_ceiling_allows: bool) -> bool {
+        self.caller == Decision::Allow
+            || (role_ceiling_allows && self.role_decision == Decision::Allow)
     }
+
+    /// As [`Self::grants`], counting only entries naming the caller or its
+    /// role, not its whole account (a KMS key policy's direct grant).
+    fn grants_specifically(&self, role_ceiling_allows: bool) -> bool {
+        self.evaluate_caller(true) == Decision::Allow
+            || (role_ceiling_allows && self.evaluate_role(true) == Decision::Allow)
+    }
+}
+
+/// Whether evaluating `policy` for the role `role_arn` can differ from
+/// evaluating it for one of the role's sessions: a statement names the role,
+/// or excludes principals with `NotPrincipal`.
+fn policy_distinguishes_role(policy: &PolicyDocument, role_arn: &str) -> bool {
+    policy.statements.iter().any(|s| match &s.principal {
+        PrincipalPattern::NotPrincipal(_) => true,
+        PrincipalPattern::Principal(refs) => refs
+            .iter()
+            .any(|r| matches!(r, PrincipalRef::AwsArn(arn) if arn == role_arn)),
+        PrincipalPattern::None => false,
+    })
 }
 
 /// Same-account KMS authorization. The key policy is the root of trust:
@@ -879,11 +961,11 @@ impl ResourcePolicyDecision {
 ///
 /// The caller's SCPs were applied before: none of these reaches past them.
 fn evaluate_kms_same_account(
-    key_policy: &ResourcePolicyDecision,
+    key_policy: &ResourcePolicyDecision<'_, '_, '_>,
     identity_gated: Decision,
     role_ceiling_allows: bool,
 ) -> Decision {
-    if key_policy.grants(true, role_ceiling_allows) {
+    if key_policy.grants_specifically(role_ceiling_allows) {
         return Decision::Allow;
     }
     // A non-direct key-policy Allow is the account-root delegation to IAM:

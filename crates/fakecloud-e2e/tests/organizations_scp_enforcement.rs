@@ -497,10 +497,19 @@ fn read_grant(bucket: &str, principals: &[&str]) -> serde_json::Value {
     })
 }
 
-fn assert_access_denied<E: std::fmt::Debug>(result: Result<impl std::fmt::Debug, E>, what: &str) {
+/// Assert `result` is fakecloud's IAM refusal (`AccessDeniedException`)
+/// whose message names the SCP the way AWS does (`reason`).
+fn assert_scp_denied<E>(result: Result<impl std::fmt::Debug, E>, reason: &str, what: &str)
+where
+    E: aws_sdk_s3::error::ProvideErrorMetadata + std::fmt::Debug,
+{
     let err = result.expect_err(what);
-    let msg = format!("{err:?}");
-    assert!(msg.contains("AccessDenied"), "{what}: {msg}");
+    assert_eq!(err.code(), Some("AccessDeniedException"), "{what}: {err:?}");
+    let message = err.message().unwrap_or_default();
+    assert!(
+        message.starts_with("User: ") && message.contains(&format!(" {reason}")),
+        "{what}: {message}"
+    );
 }
 
 const SCP_DENY_GRANTED_ACTIONS: &str = r#"{"Version":"2012-10-17","Statement":[
@@ -642,6 +651,13 @@ async fn scp_caps_resource_policy_grants_to_member_principals() {
     )
     .await;
     for ceiling in ["explicit deny", "allow-list"] {
+        let reason = |action: &str| {
+            if ceiling == "allow-list" {
+                format!("because no service control policy allows the {action} action")
+            } else {
+                "with an explicit deny in a service control policy".to_string()
+            }
+        };
         if ceiling == "allow-list" {
             detach_root_scp(&orgs, &root_id, &deny).await;
             detach_root_scp(&orgs, &root_id, "p-FullAWSAccess").await;
@@ -653,20 +669,24 @@ async fn scp_caps_resource_policy_grants_to_member_principals() {
             )
             .await;
         }
-        assert_access_denied(
+        assert_scp_denied(
             b_reads_a().await,
+            &reason("s3:GetObject"),
             &format!("{ceiling}: cross-account bucket read"),
         );
-        assert_access_denied(
+        assert_scp_denied(
             encrypt(&b_cfg, &a_key_arn).await,
+            &reason("kms:Encrypt"),
             &format!("{ceiling}: cross-account key use"),
         );
-        assert_access_denied(
+        assert_scp_denied(
             reader_reads_b().await,
+            &reason("s3:GetObject"),
             &format!("{ceiling}: same-account bucket read"),
         );
-        assert_access_denied(
+        assert_scp_denied(
             encrypt(&reader_cfg, &b_key_arn).await,
+            &reason("kms:Encrypt"),
             &format!("{ceiling}: same-account key use"),
         );
 
@@ -688,19 +708,21 @@ async fn scp_caps_resource_policy_grants_to_member_principals() {
     }
 }
 
-/// Root credentials for `account`, minted by the management account's
-/// admin through `sts:AssumeRoot` (centralized root access).
+/// Root credentials for the member `account`, minted by the management
+/// account's admin through `sts:AssumeRoot` (centralized root access) and
+/// scoped by AWS to the root-task policy `task_policy`.
 async fn root_session(
     server: &TestServer,
     management: &aws_config::SdkConfig,
     account: &str,
+    task_policy: &str,
 ) -> aws_config::SdkConfig {
     let creds = StsClient::new(management)
         .assume_root()
         .target_principal(account)
         .task_policy_arn(
             aws_sdk_sts::types::PolicyDescriptorType::builder()
-                .arn("arn:aws:iam::aws:policy/root-task/SQSUnlockQueuePolicy")
+                .arn(format!("arn:aws:iam::aws:policy/root-task/{task_policy}"))
                 .build(),
         )
         .send()
@@ -721,21 +743,25 @@ async fn root_session(
         .await
 }
 
-/// SCPs restrict a member account's root user: in its own account, and in
-/// another account whose bucket policy grants it. The management account's
-/// root is not restricted.
+/// SCPs restrict a member account's root user. Each privileged root session
+/// is used only for actions its root-task policy allows on AWS
+/// (`SQSUnlockQueuePolicy`: reading a queue's attributes;
+/// `S3UnlockBucketPolicy`: reading a bucket's policy), so what changes once
+/// an SCP is attached is due to the SCP alone. (The cross-account root path
+/// is covered by the dispatch unit tests: no root-task policy allows using
+/// another account's resource.)
 #[tokio::test]
 async fn scp_caps_member_account_root() {
     let server = start().await;
-    let (root_id, a_cfg, _b_cfg) = org_with_member(&server).await;
+    let (root_id, a_cfg, b_cfg) = org_with_member(&server).await;
     IamClient::new(&a_cfg)
         .enable_organizations_root_sessions()
         .send()
         .await
         .unwrap();
-    let b_root = root_session(&server, &a_cfg, ACCOUNT_B).await;
-    let a_root = root_session(&server, &a_cfg, ACCOUNT_A).await;
-    let caller = StsClient::new(&b_root)
+    let sqs_root = root_session(&server, &a_cfg, ACCOUNT_B, "SQSUnlockQueuePolicy").await;
+    let s3_root = root_session(&server, &a_cfg, ACCOUNT_B, "S3UnlockBucketPolicy").await;
+    let caller = StsClient::new(&sqs_root)
         .get_caller_identity()
         .send()
         .await
@@ -745,63 +771,219 @@ async fn scp_caps_member_account_root() {
         Some(format!("arn:aws:iam::{ACCOUNT_B}:root").as_str())
     );
 
-    // A's bucket grants B's root.
+    // B's queue and bucket (with a policy to read back).
+    let queue_url = SqsClient::new(&b_cfg)
+        .create_queue()
+        .queue_name("scp-b-root-queue")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
     seed_bucket(
-        &path_style_s3(&a_cfg),
-        "scp-a-root-shared",
+        &path_style_s3(&b_cfg),
+        "scp-b-root-bucket",
         read_grant(
-            "scp-a-root-shared",
-            &[&format!("arn:aws:iam::{ACCOUNT_B}:root")],
+            "scp-b-root-bucket",
+            &[&format!("arn:aws:iam::{ACCOUNT_B}:user/admin-b")],
         ),
     )
     .await;
-    let b_root_reads_a = || async {
-        path_style_s3(&b_root)
-            .get_object()
-            .bucket("scp-a-root-shared")
-            .key("k")
+    let read_queue = || async {
+        SqsClient::new(&sqs_root)
+            .get_queue_attributes()
+            .queue_url(&queue_url)
+            .attribute_names(aws_sdk_sqs::types::QueueAttributeName::All)
             .send()
             .await
     };
-    let create_queue = |cfg: &aws_config::SdkConfig, name: &'static str| {
-        let sqs = SqsClient::new(cfg);
-        async move { sqs.create_queue().queue_name(name).send().await }
+    let read_bucket_policy = || async {
+        path_style_s3(&s3_root)
+            .get_bucket_policy()
+            .bucket("scp-b-root-bucket")
+            .send()
+            .await
     };
 
-    b_root_reads_a()
-        .await
-        .expect("A's bucket policy grants B's root");
-    create_queue(&b_root, "b-root-before")
+    read_queue()
         .await
         .expect("root needs no identity policy in its own account");
+    read_bucket_policy()
+        .await
+        .expect("root needs no identity policy in its own account");
+
+    let orgs = OrgsClient::new(&a_cfg);
+    let deny = attach_root_scp(
+        &orgs,
+        &root_id,
+        "DenyRootTasks",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"*","Resource":"*"},
+            {"Effect":"Deny","Action":["sqs:GetQueueAttributes","s3:GetBucketPolicy"],"Resource":"*"}
+        ]}"#,
+    )
+    .await;
+    assert_scp_denied(
+        read_queue().await,
+        "with an explicit deny in a service control policy",
+        "member root reading its queue",
+    );
+    assert_scp_denied(
+        read_bucket_policy().await,
+        "with an explicit deny in a service control policy",
+        "member root reading its bucket policy",
+    );
+
+    // An allow-list SCP that leaves the actions out refuses them as well.
+    detach_root_scp(&orgs, &root_id, &deny).await;
+    detach_root_scp(&orgs, &root_id, "p-FullAWSAccess").await;
+    attach_root_scp(
+        &orgs,
+        &root_id,
+        "AllowAllButRootTasks",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","NotAction":["sqs:GetQueueAttributes","s3:GetBucketPolicy"],"Resource":"*"}
+        ]}"#,
+    )
+    .await;
+    assert_scp_denied(
+        read_queue().await,
+        "because no service control policy allows the sqs:GetQueueAttributes action",
+        "member root reading its queue",
+    );
+    assert_scp_denied(
+        read_bucket_policy().await,
+        "because no service control policy allows the s3:GetBucketPolicy action",
+        "member root reading its bucket policy",
+    );
+}
+
+/// Create role `name` (under `path`) in `cfg`'s account, trusted by the
+/// account and with `policy` inline when given, and return a session of it
+/// assumed by `cfg`'s admin together with the role's ARN.
+async fn role_session(
+    server: &TestServer,
+    cfg: &aws_config::SdkConfig,
+    account: &str,
+    path: &str,
+    name: &str,
+    policy: Option<&str>,
+) -> (aws_config::SdkConfig, String) {
+    let iam = IamClient::new(cfg);
+    let role_arn = iam
+        .create_role()
+        .role_name(name)
+        .path(path)
+        .assume_role_policy_document(format!(
+            r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{account}:root"}},"Action":"sts:AssumeRole"}}]}}"#
+        ))
+        .send()
+        .await
+        .unwrap()
+        .role()
+        .unwrap()
+        .arn()
+        .to_string();
+    if let Some(policy) = policy {
+        iam.put_role_policy()
+            .role_name(name)
+            .policy_name("inline")
+            .policy_document(policy)
+            .send()
+            .await
+            .unwrap();
+    }
+    let creds = StsClient::new(cfg)
+        .assume_role()
+        .role_arn(&role_arn)
+        .role_session_name("s1")
+        .send()
+        .await
+        .unwrap();
+    let creds = creds.credentials().unwrap();
+    let session = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(
+            creds.access_key_id(),
+            creds.secret_access_key(),
+            Some(creds.session_token().to_string()),
+            None,
+            "scp-e2e-role",
+        ))
+        .load()
+        .await;
+    (session, role_arn)
+}
+
+/// An assumed-role session's `aws:PrincipalArn` is its role's ARN, path
+/// included, not the session ARN: the "deny everyone but the Admin role"
+/// SCP lets the Admin role's sessions through, and a bucket policy granting
+/// `Principal: "*"` on `ArnEquals aws:PrincipalArn <role>` grants the role's
+/// sessions.
+#[tokio::test]
+async fn principal_arn_of_a_role_session_is_its_role() {
+    let server = start().await;
+    let (root_id, a_cfg, b_cfg) = org_with_member(&server).await;
+    let (admin, _) = role_session(
+        &server,
+        &b_cfg,
+        ACCOUNT_B,
+        "/",
+        "Admin",
+        Some(r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#),
+    )
+    .await;
+    let (reader, reader_role) =
+        role_session(&server, &b_cfg, ACCOUNT_B, "/team/", "Reader", None).await;
+
+    seed_bucket(
+        &path_style_s3(&b_cfg),
+        "scp-principal-arn",
+        serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": "s3:GetObject",
+                "Resource": "arn:aws:s3:::scp-principal-arn/*",
+                "Condition": {"ArnEquals": {"aws:PrincipalArn": reader_role}}
+            }]
+        }),
+    )
+    .await;
+    path_style_s3(&reader)
+        .get_object()
+        .bucket("scp-principal-arn")
+        .key("k")
+        .send()
+        .await
+        .expect("the bucket policy grants the Reader role's sessions");
 
     attach_root_scp(
         &OrgsClient::new(&a_cfg),
         &root_id,
-        "DenyRootActions",
-        r#"{"Version":"2012-10-17","Statement":[
-            {"Effect":"Allow","Action":"*","Resource":"*"},
-            {"Effect":"Deny","Action":["s3:GetObject","sqs:CreateQueue"],"Resource":"*"}
-        ]}"#,
+        "OnlyAdmin",
+        r#"{"Version":"2012-10-17","Statement":[{
+            "Effect":"Deny","Action":"sqs:*","Resource":"*",
+            "Condition":{"ArnNotLike":{"aws:PrincipalArn":"arn:aws:iam::*:role/Admin"}}
+        }]}"#,
     )
     .await;
-
-    let err = b_root_reads_a()
+    SqsClient::new(&admin)
+        .create_queue()
+        .queue_name("admin-only")
+        .send()
         .await
-        .expect_err("B's SCP denies the read the bucket policy grants");
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("AccessDenied")
-            && msg.contains("with an explicit deny in a service control policy"),
-        "{msg}"
+        .expect("the SCP exempts the Admin role's sessions");
+    assert_scp_denied(
+        SqsClient::new(&b_cfg)
+            .create_queue()
+            .queue_name("not-admin")
+            .send()
+            .await,
+        "with an explicit deny in a service control policy",
+        "B's admin user is not the Admin role",
     );
-    assert_access_denied(
-        create_queue(&b_root, "b-root-after").await,
-        "member root in its own account",
-    );
-
-    // The management account's root is exempt.
-    create_queue(&a_root, "a-root-after")
-        .await
-        .expect("SCPs do not apply to the management account's root");
 }

@@ -45,21 +45,24 @@ impl CredentialResolver for IamCredentialResolver {
         for (_, account_state) in states.iter_mut() {
             if let Some(lookup) = account_state.credential_secret(access_key_id) {
                 let principal_type = PrincipalType::from_arn(&lookup.principal_arn);
+                let principal = Principal {
+                    arn: lookup.principal_arn,
+                    user_id: lookup.user_id,
+                    account_id: lookup.account_id,
+                    principal_type,
+                    source_identity: None,
+                    tags: lookup.principal_tags.map(|m| m.into_iter().collect()),
+                };
+                let role_arn = crate::evaluator::session_role_arn(account_state, &principal);
                 return Some(ResolvedCredential {
                     secret_access_key: lookup.secret_access_key,
                     session_token: lookup.session_token,
-                    principal: Principal {
-                        arn: lookup.principal_arn,
-                        user_id: lookup.user_id,
-                        account_id: lookup.account_id,
-                        principal_type,
-                        source_identity: None,
-                        tags: lookup.principal_tags.map(|m| m.into_iter().collect()),
-                    },
+                    principal,
                     session_policies: lookup.session_policies,
                     mfa_present: lookup.mfa_present,
                     token_issued_at: lookup.token_issued_at,
                     federated_provider: lookup.federated_provider,
+                    role_arn,
                 });
             }
         }
@@ -167,6 +170,8 @@ mod tests {
             PrincipalType::AssumedRole
         );
         assert_eq!(resolved.session_token.as_deref(), Some("temp-token"));
+        // The role `ops` does not exist, so its ARN is unknown.
+        assert_eq!(resolved.role_arn, None);
     }
 
     #[test]
@@ -323,6 +328,11 @@ mod tests {
         );
         let resolver = IamCredentialResolver::new(shared(state));
         let resolved = resolver.resolve("FSIAOPS").unwrap();
+        // The session's `aws:PrincipalArn` is its role's ARN.
+        assert_eq!(
+            resolved.role_arn.as_deref(),
+            Some("arn:aws:iam::123456789012:role/ops")
+        );
         let tags = resolved.principal.tags.as_ref().unwrap();
         assert_eq!(
             tags.get("Department").map(|s| s.as_str()),

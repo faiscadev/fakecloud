@@ -166,8 +166,18 @@ impl StsService {
                 },
             };
 
+            // A role session chaining into this role: its role, which a
+            // trust policy names to trust the role's sessions, and which
+            // is its `aws:PrincipalArn`.
+            let caller_role_arn = accounts
+                .get(&caller_principal.account_id)
+                .and_then(|s| crate::evaluator::session_role_arn(s, &caller_principal));
             let mut context = RequestContext {
-                aws_principal_arn: Some(caller_principal.arn.clone()),
+                aws_principal_arn: Some(
+                    caller_role_arn
+                        .clone()
+                        .unwrap_or_else(|| caller_principal.arn.clone()),
+                ),
                 aws_principal_account: Some(caller_principal.account_id.clone()),
                 aws_principal_type: Some(caller_principal.principal_type.as_str().to_string()),
                 aws_mfa_present: Some(mfa_present),
@@ -203,7 +213,11 @@ impl StsService {
                 resource: role_arn.clone(),
                 context,
             };
-            match evaluate_resource_policy_only(&trust_doc, &eval_req) {
+            match crate::evaluator::evaluate_resource_policy_for_role(
+                &trust_doc,
+                caller_role_arn.as_deref(),
+                &eval_req,
+            ) {
                 Decision::Allow => {}
                 _ => {
                     return Err(AwsServiceError::aws_error(

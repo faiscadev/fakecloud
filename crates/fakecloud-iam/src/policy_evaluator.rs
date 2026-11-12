@@ -93,7 +93,7 @@ impl IamPolicyEvaluator for IamPolicyEvaluatorImpl {
             session.as_deref(),
             scp_docs.as_deref(),
             resource_policy.as_ref(),
-            session_role_arn(state, principal).as_deref(),
+            evaluator::session_role_arn(state, principal).as_deref(),
             &request,
             resource_account_id,
         ))
@@ -193,16 +193,6 @@ fn anonymous_principal() -> Principal {
         source_identity: None,
         tags: None,
     }
-}
-
-/// For an assumed-role session, the IAM ARN (path included) of the role it
-/// assumed, which a resource policy names to grant the role's sessions.
-fn session_role_arn(state: &crate::state::IamState, principal: &Principal) -> Option<String> {
-    if principal.principal_type != PrincipalType::AssumedRole {
-        return None;
-    }
-    let name = evaluator::role_name_from_assumed_role_arn(&principal.arn)?;
-    state.roles.get(name).map(|role| role.arn.clone())
 }
 
 fn parse_session_policies(raw: &[String]) -> Option<Vec<evaluator::PolicyDocument>> {

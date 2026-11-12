@@ -34,6 +34,7 @@ pub struct EventBridgeService {
     container_runtime: Option<Arc<ContainerRuntime>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    session_roles: Option<fakecloud_iam::evaluator::SessionRoleResolver>,
 }
 
 impl EventBridgeService {
@@ -47,7 +48,18 @@ impl EventBridgeService {
             container_runtime: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            session_roles: None,
         }
+    }
+
+    /// Resolve an assumed-role caller's role, which a bus policy names to
+    /// grant the role's sessions (and which is their `aws:PrincipalArn`).
+    pub fn with_session_role_resolver(
+        mut self,
+        resolver: fakecloud_iam::evaluator::SessionRoleResolver,
+    ) -> Self {
+        self.session_roles = Some(resolver);
+        self
     }
 
     /// Wire every non-bus target dependency at once (see
@@ -1357,6 +1369,13 @@ impl EventBridgeService {
         }
         let entries: Vec<Value> = entries_array.clone();
         let entries = &entries;
+        // An assumed-role caller's role, resolved before the bus state is
+        // locked.
+        let caller_role_arn = req
+            .principal
+            .as_ref()
+            .zip(self.session_roles.as_ref())
+            .and_then(|(principal, resolve)| resolve(principal));
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1394,9 +1413,13 @@ impl EventBridgeService {
                     .principal
                     .clone()
                     .unwrap_or_else(|| account_root_principal(caller_account, &req.region));
-                if let Some(message) =
-                    cross_account_put_denial(state, &event_bus_name, &req.region, &principal)
-                {
+                if let Some(message) = cross_account_put_denial(
+                    state,
+                    &event_bus_name,
+                    &req.region,
+                    &principal,
+                    caller_role_arn.as_deref(),
+                ) {
                     failed_count += 1;
                     result_entries.push(json!({
                         "ErrorCode": "AccessDeniedException",
@@ -1720,11 +1743,17 @@ pub(crate) fn account_root_principal(
 /// `AccessDeniedException` message when the put is refused. Shared by
 /// PutEvents and cross-service delivery (Lambda destinations, Step
 /// Functions, Pipes, Scheduler, SES) so both enforce the same rule.
+///
+/// `role_arn` is, for an assumed-role session, its role's IAM ARN: a policy
+/// naming the role grants its sessions, and it is their `aws:PrincipalArn`.
+/// (A cross-service put is made as the source's role itself, whose
+/// principal ARN already is the role's.)
 pub(crate) fn cross_account_put_denial(
     state: &EventBridgeState,
     event_bus_name: &str,
     region: &str,
     principal: &fakecloud_core::auth::Principal,
+    role_arn: Option<&str>,
 ) -> Option<String> {
     let bus = state.buses.get(event_bus_name);
     let allowed = bus.and_then(|b| b.policy.as_ref()).is_some_and(|policy| {
@@ -1736,7 +1765,7 @@ pub(crate) fn cross_account_put_denial(
             .map(|b| arn_with_request_region(&b.arn, region))
             .unwrap_or_default();
         let context = fakecloud_iam::evaluator::RequestContext {
-            aws_principal_arn: Some(principal.arn.clone()),
+            aws_principal_arn: Some(role_arn.unwrap_or(&principal.arn).to_string()),
             aws_principal_account: Some(principal.account_id.clone()),
             ..Default::default()
         };
@@ -1747,7 +1776,11 @@ pub(crate) fn cross_account_put_denial(
             context,
         };
         matches!(
-            fakecloud_iam::evaluator::evaluate_resource_policy_only(&policy_doc, &eval_req),
+            fakecloud_iam::evaluator::evaluate_resource_policy_for_role(
+                &policy_doc,
+                role_arn,
+                &eval_req
+            ),
             fakecloud_iam::evaluator::Decision::Allow
         )
     });

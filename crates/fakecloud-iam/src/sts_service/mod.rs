@@ -1938,6 +1938,58 @@ mod tests {
         assert_eq!(err.status(), StatusCode::FORBIDDEN);
     }
 
+    /// Role chaining: a trust policy naming the source role's ARN (or
+    /// testing it as `aws:PrincipalArn`) trusts that role's sessions; the
+    /// session ARN is not what either names.
+    #[tokio::test]
+    async fn assume_role_trust_naming_the_source_role_trusts_its_sessions() {
+        let (svc, state) = make_sts_service();
+        let source = create_role_in_state_with_trust(&state, "source", "{}");
+        let session = fakecloud_core::auth::Principal {
+            arn: "arn:aws:sts::123456789012:assumed-role/source/s1".into(),
+            user_id: "AROASOURCE:s1".into(),
+            account_id: "123456789012".into(),
+            principal_type: fakecloud_core::auth::PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        };
+        let assume = |target: &str| {
+            let mut req = sts_request(
+                "AssumeRole",
+                vec![("RoleArn", target), ("RoleSessionName", "chained")],
+            );
+            req.principal = Some(session.clone());
+            req
+        };
+        let by_role = create_role_in_state_with_trust(
+            &state,
+            "by-role",
+            &format!(
+                r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"{source}"}},"Action":"sts:AssumeRole"}}]}}"#
+            ),
+        );
+        let by_condition = create_role_in_state_with_trust(
+            &state,
+            "by-condition",
+            &format!(
+                r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"*"}},"Action":"sts:AssumeRole","Condition":{{"ArnEquals":{{"aws:PrincipalArn":"{source}"}}}}}}]}}"#
+            ),
+        );
+        let by_session_arn_condition = create_role_in_state_with_trust(
+            &state,
+            "by-session-arn",
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole","Condition":{"ArnEquals":{"aws:PrincipalArn":"arn:aws:sts::123456789012:assumed-role/source/s1"}}}]}"#,
+        );
+        for target in [&by_role, &by_condition] {
+            assert!(svc.handle(assume(target)).await.is_ok(), "{target}");
+        }
+        let err = match svc.handle(assume(&by_session_arn_condition)).await {
+            Err(e) => e,
+            Ok(_) => panic!("aws:PrincipalArn is the role ARN, not the session's"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
     // ── Trust policy: ExternalId aliases (rename of existing tests for plan) ──
 
     #[tokio::test]
