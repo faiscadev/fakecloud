@@ -796,6 +796,11 @@ async fn dispatch_inner(
     // lists which services are under enforcement so users always know.
     // An operation that needs no authorization (`sts:GetCallerIdentity`)
     // evaluates no policy for a caller whose credentials resolved.
+    // Whether `validate_before_authorization` ran ahead of the
+    // authorization of an authenticated caller; otherwise it runs just
+    // before the handler (no enforcement, or a request enforcement let
+    // through without an identity).
+    let mut validated = false;
     let authorization_required = aws_request.principal.is_none()
         || internal_caller.is_some()
         || service.iam_authorization_required(&aws_request);
@@ -821,6 +826,7 @@ async fn dispatch_inner(
                 // Validation AWS performs before authorizing, once the
                 // caller is authenticated (an unresolved key or an anonymous
                 // request is refused first, in the branches below).
+                validated = true;
                 if let Err(err) = service.validate_before_authorization(&aws_request) {
                     return service_error_response(&err, &request_id, error_envelope);
                 }
@@ -1210,6 +1216,12 @@ async fn dispatch_inner(
                     }
                 }
             }
+        }
+    }
+
+    if !validated {
+        if let Err(err) = service.validate_before_authorization(&aws_request) {
+            return service_error_response(&err, &request_id, error_envelope);
         }
     }
 

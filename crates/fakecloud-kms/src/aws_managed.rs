@@ -429,7 +429,8 @@ pub(crate) fn request_context(
         context
             .service_keys
             .insert("aws:viaawsservice".to_string(), vec!["true".to_string()]);
-        context.aws_called_via = vec![service_principal.to_string()];
+        let region = key_region.as_deref().unwrap_or("us-east-1");
+        context.aws_called_via = vec![called_via(service_principal, region).to_string()];
     }
     context.aws_requested_region = context.aws_requested_region.take().or(key_region);
     fakecloud_core::dispatch::global_request_keys(
@@ -439,6 +440,23 @@ pub(crate) fn request_context(
         org_of,
     );
     context
+}
+
+/// The `aws:CalledVia` value of a KMS call the service `service_principal`
+/// forwards in `region` with its caller's credentials. Each service names
+/// itself its own way, recorded against real AWS in
+/// `tests/fixtures/forwarded-kms-condition-keys/`: S3 as
+/// `fas.s3.amazonaws.com`, SQS and SNS by their service principal, SSM by an
+/// AWS-owned account id (recorded in us-east-1 only). DynamoDB's
+/// `dynamodb.amazonaws.com` is the IAM user guide's. A service with no
+/// recording (Secrets Manager, ...), and SSM in another region, is named by
+/// its service principal.
+pub(crate) fn called_via<'a>(service_principal: &'a str, region: &str) -> &'a str {
+    match (service_principal, region) {
+        ("s3.amazonaws.com", _) => "fas.s3.amazonaws.com",
+        ("ssm.amazonaws.com", "us-east-1") => "556613725826",
+        (principal, _) => principal,
+    }
 }
 
 /// [`request_context`]'s keys that come from the caller alone.
@@ -626,6 +644,107 @@ mod tests {
 
     const ACCOUNT: &str = "123456789012";
 
+    /// The recorded `aws:CalledVia` of each service's forwarded KMS calls
+    /// (`tests/fixtures/forwarded-kms-condition-keys/recordings.md`), and
+    /// how the recorded conditions evaluate against them.
+    #[test]
+    fn called_via_follows_the_recordings() {
+        let recordings =
+            include_str!("../tests/fixtures/forwarded-kms-condition-keys/recordings.md");
+        for (principal, region, value) in [
+            ("s3.amazonaws.com", "us-east-1", "fas.s3.amazonaws.com"),
+            ("sqs.amazonaws.com", "us-east-1", "sqs.amazonaws.com"),
+            ("sns.amazonaws.com", "us-east-1", "sns.amazonaws.com"),
+            ("ssm.amazonaws.com", "us-east-1", "556613725826"),
+        ] {
+            assert_eq!(called_via(principal, region), value);
+            assert!(recordings.contains(value), "{value} is recorded");
+        }
+        // Not recorded: the service principal.
+        assert_eq!(
+            called_via("dynamodb.amazonaws.com", "us-east-1"),
+            "dynamodb.amazonaws.com"
+        );
+        assert_eq!(
+            called_via("secretsmanager.amazonaws.com", "us-east-1"),
+            "secretsmanager.amazonaws.com"
+        );
+        assert_eq!(
+            called_via("ssm.amazonaws.com", "eu-west-1"),
+            "ssm.amazonaws.com"
+        );
+
+        // As recorded on S3's forwarded call: a Deny naming s3.amazonaws.com
+        // does not match, one naming fas.s3.amazonaws.com does.
+        let caller = KeyCaller::ViaService {
+            service_principal: "s3.amazonaws.com",
+            region: "us-east-1",
+            account: ACCOUNT,
+            caller_arn: Some("arn:aws:iam::123456789012:user/alice"),
+            facts: None,
+        };
+        let key = "arn:aws:kms:us-east-1:123456789012:key/k";
+        let deny_unless = |operator: &str, key_name: &str, value: &str| {
+            format!(
+                r#"{{"Statement":[
+                    {{"Effect":"Allow","Principal":{{"AWS":"*"}},"Action":"kms:*","Resource":"*"}},
+                    {{"Effect":"Deny","Principal":{{"AWS":"*"}},"Action":"kms:*","Resource":"*",
+                      "Condition":{{"{operator}":{{"{key_name}":"{value}"}}}}}}]}}"#
+            )
+        };
+        let decide = |policy: String| {
+            policy_decision(
+                &policy,
+                key,
+                &caller,
+                "kms:GenerateDataKey",
+                &BTreeMap::new(),
+                &[],
+            )
+        };
+        for (operator, key_name, value, denied) in [
+            (
+                "ForAnyValue:StringEquals",
+                "aws:CalledVia",
+                "s3.amazonaws.com",
+                false,
+            ),
+            (
+                "ForAnyValue:StringEquals",
+                "aws:CalledVia",
+                "fas.s3.amazonaws.com",
+                true,
+            ),
+            (
+                "StringEquals",
+                "aws:CalledViaFirst",
+                "fas.s3.amazonaws.com",
+                true,
+            ),
+            (
+                "StringEquals",
+                "aws:CalledViaLast",
+                "s3.amazonaws.com",
+                false,
+            ),
+            ("Bool", "aws:ViaAWSService", "true", true),
+            ("Bool", "aws:PrincipalIsAWSService", "true", false),
+            (
+                "StringEquals",
+                "kms:ViaService",
+                "s3.us-east-1.amazonaws.com",
+                true,
+            ),
+            ("StringEquals", "aws:RequestedRegion", "us-east-1", true),
+        ] {
+            assert_eq!(
+                decide(deny_unless(operator, key_name, value)) == Decision::ExplicitDeny,
+                denied,
+                "{operator} {key_name} {value}"
+            );
+        }
+    }
+
     /// A call a service forwards carries the global keys of a forwarded
     /// request; a direct call says it was not forwarded.
     #[test]
@@ -645,14 +764,17 @@ mod tests {
         let ctx = request_context(&via, key_arn, &BTreeMap::new(), &[], &org_of);
         let one = |k: &str| ctx.lookup(k).map(|v| v.join(","));
         assert_eq!(one("aws:ViaAWSService").as_deref(), Some("true"));
-        assert_eq!(one("aws:CalledVia").as_deref(), Some("s3.amazonaws.com"));
+        assert_eq!(
+            one("aws:CalledVia").as_deref(),
+            Some("fas.s3.amazonaws.com")
+        );
         assert_eq!(
             one("aws:CalledViaFirst").as_deref(),
-            Some("s3.amazonaws.com")
+            Some("fas.s3.amazonaws.com")
         );
         assert_eq!(
             one("aws:CalledViaLast").as_deref(),
-            Some("s3.amazonaws.com")
+            Some("fas.s3.amazonaws.com")
         );
         assert_eq!(one("aws:RequestedRegion").as_deref(), Some("eu-west-1"));
         assert_eq!(one("aws:ResourceAccount").as_deref(), Some("222222222222"));
