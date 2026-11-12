@@ -1380,6 +1380,16 @@ impl AwsService for S3Service {
     /// caller, anonymous included, gets these errors rather than an
     /// AccessDenied, answered as the handler answers them.
     fn validate_before_authorization(&self, request: &AwsRequest) -> Result<(), AwsServiceError> {
+        // S3 Control TagResource: as for the S3 tagging writes below, a tag
+        // set the handler cannot read is refused before its request tags are
+        // evaluated.
+        if control_tags::is_control_tags_request(request)
+            && request.method == Method::POST
+            && !request.body.is_empty()
+        {
+            let body = std::str::from_utf8(&request.body).unwrap_or("");
+            tags::read_tag_set(body, "TagResourceRequest", "Tags")?;
+        }
         if fakecloud_core::protocol::is_s3_control_host(&request.headers)
             || request.method == Method::OPTIONS
             || request.raw_path.starts_with("//")
@@ -1387,10 +1397,22 @@ impl AwsService for S3Service {
             return Ok(());
         }
         let op = classify_request(request).map_err(|refusal| self.refuse(request, refusal))?;
-        match self.missing_upload(request, op) {
-            Some(error) => Err(self.refuse(request, error.into())),
-            None => Ok(()),
+        if let Some(error) = self.missing_upload(request, op) {
+            return Err(self.refuse(request, error.into()));
         }
+        // A tag set the handler cannot read is refused before its request
+        // tags are evaluated, so IAM never judges a partial or misread set.
+        if matches!(
+            op,
+            route::S3Op::PutObjectTagging | route::S3Op::PutBucketTagging
+        ) && !request.body.is_empty()
+        {
+            let body = std::str::from_utf8(&request.body).unwrap_or("");
+            if let Err(error) = tags::read_tag_set(body, "Tagging", "TagSet") {
+                return Err(self.refuse(request, error.into()));
+            }
+        }
+        Ok(())
     }
 
     fn iam_condition_keys_for(
@@ -1891,23 +1913,30 @@ fn s3_request_tags(
         "PutObject" | "CopyObject" | "CreateMultipartUpload" => {
             // Tags come via x-amz-tagging header
             if let Some(tagging) = request.headers.get("x-amz-tagging") {
-                let tags = parse_url_encoded_tags(tagging.to_str().unwrap_or(""));
+                // An invalid header is refused by the handler before anything
+                // is written.
+                let tags =
+                    tags::parse_tagging_header(tagging.to_str().unwrap_or("")).unwrap_or_default();
                 Some(tags.into_iter().collect())
             } else {
                 Some(std::collections::BTreeMap::new())
             }
         }
+        // Tags come in the XML body, read by the parser the handler stores
+        // them with (`tags::read_tag_set`). A body it cannot read is refused
+        // before authorization (`validate_before_authorization`), so no
+        // partial tag set is ever evaluated.
         "PutBucketTagging" | "PutObjectTagging" => {
-            // Tags come in XML body
             let body = std::str::from_utf8(&request.body).unwrap_or("");
-            let tags = parse_tagging_xml(body);
+            let tags = tags::read_tag_set(body, "Tagging", "TagSet").unwrap_or_default();
             Some(tags.into_iter().collect())
         }
         // S3 Control TagResource carries its tags in a `<TagResourceRequest>`
         // body.
         "TagResource" if control_tags::is_control_tags_request(request) => {
             let body = std::str::from_utf8(&request.body).unwrap_or("");
-            Some(parse_tagging_xml(body).into_iter().collect())
+            let tags = tags::read_tag_set(body, "TagResourceRequest", "Tags").unwrap_or_default();
+            Some(tags.into_iter().collect())
         }
         // UntagResource carries no tag values, only keys: AWS sets
         // `aws:TagKeys` (see `iam_condition_keys_for`) but no
@@ -3176,32 +3205,10 @@ pub(crate) fn parse_delete_objects_quiet(xml: &str) -> bool {
 /// and an element written with a namespace or attribute
 /// (`<Tags xmlns="...">`) is not silently skipped.
 pub(crate) fn create_bucket_configuration_tags(body: &str) -> Vec<(String, String)> {
-    if body.is_empty() || !body.contains("CreateBucketConfiguration") {
+    if body.is_empty() {
         return Vec::new();
     }
-    parse_tagging_xml(body)
-}
-
-/// Minimal XML parser for `<Tagging><TagSet><Tag><Key>k</Key><Value>v</Value></Tag>...`.
-/// Returns a Vec to preserve insertion order and detect duplicates.
-pub(crate) fn parse_tagging_xml(xml: &str) -> Vec<(String, String)> {
-    let mut tags = Vec::new();
-    let mut remaining = xml;
-    while let Some(tag_start) = remaining.find("<Tag>") {
-        let after = &remaining[tag_start + 5..];
-        if let Some(tag_end) = after.find("</Tag>") {
-            let tag_body = &after[..tag_end];
-            let key = extract_xml_value(tag_body, "Key");
-            let value = extract_xml_value(tag_body, "Value");
-            if let (Some(k), Some(v)) = (key, value) {
-                tags.push((k, v));
-            }
-            remaining = &after[tag_end + 6..];
-        } else {
-            break;
-        }
-    }
-    tags
+    tags::read_tag_set(body, "CreateBucketConfiguration", "Tags").unwrap_or_default()
 }
 
 pub(crate) fn validate_tags(tags: &[(String, String)]) -> Result<(), AwsServiceError> {

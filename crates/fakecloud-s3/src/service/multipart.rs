@@ -414,6 +414,11 @@ impl S3Service {
             .get("x-amz-tagging")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+        // Checked now, as PutObject checks it; stored as sent and applied at
+        // completion.
+        if let Some(tagging) = &tagging {
+            crate::service::tags::parse_tagging_header(tagging)?;
+        }
         self.reject_blocked_sse_c(
             account_id,
             req,

@@ -47,7 +47,7 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("");
-        let tags = parse_tagging_xml(body_str);
+        let tags = crate::service::tags::read_tag_set(body_str, "Tagging", "TagSet")?;
 
         // Validate tags: no duplicate keys
         validate_tags(&tags)?;

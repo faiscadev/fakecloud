@@ -391,14 +391,22 @@ async fn unauthorized_extra_form_field_is_rejected() {
         "us-east-1",
         1_000_000,
     );
-    // `x-amz-meta-foo` is not covered by any condition in `build_policy`.
-    let form = post_form(
-        &policy,
-        "uploads/extra.txt",
-        "0".repeat(64).as_str(),
-        b"body".to_vec(),
-    )
-    .text("x-amz-meta-foo", "bar");
+    // `x-amz-meta-foo` is not covered by any condition in `build_policy`. It
+    // precedes the file: fields after it are ignored, as on S3.
+    let form = reqwest::multipart::Form::new()
+        .text("key", "uploads/extra.txt")
+        .text("Content-Type", "text/plain")
+        .text("x-amz-algorithm", "AWS4-HMAC-SHA256")
+        .text("x-amz-credential", policy.credential.clone())
+        .text("x-amz-date", policy.amz_date.clone())
+        .text("policy", policy.policy_b64.clone())
+        .text("x-amz-signature", "0".repeat(64))
+        .text("success_action_status", "201")
+        .text("x-amz-meta-foo", "bar")
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(b"body".to_vec()).file_name("upload.txt"),
+        );
 
     let resp = reqwest::Client::new()
         .post(format!("{}/post-policy-extra", server.endpoint()))
@@ -643,13 +651,15 @@ async fn post_object_fires_object_created_post_notification() {
 }
 
 /// A form signed by `akid`/`secret` for `key` in `bucket`, whose policy
-/// names (exactly) each of `fields`, which the form also sets.
-fn signed_form(
+/// names (exactly) each of `fields`, which the form also sets, followed by
+/// the `unpinned` fields the policy does not name; the file comes last.
+fn signed_form_with(
     bucket: &str,
     key: &str,
     akid: &str,
     secret: &str,
     fields: &[(&str, &str)],
+    unpinned: &[(&str, &str)],
 ) -> reqwest::multipart::Form {
     let now = chrono::Utc::now();
     let date_stamp = now.format("%Y%m%d").to_string();
@@ -680,13 +690,24 @@ fn signed_form(
         .text("x-amz-date", amz_date)
         .text("policy", policy_b64)
         .text("x-amz-signature", signature);
-    for (name, value) in fields {
+    for (name, value) in fields.iter().chain(unpinned) {
         form = form.text(name.to_string(), value.to_string());
     }
     form.part(
         "file",
         reqwest::multipart::Part::bytes(b"form body".to_vec()).file_name("f.txt"),
     )
+}
+
+/// [`signed_form_with`] with no fields beyond those the policy names.
+fn signed_form(
+    bucket: &str,
+    key: &str,
+    akid: &str,
+    secret: &str,
+    fields: &[(&str, &str)],
+) -> reqwest::multipart::Form {
+    signed_form_with(bucket, key, akid, secret, fields, &[])
 }
 
 /// A form upload is authorized as the PutObject its fields make it: the
@@ -920,8 +941,14 @@ async fn post_object_fields_are_checked_in_every_occurrence() {
             "aws:kms",
         ),
     ] {
-        let form = signed_form("dup-fields", "dup.txt", "test", "test", &[(field, pinned)])
-            .text(extra_name.to_string(), extra_value.to_string());
+        let form = signed_form_with(
+            "dup-fields",
+            "dup.txt",
+            "test",
+            "test",
+            &[(field, pinned)],
+            &[(extra_name, extra_value)],
+        );
         let resp = post(form).await.unwrap();
         assert_eq!(
             resp.status(),
@@ -979,6 +1006,67 @@ async fn post_object_fields_are_checked_in_every_occurrence() {
             .await
             .unwrap();
     assert_eq!(good.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+/// "The file or content must be the last field in the form. Any fields
+/// below it are ignored." (POST Object API reference)
+#[tokio::test]
+async fn post_object_ignores_fields_after_the_file() {
+    let server = TestServer::start().await;
+    let s3 = helpers::root_s3_client(&server).await;
+    s3.create_bucket().bucket("file-last").send().await.unwrap();
+    s3.put_bucket_ownership_controls()
+        .bucket("file-last")
+        .ownership_controls(
+            aws_sdk_s3::types::OwnershipControls::builder()
+                .rules(
+                    aws_sdk_s3::types::OwnershipControlsRule::builder()
+                        .object_ownership(aws_sdk_s3::types::ObjectOwnership::ObjectWriter)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let post = |form: reqwest::multipart::Form| {
+        reqwest::Client::new()
+            .post(format!("{}/file-last", server.endpoint()))
+            .multipart(form)
+            .send()
+    };
+    // An `acl` after the file is not read, so neither checked against the
+    // policy (which does not name it) nor applied.
+    let form =
+        signed_form("file-last", "late-acl.txt", "test", "test", &[]).text("acl", "public-read");
+    let resp = post(form).await.unwrap();
+    assert!(resp.status().is_success(), "{:?}", resp.text().await);
+    let acl = s3
+        .get_object_acl()
+        .bucket("file-last")
+        .key("late-acl.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(acl.grants().len(), 1, "{acl:?}");
+
+    // A `key` only after the file is no key.
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(b"x".to_vec()).file_name("f.txt"),
+        )
+        .text("key", "after.txt");
+    let resp = post(form).await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let text = resp.text().await.unwrap();
+    assert!(
+        text.contains("Bucket POST must contain a field named &apos;key&apos;.")
+            || text.contains("Bucket POST must contain a field named 'key'."),
+        "{text}"
+    );
 }
 
 /// SSE-KMS under a form upload uses the key as the policy's signer: a key

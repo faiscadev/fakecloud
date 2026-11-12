@@ -134,7 +134,7 @@ fn parse_delete_xml_with_version() {
 #[test]
 fn parse_tags_xml() {
     let xml = r#"<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>"#;
-    let tags = parse_tagging_xml(xml);
+    let tags = tags::read_tag_set(xml, "Tagging", "TagSet").unwrap();
     assert_eq!(tags, vec![("env".to_string(), "prod".to_string())]);
 }
 
@@ -14110,7 +14110,8 @@ async fn object_tag_keys(svc: &S3Service, key: &str, version: Option<&str>) -> V
         .await
         .expect("GetObjectTagging");
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
-    parse_tagging_xml(&body)
+    tags::read_tag_set(&body, "Tagging", "TagSet")
+        .unwrap()
         .into_iter()
         .map(|(k, _)| k)
         .collect()
@@ -14302,4 +14303,125 @@ async fn refused_requests_do_not_read_their_body() {
             .unwrap_or_else(|_| panic!("{query:?} waited for its body"));
         assert!(refused.is_err(), "{query:?}");
     }
+}
+
+/// The tags IAM evaluates for a tagging write are exactly the tags stored:
+/// one parser reads both. A whitespace-padded `<Tag >`, a CDATA key and a
+/// commented-out tag used to be read differently by the two.
+#[tokio::test]
+async fn tagging_writes_evaluate_the_tags_they_store() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    put_versioned(&svc, "k", b"x").await;
+    let bodies = [
+        "<Tagging><TagSet><Tag ><Key>owner</Key><Value>x</Value></Tag></TagSet></Tagging>",
+        "<Tagging><TagSet><Tag><Key><![CDATA[owner]]></Key><Value>x</Value></Tag></TagSet></Tagging>",
+        "<Tagging><TagSet><Tag><Key>owner</Key><Value>x</Value></Tag>\
+         <!--<Tag><Key>other</Key><Value>y</Value></Tag>--></TagSet></Tagging>",
+    ];
+    for body in bodies {
+        for (path, query, op) in [
+            ("/b/k", "tagging", "PutObjectTagging"),
+            ("/b", "tagging", "PutBucketTagging"),
+        ] {
+            let req = make_request(Method::PUT, path, &[(query, "")], body.as_bytes());
+            let evaluated = svc.request_tags_from(&req, op).unwrap();
+            assert_eq!(
+                evaluated,
+                [("owner".to_string(), "x".to_string())].into(),
+                "{op}: {body}"
+            );
+            svc.handle(req)
+                .await
+                .unwrap_or_else(|e| panic!("{op}: {body}: {e:?}"));
+            let stored: std::collections::HashMap<String, String> = {
+                let mas = svc.state.read();
+                let b = mas.default_ref().buckets.get("b").unwrap();
+                if path == "/b" {
+                    b.tags.clone().into_iter().collect()
+                } else {
+                    b.objects["k"].tags.clone().into_iter().collect()
+                }
+            };
+            assert_eq!(stored, evaluated, "{op}: {body}");
+        }
+    }
+    // A body the handler cannot read is refused before authorization.
+    for (path, query) in [("/b/k", "tagging"), ("/b", "tagging")] {
+        let req = make_request(
+            Method::PUT,
+            path,
+            &[(query, "")],
+            b"<Tagging><TagSet><Tag><Value>v</Value></Tag></TagSet></Tagging>",
+        );
+        let refused = svc.validate_before_authorization(&req).unwrap_err();
+        assert_eq!(refused.code(), "MalformedXML", "{path}");
+    }
+}
+
+/// Object tag limits, as recorded on S3, for the XML body and the header.
+#[test]
+fn object_tag_limits_follow_the_recordings() {
+    use super::tags::{parse_object_tagging, parse_tagging_header};
+    let doc = |key: &str, value: &str| {
+        format!(
+            "<Tagging><TagSet><Tag><Key>{key}</Key><Value>{value}</Value></Tag></TagSet></Tagging>"
+        )
+    };
+    let code_and_message = |r: Result<Vec<(String, String)>, AwsServiceError>| {
+        let e = r.unwrap_err();
+        (e.code().to_string(), e.message())
+    };
+    let bad_key = (
+        "InvalidTag".to_string(),
+        "The TagKey you have provided is invalid".to_string(),
+    );
+    let bad_value = (
+        "InvalidTag".to_string(),
+        "The TagValue you have provided is invalid".to_string(),
+    );
+    for xml in [
+        doc("", "v"),
+        "<Tagging><TagSet><Tag><Key/><Value>v</Value></Tag></TagSet></Tagging>".to_string(),
+        doc(&"k".repeat(129), "v"),
+        doc("a*b", "v"),
+    ] {
+        assert_eq!(
+            code_and_message(parse_object_tagging(&xml)),
+            bad_key,
+            "{xml}"
+        );
+    }
+    assert!(parse_object_tagging(&doc(&"k".repeat(128), "v")).is_ok());
+    assert!(parse_object_tagging(&doc("a", "")).is_ok());
+    assert!(parse_object_tagging(&doc("a + -=._:/@ é", "v")).is_ok());
+    assert!(parse_object_tagging(&doc("a", &"v".repeat(256))).is_ok());
+    assert_eq!(
+        code_and_message(parse_object_tagging(&doc("a", &"v".repeat(257)))),
+        bad_value
+    );
+
+    assert_eq!(
+        code_and_message(parse_tagging_header(&format!("{}=1", "k".repeat(129)))),
+        bad_key
+    );
+    assert_eq!(
+        code_and_message(parse_tagging_header(&format!("a={}", "v".repeat(257)))),
+        bad_value
+    );
+    for header in ["=1", "a=1&a=2"] {
+        let (code, message) = code_and_message(parse_tagging_header(header));
+        assert_eq!(code, "InvalidArgument", "{header}");
+        assert!(
+            message.starts_with("The header 'x-amz-tagging' shall be encoded"),
+            "{message}"
+        );
+    }
+    assert_eq!(
+        parse_tagging_header("team=a%20b&x=").unwrap(),
+        vec![
+            ("team".to_string(), "a b".to_string()),
+            ("x".to_string(), String::new())
+        ]
+    );
 }

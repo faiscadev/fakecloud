@@ -20,15 +20,22 @@ fn invalid_tag(message: &str) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidTag", message)
 }
 
-/// An object's tag set from a `Tagging` document (PutObjectTagging's body, a
-/// POST Object form's `tagging` field), read as XML: comments are ignored,
-/// text and CDATA decoded. As recorded on S3: a document that is not
-/// well-formed, has another root, or has a `Tag` without a `Key` or `Value`
-/// is 400 MalformedXML; a repeated key is InvalidTag "Cannot provide multiple
-/// Tags with the same key", an `aws:` key InvalidTag "Your TagKey cannot be
-/// prefixed with aws:"; more than 10 tags is BadRequest.
-pub(crate) fn parse_object_tagging(xml: &str) -> Result<Vec<(String, String)>, AwsServiceError> {
+/// The tag set of a tagging document (`<root><container><Tag><Key/><Value/>`
+/// ...), read as XML: comments are ignored, text and CDATA decoded, element
+/// names matched whatever their namespace or attributes (`<Tag >`). The one
+/// reader of every XML tag set S3 takes (PutObjectTagging, PutBucketTagging,
+/// S3 Control TagResource, CreateBucketConfiguration, a POST Object form's
+/// `tagging`), and of the request tags IAM evaluates for them, so what is
+/// authorized is what is stored. A document that is not well-formed, has
+/// another root, or has a `Tag` without a `Key` or `Value` is 400
+/// MalformedXML (recorded); an empty key is the validator's to judge.
+pub(crate) fn read_tag_set(
+    xml: &str,
+    root: &str,
+    container: &str,
+) -> Result<Vec<(String, String)>, AwsServiceError> {
     use quick_xml::events::Event;
+    let (root, container) = (root.as_bytes(), container.as_bytes());
     let xml = xml.strip_prefix('\u{feff}').unwrap_or(xml);
     let mut reader = quick_xml::Reader::from_str(xml);
     let mut path: Vec<Vec<u8>> = Vec::new();
@@ -37,19 +44,22 @@ pub(crate) fn parse_object_tagging(xml: &str) -> Result<Vec<(String, String)>, A
     // The tag being read, and the text of its Key / Value so far.
     let mut current: Option<(Option<String>, Option<String>)> = None;
     let mut text = String::new();
+    let in_tag = |path: &[Vec<u8>]| {
+        path.len() == 3 && path[1].as_slice() == container && path[2].as_slice() == b"Tag"
+    };
     loop {
         match reader.read_event().map_err(|_| malformed_xml())? {
             Event::Start(e) => {
                 let name = e.local_name().as_ref().to_vec();
                 if path.is_empty() {
                     roots += 1;
-                    if roots > 1 || name != b"Tagging" {
+                    if roots > 1 || name != root {
                         return Err(malformed_xml());
                     }
                 }
                 path.push(name);
                 text.clear();
-                if path.len() == 3 && path[1] == b"TagSet" && path[2] == b"Tag" {
+                if in_tag(&path) {
                     current = Some((None, None));
                 }
             }
@@ -58,16 +68,21 @@ pub(crate) fn parse_object_tagging(xml: &str) -> Result<Vec<(String, String)>, A
                 if path.is_empty() {
                     return Err(malformed_xml());
                 }
-                match (path.len(), name.as_slice()) {
+                let mut at = path.clone();
+                at.push(name.clone());
+                if in_tag(&at) {
                     // `<Tag/>` has no key.
-                    (2, b"Tag") => return Err(malformed_xml()),
-                    // An empty value is a value.
-                    (3, b"Value") if current.is_some() => {
-                        if let Some((_, value)) = current.as_mut() {
-                            *value = Some(String::new());
+                    return Err(malformed_xml());
+                }
+                if in_tag(&path) {
+                    // `<Key/>` / `<Value/>`: present and empty.
+                    if let Some((key, value)) = current.as_mut() {
+                        match name.as_slice() {
+                            b"Key" => *key = Some(String::new()),
+                            b"Value" => *value = Some(String::new()),
+                            _ => {}
                         }
                     }
-                    _ => {}
                 }
             }
             Event::Text(t) => {
@@ -81,21 +96,23 @@ pub(crate) fn parse_object_tagging(xml: &str) -> Result<Vec<(String, String)>, A
                 text.push_str(&String::from_utf8_lossy(&c.into_inner()));
             }
             Event::End(_) => {
+                let was_tag = in_tag(&path);
                 let Some(name) = path.pop() else {
                     return Err(malformed_xml());
                 };
-                match (path.len(), name.as_slice()) {
-                    (3, b"Key") | (3, b"Value") if current.is_some() => {
-                        if let Some((key, value)) = current.as_mut() {
-                            let slot = if name == b"Key" { key } else { value };
-                            *slot = Some(std::mem::take(&mut text));
-                        }
-                    }
-                    (2, b"Tag") => match current.take() {
+                if was_tag {
+                    match current.take() {
                         Some((Some(key), Some(value))) => tags.push((key, value)),
                         _ => return Err(malformed_xml()),
-                    },
-                    _ => {}
+                    }
+                } else if in_tag(&path) {
+                    if let Some((key, value)) = current.as_mut() {
+                        match name.as_slice() {
+                            b"Key" => *key = Some(std::mem::take(&mut text)),
+                            b"Value" => *value = Some(std::mem::take(&mut text)),
+                            _ => {}
+                        }
+                    }
                 }
                 text.clear();
             }
@@ -107,15 +124,50 @@ pub(crate) fn parse_object_tagging(xml: &str) -> Result<Vec<(String, String)>, A
     if roots != 1 || !path.is_empty() {
         return Err(malformed_xml());
     }
+    Ok(tags)
+}
+
+/// An object's tag set from a `Tagging` document (PutObjectTagging's body, a
+/// POST Object form's `tagging` field), read by [`read_tag_set`] and checked
+/// by [`validate_object_tags`].
+pub(crate) fn parse_object_tagging(xml: &str) -> Result<Vec<(String, String)>, AwsServiceError> {
+    let tags = read_tag_set(xml, "Tagging", "TagSet")?;
+    validate_object_tags(&tags)?;
+    Ok(tags)
+}
+
+/// Whether a tag key uses only the characters S3 allows: Unicode letters and
+/// digits, spaces, and `+ - = . _ : / @` (S3 user guide, object tagging;
+/// recorded: `a*b` is refused).
+fn tag_key_chars_valid(key: &str) -> bool {
+    key.chars().all(|c| {
+        c.is_alphanumeric() || (c.is_whitespace() && !c.is_control()) || "+-=._:/@".contains(c)
+    })
+}
+
+/// The checks every object tag set gets (recorded on S3): a key must be 1-128
+/// characters of the allowed set (InvalidTag "The TagKey you have provided
+/// is invalid"), not `aws:` prefixed (InvalidTag "Your TagKey cannot be
+/// prefixed with aws:"), and appear once (InvalidTag "Cannot provide multiple
+/// Tags with the same key"); a value at most 256 characters, empty allowed
+/// (InvalidTag "The TagValue you have provided is invalid"); at most 10 tags
+/// (BadRequest).
+pub(crate) fn validate_object_tags(tags: &[(String, String)]) -> Result<(), AwsServiceError> {
     let mut seen = std::collections::HashSet::new();
-    for (key, _) in &tags {
+    for (key, value) in tags {
+        if key.is_empty() || key.chars().count() > 128 || !tag_key_chars_valid(key) {
+            return Err(invalid_tag("The TagKey you have provided is invalid"));
+        }
+        if value.chars().count() > 256 {
+            return Err(invalid_tag("The TagValue you have provided is invalid"));
+        }
+        if key.starts_with("aws:") {
+            return Err(invalid_tag("Your TagKey cannot be prefixed with aws:"));
+        }
         if !seen.insert(key.as_str()) {
             return Err(invalid_tag(
                 "Cannot provide multiple Tags with the same key",
             ));
-        }
-        if key.starts_with("aws:") {
-            return Err(invalid_tag("Your TagKey cannot be prefixed with aws:"));
         }
     }
     if tags.len() > 10 {
@@ -125,6 +177,29 @@ pub(crate) fn parse_object_tagging(xml: &str) -> Result<Vec<(String, String)>, A
             "Object tags cannot be greater than 10",
         ));
     }
+    Ok(())
+}
+
+/// An object's tag set from the `x-amz-tagging` header (PutObject,
+/// CopyObject with REPLACE, CreateMultipartUpload): URL-encoded query
+/// parameters. Recorded on S3: an empty key is InvalidArgument (the message
+/// below, which also names duplicates), otherwise the tags are checked as
+/// any object tag set.
+pub(crate) fn parse_tagging_header(value: &str) -> Result<Vec<(String, String)>, AwsServiceError> {
+    let tags = super::parse_url_encoded_tags(value);
+    let mut seen = std::collections::HashSet::new();
+    if tags
+        .iter()
+        .any(|(key, _)| key.is_empty() || !seen.insert(key.as_str()))
+    {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "The header 'x-amz-tagging' shall be encoded as UTF-8 then URLEncoded URL query \
+             parameters without tag name duplicates.",
+        ));
+    }
+    validate_object_tags(&tags)?;
     Ok(tags)
 }
 

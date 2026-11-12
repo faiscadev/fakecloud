@@ -108,6 +108,9 @@ async fn parse_multipart_form(
             file_name = field.file_name().map(|s| s.to_string());
             file_content_type = field.content_type().map(|m| m.to_string());
             file_bytes = multer_field_bytes(field).await?;
+            // "The file or content must be the last field in the form. Any
+            // fields below it are ignored." (POST Object API reference)
+            break;
         } else {
             let value = field
                 .text()
@@ -494,9 +497,20 @@ impl S3Service {
 
         let form = parse_multipart_form(&content_type, req.body.clone()).await?;
 
-        let key_field = form
-            .field_lower("key")
-            .ok_or_else(|| invalid_argument("POST Object requires a `key` form field"))?;
+        let key_field = form.field_lower("key").ok_or_else(|| {
+            // S3's own wording: a `key` sent after the file is ignored,
+            // hence the hint about field order.
+            AwsServiceError::aws_error_with_fields(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "Bucket POST must contain a field named 'key'.  If it is specified, please \
+                     check the order of the fields.",
+                vec![
+                    ("ArgumentName".to_string(), "key".to_string()),
+                    ("ArgumentValue".to_string(), String::new()),
+                ],
+            )
+        })?;
         let resolved_key = resolve_key(key_field, form.file_name.as_deref());
         if resolved_key.is_empty() {
             return Err(invalid_argument(
@@ -943,10 +957,10 @@ mod form_tests {
         );
         assert_eq!(
             tagging_document(&doc(
-                "<Tag><Key><![CDATA[c&d]]></Key><Value>e&amp;f</Value></Tag>"
+                "<Tag ><Key><![CDATA[c d]]></Key><Value>e&amp;f</Value></Tag>"
             ))
             .unwrap(),
-            vec![("c&d".to_string(), "e&f".to_string())]
+            vec![("c d".to_string(), "e&f".to_string())]
         );
         for malformed in [
             "not xml".to_string(),

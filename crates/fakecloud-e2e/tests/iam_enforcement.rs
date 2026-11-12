@@ -2153,6 +2153,50 @@ async fn s3_pre_authorization_refusals_and_cors() {
     assert!(body.contains("<ArgumentValue>x</ArgumentValue>"), "{body}");
 }
 
+/// A PutObjectTagging's tags reach IAM (its body is read before
+/// authorization, not streamed past it): a Deny on `aws:RequestTag/team`
+/// refuses that tag set and nothing else.
+#[tokio::test]
+async fn s3_put_object_tagging_request_tags_reach_iam() {
+    use aws_sdk_s3::types::{Tag, Tagging};
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("tagged").send().await.unwrap();
+    boot.put_object()
+        .bucket("tagged")
+        .key("k")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap();
+    let (akid, secret) = bootstrap_user(&server, "tagger").await;
+    attach_inline_policy(
+        &server,
+        "tagger",
+        "Tag",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:PutObjectTagging","Resource":"arn:aws:s3:::tagged/*"},
+            {"Effect":"Deny","Action":"s3:PutObjectTagging","Resource":"*",
+             "Condition":{"StringEquals":{"aws:RequestTag/team":"evil"}}}]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let tag = |value: &str| {
+        s3.put_object_tagging()
+            .bucket("tagged")
+            .key("k")
+            .tagging(
+                Tagging::builder()
+                    .tag_set(Tag::builder().key("team").value(value).build().unwrap())
+                    .build()
+                    .unwrap(),
+            )
+            .send()
+    };
+    assert!(is_access_denied(tag("evil").await));
+    tag("good").await.unwrap();
+}
+
 /// The website error document is an object read of its own: a caller not
 /// allowed to read it (here, anonymous with a bucket policy opening only
 /// `public/*`) gets a plain 403, never its content.

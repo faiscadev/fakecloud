@@ -1699,6 +1699,23 @@ fn streaming_route(
         if !has_key {
             return None;
         }
+        // Only an upload streams: PutObject (no sub-resource) or an upload
+        // part (`partNumber` + `uploadId`). A sub-resource PUT to a key
+        // (tagging, acl, retention, legal hold, ...) carries a small XML body
+        // that has to be buffered before IAM enforcement, which reads it (the
+        // request tags of PutObjectTagging, for one). Presigned-URL
+        // authentication parameters and the SDKs' `x-id` hint are no
+        // sub-resource.
+        let upload_query = query_params.keys().all(|name| {
+            let lower = name.to_ascii_lowercase();
+            matches!(
+                lower.as_str(),
+                "partnumber" | "uploadid" | "x-id" | "awsaccesskeyid" | "signature" | "expires"
+            ) || lower.starts_with("x-amz-")
+        });
+        if !upload_query {
+            return None;
+        }
         let header_s3 = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
@@ -4155,6 +4172,38 @@ mod tests {
             streaming_route(&http::Method::PUT, "//key", &headers, &HashMap::new()),
             None,
         );
+    }
+
+    #[test]
+    fn streaming_route_streams_only_uploads() {
+        // A sub-resource PUT to a key is buffered so IAM can read its body;
+        // uploads (with or without presigned parameters) stream.
+        let headers = s3_sigv4_headers();
+        let q = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        for sub in ["tagging", "acl", "retention", "legal-hold", "annotation"] {
+            assert_eq!(
+                streaming_route(&http::Method::PUT, "/b/k", &headers, &q(&[(sub, "")])),
+                None,
+                "{sub}"
+            );
+        }
+        for upload in [
+            q(&[]),
+            q(&[("partNumber", "1"), ("uploadId", "u")]),
+            q(&[("x-id", "PutObject")]),
+            q(&[("X-Amz-Credential", "c"), ("X-Amz-Signature", "s")]),
+        ] {
+            assert_eq!(
+                streaming_route(&http::Method::PUT, "/b/k", &headers, &upload),
+                Some(("s3", "")),
+                "{upload:?}"
+            );
+        }
     }
 
     #[test]

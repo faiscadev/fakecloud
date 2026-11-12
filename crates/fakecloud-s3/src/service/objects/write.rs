@@ -63,18 +63,9 @@ impl S3Service {
 
         // Parse tags from header
         let tags = if let Some(tagging) = &tagging_header {
-            let parsed = parse_url_encoded_tags(tagging);
-            // Validate aws: prefix
-            for (k, _) in &parsed {
-                if k.starts_with("aws:") {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidTag",
-                        "Your TagKey cannot be prefixed with aws:",
-                    ));
-                }
-            }
-            parsed.into_iter().collect()
+            crate::service::tags::parse_tagging_header(tagging)?
+                .into_iter()
+                .collect()
         } else {
             std::collections::BTreeMap::new()
         };
@@ -732,18 +723,9 @@ impl S3Service {
                 .get("x-amz-tagging")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            let tags = parse_url_encoded_tags(th);
-            // Validate aws: prefix
-            for (k, _) in &tags {
-                if k.starts_with("aws:") {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidTag",
-                        "Your TagKey cannot be prefixed with aws:",
-                    ));
-                }
-            }
-            tags.into_iter().collect()
+            crate::service::tags::parse_tagging_header(th)?
+                .into_iter()
+                .collect()
         } else {
             src_obj.tags.clone()
         };
