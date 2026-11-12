@@ -871,10 +871,7 @@ impl S3Service {
                 "Request Body is empty",
             ));
         }
-        let body = std::str::from_utf8(&req.body)
-            .ok()
-            .filter(|b| is_object_encryption_document(b))
-            .ok_or_else(update_encryption_malformed_xml)?;
+        let body = std::str::from_utf8(&req.body).map_err(|_| update_encryption_malformed_xml())?;
         let encryption = parse_object_encryption(body)?;
         // `BucketKeyEnabled` "defaults to false" (the model's SSEKMSEncryption).
         let new_bucket_key = encryption.bucket_key_enabled.unwrap_or(false);
@@ -1552,50 +1549,113 @@ fn update_encryption_malformed_xml() -> AwsServiceError {
     )
 }
 
-/// Whether `body` is a well-formed XML document whose one root element is
-/// `ObjectEncryption` (in any namespace): what an UpdateObjectEncryption body
-/// must be, anything else being MalformedXML.
-fn is_object_encryption_document(body: &str) -> bool {
+/// What an `UpdateObjectEncryption` body holds, read in one pass over its
+/// XML: whether it is a document whose one root element is
+/// `ObjectEncryption`, whether that root has an `SSE-KMS` child, and the
+/// text of that child's `KMSKeyArn` and `BucketKeyEnabled`. Elements are
+/// matched by local name (any namespace or prefix); comments, processing
+/// instructions and the DOCTYPE are skipped, and text is unescaped with the
+/// predefined XML entities and character references only (an entity the
+/// DOCTYPE declares is not expanded, and makes the body malformed). `None`
+/// when the body is not such a document.
+#[derive(Default)]
+struct ObjectEncryptionDocument {
+    has_sse_kms: bool,
+    kms_key_arn: Option<String>,
+    bucket_key_enabled: Option<String>,
+}
+
+fn read_object_encryption_document(body: &str) -> Option<ObjectEncryptionDocument> {
     use quick_xml::events::Event;
+    let body = body.strip_prefix('\u{feff}').unwrap_or(body);
     let mut reader = quick_xml::Reader::from_str(body);
-    let mut depth = 0usize;
-    let mut root = None;
+    let mut path: Vec<Vec<u8>> = Vec::new();
+    let mut roots = 0usize;
+    let mut doc = ObjectEncryptionDocument::default();
+    // The field whose text is being read, and that text so far.
+    let mut field: Option<(&'static str, String)> = None;
+    let field_at = |path: &[Vec<u8>]| -> Option<&'static str> {
+        match path {
+            [_, sse, leaf] if sse.as_slice() == b"SSE-KMS" => match leaf.as_slice() {
+                b"KMSKeyArn" => Some("KMSKeyArn"),
+                b"BucketKeyEnabled" => Some("BucketKeyEnabled"),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
     loop {
-        let element = match reader.read_event() {
-            Ok(Event::Start(e)) => {
-                depth += 1;
-                (depth == 1).then(|| e.local_name().as_ref() == b"ObjectEncryption")
-            }
-            Ok(Event::Empty(e)) => {
-                (depth == 0).then(|| e.local_name().as_ref() == b"ObjectEncryption")
-            }
-            Ok(Event::End(_)) => {
-                let Some(outer) = depth.checked_sub(1) else {
-                    return false;
-                };
-                depth = outer;
-                None
-            }
-            Ok(Event::Text(text)) => {
-                if depth == 0 && !text.iter().all(u8::is_ascii_whitespace) {
-                    return false;
+        match reader.read_event().ok()? {
+            Event::Start(e) => {
+                let name = e.local_name().as_ref().to_vec();
+                if path.is_empty() {
+                    roots += 1;
+                    if roots > 1 || name != b"ObjectEncryption" {
+                        return None;
+                    }
                 }
-                None
+                path.push(name);
+                if path.len() == 2 && path[1] == b"SSE-KMS" {
+                    doc.has_sse_kms = true;
+                }
+                field = field_at(&path).map(|f| (f, String::new()));
             }
-            Ok(Event::CData(_)) if depth == 0 => return false,
-            Ok(Event::Eof) => break,
-            Ok(_) => None,
-            Err(_) => return false,
-        };
-        if let Some(is_object_encryption) = element {
-            // A second root element is not a document.
-            if root.is_some() {
-                return false;
+            Event::Empty(e) => {
+                let name = e.local_name().as_ref().to_vec();
+                if path.is_empty() {
+                    roots += 1;
+                    if roots > 1 || name != b"ObjectEncryption" {
+                        return None;
+                    }
+                }
+                path.push(name);
+                if path.len() == 2 && path[1] == b"SSE-KMS" {
+                    doc.has_sse_kms = true;
+                }
+                if let Some(f) = field_at(&path) {
+                    doc.set(f, String::new());
+                }
+                path.pop();
             }
-            root = Some(is_object_encryption);
+            Event::End(_) => {
+                if let Some((f, text)) = field.take() {
+                    doc.set(f, text);
+                }
+                path.pop()?;
+            }
+            Event::Text(text) => {
+                if path.is_empty() {
+                    if !text.iter().all(u8::is_ascii_whitespace) {
+                        return None;
+                    }
+                } else if let Some((_, value)) = field.as_mut() {
+                    value.push_str(&text.unescape().ok()?);
+                }
+            }
+            Event::CData(data) => {
+                if path.is_empty() {
+                    return None;
+                }
+                if let Some((_, value)) = field.as_mut() {
+                    value.push_str(std::str::from_utf8(&data).ok()?);
+                }
+            }
+            Event::Eof => break,
+            // Comments, processing instructions, the XML declaration and
+            // the DOCTYPE carry no content.
+            _ => {}
         }
     }
-    depth == 0 && root == Some(true)
+    (path.is_empty() && roots == 1).then_some(doc)
+}
+
+impl ObjectEncryptionDocument {
+    fn set(&mut self, field: &str, value: String) {
+        match field {
+            "KMSKeyArn" => self.kms_key_arn = Some(value),
+            _ => self.bucket_key_enabled = Some(value),
+        }
+    }
 }
 
 /// S3's answer when another request changed the object while this one was
@@ -1717,17 +1777,20 @@ fn update_encryption_invalid(message: &str) -> AwsServiceError {
 
 /// Parse an `UpdateObjectEncryption` body (`<ObjectEncryption>` holding an
 /// `<SSE-KMS>` with `KMSKeyArn` and an optional `BucketKeyEnabled`; SSE-KMS
-/// is the only encryption type it can set), refusing what the S3 API
-/// reference lists as `InvalidRequest`: no or another encryption type, and a
+/// is the only encryption type it can set; see
+/// [`read_object_encryption_document`]). A body that is not such a document
+/// is MalformedXML; otherwise what the S3 API reference lists as
+/// `InvalidRequest` is refused: no or another encryption type, and a
 /// `BucketKeyEnabled` other than `true` / `false`. A missing key is checked
 /// with the object (see [`check_update_object_encryption`]).
 fn parse_object_encryption(body: &str) -> Result<RequestedObjectEncryption, AwsServiceError> {
-    if !body.contains("<SSE-KMS>") {
+    let doc = read_object_encryption_document(body).ok_or_else(update_encryption_malformed_xml)?;
+    if !doc.has_sse_kms {
         return Err(update_encryption_invalid(
             "Requests that modify an object encryption configuration require a valid new encryption type. Valid values are SSEKMS. Modify the request to specify SSE-KMS for the updated encryption type, and then try again.",
         ));
     }
-    let bucket_key_enabled = match extract_xml_value(body, "BucketKeyEnabled") {
+    let bucket_key_enabled = match doc.bucket_key_enabled {
         None => None,
         Some(v) => match v.trim() {
             "true" => Some(true),
@@ -1740,7 +1803,8 @@ fn parse_object_encryption(body: &str) -> Result<RequestedObjectEncryption, AwsS
         },
     };
     Ok(RequestedObjectEncryption {
-        kms_key_arn: extract_xml_value(body, "KMSKeyArn")
+        kms_key_arn: doc
+            .kms_key_arn
             .map(|v| v.trim().to_string())
             .unwrap_or_default(),
         bucket_key_enabled,
@@ -1857,8 +1921,9 @@ mod update_object_encryption_tests {
             r#"<?xml version="1.0" encoding="UTF-8"?><ObjectEncryption xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><SSE-KMS><KMSKeyArn>a</KMSKeyArn></SSE-KMS></ObjectEncryption>"#,
             r#"<s3:ObjectEncryption xmlns:s3="http://s3.amazonaws.com/doc/2006-03-01/"></s3:ObjectEncryption>"#,
             "  <ObjectEncryption></ObjectEncryption>\n",
+            "\u{feff}<ObjectEncryption/>",
         ] {
-            assert!(is_object_encryption_document(body), "{body}");
+            assert!(read_object_encryption_document(body).is_some(), "{body}");
         }
         for body in [
             "",
@@ -1871,9 +1936,60 @@ mod update_object_encryption_tests {
             "<ObjectEncryption/>trailing",
             "</ObjectEncryption>",
             "<Wrapper><ObjectEncryption/></Wrapper>",
+            "<ObjectEncryption><SSE-KMS><KMSKeyArn>&bogus;</KMSKeyArn></SSE-KMS></ObjectEncryption>",
         ] {
-            assert!(!is_object_encryption_document(body), "{body}");
+            assert!(read_object_encryption_document(body).is_none(), "{body}");
+            assert_eq!(
+                code(parse_object_encryption(body).map(|_| ())),
+                "MalformedXML",
+                "{body}"
+            );
         }
+    }
+
+    /// Values are read from the elements themselves: a commented-out
+    /// `KMSKeyArn` is not one, prefixed children are, a leading BOM is
+    /// dropped, and entity and character references are unescaped.
+    #[test]
+    fn values_come_from_the_parsed_elements() {
+        let parsed = |body: &str| parse_object_encryption(body).ok().unwrap();
+        let commented = format!(
+            "<ObjectEncryption><SSE-KMS><!-- <KMSKeyArn>arn:aws:kms:us-east-1:123456789012:key/wrong</KMSKeyArn> --><KMSKeyArn>{ARN}</KMSKeyArn></SSE-KMS></ObjectEncryption>"
+        );
+        assert_eq!(parsed(&commented).kms_key_arn, ARN);
+        let only_commented =
+            format!("<ObjectEncryption><SSE-KMS><!-- <KMSKeyArn>{ARN}</KMSKeyArn> --></SSE-KMS></ObjectEncryption>");
+        assert_eq!(parsed(&only_commented).kms_key_arn, "");
+
+        let prefixed = format!(
+            r#"<s3:ObjectEncryption xmlns:s3="http://s3.amazonaws.com/doc/2006-03-01/"><s3:SSE-KMS><s3:KMSKeyArn>{ARN}</s3:KMSKeyArn><s3:BucketKeyEnabled>true</s3:BucketKeyEnabled></s3:SSE-KMS></s3:ObjectEncryption>"#
+        );
+        let p = parsed(&prefixed);
+        assert_eq!(p.kms_key_arn, ARN);
+        assert_eq!(p.bucket_key_enabled, Some(true));
+
+        let bom = format!(
+            "\u{feff}<?xml version=\"1.0\"?><ObjectEncryption><SSE-KMS><KMSKeyArn>{ARN}</KMSKeyArn></SSE-KMS></ObjectEncryption>"
+        );
+        assert_eq!(parsed(&bom).kms_key_arn, ARN);
+
+        let escaped = "<ObjectEncryption><SSE-KMS><KMSKeyArn>arn:aws:kms:us-east-1:123456789012:key/a&amp;b&#47;c&#x3c;</KMSKeyArn></SSE-KMS></ObjectEncryption>";
+        assert_eq!(
+            parsed(escaped).kms_key_arn,
+            "arn:aws:kms:us-east-1:123456789012:key/a&b/c<"
+        );
+
+        // A KMSKeyArn outside SSE-KMS is not the key.
+        let misplaced = format!(
+            "<ObjectEncryption><KMSKeyArn>{ARN}</KMSKeyArn><SSE-KMS></SSE-KMS></ObjectEncryption>"
+        );
+        assert_eq!(parsed(&misplaced).kms_key_arn, "");
+        // A DOCTYPE is skipped; the entity it declares is not expanded.
+        let doctype = r#"<!DOCTYPE x [<!ENTITY e "arn:aws:kms:us-east-1:123456789012:key/x">]><ObjectEncryption><SSE-KMS><KMSKeyArn>&e;</KMSKeyArn></SSE-KMS></ObjectEncryption>"#;
+        assert_eq!(
+            code(parse_object_encryption(doctype).map(|_| ())),
+            "MalformedXML"
+        );
     }
 
     #[test]

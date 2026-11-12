@@ -2305,3 +2305,90 @@ async fn persistence_null_version_object_tagging_survives_restart() {
         );
     }
 }
+
+/// An object UpdateObjectEncryption resealed under a KMS key is stored in
+/// its new form: after a restart it still reports the key and reads back,
+/// and resealing it again afterwards works too.
+#[tokio::test]
+async fn persistence_update_object_encryption_survives_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut server = TestServer::start_persistent(tmp.path()).await;
+    let client = server.s3_client().await;
+    let kms = server.kms_client().await;
+    let new_key = || async {
+        kms.create_key()
+            .send()
+            .await
+            .unwrap()
+            .key_metadata()
+            .unwrap()
+            .arn()
+            .unwrap()
+            .to_string()
+    };
+    let first_key = new_key().await;
+    client
+        .create_bucket()
+        .bucket("reseal-bucket")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_object()
+        .bucket("reseal-bucket")
+        .key("doc.txt")
+        .body(ByteStream::from_static(b"resealed across restarts"))
+        .send()
+        .await
+        .unwrap();
+    let reseal = |client: aws_sdk_s3::Client, key: String| async move {
+        client
+            .update_object_encryption()
+            .bucket("reseal-bucket")
+            .key("doc.txt")
+            .object_encryption(aws_sdk_s3::types::ObjectEncryption::Ssekms(
+                aws_sdk_s3::types::SsekmsEncryption::builder()
+                    .kms_key_arn(key)
+                    .build()
+                    .unwrap(),
+            ))
+            .send()
+            .await
+            .unwrap();
+    };
+    reseal(client.clone(), first_key.clone()).await;
+
+    server.restart().await;
+    let client = server.s3_client().await;
+    let read = |client: aws_sdk_s3::Client| async move {
+        let got = client
+            .get_object()
+            .bucket("reseal-bucket")
+            .key("doc.txt")
+            .send()
+            .await
+            .unwrap();
+        let key = got.ssekms_key_id().map(str::to_string);
+        (key, got.body.collect().await.unwrap().into_bytes().to_vec())
+    };
+    let (key, body) = read(client.clone()).await;
+    assert_eq!(key.as_deref(), Some(first_key.as_str()));
+    assert_eq!(body, b"resealed across restarts");
+
+    let kms = server.kms_client().await;
+    let second_key = kms
+        .create_key()
+        .send()
+        .await
+        .unwrap()
+        .key_metadata()
+        .unwrap()
+        .arn()
+        .unwrap()
+        .to_string();
+    reseal(client.clone(), second_key.clone()).await;
+    server.restart().await;
+    let (key, body) = read(server.s3_client().await).await;
+    assert_eq!(key.as_deref(), Some(second_key.as_str()));
+    assert_eq!(body, b"resealed across restarts");
+}

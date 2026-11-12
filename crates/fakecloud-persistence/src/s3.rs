@@ -197,6 +197,15 @@ pub struct ObjectMeta {
     /// `x-amz-replication-status` (`COMPLETED` / `FAILED` / `REPLICA`).
     #[serde(default)]
     pub replication_status: Option<String>,
+    /// The file in the object's directory that holds this version's body,
+    /// when it is not the default `<version tag>.bin`: a body replaced in
+    /// place ([`S3Store::replace_object_body`]) is written to a fresh
+    /// generation file that the sidecar then names, so the switch is the one
+    /// atomic sidecar rename. Kept by the disk store itself (a sidecar
+    /// rewritten through [`S3Store::put_object_meta`] keeps the one already
+    /// recorded); callers leave it `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_file: Option<String>,
 }
 
 /// One `PutObjectAnnotation` payload, persisted alongside its object so
@@ -790,6 +799,139 @@ impl DiskS3Store {
         (dir, bin, toml)
     }
 
+    /// The marker between a version tag and the generation of a body file a
+    /// replace wrote: `<version tag>.gen-<generation>.bin`.
+    const GENERATION_MARKER: &'static str = ".gen-";
+
+    /// A fresh generation body file name for `tag`, unique in the process
+    /// (time and a counter) and across restarts (the time).
+    fn generation_body_name(tag: &str) -> String {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!(
+            "{tag}{}{nanos:x}-{:x}-{n:x}.bin",
+            Self::GENERATION_MARKER,
+            std::process::id()
+        )
+    }
+
+    /// The version tag a generation body file belongs to, `None` for any
+    /// other file (the default `<tag>.bin` among them).
+    fn generation_body_tag(file_name: &str) -> Option<&str> {
+        if file_name.contains(['/', '\\']) {
+            return None;
+        }
+        let stem = file_name.strip_suffix(".bin")?;
+        let (tag, generation) = stem.rsplit_once(Self::GENERATION_MARKER)?;
+        (!tag.is_empty()
+            && !generation.is_empty()
+            && generation
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b'-'))
+        .then_some(tag)
+    }
+
+    /// Where the body of the version with sidecar `meta` and tag `tag` lives
+    /// in `dir`: the generation file the sidecar names, else `<tag>.bin`. A
+    /// recorded name that is not one of this tag's generation files (it can
+    /// only come from a hand-edited sidecar) is ignored.
+    fn body_path_in(dir: &std::path::Path, tag: &str, meta: &ObjectMeta) -> PathBuf {
+        match meta.body_file.as_deref() {
+            Some(name) if Self::generation_body_tag(name) == Some(tag) => dir.join(name),
+            _ => dir.join(format!("{tag}.bin")),
+        }
+    }
+
+    /// The generation body file the sidecar at `toml_path` (`<tag>.toml`)
+    /// names, if any: only one of that tag's generation files counts.
+    fn recorded_generation_body(toml_path: &std::path::Path) -> Option<String> {
+        let tag = toml_path.file_name()?.to_str()?.strip_suffix(".toml")?;
+        let text = std::fs::read_to_string(toml_path).ok()?;
+        let meta: ObjectMeta = toml::from_str(&text).ok()?;
+        meta.body_file
+            .filter(|name| Self::generation_body_tag(name) == Some(tag))
+    }
+
+    /// Best-effort removal of a body file the slot no longer uses: once the
+    /// sidecar no longer names it, a failure only leaves residue that the
+    /// next load removes.
+    fn remove_stale_body(path: &std::path::Path) {
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "replaced object body could not be removed; the next load removes it",
+                );
+            }
+        }
+    }
+
+    /// Write a slot's body to `bin_path`, then its sidecar (naming
+    /// `body_file`) atomically: the sidecar rename is what makes the new body
+    /// the slot's. Returns the body ref.
+    #[allow(clippy::too_many_arguments)]
+    fn write_slot(
+        &self,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+        bin_path: PathBuf,
+        toml_path: &std::path::Path,
+        body: BodySource,
+        meta: &ObjectMeta,
+        body_file: Option<String>,
+    ) -> StoreResult<BodyRef> {
+        let mut meta = meta.clone();
+        meta.body_file = body_file;
+        if meta.is_delete_marker {
+            meta.body_file = None;
+            crate::atomic::write_atomic_toml(toml_path, &meta)?;
+            return Ok(BodyRef::Memory(Bytes::new()));
+        }
+
+        let (size, bytes_for_cache): (u64, Option<Bytes>) = match body {
+            BodySource::Bytes(b) => {
+                crate::atomic::write_atomic_bytes(&bin_path, &b)?;
+                (b.len() as u64, Some(b))
+            }
+            BodySource::File(src) => {
+                let src_size = std::fs::metadata(&src)?.len();
+                crate::atomic::write_atomic_from_file(&src, &bin_path)?;
+                (src_size, None)
+            }
+            BodySource::FileCopy(src) => {
+                let src_size = std::fs::metadata(&src)?.len();
+                crate::atomic::write_atomic_copy_from_file(&src, &bin_path)?;
+                (src_size, None)
+            }
+        };
+
+        crate::atomic::write_atomic_toml(toml_path, &meta)?;
+
+        let body_key = crate::cache::BodyKey::new(
+            bucket.to_string(),
+            key.to_string(),
+            version.map(|s| s.to_string()),
+        );
+        if let Some(b) = bytes_for_cache {
+            self.cache.insert(body_key, b);
+        } else {
+            self.cache.invalidate(&body_key);
+        }
+
+        Ok(BodyRef::Disk {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            version: version.map(|s| s.to_string()),
+            path: bin_path,
+            size,
+        })
+    }
+
     /// Where an object version's annotations live: one `<id>.toml` record and
     /// `<id>.bin` payload per annotation, `<id>` the SHA-256 of the name (a
     /// name can be 512 bytes, too long for a file name once escaped).
@@ -1005,7 +1147,12 @@ impl S3Store for DiskS3Store {
                         // mid-listing may list an entry twice.
                         let version_entries: Vec<std::fs::DirEntry> =
                             std::fs::read_dir(&key_dir)?.collect::<Result<_, _>>()?;
-                        for version_entry in version_entries {
+                        // Body files the sidecars name, for clearing what a
+                        // replace interrupted or could not remove.
+                        let mut referenced: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        let mut superseded_defaults: Vec<PathBuf> = Vec::new();
+                        for version_entry in &version_entries {
                             let path = version_entry.path();
                             let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
                                 continue;
@@ -1018,7 +1165,17 @@ impl S3Store for DiskS3Store {
                             let mut obj_meta: ObjectMeta = toml::from_str(&toml_text)
                                 .map_err(|e| StoreError::Serde(e.to_string()))?;
                             Self::load_annotations(&key_dir, version_tag, &path, &mut obj_meta)?;
-                            let bin_path = key_dir.join(format!("{}.bin", version_tag));
+                            let bin_path = Self::body_path_in(&key_dir, version_tag, &obj_meta);
+                            if let Some(name) = bin_path.file_name().and_then(|n| n.to_str()) {
+                                if Self::generation_body_tag(name).is_some() {
+                                    referenced.insert(name.to_string());
+                                    // The sidecar names a generation file:
+                                    // the default one is no longer this
+                                    // version's body.
+                                    superseded_defaults
+                                        .push(key_dir.join(format!("{version_tag}.bin")));
+                                }
+                            }
                             let (body, size) = if obj_meta.is_delete_marker {
                                 (BodyRef::Memory(Bytes::new()), 0u64)
                             } else if bin_path.exists() {
@@ -1063,6 +1220,26 @@ impl S3Store for DiskS3Store {
                                     body,
                                 });
                             }
+                        }
+                        // A generation body no sidecar names was written by a
+                        // replace that did not reach its sidecar rename, or
+                        // was superseded by one that did; a default body
+                        // whose sidecar names a generation file was replaced.
+                        // Default files of any other version are never
+                        // touched.
+                        for entry in &version_entries {
+                            let path = entry.path();
+                            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                                continue;
+                            };
+                            if Self::generation_body_tag(name).is_some()
+                                && !referenced.contains(name)
+                            {
+                                Self::remove_stale_body(&path);
+                            }
+                        }
+                        for default in &superseded_defaults {
+                            Self::remove_stale_body(default);
                         }
                         if !versioned.is_empty() {
                             versioned.sort_by_key(|v| v.meta.last_modified);
@@ -1288,23 +1465,29 @@ impl S3Store for DiskS3Store {
         body: BodySource,
         meta: &ObjectMeta,
     ) -> StoreResult<BodyRef> {
+        let (dir, bin_path, toml_path) = self.object_paths(bucket, key, version);
+        std::fs::create_dir_all(&dir)?;
         // A new object in this slot starts without annotations; the replaced
         // object's go with it.
         remove_dir_if_present(&self.annotation_dir(bucket, key, version))?;
-        self.replace_object_body(bucket, key, version, body, meta)
+        // A body a replace left in a generation file stops being the slot's
+        // once the new sidecar (naming the default file) is in place.
+        let previous = Self::recorded_generation_body(&toml_path);
+        let body = self.write_slot(bucket, key, version, bin_path, &toml_path, body, meta, None)?;
+        if let Some(previous) = previous {
+            Self::remove_stale_body(&dir.join(previous));
+        }
+        Ok(body)
     }
 
-    /// The same files [`S3Store::put_object`] writes, with the slot's
-    /// annotation records left where they are.
-    ///
-    /// The `.bin` body and the `.toml` sidecar are each replaced atomically,
-    /// body first, as `put_object` writes them, but not together: a crash
-    /// between the two renames leaves the new body under the old sidecar.
-    /// For a reseal that order is the safer one: the body's KMS envelope
-    /// names the key that sealed it, so the new body still opens under the
-    /// old sidecar's key id; only a changed S3 Bucket Key setting (which the
-    /// sidecar records, and which selects the encryption context) would not
-    /// match until the request is retried.
+    /// Replace the version's body with one stored in a fresh generation file
+    /// (`<tag>.gen-<generation>.bin`), then atomically replace the sidecar,
+    /// which names that file: the sidecar rename is the single commit point.
+    /// A crash before it leaves the old sidecar and the old body, which still
+    /// match (the unreferenced new file is removed by the next load); a crash
+    /// after it leaves the new sidecar and the new body, with the old body
+    /// file left for the next load to remove. The previous body file is then
+    /// removed, best effort. The slot's annotation records are not touched.
     fn replace_object_body(
         &self,
         bucket: &str,
@@ -1313,55 +1496,28 @@ impl S3Store for DiskS3Store {
         body: BodySource,
         meta: &ObjectMeta,
     ) -> StoreResult<BodyRef> {
-        let (dir, bin_path, toml_path) = self.object_paths(bucket, key, version);
+        let (dir, default_bin, toml_path) = self.object_paths(bucket, key, version);
         std::fs::create_dir_all(&dir)?;
-
-        if meta.is_delete_marker {
-            crate::atomic::write_atomic_toml(&toml_path, meta)?;
-            return Ok(BodyRef::Memory(Bytes::new()));
-        }
-
-        let (size, bytes_for_cache): (u64, Option<Bytes>) = match body {
-            BodySource::Bytes(b) => {
-                crate::atomic::write_atomic_bytes(&bin_path, &b)?;
-                (b.len() as u64, Some(b))
-            }
-            BodySource::File(src) => {
-                let src_size = std::fs::metadata(&src)?.len();
-                crate::atomic::write_atomic_from_file(&src, &bin_path)?;
-                (src_size, None)
-            }
-            BodySource::FileCopy(src) => {
-                let src_size = std::fs::metadata(&src)?.len();
-                crate::atomic::write_atomic_copy_from_file(&src, &bin_path)?;
-                (src_size, None)
-            }
+        let tag = Self::version_tag(version);
+        let previous = match Self::recorded_generation_body(&toml_path) {
+            Some(name) => dir.join(name),
+            None => default_bin,
         };
-
-        crate::atomic::write_atomic_toml(&toml_path, meta)?;
-
-        let body_key = crate::cache::BodyKey::new(
-            bucket.to_string(),
-            key.to_string(),
-            version.map(|s| s.to_string()),
-        );
-        if let Some(b) = bytes_for_cache {
-            self.cache.insert(body_key, b);
-        } else {
-            self.cache.invalidate(&crate::cache::BodyKey::new(
-                bucket.to_string(),
-                key.to_string(),
-                version.map(|s| s.to_string()),
-            ));
+        let name = Self::generation_body_name(&tag);
+        let body = self.write_slot(
+            bucket,
+            key,
+            version,
+            dir.join(&name),
+            &toml_path,
+            body,
+            meta,
+            Some(name),
+        )?;
+        if !meta.is_delete_marker {
+            Self::remove_stale_body(&previous);
         }
-
-        Ok(BodyRef::Disk {
-            bucket: bucket.to_string(),
-            key: key.to_string(),
-            version: version.map(|s| s.to_string()),
-            path: bin_path,
-            size,
-        })
+        Ok(body)
     }
 
     fn put_object_meta(
@@ -1373,12 +1529,20 @@ impl S3Store for DiskS3Store {
     ) -> StoreResult<()> {
         let (dir, _bin, toml_path) = self.object_paths(bucket, key, version);
         std::fs::create_dir_all(&dir)?;
-        crate::atomic::write_atomic_toml(&toml_path, meta)?;
+        // A metadata update does not move the body: the sidecar keeps naming
+        // the body file it named.
+        let mut meta = meta.clone();
+        meta.body_file = Self::recorded_generation_body(&toml_path);
+        crate::atomic::write_atomic_toml(&toml_path, &meta)?;
         Ok(())
     }
 
     fn delete_object(&self, bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()> {
-        let (dir, bin_path, toml_path) = self.object_paths(bucket, key, version);
+        let (dir, default_bin, toml_path) = self.object_paths(bucket, key, version);
+        // The body is whichever file the sidecar names; a default file left
+        // beside a generation one goes too.
+        let generation = Self::recorded_generation_body(&toml_path).map(|name| dir.join(name));
+        let bin_path = generation.clone().unwrap_or_else(|| default_bin.clone());
         // Sidecar first, body second. `load` iterates `*.toml` and treats a
         // sidecar whose `.bin` is gone as a hard error that costs the whole
         // bucket, while an orphan `.bin` is never looked at. So if this is
@@ -1403,6 +1567,9 @@ impl S3Store for DiskS3Store {
                      bucket is deleted",
                 );
             }
+        }
+        if generation.is_some() {
+            Self::remove_stale_body(&default_bin);
         }
         // Annotations without their sidecar are never loaded, so like the
         // body a failure here only leaves residue.
@@ -1687,7 +1854,15 @@ impl S3Store for DiskS3Store {
             total
         };
 
-        crate::atomic::write_atomic_toml(&toml_path, meta)?;
+        // The completed object's body is the default file; a generation file
+        // an earlier replace left in the slot stops being its body.
+        let previous = Self::recorded_generation_body(&toml_path);
+        let mut meta = meta.clone();
+        meta.body_file = None;
+        crate::atomic::write_atomic_toml(&toml_path, &meta)?;
+        if let (Some(previous), Some(dir)) = (previous, toml_path.parent()) {
+            Self::remove_stale_body(&dir.join(previous));
+        }
 
         // Invalidate per-part cache entries and drop the mpu dir.
         for n in &part_numbers {
@@ -2230,6 +2405,140 @@ mod disk_tests {
         assert!(dir
             .join(format!("{}.bin", DiskS3Store::annotation_file_stem("n")))
             .exists());
+    }
+
+    /// The files in the object directory of `b/k`, sorted.
+    fn slot_files(store: &DiskS3Store) -> Vec<String> {
+        let (dir, _, _) = store.object_paths("b", "k", None);
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().is_file())
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// The body `b/k` loads with, read through a fresh store over the same
+    /// directory (a restart).
+    fn reloaded_body(tmp: &TempDir) -> Vec<u8> {
+        let store = new_store(tmp);
+        let loaded = store.load().unwrap();
+        let obj = &loaded.buckets["b"].objects["k"];
+        store.open_object_body(&obj.body).unwrap().to_vec()
+    }
+
+    fn replace(store: &DiskS3Store, body: &'static [u8]) {
+        store
+            .replace_object_body(
+                "b",
+                "k",
+                None,
+                BodySource::Bytes(Bytes::from_static(body)),
+                &sample_meta("k", body.len() as u64),
+            )
+            .unwrap();
+    }
+
+    /// A replaced body lives in a generation file the sidecar names; the
+    /// previous body file is removed, and a restart reads the new body.
+    #[test]
+    fn a_replaced_body_survives_a_restart() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_with_object(&tmp);
+        replace(&store, b"first");
+        replace(&store, b"second");
+        let files = slot_files(&store);
+        assert_eq!(files.len(), 2, "{files:?}");
+        assert!(files.iter().any(|f| f == "null.toml"), "{files:?}");
+        let body = files.iter().find(|f| f.ends_with(".bin")).unwrap();
+        assert_eq!(DiskS3Store::generation_body_tag(body), Some("null"));
+        assert_eq!(reloaded_body(&tmp), b"second");
+        // A metadata update keeps the sidecar naming that file.
+        store
+            .put_object_meta("b", "k", None, &sample_meta("k", 6))
+            .unwrap();
+        assert_eq!(reloaded_body(&tmp), b"second");
+        // A new object in the slot is back in the default file, alone.
+        store
+            .put_object(
+                "b",
+                "k",
+                None,
+                BodySource::Bytes(Bytes::from_static(b"fresh")),
+                &sample_meta("k", 5),
+            )
+            .unwrap();
+        assert_eq!(slot_files(&store), vec!["null.bin", "null.toml"]);
+        assert_eq!(reloaded_body(&tmp), b"fresh");
+    }
+
+    /// A crash after the new body is written but before the sidecar rename
+    /// leaves the old sidecar and body, which read back as they were; the
+    /// orphaned generation file is removed by the next load.
+    #[test]
+    fn a_replace_interrupted_before_its_sidecar_keeps_the_old_object() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_with_object(&tmp);
+        let (dir, _, _) = store.object_paths("b", "k", None);
+        let orphan = dir.join(DiskS3Store::generation_body_name("null"));
+        std::fs::write(&orphan, b"sealed but never committed").unwrap();
+        assert_eq!(reloaded_body(&tmp), b"abc");
+        assert!(!orphan.exists(), "the orphan is removed on load");
+        assert_eq!(slot_files(&store), vec!["null.bin", "null.toml"]);
+    }
+
+    /// A crash after the sidecar rename, before the previous body file is
+    /// removed, reads the new body; the previous file is removed on load.
+    #[test]
+    fn a_replace_interrupted_after_its_sidecar_keeps_the_new_object() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_with_object(&tmp);
+        replace(&store, b"resealed");
+        let (dir, default_bin, _) = store.object_paths("b", "k", None);
+        // The removals the crash prevented: the default body and an older
+        // generation.
+        std::fs::write(&default_bin, b"abc").unwrap();
+        let older = dir.join(DiskS3Store::generation_body_name("null"));
+        std::fs::write(&older, b"older").unwrap();
+        assert_eq!(reloaded_body(&tmp), b"resealed");
+        assert!(!default_bin.exists());
+        assert!(!older.exists());
+        assert_eq!(slot_files(&store).len(), 2);
+    }
+
+    /// Deleting a resealed object removes the file its sidecar names (and a
+    /// default file left beside it), leaving nothing.
+    #[test]
+    fn deleting_a_resealed_object_leaves_no_files() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_with_object(&tmp);
+        replace(&store, b"resealed");
+        let (_, default_bin, _) = store.object_paths("b", "k", None);
+        std::fs::write(&default_bin, b"leftover").unwrap();
+        store.delete_object("b", "k", None).unwrap();
+        assert!(slot_files(&store).is_empty(), "{:?}", slot_files(&store));
+    }
+
+    /// A sidecar written before body files were recorded (no `body_file`)
+    /// still means the default `<tag>.bin`, and is written back without one.
+    #[test]
+    fn sidecars_without_a_body_file_read_the_default_body() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_with_object(&tmp);
+        let (_, _, toml_path) = store.object_paths("b", "k", None);
+        let text = std::fs::read_to_string(&toml_path).unwrap();
+        assert!(!text.contains("body_file"), "{text}");
+        assert_eq!(reloaded_body(&tmp), b"abc");
+        // A name that is not this slot's generation file is not followed.
+        let mut meta: ObjectMeta = toml::from_str(&text).unwrap();
+        meta.body_file = Some("../../escape.bin".to_string());
+        crate::atomic::write_atomic_toml(&toml_path, &meta).unwrap();
+        assert_eq!(reloaded_body(&tmp), b"abc");
     }
 
     /// The memory store keeps annotations in the runtime state only: replacing

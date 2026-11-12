@@ -78,6 +78,8 @@ pub fn object_meta_snapshot(o: &S3Object) -> ObjectMeta {
         expires: o.expires.clone(),
         website_redirect_location: o.website_redirect_location.clone(),
         replication_status: o.replication_status.clone(),
+        // Which file holds the body is the disk store's own record.
+        body_file: None,
     }
 }
 
