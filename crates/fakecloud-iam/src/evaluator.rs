@@ -715,7 +715,9 @@ pub fn evaluate_with_resource_policy_and_gates_and_scps(
 /// access"). Within the same account, a resource-policy grant naming the
 /// role ARN is also "limited by an implicit deny in a permissions boundary
 /// or session policy", while one naming the IAM user or the role session
-/// itself is not.
+/// itself is not. One naming the caller's account (its root ARN or bare
+/// account id) delegates to the account, granting nothing by itself: the
+/// caller's identity policies must allow the request.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_with_resource_policy_for_role(
     identity_policies: &[PolicyDocument],
@@ -782,11 +784,14 @@ pub fn evaluate_with_resource_policy_for_role(
     }
     let identity_allows = matches!(identity_gated, Decision::Allow);
     let allowed = if same_account {
-        identity_allows || resource.grants(role_ceiling_allows)
+        // A statement naming the caller's own account delegates to the
+        // account's IAM policies rather than granting: only the identity
+        // side can then allow.
+        identity_allows || resource.grants(PrincipalScope::NotAccount, role_ceiling_allows)
     } else {
         // The caller's boundary and session policies already cap the
         // identity side, which must allow as well.
-        identity_allows && resource.grants(true)
+        identity_allows && resource.grants(PrincipalScope::All, true)
     };
     if allowed {
         Decision::Allow
@@ -813,6 +818,100 @@ pub fn evaluate_resource_policy_for_role(
         Decision::Allow
     } else {
         Decision::ImplicitDeny
+    }
+}
+
+/// The identity a service evaluates its own resource policy for (an SSM
+/// parameter's, an ECR repository's, a Secrets Manager secret's): the calling
+/// principal and, for an assumed-role session, its role's IAM ARN with its
+/// path, which a policy names to grant the role's sessions.
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyCaller<'a> {
+    pub principal: &'a Principal,
+    pub role_arn: Option<&'a str>,
+}
+
+/// The decision of `policy` (a resource policy) on `caller` performing
+/// `action` on `resource`, with the request context AWS fills from the
+/// calling identity (`aws:PrincipalArn`, its role's ARN for a role session;
+/// `aws:PrincipalAccount`; `aws:PrincipalType`; `aws:userid`;
+/// `aws:username` for an IAM user).
+pub fn evaluate_resource_policy_for_caller(
+    policy: &PolicyDocument,
+    caller: PolicyCaller<'_>,
+    action: &str,
+    resource: &str,
+) -> Decision {
+    let principal = caller.principal;
+    let username = (principal.principal_type == PrincipalType::User)
+        .then(|| principal.arn.rsplit('/').next().map(str::to_string))
+        .flatten();
+    let context = RequestContext {
+        aws_principal_arn: Some(caller.role_arn.unwrap_or(&principal.arn).to_string()),
+        aws_principal_account: Some(principal.account_id.clone()),
+        aws_principal_type: Some(
+            fakecloud_core::dispatch::principal_type_label(principal.principal_type).to_string(),
+        ),
+        aws_userid: Some(principal.user_id.clone()).filter(|id| !id.is_empty()),
+        aws_username: username,
+        principal_tags: principal.tags.clone(),
+        ..Default::default()
+    };
+    let request = EvalRequest {
+        principal,
+        action: action.to_string(),
+        resource: resource.to_string(),
+        context,
+    };
+    evaluate_resource_policy_for_role(policy, caller.role_arn, &request)
+}
+
+/// The owned identity behind a [`PolicyCaller`]: a request's calling
+/// principal (its account's root user when the request resolved none) and,
+/// for an assumed-role session, its role's ARN.
+#[derive(Debug, Clone)]
+pub struct RequestCaller {
+    pub principal: Principal,
+    pub role_arn: Option<String>,
+}
+
+impl RequestCaller {
+    /// The caller of a request made by `principal` (`None`: the root user of
+    /// `account`, in `partition`), its role resolved by `roles`.
+    pub fn new(
+        principal: Option<&Principal>,
+        account: &str,
+        partition: &str,
+        roles: Option<&SessionRoleResolver>,
+    ) -> Self {
+        let principal = principal
+            .cloned()
+            .unwrap_or_else(|| account_root_principal(account, partition));
+        let role_arn = roles.and_then(|resolve| resolve(&principal));
+        Self {
+            principal,
+            role_arn,
+        }
+    }
+
+    pub fn as_policy_caller(&self) -> PolicyCaller<'_> {
+        PolicyCaller {
+            principal: &self.principal,
+            role_arn: self.role_arn.as_deref(),
+        }
+    }
+}
+
+/// The root user of `account`, in `partition`: who a request made with no
+/// resolved identity acts as.
+pub fn account_root_principal(account: &str, partition: &str) -> Principal {
+    Principal {
+        arn: format!("arn:{partition}:iam::{account}:root"),
+        user_id: account.to_string(),
+        account_id: account.to_string(),
+        principal_type: PrincipalType::Root,
+        source_identity: None,
+        tags: None,
     }
 }
 
@@ -922,24 +1021,18 @@ impl<'p, 'r, 'a> ResourcePolicyDecision<'p, 'r, 'a> {
             caller: Decision::ImplicitDeny,
             role_decision: Decision::ImplicitDeny,
         };
-        decision.caller = decision.evaluate_caller(false);
-        decision.role_decision = decision.evaluate_role(false);
+        decision.caller = decision.evaluate_caller(PrincipalScope::All);
+        decision.role_decision = decision.evaluate_role(PrincipalScope::All);
         decision
     }
 
-    fn evaluate_caller(&self, specific: bool) -> Decision {
-        evaluate_inner_scoped(
-            std::slice::from_ref(self.policy),
-            self.request,
-            true,
-            specific,
-        )
+    fn evaluate_caller(&self, scope: PrincipalScope) -> Decision {
+        evaluate_inner_scoped(std::slice::from_ref(self.policy), self.request, true, scope)
     }
 
-    /// The decision for the role (`ImplicitDeny` when it is not evaluated);
-    /// `specific` leaves out the account-wide entries (`"AWS": "*"`, the
-    /// account root).
-    fn evaluate_role(&self, specific: bool) -> Decision {
+    /// The decision for the role (`ImplicitDeny` when it is not evaluated),
+    /// counting the `Principal` entries `scope` says.
+    fn evaluate_role(&self, scope: PrincipalScope) -> Decision {
         let Some((role, role_policy)) = self.role.as_ref() else {
             return Decision::ImplicitDeny;
         };
@@ -949,7 +1042,7 @@ impl<'p, 'r, 'a> ResourcePolicyDecision<'p, 'r, 'a> {
             resource: self.request.resource.clone(),
             context: self.request.context.clone(),
         };
-        evaluate_inner_scoped(std::slice::from_ref(role_policy), &as_role, true, specific)
+        evaluate_inner_scoped(std::slice::from_ref(role_policy), &as_role, true, scope)
     }
 
     /// Whether the caller's or the role's decision is `decision`.
@@ -957,19 +1050,16 @@ impl<'p, 'r, 'a> ResourcePolicyDecision<'p, 'r, 'a> {
         self.caller == decision || self.role_decision == decision
     }
 
-    /// Whether the policy grants the request: to the caller itself, or to its
-    /// role when what limits a grant to the role (`role_ceiling_allows`)
-    /// allows.
-    fn grants(&self, role_ceiling_allows: bool) -> bool {
-        self.caller == Decision::Allow
-            || (role_ceiling_allows && self.role_decision == Decision::Allow)
-    }
-
-    /// As [`Self::grants`], counting only entries naming the caller or its
-    /// role, not its whole account (a KMS key policy's direct grant).
-    fn grants_specifically(&self, role_ceiling_allows: bool) -> bool {
-        self.evaluate_caller(true) == Decision::Allow
-            || (role_ceiling_allows && self.evaluate_role(true) == Decision::Allow)
+    /// Whether the policy grants the request, counting the `Principal`
+    /// entries `scope` says: to the caller itself, or to its role when what
+    /// limits a grant to the role (`role_ceiling_allows`) allows.
+    fn grants(&self, scope: PrincipalScope, role_ceiling_allows: bool) -> bool {
+        let (caller, role) = if scope == PrincipalScope::All {
+            (self.caller, self.role_decision)
+        } else {
+            (self.evaluate_caller(scope), self.evaluate_role(scope))
+        };
+        caller == Decision::Allow || (role_ceiling_allows && role == Decision::Allow)
     }
 }
 
@@ -1006,7 +1096,7 @@ fn evaluate_kms_same_account(
     identity_gated: Decision,
     role_ceiling_allows: bool,
 ) -> Decision {
-    if key_policy.grants_specifically(role_ceiling_allows) {
+    if key_policy.grants(PrincipalScope::Specific, role_ceiling_allows) {
         return Decision::Allow;
     }
     // A non-direct key-policy Allow is the account-root delegation to IAM:
@@ -1022,18 +1112,16 @@ fn evaluate_inner(
     request: &EvalRequest<'_>,
     is_resource_policy: bool,
 ) -> Decision {
-    evaluate_inner_scoped(policies, request, is_resource_policy, false)
+    evaluate_inner_scoped(policies, request, is_resource_policy, PrincipalScope::All)
 }
 
-/// As [`evaluate_inner`], but when `ignore_account_wide` is set, account-wide
-/// resource-policy principals (`"AWS": "*"` / account root) do not match. KMS
-/// evaluation uses this to isolate a direct grant of a specific principal from
-/// the account-root delegation entry.
+/// As [`evaluate_inner`], with a statement's `Principal` entries counted as
+/// `scope` says (see [`PrincipalScope`]).
 fn evaluate_inner_scoped(
     policies: &[PolicyDocument],
     request: &EvalRequest<'_>,
     is_resource_policy: bool,
-    ignore_account_wide: bool,
+    scope: PrincipalScope,
 ) -> Decision {
     let mut allowed = false;
     for policy in policies {
@@ -1057,7 +1145,7 @@ fn evaluate_inner_scoped(
                     }
                 }
                 PrincipalPattern::Principal(refs) => {
-                    if !principal_matches_scoped(refs, request.principal, ignore_account_wide) {
+                    if !principal_matches_scoped(refs, request.principal, scope) {
                         continue;
                     }
                 }
@@ -1107,26 +1195,43 @@ fn evaluate_inner_scoped(
     }
 }
 
+/// Which `Principal` entries of a resource policy count as naming the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrincipalScope {
+    /// Every entry: the policy's statements as written.
+    All,
+    /// Not an entry naming the caller's account (`arn:aws:iam::<acct>:root`
+    /// or the bare account id), which only delegates to the account's IAM
+    /// policies, except for the account's root user itself. `"AWS": "*"`
+    /// still matches.
+    NotAccount,
+    /// Only entries naming the caller itself (or its role): neither the
+    /// account nor `"AWS": "*"`. A KMS key policy's direct grant.
+    Specific,
+}
+
 /// Check whether any entry in a parsed `Principal` list matches the
 /// calling principal. An empty list never matches — that's how we
 /// keep unrecognized principal types from silently granting.
 fn principal_matches(refs: &[PrincipalRef], principal: &Principal) -> bool {
-    principal_matches_scoped(refs, principal, false)
+    principal_matches_scoped(refs, principal, PrincipalScope::All)
 }
 
-/// As [`principal_matches`], but when `ignore_account_wide` is set the
-/// account-wide entries (`"AWS": "*"` and `arn:aws:iam::<acct>:root`) do not
-/// match. KMS evaluation uses this to tell a *direct* grant of a specific
-/// principal apart from the default "Enable IAM" account-root delegation.
+/// As [`principal_matches`], limited to the entries `scope` counts.
 fn principal_matches_scoped(
     refs: &[PrincipalRef],
     principal: &Principal,
-    ignore_account_wide: bool,
+    scope: PrincipalScope,
 ) -> bool {
     refs.iter().any(|r| match r {
-        PrincipalRef::AnyAws => !ignore_account_wide,
+        PrincipalRef::AnyAws => scope != PrincipalScope::Specific,
         PrincipalRef::AwsAccountRoot(account) => {
-            !ignore_account_wide && &principal.account_id == account
+            &principal.account_id == account
+                && match scope {
+                    PrincipalScope::All => true,
+                    PrincipalScope::NotAccount => principal.principal_type == PrincipalType::Root,
+                    PrincipalScope::Specific => false,
+                }
         }
         PrincipalRef::AwsArn(arn) => &principal.arn == arn,
         PrincipalRef::Service(service) => principal_is_service(principal, service),

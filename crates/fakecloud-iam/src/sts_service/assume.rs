@@ -954,12 +954,20 @@ impl StsService {
         {
             return Err(sts_assume_root_error("TaskPolicyArn is required"));
         }
-        let _task_policy_arn = req
+        let task_policy_arn = req
             .query_params
             .get("TaskPolicyArn.arn")
             .or_else(|| req.query_params.get("TaskPolicyArn"))
-            .cloned()
-            .unwrap_or_else(|| "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials".to_string());
+            .map(String::as_str)
+            .unwrap_or_default();
+        let task_policy = root_task_policy(task_policy_arn, partition_for_region(&req.region))
+            .ok_or_else(|| {
+                sts_assume_root_error(format!(
+                    "TaskPolicyArn {task_policy_arn} is not one of the AWS managed root-task \
+                     policies ({})",
+                    ROOT_TASK_POLICIES.join(", ")
+                ))
+            })?;
 
         // `RootDurationSecondsType` is @range 0..=900. Reject negative or
         // > 900 inputs up front rather than clamping silently.
@@ -1075,7 +1083,7 @@ impl StsService {
                 user_id: target_account.clone(),
                 account_id: target_account.clone(),
                 expiration: expiration_at,
-                session_policies: Vec::new(),
+                session_policies: vec![task_policy],
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider: None,
@@ -1171,4 +1179,38 @@ impl StsService {
         );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
+}
+
+/// The AWS managed policies (path `/root-task/`) an `AssumeRoot` session can
+/// be scoped to.
+pub(crate) const ROOT_TASK_POLICIES: &[&str] = &[
+    "IAMAuditRootUserCredentials",
+    "IAMCreateRootUserPassword",
+    "IAMDeleteRootUserCredentials",
+    "S3UnlockBucketPolicy",
+    "SQSUnlockQueuePolicy",
+];
+
+/// The policy an `AssumeRoot` session with the task policy `arn` (an
+/// `arn:<partition>:iam::aws:policy/root-task/<name>` of
+/// [`ROOT_TASK_POLICIES`]) is evaluated with, recorded as its session policy:
+/// the root user's own unrestricted access, which the task policy's Deny
+/// statements scope to the privileged task. `None` when `arn` names no
+/// root-task policy.
+pub(crate) fn root_task_policy(arn: &str, partition: &str) -> Option<String> {
+    let name = arn
+        .strip_prefix(&format!("arn:{partition}:iam::aws:policy/root-task/"))
+        .filter(|name| ROOT_TASK_POLICIES.contains(name))?;
+    let document = crate::managed_policies::default_document(&format!(
+        "arn:aws:iam::aws:policy/root-task/{name}"
+    ))?;
+    let mut policy: serde_json::Value = serde_json::from_str(document).ok()?;
+    let statements = policy.get_mut("Statement")?.as_array_mut()?;
+    statements.push(serde_json::json!({
+        "Sid": "RootUserAccess",
+        "Effect": "Allow",
+        "Action": "*",
+        "Resource": "*"
+    }));
+    Some(policy.to_string())
 }

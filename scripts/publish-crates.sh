@@ -165,7 +165,7 @@ CRATES=(
   fakecloud-firehose       # depends on s3
   fakecloud-athena         # depends on glue, s3
   fakecloud-route53        # depends on cloudfront, elbv2, logs, s3
-  fakecloud-ecs            # depends on logs, secretsmanager, ssm
+  fakecloud-ecs            # depends on iam, logs, secretsmanager, ssm
   fakecloud-batch          # depends on ecs (drives ECS for real job execution)
   fakecloud-config         # depends on s3, iam, ec2, lambda (records cross-service state)
 

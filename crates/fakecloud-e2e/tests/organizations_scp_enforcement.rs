@@ -880,6 +880,195 @@ async fn scp_caps_member_account_root() {
     );
 }
 
+/// The KMS key use S3 makes for a member-account caller (SSE-KMS) is capped
+/// by the caller's SCPs, which see `kms:ViaService`; `SimulatePrincipalPolicy`
+/// includes the SCPs and says whether they allow each action.
+#[tokio::test]
+async fn scps_cap_service_key_use_and_show_in_the_simulator() {
+    let server = start().await;
+    let (root_id, a_cfg, b_cfg) = org_with_member(&server).await;
+    let s3 = path_style_s3(&b_cfg);
+    s3.create_bucket().bucket("scp-sse").send().await.unwrap();
+    let put = |sse: bool| {
+        let mut req = s3
+            .put_object()
+            .bucket("scp-sse")
+            .key("k")
+            .body(ByteStream::from_static(b"x"));
+        if sse {
+            req = req.server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::AwsKms);
+        }
+        req.send()
+    };
+    put(true).await.expect("SSE-KMS before any SCP");
+
+    attach_root_scp(
+        &OrgsClient::new(&a_cfg),
+        &root_id,
+        "DenyKmsThroughS3",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"*","Resource":"*"},
+            {"Effect":"Deny","Action":"kms:GenerateDataKey","Resource":"*",
+             "Condition":{"StringLike":{"kms:ViaService":"s3.*.amazonaws.com"}}},
+            {"Effect":"Deny","Action":"sqs:DeleteQueue","Resource":"*"}
+        ]}"#,
+    )
+    .await;
+    assert_scp_denied(
+        put(true).await,
+        S3_DENIED,
+        "with an explicit deny in a service control policy",
+        "SSE-KMS write through S3",
+    );
+    put(false).await.expect("an SSE-S3 write calls no KMS");
+
+    let results = IamClient::new(&b_cfg)
+        .simulate_principal_policy()
+        .policy_source_arn(format!("arn:aws:iam::{ACCOUNT_B}:user/admin-b"))
+        .action_names("s3:GetObject")
+        .action_names("sqs:DeleteQueue")
+        .send()
+        .await
+        .unwrap();
+    let decisions: Vec<(String, String, Option<bool>)> = results
+        .evaluation_results()
+        .iter()
+        .map(|r| {
+            (
+                r.eval_action_name().to_string(),
+                r.eval_decision().as_str().to_string(),
+                r.organizations_decision_detail()
+                    .map(|d| d.allowed_by_organizations()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        decisions,
+        vec![
+            (
+                "s3:GetObject".to_string(),
+                "allowed".to_string(),
+                Some(true)
+            ),
+            (
+                "sqs:DeleteQueue".to_string(),
+                "explicitDeny".to_string(),
+                Some(false)
+            ),
+        ]
+    );
+}
+
+/// An `sts:AssumeRoot` session is scoped by its root-task policy: it performs
+/// the privileged task the policy names and nothing else, while
+/// `sts:GetCallerIdentity` needs no permission.
+#[tokio::test]
+async fn assume_root_session_is_scoped_to_its_task_policy() {
+    let server = start().await;
+    let (_, a_cfg, b_cfg) = org_with_member(&server).await;
+    IamClient::new(&a_cfg)
+        .enable_organizations_root_sessions()
+        .send()
+        .await
+        .unwrap();
+    let queue_url = SqsClient::new(&b_cfg)
+        .create_queue()
+        .queue_name("task-scoped-queue")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    seed_bucket(
+        &path_style_s3(&b_cfg),
+        "task-scoped-bucket",
+        read_grant(
+            "task-scoped-bucket",
+            &[&format!("arn:aws:iam::{ACCOUNT_B}:user/admin-b")],
+        ),
+    )
+    .await;
+
+    // S3UnlockBucketPolicy: read and delete the bucket policy.
+    let s3_root = root_session(&server, &a_cfg, ACCOUNT_B, "S3UnlockBucketPolicy").await;
+    let caller = StsClient::new(&s3_root)
+        .get_caller_identity()
+        .send()
+        .await
+        .expect("GetCallerIdentity needs no permission");
+    assert_eq!(
+        caller.arn(),
+        Some(format!("arn:aws:iam::{ACCOUNT_B}:root").as_str())
+    );
+    let s3 = path_style_s3(&s3_root);
+    s3.get_bucket_policy()
+        .bucket("task-scoped-bucket")
+        .send()
+        .await
+        .expect("s3:GetBucketPolicy");
+    let err = s3
+        .get_object()
+        .bucket("task-scoped-bucket")
+        .key("k")
+        .send()
+        .await
+        .expect_err("the task policy denies s3:GetObject");
+    assert_eq!(err.code(), Some(S3_DENIED), "{err:?}");
+    let err = SqsClient::new(&s3_root)
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .send()
+        .await
+        .expect_err("an S3 task session cannot use SQS");
+    assert_eq!(err.code(), Some(SQS_DENIED), "{err:?}");
+    s3.delete_bucket_policy()
+        .bucket("task-scoped-bucket")
+        .send()
+        .await
+        .expect("s3:DeleteBucketPolicy");
+
+    // SQSUnlockQueuePolicy: read the queue's attributes, not send to it.
+    let sqs_root = root_session(&server, &a_cfg, ACCOUNT_B, "SQSUnlockQueuePolicy").await;
+    let sqs = SqsClient::new(&sqs_root);
+    sqs.get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::All)
+        .send()
+        .await
+        .expect("sqs:GetQueueAttributes");
+    let err = sqs
+        .send_message()
+        .queue_url(&queue_url)
+        .message_body("x")
+        .send()
+        .await
+        .expect_err("the task policy denies sqs:SendMessage");
+    assert_eq!(err.code(), Some(SQS_DENIED), "{err:?}");
+
+    // IAMAuditRootUserCredentials: audit the root user's own credentials
+    // (no UserName: the calling root user), not other IAM users.
+    let iam_root = root_session(&server, &a_cfg, ACCOUNT_B, "IAMAuditRootUserCredentials").await;
+    let iam = IamClient::new(&iam_root);
+    iam.list_access_keys()
+        .send()
+        .await
+        .expect("iam:ListAccessKeys on the root user");
+    let err = iam
+        .list_access_keys()
+        .user_name("admin-b")
+        .send()
+        .await
+        .expect_err("auditing another user is denied");
+    assert_eq!(err.code(), Some("AccessDenied"), "{err:?}");
+    let err = iam
+        .list_users()
+        .send()
+        .await
+        .expect_err("iam:ListUsers is outside the task");
+    assert_eq!(err.code(), Some("AccessDenied"), "{err:?}");
+}
+
 /// Create role `name` (under `path`) in `cfg`'s account, trusted by the
 /// account and with `policy` inline when given, and return a session of it
 /// assumed by `cfg`'s admin together with the role's ARN.

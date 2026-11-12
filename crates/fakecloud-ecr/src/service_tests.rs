@@ -438,12 +438,98 @@ fn repository_policy_allows_empty_policy_denies() {
     ));
 }
 
+/// [`super::check_repo_policy`] for the root user of `caller_account`.
+fn check_as_root(
+    owner: &str,
+    caller_account: &str,
+    repo_arn: &str,
+    name: &str,
+    policy: Option<&str>,
+    action: &str,
+) -> Result<(), fakecloud_core::service::AwsServiceError> {
+    let root = fakecloud_iam::evaluator::account_root_principal(caller_account, "aws");
+    let caller = fakecloud_iam::evaluator::PolicyCaller {
+        principal: &root,
+        role_arn: None,
+    };
+    super::check_repo_policy(owner, caller, repo_arn, name, policy, action)
+}
+
+#[test]
+fn check_repo_policy_evaluates_the_calling_principal() {
+    use fakecloud_core::auth::{Principal, PrincipalType};
+    use fakecloud_iam::evaluator::PolicyCaller;
+    let policy = r#"{
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": [
+                "arn:aws:iam::222222222222:role/ci/puller",
+                "arn:aws:iam::222222222222:user/alice"
+            ]},
+            "Action": "ecr:BatchGetImage",
+            "Resource": "*"
+        }]
+    }"#;
+    let principal = |arn: &str, principal_type| Principal {
+        arn: arn.to_string(),
+        user_id: "AIDAEXAMPLE".to_string(),
+        account_id: "222222222222".to_string(),
+        principal_type,
+        source_identity: None,
+        tags: None,
+    };
+    let check = |caller: PolicyCaller<'_>| {
+        super::check_repo_policy(
+            "111111111111",
+            caller,
+            "arn:aws:ecr:us-east-1:111111111111:repository/app",
+            "app",
+            Some(policy),
+            "ecr:BatchGetImage",
+        )
+    };
+    let session = principal(
+        "arn:aws:sts::222222222222:assumed-role/puller/s1",
+        PrincipalType::AssumedRole,
+    );
+    let alice = principal("arn:aws:iam::222222222222:user/alice", PrincipalType::User);
+    let bob = principal("arn:aws:iam::222222222222:user/bob", PrincipalType::User);
+    // A session of the named role (path included), and the named user.
+    assert!(check(PolicyCaller {
+        principal: &session,
+        role_arn: Some("arn:aws:iam::222222222222:role/ci/puller"),
+    })
+    .is_ok());
+    assert!(check(PolicyCaller {
+        principal: &alice,
+        role_arn: None,
+    })
+    .is_ok());
+    // Another user, and the account's root, are not named.
+    let err = check(PolicyCaller {
+        principal: &bob,
+        role_arn: None,
+    })
+    .unwrap_err();
+    assert_eq!(err.code(), "AccessDeniedException");
+    let err = check_as_root(
+        "111111111111",
+        "222222222222",
+        "arn:aws:ecr:us-east-1:111111111111:repository/app",
+        "app",
+        Some(policy),
+        "ecr:BatchGetImage",
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "AccessDeniedException");
+}
+
 #[test]
 fn check_repo_policy_same_account_passes_without_policy() {
-    use super::check_repo_policy;
     // Same-account caller: policy is irrelevant (real ECR falls back to
     // the caller's IAM identity policies for the same-account path).
-    let res = check_repo_policy(
+    let res = check_as_root(
         "111111111111",
         "111111111111",
         "arn:aws:ecr:us-east-1:111111111111:repository/app",
@@ -456,8 +542,7 @@ fn check_repo_policy_same_account_passes_without_policy() {
 
 #[test]
 fn check_repo_policy_cross_account_no_policy_returns_not_found() {
-    use super::check_repo_policy;
-    let err = check_repo_policy(
+    let err = check_as_root(
         "111111111111",
         "222222222222",
         "arn:aws:ecr:us-east-1:111111111111:repository/app",
@@ -471,7 +556,6 @@ fn check_repo_policy_cross_account_no_policy_returns_not_found() {
 
 #[test]
 fn check_repo_policy_cross_account_explicit_allow_passes() {
-    use super::check_repo_policy;
     let policy = r#"{
         "Version": "2012-10-17",
         "Statement": [{
@@ -481,7 +565,7 @@ fn check_repo_policy_cross_account_explicit_allow_passes() {
             "Resource": "*"
         }]
     }"#;
-    let res = check_repo_policy(
+    let res = check_as_root(
         "111111111111",
         "222222222222",
         "arn:aws:ecr:us-east-1:111111111111:repository/app",
@@ -494,7 +578,6 @@ fn check_repo_policy_cross_account_explicit_allow_passes() {
 
 #[test]
 fn check_repo_policy_cross_account_implicit_deny_returns_access_denied() {
-    use super::check_repo_policy;
     // Policy exists but doesn't grant the requested action: ECR returns
     // AccessDeniedException, not RepositoryPolicyNotFoundException.
     let policy = r#"{
@@ -506,7 +589,7 @@ fn check_repo_policy_cross_account_implicit_deny_returns_access_denied() {
             "Resource": "*"
         }]
     }"#;
-    let err = check_repo_policy(
+    let err = check_as_root(
         "111111111111",
         "222222222222",
         "arn:aws:ecr:us-east-1:111111111111:repository/app",
@@ -520,7 +603,6 @@ fn check_repo_policy_cross_account_implicit_deny_returns_access_denied() {
 
 #[test]
 fn check_repo_policy_cross_account_explicit_deny_returns_access_denied() {
-    use super::check_repo_policy;
     // Explicit Deny in the resource policy beats any matching Allow.
     let policy = r#"{
         "Version": "2012-10-17",
@@ -539,7 +621,7 @@ fn check_repo_policy_cross_account_explicit_deny_returns_access_denied() {
             }
         ]
     }"#;
-    let err = check_repo_policy(
+    let err = check_as_root(
         "111111111111",
         "222222222222",
         "arn:aws:ecr:us-east-1:111111111111:repository/app",

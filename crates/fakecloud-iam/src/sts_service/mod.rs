@@ -2751,7 +2751,7 @@ mod tests {
                 ("TargetPrincipal", "111122223333"),
                 (
                     "TaskPolicyArn.arn",
-                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                    "arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials",
                 ),
             ],
         );
@@ -2778,7 +2778,7 @@ mod tests {
                 ("TargetPrincipal", "arn:aws:iam::444455556666:root"),
                 (
                     "TaskPolicyArn.arn",
-                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                    "arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials",
                 ),
                 ("DurationSeconds", "600"),
                 ("SourceIdentity", "alice"),
@@ -2804,7 +2804,7 @@ mod tests {
                 ("TargetPrincipal", "arn:aws:iam::444455556666:root"),
                 (
                     "TaskPolicyArn.arn",
-                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                    "arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials",
                 ),
             ],
         );
@@ -2834,7 +2834,7 @@ mod tests {
                 ("TargetPrincipal", "arn:aws:iam::444455556666:root"),
                 (
                     "TaskPolicyArn.arn",
-                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                    "arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials",
                 ),
             ],
         );
@@ -2861,7 +2861,7 @@ mod tests {
                 ("TargetPrincipal", "arn:aws:iam::444455556666:root"),
                 (
                     "TaskPolicyArn.arn",
-                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                    "arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials",
                 ),
             ],
         );
@@ -2884,7 +2884,7 @@ mod tests {
                 ("TargetPrincipal", "123456789012"),
                 (
                     "TaskPolicyArn.arn",
-                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                    "arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials",
                 ),
             ],
         );
@@ -2939,7 +2939,10 @@ mod tests {
             "AssumeRoot",
             vec![
                 ("TargetPrincipal", "111122223333"),
-                ("TaskPolicyArn.arn", "arn:aws:iam::aws:policy/X"),
+                (
+                    "TaskPolicyArn.arn",
+                    "arn:aws:iam::aws:policy/root-task/S3UnlockBucketPolicy",
+                ),
                 ("DurationSeconds", "1800"),
             ],
         );
@@ -2948,5 +2951,90 @@ mod tests {
             .err()
             .expect("out-of-range DurationSeconds must fail");
         assert_eq!(err.code(), "ExpiredTokenException");
+    }
+
+    #[tokio::test]
+    async fn assume_root_refuses_a_policy_that_is_not_a_root_task_policy() {
+        let (svc, _) = make_sts_service();
+        for arn in [
+            "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+            "arn:aws:iam::aws:policy/AdministratorAccess",
+            "arn:aws:iam::aws:policy/root-task/Unknown",
+            "arn:aws:iam::123456789012:policy/root-task/S3UnlockBucketPolicy",
+            "arn:aws-cn:iam::aws:policy/root-task/S3UnlockBucketPolicy",
+        ] {
+            let req = sts_request(
+                "AssumeRoot",
+                vec![
+                    ("TargetPrincipal", "123456789012"),
+                    ("TaskPolicyArn.arn", arn),
+                ],
+            );
+            let err = svc.assume_root(&req).err().expect(arn);
+            assert_eq!(err.code(), "ExpiredTokenException", "{arn}");
+        }
+    }
+
+    #[tokio::test]
+    async fn assume_root_session_is_scoped_by_its_task_policy() {
+        use crate::evaluator::{evaluate_with_gates, Decision, EvalRequest, PolicyDocument};
+        let (svc, state) = make_sts_service();
+        let req = sts_request(
+            "AssumeRoot",
+            vec![
+                ("TargetPrincipal", "123456789012"),
+                (
+                    "TaskPolicyArn.arn",
+                    "arn:aws:iam::aws:policy/root-task/S3UnlockBucketPolicy",
+                ),
+            ],
+        );
+        let resp = svc.assume_root(&req).unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        let akid = body
+            .split("<AccessKeyId>")
+            .nth(1)
+            .and_then(|rest| rest.split('<').next())
+            .unwrap()
+            .to_string();
+        let session_policies = state
+            .read()
+            .get("123456789012")
+            .unwrap()
+            .sts_temp_credentials[&akid]
+            .session_policies
+            .clone();
+        assert_eq!(session_policies.len(), 1);
+        let session: Vec<PolicyDocument> = session_policies
+            .iter()
+            .map(|p| PolicyDocument::parse(p))
+            .collect();
+        let root = fakecloud_core::auth::Principal {
+            arn: "arn:aws:iam::123456789012:root".into(),
+            user_id: "123456789012".into(),
+            account_id: "123456789012".into(),
+            principal_type: fakecloud_core::auth::PrincipalType::Root,
+            source_identity: None,
+            tags: None,
+        };
+        let decide = |action: &str| {
+            let request = EvalRequest {
+                principal: &root,
+                action: action.into(),
+                resource: "arn:aws:s3:::bucket".into(),
+                context: crate::evaluator::RequestContext {
+                    aws_principal_arn: Some(root.arn.clone()),
+                    ..Default::default()
+                },
+            };
+            let allow_all = PolicyDocument::parse(
+                r#"{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#,
+            );
+            evaluate_with_gates(&[allow_all], None, Some(&session), &request)
+        };
+        assert_eq!(decide("s3:DeleteBucketPolicy"), Decision::Allow);
+        assert_eq!(decide("s3:GetBucketPolicy"), Decision::Allow);
+        assert_eq!(decide("s3:GetObject"), Decision::ExplicitDeny);
+        assert_eq!(decide("iam:CreateUser"), Decision::ExplicitDeny);
     }
 }

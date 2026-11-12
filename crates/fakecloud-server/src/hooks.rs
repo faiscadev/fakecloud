@@ -30,8 +30,14 @@ impl KmsHookAdapter {
     /// Resolve calling identities from `iam` (an assumed-role session's role
     /// ARN with its path and `<role id>:<session>` id, a user's id, their
     /// tags) and from Organizations once [`Self::set_org_resolver`] wires it,
-    /// for the request context key policies and grants are evaluated with.
-    pub(crate) fn with_iam(mut self, iam: fakecloud_iam::SharedIamState) -> Self {
+    /// for the request context key policies and grants are evaluated with,
+    /// and, under IAM enforcement (`iam_mode`), the caller's SCPs, which cap
+    /// the key use a service makes on its behalf.
+    pub(crate) fn with_iam(
+        mut self,
+        iam: fakecloud_iam::SharedIamState,
+        iam_mode: fakecloud_core::auth::IamMode,
+    ) -> Self {
         let org = self.org_resolver.clone();
         self.inner = self.inner.with_caller_resolver(Arc::new(move |arn: &str| {
             let tags = |tags: &[fakecloud_iam::Tag]| -> std::collections::HashMap<String, String> {
@@ -40,8 +46,23 @@ impl KmsHookAdapter {
                     .collect()
             };
             let account = fakecloud_aws::arn::account_of(arn).unwrap_or_default();
+            let scps = org
+                .get()
+                .filter(|_| iam_mode.is_enabled())
+                .and_then(|resolver| {
+                    resolver.scps_for(&fakecloud_core::auth::Principal {
+                        arn: arn.to_string(),
+                        user_id: String::new(),
+                        account_id: account.to_string(),
+                        principal_type: fakecloud_core::auth::PrincipalType::from_arn(arn),
+                        source_identity: None,
+                        tags: None,
+                    })
+                });
             let mut facts = fakecloud_kms::hook::CallerFacts {
                 org: org.get().and_then(|r| r.principal_org(account)),
+                scps,
+                enforce_scps: iam_mode.is_strict(),
                 ..Default::default()
             };
             let iam = iam.read();

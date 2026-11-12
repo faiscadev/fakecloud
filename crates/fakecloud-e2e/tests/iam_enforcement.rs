@@ -1645,6 +1645,50 @@ async fn bucket_policy_grants_access_without_identity_policy() {
 }
 
 #[tokio::test]
+async fn bucket_policy_naming_the_own_account_delegates_to_iam() {
+    // A same-account bucket policy naming the account (its root ARN or bare
+    // id) grants a user nothing by itself: it delegates to the account's
+    // IAM, so the user's identity policy decides.
+    let server = start_strict().await;
+    let (akid, secret) = bootstrap_user(&server, "acct_reader").await;
+    seed_bucket_with_policy(
+        &server,
+        "bp-account-docs",
+        r#"{"Version":"2012-10-17","Statement":[{
+            "Effect":"Allow",
+            "Principal":{"AWS":["arn:aws:iam::123456789012:root","123456789012"]},
+            "Action":"s3:GetObject",
+            "Resource":"arn:aws:s3:::bp-account-docs/*"
+        }]}"#,
+    )
+    .await;
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let s3 = aws_sdk_s3::Client::new(&cfg);
+    let get = || {
+        s3.get_object()
+            .bucket("bp-account-docs")
+            .key("readme.md")
+            .send()
+    };
+    let err = get()
+        .await
+        .expect_err("an account-root grant is no grant to the user");
+    assert_eq!(
+        aws_sdk_s3::error::ProvideErrorMetadata::code(&err),
+        Some("AccessDenied"),
+        "{err:?}"
+    );
+    attach_inline_policy(
+        &server,
+        "acct_reader",
+        "ReadDocs",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::bp-account-docs/*"}]}"#,
+    )
+    .await;
+    get().await.expect("the identity policy allows the read");
+}
+
+#[tokio::test]
 async fn bucket_policy_explicit_deny_beats_identity_allow() {
     // Identity policy grants s3:GetObject but the bucket policy denies
     // it for this user. Explicit deny on either side wins, regardless

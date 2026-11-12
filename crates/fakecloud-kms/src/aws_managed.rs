@@ -247,7 +247,6 @@ pub(crate) fn policy_decision(
     encryption_context: &BTreeMap<String, String>,
     extra: &[(&str, &str)],
 ) -> Decision {
-    let mut keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
     // Forms that can only deny: when an assumed-role caller's role path is
     // unknown (the role is not in fakecloud's IAM, or was deleted), a Deny
     // naming that role under any path applies, failing closed, while an
@@ -279,55 +278,22 @@ pub(crate) fn policy_decision(
                 .collect();
         }
     }
-    // The global keys AWS sets from the calling identity (`aws:PrincipalArn`,
-    // `aws:PrincipalAccount`, `aws:PrincipalType`, `aws:userid`,
-    // `aws:PrincipalTag/*`, `aws:PrincipalOrgID`, ...): guard statements
-    // such as `Deny ... ArnNotLike aws:PrincipalArn` would otherwise match
-    // every caller, a negated operator on a missing key being true.
-    let mut base = RequestContext::default();
+    let context = request_context(caller, encryption_context, extra);
     let principals: Vec<Principal> = match caller {
-        KeyCaller::Direct { principal, account } => {
-            let account = caller_account(&principal.arn, account);
-            keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
-            base = principal_context(
-                &principal.arn,
-                account,
-                &CallerFacts {
-                    user_id: Some(principal.user_id.clone()),
-                    tags: principal.tags.clone(),
-                    ..Default::default()
-                },
-            );
-            vec![(*principal).clone()]
-        }
+        KeyCaller::Direct { principal, .. } => vec![(*principal).clone()],
         KeyCaller::ViaService {
-            service_principal,
             region,
             account,
             caller_arn,
             facts,
+            ..
         } => {
-            keys.insert(
-                "kms:ViaService".to_string(),
-                vec![via_service(service_principal, region)],
-            );
-            // The caller's own account, not the account of the resource the
-            // service acts on (an S3 bucket, an SQS queue), which may be
-            // the key's.
             let account = caller_arn.map_or(*account, |arn| caller_account(arn, account));
-            keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
-            let none = CallerFacts::default();
-            let facts = facts.unwrap_or(&none);
             match caller_arn {
                 Some(arn) => {
-                    base = principal_context(arn, account, facts);
-                    caller_principals(arn, facts.role_arn.as_deref(), account)
+                    caller_principals(arn, facts.and_then(|f| f.role_arn.as_deref()), account)
                 }
-                None => {
-                    let root = account_root(account, region);
-                    base = principal_context(&root.arn, account, facts);
-                    vec![root]
-                }
+                None => vec![account_root(account, region)],
             }
         }
         KeyCaller::Service {
@@ -335,17 +301,8 @@ pub(crate) fn policy_decision(
             region,
             source_arn,
             source_account,
-            via_service: via,
+            ..
         } => {
-            if let Some(via) = via {
-                keys.insert("kms:ViaService".to_string(), vec![via_service(via, region)]);
-            }
-            let internal = InternalCaller::Service {
-                service: service_principal.to_string(),
-                source_arn: source_arn.to_string(),
-                source_account: source_account.to_string(),
-            };
-            keys.extend(internal.condition_keys());
             let name = service_principal.split('.').next().unwrap_or_default();
             let suffix = fakecloud_aws::endpoint::dns_suffix_for_region(region);
             let mut forms = vec![service_principal.to_string()];
@@ -371,27 +328,11 @@ pub(crate) fn policy_decision(
                 .collect()
         }
     };
-    for (k, v) in encryption_context {
-        keys.insert(format!("kms:EncryptionContext:{k}"), vec![v.clone()]);
-    }
-    keys.insert(
-        "kms:EncryptionContextKeys".to_string(),
-        encryption_context.keys().cloned().collect(),
-    );
-    for (k, v) in extra {
-        keys.insert((*k).to_string(), vec![(*v).to_string()]);
-    }
     let document = PolicyDocument::parse(policy);
     // One request whose principal is every form of the caller: a statement
     // applies when its Principal names any of them. A Deny that applies to
     // any form denies, whatever another form is allowed; otherwise any
     // Allow allows; otherwise nothing grants it (implicit deny).
-    let mut service_keys = base.service_keys.clone();
-    service_keys.extend(keys);
-    let context = RequestContext {
-        service_keys,
-        ..base
-    };
     let evaluate = |principal: &Principal| {
         let request = EvalRequest {
             principal,
@@ -416,6 +357,95 @@ pub(crate) fn policy_decision(
         }
     }
     decision
+}
+
+/// The request context of `caller` using a key with `encryption_context`
+/// (`extra`: operation-specific keys such as `kms:ReEncryptOnSameKey`): what
+/// the key policy, and the caller's SCPs, are evaluated with.
+///
+/// It carries the global keys AWS sets from the calling identity
+/// (`aws:PrincipalArn`, `aws:PrincipalAccount`, `aws:PrincipalType`,
+/// `aws:userid`, `aws:PrincipalTag/*`, `aws:PrincipalOrgID`, ...): guard
+/// statements such as `Deny ... ArnNotLike aws:PrincipalArn` would otherwise
+/// match every caller, a negated operator on a missing key being true.
+pub(crate) fn request_context(
+    caller: &KeyCaller<'_>,
+    encryption_context: &BTreeMap<String, String>,
+    extra: &[(&str, &str)],
+) -> RequestContext {
+    let mut keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let base = match caller {
+        KeyCaller::Direct { principal, account } => {
+            let account = caller_account(&principal.arn, account);
+            keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
+            principal_context(
+                &principal.arn,
+                account,
+                &CallerFacts {
+                    user_id: Some(principal.user_id.clone()),
+                    tags: principal.tags.clone(),
+                    ..Default::default()
+                },
+            )
+        }
+        KeyCaller::ViaService {
+            service_principal,
+            region,
+            account,
+            caller_arn,
+            facts,
+        } => {
+            keys.insert(
+                "kms:ViaService".to_string(),
+                vec![via_service(service_principal, region)],
+            );
+            // The caller's own account, not the account of the resource the
+            // service acts on (an S3 bucket, an SQS queue), which may be
+            // the key's.
+            let account = caller_arn.map_or(*account, |arn| caller_account(arn, account));
+            keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
+            let none = CallerFacts::default();
+            let facts = facts.unwrap_or(&none);
+            match caller_arn {
+                Some(arn) => principal_context(arn, account, facts),
+                None => principal_context(&account_root(account, region).arn, account, facts),
+            }
+        }
+        KeyCaller::Service {
+            service_principal,
+            region,
+            source_arn,
+            source_account,
+            via_service: via,
+        } => {
+            if let Some(via) = via {
+                keys.insert("kms:ViaService".to_string(), vec![via_service(via, region)]);
+            }
+            let internal = InternalCaller::Service {
+                service: service_principal.to_string(),
+                source_arn: source_arn.to_string(),
+                source_account: source_account.to_string(),
+            };
+            keys.extend(internal.condition_keys());
+            RequestContext::default()
+        }
+    };
+    for (k, v) in encryption_context {
+        keys.insert(format!("kms:EncryptionContext:{k}"), vec![v.clone()]);
+    }
+    keys.insert(
+        "kms:EncryptionContextKeys".to_string(),
+        encryption_context.keys().cloned().collect(),
+    );
+    for (k, v) in extra {
+        keys.insert((*k).to_string(), vec![(*v).to_string()]);
+    }
+    let mut service_keys = base.service_keys.clone();
+    service_keys.extend(keys);
+    RequestContext {
+        service_keys,
+        ..base
+    }
 }
 
 /// The request context a key policy sees for the calling identity `arn` of

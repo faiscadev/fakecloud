@@ -42,6 +42,9 @@ pub struct SecretValue {
 /// `caller_arn` is the identity reading it (an IAM user or assumed role),
 /// whom KMS names if the secret's key refuses Secrets Manager; `None` when
 /// the reader acts as the account (a service resolving a secret for a task).
+/// `reader` is the identity another account's secret policy must allow (the
+/// caller, or the execution role session of an ECS task); `None` reads as
+/// `caller_account`'s root user.
 #[allow(clippy::too_many_arguments)]
 pub fn read_secret_value(
     state: &SharedSecretsManagerState,
@@ -52,6 +55,7 @@ pub fn read_secret_value(
     version_id: Option<&str>,
     version_stage: Option<&str>,
     caller_arn: Option<&str>,
+    reader: Option<fakecloud_iam::evaluator::PolicyCaller<'_>>,
 ) -> Result<SecretValue, AwsServiceError> {
     let owner_account = secret_owner_account(secret_id, caller_account);
     let owner_region = if fakecloud_aws::arn::arn_resource(secret_id, "secretsmanager").is_some() {
@@ -77,7 +81,15 @@ pub fn read_secret_value(
 
         if owner_account != caller_account {
             let policy_doc = secret.resource_policy.as_deref().unwrap_or("");
-            if !resource_policy_allows(policy_doc, caller_account, &secret.arn) {
+            let root = fakecloud_iam::evaluator::account_root_principal(
+                caller_account,
+                fakecloud_aws::arn::partition_of(&secret.arn),
+            );
+            let reader = reader.unwrap_or(fakecloud_iam::evaluator::PolicyCaller {
+                principal: &root,
+                role_arn: None,
+            });
+            if !resource_policy_allows(policy_doc, reader, &secret.arn) {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::FORBIDDEN,
                     "AccessDeniedException",

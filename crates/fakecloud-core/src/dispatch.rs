@@ -2214,9 +2214,9 @@ fn grant_authorizes(
     }
 }
 
-/// Authorize a request made as an account's root user: its SCPs first, then,
-/// for a resource of another account, that resource's policy (see
-/// [`authorize_root_cross_account`]).
+/// Authorize a request made as an account's root user: its SCPs and its
+/// session's policies first, then, for a resource of another account, that
+/// resource's policy (see [`authorize_root_cross_account`]).
 ///
 /// Returns the error response to send when the request is denied under
 /// strict mode; soft mode only logs.
@@ -2258,7 +2258,8 @@ fn authorize_root(
     })
 }
 
-/// Cap a root-user request at the account's SCPs.
+/// Cap a root-user request at the account's SCPs and at the policies of the
+/// session it is made with.
 ///
 /// Root needs no identity policy in its own account, but SCPs restrict
 /// "IAM users and roles in member accounts, including the member account's
@@ -2266,7 +2267,9 @@ fn authorize_root(
 /// AWS evaluates them before any resource-based policy, so a resource policy
 /// granting root in another account does not reach past them either. The
 /// resolver exempts the management account (and returns nothing outside an
-/// organization), which keeps root there unrestricted.
+/// organization), which keeps root there unrestricted. A root session minted
+/// by `sts:AssumeRoot` carries its task policy as its session policy, which
+/// scopes it to that privileged task.
 #[allow(clippy::too_many_arguments)]
 fn authorize_root_scps(
     principal: &Principal,
@@ -2279,8 +2282,12 @@ fn authorize_root_scps(
     remote_addr: Option<SocketAddr>,
     resolved: Option<&crate::auth::ResolvedCredential>,
 ) -> Option<Response<Body>> {
-    let resolver = config.scp_resolver.as_deref()?;
-    let scps = resolver.scps_for(principal)?;
+    let resolver = config.scp_resolver.as_deref();
+    let scps = resolver.and_then(|r| r.scps_for(principal));
+    let session_policies = resolved.map_or(&[][..], |r| r.session_policies.as_slice());
+    if scps.is_none() && session_policies.is_empty() {
+        return None;
+    }
     let in_caller_account = service.iam_resource_in_caller_account(aws_request);
     let iam_actions = service.iam_actions_for(aws_request);
     if iam_actions.is_empty() {
@@ -2294,7 +2301,7 @@ fn authorize_root_scps(
             principal = %principal.arn,
             mode = %config.iam_mode,
             request_id = %request_id,
-            "root request under SCPs has no IamAction mapping; denying under strict, allowing under soft"
+            "root request under SCPs or session policies has no IamAction mapping; denying under strict, allowing under soft"
         );
         return config
             .iam_mode
@@ -2302,6 +2309,11 @@ fn authorize_root_scps(
             .then(|| unmapped_action_denial(principal, aws_request, request_id, detected));
     }
     for iam_action in iam_actions {
+        // `sts:GetCallerIdentity` needs no permission and no policy denies
+        // it, so neither the SCPs nor a root-task policy keep root from it.
+        if iam_action.service == "sts" && iam_action.action == "GetCallerIdentity" {
+            continue;
+        }
         let resource_account = config
             .resource_policy_provider
             .as_ref()
@@ -2318,9 +2330,15 @@ fn authorize_root_scps(
             detected,
             remote_addr,
         );
-        add_global_request_keys(&mut context, principal, &resource_account, Some(resolver));
-        let decision =
-            evaluator.evaluate_ceiling(principal, &iam_action, &context, &[], Some(&scps), false);
+        add_global_request_keys(&mut context, principal, &resource_account, resolver);
+        let decision = evaluator.evaluate_ceiling(
+            principal,
+            &iam_action,
+            &context,
+            session_policies,
+            scps.as_deref(),
+            false,
+        );
         if decision.is_allow() {
             continue;
         }
@@ -2333,16 +2351,28 @@ fn authorize_root_scps(
             decision = ?decision,
             mode = %config.iam_mode,
             request_id = %request_id,
-            "root request denied by the account's service control policies"
+            "root request denied by the account's service control policies or its session policies"
         );
         if config.iam_mode.is_strict() {
             let action = iam_action.action_string();
+            // Name the SCPs only when they are what refused the request.
+            let scp_reason = scps.as_deref().and_then(|scps| {
+                let ceiling = evaluator.evaluate_ceiling(
+                    principal,
+                    &iam_action,
+                    &context,
+                    &[],
+                    Some(scps),
+                    false,
+                );
+                scp_cause(decision, ceiling).and_then(|d| scp_denial_reason(d, &action))
+            });
             return Some(access_denied_response(
                 &not_authorized_message(
                     &principal.arn,
                     &action,
                     &iam_action.resource,
-                    scp_denial_reason(decision, &action).as_deref(),
+                    scp_reason.as_deref(),
                     None,
                 ),
                 request_id,
