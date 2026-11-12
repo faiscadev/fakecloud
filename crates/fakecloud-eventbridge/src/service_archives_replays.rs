@@ -483,6 +483,22 @@ impl EventBridgeService {
         region: &str,
     ) {
         let target_arn = &target.arn;
+        // A replayed event invokes the target through its rule, and counts in
+        // the rule's `Invocations` like any other (for the target types the
+        // replay dispatches, below).
+        let replayed = [":sqs:", ":sns:", ":lambda:", ":logs:", ":states:"]
+            .iter()
+            .any(|kind| target_arn.contains(kind))
+            || target_arn.starts_with("https://")
+            || target_arn.starts_with("http://");
+        if replayed {
+            crate::service::helpers::count_target_invocation(
+                &self.delivery,
+                Some(rule_arn),
+                account_id,
+                region,
+            );
+        }
         let body_str = if let Some(ref transformer) = target.input_transformer {
             apply_input_transformer(transformer, event_json, Some(rule_arn))
         } else if let Some(ref input) = target.input {

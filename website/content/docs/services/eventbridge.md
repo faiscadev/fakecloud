@@ -11,6 +11,7 @@ fakecloud implements **57 of 57** EventBridge operations at 100% Smithy conforma
 - **Event buses** — default, custom, partner event sources
 - **Rules** — pattern matching on events, scheduled rules (cron and rate)
 - **Targets** — SNS, SQS, Lambda, CloudWatch Logs, Kinesis, Step Functions, HTTP, API Destinations; an SQS target that refuses the event (missing queue, KMS key refusing `events.amazonaws.com`) sends it to the target's `DeadLetterConfig` queue with `ERROR_CODE`, `ERROR_MESSAGE`, `RULE_ARN` and `TARGET_ARN` message attributes
+- **Metrics** — each rule reports `AWS/Events` metrics to CloudWatch, dimensioned by `RuleName` (and `EventBusName` on a custom bus): `Invocations` counts every invocation of every target type, successful or failed (replays included), and an SQS target that refuses the event also counts `FailedInvocations` and `InvocationsSentToDlq` / `InvocationsFailedToBeSentToDlq`
 - **Archives** — event archiving with retention
 - **Replay** — re-send archived events to targets, each through the rule that matches it (as the sender SQS sees, in `<aws.events.rule-arn>` and a dead-letter message's `RULE_ARN`)
 - **Connections** — API connection management for HTTP targets

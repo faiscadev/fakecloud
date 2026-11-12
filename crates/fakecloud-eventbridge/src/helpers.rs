@@ -1055,20 +1055,6 @@ pub(crate) fn deliver_to_sqs_target(
         None,
     );
     let dimensions = rule_arn.map(rule_metric_dimensions);
-    // Recorded (`eventbridge-sqs-target-failures.json`): every invocation of
-    // the target counts in `Invocations`, a failed one too.
-    if let Some(dimensions) = dimensions.clone() {
-        delivery.put_cloudwatch_metric(
-            account_id,
-            region,
-            "AWS/Events",
-            "Invocations",
-            1.0,
-            Some("Count"),
-            dimensions,
-            chrono::Utc::now().timestamp_millis(),
-        );
-    }
     if let Err(err) = result {
         tracing::warn!(target = %target.arn, %err, "EventBridge SQS target invocation failed");
         if let Some(dimensions) = dimensions.clone() {
@@ -1110,6 +1096,51 @@ pub(crate) fn deliver_to_sqs_target(
             );
         }
     }
+}
+
+/// Count one invocation of a rule's target in the rule's `AWS/Events`
+/// `Invocations` metric. AWS counts every time a rule invokes a target in
+/// response to an event, successful and failed invocations alike (CloudWatch
+/// metrics for EventBridge; recorded for SQS targets in
+/// `eventbridge-sqs-target-failures.json`), whatever the target type. Called
+/// once per target dispatch, with no EventBridge state lock held. Nothing is
+/// counted for an event no rule delivered (`rule_arn` `None`).
+pub(crate) fn count_target_invocation(
+    delivery: &fakecloud_core::delivery::DeliveryBus,
+    rule_arn: Option<&str>,
+    account_id: &str,
+    region: &str,
+) {
+    let Some(rule_arn) = rule_arn else {
+        return;
+    };
+    delivery.put_cloudwatch_metric(
+        account_id,
+        region,
+        "AWS/Events",
+        "Invocations",
+        1.0,
+        Some("Count"),
+        rule_metric_dimensions(rule_arn),
+        chrono::Utc::now().timestamp_millis(),
+    );
+}
+
+/// Whether `arn` names a target type [`dispatch_event_target`] invokes.
+pub(crate) fn is_dispatched_target(arn: &str) -> bool {
+    [
+        ":sqs:",
+        ":sns:",
+        ":lambda:",
+        ":logs:",
+        ":kinesis:",
+        ":states:",
+        ":api-destination/",
+    ]
+    .iter()
+    .any(|kind| arn.contains(kind))
+        || arn.starts_with("https://")
+        || arn.starts_with("http://")
 }
 
 /// The dimensions of a rule's `AWS/Events` metrics: `rule/<name>` on the
@@ -1224,6 +1255,10 @@ pub(crate) fn dispatch_event_target(
     } else {
         event_str.clone()
     };
+
+    if is_dispatched_target(arn) {
+        count_target_invocation(ctx.delivery, rule_arn, ctx.account_id, ctx.region);
+    }
 
     if arn.contains(":sqs:") {
         deliver_to_sqs_target(
