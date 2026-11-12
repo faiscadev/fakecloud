@@ -167,6 +167,12 @@ fn grants_all_users_read(grants: &[crate::state::AclGrant]) -> bool {
 /// caller treats that as "no resource policy attached," which falls
 /// through to identity-only evaluation rather than silently allowing.
 fn parse_bucket_name(arn: &str) -> Option<&str> {
+    // A directory bucket's ARN (`arn:aws:s3express:<region>:<account>:bucket/<name>`),
+    // which `s3express:CreateSession` is authorized on.
+    if let Some(rest) = arn_resource(arn, "s3express") {
+        let bucket = rest.splitn(3, ':').nth(2)?.strip_prefix("bucket/")?;
+        return Some(bucket).filter(|b| !b.is_empty() && !b.contains('/'));
+    }
     let rest = arn_resource(arn, "s3")?.strip_prefix("::")?;
     if rest.is_empty() {
         return None;
@@ -298,6 +304,22 @@ mod tests {
             Some("some/key")
         );
         assert_eq!(parse_bucket_name("arn:bogus:s3:::my-bucket"), None);
+    }
+
+    #[test]
+    fn parse_bucket_name_reads_directory_bucket_arns() {
+        assert_eq!(
+            parse_bucket_name("arn:aws:s3express:us-east-1:123456789012:bucket/b--use1-az4--x-s3"),
+            Some("b--use1-az4--x-s3")
+        );
+        assert_eq!(
+            parse_bucket_name("arn:aws:s3express:us-east-1:123456789012:bucket/"),
+            None
+        );
+        assert_eq!(
+            parse_bucket_name("arn:aws:s3express:us-east-1:123456789012:accesspoint/a--xa-s3"),
+            None
+        );
     }
 
     #[test]
