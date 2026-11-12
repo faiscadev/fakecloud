@@ -4498,3 +4498,240 @@ async fn s3_update_object_encryption_is_authorized_on_the_object() {
         .await
         .expect("an Allow on bucket/* authorizes UpdateObjectEncryption");
 }
+
+/// Re-frame an SDK request's (in-memory) body with aws-chunked, as SDKs that
+/// default to it send even a small body, its checksum as a SHA-256 trailer
+/// instead of the SDK's own checksum headers. Run before signing.
+fn frame_aws_chunked(r: &mut aws_smithy_runtime_api::http::Request) {
+    use base64::Engine;
+    use sha2::Digest;
+    let body = r.body().bytes().expect("in-memory body").to_vec();
+    let sha = base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(&body));
+    let mut framed = format!("{:x}\r\n", body.len()).into_bytes();
+    framed.extend_from_slice(&body);
+    framed.extend_from_slice(format!("\r\n0\r\nx-amz-checksum-sha256:{sha}\r\n\r\n").as_bytes());
+    let headers = r.headers_mut();
+    let checksum_headers: Vec<String> = headers
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .filter(|name| name.starts_with("x-amz-checksum-") || name == "content-md5")
+        .collect();
+    for name in checksum_headers {
+        headers.remove(name);
+    }
+    headers.remove("x-amz-sdk-checksum-algorithm");
+    headers.insert("content-encoding", "aws-chunked");
+    headers.insert("x-amz-trailer", "x-amz-checksum-sha256");
+    headers.insert("x-amz-decoded-content-length", body.len().to_string());
+    headers.insert("content-length", framed.len().to_string());
+    *r.body_mut() = aws_smithy_types::body::SdkBody::from(framed);
+}
+
+/// Add a query parameter to an SDK request's URI before signing.
+fn add_query(r: &mut aws_smithy_runtime_api::http::Request, param: &str) {
+    let uri = r.uri().to_string();
+    let sep = if uri.contains('?') { '&' } else { '?' };
+    r.set_uri(format!("{uri}{sep}{param}")).unwrap();
+}
+
+/// An aws-chunked tag set (as an SDK frames PutObjectTagging and
+/// PutBucketTagging) is read unframed by everything before the handler: a
+/// caller allowed to tag only with `env=prod` tags with it, and is refused
+/// `env=dev`, rather than every framed body being MalformedXML.
+#[tokio::test]
+async fn s3_aws_chunked_tag_sets_are_authorized_on_their_tags() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket()
+        .bucket("chunked-tags")
+        .send()
+        .await
+        .unwrap();
+    boot.put_object()
+        .bucket("chunked-tags")
+        .key("k")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"v"))
+        .send()
+        .await
+        .unwrap();
+    let (akid, secret) = bootstrap_user(&server, "chunkedtagger").await;
+    attach_inline_policy(
+        &server,
+        "chunkedtagger",
+        "Tag",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Action":["s3:PutObjectTagging","s3:PutBucketTagging"],
+            "Resource":["arn:aws:s3:::chunked-tags","arn:aws:s3:::chunked-tags/*"],
+            "Condition":{"StringEquals":{"aws:RequestTag/env":"prod"}}}]}"#,
+    )
+    .await;
+    use aws_sdk_s3::types::{Tag, Tagging};
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let tagging = |env: &str| {
+        Tagging::builder()
+            .tag_set(Tag::builder().key("env").value(env).build().unwrap())
+            .build()
+            .unwrap()
+    };
+    for env in ["dev", "prod"] {
+        let object = s3
+            .put_object_tagging()
+            .bucket("chunked-tags")
+            .key("k")
+            .tagging(tagging(env))
+            .customize()
+            .mutate_request(frame_aws_chunked)
+            .send()
+            .await;
+        let bucket = s3
+            .put_bucket_tagging()
+            .bucket("chunked-tags")
+            .tagging(tagging(env))
+            .customize()
+            .mutate_request(frame_aws_chunked)
+            .send()
+            .await;
+        if env == "prod" {
+            object.unwrap();
+            bucket.unwrap();
+        } else {
+            assert!(is_access_denied(object), "object env={env}");
+            assert!(is_access_denied(bucket), "bucket env={env}");
+        }
+    }
+    // The trailer is still the body's integrity check: a wrong one is
+    // BadDigest, and nothing is stored.
+    let err = s3
+        .put_object_tagging()
+        .bucket("chunked-tags")
+        .key("k")
+        .tagging(tagging("prod"))
+        .customize()
+        .mutate_request(|r| {
+            frame_aws_chunked(r);
+            let framed = String::from_utf8(r.body().bytes().unwrap().to_vec()).unwrap();
+            let (head, _) = framed.split_once("x-amz-checksum-sha256:").unwrap();
+            let wrong = format!(
+                "{head}x-amz-checksum-sha256:{}\r\n\r\n",
+                "A".repeat(43) + "="
+            );
+            *r.body_mut() = aws_smithy_types::body::SdkBody::from(wrong);
+        })
+        .send()
+        .await
+        .unwrap_err();
+    let raw = err.raw_response().unwrap();
+    let body = String::from_utf8_lossy(raw.body().bytes().unwrap()).to_string();
+    assert!(body.contains("<Code>BadDigest</Code>"), "{body}");
+    let object_tags = boot
+        .get_object_tagging()
+        .bucket("chunked-tags")
+        .key("k")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(object_tags.tag_set()[0].value(), "prod");
+    let bucket_tags = boot
+        .get_bucket_tagging()
+        .bucket("chunked-tags")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bucket_tags.tag_set()[0].value(), "prod");
+}
+
+/// Whether an S3 PUT streams is S3's own classification: PutObject with a
+/// query parameter S3 ignores is still PutObject, and stores its body (it
+/// was buffered and refused as having no body stream).
+#[tokio::test]
+async fn s3_put_object_with_an_ignored_query_parameter_stores_its_body() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket()
+        .bucket("odd-query")
+        .send()
+        .await
+        .unwrap();
+    let (akid, secret) = bootstrap_user(&server, "oddquery").await;
+    attach_inline_policy(
+        &server,
+        "oddquery",
+        "Put",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Action":"s3:PutObject","Resource":"arn:aws:s3:::odd-query/*"}]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    for (query, framed) in [("foo=bar", false), ("Tagging", false), ("foo=bar", true)] {
+        let key = format!("k-{}-{framed}", query.replace('=', "-"));
+        s3.put_object()
+            .bucket("odd-query")
+            .key(&key)
+            .body(aws_sdk_s3::primitives::ByteStream::from_static(b"payload"))
+            .customize()
+            .mutate_request(move |r| {
+                add_query(r, query);
+                if framed {
+                    frame_aws_chunked(r);
+                }
+            })
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("{query} framed={framed}: {e:?}"));
+        let got = boot
+            .get_object()
+            .bucket("odd-query")
+            .key(&key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            &got.body.collect().await.unwrap().into_bytes()[..],
+            b"payload"
+        );
+    }
+}
+
+/// A CreateBucket tag set that does not read is MalformedXML before
+/// authorization, and no bucket is created (it was created untagged).
+#[tokio::test]
+async fn s3_create_bucket_with_an_unreadable_tag_set_is_refused() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    let (akid, secret) = bootstrap_user(&server, "creator").await;
+    attach_inline_policy(
+        &server,
+        "creator",
+        "Create",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Action":["s3:CreateBucket","s3:TagResource"],"Resource":"*"}]}"#,
+    )
+    .await;
+    let user = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    const BODY: &str = "<CreateBucketConfiguration><Tags><Tag><Key>env</Key></Tag></Tags>\
+                        </CreateBucketConfiguration>";
+    for client in [&user, &boot] {
+        let err = client
+            .create_bucket()
+            .bucket("unread-tags")
+            .customize()
+            .mutate_request(|r| {
+                r.headers_mut()
+                    .insert("content-length", BODY.len().to_string());
+                *r.body_mut() = aws_smithy_types::body::SdkBody::from(BODY);
+            })
+            .send()
+            .await
+            .unwrap_err();
+        let raw = err.raw_response().unwrap();
+        assert_eq!(raw.status().as_u16(), 400);
+        let body = String::from_utf8_lossy(raw.body().bytes().unwrap()).to_string();
+        assert!(body.contains("<Code>MalformedXML</Code>"), "{body}");
+    }
+    assert!(boot
+        .head_bucket()
+        .bucket("unread-tags")
+        .send()
+        .await
+        .is_err());
+}

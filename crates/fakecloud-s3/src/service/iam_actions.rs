@@ -325,7 +325,12 @@ fn create_bucket(req: &AwsRequest) -> Vec<Need> {
     let body = std::str::from_utf8(&req.body).unwrap_or("");
     // "You must have the s3:TagResource permission to create a general
     // purpose bucket with tags" (CreateBucketConfiguration$Tags).
-    if !create_bucket_configuration_tags(body).is_empty() {
+    // A configuration that does not read never gets here: it is refused
+    // before authorization (`validate_before_authorization`).
+    if !create_bucket_configuration_tags(body)
+        .unwrap_or_default()
+        .is_empty()
+    {
         needs.push(Need::Own("s3", "TagResource"));
     }
     // An ACL set to public-read, public-read-write, authenticated-read "or any

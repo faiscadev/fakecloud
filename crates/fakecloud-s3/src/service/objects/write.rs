@@ -156,21 +156,16 @@ impl S3Service {
         }
 
         // --- Preparation phase: compute object data outside any lock ---
-        // PutObject is a streaming-only route: dispatch always wires
-        // `body_stream` for PUT-on-bucket-key requests routed through
-        // S3, and the test helper does the same for direct service
-        // calls. We drain the stream into a tempfile here, computing
-        // MD5 + size in constant memory; in disk mode the spool lands
-        // on the S3 root so the eventual rename is a same-FS metadata
-        // move, in memory mode the store reads the file back and
-        // unlinks it.
-        let stream = req.take_body_stream().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "MalformedRequestBody",
-                "PutObject requires a streaming request body",
-            )
-        })?;
+        // Dispatch streams PutObject's body (`streams_request_body`) and the
+        // test helper does the same for direct service calls. We drain the
+        // stream into a tempfile here, computing MD5 + size in constant
+        // memory; in disk mode the spool lands on the S3 root so the
+        // eventual rename is a same-FS metadata move, in memory mode the
+        // store reads the file back and unlinks it. A body that arrived
+        // buffered (already unframed) is spooled the same way.
+        let stream = req
+            .take_body_stream()
+            .unwrap_or_else(|| req.body.clone().into());
         // Spool the body, folding the checksum digest into the same pass, and
         // verify Content-MD5, the x-amz-checksum-* value or trailing checksum,
         // and a hex x-amz-content-sha256 against the bytes received. A

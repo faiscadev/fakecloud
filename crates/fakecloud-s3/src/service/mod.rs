@@ -784,14 +784,13 @@ impl AwsService for S3Service {
 
     async fn handle(&self, mut req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         // PutObject / UploadPart enter dispatch via the streaming path
-        // with `body = Bytes::new()` and the raw HTTP body available on
-        // `req.body_stream`. Those handlers consume the stream directly
-        // — spooling chunks to disk while computing MD5 + size in
-        // constant memory — so a 1 GiB upload never materializes into
-        // RAM. Every *other* PUT-on-bucket-key the streaming dispatch
-        // flagged (PutObjectTagging, PutObjectAcl, PutObjectRetention,
-        // PutObjectLegalHold, CopyObject, …) reads a small XML/JSON
-        // body from `req.body`, so drain the stream for them.
+        // (`streams_request_body`) with `body = Bytes::new()` and the raw
+        // HTTP body available on `req.body_stream`. Those handlers consume
+        // the stream directly -- spooling chunks to disk while computing
+        // MD5 + size in constant memory -- so a 1 GiB upload never
+        // materializes into RAM. Every other request reads a small XML/JSON
+        // body from `req.body`; a stream reaching one of them (a direct
+        // call) is drained.
         // S3 Control (`s3-control` host) shares this handler; its PUTs
         // (CreateAccessPoint, ...) carry an XML body, never object data.
         let is_control = fakecloud_core::protocol::is_s3_control_host(&req.headers);
@@ -826,6 +825,9 @@ impl AwsService for S3Service {
                 req.body = fakecloud_core::service::drain_request_stream(stream).await?;
             }
         }
+        // Dispatch already prepared the request; a direct call has not. A
+        // no-op the second time.
+        self.prepare_request(&mut req)?;
 
         // Access point data plane: resolve alias -> bucket before routing.
         access_points::resolve_access_point(self, &mut req)?;
@@ -926,9 +928,7 @@ impl AwsService for S3Service {
             )
         );
         if !is_control && !verifies_own_payload && (bucket.is_none() || owner_account.is_some()) {
-            if let Some(decoded) = crate::checksum::verify_request_body(&req.headers, &req.body)? {
-                req.body = decoded.into();
-            }
+            crate::checksum::verify_request_body(&req.headers, &req.body)?;
         }
 
         // Handle OPTIONS preflight requests (CORS)
@@ -1379,6 +1379,54 @@ impl AwsService for S3Service {
     /// NoSuchUpload, even anonymously and whatever the part number). Every
     /// caller, anonymous included, gets these errors rather than an
     /// AccessDenied, answered as the handler answers them.
+    fn streams_request_body(&self, head: &fakecloud_core::service::RequestHead<'_>) -> bool {
+        // Only an upload streams; every other request's body is small and
+        // buffered, so what runs before the handler (IAM reading the tag set
+        // of PutObjectTagging or CreateBucket, for one) sees it. Decided by
+        // the classification the handler routes on, from the same bucket and
+        // key, so the two cannot disagree about which requests stream.
+        if fakecloud_core::protocol::is_s3_control_host(head.headers)
+            || head.raw_path.starts_with("//")
+        {
+            return false;
+        }
+        let segments = fakecloud_core::path::split_path_segments(head.raw_path);
+        let key = key_of_raw_path(head.raw_path);
+        matches!(
+            route::classify(
+                head.method,
+                segments.first().map(String::as_str),
+                key.as_deref(),
+                head.query_params,
+                head.headers,
+            ),
+            Ok(route::S3Op::PutObject | route::S3Op::UploadPart)
+        )
+    }
+
+    fn prepare_request(&self, request: &mut AwsRequest) -> Result<(), AwsServiceError> {
+        if request.body_stream.lock().is_some() {
+            return Ok(());
+        }
+        let mut body = std::mem::take(&mut request.body);
+        let deframed = crate::checksum::deframe_buffered(&mut request.headers, &mut body);
+        request.body = body;
+        deframed.map_err(|error| {
+            // A bucket-addressed refusal carries the bucket's CORS headers
+            // and access log record, as every other one does.
+            let reaches_bucket = !fakecloud_core::protocol::is_s3_control_host(&request.headers)
+                && request.method != Method::OPTIONS
+                && !request.raw_path.starts_with("//");
+            self.refuse(
+                request,
+                route::Refusal {
+                    error,
+                    reaches_bucket,
+                },
+            )
+        })
+    }
+
     fn validate_before_authorization(&self, request: &AwsRequest) -> Result<(), AwsServiceError> {
         // S3 Control TagResource: as for the S3 tagging writes below, a tag
         // set the handler cannot read is refused before its request tags are
@@ -1409,6 +1457,12 @@ impl AwsService for S3Service {
         {
             let body = std::str::from_utf8(&request.body).unwrap_or("");
             if let Err(error) = tags::read_tag_set(body, "Tagging", "TagSet") {
+                return Err(self.refuse(request, error.into()));
+            }
+        }
+        if op == route::S3Op::CreateBucket {
+            let body = std::str::from_utf8(&request.body).unwrap_or("");
+            if let Err(error) = create_bucket_configuration_tags(body) {
                 return Err(self.refuse(request, error.into()));
             }
         }
@@ -1615,7 +1669,13 @@ impl S3Service {
 /// the operation dispatch authorizes is the operation the handler runs.
 pub(crate) fn request_key(req: &AwsRequest) -> Option<String> {
     req.path_segments.first()?;
-    let rest = req.raw_path.strip_prefix('/').unwrap_or(&req.raw_path);
+    key_of_raw_path(&req.raw_path)
+}
+
+/// [`request_key`] from the raw path alone, for a request not yet built
+/// (dispatch asking whether it streams).
+fn key_of_raw_path(raw_path: &str) -> Option<String> {
+    let rest = raw_path.strip_prefix('/').unwrap_or(raw_path);
     let (_, raw_key) = rest.split_once('/')?;
     (!raw_key.is_empty()).then(|| {
         percent_encoding::percent_decode_str(raw_key)
@@ -1950,7 +2010,9 @@ fn s3_request_tags(
         // create must not then deny the ACL or object-lock action it implies.
         "CreateBucket" => {
             let body = std::str::from_utf8(&request.body).unwrap_or("");
-            let tags = create_bucket_configuration_tags(body);
+            // Refused before authorization when it does not read
+            // (`validate_before_authorization`).
+            let tags = create_bucket_configuration_tags(body).unwrap_or_default();
             Some(tags.into_iter().collect())
         }
         _ => Some(std::collections::BTreeMap::new()),
@@ -3199,16 +3261,20 @@ pub(crate) fn parse_delete_objects_quiet(xml: &str) -> bool {
 ///
 /// The tag set was added to `CreateBucketConfiguration` in the 2025 S3 API;
 /// it is serialized as `<Tags><Tag><Key/><Value/></Tag></Tags>`, the same
-/// `Tag` shape `PutBucketTagging` uses. Returns an empty vec for a body that
-/// is not a `CreateBucketConfiguration` or carries no tags — no `<Tags>`
-/// element means no `<Tag>` elements to find, so the scan is its own gate
-/// and an element written with a namespace or attribute
-/// (`<Tags xmlns="...">`) is not silently skipped.
-pub(crate) fn create_bucket_configuration_tags(body: &str) -> Vec<(String, String)> {
-    if body.is_empty() {
-        return Vec::new();
+/// `Tag` shape `PutBucketTagging` uses, read by the same reader
+/// ([`tags::read_tag_set`]). A configuration that does not read (not
+/// well-formed, a `Tag` missing its `Key` or `Value`) is 400 MalformedXML,
+/// as for PutBucketTagging: creating the bucket untagged would drop tags the
+/// caller asked for, and authorize the create without them. A body that is
+/// no `CreateBucketConfiguration` at all names no tags, which the create
+/// handler judges as it always has (by its location constraint).
+pub(crate) fn create_bucket_configuration_tags(
+    body: &str,
+) -> Result<Vec<(String, String)>, AwsServiceError> {
+    if !body.contains("CreateBucketConfiguration") {
+        return Ok(Vec::new());
     }
-    tags::read_tag_set(body, "CreateBucketConfiguration", "Tags").unwrap_or_default()
+    tags::read_tag_set(body, "CreateBucketConfiguration", "Tags")
 }
 
 pub(crate) fn validate_tags(tags: &[(String, String)]) -> Result<(), AwsServiceError> {

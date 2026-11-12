@@ -206,9 +206,22 @@ async fn dispatch_inner(
         // whole body, and header detection must not pick its service.
         _ if pinned.is_some() => None,
         _ if rpc_v2_cbor.is_some() => None,
-        // Header-only detection agrees with the URL match — covers S3
-        // PUT object (SigV4 service=s3 in Authorization).
-        (Some(sr), Some(detected)) if sr.0 == detected.service => Some(detected.clone()),
+        // Header-only detection agrees with the URL match (an S3 PUT, SigV4
+        // service=s3 in Authorization), and the service streams this request.
+        (Some(sr), Some(detected))
+            if sr.0 == detected.service
+                && registry.get(&detected.service).is_some_and(|service| {
+                    service_streams_body(
+                        service.as_ref(),
+                        &parts.method,
+                        parts.uri.path(),
+                        &parts.headers,
+                        &query_params,
+                    )
+                }) =>
+        {
+            Some(detected.clone())
+        }
         // ECR OCI v2 blob upload has no AWS auth header; the path
         // alone (`/v2/.../blobs/uploads/...`) tells us the route is
         // ECR. Synthesize a DetectedRequest so dispatch picks the
@@ -747,7 +760,7 @@ async fn dispatch_inner(
         caller_principal.or_else(|| internal_caller.as_ref().map(|c| c.principal()));
 
     let error_envelope = ErrorEnvelope::for_request(&detected, &parts.headers);
-    let aws_request = AwsRequest {
+    let mut aws_request = AwsRequest {
         service: detected.service.clone(),
         action: detected.action.clone(),
         region,
@@ -786,6 +799,12 @@ async fn dispatch_inner(
         request_id = %aws_request.request_id,
         "handling request"
     );
+
+    // One form of the request for everything below: pre-authorization
+    // validation, IAM derivation and the handler read the same body.
+    if let Err(err) = service.prepare_request(&mut aws_request) {
+        return service_error_response(&err, &detected, &request_id, error_envelope);
+    }
 
     let enforcement = IamEnforcement {
         config: config.clone(),
@@ -1636,23 +1655,19 @@ fn s3_routing_path(wire_path: &str, host_bucket: Option<&str>) -> String {
     }
 }
 
-/// Extract the 12-digit account ID segment from an AWS ARN.
-///
-/// ARNs follow `arn:<partition>:<service>:<region>:<account>:<resource>`.
-/// Identifies routes that opt into streaming request bodies. Returns
-/// `Some((service, action_hint))` when the dispatch path should hand
-/// the raw body to the service handler unbuffered, otherwise `None`
-/// for the default buffered path. The handler reads the stream via
+/// Identifies requests that may stream their body. Returns
+/// `Some((service, action_hint))` for a candidate, otherwise `None` for the
+/// default buffered path. The handler reads the stream via
 /// [`crate::service::AwsRequest::take_body_stream`].
 ///
-/// Streaming-eligible routes today:
+/// Streaming candidates today:
 ///
-/// * `s3` PUT object — `PUT /<bucket>/<key>` with a SigV4 (or
-///   presigned) auth header. Covers PutObject, UploadPart, and
-///   UploadPartCopy. The S3 service spills to disk via
-///   [`fakecloud_persistence::BodySource::File`] when the stream is
-///   present.
-/// * `ecr` OCI Distribution v2 blob upload — `PATCH` and `PUT` on
+/// * `s3` -- any `PUT` signed for S3 (SigV4 header, SigV4 or SigV2
+///   presigned URL). Whether it streams is S3's decision
+///   ([`crate::service::AwsService::streams_request_body`], asked by
+///   [`service_streams_body`]): only an upload (PutObject, UploadPart)
+///   does, by the classification its handler routes on.
+/// * `ecr` OCI Distribution v2 blob upload -- `PATCH` and `PUT` on
 ///   `/v2/{name}/blobs/uploads/{uuid}`. The ECR service spools the
 ///   stream into a per-upload temp file before computing the digest.
 fn streaming_route(
@@ -1669,53 +1684,11 @@ fn streaming_route(
         return Some(("ecr", ""));
     }
 
-    // S3 PutObject / UploadPart / UploadPartCopy. Detect either via
-    // SigV4 service field in the Authorization header OR via a SigV4
-    // presigned URL (X-Amz-Credential .../s3/...) OR a SigV2 presigned
-    // URL (AWSAccessKeyId + Signature + Expires query parameters).
+    // An S3 PUT, signed either via the SigV4 service field in the
+    // Authorization header OR via a SigV4 presigned URL
+    // (X-Amz-Credential .../s3/...) OR a SigV2 presigned URL
+    // (AWSAccessKeyId + Signature + Expires query parameters).
     if method == http::Method::PUT {
-        // An object upload needs a bucket AND a key. Resolve the request the
-        // way routing will (bucket from the Host header for virtual-hosted,
-        // straight from the path otherwise), then take the key the way S3
-        // does (`fakecloud_s3`'s `request_key`): everything after the bucket
-        // segment of the raw path, so `PUT /<bucket>//` uploads the key `/`.
-        // Anything that leaves no key is a bucket-level operation:
-        // `PUT /<bucket>`, `PUT /<bucket>/` (the form the AWS SDKs actually
-        // send for CreateBucket), and the virtual-hosted equivalents.
-        // Streaming those left the body unbuffered, so everything that runs
-        // before the handler -- IAM enforcement above all -- saw an empty body
-        // and could not read `CreateBucketConfiguration` (no `aws:RequestTag`
-        // from a create-time tag set, for one). A path with an empty bucket
-        // segment (`//...`) is refused by the handler and not streamed.
-        let host_bucket = protocol::parse_routing_host_from_headers(headers)
-            .filter(|h| h.service == "s3")
-            .and_then(|h| h.bucket);
-        let routed = s3_routing_path(path, host_bucket.as_deref());
-        let rest = routed.strip_prefix('/').unwrap_or(&routed);
-        let has_key = matches!(
-            rest.split_once('/'),
-            Some((bucket, key)) if !bucket.is_empty() && !key.is_empty()
-        );
-        if !has_key {
-            return None;
-        }
-        // Only an upload streams: PutObject (no sub-resource) or an upload
-        // part (`partNumber` + `uploadId`). A sub-resource PUT to a key
-        // (tagging, acl, retention, legal hold, ...) carries a small XML body
-        // that has to be buffered before IAM enforcement, which reads it (the
-        // request tags of PutObjectTagging, for one). Presigned-URL
-        // authentication parameters and the SDKs' `x-id` hint are no
-        // sub-resource.
-        let upload_query = query_params.keys().all(|name| {
-            let lower = name.to_ascii_lowercase();
-            matches!(
-                lower.as_str(),
-                "partnumber" | "uploadid" | "x-id" | "awsaccesskeyid" | "signature" | "expires"
-            ) || lower.starts_with("x-amz-")
-        });
-        if !upload_query {
-            return None;
-        }
         let header_s3 = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
@@ -1736,6 +1709,48 @@ fn streaming_route(
     }
 
     None
+}
+
+/// Whether `service` reads this request's body as a stream, asked of the
+/// service itself with the request as its handler will see it: the S3 path
+/// carries the virtual-hosted bucket ([`s3_routing_path`]) and a presigned
+/// URL's `x-amz-*` query parameters count as headers
+/// ([`hoist_presigned_query_headers`]), as they do once the request is
+/// routed. Keeping the decision with the service's own classification is what
+/// keeps the two from drifting: a request dispatch streams but the handler
+/// reads buffered arrives with no body, and one dispatch buffers but the
+/// handler streams is refused as having no body stream.
+fn service_streams_body(
+    service: &dyn crate::service::AwsService,
+    method: &http::Method,
+    wire_path: &str,
+    headers: &http::HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> bool {
+    let is_s3 = service.service_name() == "s3";
+    let path = if is_s3 {
+        let host_bucket = protocol::parse_routing_host_from_headers(headers)
+            .filter(|h| h.service == "s3")
+            .and_then(|h| h.bucket);
+        s3_routing_path(wire_path, host_bucket.as_deref())
+    } else {
+        wire_path.to_string()
+    };
+    let hoisted;
+    let headers = if is_s3 && query_params.contains_key("X-Amz-Credential") {
+        let mut with_query = headers.clone();
+        hoist_presigned_query_headers(&mut with_query, query_params);
+        hoisted = with_query;
+        &hoisted
+    } else {
+        headers
+    };
+    service.streams_request_body(&crate::service::RequestHead {
+        method,
+        raw_path: &path,
+        headers,
+        query_params,
+    })
 }
 
 /// The SigV4 query-authentication parameters themselves. They authenticate
@@ -4108,14 +4123,114 @@ mod tests {
     }
 
     #[test]
-    fn streaming_route_path_style_create_bucket_skipped() {
-        // `PUT /bucket` (no trailing key) is CreateBucket — must NOT
-        // hit the streaming path.
+    fn streaming_route_any_s3_put_is_a_candidate() {
+        // Which S3 PUTs stream is S3's decision (`service_streams_body`):
+        // the route only names the candidates, whatever their path or query.
         let headers = s3_sigv4_headers();
-        assert_eq!(
-            streaming_route(&http::Method::PUT, "/my-bucket", &headers, &HashMap::new(),),
-            None,
+        let tagging: HashMap<String, String> = [("tagging".to_string(), String::new())].into();
+        for (path, query) in [
+            ("/my-bucket", HashMap::new()),
+            ("/my-bucket/", HashMap::new()),
+            ("/my-bucket/k", tagging),
+        ] {
+            assert_eq!(
+                streaming_route(&http::Method::PUT, path, &headers, &query),
+                Some(("s3", "")),
+                "{path}"
+            );
+        }
+    }
+
+    /// Records the request head dispatch asks about, and streams when the
+    /// path says so.
+    struct HeadRecorder {
+        name: &'static str,
+        seen: parking_lot::Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::service::AwsService for HeadRecorder {
+        fn service_name(&self) -> &str {
+            self.name
+        }
+        async fn handle(
+            &self,
+            _request: AwsRequest,
+        ) -> Result<crate::service::AwsResponse, crate::service::AwsServiceError> {
+            unreachable!("only asked whether it streams")
+        }
+        fn supported_actions(&self) -> &[&str] {
+            &[]
+        }
+        fn streams_request_body(&self, head: &crate::service::RequestHead<'_>) -> bool {
+            let tagging = head
+                .headers
+                .get("x-amz-tagging")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            self.seen.lock().push((head.raw_path.to_string(), tagging));
+            head.raw_path.ends_with("/upload")
+        }
+    }
+
+    #[test]
+    fn service_streams_body_asks_with_the_request_as_routed() {
+        // S3 is asked about the path its handler will see (the
+        // virtual-hosted bucket prefixed) and the headers it will see (a
+        // presigned URL's `x-amz-*` parameters hoisted); its answer stands.
+        let s3 = HeadRecorder {
+            name: "s3",
+            seen: Default::default(),
+        };
+        let mut headers = s3_sigv4_headers();
+        headers.insert(
+            "host",
+            "my-bucket.s3.us-east-1.amazonaws.com".parse().unwrap(),
         );
+        let presigned: HashMap<String, String> = [
+            (
+                "X-Amz-Credential",
+                "test/20240101/us-east-1/s3/aws4_request",
+            ),
+            ("x-amz-tagging", "env=test"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let put = http::Method::PUT;
+        assert!(service_streams_body(
+            &s3, &put, "/upload", &headers, &presigned
+        ));
+        assert!(!service_streams_body(
+            &s3,
+            &put,
+            "/",
+            &headers,
+            &HashMap::new()
+        ));
+        assert_eq!(
+            *s3.seen.lock(),
+            vec![
+                (
+                    "/my-bucket/upload".to_string(),
+                    Some("env=test".to_string())
+                ),
+                ("/my-bucket".to_string(), None),
+            ]
+        );
+        // Another service sees its wire path untouched.
+        let other = HeadRecorder {
+            name: "ecr",
+            seen: Default::default(),
+        };
+        assert!(!service_streams_body(
+            &other,
+            &put,
+            "/my-bucket/k",
+            &headers,
+            &presigned
+        ));
+        assert_eq!(*other.seen.lock(), vec![("/my-bucket/k".to_string(), None)]);
     }
 
     #[test]
@@ -4136,90 +4251,6 @@ mod tests {
             "/docs/docs/intro.html"
         );
         assert_eq!(s3_routing_path("/docs", Some("docs")), "/docs/docs");
-    }
-
-    #[test]
-    fn streaming_route_path_style_create_bucket_with_trailing_slash_skipped() {
-        // The AWS SDKs send CreateBucket as `PUT /<bucket>/`. The trailing
-        // slash must not make it look like an object upload: the body carries
-        // `CreateBucketConfiguration` (location constraint, tag set) and has
-        // to be buffered before IAM enforcement reads it.
-        let headers = s3_sigv4_headers();
-        assert_eq!(
-            streaming_route(&http::Method::PUT, "/my-bucket/", &headers, &HashMap::new(),),
-            None,
-        );
-    }
-
-    #[test]
-    fn streaming_route_path_style_doubled_slash_is_the_slash_key() {
-        // S3 takes the key from the raw path, so `PUT /<bucket>//` uploads
-        // the key "/". The streaming gate has to agree with the handler (and
-        // with IAM, which authorizes it as s3:PutObject on `<bucket>//`), or
-        // the upload arrives without the body stream it reads. An empty
-        // bucket segment is no upload.
-        let headers = s3_sigv4_headers();
-        assert_eq!(
-            streaming_route(
-                &http::Method::PUT,
-                "/my-bucket//",
-                &headers,
-                &HashMap::new()
-            ),
-            Some(("s3", "")),
-        );
-        assert_eq!(
-            streaming_route(&http::Method::PUT, "//key", &headers, &HashMap::new()),
-            None,
-        );
-    }
-
-    #[test]
-    fn streaming_route_streams_only_uploads() {
-        // A sub-resource PUT to a key is buffered so IAM can read its body;
-        // uploads (with or without presigned parameters) stream.
-        let headers = s3_sigv4_headers();
-        let q = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
-            pairs
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect()
-        };
-        for sub in ["tagging", "acl", "retention", "legal-hold", "annotation"] {
-            assert_eq!(
-                streaming_route(&http::Method::PUT, "/b/k", &headers, &q(&[(sub, "")])),
-                None,
-                "{sub}"
-            );
-        }
-        for upload in [
-            q(&[]),
-            q(&[("partNumber", "1"), ("uploadId", "u")]),
-            q(&[("x-id", "PutObject")]),
-            q(&[("X-Amz-Credential", "c"), ("X-Amz-Signature", "s")]),
-        ] {
-            assert_eq!(
-                streaming_route(&http::Method::PUT, "/b/k", &headers, &upload),
-                Some(("s3", "")),
-                "{upload:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn streaming_route_path_style_key_with_trailing_slash_streams() {
-        // A real object key that ends in '/' (a directory marker) still
-        // streams -- the gate rejects an absent key, not a trailing slash.
-        let headers = s3_sigv4_headers();
-        assert_eq!(
-            streaming_route(
-                &http::Method::PUT,
-                "/my-bucket/folder/",
-                &headers,
-                &HashMap::new(),
-            ),
-            Some(("s3", "")),
-        );
     }
 
     #[test]
@@ -4259,23 +4290,6 @@ mod tests {
                 "{path}",
             );
         }
-    }
-
-    #[test]
-    fn streaming_route_virtual_hosted_s3_root_skipped() {
-        // `PUT /` against a virtual-hosted Host = CreateBucket, which
-        // is handled buffered. Empty path-after-slash must short-circuit.
-        let mut headers = s3_sigv4_headers();
-        headers.insert(
-            "host",
-            "vhost-bucket.s3.us-east-1.localhost.localstack.cloud:4566"
-                .parse()
-                .unwrap(),
-        );
-        assert_eq!(
-            streaming_route(&http::Method::PUT, "/", &headers, &HashMap::new()),
-            None,
-        );
     }
 
     #[test]

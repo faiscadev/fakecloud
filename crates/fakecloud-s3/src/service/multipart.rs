@@ -579,16 +579,13 @@ impl S3Service {
         }
         let part_algorithm = upload_algorithm.or(checks.algorithm());
 
-        // UploadPart is streaming-only: spool chunks to a tempfile
-        // while computing MD5 + size in constant memory, then hand
-        // the file to the store as `BodySource::File`.
-        let stream = req.take_body_stream().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "MalformedRequestBody",
-                "UploadPart requires a streaming request body",
-            )
-        })?;
+        // UploadPart streams (`streams_request_body`): spool chunks to a
+        // tempfile while computing MD5 + size in constant memory, then hand
+        // the file to the store as `BodySource::File`. A body that arrived
+        // buffered (already unframed) is spooled the same way.
+        let stream = req
+            .take_body_stream()
+            .unwrap_or_else(|| req.body.clone().into());
         // Verifies Content-MD5, the x-amz-checksum-* value or trailing
         // checksum, and x-amz-content-sha256 against the part's bytes,
         // computing the part checksum in the same pass.

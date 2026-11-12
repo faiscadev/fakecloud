@@ -779,6 +779,18 @@ impl AwsServiceError {
     }
 }
 
+/// What dispatch knows of a request before reading its body: enough for a
+/// service to classify it ([`AwsService::streams_request_body`]).
+pub struct RequestHead<'a> {
+    pub method: &'a Method,
+    /// The raw (undecoded) path the request is routed on; for S3 the
+    /// virtual-hosted bucket is already prefixed, as in
+    /// [`AwsRequest::raw_path`].
+    pub raw_path: &'a str,
+    pub headers: &'a HeaderMap,
+    pub query_params: &'a HashMap<String, String>,
+}
+
 /// Trait that every AWS service implements.
 #[async_trait]
 pub trait AwsService: Send + Sync {
@@ -837,6 +849,28 @@ pub trait AwsService: Send + Sync {
     /// mapping, which strict enforcement denies.
     fn iam_actions_for(&self, request: &AwsRequest) -> Vec<crate::auth::IamAction> {
         self.iam_action_for(request).into_iter().collect()
+    }
+
+    /// Whether the handler reads this request's body as a stream
+    /// ([`AwsRequest::take_body_stream`]) instead of from a buffered
+    /// [`AwsRequest::body`]. Dispatch asks only for a request its headers
+    /// already route to this service, and buffers the body otherwise, so
+    /// everything that runs before the handler (IAM enforcement reading the
+    /// request's tags, for one) sees it. The service decides by the same
+    /// classification its handler routes on. Default `false`.
+    fn streams_request_body(&self, _head: &RequestHead<'_>) -> bool {
+        false
+    }
+
+    /// Put a buffered request into the form every later consumer reads --
+    /// pre-authorization validation, IAM derivation and the handler alike --
+    /// so none of them works on a different body than the others (S3
+    /// removes the `aws-chunked` framing of a small XML body here). Dispatch
+    /// calls it first, IAM enforcement on or off, and answers `Err` as the
+    /// service's error. It must be idempotent: a handler called directly
+    /// may run it again. Default: nothing to do.
+    fn prepare_request(&self, _request: &mut AwsRequest) -> Result<(), AwsServiceError> {
+        Ok(())
     }
 
     /// Refuse a request the service rejects before authorizing anything --

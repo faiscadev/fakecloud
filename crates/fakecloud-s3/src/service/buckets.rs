@@ -171,6 +171,12 @@ impl S3Service {
 
         // Parse LocationConstraint from body if present
         let body_str = std::str::from_utf8(&req.body).unwrap_or("");
+        // CreateBucketConfiguration carries an optional <Tags> tag set (added to
+        // the S3 API in 2025). The AWS Terraform provider tags a bucket this way
+        // on create and then skips PutBucketTagging, so dropping these leaves the
+        // bucket untagged (issue #2553). A configuration that does not read is
+        // refused before anything in it is judged.
+        let create_tags = create_bucket_configuration_tags(body_str)?;
         let has_config_body =
             !body_str.is_empty() && body_str.contains("CreateBucketConfiguration");
         let explicit_constraint = if has_config_body {
@@ -240,11 +246,6 @@ impl S3Service {
         // GetBucketLocation keeps reporting the constraint it was created with.
         let legacy_eu_location = explicit_constraint.as_deref() == Some("EU");
 
-        // CreateBucketConfiguration carries an optional <Tags> tag set (added to
-        // the S3 API in 2025). The AWS Terraform provider tags a bucket this way
-        // on create and then skips PutBucketTagging, so dropping these leaves the
-        // bucket untagged (issue #2553).
-        let create_tags = create_bucket_configuration_tags(body_str);
         validate_tags(&create_tags)?;
 
         // Parse the ACL the create asks for. Either a canned `x-amz-acl` or the

@@ -5809,16 +5809,174 @@ fn create_bucket_configuration_tags_ignores_foreign_bodies() {
     // the helper is gated on the CreateBucketConfiguration root element.
     let tagging =
         r#"<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>"#;
-    assert!(create_bucket_configuration_tags(tagging).is_empty());
-    assert!(create_bucket_configuration_tags("").is_empty());
+    assert!(create_bucket_configuration_tags(tagging)
+        .unwrap()
+        .is_empty());
+    assert!(create_bucket_configuration_tags("").unwrap().is_empty());
 
     // A namespaced or attributed <Tags> element is still parsed — the scan
     // matches the <Tag> children, not the container.
     let ns = r#"<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Tags xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Tag><Key>team</Key><Value>a</Value></Tag></Tags></CreateBucketConfiguration>"#;
     assert_eq!(
-        create_bucket_configuration_tags(ns),
+        create_bucket_configuration_tags(ns).unwrap(),
         vec![("team".to_string(), "a".to_string())]
     );
+}
+
+#[test]
+fn only_uploads_stream_their_body() {
+    // Dispatch streams exactly the requests the handler reads as a stream:
+    // PutObject and UploadPart, by the classification it routes on. Every
+    // other PUT, bucket-level or a key's sub-resource, is buffered so IAM can
+    // read its body; a query parameter S3 ignores does not change that.
+    let svc = make_service();
+    let streams = |path: &str, query: &[(&str, &str)], headers: &[(&str, &str)]| {
+        let query: HashMap<String, String> = query
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let mut map = HeaderMap::new();
+        for (k, v) in headers {
+            map.insert(
+                http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        svc.streams_request_body(&fakecloud_core::service::RequestHead {
+            method: &Method::PUT,
+            raw_path: path,
+            headers: &map,
+            query_params: &query,
+        })
+    };
+    for (path, query) in [
+        ("/b/k", &[][..]),
+        ("/b/folder/", &[]),
+        // The raw path is the key: `/b//` uploads the key `/`.
+        ("/b//", &[]),
+        ("/b/k", &[("partNumber", "1"), ("uploadId", "u")]),
+        ("/b/k", &[("x-id", "PutObject")]),
+        ("/b/k", &[("foo", "bar")]),
+        ("/b/k", &[("Tagging", "")]),
+        (
+            "/b/k",
+            &[("X-Amz-Credential", "c"), ("X-Amz-Signature", "s")],
+        ),
+    ] {
+        assert!(streams(path, query, &[]), "{path} {query:?}");
+    }
+    for (path, query, headers) in [
+        ("/b", &[][..], &[][..]),
+        ("/b/", &[], &[]),
+        ("/", &[], &[]),
+        ("//k", &[], &[]),
+        ("/b/k", &[("tagging", "")], &[]),
+        ("/b/k", &[("acl", "")], &[]),
+        ("/b/k", &[("retention", "")], &[]),
+        ("/b/k", &[("legal-hold", "")], &[]),
+        ("/b/k", &[("annotation", "")], &[]),
+        ("/b/k", &[], &[("x-amz-copy-source", "/src/k")]),
+        (
+            "/b/k",
+            &[("partNumber", "1"), ("uploadId", "u")],
+            &[("x-amz-copy-source", "/src/k")],
+        ),
+        ("/b/k", &[("partNumber", "1")], &[]),
+        ("/b/k", &[("tagging", ""), ("acl", "")], &[]),
+        (
+            "/v20180820/accesspoint/ap",
+            &[],
+            &[("host", "123456789012.s3-control.us-east-1.amazonaws.com")],
+        ),
+    ] {
+        assert!(
+            !streams(path, query, headers),
+            "{path} {query:?} {headers:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn aws_chunked_tag_sets_are_read_unframed_before_authorization() {
+    // An SDK may frame a tagging body with aws-chunked. The framing is undone
+    // once, before anything reads the body, so pre-authorization validation,
+    // the request tags IAM evaluates and the handler all read the tag set.
+    let svc = make_service();
+    svc.handle(make_request(Method::PUT, "/chunked-tags", &[], b""))
+        .await
+        .unwrap();
+    svc.handle(make_request(Method::PUT, "/chunked-tags/k", &[], b"x"))
+        .await
+        .unwrap();
+    let xml = "<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>";
+    let crc = crate::checksum::checksum(crate::checksum::ChecksumAlgorithm::Crc32, xml.as_bytes());
+    let framed = format!(
+        "{:x}\r\n{xml}\r\n0\r\nx-amz-checksum-crc32:{crc}\r\n\r\n",
+        xml.len()
+    );
+    for (path, op) in [
+        ("/chunked-tags/k", "PutObjectTagging"),
+        ("/chunked-tags", "PutBucketTagging"),
+    ] {
+        let mut req = make_request(Method::PUT, path, &[("tagging", "")], framed.as_bytes());
+        *req.body_stream.lock() = None;
+        for (name, value) in [
+            ("content-encoding", "aws-chunked"),
+            ("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"),
+            ("x-amz-trailer", "x-amz-checksum-crc32"),
+            ("x-amz-decoded-content-length", &xml.len().to_string()),
+        ] {
+            req.headers.insert(name, value.parse().unwrap());
+        }
+        svc.prepare_request(&mut req).unwrap();
+        assert_eq!(&req.body[..], xml.as_bytes(), "{op}");
+        svc.validate_before_authorization(&req).unwrap();
+        let tags = s3_request_tags(&req, op).expect("request tags");
+        assert_eq!(tags.get("env").map(String::as_str), Some("prod"), "{op}");
+        svc.handle(req).await.unwrap();
+    }
+    let get = make_request(Method::GET, "/chunked-tags/k", &[("tagging", "")], b"");
+    let resp = svc.handle(get).await.unwrap();
+    assert!(String::from_utf8_lossy(resp.body.expect_bytes()).contains("<Key>env</Key>"));
+
+    // A body whose framing is broken is refused before anything reads it.
+    let mut req = make_request(
+        Method::PUT,
+        "/chunked-tags/k",
+        &[("tagging", "")],
+        b"zz\r\n",
+    );
+    *req.body_stream.lock() = None;
+    req.headers
+        .insert("content-encoding", "aws-chunked".parse().unwrap());
+    assert_eq!(
+        svc.prepare_request(&mut req).unwrap_err().code(),
+        "InvalidChunkSizeError"
+    );
+}
+
+#[tokio::test]
+async fn create_bucket_refuses_a_configuration_that_does_not_read() {
+    // A tag set the create cannot read is MalformedXML, as for
+    // PutBucketTagging, not a bucket created without the tags asked for;
+    // dispatch refuses it before authorization too.
+    let svc = make_service();
+    for body in [
+        "<CreateBucketConfiguration><Tags><Tag><Key>k</Key></Tag></Tags></CreateBucketConfiguration>",
+        "<CreateBucketConfiguration><Tags><Tag><Key>k</Key><Value>v</Value></Tag></Tags>",
+    ] {
+        let req = make_request(Method::PUT, "/unread-config", &[], body.as_bytes());
+        assert_eq!(
+            svc.validate_before_authorization(&req)
+                .unwrap_err()
+                .code(),
+            "MalformedXML",
+            "{body}"
+        );
+        assert_aws_err(svc.handle(req).await, "MalformedXML");
+    }
+    let req = make_request(Method::GET, "/unread-config", &[("location", "")], b"");
+    assert_aws_err(svc.handle(req).await, "NoSuchBucket");
 }
 
 #[test]
@@ -12202,8 +12360,10 @@ mod flexible_checksums {
         assert_aws_err(svc.copy_object(ACCT, &req, "src", "k2"), "InvalidRequest");
     }
 
+    /// A PutObjectAnnotation request as its handler receives it: buffered,
+    /// any aws-chunked framing already undone (`prepare_request`).
     fn put_annotation_req(name: &str, body: &[u8], headers: &[(&str, &str)]) -> AwsRequest {
-        with_headers(
+        let mut req = with_headers(
             make_request(
                 Method::PUT,
                 "/an/k",
@@ -12211,7 +12371,10 @@ mod flexible_checksums {
                 body,
             ),
             headers,
-        )
+        );
+        *req.body_stream.lock() = None;
+        crate::checksum::deframe_buffered(&mut req.headers, &mut req.body).unwrap();
+        req
     }
 
     fn get_annotation(svc: &S3Service, name: &str, checksum_mode: bool) -> AwsResponse {
