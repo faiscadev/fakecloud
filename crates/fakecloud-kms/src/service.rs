@@ -654,9 +654,10 @@ impl KmsService {
     /// `RevokeGrant` and `RetireGrant` naming it by its key ARN. A `Decrypt`
     /// naming no key uses the key its ciphertext names, a `RetireGrant`
     /// naming its grant by `GrantToken` the account holding that grant, and a
-    /// `ReEncrypt` is
-    /// served in another account only when its source and destination keys
-    /// are both there. A key id or alias name is always the caller's own
+    /// `ReEncrypt` is served in another account only when its source and
+    /// destination keys are both there (with keys in different accounts it
+    /// stays in the caller's, and `re_encrypt` opens the ciphertext and seals
+    /// the new one each in its own key's account). A key id or alias name is always the caller's own
     /// account's. Whether the caller may use the key is decided by IAM
     /// enforcement at dispatch (key policy, identity policies and grants).
     fn cross_account_key_owner(&self, req: &AwsRequest) -> Option<String> {

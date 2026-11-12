@@ -510,37 +510,22 @@ pub(crate) fn decode_plaintext(plaintext_b64: &str) -> Result<Vec<u8>, AwsServic
     Ok(bytes)
 }
 
-/// Build the base64-encoded ciphertext envelope for `Encrypt`. Two
-/// shapes: when imported key material is present, XOR the plaintext
-/// against the material so the ciphertext is deterministic in the
-/// imported key; otherwise the fakecloud envelope just wraps the
-/// original base64 plaintext under a fixed prefix. `embedded` is the key
-/// reference the blob names (see [`sealed_key_ref`]).
+/// Build the base64-encoded symmetric ciphertext `Encrypt` and `ReEncrypt`
+/// return: the AWS-shaped binary blob, AES-256-GCM under the master key of
+/// the key's account (`state`), naming the key as `embedded` (see
+/// [`sealed_key_ref`]) and binding the encryption context. A key with
+/// imported material (`EXTERNAL` origin) seals the same way, as
+/// `GenerateDataKey` always has, so its ciphertext names its key (and opens
+/// from another account, or with the encryption context it was sealed with)
+/// like any symmetric ciphertext; a key whose material was deleted is
+/// `PendingImport`, which refuses the decrypt. The textual
+/// `fakecloud-imported:` envelope earlier builds produced still decrypts.
 pub(crate) fn build_encrypt_ciphertext(
     state: &KmsState,
-    key: &KmsKey,
     embedded: &str,
     plaintext_bytes: &[u8],
     encryption_context_aad: &[u8],
 ) -> String {
-    if let Some(ref material) = key.imported_material_bytes {
-        // Imported key material path: legacy XOR envelope wrapped in the
-        // textual `fakecloud-imported:<key>:<b64>` form, base64-encoded for
-        // wire transport. This format is preserved for back-compat with
-        // snapshots and external callers that may already have stored
-        // ciphertexts produced before the AES-GCM blob format landed.
-        let xored: Vec<u8> = plaintext_bytes
-            .iter()
-            .enumerate()
-            .map(|(i, b)| b ^ material[i % material.len()])
-            .collect();
-        let xored_b64 = base64::engine::general_purpose::STANDARD.encode(&xored);
-        let envelope = format!("fakecloud-imported:{}:{xored_b64}", key.key_id);
-        return base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
-    }
-    // Default path: AWS-shaped binary blob with AES-256-GCM under the
-    // per-account master key persisted in `KmsState`. Round-trips through
-    // real SDKs and does not leak plaintext to anyone inspecting the bytes.
     let blob = crate::blob::encode_with_context(
         &state.master_key_bytes,
         embedded,
@@ -941,14 +926,20 @@ pub(crate) fn grant_to_json(grant: &KmsGrant, state: &KmsState, region: &str) ->
     let mut v = json!({
         "KeyId": key.map_or(grant.key_id.as_str(), |k| k.arn.as_str()),
         "GrantId": grant.grant_id,
-        "GranteePrincipal": grant.grantee_principal,
         "Operations": grant.operations,
         "IssuingAccount": Arn::global("iam", &state.account_id, "root").with_partition(partition).to_string(),
         "CreationDate": grant.creation_date,
     });
 
+    match grant.grantee_service_principal {
+        Some(ref sp) => v["GranteeServicePrincipal"] = json!(sp),
+        None => v["GranteePrincipal"] = json!(grant.grantee_principal),
+    }
     if let Some(ref rp) = grant.retiring_principal {
         v["RetiringPrincipal"] = json!(rp);
+    }
+    if let Some(ref sp) = grant.retiring_service_principal {
+        v["RetiringServicePrincipal"] = json!(sp);
     }
     if let Some(ref c) = grant.constraints {
         v["Constraints"] = c.clone();

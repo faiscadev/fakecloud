@@ -382,6 +382,78 @@ async fn a_grant_lets_another_accounts_identity_use_the_key() {
         .expect("account grant delegated by an IAM policy");
 }
 
+/// ReEncrypt moves a ciphertext from a key of another account into the
+/// caller's own: `kms:ReEncryptFrom` is authorized on the source key (here a
+/// grant on account A's key), `kms:ReEncryptTo` on the destination key (the
+/// caller's IAM policy on its account's key), each by its own key's policy
+/// and grants, and the new ciphertext is the destination key's.
+#[tokio::test]
+async fn re_encrypt_across_accounts_is_authorized_on_each_key() {
+    let server = start().await;
+    let (_, owner) = admin(&server, ACCOUNT_A).await;
+    let (b_admin_cfg, b_admin) = admin(&server, ACCOUNT_B).await;
+    let key_a = create_key(&owner, None).await;
+    let key_b = create_key(&b_admin, None).await;
+    let iam_policy = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["kms:ReEncryptTo","kms:Decrypt"],"Resource":"{key_b}"}}]}}"#
+    );
+    let (b_arn, b_user) = user(&server, &b_admin_cfg, "b-mover", Some(&iam_policy)).await;
+    let sealed = encrypt(&owner, &key_a, Some(("app", "a"))).await.unwrap();
+    let blob = sealed.ciphertext_blob().unwrap().clone();
+    let re_encrypt = |source_context: (&'static str, &'static str)| {
+        b_user
+            .re_encrypt()
+            .ciphertext_blob(blob.clone())
+            .source_encryption_context(source_context.0, source_context.1)
+            .destination_key_id(&key_b)
+            .send()
+    };
+
+    denied(
+        re_encrypt(("app", "a")).await,
+        "ReEncrypt without ReEncryptFrom on the source key",
+    );
+    grant(
+        &owner,
+        &key_a,
+        &b_arn,
+        &[GrantOperation::ReEncryptFrom],
+        Some(
+            GrantConstraints::builder()
+                .encryption_context_equals("app", "a")
+                .build(),
+        ),
+    )
+    .await;
+    let moved = re_encrypt(("app", "a"))
+        .await
+        .expect("ReEncryptFrom by the grant, ReEncryptTo by the IAM policy");
+    assert_eq!(moved.source_key_id(), Some(key_a.as_str()));
+    assert_eq!(moved.key_id(), Some(key_b.as_str()));
+    let opened = decrypt(&b_user, moved.ciphertext_blob().unwrap(), None)
+        .await
+        .expect("the destination key's ciphertext, in its account");
+    assert_eq!(opened.key_id(), Some(key_b.as_str()));
+    assert_eq!(opened.plaintext().unwrap().as_ref(), b"granted");
+
+    // The grant's constraint holds against the source context; the IAM
+    // policy cannot authorize the source key of another account.
+    denied(
+        re_encrypt(("app", "other")).await,
+        "a source context outside the grant's constraint",
+    );
+    // Into a key of A the grant does not cover: ReEncryptTo is refused.
+    denied(
+        b_user
+            .re_encrypt()
+            .ciphertext_blob(moved.ciphertext_blob().unwrap().clone())
+            .destination_key_id(&key_a)
+            .send()
+            .await,
+        "ReEncryptTo another account's key without a grant",
+    );
+}
+
 /// RetireGrant is authorized by the grant it retires: its retiring principal
 /// (also from another account, also by grant token), its grantee when the
 /// grant allows RetireGrant, or an IAM-allowed principal of the key's

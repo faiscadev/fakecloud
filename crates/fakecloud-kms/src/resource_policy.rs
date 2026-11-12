@@ -168,9 +168,14 @@ impl ResourcePolicyProvider for KmsResourcePolicyProvider {
                 &state.grants,
                 &storage_id,
                 &key.arn,
-                |grantee| principal_match(grantee, principal) == Some(*kind),
+                |grant| {
+                    grant.grantee_service_principal.is_none()
+                        && principal_match(&grant.grantee_principal, principal) == Some(*kind)
+                },
                 action.action,
                 grant_request,
+                // A direct KMS API call is made on behalf of no resource.
+                None,
             )
         })
     }
@@ -403,6 +408,8 @@ mod tests {
                     key_id: KEY_ID.to_string(),
                     grantee_principal: grantee.to_string(),
                     retiring_principal: None,
+                    grantee_service_principal: None,
+                    retiring_service_principal: None,
                     operations: operations.iter().map(|o| o.to_string()).collect(),
                     constraints: constraints.clone(),
                     name: None,
@@ -466,6 +473,39 @@ mod tests {
     }
 
     const USER: &str = "arn:aws:iam::111111111111:user/alice";
+
+    /// A grant with a `SourceArn` constraint allows its operations only on
+    /// behalf of that resource, and a direct KMS API call is made on behalf
+    /// of none, so it authorizes no direct call (`DescribeKey` included);
+    /// it still lets its grantee retire it.
+    #[test]
+    fn source_arn_grants_authorize_no_direct_call() {
+        let bound = serde_json::json!({"SourceArn": "arn:aws:s3:::bucket"});
+        let state = state_with_grants(&[(
+            USER,
+            &["Encrypt", "DescribeKey", "RetireGrant"],
+            Some(bound),
+        )]);
+        for action in ["Encrypt", "DescribeKey"] {
+            assert_eq!(
+                ask(&state, USER, action, serde_json::json!({})),
+                None,
+                "{action}"
+            );
+        }
+        let grant_id = state.read().get(KEY_ACCOUNT).unwrap().grants[0]
+            .grant_id
+            .clone();
+        assert_eq!(
+            ask(
+                &state,
+                USER,
+                "RetireGrant",
+                serde_json::json!({"KeyId": key_arn(), "GrantId": grant_id})
+            ),
+            Some(GrantAuthorization::Grantee)
+        );
+    }
 
     #[test]
     fn a_grant_to_the_caller_covers_only_its_operations() {
@@ -773,6 +813,8 @@ mod tests {
             key_id: KEY_ID.to_string(),
             grantee_principal: grantee.to_string(),
             retiring_principal: retiring.map(str::to_string),
+            grantee_service_principal: None,
+            retiring_service_principal: None,
             operations: operations.iter().map(|o| o.to_string()).collect(),
             constraints: None,
             name: None,
@@ -898,6 +940,8 @@ mod tests {
                 key_id: replica_storage,
                 grantee_principal: USER.into(),
                 retiring_principal: None,
+                grantee_service_principal: None,
+                retiring_service_principal: None,
                 operations: vec!["Decrypt".into()],
                 constraints: None,
                 name: None,

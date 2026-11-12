@@ -69,6 +69,52 @@ fn validate_encryption_context_constraints(
     Ok(())
 }
 
+/// The grantee and retiring principals `CreateGrant` takes, as its API
+/// reference requires them: exactly one of `GranteePrincipal` (an AWS
+/// principal) and `GranteeServicePrincipal` (an AWS service principal), at
+/// most one of `RetiringPrincipal` and `RetiringServicePrincipal`, and a
+/// grant to a service principal also needs a `SourceArn` constraint and a
+/// retiring principal of either kind. A violation is a `ValidationException`
+/// (AWS documents the rules, not its messages).
+fn validate_grant_principals(
+    body: &Value,
+    service_grantee: bool,
+    retiring: bool,
+    retiring_service: bool,
+) -> Result<(), AwsServiceError> {
+    let invalid = |message: &str| {
+        Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            message,
+        ))
+    };
+    let aws_grantee = body["GranteePrincipal"].as_str().is_some();
+    if aws_grantee == service_grantee {
+        return invalid(
+            "You must specify either GranteePrincipal or GranteeServicePrincipal, but not both.",
+        );
+    }
+    if retiring && retiring_service {
+        return invalid(
+            "You can specify either RetiringPrincipal or RetiringServicePrincipal, but not both.",
+        );
+    }
+    if service_grantee {
+        if body["Constraints"]["SourceArn"].as_str().is_none() {
+            return invalid(
+                "When you specify a GranteeServicePrincipal, you must also specify a SourceArn grant constraint.",
+            );
+        }
+        if !retiring && !retiring_service {
+            return invalid(
+                "When you specify a GranteeServicePrincipal, you must specify either a RetiringPrincipal or a RetiringServicePrincipal.",
+            );
+        }
+    }
+    Ok(())
+}
+
 impl KmsService {
     pub(super) fn create_grant(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
@@ -85,7 +131,18 @@ impl KmsService {
             })?;
 
         let grantee_principal = body["GranteePrincipal"].as_str().unwrap_or("").to_string();
+        let grantee_service_principal =
+            body["GranteeServicePrincipal"].as_str().map(str::to_string);
         let retiring_principal = body["RetiringPrincipal"].as_str().map(|s| s.to_string());
+        let retiring_service_principal = body["RetiringServicePrincipal"]
+            .as_str()
+            .map(str::to_string);
+        validate_grant_principals(
+            &body,
+            grantee_service_principal.is_some(),
+            retiring_principal.is_some(),
+            retiring_service_principal.is_some(),
+        )?;
         let operations: Vec<String> = body["Operations"]
             .as_array()
             .map(|arr| {
@@ -122,7 +179,9 @@ impl KmsService {
             grant_token: grant_token.clone(),
             key_id: resolved,
             grantee_principal,
+            grantee_service_principal,
             retiring_principal,
+            retiring_service_principal,
             operations,
             constraints,
             name,
@@ -154,6 +213,17 @@ impl KmsService {
             })?;
 
         let grant_id_filter = body["GrantId"].as_str();
+        // "You can specify either GranteePrincipal or GranteeServicePrincipal,
+        // but not both."
+        let grantee_filter = body["GranteePrincipal"].as_str();
+        let service_grantee_filter = body["GranteeServicePrincipal"].as_str();
+        if grantee_filter.is_some() && service_grantee_filter.is_some() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "You can specify either GranteePrincipal or GranteeServicePrincipal, but not both.",
+            ));
+        }
 
         let accounts = self.state.read();
         let empty = KmsState::new(&req.account_id, &req.region);
@@ -162,12 +232,11 @@ impl KmsService {
             .grants
             .iter()
             .filter(|g| g.key_id == resolved)
+            .filter(|g| grant_id_filter.is_none_or(|gid| g.grant_id == gid))
+            .filter(|g| grantee_filter.is_none_or(|p| g.grantee_principal == p))
             .filter(|g| {
-                if let Some(gid) = grant_id_filter {
-                    g.grant_id == gid
-                } else {
-                    true
-                }
+                service_grantee_filter
+                    .is_none_or(|p| g.grantee_service_principal.as_deref() == Some(p))
             })
             .map(|g| grant_to_json(g, state, &req.region))
             .collect();
@@ -192,19 +261,35 @@ impl KmsService {
         // KMSInternal / DependencyTimeout. Map RetiringPrincipal shape
         // failures onto InvalidArnException and Limit/Marker onto
         // InvalidMarkerException.
-        recoded("InvalidArnException", || {
-            validate_required("RetiringPrincipal", &body["RetiringPrincipal"])
-        })?;
-        let retiring_principal = body["RetiringPrincipal"].as_str().ok_or_else(|| {
-            AwsServiceError::aws_error(
+        // "You must specify either RetiringPrincipal or
+        // RetiringServicePrincipal, but not both."
+        let service_principal = body["RetiringServicePrincipal"].as_str();
+        if service_principal.is_some() && !body["RetiringPrincipal"].is_null() {
+            return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "InvalidArnException",
-                "RetiringPrincipal must be a string",
-            )
-        })?;
-        recoded("InvalidArnException", || {
-            validate_string_length("retiringPrincipal", retiring_principal, 1, 256)
-        })?;
+                "ValidationException",
+                "You must specify either RetiringPrincipal or RetiringServicePrincipal, but not both.",
+            ));
+        }
+        let retiring_principal = match service_principal {
+            Some(_) => None,
+            None => {
+                recoded("InvalidArnException", || {
+                    validate_required("RetiringPrincipal", &body["RetiringPrincipal"])
+                })?;
+                let principal = body["RetiringPrincipal"].as_str().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidArnException",
+                        "RetiringPrincipal must be a string",
+                    )
+                })?;
+                recoded("InvalidArnException", || {
+                    validate_string_length("retiringPrincipal", principal, 1, 256)
+                })?;
+                Some(principal)
+            }
+        };
         recoded("InvalidMarkerException", || {
             validate_optional_json_range("limit", &body["Limit"], 1, 1000)
         })?;
@@ -221,10 +306,9 @@ impl KmsService {
         let mut all_grants: Vec<Value> = state
             .grants
             .iter()
-            .filter(|g| {
-                g.retiring_principal
-                    .as_deref()
-                    .is_some_and(|rp| rp == retiring_principal)
+            .filter(|g| match retiring_principal {
+                Some(principal) => g.retiring_principal.as_deref() == Some(principal),
+                None => g.retiring_service_principal.as_deref() == service_principal,
             })
             .map(|g| grant_to_json(g, state, &req.region))
             .collect();
