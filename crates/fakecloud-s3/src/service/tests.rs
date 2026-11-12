@@ -7093,6 +7093,165 @@ async fn put_bucket_encryption_aws_kms_without_a_key_uses_aws_s3() {
     assert_eq!(got.body.expect_bytes(), b"payload");
 }
 
+/// The stored body of `bucket/key` (the fake KMS seals as `enc:<key>:...`).
+fn stored_body(svc: &S3Service, bucket: &str, key: &str) -> String {
+    let obj = bucket_of(svc, bucket).objects[key].clone();
+    let bytes = svc.state.read().default_ref().read_body(&obj.body).unwrap();
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+/// A copy naming no SSE takes the destination bucket's default encryption
+/// (S3 API reference, CopyObject), key and Bucket Key included, also for a
+/// copy in place; with no default, a copy in place of an encrypted object
+/// lands under SSE-S3.
+#[tokio::test]
+async fn copy_without_sse_headers_takes_the_destination_default() {
+    let svc = kms_service();
+    seed_bucket(&svc, "src");
+    seed_bucket(&svc, "dst");
+    seed_bucket(&svc, "plainbucket");
+    seed_object(&svc, "src", "a", b"payload");
+    let body = b"<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>key-k</KMSMasterKeyID></ApplyServerSideEncryptionByDefault><BucketKeyEnabled>true</BucketKeyEnabled></Rule></ServerSideEncryptionConfiguration>";
+    svc.put_bucket_encryption(
+        "123456789012",
+        &make_request(Method::PUT, "/dst", &[("encryption", "")], body),
+        "dst",
+    )
+    .unwrap();
+    let copy = |to: &str, from: &str, replace_metadata: bool| {
+        let mut req = make_request(Method::PUT, to, &[], b"");
+        req.headers
+            .insert("x-amz-copy-source", from.parse().unwrap());
+        if replace_metadata {
+            req.headers
+                .insert("x-amz-metadata-directive", "REPLACE".parse().unwrap());
+        }
+        req
+    };
+
+    let resp = svc.handle(copy("/dst/b", "/src/a", false)).await.unwrap();
+    assert_eq!(resp.headers["x-amz-server-side-encryption"], "aws:kms");
+    assert_eq!(
+        resp.headers["x-amz-server-side-encryption-aws-kms-key-id"],
+        "key-k"
+    );
+    assert_eq!(
+        resp.headers["x-amz-server-side-encryption-bucket-key-enabled"],
+        "true"
+    );
+    let obj = bucket_of(&svc, "dst").objects["b"].clone();
+    assert_eq!(obj.sse_algorithm.as_deref(), Some("aws:kms"));
+    assert_eq!(obj.sse_kms_key_id.as_deref(), Some("key-k"));
+    assert_eq!(obj.bucket_key_enabled, Some(true));
+    assert_eq!(stored_body(&svc, "dst", "b"), "enc:key-k:payload");
+    let got = svc
+        .handle(make_request(Method::GET, "/dst/b", &[], b""))
+        .await
+        .unwrap();
+    assert_eq!(got.body.expect_bytes(), b"payload");
+
+    // In place: an SSE-KMS object stays under the bucket's default key.
+    svc.handle(copy("/dst/b", "/dst/b", true)).await.unwrap();
+    let obj = bucket_of(&svc, "dst").objects["b"].clone();
+    assert_eq!(obj.sse_algorithm.as_deref(), Some("aws:kms"));
+    assert_eq!(obj.sse_kms_key_id.as_deref(), Some("key-k"));
+    assert_eq!(stored_body(&svc, "dst", "b"), "enc:key-k:payload");
+
+    // In place in a bucket with no default: SSE-S3.
+    svc.handle(sse_kms_put("/plainbucket/c", Some("key-a")))
+        .await
+        .unwrap();
+    let resp = svc
+        .handle(copy("/plainbucket/c", "/plainbucket/c", true))
+        .await
+        .unwrap();
+    assert_eq!(resp.headers["x-amz-server-side-encryption"], "AES256");
+    assert_eq!(stored_body(&svc, "plainbucket", "c"), "secret body");
+
+    // Request headers still win over the default.
+    let mut explicit = copy("/dst/d", "/src/a", false);
+    explicit
+        .headers
+        .insert("x-amz-server-side-encryption", "aws:kms".parse().unwrap());
+    explicit.headers.insert(
+        "x-amz-server-side-encryption-aws-kms-key-id",
+        "key-x".parse().unwrap(),
+    );
+    svc.handle(explicit).await.unwrap();
+    assert_eq!(stored_body(&svc, "dst", "d"), "enc:key-x:payload");
+}
+
+/// UpdateObjectEncryption from one KMS key to another reseals the body
+/// under the new key; naming the key it already has changes nothing.
+#[tokio::test]
+async fn update_object_encryption_to_another_kms_key_reseals_the_body() {
+    let svc = kms_service();
+    seed_bucket(&svc, "bk");
+    svc.handle(sse_kms_put("/bk/o", Some("key-a")))
+        .await
+        .unwrap();
+    assert_eq!(stored_body(&svc, "bk", "o"), "enc:key-a:secret body");
+    let update = |key: &str| {
+        let mut req = make_request(Method::PUT, "/bk/o", &[], b"");
+        req.headers
+            .insert("x-amz-server-side-encryption", "aws:kms".parse().unwrap());
+        req.headers.insert(
+            "x-amz-server-side-encryption-aws-kms-key-id",
+            key.parse().unwrap(),
+        );
+        req
+    };
+    svc.update_object_encryption("123456789012", &update("key-b"), "bk", "o")
+        .unwrap();
+    let obj = bucket_of(&svc, "bk").objects["o"].clone();
+    assert_eq!(obj.sse_kms_key_id.as_deref(), Some("key-b"));
+    assert_eq!(stored_body(&svc, "bk", "o"), "enc:key-b:secret body");
+    let got = svc
+        .handle(make_request(Method::GET, "/bk/o", &[], b""))
+        .await
+        .unwrap();
+    assert_eq!(got.body.expect_bytes(), b"secret body");
+
+    // The same key again keeps the body under it.
+    svc.update_object_encryption("123456789012", &update("key-b"), "bk", "o")
+        .unwrap();
+    assert_eq!(stored_body(&svc, "bk", "o"), "enc:key-b:secret body");
+
+    // The request as the SDKs send it: an `ObjectEncryption` body naming
+    // the new key and turning on an S3 Bucket Key.
+    let key_c = "arn:aws:kms:us-east-1:123456789012:key/key-c";
+    let body = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><ObjectEncryption xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><SSE-KMS><KMSKeyArn>{key_c}</KMSKeyArn><BucketKeyEnabled>true</BucketKeyEnabled></SSE-KMS></ObjectEncryption>"#
+    );
+    let req = make_request(Method::PUT, "/bk/o", &[("encryption", "")], body.as_bytes());
+    svc.update_object_encryption("123456789012", &req, "bk", "o")
+        .unwrap();
+    let obj = bucket_of(&svc, "bk").objects["o"].clone();
+    assert_eq!(obj.sse_algorithm.as_deref(), Some("aws:kms"));
+    assert_eq!(obj.sse_kms_key_id.as_deref(), Some(key_c));
+    assert_eq!(obj.bucket_key_enabled, Some(true));
+    // (The fake KMS seals as `enc:<key>:...`, so a key ARN's colons keep its
+    // GetObject from parsing the body back; the E2E test reads it through
+    // the real KMS.)
+    assert_eq!(
+        stored_body(&svc, "bk", "o"),
+        format!("enc:{key_c}:secret body")
+    );
+
+    // A body naming a key another account owns is refused.
+    let foreign = "<ObjectEncryption><SSE-KMS><KMSKeyArn>arn:aws:kms:us-east-1:210987654321:key/k</KMSKeyArn></SSE-KMS></ObjectEncryption>";
+    let req = make_request(
+        Method::PUT,
+        "/bk/o",
+        &[("encryption", "")],
+        foreign.as_bytes(),
+    );
+    assert_aws_err(
+        svc.update_object_encryption("123456789012", &req, "bk", "o"),
+        "AccessDenied",
+    );
+}
+
 #[test]
 fn put_bucket_encryption_rejects_control_char_in_kms_key_id() {
     // Regression (bug-audit 2026-06-13 2.1): a control byte (newline) in the

@@ -859,16 +859,33 @@ impl S3Service {
         bucket: &str,
         key: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let new_alg = req
-            .headers
-            .get("x-amz-server-side-encryption")
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
-        let new_kms_key_id = req
-            .headers
-            .get("x-amz-server-side-encryption-aws-kms-key-id")
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
+        // The new encryption is the request body's `ObjectEncryption`
+        // (S3 API reference, UpdateObjectEncryption: `<SSE-KMS>` with
+        // `KMSKeyArn` and `BucketKeyEnabled`), as the SDKs send it. A
+        // request without one may name the encryption in the SSE headers.
+        let body = std::str::from_utf8(&req.body).unwrap_or_default();
+        let from_body = body.contains("<ObjectEncryption");
+        let (new_alg, new_kms_key_id, new_bucket_key) = if from_body {
+            let encryption = parse_object_encryption(body)?;
+            (
+                Some("aws:kms".to_string()),
+                Some(encryption.kms_key_arn),
+                encryption.bucket_key_enabled,
+            )
+        } else {
+            let header = |name: &str| {
+                req.headers
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from)
+            };
+            (
+                header("x-amz-server-side-encryption"),
+                header("x-amz-server-side-encryption-aws-kms-key-id"),
+                header("x-amz-server-side-encryption-bucket-key-enabled")
+                    .map(|v| v.eq_ignore_ascii_case("true")),
+            )
+        };
 
         // Snapshot what we need to crunch the body re-encryption
         // outside the write lock, so the encrypt/decrypt hooks (which
@@ -908,6 +925,14 @@ impl S3Service {
             )
         };
 
+        if from_body {
+            check_update_object_encryption(
+                old_alg.as_deref(),
+                new_kms_key_id.as_deref(),
+                account_id,
+            )?;
+        }
+
         // The object records the ARN of the key it is sealed under (resolved
         // in the bucket's region), as PutObject does, whatever form the
         // request named it in.
@@ -918,10 +943,23 @@ impl S3Service {
             other => other,
         };
 
-        // Same algorithm, no body work — only flip the kms key id
-        // when the caller bumped that.
+        // The body is resealed when the algorithm changes, or when an SSE-KMS
+        // object moves to another KMS key: recording the new key without
+        // resealing would leave the body under the old one, unreadable once
+        // that key is disabled, deleted or denied. Otherwise only metadata
+        // changes.
+        // Turning an S3 Bucket Key on or off changes the encryption context
+        // (the bucket's ARN instead of the object's), so it reseals too.
         let same_alg = old_alg == new_alg;
-        let plaintext: bytes::Bytes = if old_alg.as_deref() == Some("aws:kms") && !same_alg {
+        let new_bucket_key_on = new_bucket_key.unwrap_or(bucket_key);
+        let key_changed = same_alg
+            && new_alg.as_deref() == Some("aws:kms")
+            && (new_kms_key_id
+                .as_deref()
+                .is_some_and(|kid| !kid.is_empty() && Some(kid) != old_kms_key_id.as_deref())
+                || new_bucket_key_on != bucket_key);
+        let reseal = !same_alg || key_changed;
+        let plaintext: bytes::Bytes = if old_alg.as_deref() == Some("aws:kms") && reseal {
             self.decrypt_object_body(
                 req,
                 account_id,
@@ -930,21 +968,23 @@ impl S3Service {
                 bucket_key,
                 &existing_bytes,
                 old_kms_key_id.as_deref(),
-            )?
+            )
+            .map_err(|err| update_encryption_kms_error(from_body, err))?
         } else {
             existing_bytes
         };
-        let new_bytes = if new_alg.as_deref() == Some("aws:kms") && !same_alg {
+        let new_bytes = if new_alg.as_deref() == Some("aws:kms") && reseal {
             self.encrypt_object_body(
                 req,
                 account_id,
                 &bucket_region,
                 bucket,
                 key,
-                bucket_key,
+                new_bucket_key_on,
                 &plaintext,
                 new_kms_key_id.as_deref(),
-            )?
+            )
+            .map_err(|err| update_encryption_kms_error(from_body, err))?
         } else {
             plaintext
         };
@@ -966,7 +1006,10 @@ impl S3Service {
         if let Some(kid) = new_kms_key_id {
             obj.sse_kms_key_id = if kid.is_empty() { None } else { Some(kid) };
         }
-        let _ = body_handle; // silence unused when same_alg branch wins
+        if new_bucket_key.is_some() {
+            obj.bucket_key_enabled = new_bucket_key;
+        }
+        let _ = body_handle; // silence unused when the body is not resealed
 
         // Snapshot the just-mutated metadata and persist through the store so
         // the re-encrypted body + updated SSE metadata survive a restart.
@@ -980,8 +1023,8 @@ impl S3Service {
                 .and_then(|bb| bb.objects.get(key))
                 .ok_or_else(|| no_such_bucket(bucket))?,
         );
-        if same_alg {
-            // Body unchanged; only the metadata (kms key id) may have moved.
+        if !reseal {
+            // Body unchanged; only the metadata may have moved.
             self.store
                 .put_object_meta(bucket, key, meta.version_id.as_deref(), &meta)
                 .map_err(crate::service::persistence_error)?;
@@ -1529,6 +1572,192 @@ fn validate_default_retention(body: &str) -> Result<(), AwsServiceError> {
         }
     }
     Ok(())
+}
+
+/// A KMS failure while resealing for an `UpdateObjectEncryption` request
+/// (`from_body`: the API form). The operation's documented errors are
+/// `AccessDenied`, `InvalidRequest` and `NoSuchKey`, with `AccessDenied`
+/// the answer when the KMS key cannot be used ("You might receive an
+/// AccessDenied error for several reasons"), so a KMS refusal of the key
+/// (missing, disabled, denied) is `AccessDenied` with KMS's message, rather
+/// than the `KMS.<code>` PutObject reports.
+fn update_encryption_kms_error(from_body: bool, err: AwsServiceError) -> AwsServiceError {
+    if from_body && err.code().starts_with("KMS.") {
+        AwsServiceError::aws_error(StatusCode::FORBIDDEN, "AccessDenied", err.message())
+    } else {
+        err
+    }
+}
+
+/// The new encryption an `UpdateObjectEncryption` body names.
+struct RequestedObjectEncryption {
+    kms_key_arn: String,
+    bucket_key_enabled: Option<bool>,
+}
+
+/// UpdateObjectEncryption's `InvalidRequest`, with the message the S3 API
+/// reference gives for the reason.
+fn update_encryption_invalid(message: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidRequest", message)
+}
+
+/// Parse an `UpdateObjectEncryption` body (`<ObjectEncryption>` holding an
+/// `<SSE-KMS>` with `KMSKeyArn` and an optional `BucketKeyEnabled`; SSE-KMS
+/// is the only encryption type it can set), refusing what the S3 API
+/// reference lists as `InvalidRequest`: no or another encryption type, and a
+/// `BucketKeyEnabled` other than `true` / `false`. A missing key is checked
+/// with the object (see [`check_update_object_encryption`]).
+fn parse_object_encryption(body: &str) -> Result<RequestedObjectEncryption, AwsServiceError> {
+    if !body.contains("<SSE-KMS>") {
+        return Err(update_encryption_invalid(
+            "Requests that modify an object encryption configuration require a valid new encryption type. Valid values are SSEKMS. Modify the request to specify SSE-KMS for the updated encryption type, and then try again.",
+        ));
+    }
+    let bucket_key_enabled = match extract_xml_value(body, "BucketKeyEnabled") {
+        None => None,
+        Some(v) => match v.trim() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => {
+                return Err(update_encryption_invalid(
+                    "The BucketKeyEnabled value isn't valid. Valid values are true or false. Modify the request to specify a valid value, and then try again.",
+                ))
+            }
+        },
+    };
+    Ok(RequestedObjectEncryption {
+        kms_key_arn: extract_xml_value(body, "KMSKeyArn")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default(),
+        bucket_key_enabled,
+    })
+}
+
+/// The S3 API reference's conditions on an `UpdateObjectEncryption`: the
+/// object must be encrypted with SSE-S3 or SSE-KMS (`source`, its recorded
+/// algorithm), the new key must be named by a well-formed KMS key ARN, and
+/// the key must belong to the bucket owner's account (`bucket_account`).
+fn check_update_object_encryption(
+    source: Option<&str>,
+    kms_key_arn: Option<&str>,
+    bucket_account: &str,
+) -> Result<(), AwsServiceError> {
+    match source {
+        Some("AES256") | Some("aws:kms") => {}
+        Some(_) => {
+            return Err(update_encryption_invalid(
+                "The UpdateObjectEncryption operation doesn't support source objects with the encryption type DSSE-KMS or SSE-C. Only source objects encrypted with SSE-S3 or SSE-KMS are supported.",
+            ))
+        }
+        None => {
+            return Err(update_encryption_invalid(
+                "The UpdateObjectEncryption operation doesn't supported unencrypted source objects. Only source objects encrypted with SSE-S3 or SSE-KMS are supported.",
+            ))
+        }
+    }
+    let arn = kms_key_arn.unwrap_or_default();
+    if arn.is_empty() {
+        return Err(update_encryption_invalid(
+            "Requests that modify an object's encryption type to SSE-KMS require an AWS KMS key Amazon Resource Name (ARN). Modify the request to specify a KMS key ARN, and then try again.",
+        ));
+    }
+    let fields: Vec<&str> = arn.splitn(6, ':').collect();
+    let well_formed = matches!(
+        fields.as_slice(),
+        ["arn", partition, "kms", region, account, resource]
+            if !partition.is_empty()
+                && !region.is_empty()
+                && account.len() == 12
+                && account.bytes().all(|b| b.is_ascii_digit())
+                && resource.strip_prefix("key/").is_some_and(|id| !id.is_empty())
+    );
+    if !well_formed {
+        return Err(update_encryption_invalid(
+            "Requests that modify an object's encryption type to SSE-KMS require a valid AWS KMS key Amazon Resource Name (ARN). Confirm that you have a correctly formatted KMS key ARN in your request, and then try again.",
+        ));
+    }
+    if fields[4] != bucket_account {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::FORBIDDEN,
+            "AccessDenied",
+            "The AWS KMS key in the request must be owned by the same account as the bucket. Modify the request to specify a KMS key from the same account, and then try again.",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod update_object_encryption_tests {
+    use super::*;
+
+    const ARN: &str = "arn:aws:kms:us-east-1:123456789012:key/0b5f2a4e";
+
+    fn code(result: Result<impl std::fmt::Debug, AwsServiceError>) -> String {
+        result.unwrap_err().code().to_string()
+    }
+
+    #[test]
+    fn the_body_must_name_sse_kms_and_a_boolean_bucket_key() {
+        let body = |inner: &str| format!("<ObjectEncryption>{inner}</ObjectEncryption>");
+        let parsed = parse_object_encryption(&body(&format!(
+            "<SSE-KMS><KMSKeyArn>{ARN}</KMSKeyArn><BucketKeyEnabled>false</BucketKeyEnabled></SSE-KMS>"
+        )))
+        .ok()
+        .unwrap();
+        assert_eq!(parsed.kms_key_arn, ARN);
+        assert_eq!(parsed.bucket_key_enabled, Some(false));
+        let parsed = parse_object_encryption(&body(&format!(
+            "<SSE-KMS><KMSKeyArn>{ARN}</KMSKeyArn></SSE-KMS>"
+        )))
+        .ok()
+        .unwrap();
+        assert_eq!(parsed.bucket_key_enabled, None);
+        assert_eq!(
+            code(parse_object_encryption(&body("")).map(|_| ())),
+            "InvalidRequest"
+        );
+        assert_eq!(
+            code(
+                parse_object_encryption(&body(&format!(
+                    "<SSE-KMS><KMSKeyArn>{ARN}</KMSKeyArn><BucketKeyEnabled>yes</BucketKeyEnabled></SSE-KMS>"
+                )))
+                .map(|_| ())
+            ),
+            "InvalidRequest"
+        );
+    }
+
+    #[test]
+    fn only_encrypted_objects_move_to_a_well_formed_key_of_the_bucket_owner() {
+        let owner = "123456789012";
+        for source in ["AES256", "aws:kms"] {
+            check_update_object_encryption(Some(source), Some(ARN), owner).unwrap();
+        }
+        for (source, key, expected) in [
+            (None, Some(ARN), "InvalidRequest"),
+            (Some("aws:kms:dsse"), Some(ARN), "InvalidRequest"),
+            (Some("AES256"), None, "InvalidRequest"),
+            (Some("AES256"), Some(""), "InvalidRequest"),
+            (Some("AES256"), Some("alias/mine"), "InvalidRequest"),
+            (Some("AES256"), Some("0b5f2a4e"), "InvalidRequest"),
+            (
+                Some("AES256"),
+                Some("arn:aws:kms:us-east-1:123456789012:alias/mine"),
+                "InvalidRequest",
+            ),
+            (
+                Some("AES256"),
+                Some("arn:aws:kms:us-east-1:210987654321:key/0b5f2a4e"),
+                "AccessDenied",
+            ),
+        ] {
+            assert_eq!(
+                code(check_update_object_encryption(source, key, owner)),
+                expected,
+                "{source:?} {key:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
