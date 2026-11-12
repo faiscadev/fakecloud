@@ -455,6 +455,8 @@ impl ConditionContext {
                     Some(self.aws_called_via.clone())
                 }
             }
+            "aws:calledviafirst" => self.aws_called_via.first().map(|s| vec![s.clone()]),
+            "aws:calledvialast" => self.aws_called_via.last().map(|s| vec![s.clone()]),
             "aws:sourcevpce" => self.aws_source_vpce.as_deref().and_then(one),
             "aws:sourcevpc" => self.aws_source_vpc.as_deref().and_then(one),
             "aws:vpcsourceip" => self.aws_vpc_source_ip.map(|ip| vec![ip.to_string()]),

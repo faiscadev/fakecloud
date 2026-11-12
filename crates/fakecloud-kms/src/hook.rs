@@ -69,7 +69,13 @@ pub struct KmsServiceHook {
     state: SharedKmsState,
     usage: SharedKmsUsageState,
     caller_facts: Option<CallerResolver>,
+    org_of: Option<OrgResolver>,
 }
+
+/// The organization id and path (`o-xxx/r-xxx/ou-xxx/.../`) of an account,
+/// `None` when it belongs to none: a key's account's for
+/// `aws:ResourceOrgID` / `aws:ResourceOrgPaths`.
+pub type OrgResolver = Arc<dyn Fn(&str) -> Option<(String, String)> + Send + Sync>;
 
 /// The ARN (path included) of the IAM role `role_name` in `account_id`, as
 /// IAM holds it: an assumed-role session ARN names its role without the
@@ -178,7 +184,20 @@ impl KmsServiceHook {
             state,
             usage,
             caller_facts: None,
+            org_of: None,
         }
+    }
+
+    /// Resolve accounts to their organizations, for the global keys a key's
+    /// policy and the caller's SCPs see.
+    pub fn with_org_resolver(mut self, resolver: OrgResolver) -> Self {
+        self.org_of = Some(resolver);
+        self
+    }
+
+    /// The organization of `account`, when an org resolver is wired.
+    fn org_of(&self, account: &str) -> Option<(String, String)> {
+        self.org_of.as_ref().and_then(|resolve| resolve(account))
     }
 
     /// Resolve calling identities to what IAM and Organizations know about
@@ -280,6 +299,7 @@ impl KmsServiceHook {
                 &facts,
                 &format!("kms:{operation}"),
                 &encryption_context,
+                &|account| self.org_of(account),
             )?;
             require_enabled(key)?;
             require_symmetric_encryption_key(key, operation)?;
@@ -362,6 +382,7 @@ impl KmsServiceHook {
                 &facts,
                 "kms:Decrypt",
                 &encryption_context,
+                &|account| self.org_of(account),
             )?;
             // A disabled / pending-deletion key can't decrypt: real KMS
             // rejects the operation, and SSE-KMS consumers (SQS/SNS/...) must
@@ -424,6 +445,7 @@ impl KmsServiceHook {
                 &facts,
                 action,
                 encryption_context,
+                &|account| self.org_of(account),
             )?;
         }
         require_enabled(key)?;
@@ -661,6 +683,7 @@ fn authorize(
     facts: &CallerFacts,
     action: &str,
     encryption_context: &HashMap<String, String>,
+    org_of: &dyn Fn(&str) -> Option<(String, String)>,
 ) -> Result<(), KmsError> {
     let role_arn = facts.role_arn.as_deref();
     let caller_arn = match caller {
@@ -740,7 +763,13 @@ fn authorize(
                 principal: &principal,
                 action: action.to_string(),
                 resource: key.arn.clone(),
-                context: crate::aws_managed::request_context(&caller, &context, &[]),
+                context: crate::aws_managed::request_context(
+                    &caller,
+                    &key.arn,
+                    &context,
+                    &[],
+                    org_of,
+                ),
             };
             fakecloud_iam::evaluator::evaluate_ceiling(None, None, Some(&docs), &request)
         });
@@ -782,8 +811,15 @@ fn authorize(
         Some(scp) if !scp_explicit_deny => scp_refusal(scp).map_or(Ok(()), Err),
         _ => Ok(()),
     };
-    let decision =
-        crate::aws_managed::policy_decision(&key.policy, &key.arn, &caller, action, &context, &[]);
+    let decision = crate::aws_managed::policy_decision_with_orgs(
+        &key.policy,
+        &key.arn,
+        &caller,
+        action,
+        &context,
+        &[],
+        org_of,
+    );
     let explicit_deny = decision == fakecloud_iam::evaluator::Decision::ExplicitDeny;
     // A customer key of the caller's own account is left to IAM (see above),
     // except that an explicit Deny in its key policy always wins.

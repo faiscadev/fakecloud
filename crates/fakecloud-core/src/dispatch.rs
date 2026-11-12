@@ -794,9 +794,6 @@ async fn dispatch_inner(
     // resource's policy (`authorize_root`). Services that haven't opted in via
     // `iam_enforceable()` are transparently skipped — the startup log
     // lists which services are under enforcement so users always know.
-    if let Err(err) = service.validate_before_authorization(&aws_request) {
-        return service_error_response(&err, &request_id, error_envelope);
-    }
     // An operation that needs no authorization (`sts:GetCallerIdentity`)
     // evaluates no policy for a caller whose credentials resolved.
     let authorization_required = aws_request.principal.is_none()
@@ -821,6 +818,12 @@ async fn dispatch_inner(
                     return denied;
                 }
             } else if let Some(principal) = aws_request.principal.as_ref() {
+                // Validation AWS performs before authorizing, once the
+                // caller is authenticated (an unresolved key or an anonymous
+                // request is refused first, in the branches below).
+                if let Err(err) = service.validate_before_authorization(&aws_request) {
+                    return service_error_response(&err, &request_id, error_envelope);
+                }
                 if principal.is_root() {
                     if let Some(denied) = authorize_root(
                         principal,
@@ -1996,30 +1999,50 @@ fn principal_condition_context(
     ctx
 }
 
-/// Populate `aws:ResourceAccount` (the account owning the target resource)
-/// and, when the principal's account is in an organization,
-/// `aws:PrincipalOrgID` / `aws:PrincipalOrgPaths`. A value the service
-/// already supplied wins.
+/// [`global_request_keys`] for a request dispatch received directly from
+/// `principal`.
 fn add_global_request_keys(
     ctx: &mut ConditionContext,
     principal: &Principal,
     resource_account_id: &str,
     scp_resolver: Option<&dyn crate::auth::ScpResolver>,
 ) {
+    global_request_keys(ctx, &principal.account_id, resource_account_id, |account| {
+        scp_resolver.and_then(|r| r.principal_org(account))
+    });
+}
+
+/// Populate the global keys AWS sets on every request from who makes it and
+/// what it is made on: `aws:ResourceAccount` (the account owning the target
+/// resource), `aws:PrincipalOrgID` / `aws:PrincipalOrgPaths` when the
+/// principal's account (`principal_account`) is in an organization,
+/// `aws:ResourceOrgID` / `aws:ResourceOrgPaths` when the resource's account
+/// is, and `aws:ViaAWSService` (`false` unless a service set it for a call it
+/// forwards). `org_of` gives an account's organization id and path. A value
+/// already present wins.
+pub fn global_request_keys(
+    ctx: &mut ConditionContext,
+    principal_account: &str,
+    resource_account_id: &str,
+    org_of: impl Fn(&str) -> Option<(String, String)>,
+) {
+    let mut set = |key: &str, value: String| {
+        ctx.service_keys
+            .entry(key.to_string())
+            .or_insert_with(|| vec![value]);
+    };
     if !resource_account_id.is_empty() {
-        ctx.service_keys
-            .entry("aws:resourceaccount".to_string())
-            .or_insert_with(|| vec![resource_account_id.to_string()]);
+        set("aws:resourceaccount", resource_account_id.to_string());
+        if let Some((org_id, path)) = org_of(resource_account_id) {
+            set("aws:resourceorgid", org_id);
+            set("aws:resourceorgpaths", path);
+        }
     }
-    if let Some((org_id, path)) = scp_resolver.and_then(|r| r.principal_org(&principal.account_id))
-    {
-        ctx.service_keys
-            .entry("aws:principalorgid".to_string())
-            .or_insert_with(|| vec![org_id]);
-        ctx.service_keys
-            .entry("aws:principalorgpaths".to_string())
-            .or_insert_with(|| vec![path]);
+    if let Some((org_id, path)) = org_of(principal_account) {
+        set("aws:principalorgid", org_id);
+        set("aws:principalorgpaths", path);
     }
+    set("aws:viaawsservice", "false".to_string());
 }
 
 /// The AWS error for a request whose access key resolves to no identity:

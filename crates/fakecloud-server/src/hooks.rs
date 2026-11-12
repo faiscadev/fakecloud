@@ -39,6 +39,10 @@ impl KmsHookAdapter {
         iam_mode: fakecloud_core::auth::IamMode,
     ) -> Self {
         let org = self.org_resolver.clone();
+        let orgs = self.org_resolver.clone();
+        self.inner = self.inner.with_org_resolver(Arc::new(move |account: &str| {
+            orgs.get().and_then(|r| r.principal_org(account))
+        }));
         self.inner = self.inner.with_caller_resolver(Arc::new(move |arn: &str| {
             let tags = |tags: &[fakecloud_iam::Tag]| -> std::collections::HashMap<String, String> {
                 tags.iter()

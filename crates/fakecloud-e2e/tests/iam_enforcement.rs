@@ -185,6 +185,30 @@ async fn same_account_trust_policy_naming_the_account_needs_identity_permission(
 }
 
 #[tokio::test]
+async fn assume_root_authenticates_before_validating_the_task_policy() {
+    // An unknown access key is refused as such before the request is
+    // validated, as AWS authenticates first.
+    let server = start_strict().await;
+    let cfg = sdk_config_with(&server, "AKIAUNKNOWNKEY000000", "secret").await;
+    let err = StsClient::new(&cfg)
+        .assume_root()
+        .target_principal("123456789012")
+        .task_policy_arn(
+            aws_sdk_sts::types::PolicyDescriptorType::builder()
+                .arn("arn:aws:iam::aws:policy/NotATaskPolicy")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(
+        aws_sdk_sts::error::ProvideErrorMetadata::code(&err),
+        Some("InvalidClientTokenId")
+    );
+}
+
+#[tokio::test]
 async fn assume_root_validates_the_task_policy_before_authorizing() {
     // Recorded: an invalid TaskPolicyArn is a ValidationError even for a
     // caller with no sts:AssumeRoot permission; a valid one is then

@@ -247,6 +247,28 @@ pub(crate) fn policy_decision(
     encryption_context: &BTreeMap<String, String>,
     extra: &[(&str, &str)],
 ) -> Decision {
+    policy_decision_with_orgs(
+        policy,
+        key_arn,
+        caller,
+        action,
+        encryption_context,
+        extra,
+        &|_| None,
+    )
+}
+
+/// [`policy_decision`] with the organizations of accounts known (`org_of`),
+/// for `aws:PrincipalOrgID` / `aws:ResourceOrgID` (see [`request_context`]).
+pub(crate) fn policy_decision_with_orgs(
+    policy: &str,
+    key_arn: &str,
+    caller: &KeyCaller<'_>,
+    action: &str,
+    encryption_context: &BTreeMap<String, String>,
+    extra: &[(&str, &str)],
+    org_of: &dyn Fn(&str) -> Option<(String, String)>,
+) -> Decision {
     // Forms that can only deny: when an assumed-role caller's role path is
     // unknown (the role is not in fakecloud's IAM, or was deleted), a Deny
     // naming that role under any path applies, failing closed, while an
@@ -278,7 +300,7 @@ pub(crate) fn policy_decision(
                 .collect();
         }
     }
-    let context = request_context(caller, encryption_context, extra);
+    let context = request_context(caller, key_arn, encryption_context, extra, org_of);
     let principals: Vec<Principal> = match caller {
         KeyCaller::Direct { principal, .. } => vec![(*principal).clone()],
         KeyCaller::ViaService {
@@ -368,7 +390,59 @@ pub(crate) fn policy_decision(
 /// `aws:userid`, `aws:PrincipalTag/*`, `aws:PrincipalOrgID`, ...): guard
 /// statements such as `Deny ... ArnNotLike aws:PrincipalArn` would otherwise
 /// match every caller, a negated operator on a missing key being true.
+///
+/// It also carries the global keys of the request itself, as dispatch sets
+/// them for a direct call (`fakecloud_core::dispatch::global_request_keys`):
+/// `aws:RequestedRegion` (the key's region), `aws:ResourceAccount` and
+/// `aws:ResourceOrgID` / `aws:ResourceOrgPaths` (the key's account and its
+/// organization, from `org_of`), and `aws:ViaAWSService`, `true` for a call
+/// a service forwards with the caller's credentials, whose `aws:CalledVia`
+/// (and `aws:CalledViaFirst` / `aws:CalledViaLast`) is that service's
+/// principal.
 pub(crate) fn request_context(
+    caller: &KeyCaller<'_>,
+    key_arn: &str,
+    encryption_context: &BTreeMap<String, String>,
+    extra: &[(&str, &str)],
+    org_of: &dyn Fn(&str) -> Option<(String, String)>,
+) -> RequestContext {
+    let mut context = caller_context(caller, encryption_context, extra);
+    let key_account = fakecloud_aws::arn::account_of(key_arn).unwrap_or_default();
+    let key_region = fakecloud_aws::arn::region_of(key_arn).map(str::to_string);
+    let principal_account = match caller {
+        KeyCaller::Direct { principal, account } => {
+            caller_account(&principal.arn, account).to_string()
+        }
+        KeyCaller::ViaService {
+            account,
+            caller_arn,
+            ..
+        } => caller_arn
+            .map_or(*account, |arn| caller_account(arn, account))
+            .to_string(),
+        KeyCaller::Service { .. } => String::new(),
+    };
+    if let KeyCaller::ViaService {
+        service_principal, ..
+    } = caller
+    {
+        context
+            .service_keys
+            .insert("aws:viaawsservice".to_string(), vec!["true".to_string()]);
+        context.aws_called_via = vec![service_principal.to_string()];
+    }
+    context.aws_requested_region = context.aws_requested_region.take().or(key_region);
+    fakecloud_core::dispatch::global_request_keys(
+        &mut context,
+        &principal_account,
+        key_account,
+        org_of,
+    );
+    context
+}
+
+/// [`request_context`]'s keys that come from the caller alone.
+fn caller_context(
     caller: &KeyCaller<'_>,
     encryption_context: &BTreeMap<String, String>,
     extra: &[(&str, &str)],
@@ -551,6 +625,57 @@ mod tests {
     use super::*;
 
     const ACCOUNT: &str = "123456789012";
+
+    /// A call a service forwards carries the global keys of a forwarded
+    /// request; a direct call says it was not forwarded.
+    #[test]
+    fn request_context_carries_the_global_keys_of_the_call() {
+        let key_arn = "arn:aws:kms:eu-west-1:222222222222:key/k";
+        let org_of = |account: &str| {
+            (account == "222222222222" || account == ACCOUNT)
+                .then(|| ("o-abc".to_string(), "o-abc/r-1/".to_string()))
+        };
+        let via = KeyCaller::ViaService {
+            service_principal: "s3.amazonaws.com",
+            region: "eu-west-1",
+            account: ACCOUNT,
+            caller_arn: Some("arn:aws:iam::123456789012:user/alice"),
+            facts: None,
+        };
+        let ctx = request_context(&via, key_arn, &BTreeMap::new(), &[], &org_of);
+        let one = |k: &str| ctx.lookup(k).map(|v| v.join(","));
+        assert_eq!(one("aws:ViaAWSService").as_deref(), Some("true"));
+        assert_eq!(one("aws:CalledVia").as_deref(), Some("s3.amazonaws.com"));
+        assert_eq!(
+            one("aws:CalledViaFirst").as_deref(),
+            Some("s3.amazonaws.com")
+        );
+        assert_eq!(
+            one("aws:CalledViaLast").as_deref(),
+            Some("s3.amazonaws.com")
+        );
+        assert_eq!(one("aws:RequestedRegion").as_deref(), Some("eu-west-1"));
+        assert_eq!(one("aws:ResourceAccount").as_deref(), Some("222222222222"));
+        assert_eq!(one("aws:ResourceOrgID").as_deref(), Some("o-abc"));
+        assert_eq!(one("aws:PrincipalOrgID").as_deref(), Some("o-abc"));
+        assert_eq!(
+            one("kms:ViaService").as_deref(),
+            Some("s3.eu-west-1.amazonaws.com")
+        );
+
+        let principal = account_root(ACCOUNT, "eu-west-1");
+        let direct = KeyCaller::Direct {
+            principal: &principal,
+            account: ACCOUNT,
+        };
+        let ctx = request_context(&direct, key_arn, &BTreeMap::new(), &[], &|_| None);
+        assert_eq!(
+            ctx.lookup("aws:ViaAWSService"),
+            Some(vec!["false".to_string()])
+        );
+        assert_eq!(ctx.lookup("aws:CalledVia"), None);
+        assert_eq!(ctx.lookup("aws:ResourceOrgID"), None);
+    }
 
     fn fixtures() -> Vec<(String, Value)> {
         let dir = format!(

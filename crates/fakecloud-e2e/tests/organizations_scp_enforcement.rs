@@ -902,18 +902,80 @@ async fn scps_cap_service_key_use_and_show_in_the_simulator() {
     };
     put(true).await.expect("SSE-KMS before any SCP");
 
+    // Region and data-perimeter guardrails see the forwarded KMS call's
+    // global keys (its region, the key's account and organization,
+    // aws:ViaAWSService), so they let SSE-KMS through.
+    let orgs = OrgsClient::new(&a_cfg);
+    let guardrails = attach_root_scp(
+        &orgs,
+        &root_id,
+        "RegionAndPerimeter",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Deny","Action":"*","Resource":"*",
+             "Condition":{"StringNotEquals":{"aws:RequestedRegion":"us-east-1"}}},
+            {"Effect":"Deny","Action":"*","Resource":"*",
+             "Condition":{"StringNotEqualsIfExists":{"aws:ResourceOrgID":"${aws:PrincipalOrgID}"}}},
+            {"Effect":"Deny","Action":"*","Resource":"*",
+             "Condition":{"StringNotEqualsIfExists":{"aws:ResourceAccount":"222222222222"},
+                          "BoolIfExists":{"aws:ViaAWSService":"false"}}}
+        ]}"#,
+    )
+    .await;
+    put(true)
+        .await
+        .expect("SSE-KMS inside the region and the perimeter");
+    detach_root_scp(&orgs, &root_id, &guardrails).await;
+
     attach_root_scp(
-        &OrgsClient::new(&a_cfg),
+        &orgs,
         &root_id,
         "DenyKmsThroughS3",
         r#"{"Version":"2012-10-17","Statement":[
             {"Effect":"Allow","Action":"*","Resource":"*"},
             {"Effect":"Deny","Action":"kms:GenerateDataKey","Resource":"*",
              "Condition":{"StringLike":{"kms:ViaService":"s3.*.amazonaws.com"}}},
+            {"Effect":"Deny","Action":"kms:CreateGrant","Resource":"*",
+             "Condition":{"StringEquals":{"aws:CalledViaLast":"dynamodb.amazonaws.com"}}},
             {"Effect":"Deny","Action":"sqs:DeleteQueue","Resource":"*"}
         ]}"#,
     )
     .await;
+    // DynamoDB creates a table's KMS grant with the caller's credentials.
+    let err = aws_sdk_dynamodb::Client::new(&b_cfg)
+        .create_table()
+        .table_name("scp-sse-table")
+        .attribute_definitions(
+            aws_sdk_dynamodb::types::AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(aws_sdk_dynamodb::types::ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            aws_sdk_dynamodb::types::KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(aws_sdk_dynamodb::types::KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+        .sse_specification(
+            aws_sdk_dynamodb::types::SseSpecification::builder()
+                .enabled(true)
+                .sse_type(aws_sdk_dynamodb::types::SseType::Kms)
+                .kms_master_key_id("alias/aws/dynamodb")
+                .build(),
+        )
+        .send()
+        .await
+        .expect_err("the SCP denies DynamoDB's kms:CreateGrant");
+    assert_eq!(err.code(), Some(JSON_DENIED), "{err:?}");
+    assert!(
+        err.message()
+            .unwrap_or_default()
+            .contains("with an explicit deny in a service control policy"),
+        "{err:?}"
+    );
     assert_scp_denied(
         put(true).await,
         S3_DENIED,
