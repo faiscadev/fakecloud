@@ -1270,6 +1270,80 @@ fn alias_or_version(
     Some(primary)
 }
 
+/// What one invocation of a function at a qualifier runs, resolved once.
+#[derive(Debug)]
+pub(crate) struct ResolvedInvoke<'a> {
+    /// The alias the qualifier named, if it named one.
+    pub alias: Option<String>,
+    /// `$LATEST`, `$LATEST.PUBLISHED` or a version number: what ran
+    /// (`x-amz-executed-version`).
+    pub executed_version: String,
+    /// That version's code and configuration.
+    pub func: &'a LambdaFunction,
+}
+
+/// The one resolver every invocation path (Invoke, its `Event` type,
+/// InvokeWithResponseStream, event sources and other services' integrations)
+/// uses to decide what a qualifier runs. `qualifier` is the effective one
+/// (the caller applies [`default_invoke_qualifier`] to an unqualified call).
+///
+/// No qualifier or `$LATEST` runs the live function; `$LATEST.PUBLISHED` and
+/// a version number run that published snapshot; an alias runs its version
+/// (its routing config applied), and an alias pointing at `$LATEST` the live
+/// function. `None` for an unknown function, alias or version: a version that
+/// does not exist never runs `$LATEST` instead.
+pub(crate) fn resolve_invoke<'a>(
+    state: &'a LambdaState,
+    function_name: &str,
+    qualifier: Option<&str>,
+) -> Option<ResolvedInvoke<'a>> {
+    let live = state.functions.get(function_name)?;
+    let resolved = |alias: Option<&str>, version: &str, func: &'a LambdaFunction| {
+        Some(ResolvedInvoke {
+            alias: alias.map(str::to_string),
+            executed_version: version.to_string(),
+            func,
+        })
+    };
+    let q = match qualifier {
+        None | Some("$LATEST") => return resolved(None, "$LATEST", live),
+        Some(q) => q,
+    };
+    if q == crate::state::LATEST_PUBLISHED || q.chars().all(|c| c.is_ascii_digit()) {
+        return resolved(None, q, state.version_snapshot(function_name, q)?);
+    }
+    state.aliases.get(&format!("{function_name}:{q}"))?;
+    let version = alias_or_version(state, function_name, Some(q))?;
+    if version == "$LATEST" {
+        return resolved(Some(q), "$LATEST", live);
+    }
+    resolved(
+        Some(q),
+        &version,
+        state.version_snapshot(function_name, &version)?,
+    )
+}
+
+/// The `ResourceNotFoundException` an invocation of a function that does not
+/// exist at `qualifier` answers: the ARN carries the qualifier the call named
+/// (`$LATEST` included), as Lambda's does.
+pub(crate) fn invoke_not_found(
+    region: &str,
+    account_id: &str,
+    function_name: &str,
+    qualifier: Option<&str>,
+) -> AwsServiceError {
+    let arn = match qualifier.filter(|q| !q.is_empty()) {
+        Some(q) => qualified_function_arn(region, account_id, function_name, q),
+        None => function_arn(region, account_id, function_name),
+    };
+    AwsServiceError::aws_error(
+        StatusCode::NOT_FOUND,
+        "ResourceNotFoundException",
+        format!("Function not found: {arn}"),
+    )
+}
+
 pub struct LambdaService {
     pub(crate) state: SharedLambdaState,
     pub(crate) runtime: Option<Arc<ContainerRuntime>>,
@@ -1312,7 +1386,7 @@ pub struct LambdaService {
 pub(crate) mod async_invoke;
 mod functions;
 mod init;
-mod invoke;
+pub(crate) mod invoke;
 mod publish;
 pub use publish::{check_latest_published, publish_latest_published};
 
@@ -1854,6 +1928,15 @@ impl AwsService for LambdaService {
                             qualifier,
                             log_tail,
                             &req.request_id,
+                            &invoke::invocation_context(
+                                &req,
+                                &crate::state::function_arn(
+                                    req.region.as_str(),
+                                    &invoke_account,
+                                    name,
+                                ),
+                                qualifier,
+                            ),
                         )
                         .await
                     }

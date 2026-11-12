@@ -10,7 +10,7 @@ impl LambdaService {
     /// streaming handlers, custom runtimes that flush mid-handler).
     ///
     /// On success: zero or more `PayloadChunk` events (one per chunk
-    /// the RIE flushed) followed by an `InvokeComplete` event with
+    /// the runtime sent) followed by an `InvokeComplete` event with
     /// `ErrorCode = null`. On a function error (uncaught exception in
     /// the handler) or an infrastructure error (timeout, container
     /// crash): an `InvokeComplete` with non-null `ErrorCode`/
@@ -26,60 +26,36 @@ impl LambdaService {
         // — qualifier, version snapshots, attached layers, code-zip
         // presence — but without the InvocationType branch (streaming
         // is always synchronous).
-        let default_qualifier = {
-            let accounts = self.state.read();
-            accounts
-                .regional(account_id, &req.region)
-                .and_then(|s| crate::service::default_invoke_qualifier(s, function_name))
-        };
-        let qualifier = req
-            .query_params
-            .get("Qualifier")
-            .map(String::as_str)
-            .or(default_qualifier);
-
-        let resolved_version: Option<String> = {
+        // `?Qualifier=` wins; otherwise a qualifier embedded in the function
+        // reference in the path (`name:alias`, a qualified ARN), as on Invoke.
+        let requested_qualifier: Option<String> =
+            req.query_params.get("Qualifier").cloned().or_else(|| {
+                req.path_segments
+                    .get(2)
+                    .and_then(|raw| crate::service::qualifier_from_function_ref(raw))
+            });
+        let (func, layer_zips, executed_version) = {
             let accounts = self.state.read();
             let empty = LambdaState::new(account_id, &req.region);
             let state = accounts.regional(account_id, &req.region).unwrap_or(&empty);
-            crate::service::resolve_qualifier_to_version(state, function_name, qualifier)
-        };
-        let executed_version = resolved_version
-            .clone()
-            .unwrap_or_else(|| "$LATEST".to_string());
-
-        let (func, layer_zips) = {
-            let accounts = self.state.read();
-            let empty = LambdaState::new(account_id, &req.region);
-            let state = accounts.regional(account_id, &req.region).unwrap_or(&empty);
-            let func = match resolved_version.as_deref() {
-                Some(v) => state
-                    .version_snapshot(function_name, v)
-                    .cloned()
-                    // A numeric version without a snapshot is legacy state
-                    // and runs `$LATEST`, as Invoke does; an alias that does
-                    // not exist is not found.
-                    .or_else(|| {
-                        v.chars()
-                            .all(|c| c.is_ascii_digit())
-                            .then(|| state.functions.get(function_name).cloned())
-                            .flatten()
-                    }),
-                None => state.functions.get(function_name).cloned(),
-            }
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFoundException",
-                    format!(
-                        "Function not found: {}{}",
-                        function_arn(&req.region, &state.account_id, function_name),
-                        qualifier.map(|q| format!(":{q}")).unwrap_or_default()
-                    ),
-                )
-            })?;
+            let qualifier = requested_qualifier
+                .as_deref()
+                .or_else(|| crate::service::default_invoke_qualifier(state, function_name));
+            // Resolved exactly as Invoke resolves it: an unknown alias or
+            // version is not found (it never runs `$LATEST` instead), and an
+            // alias at `$LATEST` runs the live function.
+            let resolved = crate::service::resolve_invoke(state, function_name, qualifier)
+                .ok_or_else(|| {
+                    crate::service::invoke_not_found(
+                        &req.region,
+                        account_id,
+                        function_name,
+                        qualifier,
+                    )
+                })?;
+            let func = resolved.func.clone();
             let zips = crate::state::attached_layer_zips(&accounts, &func);
-            (func, zips)
+            (func, zips, resolved.executed_version)
         };
 
         if func.code_zip.is_none() && func.package_type != "Image" {
@@ -101,77 +77,43 @@ impl LambdaService {
             )
         })?;
 
-        // Drive the streaming RIE call and assemble the eventstream
-        // body. We buffer all frames before returning — `AwsResponse`
-        // is byte-buffered today — but the chunk boundaries the RIE
-        // flushed are preserved as separate `PayloadChunk` events, so
-        // SDK parsers see exactly the streaming structure they expect.
+        // Relay the runtime's response as it arrives and assemble the
+        // eventstream body. We buffer all frames before returning
+        // (`AwsResponse` is byte-buffered today), but each piece the runtime
+        // sent (one per `responseStream.write`) stays its own
+        // `PayloadChunk` event, so SDK parsers see exactly the streaming
+        // structure they expect.
         let mut frames: Vec<u8> = Vec::new();
+        let ctx = crate::runtime::InvocationContext {
+            request_id: Some(req.request_id.clone()),
+            invoked_function_arn: Some(crate::service::invoke::invoked_function_arn(
+                &func.function_arn,
+                requested_qualifier.as_deref(),
+            )),
+            trace_id: crate::service::invoke::trace_header(req),
+            client_context: crate::service::invoke::client_context(req),
+            cognito_identity: None,
+        };
         let invoke_result = runtime
-            .invoke_streaming(&func, &req.body, &layer_zips)
+            .invoke_streaming(&func, &req.body, &layer_zips, &ctx, &mut |chunk| {
+                frames.extend_from_slice(&crate::eventstream::payload_chunk_frame(&chunk));
+            })
             .await;
 
         let (error_code, error_details) = match invoke_result {
-            Ok(mut stream) => {
-                let status = stream.status();
-                let mut last_chunk: Option<bytes::Bytes> = None;
-                let mut had_chunks = false;
-                loop {
-                    match stream.next_chunk().await {
-                        Ok(Some(chunk)) => {
-                            had_chunks = true;
-                            frames.extend_from_slice(&crate::eventstream::payload_chunk_frame(
-                                &chunk,
-                            ));
-                            last_chunk = Some(chunk);
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            // Stream-invoke contract: errors are encoded
-                            // in-stream as a terminal InvokeComplete frame
-                            // with HTTP 200. Returning HTTP 500 here breaks
-                            // SDK parsers expecting that envelope.
-                            tracing::error!(function = %function_name, error = %e, "Lambda streaming chunk read failed");
-                            let detail = format!("Lambda streaming read failed: {e}");
-                            frames.extend_from_slice(&crate::eventstream::invoke_complete_frame(
-                                Some("Runtime.StreamReadFailure"),
-                                Some(&detail),
-                                "",
-                            ));
-                            return Ok(AwsResponse {
-                                status: StatusCode::OK,
-                                headers: http::HeaderMap::new(),
-                                body: bytes::Bytes::from(frames).into(),
-                                content_type: "application/vnd.amazon.eventstream".to_string(),
-                            });
-                        }
-                    }
-                }
-
-                // A function error ends the stream with the runtime's error
-                // object as the final chunk (or the whole body, for a
-                // runtime that exited / timed out). The runtime layer's
-                // classification decides, and its error object names the
-                // terminal `InvokeComplete` event's code and details.
-                let mut error: Option<(String, String)> = None;
-                let tail = last_chunk.unwrap_or_default();
-                if had_chunks || status != 200 {
-                    let output = crate::runtime::classify_invocation_response(status, &tail);
-                    if output.is_function_error() {
-                        error = Some((
-                            output
-                                .error_type()
-                                .unwrap_or_else(|| "Runtime.Unknown".to_string()),
-                            output
-                                .error_message()
-                                .unwrap_or_else(|| "function error".to_string()),
-                        ));
-                    }
-                }
-                match error {
-                    Some((code, details)) => (Some(code), Some(details)),
-                    None => (None, None),
-                }
+            Ok(crate::runtime::RunOutcome::Success) => (None, None),
+            // A function error ends the stream with an `InvokeComplete`
+            // naming the error object's type and message.
+            Ok(crate::runtime::RunOutcome::Error(payload)) => {
+                let output = fakecloud_core::delivery::LambdaInvocationOutput::unhandled(payload);
+                (
+                    Some(
+                        output
+                            .error_type()
+                            .unwrap_or_else(|| "Unhandled".to_string()),
+                    ),
+                    Some(output.error_message().unwrap_or_default()),
+                )
             }
             Err(e) => {
                 tracing::error!(function = %function_name, error = %e, "Lambda streaming invocation failed");

@@ -412,6 +412,47 @@ async fn test_invoke_nonexistent_function() {
     assert!(resp.is_err());
 }
 
+/// A version that was never published is not found on a synchronous and an
+/// `Event` invoke alike, whether named in the path or by `Qualifier`: it
+/// never runs `$LATEST` instead.
+#[tokio::test]
+async fn invoke_of_an_unknown_version_is_not_found() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "vfn").await;
+    let req = make_request(Method::POST, "/2015-03-31/functions/vfn/versions", "{}");
+    svc.handle(req).await.unwrap();
+
+    for invocation_type in ["RequestResponse", "Event"] {
+        for by_query in [false, true] {
+            let path = if by_query {
+                "/2015-03-31/functions/vfn/invocations"
+            } else {
+                "/2015-03-31/functions/vfn:99/invocations"
+            };
+            let mut req = make_request(Method::POST, path, "{}");
+            if by_query {
+                req.query_params
+                    .insert("Qualifier".to_string(), "99".to_string());
+            }
+            req.headers.insert(
+                "x-amz-invocation-type",
+                http::HeaderValue::from_static(invocation_type),
+            );
+            let err = match svc.handle(req).await {
+                Err(e) => e,
+                Ok(r) => panic!("{invocation_type}: expected 404, got {}", r.status),
+            };
+            assert_eq!(err.status(), 404, "{invocation_type}");
+            assert_eq!(err.code(), "ResourceNotFoundException", "{invocation_type}");
+            assert_eq!(
+                err.message(),
+                "Function not found: arn:aws:lambda:us-east-1:123456789012:function:vfn:99",
+                "{invocation_type}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_list_functions() {
     let state = make_state();
@@ -3560,6 +3601,7 @@ impl crate::runtime::LambdaBackend for PrepullSpy {
         _layers: &[Vec<u8>],
         _deploy_id: &str,
         _credentials: Option<&fakecloud_core::auth::SessionCredentials>,
+        _runtime_api: &crate::runtime::RuntimeApiAddress,
     ) -> Result<crate::runtime::WarmInstance, crate::runtime::RuntimeError> {
         unreachable!("prepull regression test never invokes launch")
     }
@@ -3703,6 +3745,7 @@ async fn invoke_unknown_alias_returns_not_found() {
             Some("no-such-alias"),
             false,
             "req-1",
+            &crate::runtime::InvocationContext::default(),
         )
         .await;
     match result {
@@ -6519,5 +6562,148 @@ async fn update_event_source_mapping_refuses_a_function_of_another_region() {
     assert_eq!(
         err.message(),
         "Functions from 'us-west-2' are not reachable in this region ('us-east-1')"
+    );
+}
+
+/// An invocation request: `Invoke` (`invocation_type` as given) or, with
+/// `None`, `InvokeWithResponseStream`, of `function_ref` at `qualifier`.
+fn invoke_request(
+    function_ref: &str,
+    qualifier: Option<&str>,
+    invocation_type: Option<&str>,
+) -> AwsRequest {
+    let path = match invocation_type {
+        Some(_) => format!("/2015-03-31/functions/{function_ref}/invocations"),
+        None => format!("/2021-11-15/functions/{function_ref}/response-streaming-invocations"),
+    };
+    let mut req = make_request(Method::POST, &path, "{}");
+    if let Some(q) = qualifier {
+        req.query_params.insert("Qualifier".into(), q.into());
+    }
+    if let Some(t) = invocation_type {
+        req.headers
+            .insert("x-amz-invocation-type", t.parse().unwrap());
+    }
+    req
+}
+
+#[tokio::test]
+async fn every_invocation_path_runs_an_alias_at_latest() {
+    // An alias pointing at `$LATEST` runs the live function on Invoke and on
+    // InvokeWithResponseStream, named by `?Qualifier=` or in the path. The
+    // seeded function has no deployment package, so a request that resolved
+    // is refused for that, never as not found.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "lfn").await;
+    svc.handle(make_request(
+        Method::POST,
+        "/2015-03-31/functions/lfn/aliases",
+        &json!({"Name": "live", "FunctionVersion": "$LATEST"}).to_string(),
+    ))
+    .await
+    .expect("create alias");
+    for invocation_type in [None, Some("RequestResponse"), Some("Event")] {
+        for req in [
+            invoke_request("lfn", Some("live"), invocation_type),
+            invoke_request("lfn:live", None, invocation_type),
+        ] {
+            let err = svc.handle(req).await.err().expect("no deployment package");
+            assert_eq!(
+                err.code(),
+                "InvalidParameterValueException",
+                "{invocation_type:?}: {}",
+                err.message()
+            );
+        }
+    }
+    // A version that was never published is not found on every path.
+    for invocation_type in [None, Some("RequestResponse"), Some("Event")] {
+        for req in [
+            invoke_request("lfn", Some("99"), invocation_type),
+            invoke_request("lfn:99", None, invocation_type),
+        ] {
+            let err = svc.handle(req).await.err().expect("version 99 not found");
+            assert_eq!(err.code(), "ResourceNotFoundException");
+            assert_eq!(
+                err.message(),
+                "Function not found: arn:aws:lambda:us-east-1:123456789012:function:lfn:99",
+                "{invocation_type:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn invoking_a_missing_function_at_latest_names_the_qualifier() {
+    // Recorded against Lambda (`tests/fixtures/durable/aws-round3.jsonl`):
+    // `fn:$LATEST` of a function that does not exist answers
+    // `Function not found: <arn>:$LATEST`; an unqualified call names the
+    // bare ARN.
+    let svc = LambdaService::new(make_state());
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:ghost";
+    for invocation_type in [None, Some("RequestResponse"), Some("Event")] {
+        for req in [
+            invoke_request("ghost", Some("$LATEST"), invocation_type),
+            invoke_request("ghost:$LATEST", None, invocation_type),
+        ] {
+            let err = svc.handle(req).await.err().expect("not found");
+            assert_eq!(err.code(), "ResourceNotFoundException");
+            assert_eq!(
+                err.message(),
+                format!("Function not found: {arn}:$LATEST"),
+                "{invocation_type:?}"
+            );
+        }
+        let err = svc
+            .handle(invoke_request("ghost", None, invocation_type))
+            .await
+            .err()
+            .expect("not found");
+        assert_eq!(err.message(), format!("Function not found: {arn}"));
+    }
+}
+
+#[test]
+fn integrations_resolve_an_alias_at_latest_to_the_live_function() {
+    // SNS, S3, EventBridge, event source mappings, Step Functions and Config
+    // rules resolve their function reference through `resolve_invocable`.
+    let mut accounts: fakecloud_core::multi_account::MultiRegionState<LambdaState> =
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", "");
+    let state = accounts.regional_mut("123456789012", "us-east-1");
+    let mut live = LambdaFunction {
+        function_name: "f".into(),
+        function_arn: "arn:aws:lambda:us-east-1:123456789012:function:f".into(),
+        ..LambdaFunction::default()
+    };
+    live.description = "live".into();
+    state.functions.insert("f".into(), live);
+    state.aliases.insert(
+        "f:head".into(),
+        crate::state::FunctionAlias {
+            alias_arn: "arn:aws:lambda:us-east-1:123456789012:function:f:head".into(),
+            name: "head".into(),
+            function_version: "$LATEST".into(),
+            description: String::new(),
+            revision_id: String::new(),
+            routing_config: None,
+            policy: None,
+        },
+    );
+    let target = crate::state::resolve_invocable_target(
+        &accounts,
+        "arn:aws:lambda:us-east-1:123456789012:function:f:head",
+        "123456789012",
+        "us-east-1",
+    )
+    .expect("an alias at $LATEST is invocable");
+    assert_eq!(target.alias.as_deref(), Some("head"));
+    assert_eq!(target.executed_version, "$LATEST");
+    assert_eq!(target.func.description, "live");
+    let (func, _) =
+        crate::state::resolve_invocable(&accounts, "f:head", "123456789012", "us-east-1")
+            .expect("resolve_invocable");
+    assert_eq!(func.description, "live");
+    assert!(
+        crate::state::resolve_invocable(&accounts, "f:gone", "123456789012", "us-east-1").is_none()
     );
 }

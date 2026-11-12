@@ -261,3 +261,116 @@ async fn terminate_pod_handle_is_idempotent() {
     backend.terminate(&handle).await;
     backend.terminate(&handle).await;
 }
+
+/// A function invoked through the k8s backend runs on a Pod whose runtime
+/// reaches the Runtime API at its own host name (mapped to the fakecloud
+/// listener with `hostAliases`): a returned error-shaped object is a
+/// success, a raised error is `Unhandled` with the runtime's error object.
+/// The listener here is this test's own, on the kind network's gateway, the
+/// way an in-cluster fakecloud's Service would be.
+#[tokio::test]
+async fn invoke_runs_through_the_runtime_api_on_a_pod() {
+    use std::io::Write;
+    require_test_env();
+    let c = client().await;
+    ensure_namespace(&c).await;
+
+    let gateway = std::process::Command::new("docker")
+        .args([
+            "network",
+            "inspect",
+            "kind",
+            "--format",
+            "{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}",
+        ])
+        .output()
+        .expect("docker network inspect kind");
+    let gateway = String::from_utf8_lossy(&gateway.stdout)
+        .split_whitespace()
+        .find(|g| g.parse::<std::net::Ipv4Addr>().is_ok())
+        .expect("the kind network has an IPv4 gateway")
+        .to_string();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::env::set_var("FAKECLOUD_K8S_SELF_URL", format!("http://{gateway}:{port}"));
+    std::env::set_var("FAKECLOUD_K8S_NAMESPACE", TEST_NS);
+
+    let code = {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        w.start_file("index.py", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        w.write_all(
+            b"def handler(event, context):\n    if event.get('raise'):\n        raise ValueError('pod boom')\n    return {'errorType': 'X', 'errorMessage': 'returned'}\n",
+        )
+        .unwrap();
+        w.finish().unwrap().into_inner()
+    };
+    let rt = std::sync::Arc::new(
+        fakecloud_lambda::runtime::LambdaRuntime::new_k8s(port, "tok".to_string())
+            .await
+            .expect("k8s runtime"),
+    );
+    let api = rt.runtime_api();
+    let served_code = code.clone();
+    let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+        let api = api.clone();
+        let code = served_code.clone();
+        async move {
+            if fakecloud_lambda::runtime::RuntimeApi::is_runtime_request(req.headers()) {
+                return api.serve(req).await;
+            }
+            // The init container's code and layer downloads.
+            let path = req.uri().path().to_string();
+            let body = if path.contains("/_internal/code/") {
+                code
+            } else {
+                Vec::new()
+            };
+            axum::response::Response::new(axum::body::Body::from(body))
+        }
+    });
+    tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let func: fakecloud_lambda::LambdaFunction = serde_json::from_value(serde_json::json!({
+        "function_name": "k8s-rtapi",
+        "function_arn": "arn:aws:lambda:us-east-1:000000000000:function:k8s-rtapi",
+        "runtime": "python3.12",
+        "role": "",
+        "handler": "index.handler",
+        "description": "",
+        "timeout": 30,
+        "memory_size": 128,
+        "code_sha256": "k8s-rtapi",
+        "code_size": code.len(),
+        "version": "$LATEST",
+        "last_modified": "2020-01-01T00:00:00Z",
+        "tags": {},
+        "environment": {},
+        "architectures": ["x86_64"],
+        "package_type": "Zip",
+        "code_zip": code,
+        "policy": null
+    }))
+    .unwrap();
+
+    let out = rt.invoke(&func, b"{}", &[]).await.expect("invoke on a Pod");
+    rt.stop_all().await;
+    assert_eq!(
+        out.function_error,
+        None,
+        "{}",
+        String::from_utf8_lossy(&out.payload)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&out.payload).unwrap(),
+        serde_json::json!({"errorType": "X", "errorMessage": "returned"})
+    );
+    let out = rt
+        .invoke(&func, br#"{"raise": true}"#, &[])
+        .await
+        .expect("invoke on a Pod");
+    rt.stop_all().await;
+    assert_eq!(out.function_error.as_deref(), Some("Unhandled"));
+    assert_eq!(out.error_type().as_deref(), Some("ValueError"));
+    assert_eq!(out.error_message().as_deref(), Some("pod boom"));
+}

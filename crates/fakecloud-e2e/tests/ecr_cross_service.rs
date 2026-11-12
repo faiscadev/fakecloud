@@ -445,3 +445,130 @@ async fn lambda_image_package_requires_image_uri() {
         "unexpected error: {msg}"
     );
 }
+
+/// A container-image function's own external extensions (baked into the
+/// image at `/opt/extensions`) start beside its runtime, as Lambda starts
+/// them: the extension registers, gets an `INVOKE` per invocation, and the
+/// next event waits until it is done with the previous one.
+#[tokio::test]
+async fn ecr_image_lambda_starts_its_own_extensions() {
+    image_with_extension_case(
+        "ecr_image_lambda_starts_its_own_extensions",
+        "lambda-ext-image",
+        None,
+    )
+    .await;
+}
+
+/// The same with an image that runs as a non-root `USER`: the extension
+/// launcher's bookkeeping still works, so the extensions start and the
+/// invocation runs instead of hanging.
+#[tokio::test]
+async fn ecr_image_lambda_with_a_non_root_user_starts_its_extensions() {
+    image_with_extension_case(
+        "ecr_image_lambda_with_a_non_root_user_starts_its_extensions",
+        "lambda-ext-image-nonroot",
+        Some("1000:1000"),
+    )
+    .await;
+}
+
+async fn image_with_extension_case(test: &str, repo: &str, user: Option<&str>) {
+    if !require_docker_or_skip(test) {
+        return;
+    }
+    let server = TestServer::start().await;
+    let ecr = server.ecr_client().await;
+    ecr.create_repository()
+        .repository_name(repo)
+        .send()
+        .await
+        .expect("create_repository");
+
+    let extension = r#"#!/bin/sh
+API="http://${AWS_LAMBDA_RUNTIME_API}/2020-01-01/extension"
+H=$(mktemp)
+curl -sS -D "$H" -o /dev/null -X POST "$API/register" \
+  -H "Lambda-Extension-Name: image-ext" -d '{"events":["INVOKE"]}'
+ID=$(grep -Fi Lambda-Extension-Identifier "$H" | cut -d: -f2- | tr -d '[:space:]')
+while true; do
+  curl -sS "$API/event/next" -H "Lambda-Extension-Identifier: $ID" >> /tmp/ext-events
+  echo >> /tmp/ext-events
+done
+"#;
+    let bootstrap = r#"#!/bin/sh
+API="http://${AWS_LAMBDA_RUNTIME_API}/2018-06-01/runtime"
+while true; do
+  HEADERS=$(mktemp)
+  curl -sS -D "$HEADERS" -o /dev/null "$API/invocation/next"
+  ID=$(grep -Fi Lambda-Runtime-Aws-Request-Id "$HEADERS" | cut -d: -f2- | tr -d '[:space:]')
+  touch /tmp/ext-events
+  curl -sS -o /dev/null -X POST "$API/invocation/$ID/response" --data-binary @/tmp/ext-events
+done
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("image-ext"), extension).unwrap();
+    std::fs::write(dir.path().join("bootstrap"), bootstrap).unwrap();
+    std::fs::write(
+        dir.path().join("Dockerfile"),
+        format!(
+            "FROM public.ecr.aws/lambda/provided:al2023\n\
+             COPY image-ext /opt/extensions/image-ext\n\
+             COPY bootstrap /var/runtime/bootstrap\n\
+             RUN chmod 755 /opt/extensions/image-ext /var/runtime/bootstrap\n\
+             {}\
+             CMD [\"handler\"]\n",
+            user.map(|u| format!("USER {u}\n")).unwrap_or_default()
+        ),
+    )
+    .unwrap();
+
+    let port = port_from_endpoint(server.endpoint());
+    let local_uri = format!("127.0.0.1:{port}/{repo}:v1");
+    let aws_uri = format!("{AWS_ACCOUNT}.dkr.ecr.{AWS_REGION}.amazonaws.com/{repo}:v1");
+    run_docker_pull_with_retry("public.ecr.aws/lambda/provided:al2023").await;
+    run_docker(&["build", "-t", &local_uri, dir.path().to_str().unwrap()]).await;
+    let docker_home = tempfile::tempdir().expect("tempdir");
+    let auth = base64::engine::general_purpose::STANDARD
+        .encode(format!("AWS:fakecloud-seed-{port}").as_bytes());
+    let config = serde_json::json!({ "auths": { format!("127.0.0.1:{port}"): { "auth": auth } } });
+    std::fs::write(docker_home.path().join("config.json"), config.to_string()).unwrap();
+    run_docker_with_config(docker_home.path(), &["push", &local_uri]).await;
+
+    let lambda = server.lambda_client().await;
+    lambda
+        .create_function()
+        .function_name("image-with-ext")
+        .package_type(aws_sdk_lambda::types::PackageType::Image)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .image_uri(&aws_uri)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create_function");
+
+    let invoke = || async {
+        lambda
+            .invoke()
+            .function_name("image-with-ext")
+            .payload(aws_sdk_lambda::primitives::Blob::new(b"{}".to_vec()))
+            .send()
+            .await
+            .expect("invoke")
+    };
+    let first = invoke().await;
+    assert_eq!(first.function_error(), None);
+    let first_id = aws_types::request_id::RequestId::request_id(&first)
+        .unwrap()
+        .to_string();
+    let second = invoke().await;
+    let seen = String::from_utf8(second.payload().unwrap().as_ref().to_vec()).unwrap();
+    assert!(
+        seen.lines()
+            .any(|l| l.contains("\"INVOKE\"") && l.contains(&first_id)),
+        "the image's extension saw no INVOKE for {first_id}: {seen:?}"
+    );
+}

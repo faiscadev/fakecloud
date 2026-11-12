@@ -1,21 +1,30 @@
 //! Lambda execution runtime — pluggable backend behind a shared facade.
 //!
-//! [`LambdaRuntime`] owns the warm-pool bookkeeping and the HTTP
-//! invocation path. The actual lifecycle (container/pod create, port
-//! discovery, teardown) is delegated to whatever [`LambdaBackend`] the
-//! facade was constructed with — today that's [`DockerBackend`]; a
-//! Kubernetes backend ships in a follow-up.
+//! [`LambdaRuntime`] owns the warm-pool bookkeeping and the invocation
+//! path, which runs through the Lambda Runtime API fakecloud serves to every
+//! instance ([`api`]). The actual lifecycle (container/pod create, exit
+//! watching, teardown) is delegated to whatever [`LambdaBackend`] the facade
+//! was constructed with: [`DockerBackend`] (Docker or Podman) or
+//! [`K8sBackend`].
 
+pub mod api;
 pub(crate) mod backend;
+pub(crate) mod container_exits;
 pub(crate) mod docker;
 pub(crate) mod env_rewrite;
 pub mod environment;
+pub(crate) mod extensions;
 pub(crate) mod facade;
 pub mod k8s;
+pub(crate) mod logs;
 
-pub use backend::{BackendHandle, LambdaBackend, RuntimeError, StreamingInvocation, WarmInstance};
+pub use api::RuntimeApi;
+pub use backend::{
+    BackendHandle, ExitWatch, InstanceExit, LambdaBackend, RuntimeApiAddress, RuntimeError,
+    WarmInstance,
+};
 pub use docker::{extract_zip, runtime_to_image, DockerBackend};
-pub use facade::{classify_invocation_response, LambdaRuntime, TakenInstances};
+pub use facade::{InvocationContext, LambdaRuntime, RunOutcome, TakenInstances};
 pub use k8s::{K8sBackend, K8sBackendError};
 
 /// Backwards-compatible alias used by callers across the workspace

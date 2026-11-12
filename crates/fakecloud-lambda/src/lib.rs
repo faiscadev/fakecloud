@@ -23,7 +23,8 @@ pub use service::{
 };
 pub use state::CapacityProvider;
 pub use state::{
-    attached_layer_zips, find_function, function_location, parse_lambda_snapshot, resolve_invocable,
+    attached_layer_zips, find_function, function_location, invoked_function_arn,
+    parse_lambda_snapshot, resolve_invocable,
 };
 pub use state::{
     function_arn, layer_arn, qualified_function_arn, AttachedLayer, EventInvokeConfig,

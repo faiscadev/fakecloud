@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::{
-    Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, LocalObjectReference, Pod, PodSpec,
-    ResourceRequirements, Secret, SecretKeySelector, Volume, VolumeMount,
+    Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, HostAlias, LocalObjectReference, Pod,
+    PodSpec, ResourceRequirements, Secret, SecretKeySelector, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -49,6 +49,26 @@ pub struct PodSpecContext<'a> {
     /// Name of the Secret holding this instance's execution-role
     /// credentials (see [`build_credentials_secret`]); `None` exports none.
     pub credentials_secret: Option<&'a str>,
+    /// This instance's Runtime API host name (see
+    /// [`crate::runtime::api::sandbox_host`]).
+    pub runtime_api_host: &'a str,
+    /// The address the Runtime API host is mapped to (`hostAliases`): the
+    /// fakecloud Service the Pod reaches `self_url` through.
+    pub runtime_api_ip: &'a str,
+    /// Port of `self_url`.
+    pub self_port: u16,
+    /// The function's entrypoint and command, run through the extension
+    /// launcher (see [`crate::runtime::extensions`]). `None` for an image
+    /// whose command could not be read: it then runs as is, without its
+    /// extensions.
+    pub launch_command: Option<Vec<String>>,
+}
+
+/// `value` as Kubernetes passes it on unchanged: the kubelet expands
+/// `$(VAR)` references in a container's `command`, `args` and `env` values
+/// (and reduces `$$` to `$`), so every `$` is doubled.
+fn verbatim(value: &str) -> String {
+    value.replace('$', "$$")
 }
 
 /// Resource cap for the `/tmp` `emptyDir` (`medium: Memory`) — sized
@@ -61,8 +81,10 @@ fn ephemeral_storage_mib(size: Option<i64>) -> i64 {
 
 /// Build the Pod spec for a single Lambda function invocation runtime.
 /// The Pod has one init container (busybox) that downloads code + layers
-/// from fakecloud over HTTP, and one main container running the AWS RIE
-/// image (zip functions) or the user-supplied image (image functions).
+/// from fakecloud over HTTP, and one main container running the AWS base
+/// image (zip functions) or the user-supplied image (image functions), whose
+/// runtime reaches the Runtime API at its own host name, mapped to the
+/// fakecloud Service with `hostAliases`.
 pub fn build_pod_spec(
     func: &LambdaFunction,
     deploy_id: &str,
@@ -70,17 +92,7 @@ pub fn build_pod_spec(
 ) -> Result<Pod, String> {
     let is_image = func.package_type == "Image";
 
-    let main_image = if is_image {
-        let raw = func
-            .image_uri
-            .as_deref()
-            .ok_or_else(|| "PackageType=Image function has no ImageUri".to_string())?;
-        fakecloud_core::ecr_uri::translate_to_local_at(raw, ctx.ecr_host, ctx.ecr_port)
-            .unwrap_or_else(|| raw.to_string())
-    } else {
-        runtime_to_image(&func.runtime)
-            .ok_or_else(|| format!("unsupported runtime: {}", func.runtime))?
-    };
+    let main_image = main_image(func, ctx.ecr_host, ctx.ecr_port)?;
 
     let pod_name = pod_name_for(&func.function_name, deploy_id);
 
@@ -107,14 +119,16 @@ pub fn build_pod_spec(
     // Credentials never sit in the Pod spec: they are read from the
     // per-Pod Secret (see [`build_credentials_secret`]).
     let endpoint_url = ctx.self_url.trim_end_matches('/');
-    let mut env: Vec<EnvVar> = function_environment(func, endpoint_url, ctx.self_host, None)
-        .into_iter()
-        .map(|(k, v)| EnvVar {
-            name: k,
-            value: Some(v),
-            value_from: None,
-        })
-        .collect();
+    let runtime_api = format!("{}:{}", ctx.runtime_api_host, ctx.self_port);
+    let mut env: Vec<EnvVar> =
+        function_environment(func, endpoint_url, ctx.self_host, &runtime_api, None)
+            .into_iter()
+            .map(|(k, v)| EnvVar {
+                name: k,
+                value: Some(verbatim(&v)),
+                value_from: None,
+            })
+            .collect();
     if let Some(secret) = ctx.credentials_secret {
         env.extend(CREDENTIAL_ENV_KEYS.iter().map(|key| EnvVar {
             name: (*key).to_string(),
@@ -133,7 +147,7 @@ pub fn build_pod_spec(
     // Shared volumes — init container writes /var/task, /opt, layers;
     // main container reads them. `/tmp` is sized from ephemeral_storage.
     let tmp_mib = ephemeral_storage_mib(func.ephemeral_storage_size);
-    let volumes = vec![
+    let mut volumes = vec![
         Volume {
             name: "fakecloud-task".into(),
             empty_dir: Some(EmptyDirVolumeSource::default()),
@@ -154,7 +168,7 @@ pub fn build_pod_spec(
         },
     ];
 
-    let common_mounts = vec![
+    let mut common_mounts = vec![
         VolumeMount {
             name: "fakecloud-task".into(),
             mount_path: "/var/task".into(),
@@ -171,6 +185,25 @@ pub fn build_pod_spec(
             ..VolumeMount::default()
         },
     ];
+
+    // An image keeps its own `/opt` (its extensions live there) unless
+    // layers are attached; a zip function's comes from its layers.
+    if is_image && func.layers.is_empty() {
+        volumes.retain(|v| v.name != "fakecloud-opt");
+        common_mounts.retain(|m| m.name != "fakecloud-opt");
+    }
+    if ctx.launch_command.is_some() {
+        volumes.push(Volume {
+            name: "fakecloud-launcher".into(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Volume::default()
+        });
+        common_mounts.push(VolumeMount {
+            name: "fakecloud-launcher".into(),
+            mount_path: crate::runtime::extensions::LAUNCHER_DIR.into(),
+            ..VolumeMount::default()
+        });
+    }
 
     // Init container: busybox + wget. Downloads code zip + layers tar
     // and unpacks them into the shared emptyDir volumes. For
@@ -196,7 +229,19 @@ pub fn build_pod_spec(
             .to_string()
     };
 
-    let init_env = vec![
+    // The launcher's directory takes its bookkeeping files whatever user
+    // the function's image runs as (an `emptyDir` is created world
+    // writable; the sticky bit is added where the init user may).
+    let init_script = if ctx.launch_command.is_some() {
+        format!(
+            "{init_script}; printf '%s' \"$FAKECLOUD_LAUNCHER\" > {path}; chmod 755 {path}; chmod 1777 {dir} 2>/dev/null || true",
+            path = crate::runtime::extensions::LAUNCHER_PATH,
+            dir = crate::runtime::extensions::LAUNCHER_DIR
+        )
+    } else {
+        init_script
+    };
+    let mut init_env = vec![
         EnvVar {
             name: "FAKECLOUD_SELF_URL".into(),
             value: Some(ctx.self_url.into()),
@@ -236,6 +281,13 @@ pub fn build_pod_spec(
         },
     ];
 
+    if ctx.launch_command.is_some() {
+        init_env.push(EnvVar {
+            name: "FAKECLOUD_LAUNCHER".into(),
+            value: Some(verbatim(crate::runtime::extensions::LAUNCHER_SCRIPT)),
+            value_from: None,
+        });
+    }
     let init_container = Container {
         name: "fakecloud-init".into(),
         // busybox ships `wget`, `unzip`, `tar` — covers everything the
@@ -248,20 +300,44 @@ pub fn build_pod_spec(
         ..Container::default()
     };
 
-    // Main container — runs the RIE image (zip) or the user's image.
+    // Main container: runs the runtime's base image (zip) or the user's image.
     // For zip functions the handler is passed as the cmd argument, same
     // as Docker (`docker create <image> <handler>`).
     let mut main_container = Container {
-        name: "fakecloud-lambda".into(),
+        name: super::MAIN_CONTAINER.into(),
         image: Some(main_image.clone()),
         env: Some(env),
         volume_mounts: Some(common_mounts),
         resources: Some(memory_resources(func.memory_size)),
         ..Container::default()
     };
-    if !is_image {
-        main_container.command = None;
-        main_container.args = Some(vec![func.handler.clone()]);
+    main_container.working_dir =
+        crate::runtime::extensions::image_working_directory(func.image_config.as_ref());
+    match &ctx.launch_command {
+        // The launcher starts the extensions, then runs the function.
+        Some(command) => {
+            main_container.command =
+                Some(vec![crate::runtime::extensions::LAUNCHER_PATH.to_string()]);
+            main_container.args = Some(command.iter().map(|a| verbatim(a)).collect());
+        }
+        // An image run as is: `ImageConfig` still overrides its command.
+        None => {
+            let list = |key: &str| {
+                func.image_config
+                    .as_ref()
+                    .and_then(|c| c.get(key))
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|v| !v.is_empty())
+            };
+            main_container.command =
+                list("EntryPoint").map(|c| c.iter().map(|a| verbatim(a)).collect());
+            main_container.args = list("Command").map(|c| c.iter().map(|a| verbatim(a)).collect());
+        }
     }
 
     let pull_secrets = ctx.pull_secret.map(|name| {
@@ -283,10 +359,32 @@ pub fn build_pod_spec(
             containers: vec![main_container],
             volumes: Some(volumes),
             image_pull_secrets: pull_secrets,
+            host_aliases: Some(vec![HostAlias {
+                ip: ctx.runtime_api_ip.to_string(),
+                hostnames: Some(vec![ctx.runtime_api_host.to_string()]),
+            }]),
             ..PodSpec::default()
         }),
         ..Pod::default()
     })
+}
+
+/// The image a function's main container runs: its base image (zip) or
+/// its `ImageUri`, AWS private-ECR URIs translated to fakecloud's registry.
+pub fn main_image(func: &LambdaFunction, ecr_host: &str, ecr_port: u16) -> Result<String, String> {
+    if func.package_type == "Image" {
+        let raw = func
+            .image_uri
+            .as_deref()
+            .ok_or_else(|| "PackageType=Image function has no ImageUri".to_string())?;
+        Ok(
+            fakecloud_core::ecr_uri::translate_to_local_at(raw, ecr_host, ecr_port)
+                .unwrap_or_else(|| raw.to_string()),
+        )
+    } else {
+        runtime_to_image(&func.runtime)
+            .ok_or_else(|| format!("unsupported runtime: {}", func.runtime))
+    }
 }
 
 /// The Secret carrying one instance's execution-role credentials, named
@@ -386,6 +484,13 @@ mod tests {
             account_id: "000000000000",
             pull_secret: None,
             credentials_secret: None,
+            runtime_api_host: "fakecloud-runtime-abc123",
+            runtime_api_ip: "10.96.0.15",
+            self_port: 4566,
+            launch_command: Some(vec![
+                "/lambda-entrypoint.sh".to_string(),
+                "lambda_function.lambda_handler".to_string(),
+            ]),
         }
     }
 
@@ -503,7 +608,7 @@ mod tests {
         let f = zip_function("my-fn");
         let pod = build_pod_spec(&f, "d", &ctx()).unwrap();
         let args = pod.spec.unwrap().containers[0].args.clone().unwrap();
-        assert_eq!(args, vec!["lambda_function.lambda_handler"]);
+        assert_eq!(args.last().unwrap(), "lambda_function.lambda_handler");
     }
 
     #[test]
@@ -522,18 +627,188 @@ mod tests {
     }
 
     #[test]
-    fn function_timeout_env_set() {
+    fn the_function_runs_through_the_extension_launcher() {
         let f = zip_function("my-fn");
         let pod = build_pod_spec(&f, "d", &ctx()).unwrap();
-        let env = pod.spec.unwrap().containers[0].env.clone().unwrap();
-        let t = env
-            .iter()
-            .find(|e| e.name == "AWS_LAMBDA_FUNCTION_TIMEOUT")
+        let spec = pod.spec.unwrap();
+        let main = &spec.containers[0];
+        assert_eq!(main.command.clone().unwrap(), vec!["/var/fakecloud/launch"]);
+        assert_eq!(
+            main.args.clone().unwrap(),
+            vec!["/lambda-entrypoint.sh", "lambda_function.lambda_handler"]
+        );
+        let mounted = |c: &Container| {
+            c.volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|m| m.mount_path == "/var/fakecloud")
+        };
+        assert!(mounted(main));
+        let init = &spec.init_containers.unwrap()[0];
+        assert!(mounted(init));
+        let script = &init.command.as_ref().unwrap()[2];
+        assert!(script.contains("> /var/fakecloud/launch"), "{script}");
+        // The launcher's bookkeeping directory is writable whatever user the
+        // image runs as.
+        assert!(script.contains("chmod 1777 /var/fakecloud"), "{script}");
+        let launcher = init
+            .env
+            .as_ref()
             .unwrap()
-            .value
-            .clone()
+            .iter()
+            .find(|e| e.name == "FAKECLOUD_LAUNCHER")
+            .and_then(|e| e.value.clone())
             .unwrap();
-        assert_eq!(t, "30");
+        // What the kubelet hands the init container is the script itself.
+        assert_eq!(
+            kubelet_expand(&launcher),
+            crate::runtime::extensions::LAUNCHER_SCRIPT
+        );
+    }
+
+    /// The kubelet's `$(VAR)` expansion of `command`, `args` and `env`
+    /// values (`third_party/forked/golang/expansion`), with `VAR` and `HOME`
+    /// defined: `$$` is reduced to `$`, `$(NAME)` of a defined variable is
+    /// replaced, and anything else is kept.
+    fn kubelet_expand(input: &str) -> String {
+        let defined = |name: &str| match name {
+            "VAR" => Some("expanded".to_string()),
+            "HOME" => Some("/root".to_string()),
+            _ => None,
+        };
+        let bytes = input.as_bytes();
+        let mut out = String::new();
+        let mut checkpoint = 0;
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if bytes[cursor] == b'$' && cursor + 1 < bytes.len() {
+                out.push_str(&input[checkpoint..cursor]);
+                let rest = &input[cursor + 1..];
+                let advance = match rest.as_bytes()[0] {
+                    b'$' => {
+                        out.push('$');
+                        1
+                    }
+                    b'(' => match rest.find(')') {
+                        Some(close) => {
+                            let name = &rest[1..close];
+                            out.push_str(&defined(name).unwrap_or_else(|| format!("$({name})")));
+                            close + 1
+                        }
+                        None => {
+                            out.push_str("$(");
+                            1
+                        }
+                    },
+                    _ => {
+                        let c = rest.chars().next().unwrap();
+                        out.push('$');
+                        out.push(c);
+                        c.len_utf8()
+                    }
+                };
+                cursor += advance;
+                checkpoint = cursor + 1;
+            }
+            cursor += 1;
+        }
+        out.push_str(&input[checkpoint.min(input.len())..]);
+        out
+    }
+
+    #[test]
+    fn the_expansion_model_matches_the_kubelet() {
+        assert_eq!(kubelet_expand("$(VAR)"), "expanded");
+        assert_eq!(kubelet_expand("$(UNSET)"), "$(UNSET)");
+        assert_eq!(kubelet_expand("$$(VAR)"), "$(VAR)");
+        assert_eq!(kubelet_expand("a$$b"), "a$b");
+        assert_eq!(kubelet_expand("$HOME $"), "$HOME $");
+        assert_eq!(kubelet_expand("$(VAR"), "$(VAR");
+    }
+
+    #[test]
+    fn verbatim_survives_the_kubelet_expansion() {
+        for s in [
+            "plain",
+            "$(VAR)",
+            "echo $(HOME) $$ $(UNSET) $HOME",
+            "trailing $",
+            "$$(VAR)",
+            "$(VAR",
+            "ünï$(VAR)cødé",
+        ] {
+            assert_eq!(kubelet_expand(&verbatim(s)), s, "{s}");
+        }
+    }
+
+    /// `ImageConfig` command and arguments, the launcher's arguments and the
+    /// function's environment reach the container as written: the kubelet
+    /// does not expand `$(VAR)` in them (Lambda never does).
+    #[test]
+    fn container_command_args_and_env_are_not_expanded() {
+        let tricky = "$(HOME)/x $$ $(VAR)";
+        let mut f = zip_function("dollar-fn");
+        f.environment.insert("LITERAL".into(), tricky.into());
+        let mut c = ctx();
+        c.launch_command = Some(vec!["/bin/app".into(), tricky.into()]);
+        let pod = build_pod_spec(&f, "d", &c).unwrap();
+        let main = &pod.spec.unwrap().containers[0];
+        let args: Vec<String> = main
+            .args
+            .clone()
+            .unwrap()
+            .iter()
+            .map(|a| kubelet_expand(a))
+            .collect();
+        assert_eq!(args, vec!["/bin/app".to_string(), tricky.to_string()]);
+        let env = main.env.clone().unwrap();
+        let literal = env.iter().find(|e| e.name == "LITERAL").unwrap();
+        assert_eq!(kubelet_expand(literal.value.as_deref().unwrap()), tricky);
+
+        // An image run without the launcher: `ImageConfig` EntryPoint and
+        // Command become the container's command and args.
+        let mut f = zip_function("dollar-img");
+        f.package_type = "Image".into();
+        f.image_uri = Some("public.ecr.aws/test/img:1".into());
+        f.image_config = Some(serde_json::json!({
+            "EntryPoint": ["/bin/sh", "-c"],
+            "Command": [format!("echo {tricky}")],
+        }));
+        let mut c = ctx();
+        c.launch_command = None;
+        let pod = build_pod_spec(&f, "d", &c).unwrap();
+        let main = &pod.spec.unwrap().containers[0];
+        let expand = |v: &Option<Vec<String>>| {
+            v.clone()
+                .unwrap()
+                .iter()
+                .map(|a| kubelet_expand(a))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(expand(&main.command), vec!["/bin/sh", "-c"]);
+        assert_eq!(expand(&main.args), vec![format!("echo {tricky}")]);
+    }
+
+    #[test]
+    fn runtime_reaches_its_own_runtime_api_host_mapped_to_the_service() {
+        let f = zip_function("my-fn");
+        let pod = build_pod_spec(&f, "d", &ctx()).unwrap();
+        let spec = pod.spec.unwrap();
+        let env = spec.containers[0].env.clone().unwrap();
+        let api = env
+            .iter()
+            .find(|e| e.name == "AWS_LAMBDA_RUNTIME_API")
+            .and_then(|e| e.value.clone());
+        assert_eq!(api.as_deref(), Some("fakecloud-runtime-abc123:4566"));
+        assert!(env.iter().all(|e| e.name != "AWS_LAMBDA_FUNCTION_TIMEOUT"));
+        let aliases = spec.host_aliases.unwrap();
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].ip, "10.96.0.15");
+        assert_eq!(
+            aliases[0].hostnames.as_deref(),
+            Some(&["fakecloud-runtime-abc123".to_string()][..])
+        );
     }
 
     #[test]

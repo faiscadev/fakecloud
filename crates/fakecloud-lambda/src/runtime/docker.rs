@@ -5,13 +5,13 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
 use tempfile::TempDir;
 
-use super::backend::{BackendHandle, LambdaBackend, RuntimeError, WarmInstance};
+use super::backend::{BackendHandle, LambdaBackend, RuntimeApiAddress, RuntimeError, WarmInstance};
+use super::container_exits::ContainerExits;
 use super::environment::{function_environment, CREDENTIAL_ENV_KEYS};
 use crate::state::LambdaFunction;
 use fakecloud_core::auth::SessionCredentials;
@@ -33,22 +33,27 @@ pub struct DockerBackend {
     /// `--add-host <alias>:<value>` argument injected into every container
     /// `create`, or `None` when the runtime provides the alias natively.
     add_host_arg: Option<String>,
+    /// What each instance's Runtime API host name is mapped to
+    /// (`--add-host <host>:<this>`): the address `host_alias` resolves to
+    /// inside a container, so the runtime reaches the same fakecloud
+    /// listener `AWS_ENDPOINT_URL` names. Known up front when the alias is
+    /// mapped explicitly or resolves from here; otherwise (podman's native
+    /// alias) probed once in a container, see [`Self::runtime_api_target`].
+    known_runtime_api_target: Option<String>,
+    probed_runtime_api_target: tokio::sync::OnceCell<String>,
+    /// When fakecloud itself runs in a container: the network Lambda
+    /// containers join and fakecloud's address on it. Runtimes then reach
+    /// fakecloud's own listener there (whatever port, if any, the host
+    /// publishes for it), and so do SDK calls.
+    self_network: Option<SelfNetwork>,
+    /// Reports when each instance's runtime process exits.
+    exits: Arc<ContainerExits>,
     /// Port the main fakecloud server bound to. Used to translate AWS
     /// private-ECR URIs in `PackageType=Image` functions to fakecloud's
     /// local OCI v2 registry.
     server_port: u16,
-    /// Hostname fakecloud uses to reach sibling Lambda containers it
-    /// just spawned. `"127.0.0.1"` when fakecloud runs on the host (the
-    /// containers expose ports on the host loopback). When fakecloud is
-    /// itself running in a container with `/var/run/docker.sock`
-    /// bind-mounted, the spawned Lambda containers are *siblings* on
-    /// the host's daemon — their published ports are reachable from
-    /// inside fakecloud's container as `host.docker.internal:<port>`,
-    /// not `127.0.0.1:<port>`. Set via the `FAKECLOUD_IN_CONTAINER=1`
-    /// env var baked into the published image (issue #1539 Bug 4).
-    sibling_host: String,
     /// Registry host used by the Docker daemon when pulling fakecloud ECR
-    /// images. This is separate from `sibling_host`: Docker Desktop and
+    /// images. This is separate from the host alias: Docker Desktop and
     /// OrbStack accept the local HTTP registry only over loopback.
     registry_host: String,
     /// Isolated DOCKER_CONFIG dir with Basic auth for `127.0.0.1:<port>`.
@@ -76,43 +81,155 @@ impl DockerBackend {
 
         let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
         let registry_host = fakecloud_core::container_net::ecr_registry_host(&cli);
+        // The alias only resolves meaningfully from here when fakecloud is
+        // itself containerized (see `HostNetworking::detect`).
+        let in_container = net.sibling_host != "127.0.0.1";
+        let self_network = in_container.then(|| own_network(&cli)).flatten();
+        let known_runtime_api_target = match &self_network {
+            Some(n) => Some(n.ip.clone()),
+            None => known_runtime_api_target(
+                net.add_host_arg.as_deref(),
+                in_container
+                    .then(|| resolve_ipv4(&net.host_alias))
+                    .flatten(),
+            ),
+        };
+        let exits = ContainerExits::new(cli.clone(), format!("fakecloud-instance={instance_id}"));
         Some(Self {
             cli,
             instance_id,
             host_alias: net.host_alias,
             add_host_arg: net.add_host_arg,
+            known_runtime_api_target,
+            probed_runtime_api_target: tokio::sync::OnceCell::new(),
+            self_network,
+            exits,
             server_port,
-            sibling_host: net.sibling_host,
             registry_host,
             docker_config,
         })
     }
 
-    /// Append `--add-host` arguments to `cmd` when the runtime needs an
-    /// explicit host alias mapping (docker on Linux/Mac/Windows). No-op
-    /// for podman, which provides `host.containers.internal` natively.
-    fn apply_host_alias(&self, cmd: &mut tokio::process::Command) {
+    /// Append the `--add-host` arguments: the host alias mapping when the
+    /// runtime needs an explicit one (docker; podman provides
+    /// `host.containers.internal` natively), and the instance's Runtime API
+    /// host, mapped to the same place.
+    async fn apply_host_alias(
+        &self,
+        cmd: &mut tokio::process::Command,
+        runtime_api: &RuntimeApiAddress,
+    ) {
         if let Some(arg) = &self.add_host_arg {
             cmd.arg("--add-host").arg(arg);
         }
+        if let Some(net) = &self.self_network {
+            cmd.arg("--network").arg(&net.network);
+        }
+        let target = self.runtime_api_target().await;
+        cmd.arg("--add-host")
+            .arg(format!("{}:{target}", runtime_api.host));
+    }
+
+    /// The address the host alias names inside a container. When the engine
+    /// provides the alias itself (podman's `host.containers.internal`), the
+    /// address is only known in there: look it up once in a throwaway
+    /// container of a small known image ([`PROBE_IMAGE`], whatever the
+    /// function's image ships), caching the answer; `host-gateway` (not
+    /// cached) when it cannot be found.
+    async fn runtime_api_target(&self) -> String {
+        if let Some(target) = &self.known_runtime_api_target {
+            return target.clone();
+        }
+        if let Some(target) = self.probed_runtime_api_target.get() {
+            return target.clone();
+        }
+        let image = PROBE_IMAGE;
+        if let Err(e) = fakecloud_core::container_image::ensure_image(&self.cli, None, image).await
+        {
+            tracing::warn!(%image, error = %e, "could not pull the host-alias probe image");
+        }
+        let script = format!(
+            "getent ahostsv4 {alias} 2>/dev/null || cat /etc/hosts",
+            alias = self.host_alias
+        );
+        let probe = tokio::process::Command::new(&self.cli)
+            .args([
+                "run",
+                "--rm",
+                "--label",
+                &format!("fakecloud-instance={}", self.instance_id),
+                "--entrypoint",
+                "/bin/sh",
+                image,
+                "-c",
+                &script,
+            ])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(60), probe).await;
+        let found = match &outcome {
+            Ok(Ok(out)) => alias_address(&String::from_utf8_lossy(&out.stdout), &self.host_alias),
+            _ => None,
+        };
+        match found {
+            Some(ip) => {
+                let _ = self.probed_runtime_api_target.set(ip.clone());
+                ip
+            }
+            None => {
+                // Not cached: the next launch looks again.
+                let detail = match outcome {
+                    Ok(Ok(out)) => String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                    Ok(Err(e)) => e.to_string(),
+                    Err(_) => "timed out".to_string(),
+                };
+                tracing::warn!(
+                    alias = %self.host_alias,
+                    %detail,
+                    "could not find the container address of the host alias; \
+                     mapping the Lambda Runtime API host to host-gateway"
+                );
+                "host-gateway".to_string()
+            }
+        }
+    }
+
+    /// How a Lambda container reaches fakecloud: its own address on the
+    /// shared network when fakecloud runs in a container, else the host
+    /// alias.
+    fn endpoint_url(&self) -> String {
+        let host = self
+            .self_network
+            .as_ref()
+            .map_or(self.host_alias.as_str(), |n| n.ip.as_str());
+        format!("http://{host}:{}", self.server_port)
     }
 
     /// Export the function's execution environment into the container. The
     /// container reaches fakecloud through the host alias, since `localhost`
-    /// inside it is the container itself.
+    /// inside it is the container itself, and its runtime reaches the
+    /// Runtime API through its own host name on the same listener.
     fn apply_function_env(
         &self,
         cmd: &mut tokio::process::Command,
         func: &LambdaFunction,
         credentials: Option<&SessionCredentials>,
+        runtime_api: &RuntimeApiAddress,
     ) {
-        let endpoint_url = format!("http://{}:{}", self.host_alias, self.server_port);
-        let (args, child_env) = docker_env_args(function_environment(
+        let endpoint_url = self.endpoint_url();
+        let env = function_environment(
             func,
             &endpoint_url,
             &self.host_alias,
+            &format!("{}:{}", runtime_api.host, self.server_port),
             credentials,
-        ));
+        );
+        let env = match &self.self_network {
+            Some(net) => fakecloud_on_its_network(env, &self.host_alias, self.server_port, &net.ip),
+            None => env,
+        };
+        let (args, child_env) = docker_env_args(env);
         cmd.args(args).envs(child_env);
     }
 
@@ -120,16 +237,18 @@ impl DockerBackend {
         self.docker_config.as_ref().map(|d| d.path().to_path_buf())
     }
 
-    /// Start a container for a `PackageType=Image` function. The image is
-    /// expected to already embed the Runtime Interface Emulator (RIE) or
-    /// an equivalent, exposing port 8080. AWS private-ECR URIs get
-    /// translated to fakecloud's local OCI v2 registry and retagged so
-    /// the container reports its user-visible image name.
+    /// Start a container for a `PackageType=Image` function. Its runtime
+    /// (the AWS base images' entrypoint, or a runtime interface client)
+    /// talks to the Runtime API at `AWS_LAMBDA_RUNTIME_API`, as on Lambda.
+    /// AWS private-ECR URIs get translated to fakecloud's local OCI v2
+    /// registry and retagged so the container reports its user-visible
+    /// image name.
     async fn start_image_container(
         &self,
         func: &LambdaFunction,
         layers: &[Vec<u8>],
         credentials: Option<&SessionCredentials>,
+        runtime_api: &RuntimeApiAddress,
     ) -> Result<WarmInstance, RuntimeError> {
         let image = func.image_uri.as_deref().ok_or_else(|| {
             RuntimeError::ContainerStartFailed("PackageType=Image function has no ImageUri".into())
@@ -173,70 +292,70 @@ impl DockerBackend {
             image.to_string()
         };
 
-        let mut cmd = tokio::process::Command::new(&self.cli);
-        cmd.arg("create")
-            .arg("-p")
-            .arg(":8080")
-            .arg("--label")
-            .arg(format!("fakecloud-lambda={}", func.function_name))
-            .arg("--label")
-            .arg(format!("fakecloud-instance={}", self.instance_id));
-        self.apply_host_alias(&mut cmd);
+        let (entrypoint, image_cmd) = self.image_command(&run_image).await;
+        let command = super::extensions::function_command(
+            &entrypoint,
+            &image_cmd,
+            func.image_config.as_ref(),
+        );
+        let workdir = super::extensions::image_working_directory(func.image_config.as_ref());
 
-        self.apply_function_env(&mut cmd, func, credentials);
-
-        let tmpfs_arg = ephemeral_storage_tmpfs_arg(func.ephemeral_storage_size);
-        cmd.arg("--tmpfs").arg(tmpfs_arg);
-        cmd.args(memory_limit_args(
-            func.memory_size,
-            func.ephemeral_storage_size,
-        ));
-
-        cmd.arg(&run_image);
-
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-        if !output.status.success() {
-            return Err(RuntimeError::ContainerStartFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
-        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        if let Err(e) = self.copy_layers_into(&container_id, layers).await {
+        let mut container_id = self
+            .create_container(
+                func,
+                &run_image,
+                &command,
+                true,
+                workdir.as_deref(),
+                credentials,
+                runtime_api,
+            )
+            .await?;
+        if let Err(e) = self.prepare_container(&container_id, layers, true).await {
             self.remove_container(&container_id).await;
             return Err(e);
         }
-
-        let start_result = tokio::process::Command::new(&self.cli)
-            .args(["start", &container_id])
-            .output()
-            .await
-            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-        if !start_result.status.success() {
+        // The launcher is a shell script: an image without `/bin/sh` runs
+        // its command directly, without its extensions.
+        let launcher = self.has_shell(&container_id).await;
+        if !launcher {
+            tracing::warn!(
+                image = %image,
+                "image has no /bin/sh: its /opt/extensions are not started"
+            );
             self.remove_container(&container_id).await;
-            return Err(RuntimeError::ContainerStartFailed(format!(
-                "docker start failed: {}",
-                String::from_utf8_lossy(&start_result.stderr)
-            )));
+            container_id = self
+                .create_container(
+                    func,
+                    &run_image,
+                    &command,
+                    false,
+                    workdir.as_deref(),
+                    credentials,
+                    runtime_api,
+                )
+                .await?;
+            if let Err(e) = self.prepare_container(&container_id, layers, false).await {
+                self.remove_container(&container_id).await;
+                return Err(e);
+            }
         }
 
-        let port = self.query_host_port(&container_id).await?;
-        self.wait_for_ready(&container_id, port).await?;
+        let exit = self
+            .start_container(&container_id, runtime_api, launcher)
+            .await?;
 
         tracing::info!(
             function = %func.function_name,
             container_id = %container_id,
-            port = port,
             image = %image,
             "Lambda image container started"
         );
 
         Ok(WarmInstance {
-            endpoint: format!("{}:{port}", self.sibling_host),
             handle: BackendHandle::Container { id: container_id },
+            exit,
+            launcher,
         })
     }
 
@@ -246,6 +365,7 @@ impl DockerBackend {
         zip_bytes: &[u8],
         layers: &[Vec<u8>],
         credentials: Option<&SessionCredentials>,
+        runtime_api: &RuntimeApiAddress,
     ) -> Result<WarmInstance, RuntimeError> {
         let image = runtime_to_image(&func.runtime)
             .ok_or_else(|| RuntimeError::UnsupportedRuntime(func.runtime.clone()))?;
@@ -260,38 +380,13 @@ impl DockerBackend {
             .map_err(|e| RuntimeError::LocalIo(e.to_string()))??;
 
         // Step 1: docker create (no volume mounts — works in Docker-in-Docker)
-        let mut cmd = tokio::process::Command::new(&self.cli);
-        cmd.arg("create")
-            .arg("-p")
-            .arg(":8080")
-            .arg("--label")
-            .arg(format!("fakecloud-lambda={}", func.function_name))
-            .arg("--label")
-            .arg(format!("fakecloud-instance={}", self.instance_id));
-        self.apply_host_alias(&mut cmd);
-
-        self.apply_function_env(&mut cmd, func, credentials);
-
-        let tmpfs_arg = ephemeral_storage_tmpfs_arg(func.ephemeral_storage_size);
-        cmd.arg("--tmpfs").arg(tmpfs_arg);
-        cmd.args(memory_limit_args(
-            func.memory_size,
-            func.ephemeral_storage_size,
-        ));
-
-        cmd.arg(&image).arg(&func.handler);
-
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(RuntimeError::ContainerStartFailed(stderr.to_string()));
-        }
-
-        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let command = vec![
+            super::extensions::BASE_IMAGE_ENTRYPOINT.to_string(),
+            func.handler.clone(),
+        ];
+        let container_id = self
+            .create_container(func, &image, &command, true, None, credentials, runtime_api)
+            .await?;
 
         // Step 2: docker cp — copy code into the container
         let cp_result = tokio::process::Command::new(&self.cli)
@@ -329,80 +424,183 @@ impl DockerBackend {
             }
         }
 
-        if let Err(e) = self.copy_layers_into(&container_id, layers).await {
+        if let Err(e) = self.prepare_container(&container_id, layers, true).await {
             self.remove_container(&container_id).await;
             return Err(e);
         }
 
         // TempDir is dropped here — code now lives inside the container
 
-        let start_result = tokio::process::Command::new(&self.cli)
-            .args(["start", &container_id])
-            .output()
-            .await
-            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-
-        if !start_result.status.success() {
-            self.remove_container(&container_id).await;
-            let stderr = String::from_utf8_lossy(&start_result.stderr);
-            return Err(RuntimeError::ContainerStartFailed(format!(
-                "docker start failed: {stderr}"
-            )));
-        }
-
-        let port = self.query_host_port(&container_id).await?;
-        self.wait_for_ready(&container_id, port).await?;
+        let exit = self
+            .start_container(&container_id, runtime_api, true)
+            .await?;
 
         tracing::info!(
             function = %func.function_name,
             container_id = %container_id,
-            port = port,
             runtime = %func.runtime,
             "Lambda container started"
         );
 
         Ok(WarmInstance {
-            endpoint: format!("{}:{port}", self.sibling_host),
             handle: BackendHandle::Container { id: container_id },
+            exit,
+            launcher: true,
         })
     }
 
-    async fn query_host_port(&self, container_id: &str) -> Result<u16, RuntimeError> {
-        let port_output = tokio::process::Command::new(&self.cli)
-            .args(["port", container_id, "8080"])
+    /// `docker create` a function container running `command` (its
+    /// entrypoint and arguments), through the extension launcher when
+    /// `launcher`.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_container(
+        &self,
+        func: &LambdaFunction,
+        image: &str,
+        command: &[String],
+        launcher: bool,
+        workdir: Option<&str>,
+        credentials: Option<&SessionCredentials>,
+        runtime_api: &RuntimeApiAddress,
+    ) -> Result<String, RuntimeError> {
+        let mut cmd = tokio::process::Command::new(&self.cli);
+        cmd.arg("create")
+            .arg("--label")
+            .arg(format!("fakecloud-lambda={}", func.function_name))
+            .arg("--label")
+            .arg(format!("fakecloud-instance={}", self.instance_id));
+        self.apply_host_alias(&mut cmd, runtime_api).await;
+        self.apply_function_env(&mut cmd, func, credentials, runtime_api);
+        cmd.arg("--tmpfs")
+            .arg(ephemeral_storage_tmpfs_arg(func.ephemeral_storage_size));
+        cmd.args(memory_limit_args(
+            func.memory_size,
+            func.ephemeral_storage_size,
+        ));
+        if let Some(dir) = workdir {
+            cmd.arg("--workdir").arg(dir);
+        }
+        let (entry, args) = if launcher {
+            (Some(super::extensions::LAUNCHER_PATH), command)
+        } else {
+            match command.split_first() {
+                Some((first, rest)) => (Some(first.as_str()), rest),
+                None => (None, command),
+            }
+        };
+        if let Some(entry) = entry {
+            cmd.arg("--entrypoint").arg(entry);
+        }
+        cmd.arg(image).args(args);
+        let output = cmd
             .output()
             .await
             .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-        let port_str = String::from_utf8_lossy(&port_output.stdout);
-        port_str
-            .trim()
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.parse().ok())
-            .ok_or_else(|| {
-                RuntimeError::ContainerStartFailed(format!(
-                    "could not determine port from: {}",
-                    port_str.trim()
-                ))
-            })
+        if !output.status.success() {
+            return Err(RuntimeError::ContainerStartFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    /// Wait until the container's Runtime Interface Emulator answers HTTP
-    /// (see `facade::endpoint_reachable`: the published port accepts TCP
-    /// before anything listens in the container).
-    async fn wait_for_ready(&self, container_id: &str, port: u16) -> Result<(), RuntimeError> {
-        let endpoint = format!("{}:{port}", self.sibling_host);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while tokio::time::Instant::now() < deadline {
-            if super::facade::endpoint_reachable(&endpoint, Duration::from_millis(500)).await {
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+    /// Copy the layers (and, with `launcher`, the extension launcher) into
+    /// a created container.
+    async fn prepare_container(
+        &self,
+        container_id: &str,
+        layers: &[Vec<u8>],
+        launcher: bool,
+    ) -> Result<(), RuntimeError> {
+        self.copy_layers_into(container_id, layers).await?;
+        if launcher {
+            // Streamed in as a tar so the directory keeps its mode: world
+            // writable (sticky) for the launcher's bookkeeping whatever user
+            // the image runs as.
+            let target = format!("{container_id}:/var");
+            run_with_stdin(
+                &self.cli,
+                &["cp", "-", &target],
+                &super::extensions::launcher_tar(),
+            )
+            .await
+            .map_err(|e| {
+                RuntimeError::ContainerStartFailed(format!(
+                    "docker cp of the extension launcher failed: {e}"
+                ))
+            })?;
         }
+        Ok(())
+    }
+
+    /// Whether a created container's image has `/bin/sh` (read from its
+    /// filesystem, so nothing has to run).
+    async fn has_shell(&self, container_id: &str) -> bool {
+        tokio::process::Command::new(&self.cli)
+            .args(["cp", &format!("{container_id}:/bin/sh"), "-"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|s| s.success())
+    }
+
+    /// The image's own entrypoint and command.
+    async fn image_command(&self, image: &str) -> (Vec<String>, Vec<String>) {
+        let out = tokio::process::Command::new(&self.cli)
+            .args([
+                "image",
+                "inspect",
+                "--format",
+                "{{json .Config.Entrypoint}}\t{{json .Config.Cmd}}",
+                image,
+            ])
+            .output()
+            .await;
+        let text = out
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let (entry, cmd) = text.trim().split_once('\t').unwrap_or(("null", "null"));
+        let parse = |v: &str| {
+            serde_json::from_str::<Option<Vec<String>>>(v)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        };
+        (parse(entry), parse(cmd))
+    }
+
+    /// Start a created container, watching its runtime process from before
+    /// it starts so an immediate exit is never missed.
+    async fn start_container(
+        &self,
+        container_id: &str,
+        runtime_api: &RuntimeApiAddress,
+        launcher: bool,
+    ) -> Result<super::backend::ExitWatch, RuntimeError> {
+        if launcher {
+            // The first event waits for the launcher's extension count.
+            runtime_api.sandbox.await_extension_count();
+        }
+        let exit = self.exits.watch(container_id);
+        let start_result = tokio::process::Command::new(&self.cli)
+            .args(["start", container_id])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()));
+        let failure = match start_result {
+            Ok(out) if out.status.success() => return Ok(exit),
+            Ok(out) => format!(
+                "docker start failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(e) => e.to_string(),
+        };
+        self.exits.forget(container_id);
         self.remove_container(container_id).await;
-        Err(RuntimeError::ContainerStartFailed(
-            "container did not become ready within 10 seconds".to_string(),
-        ))
+        Err(RuntimeError::ContainerStartFailed(failure))
     }
 
     /// Extract each layer ZIP into a shared temp directory and `docker cp`
@@ -459,7 +657,7 @@ impl DockerBackend {
 #[async_trait]
 impl LambdaBackend for DockerBackend {
     fn callback_endpoint(&self) -> Option<String> {
-        Some(format!("http://{}:{}", self.host_alias, self.server_port))
+        Some(self.endpoint_url())
     }
 
     fn name(&self) -> &str {
@@ -473,45 +671,134 @@ impl LambdaBackend for DockerBackend {
         layers: &[Vec<u8>],
         _deploy_id: &str,
         credentials: Option<&SessionCredentials>,
+        runtime_api: &RuntimeApiAddress,
     ) -> Result<WarmInstance, RuntimeError> {
         if func.package_type == "Image" {
-            self.start_image_container(func, layers, credentials).await
+            self.start_image_container(func, layers, credentials, runtime_api)
+                .await
         } else {
             let bytes =
                 code_zip.ok_or_else(|| RuntimeError::NoCodeZip(func.function_name.clone()))?;
-            self.start_zip_container(func, bytes, layers, credentials)
+            self.start_zip_container(func, bytes, layers, credentials, runtime_api)
                 .await
         }
     }
 
     async fn terminate(&self, handle: &BackendHandle) {
         match handle {
-            BackendHandle::Container { id } => self.remove_container(id).await,
+            BackendHandle::Container { id } => {
+                self.remove_container(id).await;
+                self.exits.forget(id);
+            }
             // Pod handles belong to the K8s backend — defensive no-op
             // so a mis-wired multi-backend setup doesn't panic.
             BackendHandle::Pod { .. } => {}
         }
     }
 
-    async fn instance_logs(&self, handle: &BackendHandle) -> Option<String> {
+    async fn read_instance_file(&self, handle: &BackendHandle, path: &str) -> Option<Vec<u8>> {
         let BackendHandle::Container { id } = handle else {
             return None;
         };
-        // `docker logs` writes the container's stdout to our stdout and stderr
-        // to our stderr; the RIE prints the function's logs there. Tail the
-        // recent lines — the Invoke caller keeps only the last 4 KiB.
-        let output = tokio::process::Command::new(&self.cli)
-            .args(["logs", "--tail", "200", id])
+        // A caller that gives up on a hung CLI (see `monitor_launcher`)
+        // must not leave the process behind.
+        let out = tokio::process::Command::new(&self.cli)
+            .args(["cp", &format!("{id}:{path}"), "-"])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
             .output()
             .await
-            .ok()?;
-        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-        combined.push_str(&String::from_utf8_lossy(&output.stderr));
-        if combined.is_empty() {
-            None
-        } else {
-            Some(combined)
+            .ok()
+            .filter(|o| o.status.success())?;
+        let mut archive = tar::Archive::new(out.stdout.as_slice());
+        let mut entry = archive.entries().ok()?.flatten().next()?;
+        let mut contents = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut contents).ok()?;
+        Some(contents)
+    }
+
+    async fn write_instance_file(
+        &self,
+        handle: &BackendHandle,
+        path: &str,
+        contents: &[u8],
+    ) -> bool {
+        let BackendHandle::Container { id } = handle else {
+            return false;
+        };
+        let Ok(dir) = TempDir::new() else {
+            return false;
+        };
+        let name = Path::new(path)
+            .file_name()
+            .map(|n| n.to_owned())
+            .unwrap_or_default();
+        let local = dir.path().join(name);
+        if std::fs::write(&local, contents).is_err() {
+            return false;
         }
+        tokio::process::Command::new(&self.cli)
+            .arg("cp")
+            .arg(&local)
+            .arg(format!("{id}:{path}"))
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await
+            .is_ok_and(|o| o.status.success())
+    }
+
+    async fn log_cursor(&self, handle: &BackendHandle) -> Option<String> {
+        let BackendHandle::Container { id } = handle else {
+            return None;
+        };
+        let read = |extra: Vec<String>| async move {
+            let out = tokio::process::Command::new(&self.cli)
+                .args(["logs", "--timestamps"])
+                .args(extra)
+                .arg(id)
+                .output()
+                .await
+                .ok()?;
+            Some((
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            ))
+        };
+        let (out, err) = read(vec![
+            "--tail".into(),
+            super::logs::CURSOR_TAIL_LINES.to_string(),
+        ])
+        .await?;
+        if super::logs::tail_covers_cursor(&[&out, &err]) {
+            return super::logs::cursor(&[&out, &err]);
+        }
+        // Every tail line shares the latest timestamp: count them all.
+        let latest = super::logs::cursor(&[&out, &err])?;
+        let since = super::logs::cursor_since(&latest).to_string();
+        let (out, err) = read(vec!["--since".into(), since]).await?;
+        super::logs::cursor(&[&out, &err])
+    }
+
+    async fn instance_logs(&self, handle: &BackendHandle, since: Option<&str>) -> Option<String> {
+        let BackendHandle::Container { id } = handle else {
+            return None;
+        };
+        // `docker logs` writes the container's stdout to our stdout and its
+        // stderr to our stderr; the timestamps put them back in order.
+        let mut cmd = tokio::process::Command::new(&self.cli);
+        cmd.args(["logs", "--timestamps"]);
+        if let Some(since) = since {
+            cmd.args(["--since", super::logs::cursor_since(since)]);
+        }
+        let output = cmd.arg(id).output().await.ok()?;
+        Some(super::logs::lines_since(
+            &[
+                &String::from_utf8_lossy(&output.stdout),
+                &String::from_utf8_lossy(&output.stderr),
+            ],
+            since,
+        ))
     }
 
     async fn prepull_image(&self, image: &str) -> Result<(), RuntimeError> {
@@ -539,6 +826,198 @@ impl LambdaBackend for DockerBackend {
         })?;
         Ok(())
     }
+}
+
+/// The image the host-alias address is looked up in: small, with a shell
+/// and `getent`, and already what fakecloud runs helper containers from.
+const PROBE_IMAGE: &str = "public.ecr.aws/docker/library/alpine:3.20";
+
+/// What an instance's Runtime API host is mapped to with `--add-host`, when
+/// known without looking inside a container: the value the host alias itself
+/// is mapped to (`host-gateway` on Docker Desktop, the bridge gateway on
+/// Linux docker), else the address the alias resolves to from here (fakecloud
+/// running in a sibling container, where the engine provides the alias
+/// natively).
+fn known_runtime_api_target(
+    alias_mapping: Option<&str>,
+    resolved_alias: Option<String>,
+) -> Option<String> {
+    alias_mapping
+        .and_then(|arg| arg.split_once(':'))
+        .map(|(_, target)| target.to_string())
+        .or(resolved_alias)
+}
+
+/// Point the function's own references to fakecloud (a loopback address on
+/// fakecloud's port, already rewritten to the host alias) at fakecloud's
+/// address on the shared network: a containerized fakecloud is not
+/// necessarily reachable through the host on that port. Loopback addresses
+/// on other ports still name the host.
+fn fakecloud_on_its_network(
+    env: Vec<(String, String)>,
+    host_alias: &str,
+    port: u16,
+    ip: &str,
+) -> Vec<(String, String)> {
+    let from = format!("{host_alias}:{port}");
+    let to = format!("{ip}:{port}");
+    env.into_iter()
+        .map(|(k, v)| {
+            let v = v.replace(&from, &to);
+            (k, v)
+        })
+        .collect()
+}
+
+/// The network a containerized fakecloud shares with its Lambda containers,
+/// and fakecloud's address on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelfNetwork {
+    network: String,
+    ip: String,
+}
+
+/// Run `cli args...` with `input` on its stdin. `Err` names why it failed,
+/// with the CLI's stderr: a CLI that exits before reading all of `input`
+/// (a `cp -` refusing its target, say) makes the write fail with a broken
+/// pipe, and what it said on stderr is the reason worth reporting.
+async fn run_with_stdin(cli: &str, args: &[&str], input: &[u8]) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new(cli)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("could not run {cli}: {e}"))?;
+    let written = match child.stdin.take() {
+        // Dropped once written, so the CLI sees the end of its input.
+        Some(mut stdin) => stdin.write_all(input).await,
+        None => Ok(()),
+    };
+    let out = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("could not wait for {cli}: {e}"))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = stderr.trim();
+    match (written, out.status.success()) {
+        (Ok(()), true) => Ok(()),
+        (Err(e), true) => Err(format!("writing its input failed: {e}: {stderr}")),
+        (_, false) => Err(format!("{}: {stderr}", out.status)),
+    }
+}
+
+/// Find the container fakecloud runs in and the network to share with Lambda
+/// containers. `None` outside a container the CLI knows (or in host network
+/// mode, where the host alias already reaches fakecloud's port).
+fn own_network(cli: &str) -> Option<SelfNetwork> {
+    let id = own_container_id()?;
+    let inspect = fakecloud_core::container_net::bounded_output(cli, &["inspect", &id])?;
+    let selected = select_self_network(&inspect);
+    match &selected {
+        Some(n) => tracing::info!(
+            network = %n.network,
+            ip = %n.ip,
+            "Lambda containers reach fakecloud on its own container network"
+        ),
+        None => tracing::warn!(
+            container = %id,
+            "fakecloud's container has no network Lambda containers can share; \
+             they reach it through the host alias"
+        ),
+    }
+    selected
+}
+
+/// This process's container ID: from the runtime's bookkeeping in
+/// `/proc/self/mountinfo` (`.../containers/<id>/...` on Docker,
+/// `.../overlay-containers/<id>/...` on Podman), else the host name, which
+/// both engines set to the short ID.
+fn own_container_id() -> Option<String> {
+    if let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") {
+        if let Some(id) = container_id_in_mountinfo(&info) {
+            return Some(id);
+        }
+    }
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+}
+
+fn container_id_in_mountinfo(info: &str) -> Option<String> {
+    info.lines().find_map(|line| {
+        line.split('/')
+            .collect::<Vec<_>>()
+            .windows(2)
+            .find(|w| {
+                matches!(w[0], "containers" | "overlay-containers")
+                    && w[1].len() == 64
+                    && w[1].bytes().all(|b| b.is_ascii_hexdigit())
+            })
+            .map(|w| w[1].to_string())
+    })
+}
+
+/// From `<cli> inspect <own container>` output: the network (and the
+/// container's address on it) Lambda containers should join. A user-defined
+/// network (a compose project's) wins over the default bridge, which wins
+/// over nothing; host and none mode share no network.
+fn select_self_network(inspect: &str) -> Option<SelfNetwork> {
+    let v: serde_json::Value = serde_json::from_str(inspect).ok()?;
+    let networks = v
+        .get(0)
+        .unwrap_or(&v)
+        .pointer("/NetworkSettings/Networks")?
+        .as_object()?;
+    let mut candidates: Vec<(bool, &String, String)> = networks
+        .iter()
+        .filter(|(name, _)| !matches!(name.as_str(), "host" | "none"))
+        .filter_map(|(name, n)| {
+            let ip = n.get("IPAddress")?.as_str()?;
+            (!ip.is_empty()).then(|| {
+                let default = matches!(name.as_str(), "bridge" | "podman");
+                (default, name, ip.to_string())
+            })
+        })
+        .collect();
+    candidates.sort();
+    candidates
+        .into_iter()
+        .next()
+        .map(|(_, name, ip)| SelfNetwork {
+            network: name.clone(),
+            ip,
+        })
+}
+
+/// The IPv4 address `alias` maps to in `getent ahostsv4` or `/etc/hosts`
+/// output.
+fn alias_address(output: &str, alias: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let ip = fields.next()?.parse::<std::net::Ipv4Addr>().ok()?;
+        fields.any(|f| f == alias).then(|| ip.to_string())
+    })
+}
+
+/// The first IPv4 address `host` resolves to, bounded so a wedged resolver
+/// can't stall startup.
+fn resolve_ipv4(host: &str) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let host = host.to_string();
+    std::thread::spawn(move || {
+        let found = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), 0))
+            .ok()
+            .and_then(|mut addrs| addrs.find(std::net::SocketAddr::is_ipv4))
+            .map(|a| a.ip().to_string());
+        let _ = tx.send(found);
+    });
+    rx.recv_timeout(fakecloud_core::container_net::HOST_ALIAS_RESOLVE_TIMEOUT)
+        .ok()
+        .flatten()
 }
 
 /// `--memory` and `--memory-swap` for a function's container. Without a limit a
@@ -997,6 +1476,105 @@ mod tests {
     }
 
     #[test]
+    fn a_containerized_fakecloud_is_named_by_its_network_address() {
+        let mut func: LambdaFunction = serde_json::from_value(serde_json::json!({
+            "function_name": "f", "function_arn": "arn:aws:lambda:us-east-1:123456789012:function:f",
+            "runtime": "python3.12", "role": "", "handler": "h", "description": "", "timeout": 3,
+            "memory_size": 128, "code_sha256": "x", "code_size": 1, "version": "$LATEST",
+            "last_modified": "2020-01-01T00:00:00Z", "tags": {}, "environment": {},
+            "architectures": ["x86_64"], "package_type": "Zip", "code_zip": null, "policy": null
+        }))
+        .unwrap();
+        func.environment
+            .insert("AWS_ENDPOINT_URL".into(), "http://localhost:4566".into());
+        func.environment
+            .insert("DB".into(), "postgres://localhost:5432/app".into());
+        let env = function_environment(
+            &func,
+            "http://172.20.0.3:4566",
+            "host.docker.internal",
+            "rt:4566",
+            None,
+        );
+        let env = fakecloud_on_its_network(env, "host.docker.internal", 4566, "172.20.0.3");
+        let get = |k: &str| {
+            env.iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("AWS_ENDPOINT_URL"), Some("http://172.20.0.3:4566"));
+        // Another port on loopback still names the host.
+        assert_eq!(get("DB"), Some("postgres://host.docker.internal:5432/app"));
+    }
+
+    #[test]
+    fn a_containerized_fakecloud_shares_its_own_network() {
+        let compose = r#"[{"Id":"abc","NetworkSettings":{"Networks":{
+            "bridge":{"IPAddress":"172.17.0.5"},
+            "myapp_default":{"IPAddress":"172.20.0.3"}}}}]"#;
+        assert_eq!(
+            select_self_network(compose),
+            Some(SelfNetwork {
+                network: "myapp_default".into(),
+                ip: "172.20.0.3".into()
+            })
+        );
+        let bridge = r#"[{"NetworkSettings":{"Networks":{"bridge":{"IPAddress":"172.17.0.2"}}}}]"#;
+        assert_eq!(
+            select_self_network(bridge),
+            Some(SelfNetwork {
+                network: "bridge".into(),
+                ip: "172.17.0.2".into()
+            })
+        );
+        let host = r#"[{"NetworkSettings":{"Networks":{"host":{"IPAddress":""}}}}]"#;
+        assert_eq!(select_self_network(host), None);
+        assert_eq!(select_self_network("not json"), None);
+
+        let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let docker = format!(
+            "1234 25 0:30 /docker/containers/{id}/hostname /etc/hostname rw - ext4 /dev/vda1 rw"
+        );
+        assert_eq!(container_id_in_mountinfo(&docker).as_deref(), Some(id));
+        let podman = format!(
+            "1 2 0:3 /containers/storage/overlay-containers/{id}/userdata/hosts /etc/hosts rw"
+        );
+        assert_eq!(container_id_in_mountinfo(&podman).as_deref(), Some(id));
+        assert_eq!(container_id_in_mountinfo("1 2 0:3 / / rw"), None);
+    }
+
+    #[test]
+    fn runtime_api_hosts_map_where_the_alias_does() {
+        assert_eq!(
+            known_runtime_api_target(Some("host.docker.internal:host-gateway"), None).as_deref(),
+            Some("host-gateway")
+        );
+        assert_eq!(
+            known_runtime_api_target(Some("host.docker.internal:172.17.0.1"), None).as_deref(),
+            Some("172.17.0.1")
+        );
+        assert_eq!(
+            known_runtime_api_target(None, Some("192.168.65.254".into())).as_deref(),
+            Some("192.168.65.254")
+        );
+        assert_eq!(known_runtime_api_target(None, None), None);
+
+        let getent = "192.168.127.254 STREAM host.containers.internal\n\
+                      192.168.127.254 DGRAM  \n";
+        assert_eq!(
+            alias_address(getent, "host.containers.internal").as_deref(),
+            Some("192.168.127.254")
+        );
+        let hosts = "127.0.0.1 localhost\n::1 localhost\n\
+                     10.88.0.1 host.containers.internal host.docker.internal\n";
+        assert_eq!(
+            alias_address(hosts, "host.containers.internal").as_deref(),
+            Some("10.88.0.1")
+        );
+        assert_eq!(alias_address(hosts, "nope"), None);
+    }
+
+    #[test]
     fn credentials_stay_off_the_command_line() {
         let env = vec![
             ("AWS_REGION".to_string(), "us-east-1".to_string()),
@@ -1029,5 +1607,34 @@ mod tests {
                 ("AWS_SESSION_TOKEN".to_string(), "tok".to_string()),
             ]
         );
+    }
+
+    /// A CLI that exits without reading its input (as `cp -` does when it
+    /// refuses the target) breaks the pipe; the error still carries what it
+    /// said on stderr.
+    #[tokio::test]
+    async fn a_cli_that_exits_early_reports_its_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_str().unwrap().to_string()
+        };
+        let refuses = script(
+            "refuses",
+            "#!/bin/sh\necho 'Error: No such container: abc' >&2\nexit 1\n",
+        );
+        let accepts = script("accepts", "#!/bin/sh\ncat > /dev/null\n");
+        // Far more than a pipe buffer, so the write cannot complete.
+        let input = vec![0u8; 8 << 20];
+        let err = run_with_stdin(&refuses, &["cp", "-", "abc:/var"], &input)
+            .await
+            .unwrap_err();
+        assert!(err.contains("No such container: abc"), "{err}");
+        run_with_stdin(&accepts, &["cp", "-", "abc:/var"], &input)
+            .await
+            .unwrap();
     }
 }

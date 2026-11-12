@@ -264,14 +264,46 @@ pub(crate) struct InvokedVersion {
     pub function_name: String,
     /// The alias the call named, if it named one.
     pub alias: Option<String>,
-    /// The version the call resolved to (`$LATEST` or a number).
+    /// The version the call resolved to (`$LATEST`, `$LATEST.PUBLISHED` or a
+    /// number).
     pub executed_version: String,
+    /// The `$LATEST.PUBLISHED` snapshot the event was queued for. Unlike a
+    /// number, `$LATEST.PUBLISHED` names whatever was published last, so a
+    /// publish between attempts would otherwise run newer code than the
+    /// event was accepted for. Shared with the queued
+    /// [`AsyncInvocation::func`], not a second copy of the function (and its
+    /// code).
+    pub published: Option<Arc<LambdaFunction>>,
+}
+
+impl InvokedVersion {
+    /// What an invocation resolved to `executed_version` (running `func`)
+    /// queued, pinning a `$LATEST.PUBLISHED` snapshot.
+    pub(crate) fn new(
+        account_id: &str,
+        region: &str,
+        function_name: &str,
+        alias: Option<String>,
+        executed_version: &str,
+        func: &Arc<LambdaFunction>,
+    ) -> Self {
+        Self {
+            account_id: account_id.to_string(),
+            region: region.to_string(),
+            function_name: function_name.to_string(),
+            alias,
+            executed_version: executed_version.to_string(),
+            published: (executed_version == crate::state::LATEST_PUBLISHED)
+                .then(|| Arc::clone(func)),
+        }
+    }
 }
 
 /// The function an `Invoke`-queued event runs on each attempt: the version
-/// the call resolved to, while it still exists. Once the function, that
-/// version, or the alias the call named is gone, the event is dropped
-/// rather than run on other code.
+/// the call resolved to, while it still exists (a `$LATEST.PUBLISHED` event
+/// runs the snapshot it was queued for while the function has one). Once the
+/// function, that version, or the alias the call named is gone, the event is
+/// dropped rather than run on other code.
 pub(crate) fn invoked_version_resolver(
     state: crate::SharedLambdaState,
     target: InvokedVersion,
@@ -294,6 +326,10 @@ fn resolve_invoked(state: &LambdaState, target: &InvokedVersion) -> Option<Lambd
     if target.executed_version == "$LATEST" {
         return Some(live.clone());
     }
+    if let Some(published) = &target.published {
+        state.latest_published.get(name)?;
+        return Some(LambdaFunction::clone(published));
+    }
     state
         .version_snapshot(name, &target.executed_version)
         .cloned()
@@ -305,7 +341,7 @@ pub(crate) struct AsyncInvocation {
     pub bus: Option<Arc<DeliveryBus>>,
     pub settings: AsyncSettings,
     /// The function as queued, for the records.
-    pub func: LambdaFunction,
+    pub func: Arc<LambdaFunction>,
     /// The function as each attempt runs it.
     pub resolve: Resolver,
     pub payload: Vec<u8>,
@@ -313,6 +349,10 @@ pub(crate) struct AsyncInvocation {
     /// The invocation's request ID (the 202 response's), which its
     /// destination record and dead-letter message carry.
     pub request_id: String,
+    /// What the runtime is told about the invocation: the ARN the caller
+    /// invoked through, its trace header and client context (the request ID
+    /// is always `request_id`).
+    pub context: crate::runtime::InvocationContext,
     /// Held until processing finishes (the reserved-concurrency counter).
     pub guard: Option<Box<dyn Send>>,
     /// Told why, if Lambda discards the event without having run the
@@ -340,6 +380,7 @@ pub(crate) fn spawn(inv: AsyncInvocation) {
             payload,
             executed_version,
             request_id,
+            context,
             guard,
             on_unrunnable,
         } = inv;
@@ -349,6 +390,8 @@ pub(crate) fn spawn(inv: AsyncInvocation) {
         let outcome = run_attempts(&settings, RETRY_DELAYS, || {
             let runtime = runtime.clone();
             let payload = &payload;
+            let request_id = &request_id;
+            let context = &context;
             let current = resolve();
             let queued_arn = func.function_arn.clone();
             let slot = guard.lock().ok().and_then(|mut g| g.take());
@@ -364,9 +407,16 @@ pub(crate) fn spawn(inv: AsyncInvocation) {
                         func.function_name
                     )));
                 }
+                // Every attempt (retries included) runs under the
+                // invocation's request ID, as on Lambda.
+                let ctx = crate::runtime::InvocationContext {
+                    request_id: Some(request_id.to_string()),
+                    ..context.clone()
+                };
                 let result = runtime
-                    .invoke(&func, payload, &layer_zips)
+                    .invoke_with(&func, payload, &layer_zips, &ctx)
                     .await
+                    .map(|(output, _)| output)
                     .map_err(|e| AttemptError::of_runtime(&e));
                 drop(slot);
                 result
@@ -430,17 +480,19 @@ pub fn queue_async_invocation_observed(
     payload: &[u8],
     on_unrunnable: Option<fakecloud_core::delivery::AsyncUnrunnableHook>,
 ) -> Result<(), String> {
-    let (func, layer_zips, settings, executed_version) = {
+    let (target, settings, invoked_arn) = {
         let accounts = state.read();
         let (account, region, name) = crate::function_location(
             function_arn,
             accounts.default_account_id(),
             accounts.region(),
         );
-        let (func, layer_zips) = crate::resolve_invocable(&accounts, function_arn, account, region)
-            .ok_or_else(|| format!("Function not found: {function_arn}"))?;
-        // Cross-service invokes run the function's current code ($LATEST);
-        // a qualifier on the ARN still selects its event invoke config.
+        // The version that runs is picked once, here (an alias's routing
+        // config included): every retry runs that same version.
+        let target =
+            crate::state::resolve_invocable_target(&accounts, function_arn, account, region)
+                .ok_or_else(|| format!("Function not found: {function_arn}"))?;
+        // A qualifier on the ARN selects its event invoke config.
         let settings = resolve_settings(
             &accounts,
             account,
@@ -448,8 +500,21 @@ pub fn queue_async_invocation_observed(
             name,
             arn_qualifier(function_arn),
         );
-        (func, layer_zips, settings, "$LATEST".to_string())
+        let invoked_arn = crate::state::invoked_function_arn(
+            function_arn,
+            accounts.default_account_id(),
+            accounts.region(),
+        );
+        (target, settings, invoked_arn)
     };
+    let crate::state::InvocableTarget {
+        account_id,
+        region,
+        function_name,
+        alias,
+        executed_version,
+        func,
+    } = target;
     if func.code_zip.is_none() && func.package_type != "Image" {
         return Err(format!(
             "Function {} has no deployment package",
@@ -459,20 +524,21 @@ pub fn queue_async_invocation_observed(
     if tokio::runtime::Handle::try_current().is_err() {
         return Err("no async runtime is available to queue the invocation".to_string());
     }
-    let _ = layer_zips;
-    let resolve: Resolver = {
-        let state = state.clone();
-        let function_arn = function_arn.to_string();
-        Box::new(move || {
-            let accounts = state.read();
-            let (account, region, _) = crate::function_location(
-                &function_arn,
-                accounts.default_account_id(),
-                accounts.region(),
-            );
-            crate::resolve_invocable(&accounts, &function_arn, account, region)
-        })
-    };
+    // Each attempt runs the pinned version while it exists; once it (or the
+    // alias, or the function) is gone the event is dropped, never run on
+    // other code.
+    let func = Arc::new(func);
+    let resolve = invoked_version_resolver(
+        state.clone(),
+        InvokedVersion::new(
+            &account_id,
+            &region,
+            &function_name,
+            alias,
+            &executed_version,
+            &func,
+        ),
+    );
     spawn(AsyncInvocation {
         bus: runtime.async_destinations(),
         runtime,
@@ -482,6 +548,10 @@ pub fn queue_async_invocation_observed(
         payload: payload.to_vec(),
         executed_version,
         request_id: uuid::Uuid::new_v4().to_string(),
+        context: crate::runtime::InvocationContext {
+            invoked_function_arn: Some(invoked_arn),
+            ..Default::default()
+        },
         guard: None,
         on_unrunnable,
     });
@@ -879,6 +949,7 @@ mod tests {
             function_name: "f".into(),
             alias: alias.map(str::to_string),
             executed_version: version.into(),
+            published: None,
         };
         assert_eq!(
             resolve_invoked(&state, &target(None, "1"))
@@ -895,13 +966,31 @@ mod tests {
         // A Lambda Managed Instances function's $LATEST.PUBLISHED.
         let mut published = test_func();
         published.description = "published".into();
-        state.latest_published.insert("f".into(), published);
+        state.latest_published.insert("f".into(), published.clone());
+        let queued = InvokedVersion::new(
+            "123456789012",
+            "us-east-1",
+            "f",
+            None,
+            crate::state::LATEST_PUBLISHED,
+            &Arc::new(published),
+        );
         assert_eq!(
-            resolve_invoked(&state, &target(None, crate::state::LATEST_PUBLISHED))
-                .unwrap()
-                .description,
+            resolve_invoked(&state, &queued).unwrap().description,
             "published"
         );
+        // A publish between attempts does not change the code a retry runs.
+        let mut republished = test_func();
+        republished.description = "republished".into();
+        state.latest_published.insert("f".into(), republished);
+        assert_eq!(
+            resolve_invoked(&state, &queued).unwrap().description,
+            "published"
+        );
+        // Once the function has no $LATEST.PUBLISHED, the event is dropped.
+        let gone = state.latest_published.remove("f");
+        assert!(resolve_invoked(&state, &queued).is_none());
+        state.latest_published.insert("f".into(), gone.unwrap());
         // The alias the call named is gone.
         assert!(resolve_invoked(&state, &target(Some("live"), "1")).is_none());
         // The version is gone.
