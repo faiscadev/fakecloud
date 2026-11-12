@@ -647,10 +647,7 @@ impl DynamoDbService {
                 // one of its key attributes. AWS never returns (or counts) an
                 // item missing the index hash/range key on an index scan, so
                 // skip those before the segment filter and the count.
-                if index_name.is_some() && !index_key_attrs.iter().all(|k| item.contains_key(k)) {
-                    return false;
-                }
-                true
+                index_name.is_none() || index_key_attrs.iter().all(|k| item.contains_key(k))
             })
             .filter(|item| match (segment, total_segments) {
                 (Some(seg), Some(total)) => {
