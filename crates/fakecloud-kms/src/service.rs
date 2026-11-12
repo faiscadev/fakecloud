@@ -139,6 +139,8 @@ pub struct KmsService {
     /// Service Quotas, for the customer managed key quota once the user
     /// switched its enforcement on. Without one nothing is enforced.
     quota_provider: Option<Arc<dyn fakecloud_core::quota::QuotaProvider>>,
+    /// IAM, for the unique IDs of the users and roles grants name.
+    iam: Option<fakecloud_iam::SharedIamState>,
 }
 
 impl KmsService {
@@ -148,7 +150,16 @@ impl KmsService {
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             quota_provider: None,
+            iam: None,
         }
+    }
+
+    /// Resolve the IAM users and roles grants name to their unique IDs
+    /// (`CreateGrant` records the grantee's, `ListGrants` shows it once the
+    /// principal is gone or recreated).
+    pub fn with_iam(mut self, iam: fakecloud_iam::SharedIamState) -> Self {
+        self.iam = Some(iam);
+        self
     }
 
     /// Attach Service Quotas so the customer managed key quota is enforced
@@ -654,9 +665,10 @@ impl KmsService {
     /// `RevokeGrant` and `RetireGrant` naming it by its key ARN. A `Decrypt`
     /// naming no key uses the key its ciphertext names, a `RetireGrant`
     /// naming its grant by `GrantToken` the account holding that grant, and a
-    /// `ReEncrypt` is
-    /// served in another account only when its source and destination keys
-    /// are both there. A key id or alias name is always the caller's own
+    /// `ReEncrypt` is served in another account only when its source and
+    /// destination keys are both there (with keys in different accounts it
+    /// stays in the caller's, and `re_encrypt` opens the ciphertext and seals
+    /// the new one each in its own key's account). A key id or alias name is always the caller's own
     /// account's. Whether the caller may use the key is decided by IAM
     /// enforcement at dispatch (key policy, identity policies and grants).
     fn cross_account_key_owner(&self, req: &AwsRequest) -> Option<String> {

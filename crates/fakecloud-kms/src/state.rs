@@ -427,8 +427,25 @@ pub struct KmsGrant {
     pub grant_id: String,
     pub grant_token: String,
     pub key_id: String,
+    /// The AWS principal the grant is for; empty for a grant to a service
+    /// principal ([`Self::grantee_service_principal`]).
     pub grantee_principal: String,
+    /// The unique ID (`AIDA...` / `AROA...`) of the IAM user or role
+    /// `grantee_principal` named when the grant was created. Like a key
+    /// policy, a grant names the principal by its unique ID internally, so a
+    /// user or role deleted and recreated under the same name is a new
+    /// principal the grant does not cover.
+    #[serde(default)]
+    pub grantee_principal_id: Option<String>,
+    /// The AWS service principal the grant is for (`GranteeServicePrincipal`),
+    /// when it is not for an AWS principal.
+    #[serde(default)]
+    pub grantee_service_principal: Option<String>,
     pub retiring_principal: Option<String>,
+    /// The service principal that may retire the grant
+    /// (`RetiringServicePrincipal`).
+    #[serde(default)]
+    pub retiring_service_principal: Option<String>,
     pub operations: Vec<String>,
     pub constraints: Option<serde_json::Value>,
     pub name: Option<String>,

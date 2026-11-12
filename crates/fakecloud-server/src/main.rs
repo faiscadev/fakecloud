@@ -2542,8 +2542,9 @@ async fn main() {
         } else {
             None
         };
-    let mut kms_service =
-        KmsService::new(kms_state.clone()).with_quota_provider(Some(quota_provider.clone()));
+    let mut kms_service = KmsService::new(kms_state.clone())
+        .with_quota_provider(Some(quota_provider.clone()))
+        .with_iam(iam_state.clone());
     if let Some(store) = kms_snapshot_store {
         // Hook-driven auto-provisioning (`aws/<service>` first use) saves
         // KMS state durably before the hook call returns.
