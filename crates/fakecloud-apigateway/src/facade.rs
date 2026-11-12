@@ -23,7 +23,9 @@ use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::service::{
+    AwsRequest, AwsResponse, AwsService, AwsServiceError, DataPlaneClaim,
+};
 
 use crate::ApiGatewayService;
 
@@ -154,38 +156,40 @@ impl ApiGatewayFacade {
                 .is_some_and(|lookup| lookup(account_id, stage))
     }
 
-    /// The rule deciding whether an unsigned request on the shared listener is
+    /// The rule deciding whether an unrouted request on the shared listener is
     /// an API invocation (rather than an S3 path-style request). API Gateway
-    /// owns it when:
+    /// claims it by host when the `Host` is an execute-api endpoint
+    /// (`{api-id}.execute-api...`) or a v1/v2 custom domain name -- such a
+    /// request is never S3's -- and by path when:
     ///
-    /// - the `Host` is an execute-api endpoint (`{api-id}.execute-api...`),
-    /// - the `Host` is a v1 or v2 custom domain name,
     /// - the path is a path-style invocation URL (`/restapis/...`,
     ///   `/_aws/execute-api/...`), or
     /// - the first path segment is a stage some API in the account has
     ///   (`/{stage}/{path}` on a plain host).
     ///
-    /// Anything else -- notably `/{bucket}/{key}` for a bucket that does not
-    /// exist -- is left to S3.
-    fn unsigned_request_is_invocation(
+    /// A path claim yields to an existing bucket of that name. Anything
+    /// unclaimed -- notably `/{bucket}/{key}` for a bucket that does not exist
+    /// -- is left to S3.
+    fn invocation_claim(
         &self,
         raw_path: &str,
         headers: &http::HeaderMap,
         account_id: &str,
-    ) -> bool {
+    ) -> Option<DataPlaneClaim> {
         if headers_name_execute_api(headers)
             || self.headers_name_v1_custom_domain(headers, account_id)
             || self.headers_name_v2_custom_domain(headers, account_id)
         {
-            return true;
+            return Some(DataPlaneClaim::Host);
         }
         let segments = fakecloud_core::path::split_path_segments(raw_path);
-        match segments.first().map(String::as_str) {
+        let by_path = match segments.first().map(String::as_str) {
             None => false,
             Some("restapis") => true,
             Some("_aws") => segments.get(1).is_some_and(|s| s == "execute-api"),
             Some(stage) => self.any_api_has_stage(account_id, stage),
-        }
+        };
+        by_path.then_some(DataPlaneClaim::Path)
     }
 
     /// Rewrite a path-style invocation URL to the canonical execute-api form:
@@ -332,14 +336,14 @@ impl AwsService for ApiGatewayFacade {
         &self.actions
     }
 
-    fn claims_unsigned_request(
+    fn claim_unrouted_request(
         &self,
         _method: &http::Method,
         raw_path: &str,
         headers: &http::HeaderMap,
         account_id: &str,
-    ) -> bool {
-        self.unsigned_request_is_invocation(raw_path, headers, account_id)
+    ) -> Option<DataPlaneClaim> {
+        self.invocation_claim(raw_path, headers, account_id)
     }
 
     async fn handle(&self, mut req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -568,33 +572,53 @@ mod tests {
             .domain_names
             .insert("rest.example.com".to_string(), serde_json::json!({}));
         let plain = host_headers("localhost:4566");
-        let claims = |path: &str, headers: &HeaderMap| {
-            f.claims_unsigned_request(&Method::GET, path, headers, ACCOUNT)
+        let claim = |path: &str, headers: &HeaderMap| {
+            f.claim_unrouted_request(&Method::GET, path, headers, ACCOUNT)
         };
+        let by_path = Some(DataPlaneClaim::Path);
+        let by_host = Some(DataPlaneClaim::Host);
 
         // Documented invocation shapes on a plain host.
-        assert!(claims("/prod/items", &plain), "v1 stage");
-        assert!(claims("/v2stage/items", &plain), "v2 stage");
-        assert!(claims("/restapis/abc123/prod/_user_request_/items", &plain));
-        assert!(claims("/restapis/abc123/dev/_user_request_/items", &plain));
-        assert!(claims("/_aws/execute-api/abc123/prod/items", &plain));
-        // Host-addressed invocations, whatever the path.
+        assert_eq!(claim("/prod/items", &plain), by_path, "v1 stage");
+        assert_eq!(claim("/v2stage/items", &plain), by_path, "v2 stage");
+        for path in [
+            "/restapis/abc123/prod/_user_request_/items",
+            "/restapis/abc123/dev/_user_request_/items",
+            "/_aws/execute-api/abc123/prod/items",
+        ] {
+            assert_eq!(claim(path, &plain), by_path, "{path}");
+        }
+        // Host-addressed invocations, whatever the path (a stage path too).
         let exec = host_headers("abc123.execute-api.us-east-1.amazonaws.com");
-        assert!(claims("/ghost-bucket/k", &exec));
+        assert_eq!(claim("/ghost-bucket/k", &exec), by_host);
+        assert_eq!(claim("/prod/items", &exec), by_host);
         let ls_exec = host_headers("abc123.execute-api.localhost.localstack.cloud:4566");
-        assert!(claims("/anything", &ls_exec));
-        assert!(claims("/v1/items", &host_headers("Rest.Example.com:4566")));
-        assert!(claims("/hello/one", &host_headers("http.example.com:4566")));
+        assert_eq!(claim("/anything", &ls_exec), by_host);
+        assert_eq!(
+            claim("/v1/items", &host_headers("Rest.Example.com:4566")),
+            by_host
+        );
+        assert_eq!(
+            claim("/hello/one", &host_headers("http.example.com:4566")),
+            by_host
+        );
 
         // S3 path-style: missing bucket, root, no matching stage, and a
         // stage that exists only in another account.
-        assert!(!claims("/ghost-bucket/k.txt", &plain));
-        assert!(!claims("/ghost-bucket", &plain));
-        assert!(!claims("/", &plain));
-        assert!(!claims("/dev/items", &plain));
-        assert!(!claims("/_aws/other", &plain));
-        assert!(!claims("/ghost-bucket/k", &HeaderMap::new()));
-        assert!(!f.claims_unsigned_request(&Method::GET, "/prod/items", &plain, "999999999999"));
+        for path in [
+            "/ghost-bucket/k.txt",
+            "/ghost-bucket",
+            "/",
+            "/dev/items",
+            "/_aws/other",
+        ] {
+            assert_eq!(claim(path, &plain), None, "{path}");
+        }
+        assert_eq!(claim("/ghost-bucket/k", &HeaderMap::new()), None);
+        assert_eq!(
+            f.claim_unrouted_request(&Method::GET, "/prod/items", &plain, "999999999999"),
+            None
+        );
     }
 
     #[test]

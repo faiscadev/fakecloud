@@ -779,6 +779,18 @@ impl AwsServiceError {
     }
 }
 
+/// Why a data plane claims a request no protocol signal routed (see
+/// [`AwsService::claim_unrouted_request`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataPlaneClaim {
+    /// The `Host` names the data plane (an execute-api host, a custom domain).
+    /// Nothing sent to such a host is ever an S3 request.
+    Host,
+    /// Only the path suggests it (an invocation URL, a stage name as the
+    /// first segment) on a host S3 also serves.
+    Path,
+}
+
 /// Trait that every AWS service implements.
 #[async_trait]
 pub trait AwsService: Send + Sync {
@@ -791,24 +803,25 @@ pub trait AwsService: Send + Sync {
     /// List of actions this service supports (for introspection).
     fn supported_actions(&self) -> &[&str];
 
-    /// Whether this service's data plane owns an unsigned request (no
-    /// `Authorization`, no presign parameters) that no protocol signal --
-    /// target header, `Action`, signing scope or AWS endpoint host -- routed.
-    /// `raw_path` is the undecoded wire path and `account_id` the account
-    /// the anonymous request runs in.
+    /// Whether this service's data plane owns a request that no protocol
+    /// signal -- target header, `Action`, signing scope or AWS endpoint host --
+    /// routed, and on what grounds. `raw_path` is the undecoded wire path and
+    /// `account_id` the account an anonymous request runs in.
     ///
     /// On the shared listener such a request is either an S3 path-style
     /// request (`/{bucket}/{key}` on S3's endpoint) or an invocation of a
-    /// deployed API; dispatch asks the API Gateway data plane first and
-    /// sends everything it does not claim to S3. Defaults to `false`.
-    fn claims_unsigned_request(
+    /// deployed API. A [`DataPlaneClaim::Host`] claim always wins; a
+    /// [`DataPlaneClaim::Path`] claim loses to an existing bucket of the same
+    /// name and to S3 query authentication. Dispatch sends unclaimed unsigned
+    /// requests to S3. Defaults to `None`.
+    fn claim_unrouted_request(
         &self,
         _method: &Method,
         _raw_path: &str,
         _headers: &HeaderMap,
         _account_id: &str,
-    ) -> bool {
-        false
+    ) -> Option<DataPlaneClaim> {
+        None
     }
 
     /// Whether this service participates in opt-in IAM enforcement

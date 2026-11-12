@@ -207,23 +207,31 @@ async fn signed_object_reads_on_missing_bucket_are_no_such_bucket() {
     assert_eq!(head.raw_response().unwrap().status().as_u16(), 404);
 }
 
-/// IAM strict mode: an anonymous request for a missing bucket reaches S3's
-/// anonymous authorization, which no public grant allows: `AccessDenied` in
-/// S3's XML shape, for reads and writes alike.
+/// IAM strict mode: an anonymous object request for a missing bucket is
+/// `NoSuchBucket`, as AWS answers whoever the caller is. This depends on S3
+/// reporting a missing bucket ahead of anonymous authorization (the ordering
+/// the S3 action-names change introduces). Creating a bucket anonymously is
+/// still `AccessDenied`.
 #[tokio::test]
-async fn anonymous_request_to_missing_bucket_iam_strict_is_access_denied() {
+async fn anonymous_request_to_missing_bucket_iam_strict_is_no_such_bucket() {
     let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
     let http = reqwest::Client::new();
     let base = server.endpoint();
     for req in [
         http.get(format!("{base}/ghostbucket/x.txt")),
         http.put(format!("{base}/ghostbucket/x.txt")).body("hi"),
-        http.put(format!("{base}/ghostbucket")),
     ] {
         let (status, _, body) = unsigned(req).await;
-        assert_eq!(status, 403, "{body}");
-        assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+        assert_eq!(status, 404, "{body}");
+        assert!(body.contains("<Code>NoSuchBucket</Code>"), "{body}");
+        assert!(
+            body.contains("<BucketName>ghostbucket</BucketName>"),
+            "{body}"
+        );
     }
+    let (status, _, body) = unsigned(http.put(format!("{base}/ghostbucket"))).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
     // The bucket was not created by the denied anonymous PUT.
     let s3 = helpers::root_s3_client(&server).await;
     assert!(s3.head_bucket().bucket("ghostbucket").send().await.is_err());
@@ -373,13 +381,14 @@ async fn sigv2_presigned_request_is_attributed_to_its_caller() {
 
     // A key that resolves to no identity is rejected, not read as anonymous
     // or as the account root.
+    // (Expires 2000000000 is a valid far-future epoch; S3 rejects 9999999999.)
     let unknown =
-        format!("{base}?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Signature=dummysig&Expires=9999999999");
+        format!("{base}?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Signature=dummysig&Expires=2000000000");
     let resp = http.get(&unknown).send().await.unwrap();
     assert_eq!(resp.status(), 403, "unresolved SigV2 key must be rejected");
     assert!(resp.text().await.unwrap().contains("InvalidClientTokenId"));
 
-    let signed = format!("{base}?AWSAccessKeyId={akid}&Signature=dummysig&Expires=9999999999");
+    let signed = format!("{base}?AWSAccessKeyId={akid}&Signature=dummysig&Expires=2000000000");
     let resp = http.get(&signed).send().await.unwrap();
     assert_eq!(
         resp.status(),

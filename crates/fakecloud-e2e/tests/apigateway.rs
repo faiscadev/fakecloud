@@ -1415,6 +1415,61 @@ async fn unsigned_requests_split_between_api_invocations_and_s3() {
     }
 }
 
+/// A bucket named like a stage takes the plain-host `/{stage}/{path}` request
+/// (the stage name is only a guess there), but never one addressed to an
+/// execute-api or custom-domain host: those are always the API's, for reads
+/// and writes alike, and an unsigned PUT never lands in the bucket.
+#[tokio::test]
+async fn api_gateway_hosts_beat_a_bucket_named_like_the_stage() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+    let api_id = provision_mock_items_api(&client, "hosted").await;
+    client
+        .create_domain_name()
+        .domain_name("rest.example.com")
+        .send()
+        .await
+        .expect("create_domain_name");
+    client
+        .create_base_path_mapping()
+        .domain_name("rest.example.com")
+        .base_path("prod")
+        .rest_api_id(&api_id)
+        .stage("prod")
+        .send()
+        .await
+        .expect("create_base_path_mapping");
+    let s3 = server.s3_client().await;
+    s3.create_bucket().bucket("prod").send().await.unwrap();
+
+    let http = reqwest::Client::new();
+    let base = server.endpoint();
+    let exec_host = format!("{api_id}.execute-api.us-east-1.amazonaws.com");
+    for host in [exec_host.as_str(), "rest.example.com:4566"] {
+        let (status, body) =
+            get_body(http.get(format!("{base}/prod/items")).header("host", host)).await;
+        assert_eq!(status, 200, "{host}: {body}");
+        assert_eq!(body, r#"{"api":"hosted"}"#, "{host}");
+
+        // The API has no PUT method: API Gateway refuses it; S3 never sees it.
+        let (status, body) = get_body(
+            http.put(format!("{base}/prod/items"))
+                .header("host", host)
+                .body("not-an-object"),
+        )
+        .await;
+        assert_ne!(status, 200, "{host}: {body}");
+        assert!(!body.contains("<Error>"), "{host}: {body}");
+    }
+    let listed = s3.list_objects_v2().bucket("prod").send().await.unwrap();
+    assert_eq!(listed.key_count(), Some(0), "bucket must be untouched");
+
+    // On the plain host the existing bucket wins over the stage guess.
+    let (status, body) = get_body(http.get(format!("{base}/prod/items"))).await;
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("<Code>NoSuchKey</Code>"), "{body}");
+}
+
 #[tokio::test]
 async fn custom_domain_base_path_mapping_resolves_with_host_port() {
     // Clients reach fakecloud on a port, so the Host carries it
