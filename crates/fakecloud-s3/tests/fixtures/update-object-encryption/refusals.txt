@@ -1,0 +1,24 @@
+== missing-key
+KMSKeyArn: arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000
+HTTP 400 KMS.NotFoundException
+Key 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000' does not exist
+== missing-key-bucket-key
+KMSKeyArn: arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000
+BucketKeyEnabled: true
+HTTP 400 KMS.NotFoundException
+Key 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000' does not exist
+== not-an-arn
+KMSKeyArn: not-an-arn-but-long-enough
+HTTP 400 InvalidRequest
+Requests modifying object encryption configuration to SSE-KMS require a valid target kms key arn: Malformed ARN - doesn't start with 'arn:'
+== alias-arn
+KMSKeyArn: arn:aws:kms:us-east-1:123456789012:alias/aws/s3
+HTTP 400 InvalidRequest
+Invalid KMS Key ARN format. You must provide the full KMS Key ARN to make an UpdateObjectEncryption request
+== other-account-key
+KMSKeyArn: arn:aws:kms:us-east-1:111122223333:key/00000000-0000-0000-0000-000000000000
+HTTP 403 AccessDenied
+The KMS key must be from the same account as the bucket
+== head-object-after
+ServerSideEncryption: AES256
+SSEKMSKeyId: (none)

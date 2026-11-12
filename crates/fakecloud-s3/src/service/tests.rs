@@ -7252,6 +7252,152 @@ async fn update_object_encryption_to_another_kms_key_reseals_the_body() {
     );
 }
 
+/// An `UpdateObjectEncryption` request in the body form the SDKs send.
+fn update_encryption_request(
+    path: &str,
+    kms_key_arn: &str,
+    bucket_key: Option<&str>,
+) -> AwsRequest {
+    let bucket_key = bucket_key
+        .map(|v| format!("<BucketKeyEnabled>{v}</BucketKeyEnabled>"))
+        .unwrap_or_default();
+    let body = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><ObjectEncryption xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><SSE-KMS><KMSKeyArn>{kms_key_arn}</KMSKeyArn>{bucket_key}</SSE-KMS></ObjectEncryption>"#
+    );
+    make_request(Method::PUT, path, &[("encryption", "")], body.as_bytes())
+}
+
+/// Each `UpdateObjectEncryption` refusal recorded against S3
+/// (`tests/fixtures/update-object-encryption/refusals.txt`) is answered with
+/// the recorded status, code and message, KMS's own refusal of a missing key
+/// included, and leaves the object as it was.
+#[tokio::test]
+async fn update_object_encryption_refusals_match_the_recordings() {
+    let kms: fakecloud_kms::SharedKmsState = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let hook = fakecloud_kms::hook::KmsServiceHook::new(kms.clone(), Default::default());
+    let svc = make_service().with_kms(kms).with_kms_hook(Arc::new(hook));
+    seed_bucket(&svc, "rec");
+    let mut put = make_request(Method::PUT, "/rec/o", &[], b"plain");
+    put.headers
+        .insert("x-amz-server-side-encryption", "AES256".parse().unwrap());
+    svc.handle(put).await.unwrap();
+
+    let recording = include_str!("../../tests/fixtures/update-object-encryption/refusals.txt");
+    let mut checked = 0;
+    for block in recording.split("== ").filter(|b| !b.trim().is_empty()) {
+        let lines: Vec<&str> = block.lines().collect();
+        let field = |name: &str| {
+            lines
+                .iter()
+                .find_map(|l| l.strip_prefix(&format!("{name}: ")))
+        };
+        let Some(arn) = field("KMSKeyArn") else {
+            continue;
+        };
+        let status_line = lines.iter().find(|l| l.starts_with("HTTP ")).unwrap();
+        let mut status_parts = status_line.split_whitespace().skip(1);
+        let status: u16 = status_parts.next().unwrap().parse().unwrap();
+        let code = status_parts.next().unwrap();
+        let message = lines.last().unwrap();
+        let err = svc
+            .update_object_encryption(
+                "123456789012",
+                &update_encryption_request("/rec/o", arn, field("BucketKeyEnabled")),
+                "rec",
+                "o",
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{}: accepted", lines[0]));
+        assert_eq!(err.status().as_u16(), status, "{}", lines[0]);
+        assert_eq!(err.code(), code, "{}", lines[0]);
+        assert_eq!(&err.message(), message, "{}", lines[0]);
+        checked += 1;
+    }
+    assert_eq!(checked, 5);
+    let obj = bucket_of(&svc, "rec").objects["o"].clone();
+    assert_eq!(obj.sse_algorithm.as_deref(), Some("AES256"));
+    assert_eq!(obj.sse_kms_key_id, None);
+    assert_eq!(stored_body(&svc, "rec", "o"), "plain");
+}
+
+/// An object under a legal hold or an unexpired retention period keeps its
+/// encryption (`AccessDenied`, the API reference's Object Lock refusal); an
+/// expired retention no longer protects it.
+#[tokio::test]
+async fn update_object_encryption_refuses_object_locked_objects() {
+    let svc = kms_service();
+    seed_bucket(&svc, "locked");
+    let key = "arn:aws:kms:us-east-1:123456789012:key/lock-key";
+    let now = chrono::Utc::now();
+    let lock = |legal_hold: Option<&str>, mode: Option<&str>, until| {
+        let mut mas = svc.state.write();
+        let obj = mas
+            .default_mut()
+            .buckets
+            .get_mut("locked")
+            .unwrap()
+            .objects
+            .get_mut("o")
+            .unwrap();
+        obj.sse_algorithm = Some("AES256".into());
+        obj.sse_kms_key_id = None;
+        obj.lock_legal_hold = legal_hold.map(str::to_string);
+        obj.lock_mode = mode.map(str::to_string);
+        obj.lock_retain_until = until;
+    };
+    seed_object(&svc, "locked", "o", b"payload");
+    for (legal_hold, mode, until) in [
+        (Some("ON"), None, None),
+        (
+            None,
+            Some("GOVERNANCE"),
+            Some(now + chrono::Duration::days(1)),
+        ),
+        (
+            None,
+            Some("COMPLIANCE"),
+            Some(now + chrono::Duration::days(1)),
+        ),
+    ] {
+        lock(legal_hold, mode, until);
+        let err = assert_aws_err(
+            svc.update_object_encryption(
+                "123456789012",
+                &update_encryption_request("/locked/o", key, None),
+                "locked",
+                "o",
+            ),
+            "AccessDenied",
+        );
+        assert!(
+            err.message().contains("protected by S3 Object Lock"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(bucket_of(&svc, "locked").objects["o"].sse_kms_key_id, None);
+    }
+    lock(
+        Some("OFF"),
+        Some("GOVERNANCE"),
+        Some(now - chrono::Duration::days(1)),
+    );
+    svc.update_object_encryption(
+        "123456789012",
+        &update_encryption_request("/locked/o", key, None),
+        "locked",
+        "o",
+    )
+    .expect("an expired retention and a released hold no longer protect it");
+    assert_eq!(
+        bucket_of(&svc, "locked").objects["o"]
+            .sse_kms_key_id
+            .as_deref(),
+        Some(key)
+    );
+}
+
 #[test]
 fn put_bucket_encryption_rejects_control_char_in_kms_key_id() {
     // Regression (bug-audit 2026-06-13 2.1): a control byte (newline) in the

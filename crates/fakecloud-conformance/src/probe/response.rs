@@ -195,6 +195,13 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             // setting is InvalidBucketAclWithObjectOwnership.
             "AccessControlListNotSupported",
             "InvalidBucketAclWithObjectOwnership",
+            // A request naming an SSE-KMS key KMS does not have is refused with
+            // KMS's own code, which no S3 operation's model declares. Recorded
+            // on UpdateObjectEncryption (HTTP 400 `KMS.NotFoundException`
+            // "Key '<key ARN>' does not exist", see
+            // crates/fakecloud-s3/tests/fixtures/update-object-encryption/),
+            // the same code PutObject and the other SSE-KMS writes return.
+            "KMS.NotFoundException",
         ],
         // Real Firehose answers input that fails the model's patterns, such as a
         // `BucketARN` that is not an S3 ARN, with ValidationException, recorded on

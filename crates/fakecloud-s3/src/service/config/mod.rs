@@ -912,6 +912,14 @@ impl S3Service {
                     format!("Key {key} does not exist."),
                 )
             })?;
+            if from_body {
+                check_update_object_encryption(
+                    obj.sse_algorithm.as_deref(),
+                    new_kms_key_id.as_deref(),
+                    account_id,
+                )?;
+                check_not_object_locked(obj, chrono::Utc::now())?;
+            }
             let bytes = state
                 .read_body(&obj.body)
                 .map_err(crate::service::io_to_aws)?;
@@ -924,14 +932,6 @@ impl S3Service {
                 obj.bucket_key_enabled == Some(true),
             )
         };
-
-        if from_body {
-            check_update_object_encryption(
-                old_alg.as_deref(),
-                new_kms_key_id.as_deref(),
-                account_id,
-            )?;
-        }
 
         // The object records the ARN of the key it is sealed under (resolved
         // in the bucket's region), as PutObject does, whatever form the
@@ -968,8 +968,7 @@ impl S3Service {
                 bucket_key,
                 &existing_bytes,
                 old_kms_key_id.as_deref(),
-            )
-            .map_err(|err| update_encryption_kms_error(from_body, err))?
+            )?
         } else {
             existing_bytes
         };
@@ -983,8 +982,7 @@ impl S3Service {
                 new_bucket_key_on,
                 &plaintext,
                 new_kms_key_id.as_deref(),
-            )
-            .map_err(|err| update_encryption_kms_error(from_body, err))?
+            )?
         } else {
             plaintext
         };
@@ -1574,21 +1572,6 @@ fn validate_default_retention(body: &str) -> Result<(), AwsServiceError> {
     Ok(())
 }
 
-/// A KMS failure while resealing for an `UpdateObjectEncryption` request
-/// (`from_body`: the API form). The operation's documented errors are
-/// `AccessDenied`, `InvalidRequest` and `NoSuchKey`, with `AccessDenied`
-/// the answer when the KMS key cannot be used ("You might receive an
-/// AccessDenied error for several reasons"), so a KMS refusal of the key
-/// (missing, disabled, denied) is `AccessDenied` with KMS's message, rather
-/// than the `KMS.<code>` PutObject reports.
-fn update_encryption_kms_error(from_body: bool, err: AwsServiceError) -> AwsServiceError {
-    if from_body && err.code().starts_with("KMS.") {
-        AwsServiceError::aws_error(StatusCode::FORBIDDEN, "AccessDenied", err.message())
-    } else {
-        err
-    }
-}
-
 /// The new encryption an `UpdateObjectEncryption` body names.
 struct RequestedObjectEncryption {
     kms_key_arn: String,
@@ -1635,8 +1618,12 @@ fn parse_object_encryption(body: &str) -> Result<RequestedObjectEncryption, AwsS
 
 /// The S3 API reference's conditions on an `UpdateObjectEncryption`: the
 /// object must be encrypted with SSE-S3 or SSE-KMS (`source`, its recorded
-/// algorithm), the new key must be named by a well-formed KMS key ARN, and
-/// the key must belong to the bucket owner's account (`bucket_account`).
+/// algorithm), the new key must be named by a KMS key ARN, and the key must
+/// belong to the bucket owner's account (`bucket_account`). The key-ARN
+/// refusals carry the codes and messages recorded against S3
+/// (`tests/fixtures/update-object-encryption/`); the others the reference's
+/// text. Whether the key exists is KMS's to say, when the object is resealed
+/// (`KMS.NotFoundException`, as recorded).
 fn check_update_object_encryption(
     source: Option<&str>,
     kms_key_arn: Option<&str>,
@@ -1661,26 +1648,58 @@ fn check_update_object_encryption(
             "Requests that modify an object's encryption type to SSE-KMS require an AWS KMS key Amazon Resource Name (ARN). Modify the request to specify a KMS key ARN, and then try again.",
         ));
     }
+    if !arn.starts_with("arn:") {
+        return Err(update_encryption_invalid(
+            "Requests modifying object encryption configuration to SSE-KMS require a valid target kms key arn: Malformed ARN - doesn't start with 'arn:'",
+        ));
+    }
+    // Recorded for an alias ARN; any other ARN that is not a KMS key's is
+    // taken to get the same answer.
     let fields: Vec<&str> = arn.splitn(6, ':').collect();
-    let well_formed = matches!(
-        fields.as_slice(),
+    let key_arn = match fields.as_slice() {
         ["arn", partition, "kms", region, account, resource]
             if !partition.is_empty()
                 && !region.is_empty()
-                && account.len() == 12
-                && account.bytes().all(|b| b.is_ascii_digit())
-                && resource.strip_prefix("key/").is_some_and(|id| !id.is_empty())
-    );
-    if !well_formed {
+                && !account.is_empty()
+                && resource
+                    .strip_prefix("key/")
+                    .is_some_and(|id| !id.is_empty()) =>
+        {
+            Some(*account)
+        }
+        _ => None,
+    };
+    let Some(key_account) = key_arn else {
         return Err(update_encryption_invalid(
-            "Requests that modify an object's encryption type to SSE-KMS require a valid AWS KMS key Amazon Resource Name (ARN). Confirm that you have a correctly formatted KMS key ARN in your request, and then try again.",
+            "Invalid KMS Key ARN format. You must provide the full KMS Key ARN to make an UpdateObjectEncryption request",
         ));
-    }
-    if fields[4] != bucket_account {
+    };
+    if key_account != bucket_account {
         return Err(AwsServiceError::aws_error(
             StatusCode::FORBIDDEN,
             "AccessDenied",
-            "The AWS KMS key in the request must be owned by the same account as the bucket. Modify the request to specify a KMS key from the same account, and then try again.",
+            "The KMS key must be from the same account as the bucket",
+        ));
+    }
+    Ok(())
+}
+
+/// The S3 API reference's Object Lock refusal of `UpdateObjectEncryption`:
+/// an object under a legal hold or an unexpired retention period (governance
+/// or compliance mode) at `now` keeps its encryption, `AccessDenied` with
+/// the reference's message.
+fn check_not_object_locked(
+    obj: &crate::state::S3Object,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), AwsServiceError> {
+    let legal_hold = obj.lock_legal_hold.as_deref() == Some("ON");
+    let retained =
+        obj.lock_mode.is_some() && obj.lock_retain_until.is_some_and(|until| until > now);
+    if legal_hold || retained {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::FORBIDDEN,
+            "AccessDenied",
+            "The encryption type for the specified object can\u{2019}t be updated because that object is protected by S3 Object Lock. If the object has a governance-mode retention period or a legal hold, you must first remove the Object Lock status on the object before you issue your UpdateObjectEncryption request. You can't use the UpdateObjectEncryption operation with objects that have an Object Lock compliance mode retention period applied to them.",
         ));
     }
     Ok(())
