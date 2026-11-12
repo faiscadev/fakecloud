@@ -511,8 +511,9 @@ pub(crate) fn archive_matching_event(
 
 /// Walk the named archive, filter events into the replay window, then
 /// fan out each event against rules on `bus_name` to collect its
-/// matching targets. Returns only events that matched at least one
-/// target.
+/// matching targets. With `filter_arns` (the replay destination's
+/// `FilterArns`), only those rules receive the replay. Returns only events
+/// that matched at least one target.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_replay_events_with_targets(
     state: &crate::state::EventBridgeState,
@@ -520,6 +521,7 @@ pub(crate) fn collect_replay_events_with_targets(
     bus_name: &str,
     event_start_time: DateTime<Utc>,
     event_end_time: DateTime<Utc>,
+    filter_arns: Option<&[String]>,
     account_id: &str,
     region: &str,
 ) -> Vec<(PutEvent, Vec<(String, EventTarget)>)> {
@@ -544,6 +546,7 @@ pub(crate) fn collect_replay_events_with_targets(
             .filter(|r| {
                 r.event_bus_name == bus_name
                     && r.state == "ENABLED"
+                    && filter_arns.is_none_or(|arns| arns.contains(&r.arn))
                     && matches_pattern(
                         r.event_pattern.as_deref(),
                         &event.source,

@@ -4612,3 +4612,82 @@ fn start_replay_delivers_to_a_kinesis_target_and_counts_invocations() {
     );
     assert_eq!(*metrics.lock(), vec!["Invocations".to_string()]);
 }
+
+/// `Destination.FilterArns` limits a replay to the rules it names: another
+/// matching rule receives nothing, and DescribeReplay returns the filter.
+#[test]
+fn start_replay_filter_arns_limit_the_rules_replayed_to() {
+    let (svc, messages) = make_service_with_sqs_recorder();
+    let mut rule_arns = Vec::new();
+    for name in ["kept", "skipped"] {
+        let resp = svc
+            .put_rule(&make_request(
+                "PutRule",
+                json!({"Name": name, "EventPattern": r#"{"source": ["my.app"]}"#}),
+            ))
+            .unwrap();
+        rule_arns.push(
+            serde_json::from_slice::<Value>(resp.body.expect_bytes()).unwrap()["RuleArn"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+        svc.put_targets(&make_request(
+            "PutTargets",
+            json!({"Rule": name, "Targets": [{
+                "Id": "q",
+                "Arn": format!("arn:aws:sqs:us-east-1:123456789012:{name}")
+            }]}),
+        ))
+        .unwrap();
+    }
+    let archive = svc
+        .create_archive(&make_request(
+            "CreateArchive",
+            json!({
+                "ArchiveName": "a",
+                "EventSourceArn": "arn:aws:events:us-east-1:123456789012:event-bus/default"
+            }),
+        ))
+        .unwrap();
+    let archive_arn = serde_json::from_slice::<Value>(archive.body.expect_bytes()).unwrap()
+        ["ArchiveArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    svc.put_events(&make_request(
+        "PutEvents",
+        json!({"Entries": [{"Source": "my.app", "DetailType": "T", "Detail": "{}"}]}),
+    ))
+    .unwrap();
+    assert_eq!(messages.lock().len(), 2);
+    messages.lock().clear();
+
+    let destination = json!({
+        "Arn": "arn:aws:events:us-east-1:123456789012:event-bus/default",
+        "FilterArns": [rule_arns[0]]
+    });
+    svc.start_replay(&make_request(
+        "StartReplay",
+        json!({
+            "ReplayName": "rp",
+            "EventSourceArn": archive_arn,
+            "Destination": destination,
+            "EventStartTime": 0.0,
+            "EventEndTime": (chrono::Utc::now().timestamp() + 3600) as f64
+        }),
+    ))
+    .unwrap();
+    let delivered = messages.lock().clone();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].0, "arn:aws:sqs:us-east-1:123456789012:kept");
+
+    let described = svc
+        .describe_replay(&make_request("DescribeReplay", json!({"ReplayName": "rp"})))
+        .unwrap();
+    let described: Value = serde_json::from_slice(described.body.expect_bytes()).unwrap();
+    assert_eq!(
+        described["Destination"]["FilterArns"],
+        json!([rule_arns[0]])
+    );
+}

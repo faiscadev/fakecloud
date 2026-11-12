@@ -410,12 +410,21 @@ impl EventBridgeService {
         )
         .to_string();
 
+        // `Destination.FilterArns` limits the replay to those rules (kept in
+        // the stored destination, which DescribeReplay returns as given).
+        let filter_arns: Option<Vec<String>> =
+            input.destination["FilterArns"].as_array().map(|arns| {
+                arns.iter()
+                    .filter_map(|a| a.as_str().map(str::to_string))
+                    .collect()
+            });
         let events_to_deliver = collect_replay_events_with_targets(
             state,
             &archive_name,
             &bus_name,
             input.event_start_time,
             input.event_end_time,
+            filter_arns.as_deref(),
             &req.account_id,
             &req.region,
         );
