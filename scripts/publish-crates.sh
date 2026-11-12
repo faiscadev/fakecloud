@@ -62,10 +62,10 @@ CRATES=(
   fakecloud-core
 
   # Layer 3a: depend on aws + core + persistence only
-  fakecloud-sqs
   fakecloud-iam
   fakecloud-organizations
   fakecloud-kms
+  fakecloud-sqs            # dev-depends on kms (versioned, so it ships)
   fakecloud-ec2            # depends on aws + core; dev-depends on kms (versioned, so it ships)
   fakecloud-lambda
   fakecloud-logs
