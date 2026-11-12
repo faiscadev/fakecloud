@@ -3298,3 +3298,96 @@ async fn queue_policy_principal_wildcard_grants_any_user() {
         .await
         .unwrap();
 }
+
+/// UpdateObjectEncryption is authorized as `s3:UpdateObjectEncryption` on the
+/// object: an Allow on the bucket ARN alone does not reach it, one on
+/// `bucket/*` does.
+#[tokio::test]
+async fn s3_update_object_encryption_is_authorized_on_the_object() {
+    let server = start_strict().await;
+    let boot = sdk_config_with(&server, "test", "test").await;
+    let root_s3 = path_style_s3(&boot);
+    root_s3
+        .create_bucket()
+        .bucket("uoe-bucket")
+        .send()
+        .await
+        .unwrap();
+    root_s3
+        .put_object()
+        .bucket("uoe-bucket")
+        .key("doc.txt")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap();
+    let key_arn = aws_sdk_kms::Client::new(&boot)
+        .create_key()
+        .send()
+        .await
+        .unwrap()
+        .key_metadata()
+        .unwrap()
+        .arn()
+        .unwrap()
+        .to_string();
+    let (akid, secret) = bootstrap_user(&server, "rekeyer").await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let update = || {
+        s3.update_object_encryption()
+            .bucket("uoe-bucket")
+            .key("doc.txt")
+            .object_encryption(aws_sdk_s3::types::ObjectEncryption::Ssekms(
+                aws_sdk_s3::types::SsekmsEncryption::builder()
+                    .kms_key_arn(&key_arn)
+                    .build()
+                    .unwrap(),
+            ))
+            .send()
+    };
+    let policy = |resource: &str| {
+        format!(
+            r#"{{"Version":"2012-10-17","Statement":[
+                {{"Effect":"Allow","Action":"s3:UpdateObjectEncryption","Resource":"{resource}"}},
+                {{"Effect":"Allow","Action":"kms:*","Resource":"*"}}]}}"#
+        )
+    };
+
+    attach_inline_policy(
+        &server,
+        "rekeyer",
+        "uoe",
+        &policy("arn:aws:s3:::uoe-bucket"),
+    )
+    .await;
+    let err = update()
+        .await
+        .expect_err("an Allow on the bucket ARN does not cover the object");
+    assert!(format!("{err:?}").contains("AccessDenied"), "{err:?}");
+    // s3:PutObject on the object is not the action either.
+    attach_inline_policy(
+        &server,
+        "rekeyer",
+        "uoe",
+        &policy("arn:aws:s3:::uoe-bucket").replace(
+            "s3:UpdateObjectEncryption\",\"Resource\":\"arn:aws:s3:::uoe-bucket\"",
+            "s3:PutObject\",\"Resource\":\"arn:aws:s3:::uoe-bucket/*\"",
+        ),
+    )
+    .await;
+    let err = update()
+        .await
+        .expect_err("s3:PutObject does not authorize UpdateObjectEncryption");
+    assert!(format!("{err:?}").contains("AccessDenied"), "{err:?}");
+
+    attach_inline_policy(
+        &server,
+        "rekeyer",
+        "uoe",
+        &policy("arn:aws:s3:::uoe-bucket/*"),
+    )
+    .await;
+    update()
+        .await
+        .expect("an Allow on bucket/* authorizes UpdateObjectEncryption");
+}

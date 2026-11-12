@@ -1296,6 +1296,15 @@ impl S3Store for DiskS3Store {
 
     /// The same files [`S3Store::put_object`] writes, with the slot's
     /// annotation records left where they are.
+    ///
+    /// The `.bin` body and the `.toml` sidecar are each replaced atomically,
+    /// body first, as `put_object` writes them, but not together: a crash
+    /// between the two renames leaves the new body under the old sidecar.
+    /// For a reseal that order is the safer one: the body's KMS envelope
+    /// names the key that sealed it, so the new body still opens under the
+    /// old sidecar's key id; only a changed S3 Bucket Key setting (which the
+    /// sidecar records, and which selects the encryption context) would not
+    /// match until the request is retried.
     fn replace_object_body(
         &self,
         bucket: &str,

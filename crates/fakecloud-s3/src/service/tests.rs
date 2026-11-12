@@ -7481,6 +7481,124 @@ async fn update_object_encryption_yields_to_a_concurrent_change() {
     }
 }
 
+/// Another UpdateObjectEncryption that commits a new key or Bucket Key
+/// setting while this one reseals wins: this one aborts rather than record
+/// its own key or flag over a body it did not seal.
+#[tokio::test]
+async fn update_object_encryption_yields_to_a_concurrent_reencryption() {
+    let other_key = "arn:aws:kms:us-east-1:123456789012:key/other";
+    let cases: [Interleave; 2] = [
+        Box::new(move |obj: &mut crate::state::S3Object| {
+            obj.sse_algorithm = Some("aws:kms".to_string());
+            obj.sse_kms_key_id = Some(other_key.to_string());
+        }),
+        Box::new(|obj: &mut crate::state::S3Object| {
+            obj.bucket_key_enabled = Some(true);
+        }),
+    ];
+    for (case, interleave) in cases.into_iter().enumerate() {
+        let state: SharedS3State = Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let svc = S3Service::new(state.clone(), Arc::new(DeliveryBus::new())).with_kms_hook(
+            Arc::new(InterleavingKms {
+                state: state.clone(),
+                interleave,
+            }),
+        );
+        seed_bucket(&svc, "race");
+        seed_object(&svc, "race", "o", b"payload");
+        let seeded_key = "arn:aws:kms:us-east-1:123456789012:key/seeded";
+        {
+            let mut mas = state.write();
+            let obj = mas
+                .default_mut()
+                .buckets
+                .get_mut("race")
+                .unwrap()
+                .objects
+                .get_mut("o")
+                .unwrap();
+            obj.sse_algorithm = Some("aws:kms".to_string());
+            obj.sse_kms_key_id = Some(seeded_key.to_string());
+            obj.body = fakecloud_persistence::BodyRef::Memory(Bytes::from(format!(
+                "enc:{seeded_key}:payload"
+            )));
+        }
+        let before = bucket_of(&svc, "race").objects["o"].clone();
+        assert_aws_err(
+            svc.update_object_encryption(
+                "123456789012",
+                &update_encryption_request(
+                    "/race/o",
+                    "arn:aws:kms:us-east-1:123456789012:key/mine",
+                    None,
+                ),
+                "race",
+                "o",
+            ),
+            "OperationAborted",
+        );
+        let obj = bucket_of(&svc, "race").objects["o"].clone();
+        // What the interleaved request committed stays; nothing of this one.
+        assert_ne!(
+            obj.sse_kms_key_id.as_deref(),
+            Some("arn:aws:kms:us-east-1:123456789012:key/mine"),
+            "case {case}"
+        );
+        assert_eq!(
+            stored_body(&svc, "race", "o"),
+            format!("enc:{seeded_key}:payload"),
+            "case {case}"
+        );
+        assert_eq!(obj.etag, before.etag, "case {case}");
+    }
+}
+
+/// A store that fails to take the resealed body leaves the object as it was
+/// in memory too: the new key and flag are applied only once persisted.
+#[test]
+fn update_object_encryption_changes_memory_only_after_the_store() {
+    let (svc, store) = make_recording_service();
+    seed_bucket(&svc, "b");
+    seed_object(&svc, "b", "k", b"payload");
+    svc.state
+        .write()
+        .default_mut()
+        .buckets
+        .get_mut("b")
+        .unwrap()
+        .objects
+        .get_mut("k")
+        .unwrap()
+        .sse_algorithm = Some("AES256".to_string());
+    *store.fail_put.lock() = Some("b/k".to_string());
+    let err = svc
+        .update_object_encryption(
+            "123456789012",
+            &update_encryption_request(
+                "/b/k",
+                "arn:aws:kms:us-east-1:123456789012:key/k",
+                Some("true"),
+            ),
+            "b",
+            "k",
+        )
+        .err()
+        .expect("the store refused the body");
+    assert_eq!(
+        err.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        err.code()
+    );
+    let obj = bucket_of(&svc, "b").objects["k"].clone();
+    assert_eq!(obj.sse_algorithm.as_deref(), Some("AES256"));
+    assert_eq!(obj.sse_kms_key_id, None);
+    assert_eq!(obj.bucket_key_enabled, None);
+    assert_eq!(stored_body(&svc, "b", "k"), "payload");
+}
+
 /// The request must carry an `ObjectEncryption` body: an empty one is
 /// MissingRequestBodyError and anything else MalformedXML (both recorded),
 /// and the SSE headers PutObject takes are no substitute; the object keeps

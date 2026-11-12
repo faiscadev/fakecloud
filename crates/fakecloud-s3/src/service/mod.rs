@@ -2817,6 +2817,13 @@ fn s3_resource_for(
         "CompleteMultipartUpload",
         "AbortMultipartUpload",
         "ListParts",
+        // Object-level operations of their own: UpdateObjectEncryption (the
+        // user guide's example policy grants it on `bucket/*`), RenameObject
+        // (on the destination key) and GetObjectTorrent. SelectObjectContent
+        // is authorized as GetObject, above.
+        "UpdateObjectEncryption",
+        "RenameObject",
+        "GetObjectTorrent",
     ];
     if action == "ListBuckets" {
         return "*".to_string();
@@ -4764,6 +4771,22 @@ mod partition_tests {
             s3_resource_for("us-east-1", "ListObjectsV2", Some("b"), None),
             "arn:aws:s3:::b"
         );
+    }
+
+    /// UpdateObjectEncryption, RenameObject and GetObjectTorrent act on an
+    /// object, so they are authorized on `bucket/key`, not the bucket.
+    #[test]
+    fn object_level_operations_are_authorized_on_the_object() {
+        for action in ["UpdateObjectEncryption", "RenameObject", "GetObjectTorrent"] {
+            assert_eq!(
+                s3_resource_for("us-east-1", action, Some("b"), Some("k")),
+                "arn:aws:s3:::b/k",
+                "{action}"
+            );
+        }
+        let query = HashMap::from([("torrent".to_string(), String::new())]);
+        let torrent = s3_detect_action("GET", Some("b"), Some("k"), &query);
+        assert_eq!(torrent, Some("GetObjectTorrent"));
     }
 
     #[test]

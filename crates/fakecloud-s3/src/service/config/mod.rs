@@ -873,7 +873,7 @@ impl S3Service {
         }
         let body = std::str::from_utf8(&req.body)
             .ok()
-            .filter(|b| b.contains("<ObjectEncryption"))
+            .filter(|b| is_object_encryption_document(b))
             .ok_or_else(update_encryption_malformed_xml)?;
         let encryption = parse_object_encryption(body)?;
         // `BucketKeyEnabled` "defaults to false" (the model's SSEKMSEncryption).
@@ -968,36 +968,34 @@ impl S3Service {
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        {
+        let mut updated = {
             let current = target_version(b, key, version_id.as_deref())
                 .ok()
                 .filter(|obj| snapshot.is(obj))
                 .ok_or_else(update_encryption_conflict)?;
             check_not_object_locked(current, chrono::Utc::now())?;
-        }
-        let update = |obj: &mut crate::state::S3Object| {
-            obj.sse_algorithm = Some("aws:kms".to_string());
-            obj.sse_kms_key_id = Some(new_kms_key_id.clone());
-            obj.bucket_key_enabled = Some(new_bucket_key);
+            current.clone()
         };
-        for_each_copy(b, key, &snapshot, update);
-        // Persist through the store so the resealed body and its SSE
-        // metadata survive a restart, in the version's own slot.
-        let meta = object_meta_snapshot(
-            target_version(b, key, version_id.as_deref())
-                .map_err(|_| update_encryption_conflict())?,
-        );
+        updated.sse_algorithm = Some("aws:kms".to_string());
+        updated.sse_kms_key_id = Some(new_kms_key_id.clone());
+        updated.bucket_key_enabled = Some(new_bucket_key);
+        // Persist first, from the updated copy, and change memory only once
+        // the store took it: a store failure leaves the object as it was in
+        // both, as commit_object_version_with does. The slot is the
+        // version's own; resealed, the same version with new bytes keeps its
+        // annotations (AWS: the operation "preserves all object metadata
+        // properties").
+        let meta = object_meta_snapshot(&updated);
         let slot = snapshot.version_id.as_deref();
-        match new_bytes {
+        let new_body = match new_bytes {
             None => {
                 self.store
                     .put_object_meta(bucket, key, slot, &meta)
                     .map_err(crate::service::persistence_error)?;
+                None
             }
-            Some(new_bytes) => {
-                // The same version with new bytes: its annotations stay (AWS:
-                // the operation "preserves all object metadata properties").
-                let new_body = crate::service::objects::run_blocking_io(|| {
+            Some(new_bytes) => Some(
+                crate::service::objects::run_blocking_io(|| {
                     self.store.replace_object_body(
                         bucket,
                         key,
@@ -1006,10 +1004,17 @@ impl S3Service {
                         &meta,
                     )
                 })
-                .map_err(crate::service::persistence_error)?;
-                for_each_copy(b, key, &snapshot, |obj| obj.body = new_body.clone());
+                .map_err(crate::service::persistence_error)?,
+            ),
+        };
+        for_each_copy(b, key, &snapshot, |obj| {
+            obj.sse_algorithm = updated.sse_algorithm.clone();
+            obj.sse_kms_key_id = updated.sse_kms_key_id.clone();
+            obj.bucket_key_enabled = updated.bucket_key_enabled;
+            if let Some(body) = &new_body {
+                obj.body = body.clone();
             }
-        }
+        });
         Ok(empty_response(StatusCode::OK))
     }
 
@@ -1547,6 +1552,52 @@ fn update_encryption_malformed_xml() -> AwsServiceError {
     )
 }
 
+/// Whether `body` is a well-formed XML document whose one root element is
+/// `ObjectEncryption` (in any namespace): what an UpdateObjectEncryption body
+/// must be, anything else being MalformedXML.
+fn is_object_encryption_document(body: &str) -> bool {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(body);
+    let mut depth = 0usize;
+    let mut root = None;
+    loop {
+        let element = match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                depth += 1;
+                (depth == 1).then(|| e.local_name().as_ref() == b"ObjectEncryption")
+            }
+            Ok(Event::Empty(e)) => {
+                (depth == 0).then(|| e.local_name().as_ref() == b"ObjectEncryption")
+            }
+            Ok(Event::End(_)) => {
+                let Some(outer) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = outer;
+                None
+            }
+            Ok(Event::Text(text)) => {
+                if depth == 0 && !text.iter().all(u8::is_ascii_whitespace) {
+                    return false;
+                }
+                None
+            }
+            Ok(Event::CData(_)) if depth == 0 => return false,
+            Ok(Event::Eof) => break,
+            Ok(_) => None,
+            Err(_) => return false,
+        };
+        if let Some(is_object_encryption) = element {
+            // A second root element is not a document.
+            if root.is_some() {
+                return false;
+            }
+            root = Some(is_object_encryption);
+        }
+    }
+    depth == 0 && root == Some(true)
+}
+
 /// S3's answer when another request changed the object while this one was
 /// resealing it (Error Responses: `OperationAborted`, 409, "A conflicting
 /// conditional operation is currently in progress against this resource").
@@ -1618,13 +1669,18 @@ impl VersionSnapshot {
         }
     }
 
-    /// Whether `obj` is still the version this snapshot read: a write that
-    /// replaced it carries another write time (and usually ETag and id).
+    /// Whether `obj` is still the version this snapshot read, encrypted as
+    /// it was: a write that replaced it carries another write time (and
+    /// usually ETag and id), and a concurrent UpdateObjectEncryption another
+    /// key or Bucket Key setting, whose body this request did not reseal.
     fn is(&self, obj: &crate::state::S3Object) -> bool {
         obj.version_id == self.version_id
             && obj.etag == self.etag
             && obj.last_modified == self.last_modified
             && obj.is_delete_marker == self.is_delete_marker
+            && obj.sse_algorithm == self.sse_algorithm
+            && obj.sse_kms_key_id == self.sse_kms_key_id
+            && (obj.bucket_key_enabled == Some(true)) == self.bucket_key
     }
 }
 
@@ -1790,6 +1846,34 @@ mod update_object_encryption_tests {
 
     fn code(result: Result<impl std::fmt::Debug, AwsServiceError>) -> String {
         result.unwrap_err().code().to_string()
+    }
+
+    /// The body is a well-formed document whose root is `ObjectEncryption`,
+    /// in any namespace or prefix; anything else is MalformedXML.
+    #[test]
+    fn only_an_object_encryption_document_is_a_body() {
+        for body in [
+            "<ObjectEncryption/>",
+            r#"<?xml version="1.0" encoding="UTF-8"?><ObjectEncryption xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><SSE-KMS><KMSKeyArn>a</KMSKeyArn></SSE-KMS></ObjectEncryption>"#,
+            r#"<s3:ObjectEncryption xmlns:s3="http://s3.amazonaws.com/doc/2006-03-01/"></s3:ObjectEncryption>"#,
+            "  <ObjectEncryption></ObjectEncryption>\n",
+        ] {
+            assert!(is_object_encryption_document(body), "{body}");
+        }
+        for body in [
+            "",
+            "garbage",
+            "<Foo/>",
+            "<ObjectEncryptionX/>",
+            "<ObjectEncryption>",
+            "<ObjectEncryption><SSE-KMS></ObjectEncryption>",
+            "<ObjectEncryption></ObjectEncryption><ObjectEncryption/>",
+            "<ObjectEncryption/>trailing",
+            "</ObjectEncryption>",
+            "<Wrapper><ObjectEncryption/></Wrapper>",
+        ] {
+            assert!(!is_object_encryption_document(body), "{body}");
+        }
     }
 
     #[test]
