@@ -1485,13 +1485,13 @@ impl S3Service {
         })
     }
 
-    /// [`Self::caller_may`] for the uploader whose `access_key` signed a
-    /// browser-form upload's policy (the request itself carries no
-    /// signature): `s3:<action>` on the object `key` of `bucket`.
-    pub(crate) fn uploader_may(
+    /// [`Self::caller_may`] for a request the handler derived from the one it
+    /// serves (a browser-form upload as the PutObject its fields make it,
+    /// signed by the uploader's `access_key_id` or anonymous): `s3:<action>`
+    /// on the object `key` of `bucket`, with that request's condition keys.
+    pub(crate) fn caller_may_for(
         &self,
-        req: &AwsRequest,
-        access_key: &str,
+        derived: &AwsRequest,
         action: &'static str,
         bucket: &str,
         key: &str,
@@ -1501,9 +1501,9 @@ impl S3Service {
         };
         let region = self
             .bucket_region(bucket)
-            .unwrap_or_else(|| req.region.clone());
-        authorizer.authorize_as(
-            access_key,
+            .unwrap_or_else(|| derived.region.clone());
+        authorizer.authorize_for(
+            derived,
             &fakecloud_core::auth::IamAction {
                 service: "s3",
                 action,

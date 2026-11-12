@@ -337,6 +337,23 @@ fn enforce_no_extra_fields(
     Ok(())
 }
 
+/// A POST Object `tagging` field -- a `Tagging` XML document -- as the
+/// URL-encoded `key=value&...` tag set PutObject's `x-amz-tagging` carries.
+fn tagging_header(xml: &str) -> String {
+    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    crate::service::parse_tagging_xml(xml)
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}={}",
+                utf8_percent_encode(k, NON_ALPHANUMERIC),
+                utf8_percent_encode(v, NON_ALPHANUMERIC)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// Absolute, path-style URL for a stored object, derived from the request's
 /// `Host` header (matching fakecloud's path-style addressing). Falls back to a
 /// root-relative path when no usable host is present. Used for the `Location`
@@ -535,12 +552,27 @@ impl S3Service {
                 .parse()
                 .unwrap_or_else(|_| http::HeaderValue::from_static("binary/octet-stream")),
         );
-        // Forward any other AWS-meaningful fields the caller supplied
-        // (storage class, ACL, user metadata, cache/content headers) as if
-        // they were the equivalent PutObject headers — POST Object form
-        // field names match their header counterparts verbatim.
+        // The form fields that are PutObject headers: the `x-amz-*` ones
+        // (storage class, encryption, user metadata, lock, ...) and the
+        // cache/content headers keep their names; `acl` is the canned ACL
+        // (`x-amz-acl`) and `tagging` the object's tag set as a `Tagging` XML
+        // document (POST Object API reference), which PutObject takes as the
+        // URL-encoded `x-amz-tagging`. Like every other field, these must be
+        // named by the policy's conditions (checked above).
         for f in &form.fields {
             let lower = f.name.to_ascii_lowercase();
+            if lower == "acl" {
+                if let Ok(value) = f.value.parse::<http::HeaderValue>() {
+                    synth_headers.insert("x-amz-acl", value);
+                }
+                continue;
+            }
+            if lower == "tagging" {
+                if let Ok(value) = tagging_header(&f.value).parse::<http::HeaderValue>() {
+                    synth_headers.insert("x-amz-tagging", value);
+                }
+                continue;
+            }
             let forwardable = lower == "cache-control"
                 || lower == "content-disposition"
                 || lower == "content-encoding"
@@ -571,9 +603,44 @@ impl S3Service {
         // for the uploader the policy was signed by (or anonymously): AWS
         // authorizes a POST Object as s3:PutObject, plus s3:PutObjectAcl /
         // s3:PutObjectTagging / the Object Lock actions for the ACL, tagging
-        // and lock fields it sets, exactly as PutObject's headers. Dispatch
-        // cannot see the key or the signer, so this is the handler's
-        // (`iam_authorized_by_handler`).
+        // and lock fields it sets, exactly as PutObject's headers. The
+        // evaluation sees that PutObject -- the form's fields as its headers
+        // (so `s3:x-amz-server-side-encryption`, `s3:x-amz-acl`,
+        // `aws:RequestTag/*` ... come from the form) and the connection's
+        // own headers -- not the multipart POST that carried it. Dispatch
+        // cannot see the key, the fields or the signer, so this is the
+        // handler's (`iam_authorized_by_handler`).
+        let mut authorized_headers = synth_headers.clone();
+        for name in [
+            "host",
+            "origin",
+            "referer",
+            "user-agent",
+            "x-forwarded-proto",
+            "x-forwarded-for",
+        ] {
+            if let Some(value) = req.headers.get(name) {
+                authorized_headers.insert(name, value.clone());
+            }
+        }
+        let as_put = AwsRequest {
+            service: "s3".to_string(),
+            action: String::new(),
+            region: req.region.clone(),
+            account_id: req.account_id.clone(),
+            request_id: req.request_id.clone(),
+            headers: authorized_headers,
+            query_params: HashMap::new(),
+            body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![bucket.to_string(), resolved_key.clone()],
+            raw_path: format!("/{bucket}/{resolved_key}"),
+            raw_query: String::new(),
+            method: Method::PUT,
+            is_query_protocol: false,
+            access_key_id: signer.clone(),
+            principal: None,
+        };
         let mut actions = vec!["PutObject"];
         actions.extend(
             crate::service::iam_actions::object_write_extras(&synth_headers)
@@ -583,10 +650,9 @@ impl S3Service {
                     _ => None,
                 }),
         );
-        let allowed = actions.into_iter().all(|action| match signer.as_deref() {
-            Some(access_key) => self.uploader_may(req, access_key, action, bucket, &resolved_key),
-            None => self.caller_may(req, action, bucket, Some(&resolved_key)),
-        });
+        let allowed = actions
+            .into_iter()
+            .all(|action| self.caller_may_for(&as_put, action, bucket, &resolved_key));
         if !allowed {
             return Err(access_denied("Access Denied"));
         }

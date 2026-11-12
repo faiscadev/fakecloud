@@ -202,13 +202,15 @@ pub trait RequestAuthorizer: Send + Sync {
     /// a refused request is logged and served.
     fn authorize(&self, action: &IamAction) -> bool;
 
-    /// Whether the holder of `access_key_id` may perform `action` in this
-    /// request: for a request whose caller is named inside it rather than by
-    /// its signature (an S3 browser-form upload signs its policy document with
-    /// the uploader's key). Evaluated as [`RequestAuthorizer::authorize`]
-    /// would for a request signed with that key, the reserved `test*` root
-    /// bypass included.
-    fn authorize_as(&self, access_key_id: &str, action: &IamAction) -> bool;
+    /// Whether `action` is allowed for `request` -- a request the handler
+    /// derived from the one it serves, whose caller and condition-key sources
+    /// live inside the body (an S3 browser-form upload: its fields are the
+    /// request headers that matter, and its policy is signed with the
+    /// uploader's key). Evaluated as [`RequestAuthorizer::authorize`] would
+    /// for `request` arriving signed with its `access_key_id` (anonymous when
+    /// `None`; the reserved `test*` root bypass included), from the same
+    /// client connection.
+    fn authorize_for(&self, request: &crate::service::AwsRequest, action: &IamAction) -> bool;
 }
 
 tokio::task_local! {
@@ -1186,7 +1188,7 @@ mod tests {
         fn authorize(&self, action: &IamAction) -> bool {
             action.action == "GetObject"
         }
-        fn authorize_as(&self, _: &str, action: &IamAction) -> bool {
+        fn authorize_for(&self, _: &crate::service::AwsRequest, action: &IamAction) -> bool {
             self.authorize(action)
         }
     }

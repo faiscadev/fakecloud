@@ -873,20 +873,21 @@ impl crate::auth::RequestAuthorizer for DispatchAuthorizer {
             .is_none()
     }
 
-    fn authorize_as(&self, access_key_id: &str, action: &crate::auth::IamAction) -> bool {
-        // The request as if signed with that key: its resolved credential and
-        // principal, which every enforcement path reads.
-        let resolved = if is_root_bypass(access_key_id) {
-            None
-        } else {
-            self.enforcement
-                .config
-                .credential_resolver
-                .as_ref()
-                .and_then(|r| r.resolve(access_key_id))
-        };
-        let mut request = authorization_copy(&self.request);
-        request.access_key_id = Some(access_key_id.to_string());
+    fn authorize_for(&self, request: &AwsRequest, action: &crate::auth::IamAction) -> bool {
+        // `request` as if signed with its key: that key's resolved credential
+        // and principal, which every enforcement path reads.
+        let resolved = request
+            .access_key_id
+            .as_deref()
+            .filter(|key| !is_root_bypass(key))
+            .and_then(|key| {
+                self.enforcement
+                    .config
+                    .credential_resolver
+                    .as_ref()
+                    .and_then(|r| r.resolve(key))
+            });
+        let mut request = authorization_copy(request);
         request.principal = resolved.as_ref().map(|r| r.principal.clone());
         let enforcement = IamEnforcement {
             caller_session_policies: resolved
