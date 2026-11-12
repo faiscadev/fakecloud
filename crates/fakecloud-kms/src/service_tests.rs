@@ -5503,6 +5503,16 @@ fn grants_to_service_principals() {
         .map(|g| &g["GrantId"])
         .collect();
     assert_eq!(retirable, vec![&service_grant]);
+    for bad in [String::new(), "s".repeat(129)] {
+        let err = svc
+            .list_retirable_grants(&make_request(
+                "ListRetirableGrants",
+                json!({"RetiringServicePrincipal": bad}),
+            ))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "InvalidArnException");
+    }
 }
 
 /// Encryption-context grant constraints are refused for an operation that

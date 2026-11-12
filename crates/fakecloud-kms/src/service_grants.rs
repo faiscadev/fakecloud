@@ -279,7 +279,12 @@ impl KmsService {
             ));
         }
         let retiring_principal = match service_principal {
-            Some(_) => None,
+            Some(principal) => {
+                recoded("InvalidArnException", || {
+                    validate_string_length("retiringServicePrincipal", principal, 1, 128)
+                })?;
+                None
+            }
             None => {
                 recoded("InvalidArnException", || {
                     validate_required("RetiringPrincipal", &body["RetiringPrincipal"])
