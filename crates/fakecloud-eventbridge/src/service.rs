@@ -1642,6 +1642,27 @@ impl StartReplayInput {
             .and_then(|f| DateTime::from_timestamp(f as i64, 0))
             .unwrap_or_else(Utc::now);
 
+        // `Destination.FilterArns` is a list of ARN strings. A value of
+        // another type cannot be deserialized (SerializationException, as
+        // for other mistyped inputs), rather than being dropped. The model
+        // puts no length constraint on the list, and the member ARN length
+        // (1-1600) is a per-field constraint left to the SDK like the
+        // others: an ARN no rule has simply selects no rule. An empty list
+        // selects no rule either (the docs do not make it "no filter").
+        let filter_arns = &destination["FilterArns"];
+        let mistyped = match filter_arns {
+            Value::Null => false,
+            Value::Array(items) => items.iter().any(|item| !item.is_string()),
+            _ => true,
+        };
+        if mistyped {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "SerializationException",
+                "Value for 'Destination.FilterArns' must be a list of strings",
+            ));
+        }
+
         let destination_arn = destination["Arn"].as_str().unwrap_or("").to_string();
         if !destination_arn.contains(":event-bus/") {
             // Missing/invalid destination cannot be resolved to a bus —

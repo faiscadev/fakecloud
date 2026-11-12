@@ -4690,4 +4690,46 @@ fn start_replay_filter_arns_limit_the_rules_replayed_to() {
         described["Destination"]["FilterArns"],
         json!([rule_arns[0]])
     );
+
+    // An empty filter selects no rule.
+    messages.lock().clear();
+    svc.start_replay(&make_request(
+        "StartReplay",
+        json!({
+            "ReplayName": "rp-empty",
+            "EventSourceArn": archive_arn,
+            "Destination": {
+                "Arn": "arn:aws:events:us-east-1:123456789012:event-bus/default",
+                "FilterArns": []
+            },
+            "EventStartTime": 0.0,
+            "EventEndTime": (chrono::Utc::now().timestamp() + 3600) as f64
+        }),
+    ))
+    .unwrap();
+    assert!(messages.lock().is_empty());
+
+    // A filter that is not a list of strings is refused, not dropped.
+    for filter in [
+        json!([1]),
+        json!("arn:aws:events:us-east-1:123456789012:rule/kept"),
+    ] {
+        let err = match svc.start_replay(&make_request(
+            "StartReplay",
+            json!({
+                "ReplayName": "rp-bad",
+                "EventSourceArn": archive_arn,
+                "Destination": {
+                    "Arn": "arn:aws:events:us-east-1:123456789012:event-bus/default",
+                    "FilterArns": filter
+                },
+                "EventStartTime": 0.0,
+                "EventEndTime": (chrono::Utc::now().timestamp() + 3600) as f64
+            }),
+        )) {
+            Err(e) => e,
+            Ok(_) => panic!("a mistyped FilterArns must be refused"),
+        };
+        assert_eq!(err.code(), "SerializationException");
+    }
 }
