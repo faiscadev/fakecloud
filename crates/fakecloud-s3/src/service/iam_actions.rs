@@ -42,6 +42,9 @@ pub(crate) enum Need {
     /// `s3:GetObject`, or `s3:GetObjectVersion` for a versioned source, on the
     /// source object.
     CopySource,
+    /// `s3:GetObjectAnnotation` on the copy source of a CopyObject that
+    /// copies the source's annotations.
+    CopySourceAnnotations,
     /// `iam:PassRole` on a role the request hands to S3.
     PassRole(String),
 }
@@ -198,7 +201,17 @@ pub(crate) fn required(op: &str, req: &AwsRequest) -> Vec<Need> {
         // The destination write, then the source read.
         "CopyObject" => {
             let mut needs = vec![s3("PutObject"), Need::CopySource];
-            needs.extend(object_write_extras(&req.headers));
+            // x-amz-object-annotation-directive: "When set to COPY [the
+            // default], you must have s3:GetObjectAnnotation permission on
+            // the source object and s3:PutObjectAnnotation permission on the
+            // destination." EXCLUDE copies none.
+            let copies_annotations = header(&req.headers, "x-amz-object-annotation-directive")
+                .is_none_or(|d| d != "EXCLUDE");
+            if copies_annotations {
+                needs.push(Need::CopySourceAnnotations);
+                needs.push(s3("PutObjectAnnotation"));
+            }
+            needs.extend(copy_write_extras(&req.headers));
             needs
         }
         "UploadPart" | "CompleteMultipartUpload" => vec![s3("PutObject")],
@@ -272,13 +285,34 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 /// `s3:PutObjectTagging` for `x-amz-tagging`, `s3:PutObjectRetention` for a
 /// retention mode or date and `s3:PutObjectLegalHold` for a legal hold.
 fn object_write_extras(headers: &HeaderMap) -> Vec<Need> {
+    write_extras(headers, true)
+}
+
+/// [`object_write_extras`] for a CopyObject, whose `x-amz-tagging` sets the
+/// copy's tags only under `x-amz-tagging-directive: REPLACE`; under COPY (the
+/// default) the source's tag set is copied and the header is ignored.
+pub(crate) fn copy_write_extras(headers: &HeaderMap) -> Vec<Need> {
+    write_extras(headers, copy_replaces_tags(headers))
+}
+
+/// Whether a CopyObject replaces the copy's tag set with its `x-amz-tagging`.
+pub(crate) fn copy_replaces_tags(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-amz-tagging-directive")
+        .and_then(|v| v.to_str().ok())
+        == Some("REPLACE")
+}
+
+fn write_extras(headers: &HeaderMap, tagging_applies: bool) -> Vec<Need> {
     let mut needs = Vec::new();
     if header(headers, "x-amz-acl").is_some() || has_grant_headers(headers) {
         needs.push(Need::Own("s3", "PutObjectAcl"));
     }
-    if header(headers, "x-amz-tagging").is_some() {
+    if tagging_applies && header(headers, "x-amz-tagging").is_some() {
         needs.push(Need::Own("s3", "PutObjectTagging"));
     }
+    // Presence, blank included, as the write itself reads these headers: a
+    // blank lock header is not ignored but refused as an invalid argument.
     if headers.contains_key("x-amz-object-lock-mode")
         || headers.contains_key("x-amz-object-lock-retain-until-date")
     {
@@ -338,21 +372,28 @@ fn delete_objects(req: &AwsRequest) -> Vec<Need> {
     if entries.is_empty() {
         return vec![Need::Key("DeleteObject", String::new())];
     }
-    let mut needs = Vec::with_capacity(entries.len() * if bypass { 2 } else { 1 });
-    for entry in entries {
-        let action = if entry.version_id.is_some() {
-            "DeleteObjectVersion"
-        } else {
-            "DeleteObject"
-        };
-        if bypass {
-            needs.push(Need::Key(action, entry.key.clone()));
-            needs.push(Need::Key("BypassGovernanceRetention", entry.key));
-        } else {
-            needs.push(Need::Key(action, entry.key));
-        }
+    entries
+        .into_iter()
+        .flat_map(|entry| {
+            delete_entry_actions(entry.version_id.is_some(), bypass)
+                .into_iter()
+                .map(move |action| Need::Key(action, entry.key.clone()))
+        })
+        .collect()
+}
+
+/// The `s3:` actions deleting one DeleteObjects entry needs, on its object.
+pub(crate) fn delete_entry_actions(versioned: bool, bypass: bool) -> Vec<&'static str> {
+    let delete = if versioned {
+        "DeleteObjectVersion"
+    } else {
+        "DeleteObject"
+    };
+    if bypass {
+        vec![delete, "BypassGovernanceRetention"]
+    } else {
+        vec![delete]
     }
-    needs
 }
 
 #[cfg(test)]
@@ -403,6 +444,7 @@ mod tests {
                 Need::Own(svc, a) => format!("{svc}:{a}"),
                 Need::Key(a, _) => format!("s3:{a}"),
                 Need::CopySource => "s3:GetObject".to_string(),
+                Need::CopySourceAnnotations => "s3:GetObjectAnnotation".to_string(),
                 Need::PassRole(_) => "iam:PassRole".to_string(),
             })
             .collect()
@@ -470,6 +512,11 @@ mod tests {
         ("GetObjectAttributes", "s3:GetObjectAttributes"),
         ("GetObjectAttributes", "s3:GetObjectVersionAttributes"),
         ("CreateBucket", "s3:TagResource"),
+        // CopyObject's AnnotationDirective: "When set to COPY, you must have
+        // s3:GetObjectAnnotation permission on the source object and
+        // s3:PutObjectAnnotation permission on the destination."
+        ("CopyObject", "s3:GetObjectAnnotation"),
+        ("CopyObject", "s3:PutObjectAnnotation"),
         // "You need the relevant read object (or version) permission".
         ("HeadObject", "s3:GetObjectVersion"),
     ];
@@ -673,7 +720,17 @@ mod tests {
     fn object_write_headers_add_their_permissions() {
         for op in ["PutObject", "CopyObject", "CreateMultipartUpload"] {
             let base: Vec<String> = plain(op);
-            let tagged = actions(op, &req(&[], &[("x-amz-tagging", "a=b")], ""));
+            let tagged = actions(
+                op,
+                &req(
+                    &[],
+                    &[
+                        ("x-amz-tagging", "a=b"),
+                        ("x-amz-tagging-directive", "REPLACE"),
+                    ],
+                    "",
+                ),
+            );
             assert_eq!(tagged[..base.len()], base[..], "{op}");
             assert_eq!(tagged[base.len()..], ["s3:PutObjectTagging"], "{op}");
             for acl in [("x-amz-acl", "private"), ("x-amz-grant-read", "id=x")] {
@@ -717,13 +774,60 @@ mod tests {
 
     #[test]
     fn copies_need_the_destination_write_and_the_source_read() {
+        // COPY, the default annotation directive, also needs the source's
+        // annotations read and the destination's written; EXCLUDE does not.
+        let annotated = vec![
+            Need::Own("s3", "PutObject"),
+            Need::CopySource,
+            Need::CopySourceAnnotations,
+            Need::Own("s3", "PutObjectAnnotation"),
+        ];
+        assert_eq!(required("CopyObject", &req(&[], &[], "")), annotated);
         assert_eq!(
-            required("CopyObject", &req(&[], &[], "")),
+            required(
+                "CopyObject",
+                &req(&[], &[("x-amz-object-annotation-directive", "COPY")], "")
+            ),
+            annotated
+        );
+        assert_eq!(
+            required(
+                "CopyObject",
+                &req(&[], &[("x-amz-object-annotation-directive", "EXCLUDE")], "")
+            ),
             vec![Need::Own("s3", "PutObject"), Need::CopySource]
         );
+        // UploadPartCopy copies no annotations.
         assert_eq!(
             required("UploadPartCopy", &req(&[], &[], "")),
             vec![Need::Own("s3", "PutObject"), Need::CopySource]
+        );
+    }
+
+    /// A copy's `x-amz-tagging` sets its tags only under
+    /// `x-amz-tagging-directive: REPLACE`, so only then does it need
+    /// `s3:PutObjectTagging`.
+    #[test]
+    fn copy_tagging_needs_its_permission_only_when_replacing() {
+        let exclude = ("x-amz-object-annotation-directive", "EXCLUDE");
+        let base = vec!["s3:PutObject", "s3:GetObject"];
+        for directive in [None, Some("COPY")] {
+            let mut headers = vec![exclude, ("x-amz-tagging", "a=b")];
+            headers.extend(directive.map(|d| ("x-amz-tagging-directive", d)));
+            assert_eq!(actions("CopyObject", &req(&[], &headers, "")), base);
+        }
+        let replace = req(
+            &[],
+            &[
+                exclude,
+                ("x-amz-tagging", "a=b"),
+                ("x-amz-tagging-directive", "REPLACE"),
+            ],
+            "",
+        );
+        assert_eq!(
+            actions("CopyObject", &replace),
+            vec!["s3:PutObject", "s3:GetObject", "s3:PutObjectTagging"]
         );
     }
 

@@ -458,6 +458,18 @@ impl S3Service {
         &self,
         request: &AwsRequest,
     ) -> Option<fakecloud_core::auth::IamAction> {
+        self.copy_source_action(request, "GetObject", "GetObjectVersion")
+    }
+
+    /// `s3:<plain>` (`s3:<versioned>` for a source naming a version) on the
+    /// copy source object, under the same rules as
+    /// [`Self::copy_source_read_action`].
+    fn copy_source_action(
+        &self,
+        request: &AwsRequest,
+        plain: &'static str,
+        versioned: &'static str,
+    ) -> Option<fakecloud_core::auth::IamAction> {
         if request.method != Method::PUT
             || request.path_segments.len() < 2
             || fakecloud_core::protocol::is_s3_control_host(&request.headers)
@@ -474,9 +486,9 @@ impl S3Service {
             return None;
         }
         let action = if source.version_id.is_some() {
-            "GetObjectVersion"
+            versioned
         } else {
-            "GetObject"
+            plain
         };
         let region = self
             .bucket_region(src_bucket)
@@ -1565,11 +1577,14 @@ impl AwsService for S3Service {
                     } else if req.query_params.contains_key("legal-hold") {
                         self.get_object_legal_hold(account_id, &req, b, k)
                     } else if req.query_params.contains_key("attributes") {
-                        self.get_object_attributes(account_id, &req, b, k)
+                        let result = self.get_object_attributes(account_id, &req, b, k);
+                        self.hide_missing_key(&req, b, result)
                     } else if req.query_params.contains_key("torrent") {
                         self.get_object_torrent(account_id, &req, b, k)
                     } else {
                         let result = self.get_object(account_id, &req, b, k);
+                        let result = self.hide_missing_key(&req, b, result);
+                        let result = self.shape_lock_headers(&req, b, k, result);
                         // If object not found and bucket has website config, serve error document
                         let is_not_found = matches!(
                             &result,
@@ -1619,7 +1634,11 @@ impl AwsService for S3Service {
                         self.delete_object(account_id, &req, b, k)
                     }
                 }
-                (&Method::HEAD, Some(b), Some(k)) => self.head_object(account_id, &req, b, k),
+                (&Method::HEAD, Some(b), Some(k)) => {
+                    let result = self.head_object(account_id, &req, b, k);
+                    let result = self.hide_missing_key(&req, b, result);
+                    self.shape_lock_headers(&req, b, k, result)
+                }
 
                 // POST /{bucket}?delete — batch delete
                 (&Method::POST, Some(b), None) if req.query_params.contains_key("delete") => {
@@ -1958,6 +1977,11 @@ impl AwsService for S3Service {
                 // policy, so copying out of another account's bucket needs
                 // that bucket's grant.
                 iam_actions::Need::CopySource => self.copy_source_read_action(request),
+                // The doc names s3:GetObjectAnnotation for the source, whether
+                // or not it names a version.
+                iam_actions::Need::CopySourceAnnotations => {
+                    self.copy_source_action(request, "GetObjectAnnotation", "GetObjectAnnotation")
+                }
                 iam_actions::Need::PassRole(role) => {
                     Some(fakecloud_core::auth::IamAction::pass_role(role))
                 }
@@ -1970,6 +1994,12 @@ impl AwsService for S3Service {
     /// `BucketAlreadyExists`, not refused by that account's bucket policy.
     fn iam_resource_in_caller_account(&self, request: &AwsRequest) -> bool {
         s3_operation(request) == Some("CreateBucket") && control_iam_action(request).is_none()
+    }
+
+    /// DeleteObjects is authorized per key by its handler, which reports a
+    /// denied key as an `AccessDenied` entry of its 200 response.
+    fn iam_authorized_by_handler(&self, request: &AwsRequest) -> bool {
+        s3_operation(request) == Some("DeleteObjects") && control_iam_action(request).is_none()
     }
 
     fn iam_condition_keys_for(
@@ -2038,6 +2068,92 @@ impl AwsService for S3Service {
 }
 
 impl S3Service {
+    /// Whether the caller of the request being served may also perform
+    /// `s3:<action>` on `bucket` (or its object `key`, for an object action),
+    /// as dispatch would authorize it. `true` when IAM enforcement does not
+    /// apply (off, the `test*` root bypass, an in-process call), and under
+    /// soft enforcement, which only logs. Must not be called while holding
+    /// the state lock: the evaluation reads bucket policies and owners.
+    pub(crate) fn caller_may(
+        &self,
+        req: &AwsRequest,
+        action: &'static str,
+        bucket: &str,
+        key: Option<&str>,
+    ) -> bool {
+        let Some(authorizer) = fakecloud_core::auth::request_authorizer("s3") else {
+            return true;
+        };
+        let region = self
+            .bucket_region(bucket)
+            .unwrap_or_else(|| req.region.clone());
+        authorizer.authorize(&fakecloud_core::auth::IamAction {
+            service: "s3",
+            action,
+            resource: s3_resource_for(&region, action, Some(bucket), key),
+        })
+    }
+
+    /// A read of a key that does not exist answers 404 `NoSuchKey` only to a
+    /// caller allowed `s3:ListBucket` on the bucket, and 403 `AccessDenied`
+    /// to any other, so a caller who cannot list cannot probe which keys
+    /// exist (GetObject / HeadObject / GetObjectAttributes, "Permissions").
+    fn hide_missing_key(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        result: Result<AwsResponse, AwsServiceError>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // HeadObject reports every missing target as `NotFound`: there it is
+        // a missing key when the bucket exists and no version was named.
+        let missing_key = |e: &AwsServiceError| {
+            e.code() == "NoSuchKey"
+                || (e.code() == "NotFound"
+                    && !iam_actions::names_version(req)
+                    && self.bucket_region(bucket).is_some())
+        };
+        match result {
+            Err(e) if missing_key(&e) && !self.caller_may(req, "ListBucket", bucket, None) => Err(
+                AwsServiceError::aws_error(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied"),
+            ),
+            other => other,
+        }
+    }
+
+    /// GetObject and HeadObject return an object's Object Lock retention
+    /// (`x-amz-object-lock-mode`, `-retain-until-date`) only to a caller
+    /// allowed `s3:GetObjectRetention`, and its legal hold
+    /// (`x-amz-object-lock-legal-hold`) only to one allowed
+    /// `s3:GetObjectLegalHold` (HeadObjectOutput: "This header is only
+    /// returned if the requester has the ... permission").
+    fn shape_lock_headers(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+        mut result: Result<AwsResponse, AwsServiceError>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        if let Ok(resp) = result.as_mut() {
+            let retention = [
+                "x-amz-object-lock-mode",
+                "x-amz-object-lock-retain-until-date",
+            ];
+            if retention.iter().any(|h| resp.headers.contains_key(*h))
+                && !self.caller_may(req, "GetObjectRetention", bucket, Some(key))
+            {
+                for h in retention {
+                    resp.headers.remove(h);
+                }
+            }
+            if resp.headers.contains_key("x-amz-object-lock-legal-hold")
+                && !self.caller_may(req, "GetObjectLegalHold", bucket, Some(key))
+            {
+                resp.headers.remove("x-amz-object-lock-legal-hold");
+            }
+        }
+        result
+    }
+
     /// A directory bucket's ARN, in the `s3express` namespace and naming its
     /// region and owning account: `arn:aws:s3express:<region>:<account>:bucket/<name>`.
     fn directory_bucket_arn(&self, request: &AwsRequest, region: &str, bucket: &str) -> String {
@@ -2335,6 +2451,11 @@ fn s3_request_tags(
     op: &str,
 ) -> Option<std::collections::BTreeMap<String, String>> {
     match op {
+        // A copy sets tags from the header only when it replaces the source's
+        // tag set; under COPY (the default) the header is ignored.
+        "CopyObject" if !iam_actions::copy_replaces_tags(&request.headers) => {
+            Some(std::collections::BTreeMap::new())
+        }
         "PutObject" | "CopyObject" | "CreateMultipartUpload" => {
             // Tags come via x-amz-tagging header
             if let Some(tagging) = request.headers.get("x-amz-tagging") {
@@ -5311,6 +5432,13 @@ mod s3_iam_service_prefix_tests {
             .insert("x-amz-copy-source", "/src/old%20key".parse().unwrap());
         copy.headers
             .insert("x-amz-tagging", "team=a".parse().unwrap());
+        // Under the default COPY tagging directive the header is ignored.
+        assert!(svc
+            .request_tags_from(&copy, "PutObject")
+            .unwrap()
+            .is_empty());
+        copy.headers
+            .insert("x-amz-tagging-directive", "REPLACE".parse().unwrap());
         assert_eq!(
             pairs(&copy),
             vec![
@@ -5321,6 +5449,14 @@ mod s3_iam_service_prefix_tests {
                 (
                     "s3:GetObject".to_string(),
                     "arn:aws:s3:::src/old key".to_string()
+                ),
+                (
+                    "s3:GetObjectAnnotation".to_string(),
+                    "arn:aws:s3:::src/old key".to_string()
+                ),
+                (
+                    "s3:PutObjectAnnotation".to_string(),
+                    "arn:aws:s3:::dst/new".to_string()
                 ),
                 (
                     "s3:PutObjectTagging".to_string(),

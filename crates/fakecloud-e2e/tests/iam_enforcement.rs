@@ -1366,6 +1366,8 @@ async fn s3_copy_object_needs_source_read_and_destination_write() {
         .await
         .unwrap();
 
+    // The default annotation directive (COPY) also needs the source's
+    // annotations read and the destination's written.
     let copy = |s3: aws_sdk_s3::Client, key: &'static str| async move {
         s3.copy_object()
             .bucket("copy-dst")
@@ -1377,9 +1379,17 @@ async fn s3_copy_object_needs_source_read_and_destination_write() {
     for (user, statements, allowed) in [
         (
             "copier",
+            r#"{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectAnnotation"],
+                "Resource":"arn:aws:s3:::copy-src/orig.txt"},
+               {"Effect":"Allow","Action":["s3:PutObject","s3:PutObjectAnnotation"],
+                "Resource":"arn:aws:s3:::copy-dst/*"}"#,
+            true,
+        ),
+        (
+            "noannotations",
             r#"{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::copy-src/orig.txt"},
                {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::copy-dst/*"}"#,
-            true,
+            false,
         ),
         (
             "writeonly",
@@ -1425,6 +1435,42 @@ async fn s3_copy_object_needs_source_read_and_destination_write() {
         &got.body.collect().await.unwrap().into_bytes()[..],
         b"payload"
     );
+
+    // Excluding annotations needs only the read and the write. A tag header
+    // under the default COPY tagging directive is ignored, so it needs no
+    // s3:PutObjectTagging; under REPLACE it does.
+    let (akid, secret) = bootstrap_user(&server, "plaincopier").await;
+    attach_inline_policy(
+        &server,
+        "plaincopier",
+        "Copy",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::copy-src/*"},
+            {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::copy-dst/*"}]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let excluding = |directive: Option<aws_sdk_s3::types::TaggingDirective>| {
+        s3.copy_object()
+            .bucket("copy-dst")
+            .key("excluded.txt")
+            .copy_source("copy-src/orig.txt")
+            .tagging("team=a")
+            .set_tagging_directive(directive)
+            .customize()
+            .mutate_request(|r| {
+                r.headers_mut()
+                    .insert("x-amz-object-annotation-directive", "EXCLUDE");
+            })
+            .send()
+    };
+    excluding(None).await.unwrap();
+    excluding(Some(aws_sdk_s3::types::TaggingDirective::Copy))
+        .await
+        .unwrap();
+    assert!(is_access_denied(
+        excluding(Some(aws_sdk_s3::types::TaggingDirective::Replace)).await
+    ));
 }
 
 /// Reading a specific version is `s3:GetObjectVersion` (`s3:GetObject` is not
@@ -1533,6 +1579,210 @@ async fn s3_versioned_reads_and_tagged_writes_need_their_actions() {
         s3.get_object().bucket("vers").key("doc").send().await
     ));
     put(Some("team=a")).await.unwrap();
+}
+
+/// DeleteObjects is authorized per key, as on AWS: a denied key is an
+/// `AccessDenied` entry of a 200 response and stays, the allowed keys are
+/// deleted. Soft enforcement only logs, so every key is deleted.
+#[tokio::test]
+async fn s3_delete_objects_reports_denied_keys_per_key() {
+    use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+    for strict in [true, false] {
+        let server = if strict {
+            start_strict().await
+        } else {
+            TestServer::start_with_env(&[("FAKECLOUD_IAM", "soft")]).await
+        };
+        let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+        boot.create_bucket().bucket("batch").send().await.unwrap();
+        for key in ["open/a", "locked/b"] {
+            boot.put_object()
+                .bucket("batch")
+                .key(key)
+                .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+                .send()
+                .await
+                .unwrap();
+        }
+        let (akid, secret) = bootstrap_user(&server, "batcher").await;
+        attach_inline_policy(
+            &server,
+            "batcher",
+            "DeleteOpen",
+            r#"{"Version":"2012-10-17","Statement":[
+                {"Effect":"Allow","Action":"s3:DeleteObject","Resource":"arn:aws:s3:::batch/open/*"}
+            ]}"#,
+        )
+        .await;
+        let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+        let delete = Delete::builder()
+            .objects(ObjectIdentifier::builder().key("open/a").build().unwrap())
+            .objects(ObjectIdentifier::builder().key("locked/b").build().unwrap())
+            .build()
+            .unwrap();
+        let out = s3
+            .delete_objects()
+            .bucket("batch")
+            .delete(delete)
+            .send()
+            .await
+            .unwrap();
+        let deleted: Vec<_> = out.deleted().iter().filter_map(|d| d.key()).collect();
+        let left = boot.list_objects_v2().bucket("batch").send().await.unwrap();
+        let remaining: Vec<_> = left.contents().iter().filter_map(|o| o.key()).collect();
+        if strict {
+            assert_eq!(deleted, ["open/a"]);
+            let errors = out.errors();
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].key(), Some("locked/b"));
+            assert_eq!(errors[0].code(), Some("AccessDenied"));
+            assert_eq!(errors[0].message(), Some("Access Denied"));
+            assert_eq!(remaining, ["locked/b"]);
+        } else {
+            assert_eq!(deleted.len(), 2);
+            assert!(out.errors().is_empty());
+            assert!(remaining.is_empty());
+        }
+    }
+}
+
+/// A read of a missing key is 404 `NoSuchKey` only for a caller allowed
+/// `s3:ListBucket`; anyone else gets 403 `AccessDenied`.
+#[tokio::test]
+async fn s3_missing_key_is_404_only_with_list_bucket() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("probe").send().await.unwrap();
+    let (akid, secret) = bootstrap_user(&server, "prober").await;
+    let read_only = r#"{"Version":"2012-10-17","Statement":[
+        {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::probe/*"}
+    ]}"#;
+    attach_inline_policy(&server, "prober", "Read", read_only).await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let get = s3.get_object().bucket("probe").key("nope").send().await;
+    assert!(format!("{get:?}").contains("AccessDenied"), "{get:?}");
+    assert!(is_access_denied(get));
+    assert!(is_access_denied(
+        s3.head_object().bucket("probe").key("nope").send().await
+    ));
+
+    attach_inline_policy(
+        &server,
+        "prober",
+        "Read",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::probe/*"},
+            {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::probe"}
+        ]}"#,
+    )
+    .await;
+    let err = s3
+        .get_object()
+        .bucket("probe")
+        .key("nope")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(err.into_service_error().is_no_such_key());
+    let head = s3.head_object().bucket("probe").key("nope").send().await;
+    assert_eq!(
+        head.as_ref()
+            .err()
+            .and_then(|e| e.raw_response())
+            .map(|r| r.status().as_u16()),
+        Some(404)
+    );
+}
+
+/// HeadObject / GetObject return an object's retention only to a caller
+/// allowed `s3:GetObjectRetention`, and its legal hold only to one allowed
+/// `s3:GetObjectLegalHold`.
+#[tokio::test]
+async fn s3_object_lock_headers_need_their_read_permissions() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket()
+        .bucket("vault")
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await
+        .unwrap();
+    boot.put_object()
+        .bucket("vault")
+        .key("doc")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+        .object_lock_mode(aws_sdk_s3::types::ObjectLockMode::Governance)
+        .object_lock_retain_until_date(aws_sdk_s3::primitives::DateTime::from_secs(4_000_000_000))
+        .object_lock_legal_hold_status(aws_sdk_s3::types::ObjectLockLegalHoldStatus::On)
+        .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Crc32)
+        .send()
+        .await
+        .unwrap();
+
+    let (akid, secret) = bootstrap_user(&server, "auditor").await;
+    attach_inline_policy(
+        &server,
+        "auditor",
+        "Read",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::vault/*"}
+        ]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let head = s3
+        .head_object()
+        .bucket("vault")
+        .key("doc")
+        .send()
+        .await
+        .unwrap();
+    assert!(head.object_lock_mode().is_none());
+    assert!(head.object_lock_retain_until_date().is_none());
+    assert!(head.object_lock_legal_hold_status().is_none());
+    let get = s3
+        .get_object()
+        .bucket("vault")
+        .key("doc")
+        .send()
+        .await
+        .unwrap();
+    assert!(get.object_lock_mode().is_none());
+    assert!(get.object_lock_legal_hold_status().is_none());
+
+    attach_inline_policy(
+        &server,
+        "auditor",
+        "Read",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectRetention"],
+             "Resource":"arn:aws:s3:::vault/*"}
+        ]}"#,
+    )
+    .await;
+    let head = s3
+        .head_object()
+        .bucket("vault")
+        .key("doc")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        head.object_lock_mode(),
+        Some(&aws_sdk_s3::types::ObjectLockMode::Governance)
+    );
+    assert!(head.object_lock_retain_until_date().is_some());
+    assert!(head.object_lock_legal_hold_status().is_none());
+
+    // The bucket owner (the reserved root bypass here) sees everything.
+    let head = boot
+        .head_object()
+        .bucket("vault")
+        .key("doc")
+        .send()
+        .await
+        .unwrap();
+    assert!(head.object_lock_legal_hold_status().is_some());
 }
 
 #[tokio::test]

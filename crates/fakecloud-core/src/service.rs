@@ -839,6 +839,16 @@ pub trait AwsService: Send + Sync {
         self.iam_action_for(request).into_iter().collect()
     }
 
+    /// Whether the handler authorizes this request itself, item by item,
+    /// through [`crate::auth::request_authorizer`] -- an operation AWS
+    /// authorizes per item and answers with per-item errors (S3
+    /// `DeleteObjects` reports a denied key as an `AccessDenied` entry of a
+    /// 200 response). Dispatch then evaluates no action for the request
+    /// (the caller's credentials are still checked). Default `false`.
+    fn iam_authorized_by_handler(&self, _request: &AwsRequest) -> bool {
+        false
+    }
+
     /// Whether the request creates its resource in the CALLER's account, so
     /// that whatever currently holds the resource's name elsewhere has no say
     /// in authorizing it. S3's `CreateBucket` is the case: bucket names are

@@ -787,98 +787,473 @@ async fn dispatch_inner(
         "handling request"
     );
 
-    // Opt-in IAM identity-policy enforcement. Runs before the service
-    // handler so a deny never reaches business logic. `test*` bypass AKIDs
-    // are exempt; the account's IAM root needs no identity policy, as in
-    // AWS, but stays capped by its SCPs and, across accounts, by the
-    // resource's policy (`authorize_root`). Services that haven't opted in via
-    // `iam_enforceable()` are transparently skipped — the startup log
-    // lists which services are under enforcement so users always know.
-    if config.iam_mode.is_enabled()
-        && service.iam_enforceable()
-        && !is_root_bypass(aws_request.access_key_id.as_deref().unwrap_or(""))
-    {
-        if let Some(evaluator) = config.policy_evaluator.as_ref() {
-            if let Some(caller) = internal_caller.as_ref() {
-                if let Some(denied) = authorize_internal_caller(
-                    caller,
-                    service.as_ref(),
-                    &aws_request,
-                    evaluator.as_ref(),
-                    &config,
-                    &detected,
-                    &request_id,
-                ) {
-                    return denied;
-                }
-            } else if let Some(principal) = aws_request.principal.as_ref() {
-                if principal.is_root() {
-                    if let Some(denied) = authorize_root(
-                        principal,
-                        service.as_ref(),
-                        &aws_request,
-                        evaluator.as_ref(),
-                        &config,
-                        &detected,
-                        &request_id,
-                        remote_addr,
-                        resolved.as_ref(),
-                    ) {
-                        return denied;
-                    }
-                } else {
-                    // A request can need several authorizations -- one per
-                    // table in a batch, say -- and every one must allow it.
-                    let iam_actions = service.iam_actions_for(&aws_request);
-                    if !iam_actions.is_empty() {
-                        for iam_action in &iam_actions {
-                            let mut condition_context = principal_condition_context(
-                                principal,
-                                resolved.as_ref(),
-                                service.as_ref(),
-                                &aws_request,
-                                iam_action,
-                                &detected,
-                                remote_addr,
-                            );
-                            let service_resource = !iam_action.is_pass_role();
+    let enforcement = IamEnforcement {
+        config: config.clone(),
+        service: service.clone(),
+        detected: detected.clone(),
+        request_id: request_id.clone(),
+        remote_addr,
+        resolved,
+        caller_session_policies,
+        internal_caller,
+    };
+    // A request whose handler authorizes it per item (S3 DeleteObjects, per
+    // key) needs no authorization of its own here; the handler asks the
+    // request's authorizer instead.
+    let deferred =
+        enforcement.is_active(&aws_request) && service.iam_authorized_by_handler(&aws_request);
+    let iam_actions = if !enforcement.is_active(&aws_request) || deferred {
+        Vec::new()
+    } else {
+        service.iam_actions_for(&aws_request)
+    };
+    if let Some(denied) = enforcement.enforce(&aws_request, &iam_actions, deferred) {
+        return denied;
+    }
+    // Handlers that authorize further actions (per item, or to decide what a
+    // response may reveal) evaluate them exactly as above.
+    let authorizer = enforcement.is_active(&aws_request).then(|| {
+        Arc::new(DispatchAuthorizer {
+            request: authorization_copy(&aws_request),
+            enforcement,
+        }) as Arc<dyn crate::auth::RequestAuthorizer>
+    });
+    let service = service.clone();
+    finish_dispatch(
+        service,
+        aws_request,
+        authorizer,
+        detected,
+        request_id,
+        error_envelope,
+    )
+    .await
+}
 
-                            // Phase 2: fetch the resource-based policy (if
-                            // any) attached to the target resource and
-                            // pass it to the evaluator alongside the
-                            // principal's identity policies. The resource's
-                            // owning account is parsed from the ARN (#381
-                            // multi-account alignment); S3 ARNs have an
-                            // empty account field, so we fall back to the
-                            // server's configured account ID in that case.
-                            // A request creating its resource in the caller's
-                            // account (S3 CreateBucket) is same-account, whatever
-                            // account holds that name today.
-                            let in_caller_account =
-                                service.iam_resource_in_caller_account(&aws_request);
-                            let resource_policy_json = config
+/// Everything dispatch needs to authorize IAM actions for one request: the
+/// request's own actions before its handler runs, and any further ones the
+/// handler asks for through [`DispatchAuthorizer`].
+struct IamEnforcement {
+    config: Arc<DispatchConfig>,
+    service: Arc<dyn crate::service::AwsService>,
+    detected: protocol::DetectedRequest,
+    request_id: String,
+    remote_addr: Option<SocketAddr>,
+    resolved: Option<crate::auth::ResolvedCredential>,
+    caller_session_policies: Vec<String>,
+    internal_caller: Option<InternalCaller>,
+}
+
+/// A request's [`crate::auth::RequestAuthorizer`]: evaluates an action for
+/// the request's caller as dispatch evaluates the request's own (identity
+/// policies, boundary, session policies, SCPs, resource policy, ACLs; the
+/// root, service-principal and anonymous paths alike), in the same mode.
+struct DispatchAuthorizer {
+    enforcement: IamEnforcement,
+    request: AwsRequest,
+}
+
+impl crate::auth::RequestAuthorizer for DispatchAuthorizer {
+    fn service_name(&self) -> &str {
+        &self.enforcement.detected.service
+    }
+
+    fn authorize(&self, action: &crate::auth::IamAction) -> bool {
+        self.enforcement
+            .enforce(&self.request, std::slice::from_ref(action), false)
+            .is_none()
+    }
+}
+
+/// A copy of `request` for authorizing further actions after the request
+/// itself has gone to its handler. Its body stream, which only the handler
+/// reads, is left out.
+fn authorization_copy(request: &AwsRequest) -> AwsRequest {
+    AwsRequest {
+        service: request.service.clone(),
+        action: request.action.clone(),
+        region: request.region.clone(),
+        account_id: request.account_id.clone(),
+        request_id: request.request_id.clone(),
+        headers: request.headers.clone(),
+        query_params: request.query_params.clone(),
+        body: request.body.clone(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: request.path_segments.clone(),
+        raw_path: request.raw_path.clone(),
+        raw_query: request.raw_query.clone(),
+        method: request.method.clone(),
+        is_query_protocol: request.is_query_protocol,
+        access_key_id: request.access_key_id.clone(),
+        principal: request.principal.clone(),
+    }
+}
+
+impl IamEnforcement {
+    /// Whether IAM enforcement applies to `aws_request` at all: on, for a
+    /// service that opted in, for a caller other than the `test*` root
+    /// bypass, with an evaluator configured.
+    fn is_active(&self, aws_request: &AwsRequest) -> bool {
+        self.config.iam_mode.is_enabled()
+            && self.config.policy_evaluator.is_some()
+            && self.service.iam_enforceable()
+            && !is_root_bypass(aws_request.access_key_id.as_deref().unwrap_or(""))
+    }
+
+    /// Authorize `iam_actions` for `aws_request`. Returns the error response
+    /// to send when strict enforcement refuses the request; soft enforcement
+    /// only logs, and returns `None`. An empty list is an unmapped operation,
+    /// which strict refuses, unless `deferred` (the handler authorizes it).
+    fn enforce(
+        &self,
+        aws_request: &AwsRequest,
+        iam_actions: &[crate::auth::IamAction],
+        deferred: bool,
+    ) -> Option<Response<Body>> {
+        let Self {
+            config,
+            service,
+            detected,
+            request_id,
+            resolved,
+            caller_session_policies,
+            internal_caller,
+            ..
+        } = self;
+        let remote_addr = self.remote_addr;
+        let error_envelope = ErrorEnvelope::for_request(detected, &aws_request.headers);
+        // Opt-in IAM identity-policy enforcement. Runs before the service
+        // handler so a deny never reaches business logic. `test*` bypass AKIDs
+        // are exempt; the account's IAM root needs no identity policy, as in
+        // AWS, but stays capped by its SCPs and, across accounts, by the
+        // resource's policy (`authorize_root`). Services that haven't opted in via
+        // `iam_enforceable()` are transparently skipped — the startup log
+        // lists which services are under enforcement so users always know.
+        if self.is_active(aws_request) {
+            if let Some(evaluator) = config.policy_evaluator.as_ref() {
+                if let Some(caller) = internal_caller.as_ref() {
+                    if let Some(denied) = authorize_internal_caller(
+                        caller,
+                        service.as_ref(),
+                        aws_request,
+                        evaluator.as_ref(),
+                        config,
+                        detected,
+                        request_id,
+                        iam_actions,
+                        deferred,
+                    ) {
+                        return Some(denied);
+                    }
+                } else if let Some(principal) = aws_request.principal.as_ref() {
+                    if principal.is_root() {
+                        if let Some(denied) = authorize_root(
+                            principal,
+                            service.as_ref(),
+                            aws_request,
+                            evaluator.as_ref(),
+                            config,
+                            detected,
+                            request_id,
+                            remote_addr,
+                            resolved.as_ref(),
+                            iam_actions,
+                            deferred,
+                        ) {
+                            return Some(denied);
+                        }
+                    } else {
+                        // A request can need several authorizations -- one per
+                        // table in a batch, say -- and every one must allow it.
+                        if deferred || !iam_actions.is_empty() {
+                            for iam_action in iam_actions {
+                                let mut condition_context = principal_condition_context(
+                                    principal,
+                                    resolved.as_ref(),
+                                    service.as_ref(),
+                                    aws_request,
+                                    iam_action,
+                                    detected,
+                                    remote_addr,
+                                );
+                                let service_resource = !iam_action.is_pass_role();
+
+                                // Phase 2: fetch the resource-based policy (if
+                                // any) attached to the target resource and
+                                // pass it to the evaluator alongside the
+                                // principal's identity policies. The resource's
+                                // owning account is parsed from the ARN (#381
+                                // multi-account alignment); S3 ARNs have an
+                                // empty account field, so we fall back to the
+                                // server's configured account ID in that case.
+                                // A request creating its resource in the caller's
+                                // account (S3 CreateBucket) is same-account, whatever
+                                // account holds that name today.
+                                let in_caller_account =
+                                    service.iam_resource_in_caller_account(aws_request);
+                                let resource_policy_json = config
+                                    .resource_policy_provider
+                                    .as_ref()
+                                    .filter(|_| service_resource && !in_caller_account)
+                                    .filter(|p| {
+                                        p.resource_policy_applies(&detected.service, iam_action)
+                                    })
+                                    .and_then(|p| {
+                                        p.resource_policy(&detected.service, &iam_action.resource)
+                                    });
+                                // Derive the resource-owning account. Prefer a provider
+                                // lookup (S3 ARNs carry no account, so the bucket's
+                                // owner is resolved from state — without this, account
+                                // A reaching account B's bucket would be mis-read as
+                                // same-account and skip B's bucket-policy requirement,
+                                // bug-audit 2026-05-28, 5.3), then fall back to the
+                                // account embedded in the ARN (SQS/SNS/Lambda/…), then
+                                // to the caller's account for wildcard / unscoped
+                                // actions (ListQueues, GetCallerIdentity).
+                                let resource_account_id = config
+                                    .resource_policy_provider
+                                    .as_ref()
+                                    .filter(|_| service_resource && !in_caller_account)
+                                    .and_then(|p| {
+                                        p.resource_owner_account(
+                                            &detected.service,
+                                            &iam_action.resource,
+                                        )
+                                    })
+                                    .or_else(|| parse_account_from_arn(&iam_action.resource))
+                                    .unwrap_or_else(|| principal.account_id.clone());
+                                // SCP ceiling: resolve the inherited SCP chain
+                                // for this principal (management accounts and
+                                // service-linked roles come back as `None`, in
+                                // which case the evaluator treats the layer as
+                                // absent). Audit breadcrumbs emitted by the
+                                // resolver itself, not here.
+                                let scps = config
+                                    .scp_resolver
+                                    .as_ref()
+                                    .and_then(|r| r.scps_for(principal));
+                                // Global keys AWS sets on every request, which
+                                // perimeter guardrails gate on (`Deny ...
+                                // StringNotEquals aws:PrincipalOrgID` /
+                                // `aws:ResourceAccount`): absent, those negated
+                                // conditions would deny everyone.
+                                add_global_request_keys(
+                                    &mut condition_context,
+                                    principal,
+                                    &resource_account_id,
+                                    config.scp_resolver.as_deref(),
+                                );
+                                let decision = evaluator.evaluate_with_resource_policy(
+                                    principal,
+                                    iam_action,
+                                    &condition_context,
+                                    resource_policy_json.as_deref(),
+                                    &resource_account_id,
+                                    caller_session_policies,
+                                    scps.as_deref(),
+                                );
+                                // A grant on the resource (KMS) only adds
+                                // permission: it is consulted when the policies
+                                // left the request undecided, never over an
+                                // explicit Deny.
+                                let decision = if decision == crate::auth::IamDecision::ImplicitDeny
+                                    && service_resource
+                                    && !in_caller_account
+                                    && grant_authorizes(
+                                        config.resource_policy_provider.as_deref(),
+                                        evaluator.as_ref(),
+                                        &detected.service,
+                                        aws_request,
+                                        iam_action,
+                                        principal,
+                                        &condition_context,
+                                        caller_session_policies,
+                                        scps.as_deref(),
+                                    ) {
+                                    crate::auth::IamDecision::Allow
+                                } else {
+                                    decision
+                                };
+                                if !decision.is_allow() {
+                                    tracing::warn!(
+                                        target: "fakecloud::iam::audit",
+                                        service = %detected.service,
+                                        action = %iam_action.action_string(),
+                                        resource = %iam_action.resource,
+                                        principal = %principal.arn,
+                                        resource_policy_present = resource_policy_json.is_some(),
+                                        decision = ?decision,
+                                        mode = %config.iam_mode,
+                                        request_id = %request_id,
+                                        "IAM policy evaluation denied request"
+                                    );
+                                    if config.iam_mode.is_strict() {
+                                        // Real AWS includes an "Encoded
+                                        // authorization failure message" suffix
+                                        // on AccessDeniedException — an opaque
+                                        // base64+zlib JSON blob that the caller
+                                        // can pass to STS
+                                        // `DecodeAuthorizationMessage` to
+                                        // recover the structured deny reason
+                                        // (action, principal, matched
+                                        // statements, condition context). We
+                                        // produce the same blob inline so
+                                        // existing tooling that decodes deny
+                                        // reasons works against fakecloud.
+                                        let context_summary = serde_json::json!({
+                                            "aws:PrincipalArn": condition_context
+                                                .aws_principal_arn
+                                                .clone()
+                                                .unwrap_or_else(|| principal.arn.clone()),
+                                            "aws:PrincipalAccount": principal.account_id,
+                                            "aws:RequestedRegion": condition_context
+                                                .aws_requested_region
+                                                .clone()
+                                                .unwrap_or_default(),
+                                            "aws:SecureTransport": condition_context
+                                                .aws_secure_transport
+                                                .unwrap_or(false),
+                                            "aws:Action": iam_action.action_string(),
+                                            "aws:Resource": iam_action.resource,
+                                            "decision": format!("{:?}", decision),
+                                        });
+                                        let action_string = iam_action.action_string();
+                                        let encoded = crate::auth_message::encode_deny(
+                                            matches!(
+                                                decision,
+                                                crate::auth::IamDecision::ExplicitDeny
+                                            ),
+                                            Some(&action_string),
+                                            Some(&principal.arn),
+                                            Vec::new(),
+                                            Some(context_summary),
+                                        );
+                                        // When the SCPs are what refused the
+                                        // request, AWS says so.
+                                        let scp_reason = scps.as_deref().and_then(|scps| {
+                                            let ceiling = evaluator.evaluate_ceiling(
+                                                principal,
+                                                iam_action,
+                                                &condition_context,
+                                                &[],
+                                                Some(scps),
+                                                false,
+                                            );
+                                            scp_cause(decision, ceiling)
+                                                .and_then(|d| scp_denial_reason(d, &action_string))
+                                        });
+                                        return Some(access_denied_response(
+                                            &not_authorized_message(
+                                                &principal.arn,
+                                                &action_string,
+                                                &iam_action.resource,
+                                                scp_reason.as_deref(),
+                                                Some(&encoded),
+                                            ),
+                                            request_id,
+                                            detected,
+                                            &aws_request.headers,
+                                        ));
+                                    }
+                                    // Soft mode: audit log already emitted; fall
+                                    // through to the handler.
+                                }
+                            }
+                        } else {
+                            // Service opted in via `iam_enforceable()` but its
+                            // `iam_action_for` returned no `IamAction` for this
+                            // specific operation (e.g. S3's `s3_detect_action`
+                            // has `_ => return None` arms for unrecognized
+                            // sub-resources). Under strict enforcement that must
+                            // fail closed: an operation we cannot map to an IAM
+                            // action cannot be authorized, so serving it would be
+                            // a fail-open bypass of `--iam strict`. Deny by
+                            // default. In soft mode we preserve the historical
+                            // warn-and-allow so an incomplete mapping surfaces
+                            // during rollout without blocking traffic.
+                            tracing::warn!(
+                                target: "fakecloud::iam::audit",
+                                service = %detected.service,
+                                action = %aws_request.action,
+                                mode = %config.iam_mode,
+                                request_id = %request_id,
+                                "service is iam_enforceable but has no IamAction mapping for this action; denying under strict, allowing under soft"
+                            );
+                            if config.iam_mode.is_strict() {
+                                return Some(unmapped_action_denial(
+                                    principal,
+                                    aws_request,
+                                    request_id,
+                                    detected,
+                                ));
+                            }
+                            // Soft mode: audit log emitted; fall through to the
+                            // handler.
+                        }
+                    }
+                } else if let Some(akid) = aws_request
+                    .access_key_id
+                    .as_deref()
+                    .filter(|_| aws_request.principal.is_none())
+                {
+                    // The request presented an access key that resolves to no
+                    // identity: unknown, deactivated (Inactive), or an expired /
+                    // revoked STS session. AWS rejects such a request before
+                    // authorization (`InvalidClientTokenId` / `ExpiredToken`), so
+                    // under strict enforcement it must not run unchecked -- nor
+                    // reach STS, which would otherwise read the missing principal
+                    // as the account root and mint real credentials. The
+                    // explicit exemptions stay: the reserved `test*` root
+                    // identity (excluded above) and truly anonymous requests
+                    // (next branch). Soft mode logs and lets it through.
+                    tracing::warn!(
+                        target: "fakecloud::iam::audit",
+                        service = %detected.service,
+                        action = %aws_request.action,
+                        mode = %config.iam_mode,
+                        request_id = %request_id,
+                        "request credential does not resolve to an identity; denying under strict, allowing under soft"
+                    );
+                    if config.iam_mode.is_strict() {
+                        return Some(unresolved_credential_response(
+                            config,
+                            akid,
+                            request_id,
+                            error_envelope,
+                        ));
+                    }
+                } else if aws_request.access_key_id.is_none() {
+                    // Truly anonymous (unsigned) caller — no Authorization header at
+                    // all. No identity policies exist, so authorization rests
+                    // entirely on the resource policy (a bucket policy granting
+                    // `Principal:"*"`) and public-read ACLs — mirroring AWS, which
+                    // denies anonymous requests unless the resource is explicitly
+                    // made public. Without this an anonymous request that reached an
+                    // iam_enforceable service in enforcement mode would bypass
+                    // authorization entirely.
+                    //
+                    // A request whose credential did not resolve (principal `None`
+                    // with `access_key_id` `Some`) is handled by the branch above.
+                    if deferred || !iam_actions.is_empty() {
+                        for iam_action in iam_actions {
+                            let now = chrono::Utc::now();
+                            let mut condition_context = ConditionContext {
+                                aws_source_ip: remote_addr.map(|sa| sa.ip()),
+                                aws_current_time: Some(now),
+                                aws_epoch_time: Some(now.timestamp()),
+                                aws_secure_transport: Some(is_secure_transport(
+                                    &aws_request.headers,
+                                )),
+                                aws_requested_region: Some(aws_request.region.clone()),
+                                ..Default::default()
+                            };
+                            condition_context.service_keys =
+                                service.iam_condition_keys_for(aws_request, iam_action);
+                            // `aws:ResourceAccount` is set for anonymous requests
+                            // too: the target resource's owner.
+                            if let Some(owner) = config
                                 .resource_policy_provider
                                 .as_ref()
-                                .filter(|_| service_resource && !in_caller_account)
-                                .filter(|p| {
-                                    p.resource_policy_applies(&detected.service, iam_action)
-                                })
-                                .and_then(|p| {
-                                    p.resource_policy(&detected.service, &iam_action.resource)
-                                });
-                            // Derive the resource-owning account. Prefer a provider
-                            // lookup (S3 ARNs carry no account, so the bucket's
-                            // owner is resolved from state — without this, account
-                            // A reaching account B's bucket would be mis-read as
-                            // same-account and skip B's bucket-policy requirement,
-                            // bug-audit 2026-05-28, 5.3), then fall back to the
-                            // account embedded in the ARN (SQS/SNS/Lambda/…), then
-                            // to the caller's account for wildcard / unscoped
-                            // actions (ListQueues, GetCallerIdentity).
-                            let resource_account_id = config
-                                .resource_policy_provider
-                                .as_ref()
-                                .filter(|_| service_resource && !in_caller_account)
                                 .and_then(|p| {
                                     p.resource_owner_account(
                                         &detected.service,
@@ -886,322 +1261,108 @@ async fn dispatch_inner(
                                     )
                                 })
                                 .or_else(|| parse_account_from_arn(&iam_action.resource))
-                                .unwrap_or_else(|| principal.account_id.clone());
-                            // SCP ceiling: resolve the inherited SCP chain
-                            // for this principal (management accounts and
-                            // service-linked roles come back as `None`, in
-                            // which case the evaluator treats the layer as
-                            // absent). Audit breadcrumbs emitted by the
-                            // resolver itself, not here.
-                            let scps = config
-                                .scp_resolver
-                                .as_ref()
-                                .and_then(|r| r.scps_for(principal));
-                            // Global keys AWS sets on every request, which
-                            // perimeter guardrails gate on (`Deny ...
-                            // StringNotEquals aws:PrincipalOrgID` /
-                            // `aws:ResourceAccount`): absent, those negated
-                            // conditions would deny everyone.
-                            add_global_request_keys(
-                                &mut condition_context,
-                                principal,
-                                &resource_account_id,
-                                config.scp_resolver.as_deref(),
-                            );
-                            let decision = evaluator.evaluate_with_resource_policy(
-                                principal,
+                            {
+                                condition_context
+                                    .service_keys
+                                    .entry("aws:resourceaccount".to_string())
+                                    .or_insert_with(|| vec![owner]);
+                            }
+                            let resource_policy_json =
+                                config.resource_policy_provider.as_ref().and_then(|p| {
+                                    p.resource_policy(&detected.service, &iam_action.resource)
+                                });
+                            let policy_decision = evaluator.evaluate_anonymous(
                                 iam_action,
                                 &condition_context,
                                 resource_policy_json.as_deref(),
-                                &resource_account_id,
-                                &caller_session_policies,
-                                scps.as_deref(),
                             );
-                            // A grant on the resource (KMS) only adds
-                            // permission: it is consulted when the policies
-                            // left the request undecided, never over an
-                            // explicit Deny.
-                            let decision = if decision == crate::auth::IamDecision::ImplicitDeny
-                                && service_resource
-                                && !in_caller_account
-                                && grant_authorizes(
-                                    config.resource_policy_provider.as_deref(),
-                                    evaluator.as_ref(),
-                                    &detected.service,
-                                    &aws_request,
-                                    iam_action,
-                                    principal,
-                                    &condition_context,
-                                    &caller_session_policies,
-                                    scps.as_deref(),
-                                ) {
-                                crate::auth::IamDecision::Allow
-                            } else {
-                                decision
-                            };
-                            if !decision.is_allow() {
+                            let policy_allows = policy_decision.is_allow();
+                            // An explicit Deny in the resource policy always wins, even
+                            // over a public-read ACL — matching AWS's Deny-overrides
+                            // precedence. Collapsing the decision to a bool and ORing the
+                            // ACL let a public ACL override an explicit anonymous Deny.
+                            let policy_explicit_deny =
+                                matches!(policy_decision, crate::auth::IamDecision::ExplicitDeny);
+                            let acl_allows = !policy_explicit_deny
+                                && config.resource_policy_provider.as_ref().is_some_and(|p| {
+                                    p.public_acl_allows(
+                                        &detected.service,
+                                        &iam_action.resource,
+                                        iam_action.action,
+                                    )
+                                });
+                            if !policy_allows && !acl_allows {
                                 tracing::warn!(
                                     target: "fakecloud::iam::audit",
                                     service = %detected.service,
                                     action = %iam_action.action_string(),
                                     resource = %iam_action.resource,
-                                    principal = %principal.arn,
                                     resource_policy_present = resource_policy_json.is_some(),
-                                    decision = ?decision,
                                     mode = %config.iam_mode,
                                     request_id = %request_id,
-                                    "IAM policy evaluation denied request"
+                                    "anonymous request denied: no public bucket policy or ACL grants the action"
                                 );
                                 if config.iam_mode.is_strict() {
-                                    // Real AWS includes an "Encoded
-                                    // authorization failure message" suffix
-                                    // on AccessDeniedException — an opaque
-                                    // base64+zlib JSON blob that the caller
-                                    // can pass to STS
-                                    // `DecodeAuthorizationMessage` to
-                                    // recover the structured deny reason
-                                    // (action, principal, matched
-                                    // statements, condition context). We
-                                    // produce the same blob inline so
-                                    // existing tooling that decodes deny
-                                    // reasons works against fakecloud.
-                                    let context_summary = serde_json::json!({
-                                        "aws:PrincipalArn": condition_context
-                                            .aws_principal_arn
-                                            .clone()
-                                            .unwrap_or_else(|| principal.arn.clone()),
-                                        "aws:PrincipalAccount": principal.account_id,
-                                        "aws:RequestedRegion": condition_context
-                                            .aws_requested_region
-                                            .clone()
-                                            .unwrap_or_default(),
-                                        "aws:SecureTransport": condition_context
-                                            .aws_secure_transport
-                                            .unwrap_or(false),
-                                        "aws:Action": iam_action.action_string(),
-                                        "aws:Resource": iam_action.resource,
-                                        "decision": format!("{:?}", decision),
-                                    });
-                                    let action_string = iam_action.action_string();
-                                    let encoded = crate::auth_message::encode_deny(
-                                        matches!(decision, crate::auth::IamDecision::ExplicitDeny),
-                                        Some(&action_string),
-                                        Some(&principal.arn),
-                                        Vec::new(),
-                                        Some(context_summary),
-                                    );
-                                    // When the SCPs are what refused the
-                                    // request, AWS says so.
-                                    let scp_reason = scps.as_deref().and_then(|scps| {
-                                        let ceiling = evaluator.evaluate_ceiling(
-                                            principal,
-                                            iam_action,
-                                            &condition_context,
-                                            &[],
-                                            Some(scps),
-                                            false,
-                                        );
-                                        scp_cause(decision, ceiling)
-                                            .and_then(|d| scp_denial_reason(d, &action_string))
-                                    });
-                                    return access_denied_response(
-                                        &not_authorized_message(
-                                            &principal.arn,
-                                            &action_string,
-                                            &iam_action.resource,
-                                            scp_reason.as_deref(),
-                                            Some(&encoded),
-                                        ),
-                                        &request_id,
-                                        &detected,
-                                        &aws_request.headers,
-                                    );
+                                    return Some(build_error_response(
+                                        StatusCode::FORBIDDEN,
+                                        "AccessDenied",
+                                        "Access Denied",
+                                        request_id,
+                                        error_envelope,
+                                    ));
                                 }
-                                // Soft mode: audit log already emitted; fall
-                                // through to the handler.
+                                // Soft mode: audit log emitted; fall through to the handler.
                             }
                         }
                     } else {
-                        // Service opted in via `iam_enforceable()` but its
-                        // `iam_action_for` returned no `IamAction` for this
-                        // specific operation (e.g. S3's `s3_detect_action`
-                        // has `_ => return None` arms for unrecognized
-                        // sub-resources). Under strict enforcement that must
-                        // fail closed: an operation we cannot map to an IAM
-                        // action cannot be authorized, so serving it would be
-                        // a fail-open bypass of `--iam strict`. Deny by
-                        // default. In soft mode we preserve the historical
-                        // warn-and-allow so an incomplete mapping surfaces
-                        // during rollout without blocking traffic.
+                        // Anonymous request to an iam_enforceable service whose
+                        // operation has no IamAction mapping. Mirror the signed
+                        // branch above: an operation we cannot map to an IAM action
+                        // cannot be authorized, so serving it would be a fail-open
+                        // bypass of `--iam strict`. Deny by default under strict;
+                        // soft mode warns and falls through.
                         tracing::warn!(
                             target: "fakecloud::iam::audit",
                             service = %detected.service,
                             action = %aws_request.action,
                             mode = %config.iam_mode,
                             request_id = %request_id,
-                            "service is iam_enforceable but has no IamAction mapping for this action; denying under strict, allowing under soft"
+                            "anonymous request to iam_enforceable service has no IamAction mapping; denying under strict, allowing under soft"
                         );
                         if config.iam_mode.is_strict() {
-                            return unmapped_action_denial(
-                                principal,
-                                &aws_request,
-                                &request_id,
-                                &detected,
-                            );
+                            return Some(build_error_response(
+                                StatusCode::FORBIDDEN,
+                                "AccessDenied",
+                                "Access Denied",
+                                request_id,
+                                error_envelope,
+                            ));
                         }
-                        // Soft mode: audit log emitted; fall through to the
-                        // handler.
-                    }
-                }
-            } else if let Some(akid) = aws_request
-                .access_key_id
-                .as_deref()
-                .filter(|_| aws_request.principal.is_none())
-            {
-                // The request presented an access key that resolves to no
-                // identity: unknown, deactivated (Inactive), or an expired /
-                // revoked STS session. AWS rejects such a request before
-                // authorization (`InvalidClientTokenId` / `ExpiredToken`), so
-                // under strict enforcement it must not run unchecked -- nor
-                // reach STS, which would otherwise read the missing principal
-                // as the account root and mint real credentials. The
-                // explicit exemptions stay: the reserved `test*` root
-                // identity (excluded above) and truly anonymous requests
-                // (next branch). Soft mode logs and lets it through.
-                tracing::warn!(
-                    target: "fakecloud::iam::audit",
-                    service = %detected.service,
-                    action = %aws_request.action,
-                    mode = %config.iam_mode,
-                    request_id = %request_id,
-                    "request credential does not resolve to an identity; denying under strict, allowing under soft"
-                );
-                if config.iam_mode.is_strict() {
-                    return unresolved_credential_response(
-                        &config,
-                        akid,
-                        &request_id,
-                        ErrorEnvelope::for_request(&detected, &aws_request.headers),
-                    );
-                }
-            } else if aws_request.access_key_id.is_none() {
-                // Truly anonymous (unsigned) caller — no Authorization header at
-                // all. No identity policies exist, so authorization rests
-                // entirely on the resource policy (a bucket policy granting
-                // `Principal:"*"`) and public-read ACLs — mirroring AWS, which
-                // denies anonymous requests unless the resource is explicitly
-                // made public. Without this an anonymous request that reached an
-                // iam_enforceable service in enforcement mode would bypass
-                // authorization entirely.
-                //
-                // A request whose credential did not resolve (principal `None`
-                // with `access_key_id` `Some`) is handled by the branch above.
-                let iam_actions = service.iam_actions_for(&aws_request);
-                if !iam_actions.is_empty() {
-                    for iam_action in &iam_actions {
-                        let now = chrono::Utc::now();
-                        let mut condition_context = ConditionContext {
-                            aws_source_ip: remote_addr.map(|sa| sa.ip()),
-                            aws_current_time: Some(now),
-                            aws_epoch_time: Some(now.timestamp()),
-                            aws_secure_transport: Some(is_secure_transport(&aws_request.headers)),
-                            aws_requested_region: Some(aws_request.region.clone()),
-                            ..Default::default()
-                        };
-                        condition_context.service_keys =
-                            service.iam_condition_keys_for(&aws_request, iam_action);
-                        // `aws:ResourceAccount` is set for anonymous requests
-                        // too: the target resource's owner.
-                        if let Some(owner) = config
-                            .resource_policy_provider
-                            .as_ref()
-                            .and_then(|p| {
-                                p.resource_owner_account(&detected.service, &iam_action.resource)
-                            })
-                            .or_else(|| parse_account_from_arn(&iam_action.resource))
-                        {
-                            condition_context
-                                .service_keys
-                                .entry("aws:resourceaccount".to_string())
-                                .or_insert_with(|| vec![owner]);
-                        }
-                        let resource_policy_json =
-                            config.resource_policy_provider.as_ref().and_then(|p| {
-                                p.resource_policy(&detected.service, &iam_action.resource)
-                            });
-                        let policy_decision = evaluator.evaluate_anonymous(
-                            iam_action,
-                            &condition_context,
-                            resource_policy_json.as_deref(),
-                        );
-                        let policy_allows = policy_decision.is_allow();
-                        // An explicit Deny in the resource policy always wins, even
-                        // over a public-read ACL — matching AWS's Deny-overrides
-                        // precedence. Collapsing the decision to a bool and ORing the
-                        // ACL let a public ACL override an explicit anonymous Deny.
-                        let policy_explicit_deny =
-                            matches!(policy_decision, crate::auth::IamDecision::ExplicitDeny);
-                        let acl_allows = !policy_explicit_deny
-                            && config.resource_policy_provider.as_ref().is_some_and(|p| {
-                                p.public_acl_allows(
-                                    &detected.service,
-                                    &iam_action.resource,
-                                    iam_action.action,
-                                )
-                            });
-                        if !policy_allows && !acl_allows {
-                            tracing::warn!(
-                                target: "fakecloud::iam::audit",
-                                service = %detected.service,
-                                action = %iam_action.action_string(),
-                                resource = %iam_action.resource,
-                                resource_policy_present = resource_policy_json.is_some(),
-                                mode = %config.iam_mode,
-                                request_id = %request_id,
-                                "anonymous request denied: no public bucket policy or ACL grants the action"
-                            );
-                            if config.iam_mode.is_strict() {
-                                return build_error_response(
-                                    StatusCode::FORBIDDEN,
-                                    "AccessDenied",
-                                    "Access Denied",
-                                    &request_id,
-                                    error_envelope,
-                                );
-                            }
-                            // Soft mode: audit log emitted; fall through to the handler.
-                        }
-                    }
-                } else {
-                    // Anonymous request to an iam_enforceable service whose
-                    // operation has no IamAction mapping. Mirror the signed
-                    // branch above: an operation we cannot map to an IAM action
-                    // cannot be authorized, so serving it would be a fail-open
-                    // bypass of `--iam strict`. Deny by default under strict;
-                    // soft mode warns and falls through.
-                    tracing::warn!(
-                        target: "fakecloud::iam::audit",
-                        service = %detected.service,
-                        action = %aws_request.action,
-                        mode = %config.iam_mode,
-                        request_id = %request_id,
-                        "anonymous request to iam_enforceable service has no IamAction mapping; denying under strict, allowing under soft"
-                    );
-                    if config.iam_mode.is_strict() {
-                        return build_error_response(
-                            StatusCode::FORBIDDEN,
-                            "AccessDenied",
-                            "Access Denied",
-                            &request_id,
-                            error_envelope,
-                        );
                     }
                 }
             }
         }
+        None
     }
+}
 
-    match service.handle(aws_request).await {
+/// Run the request's handler, with its authorizer (when IAM enforcement
+/// applies) available to it, and frame the response.
+async fn finish_dispatch(
+    service: Arc<dyn crate::service::AwsService>,
+    aws_request: AwsRequest,
+    authorizer: Option<Arc<dyn crate::auth::RequestAuthorizer>>,
+    detected: protocol::DetectedRequest,
+    request_id: String,
+    error_envelope: ErrorEnvelope,
+) -> Response<Body> {
+    let handled = match authorizer {
+        Some(authorizer) => {
+            crate::auth::with_request_authorizer(authorizer, service.handle(aws_request)).await
+        }
+        None => service.handle(aws_request).await,
+    };
+    match handled {
         Ok(resp) => {
             let resp = if detected.protocol == AwsProtocol::RpcV2Cbor {
                 rpc_v2_cbor_response(resp)
@@ -2085,6 +2246,7 @@ fn internal_caller_account(
 ///
 /// Returns the error response to send when the request is denied under
 /// strict mode; soft mode only logs.
+#[allow(clippy::too_many_arguments)]
 fn authorize_internal_caller(
     caller: &InternalCaller,
     service: &dyn crate::service::AwsService,
@@ -2093,6 +2255,8 @@ fn authorize_internal_caller(
     config: &DispatchConfig,
     detected: &protocol::DetectedRequest,
     request_id: &str,
+    iam_actions: &[crate::auth::IamAction],
+    deferred: bool,
 ) -> Option<Response<Body>> {
     let principal = caller.principal();
     let denied = || {
@@ -2106,8 +2270,7 @@ fn authorize_internal_caller(
             )
         })
     };
-    let iam_actions = service.iam_actions_for(aws_request);
-    if iam_actions.is_empty() {
+    if iam_actions.is_empty() && !deferred {
         tracing::warn!(
             target: "fakecloud::iam::audit",
             service = %detected.service,
@@ -2231,6 +2394,8 @@ fn authorize_root(
     request_id: &str,
     remote_addr: Option<SocketAddr>,
     resolved: Option<&crate::auth::ResolvedCredential>,
+    iam_actions: &[crate::auth::IamAction],
+    deferred: bool,
 ) -> Option<Response<Body>> {
     authorize_root_scps(
         principal,
@@ -2242,6 +2407,8 @@ fn authorize_root(
         request_id,
         remote_addr,
         resolved,
+        iam_actions,
+        deferred,
     )
     .or_else(|| {
         authorize_root_cross_account(
@@ -2254,6 +2421,7 @@ fn authorize_root(
             request_id,
             remote_addr,
             resolved,
+            iam_actions,
         )
     })
 }
@@ -2278,12 +2446,13 @@ fn authorize_root_scps(
     request_id: &str,
     remote_addr: Option<SocketAddr>,
     resolved: Option<&crate::auth::ResolvedCredential>,
+    iam_actions: &[crate::auth::IamAction],
+    deferred: bool,
 ) -> Option<Response<Body>> {
     let resolver = config.scp_resolver.as_deref()?;
     let scps = resolver.scps_for(principal)?;
     let in_caller_account = service.iam_resource_in_caller_account(aws_request);
-    let iam_actions = service.iam_actions_for(aws_request);
-    if iam_actions.is_empty() {
+    if iam_actions.is_empty() && !deferred {
         // An operation with no IAM action mapping cannot be checked against
         // the SCPs, so under strict enforcement it fails closed, as it does
         // for every other principal.
@@ -2314,13 +2483,13 @@ fn authorize_root_scps(
             resolved,
             service,
             aws_request,
-            &iam_action,
+            iam_action,
             detected,
             remote_addr,
         );
         add_global_request_keys(&mut context, principal, &resource_account, Some(resolver));
         let decision =
-            evaluator.evaluate_ceiling(principal, &iam_action, &context, &[], Some(&scps), false);
+            evaluator.evaluate_ceiling(principal, iam_action, &context, &[], Some(&scps), false);
         if decision.is_allow() {
             continue;
         }
@@ -2504,12 +2673,13 @@ fn authorize_root_cross_account(
     request_id: &str,
     remote_addr: Option<SocketAddr>,
     resolved: Option<&crate::auth::ResolvedCredential>,
+    iam_actions: &[crate::auth::IamAction],
 ) -> Option<Response<Body>> {
     if service.iam_resource_in_caller_account(aws_request) {
         return None;
     }
     let provider = config.resource_policy_provider.as_ref()?;
-    for iam_action in service.iam_actions_for(aws_request) {
+    for iam_action in iam_actions {
         let Some(owner) = provider.resource_owner_account(&detected.service, &iam_action.resource)
         else {
             continue;
@@ -2522,7 +2692,7 @@ fn authorize_root_cross_account(
             resolved,
             service,
             aws_request,
-            &iam_action,
+            iam_action,
             detected,
             remote_addr,
         );
@@ -2533,12 +2703,12 @@ fn authorize_root_cross_account(
             config.scp_resolver.as_deref(),
         );
         let resource_policy_json = provider
-            .resource_policy_applies(&detected.service, &iam_action)
+            .resource_policy_applies(&detected.service, iam_action)
             .then(|| provider.resource_policy(&detected.service, &iam_action.resource))
             .flatten();
         let decision = evaluator.evaluate_resource_policy_only(
             principal,
-            &iam_action,
+            iam_action,
             &context,
             resource_policy_json.as_deref(),
         );
@@ -2554,7 +2724,7 @@ fn authorize_root_cross_account(
         // account needs no further IAM delegation.
         let grant_allows = decision == crate::auth::IamDecision::ImplicitDeny
             && provider
-                .grant_authorization(&detected.service, aws_request, &iam_action, principal)
+                .grant_authorization(&detected.service, aws_request, iam_action, principal)
                 .is_some();
         if decision.is_allow() || acl_allows || grant_allows {
             continue;
@@ -4269,6 +4439,7 @@ mod tests {
                 "req",
                 None,
                 Some(&credential),
+                &crate::service::AwsService::iam_actions_for(&BucketService, &request(bucket)),
             )
         };
         let denied = run("denied", IamMode::Strict).expect("no grant must deny under strict");
@@ -4538,6 +4709,8 @@ mod tests {
                 "req",
                 None,
                 None,
+                &crate::service::AwsService::iam_actions_for(&BucketService, &request(bucket)),
+                false,
             )
         };
         async fn message(resp: Response<Body>) -> String {
@@ -4626,6 +4799,8 @@ mod tests {
                 "req",
                 None,
                 None,
+                &crate::service::AwsService::iam_actions_for(&UnmappedService, &request("own")),
+                false,
             )
         };
         let refused = message(

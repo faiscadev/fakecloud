@@ -10733,10 +10733,16 @@ fn copy_requests_also_need_read_on_the_source_object() {
     req.headers
         .insert("x-amz-copy-source", "theirs/doc.txt".parse().unwrap());
     let actions = svc.iam_actions_for(&req);
-    assert_eq!(actions.len(), 2);
+    // The default annotation directive (COPY) also reads the source's
+    // annotations and writes the destination's.
+    assert_eq!(actions.len(), 4);
     assert_eq!(actions[0].action, "PutObject");
     assert_eq!(actions[1].action, "GetObject");
     assert_eq!(actions[1].resource, "arn:aws:s3:::theirs/doc.txt");
+    assert_eq!(actions[2].action, "GetObjectAnnotation");
+    assert_eq!(actions[2].resource, "arn:aws:s3:::theirs/doc.txt");
+    assert_eq!(actions[3].action, "PutObjectAnnotation");
+    assert_eq!(actions[3].resource, "arn:aws:s3:::mine/copy.txt");
 
     req.headers.insert(
         "x-amz-copy-source",
@@ -10999,7 +11005,7 @@ fn copy_source_parsing_is_shared_by_the_copy_and_its_authorization() {
         req.headers
             .insert("x-amz-copy-source", header.parse().unwrap());
         let source = parse_copy_source(header).unwrap();
-        let authorized = svc.iam_actions_for(&req).pop().unwrap();
+        let authorized = svc.iam_actions_for(&req).swap_remove(1);
         assert_eq!(
             authorized.resource,
             format!("arn:aws:s3:::{}/{}", source.bucket, source.key),

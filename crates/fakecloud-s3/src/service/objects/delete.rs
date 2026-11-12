@@ -420,14 +420,31 @@ impl S3Service {
             ));
         }
 
+        let bypass = governance_bypass_requested(req);
+        // AWS authorizes DeleteObjects per key (`s3:DeleteObject`, or
+        // `s3:DeleteObjectVersion` for an entry naming a version, plus
+        // `s3:BypassGovernanceRetention` when bypassing) and reports a denied
+        // key as an `AccessDenied` entry of the 200 response, deleting the
+        // others. Evaluated before the state lock is taken: the evaluation
+        // reads bucket policies and ownership from that state.
+        let denied: Vec<bool> = entries
+            .iter()
+            .map(|entry| {
+                !crate::service::iam_actions::delete_entry_actions(
+                    entry.version_id.is_some(),
+                    bypass,
+                )
+                .into_iter()
+                .all(|action| self.caller_may(req, action, bucket, Some(&entry.key)))
+            })
+            .collect();
+
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
         let b = state
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-
-        let bypass = governance_bypass_requested(req);
 
         let versioning_enabled = b.versioning.as_deref() == Some("Enabled");
         let versioning_configured = b.versioning.is_some();
@@ -443,8 +460,20 @@ impl S3Service {
         // objects already removed: record it, stop, and still deliver what
         // happened before returning the error.
         let mut persist_error: Option<AwsServiceError> = None;
-        for entry in &entries {
+        for (entry, denied) in entries.iter().zip(denied) {
             let key = &entry.key;
+            if denied {
+                let version = entry
+                    .version_id
+                    .as_deref()
+                    .map(|v| format!("<VersionId>{}</VersionId>", xml_escape(v)))
+                    .unwrap_or_default();
+                error_xml.push_str(&format!(
+                    "<Error><Key>{}</Key>{version}<Code>AccessDenied</Code><Message>Access Denied</Message></Error>",
+                    xml_escape(key),
+                ));
+                continue;
+            }
             if let Some(ref vid) = entry.version_id {
                 // Check lock before deleting specific version
                 let lock_denied = {

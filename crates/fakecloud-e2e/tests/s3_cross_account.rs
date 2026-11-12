@@ -153,7 +153,8 @@ async fn cross_account_object_access_needs_the_bucket_policy() {
     put(&caller, "xacct-a", "from-b.txt", b"from b").await;
     assert_eq!(get_body(&owner, "xacct-a", "from-b.txt").await, b"from b");
 
-    // A key that genuinely does not exist is NoSuchKey.
+    // A key that does not exist is 403 for a caller the bucket does not let
+    // list it (no s3:ListBucket), as on AWS, not NoSuchKey.
     let missing = err_code(
         caller
             .get_object()
@@ -162,7 +163,10 @@ async fn cross_account_object_access_needs_the_bucket_policy() {
             .send()
             .await,
     );
-    assert!(missing.contains("NoSuchKey"), "{missing}");
+    assert!(
+        missing.contains("Some(403)") && missing.contains("AccessDenied"),
+        "{missing}"
+    );
 
     // An action the bucket policy does not grant stays denied.
     let denied = err_code(
@@ -345,7 +349,12 @@ async fn cross_account_copy_needs_read_on_the_source_bucket() {
     owner
         .put_bucket_policy()
         .bucket("xacct-src")
-        .policy(grant_account_b("xacct-src", &["s3:GetObject"]))
+        // A copy also reads the source's annotations (the default
+        // annotation directive is COPY).
+        .policy(grant_account_b(
+            "xacct-src",
+            &["s3:GetObject", "s3:GetObjectAnnotation"],
+        ))
         .send()
         .await
         .unwrap();

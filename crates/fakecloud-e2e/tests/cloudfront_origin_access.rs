@@ -495,7 +495,10 @@ async fn viewer_dot_segments_stay_under_the_origin_path() {
             !resp.contains("PRIVATE"),
             "{path} escaped the origin path: {resp}"
         );
-        assert!(resp.starts_with("HTTP/1.1 404"), "{path}: {resp}");
+        // The key does not exist under the origin path, and the OAC policy
+        // grants no s3:ListBucket, so S3 answers 403 rather than 404, as on
+        // AWS.
+        assert!(resp.starts_with("HTTP/1.1 403"), "{path}: {resp}");
     }
 }
 
