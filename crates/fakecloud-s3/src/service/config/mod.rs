@@ -861,37 +861,30 @@ impl S3Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         // The new encryption is the request body's `ObjectEncryption`
         // (S3 API reference, UpdateObjectEncryption: `<SSE-KMS>` with
-        // `KMSKeyArn` and `BucketKeyEnabled`), as the SDKs send it. A
-        // request without one may name the encryption in the SSE headers.
-        let body = std::str::from_utf8(&req.body).unwrap_or_default();
-        let from_body = body.contains("<ObjectEncryption");
-        let (new_alg, new_kms_key_id, new_bucket_key) = if from_body {
-            let encryption = parse_object_encryption(body)?;
-            (
-                Some("aws:kms".to_string()),
-                Some(encryption.kms_key_arn),
-                encryption.bucket_key_enabled,
-            )
-        } else {
-            let header = |name: &str| {
-                req.headers
-                    .get(name)
-                    .and_then(|v| v.to_str().ok())
-                    .map(String::from)
-            };
-            (
-                header("x-amz-server-side-encryption"),
-                header("x-amz-server-side-encryption-aws-kms-key-id"),
-                header("x-amz-server-side-encryption-bucket-key-enabled")
-                    .map(|v| v.eq_ignore_ascii_case("true")),
-            )
-        };
+        // `KMSKeyArn` and `BucketKeyEnabled`), the only form the API has. An
+        // empty body is MissingRequestBodyError and a body that is not an
+        // `ObjectEncryption` document MalformedXML (both recorded).
+        if req.body.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingRequestBodyError",
+                "Request Body is empty",
+            ));
+        }
+        let body = std::str::from_utf8(&req.body)
+            .ok()
+            .filter(|b| b.contains("<ObjectEncryption"))
+            .ok_or_else(update_encryption_malformed_xml)?;
+        let encryption = parse_object_encryption(body)?;
+        // `BucketKeyEnabled` "defaults to false" (the model's SSEKMSEncryption).
+        let new_bucket_key = encryption.bucket_key_enabled.unwrap_or(false);
+        let version_id = req.query_params.get("versionId").cloned();
 
         // Snapshot what we need to crunch the body re-encryption
         // outside the write lock, so the encrypt/decrypt hooks (which
         // re-enter KMS state) don't deadlock against an outstanding
         // S3 write lock.
-        let (existing_bytes, old_alg, old_kms_key_id, body_handle, bucket_region, bucket_key) = {
+        let (existing_bytes, snapshot, bucket_region) = {
             let accts = self.state.read();
             let __empty = crate::state::S3State::new(account_id, "us-east-1");
             let state = accts.get(account_id).unwrap_or(&__empty);
@@ -905,144 +898,114 @@ impl S3Service {
                     format!("Key {key} does not exist."),
                 )
             })?;
-            let obj = b.objects.get(key).ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "NoSuchKey",
-                    format!("Key {key} does not exist."),
-                )
-            })?;
-            if from_body {
-                check_update_object_encryption(
-                    obj.sse_algorithm.as_deref(),
-                    new_kms_key_id.as_deref(),
-                    account_id,
-                )?;
-                check_not_object_locked(obj, chrono::Utc::now())?;
-            }
+            let obj = target_version(b, key, version_id.as_deref())?;
+            check_update_object_encryption(
+                obj.sse_algorithm.as_deref(),
+                Some(&encryption.kms_key_arn),
+                account_id,
+            )?;
+            check_not_object_locked(obj, chrono::Utc::now())?;
             let bytes = state
                 .read_body(&obj.body)
                 .map_err(crate::service::io_to_aws)?;
-            (
-                bytes,
-                obj.sse_algorithm.clone(),
-                obj.sse_kms_key_id.clone(),
-                obj.body.clone(),
-                b.region.clone(),
-                obj.bucket_key_enabled == Some(true),
-            )
+            (bytes, VersionSnapshot::of(obj), b.region.clone())
         };
 
         // The object records the ARN of the key it is sealed under (resolved
-        // in the bucket's region), as PutObject does, whatever form the
-        // request named it in.
-        let new_kms_key_id = match new_kms_key_id {
-            Some(kid) if !kid.is_empty() && new_alg.as_deref() == Some("aws:kms") => {
-                self.resolve_object_kms_key(account_id, &bucket_region, Some(kid))
-            }
-            other => other,
-        };
-
-        // The body is resealed when the algorithm changes, or when an SSE-KMS
-        // object moves to another KMS key: recording the new key without
-        // resealing would leave the body under the old one, unreadable once
-        // that key is disabled, deleted or denied. Otherwise only metadata
-        // changes.
-        // Turning an S3 Bucket Key on or off changes the encryption context
-        // (the bucket's ARN instead of the object's), so it reseals too.
-        let same_alg = old_alg == new_alg;
-        let new_bucket_key_on = new_bucket_key.unwrap_or(bucket_key);
-        let key_changed = same_alg
-            && new_alg.as_deref() == Some("aws:kms")
-            && (new_kms_key_id
-                .as_deref()
-                .is_some_and(|kid| !kid.is_empty() && Some(kid) != old_kms_key_id.as_deref())
-                || new_bucket_key_on != bucket_key);
-        let reseal = !same_alg || key_changed;
-        let plaintext: bytes::Bytes = if old_alg.as_deref() == Some("aws:kms") && reseal {
-            self.decrypt_object_body(
-                req,
+        // in the bucket's region), as PutObject does.
+        let new_kms_key_id = self
+            .resolve_object_kms_key(
                 account_id,
-                bucket,
-                key,
-                bucket_key,
-                &existing_bytes,
-                old_kms_key_id.as_deref(),
-            )?
-        } else {
-            existing_bytes
-        };
-        let new_bytes = if new_alg.as_deref() == Some("aws:kms") && reseal {
-            self.encrypt_object_body(
+                &bucket_region,
+                Some(encryption.kms_key_arn.clone()),
+            )
+            .unwrap_or_else(|| encryption.kms_key_arn.clone());
+
+        // The body is resealed when the object moves to SSE-KMS, to another
+        // KMS key, or to another S3 Bucket Key setting (which changes the
+        // encryption context: the bucket's ARN instead of the object's):
+        // recording the new key without resealing would leave the body under
+        // the old one, unreadable once that key is disabled, deleted or
+        // denied. Otherwise only metadata changes.
+        let old_kms = snapshot.sse_algorithm.as_deref() == Some("aws:kms");
+        let reseal = !old_kms
+            || snapshot.sse_kms_key_id.as_deref() != Some(new_kms_key_id.as_str())
+            || snapshot.bucket_key != new_bucket_key;
+        let new_bytes = if reseal {
+            let plaintext = if old_kms {
+                self.decrypt_object_body(
+                    req,
+                    account_id,
+                    bucket,
+                    key,
+                    snapshot.bucket_key,
+                    &existing_bytes,
+                    snapshot.sse_kms_key_id.as_deref(),
+                )?
+            } else {
+                existing_bytes
+            };
+            Some(self.encrypt_object_body(
                 req,
                 account_id,
                 &bucket_region,
                 bucket,
                 key,
-                new_bucket_key_on,
+                new_bucket_key,
                 &plaintext,
-                new_kms_key_id.as_deref(),
-            )?
+                Some(&new_kms_key_id),
+            )?)
         } else {
-            plaintext
+            None
         };
 
+        // Commit under the write lock, to the version the snapshot read: a
+        // write that replaced it meanwhile, or an Object Lock placed on it,
+        // wins over this request.
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
         let b = state
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        let obj = b.objects.get_mut(key).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "NoSuchKey",
-                format!("Key {key} does not exist."),
-            )
-        })?;
-        obj.sse_algorithm = new_alg.clone();
-        if let Some(kid) = new_kms_key_id {
-            obj.sse_kms_key_id = if kid.is_empty() { None } else { Some(kid) };
+        {
+            let current = target_version(b, key, version_id.as_deref())
+                .ok()
+                .filter(|obj| snapshot.is(obj))
+                .ok_or_else(update_encryption_conflict)?;
+            check_not_object_locked(current, chrono::Utc::now())?;
         }
-        if new_bucket_key.is_some() {
-            obj.bucket_key_enabled = new_bucket_key;
-        }
-        let _ = body_handle; // silence unused when the body is not resealed
-
-        // Snapshot the just-mutated metadata and persist through the store so
-        // the re-encrypted body + updated SSE metadata survive a restart.
-        // Previously this handler mutated RAM only: on restart disk mode
-        // rehydrated the stale on-disk ciphertext and old key id, which is
-        // undecryptable when this call had removed the KMS key.
+        let update = |obj: &mut crate::state::S3Object| {
+            obj.sse_algorithm = Some("aws:kms".to_string());
+            obj.sse_kms_key_id = Some(new_kms_key_id.clone());
+            obj.bucket_key_enabled = Some(new_bucket_key);
+        };
+        for_each_copy(b, key, &snapshot, update);
+        // Persist through the store so the resealed body and its SSE
+        // metadata survive a restart, in the version's own slot.
         let meta = object_meta_snapshot(
-            state
-                .buckets
-                .get(bucket)
-                .and_then(|bb| bb.objects.get(key))
-                .ok_or_else(|| no_such_bucket(bucket))?,
+            target_version(b, key, version_id.as_deref())
+                .map_err(|_| update_encryption_conflict())?,
         );
-        if !reseal {
-            // Body unchanged; only the metadata may have moved.
-            self.store
-                .put_object_meta(bucket, key, meta.version_id.as_deref(), &meta)
+        let slot = snapshot.version_id.as_deref();
+        match new_bytes {
+            None => {
+                self.store
+                    .put_object_meta(bucket, key, slot, &meta)
+                    .map_err(crate::service::persistence_error)?;
+            }
+            Some(new_bytes) => {
+                let new_body = crate::service::objects::run_blocking_io(|| {
+                    self.store.put_object(
+                        bucket,
+                        key,
+                        slot,
+                        fakecloud_persistence::BodySource::Bytes(new_bytes),
+                        &meta,
+                    )
+                })
                 .map_err(crate::service::persistence_error)?;
-        } else {
-            let new_body = crate::service::objects::run_blocking_io(|| {
-                self.store.put_object(
-                    bucket,
-                    key,
-                    meta.version_id.as_deref(),
-                    fakecloud_persistence::BodySource::Bytes(new_bytes),
-                    &meta,
-                )
-            })
-            .map_err(crate::service::persistence_error)?;
-            if let Some(o) = state
-                .buckets
-                .get_mut(bucket)
-                .and_then(|bb| bb.objects.get_mut(key))
-            {
-                o.body = new_body;
+                for_each_copy(b, key, &snapshot, |obj| obj.body = new_body.clone());
             }
         }
         Ok(empty_response(StatusCode::OK))
@@ -1572,6 +1535,116 @@ fn validate_default_retention(body: &str) -> Result<(), AwsServiceError> {
     Ok(())
 }
 
+/// UpdateObjectEncryption's answer to a body that is not an
+/// `ObjectEncryption` document (recorded for `<Foo/>` and `garbage`).
+fn update_encryption_malformed_xml() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "MalformedXML",
+        "The XML you provided was not well-formed or did not validate against our published schema",
+    )
+}
+
+/// S3's answer when another request changed the object while this one was
+/// resealing it (Error Responses: `OperationAborted`, 409, "A conflicting
+/// conditional operation is currently in progress against this resource").
+fn update_encryption_conflict() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::CONFLICT,
+        "OperationAborted",
+        "A conflicting conditional operation is currently in progress against this resource. Try again.",
+    )
+}
+
+/// The object version an `UpdateObjectEncryption` addresses: the one
+/// `version_id` names (`null` for the null version), else the current one,
+/// which may be a delete marker. An unknown version id is 400
+/// `InvalidArgument` "Invalid version id specified" (recorded).
+fn target_version<'a>(
+    b: &'a crate::state::S3Bucket,
+    key: &str,
+    version_id: Option<&str>,
+) -> Result<&'a crate::state::S3Object, AwsServiceError> {
+    let Some(vid) = version_id else {
+        return b.objects.get(key).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchKey",
+                format!("Key {key} does not exist."),
+            )
+        });
+    };
+    let names = |obj: &crate::state::S3Object| {
+        obj.version_id.as_deref() == Some(vid) || (vid == "null" && obj.version_id.is_none())
+    };
+    b.object_versions
+        .get(key)
+        .and_then(|versions| versions.iter().find(|o| names(o)))
+        .or_else(|| b.objects.get(key).filter(|o| names(o)))
+        .ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "Invalid version id specified",
+            )
+        })
+}
+
+/// What an `UpdateObjectEncryption` read of an object version, kept to
+/// commit to that same version: its identity (version id, ETag, write time,
+/// delete marker) and the encryption it had.
+struct VersionSnapshot {
+    version_id: Option<String>,
+    etag: String,
+    last_modified: chrono::DateTime<chrono::Utc>,
+    is_delete_marker: bool,
+    sse_algorithm: Option<String>,
+    sse_kms_key_id: Option<String>,
+    bucket_key: bool,
+}
+
+impl VersionSnapshot {
+    fn of(obj: &crate::state::S3Object) -> Self {
+        Self {
+            version_id: obj.version_id.clone(),
+            etag: obj.etag.clone(),
+            last_modified: obj.last_modified,
+            is_delete_marker: obj.is_delete_marker,
+            sse_algorithm: obj.sse_algorithm.clone(),
+            sse_kms_key_id: obj.sse_kms_key_id.clone(),
+            bucket_key: obj.bucket_key_enabled == Some(true),
+        }
+    }
+
+    /// Whether `obj` is still the version this snapshot read: a write that
+    /// replaced it carries another write time (and usually ETag and id).
+    fn is(&self, obj: &crate::state::S3Object) -> bool {
+        obj.version_id == self.version_id
+            && obj.etag == self.etag
+            && obj.last_modified == self.last_modified
+            && obj.is_delete_marker == self.is_delete_marker
+    }
+}
+
+/// Apply `f` to every copy of the version `snapshot` read: the current
+/// object and its entry in the version history, which a versioned bucket
+/// keeps side by side.
+fn for_each_copy(
+    b: &mut crate::state::S3Bucket,
+    key: &str,
+    snapshot: &VersionSnapshot,
+    mut f: impl FnMut(&mut crate::state::S3Object),
+) {
+    if let Some(obj) = b.objects.get_mut(key).filter(|o| snapshot.is(o)) {
+        f(obj);
+    }
+    if let Some(versions) = b.object_versions.get_mut(key) {
+        for obj in versions.iter_mut().filter(|o| snapshot.is(o)) {
+            f(obj);
+        }
+    }
+}
+
 /// The new encryption an `UpdateObjectEncryption` body names.
 struct RequestedObjectEncryption {
     kms_key_arn: String,
@@ -1636,9 +1709,11 @@ fn check_update_object_encryption(
                 "The UpdateObjectEncryption operation doesn't support source objects with the encryption type DSSE-KMS or SSE-C. Only source objects encrypted with SSE-S3 or SSE-KMS are supported.",
             ))
         }
+        // Recorded for a delete marker (the current version of a deleted
+        // key), and taken to be the answer for any unencrypted version.
         None => {
             return Err(update_encryption_invalid(
-                "The UpdateObjectEncryption operation doesn't supported unencrypted source objects. Only source objects encrypted with SSE-S3 or SSE-KMS are supported.",
+                "Unencrypted source objects are not supported.",
             ))
         }
     }

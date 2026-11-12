@@ -794,3 +794,92 @@ async fn s3_update_object_encryption_moves_the_object_to_the_new_key() {
         .await
         .expect_err("the object is sealed under the new key");
 }
+
+/// On a versioned bucket UpdateObjectEncryption reseals the version it
+/// names: an older version moved to the new key reads back by its version
+/// id once the old key is disabled, while the current version, left under
+/// the old key, no longer does.
+#[tokio::test]
+async fn s3_update_object_encryption_reseals_the_named_version() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    let kms = server.kms_client().await;
+    let old_key = create_kms_key(&server).await;
+    let new_key = create_kms_key(&server).await;
+    s3.create_bucket().bucket("rekey-ver").send().await.unwrap();
+    s3.put_bucket_versioning()
+        .bucket("rekey-ver")
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let mut versions = Vec::new();
+    for body in [&b"first version"[..], b"second version"] {
+        let put = s3
+            .put_object()
+            .bucket("rekey-ver")
+            .key("doc.txt")
+            .body(ByteStream::from(body.to_vec()))
+            .server_side_encryption(ServerSideEncryption::AwsKms)
+            .ssekms_key_id(&old_key)
+            .send()
+            .await
+            .unwrap();
+        versions.push(put.version_id().unwrap().to_string());
+    }
+
+    s3.update_object_encryption()
+        .bucket("rekey-ver")
+        .key("doc.txt")
+        .version_id(&versions[0])
+        .object_encryption(aws_sdk_s3::types::ObjectEncryption::Ssekms(
+            aws_sdk_s3::types::SsekmsEncryption::builder()
+                .kms_key_arn(&new_key)
+                .build()
+                .unwrap(),
+        ))
+        .send()
+        .await
+        .unwrap();
+    let head = |version: &str| {
+        s3.head_object()
+            .bucket("rekey-ver")
+            .key("doc.txt")
+            .version_id(version)
+            .send()
+    };
+    assert_eq!(
+        head(&versions[0]).await.unwrap().ssekms_key_id(),
+        Some(new_key.as_str())
+    );
+    assert_eq!(
+        head(&versions[1]).await.unwrap().ssekms_key_id(),
+        Some(old_key.as_str())
+    );
+
+    kms.disable_key().key_id(&old_key).send().await.unwrap();
+    let old_version = s3
+        .get_object()
+        .bucket("rekey-ver")
+        .key("doc.txt")
+        .version_id(&versions[0])
+        .send()
+        .await
+        .expect("the resealed version reads under the new key")
+        .body
+        .collect()
+        .await
+        .unwrap()
+        .into_bytes();
+    assert_eq!(&old_version[..], b"first version");
+    s3.get_object()
+        .bucket("rekey-ver")
+        .key("doc.txt")
+        .send()
+        .await
+        .expect_err("the current version is still under the disabled key");
+}

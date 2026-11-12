@@ -2518,12 +2518,11 @@ fn s3_detect_action(
             return Some("RenameObject");
         }
         // UpdateObjectEncryption (`PUT /bucket/key?encryption`) changes an
-        // existing object's server-side encryption. AWS gates this under
-        // `s3:PutObject` (encryption is a write attribute), and there is no
-        // distinct public `s3:UpdateObjectEncryption` IAM action — so map to
-        // PutObject deliberately rather than letting it fall through.
+        // existing object's server-side encryption, authorized as its own
+        // action: the API reference's required permissions are
+        // `s3:UpdateObjectEncryption` plus the KMS ones.
         if has("encryption") && is_put {
-            return Some("PutObject");
+            return Some("UpdateObjectEncryption");
         }
         // SelectObjectContent (`POST /bucket/key?select&select-type=2`) reads
         // object data, so AWS authorizes it with `s3:GetObject`. Previously
@@ -5107,17 +5106,20 @@ mod s3_detect_action_tests {
     }
 
     #[test]
-    fn update_object_encryption_maps_to_put_object() {
-        // PUT /bucket/key?encryption changes object SSE; AWS gates this on
-        // s3:PutObject (no distinct public action). Deliberate, not a
-        // silent PutObject fall-through.
+    fn update_object_encryption_maps_to_its_own_action() {
+        // PUT /bucket/key?encryption changes object SSE, authorized as
+        // s3:UpdateObjectEncryption (the API reference's required
+        // permission), not s3:PutObject; the bucket-level ?encryption PUT
+        // stays PutBucketEncryption.
         let action = s3_detect_action(
             "PUT",
             Some("bucket"),
             Some("key"),
             &q(&[("encryption", "")]),
         );
-        assert_eq!(action, Some("PutObject"));
+        assert_eq!(action, Some("UpdateObjectEncryption"));
+        let bucket_level = s3_detect_action("PUT", Some("bucket"), None, &q(&[("encryption", "")]));
+        assert_eq!(bucket_level, Some("PutBucketEncryption"));
     }
 
     #[test]
