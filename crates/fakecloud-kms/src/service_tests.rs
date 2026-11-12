@@ -923,8 +923,8 @@ fn imported_key_material_encrypt_decrypt_roundtrip() {
         .decode(&ciphertext)
         .unwrap();
     assert_eq!(
-        crate::blob::embedded_key_id(&ct_bytes).as_deref(),
-        Some(key_id.as_str())
+        crate::blob::embedded_key_id(&ct_bytes),
+        Some(format!("arn:aws:kms:us-east-1:123456789012:key/{key_id}"))
     );
     assert!(ct_bytes.windows(plaintext.len()).all(|w| w != plaintext));
 
@@ -5129,6 +5129,50 @@ async fn re_encrypt_moves_ciphertext_between_accounts() {
         .err()
         .unwrap();
     assert_eq!(err.code(), "IncorrectKeyException");
+}
+
+/// A symmetric ciphertext names its key by ARN whoever sealed it, so one the
+/// key's own account sealed (Encrypt, GenerateDataKey) is decrypted from
+/// another account it is handed to without naming the key.
+#[tokio::test]
+async fn own_account_ciphertexts_open_from_other_accounts() {
+    let svc = make_service();
+    let (owner, other) = ("111111111111", "222222222222");
+    let key = key_arn_in(&svc, owner, json!({})).await;
+    let plaintext = base64::engine::general_purpose::STANDARD.encode(b"handed over");
+    let sealed = json_of(
+        &svc,
+        request_as(
+            owner,
+            "Encrypt",
+            json!({"KeyId": key, "Plaintext": plaintext}),
+        ),
+    )
+    .await;
+    let data_key = json_of(
+        &svc,
+        request_as(
+            owner,
+            "GenerateDataKey",
+            json!({"KeyId": key, "KeySpec": "AES_256"}),
+        ),
+    )
+    .await;
+    let encrypted = json!(plaintext);
+    for (blob, expected) in [
+        (&sealed["CiphertextBlob"], &encrypted),
+        (&data_key["CiphertextBlob"], &data_key["Plaintext"]),
+    ] {
+        let blob = blob.as_str().unwrap();
+        assert_eq!(ciphertext_key_ref(blob).as_deref(), Some(key.as_str()));
+        let opened = json_of(
+            &svc,
+            request_as(other, "Decrypt", json!({"CiphertextBlob": blob})),
+        )
+        .await;
+        assert_eq!(&opened["Plaintext"], expected);
+        assert_eq!(opened["KeyId"], json!(key));
+    }
 }
 
 /// A symmetric key with imported material seals like any symmetric key: its

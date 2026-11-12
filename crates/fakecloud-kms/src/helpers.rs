@@ -545,15 +545,15 @@ pub(crate) fn caller_account(req: &AwsRequest) -> &str {
         .map_or(req.account_id.as_str(), |p| p.account_id.as_str())
 }
 
-/// The key reference a ciphertext sealed for `req` under `key` names: the key
-/// id, or the key ARN when the caller belongs to another account than the
-/// key, so that the caller's own `Decrypt`, which names no key, finds the
-/// key's account (as a hook-sealed blob does).
-pub(crate) fn sealed_key_ref<'a>(req: &AwsRequest, key: &'a KmsKey) -> &'a str {
-    match parse_kms_arn(&key.arn) {
-        Some((_, account, _)) if account != caller_account(req) => &key.arn,
-        _ => &key.key_id,
-    }
+/// The key reference a ciphertext sealed under `key` names: the key ARN, as
+/// the metadata of an AWS symmetric ciphertext identifies its key whoever
+/// sealed it, so a `Decrypt` naming no key finds the key's account from any
+/// account the ciphertext is handed to (as a hook-sealed blob does). A
+/// multi-Region key's ciphertext is still opened by the related key of the
+/// region of the call. Blobs earlier builds sealed for a caller of the
+/// key's own account name the bare key id, which opens in that account.
+pub(crate) fn sealed_key_ref(key: &KmsKey) -> &str {
+    &key.arn
 }
 
 /// The ARN of the key `key_ref` (key id, key ARN, alias name or alias ARN)

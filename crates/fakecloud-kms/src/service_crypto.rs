@@ -84,12 +84,8 @@ impl KmsService {
                     ));
                 }
             }
-            let ct = build_encrypt_ciphertext(
-                state,
-                sealed_key_ref(req, key),
-                &plaintext_bytes,
-                &ec_aad,
-            );
+            let ct =
+                build_encrypt_ciphertext(state, sealed_key_ref(key), &plaintext_bytes, &ec_aad);
             (ct, "SYMMETRIC_DEFAULT".to_string())
         };
 
@@ -320,7 +316,7 @@ impl KmsService {
             (
                 build_encrypt_ciphertext(
                     dest_state,
-                    sealed_key_ref(req, dest_key),
+                    sealed_key_ref(dest_key),
                     &plaintext_bytes,
                     &dest_ec_aad,
                 ),
@@ -392,7 +388,7 @@ impl KmsService {
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let blob = crate::blob::encode_with_context(
             &state.master_key_bytes,
-            sealed_key_ref(req, key),
+            sealed_key_ref(key),
             &data_key_bytes,
             &ec_aad,
         );
@@ -458,7 +454,7 @@ impl KmsService {
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let blob = crate::blob::encode_with_context(
             &state.master_key_bytes,
-            sealed_key_ref(req, key),
+            sealed_key_ref(key),
             &data_key_bytes,
             &ec_aad,
         );
@@ -1049,7 +1045,7 @@ impl KmsService {
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let blob = crate::blob::encode_with_context(
             &state.master_key_bytes,
-            sealed_key_ref(req, key),
+            sealed_key_ref(key),
             &private_key_bytes,
             &ec_aad,
         );
@@ -1119,7 +1115,7 @@ impl KmsService {
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let blob = crate::blob::encode_with_context(
             &state.master_key_bytes,
-            sealed_key_ref(req, key),
+            sealed_key_ref(key),
             &private_key_bytes,
             &ec_aad,
         );
