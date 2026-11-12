@@ -8313,6 +8313,23 @@ impl fakecloud_persistence::S3Store for RecordingStore {
         }
         self.inner.put_object(bucket, key, version, body, meta)
     }
+    fn replace_object_body(
+        &self,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+        body: fakecloud_persistence::BodySource,
+        meta: &fakecloud_persistence::ObjectMeta,
+    ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
+        self.record(format!("replace_object_body:{bucket}/{key}"));
+        if self.fail_put.lock().as_deref() == Some(format!("{bucket}/{key}").as_str()) {
+            return Err(fakecloud_persistence::StoreError::Other(
+                "disk full".to_string(),
+            ));
+        }
+        self.inner
+            .replace_object_body(bucket, key, version, body, meta)
+    }
     fn put_object_meta(
         &self,
         bucket: &str,
@@ -8598,7 +8615,7 @@ fn update_object_encryption_persists_reencrypted_body() {
     // Algorithm changed -> the body path must be re-persisted, not RAM-only.
     let calls = store.calls();
     assert!(
-        calls.iter().any(|c| c == "put_object:b/k"),
+        calls.iter().any(|c| c == "replace_object_body:b/k"),
         "expected put_object to persist the re-encrypted body, got {calls:?}"
     );
     // Metadata reflects the new algorithm in memory too.
@@ -10297,6 +10314,72 @@ fn spool_is_empty(dir: &std::path::Path) -> bool {
         Ok(entries) => entries.count() == 0,
         Err(_) => true,
     }
+}
+
+/// The annotation record files under `dir`, a disk store's root.
+fn stored_annotation_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n.to_string_lossy().ends_with(".annotations"))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// UpdateObjectEncryption reseals the same object: its annotations survive,
+/// in memory and in the disk store, which keeps them beside the body it
+/// rewrites.
+#[tokio::test]
+async fn update_object_encryption_keeps_annotations_through_a_disk_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = make_disk_service(dir.path());
+    seed_bucket(&svc, "ann");
+    let mut put = make_request(Method::PUT, "/ann/o", &[], b"annotated body");
+    put.headers
+        .insert("x-amz-server-side-encryption", "AES256".parse().unwrap());
+    svc.handle(put).await.unwrap();
+    let annotate = make_request(
+        Method::PUT,
+        "/ann/o",
+        &[("annotation", ""), ("annotationName", "review")],
+        b"looks good",
+    );
+    svc.put_object_annotation("123456789012", &annotate, "ann", "o")
+        .unwrap();
+    let before = stored_annotation_files(dir.path());
+    assert!(!before.is_empty(), "the annotation is on disk");
+
+    for key in [
+        "arn:aws:kms:us-east-1:123456789012:key/key-a",
+        "arn:aws:kms:us-east-1:123456789012:key/key-b",
+    ] {
+        svc.update_object_encryption(
+            "123456789012",
+            &update_encryption_request("/ann/o", key, None),
+            "ann",
+            "o",
+        )
+        .unwrap();
+        let obj = bucket_of(&svc, "ann").objects["o"].clone();
+        assert_eq!(obj.sse_kms_key_id.as_deref(), Some(key));
+        assert!(obj.annotations.contains_key("review"), "{key}");
+        assert_eq!(stored_annotation_files(dir.path()), before, "{key}");
+    }
+    assert_eq!(disk_body_of(&svc, "ann", "o"), b"annotated body");
 }
 
 #[tokio::test]

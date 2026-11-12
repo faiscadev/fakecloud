@@ -4066,6 +4066,7 @@ mod tests {
             delete_object(bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()>;
             open_object_body(body: &BodyRef) -> StoreResult<Bytes>;
             put_object(bucket: &str, key: &str, version: Option<&str>, body: BodySource, meta: &ObjectMeta) -> StoreResult<BodyRef>;
+            replace_object_body(bucket: &str, key: &str, version: Option<&str>, body: BodySource, meta: &ObjectMeta) -> StoreResult<BodyRef>;
             mpu_create(bucket: &str, upload_id: &str, init: &MpuInit) -> StoreResult<()>;
             mpu_put_part(bucket: &str, upload_id: &str, part_number: u32, body: BodySource, etag: &str, checksum: Option<fakecloud_persistence::PartChecksum<'_>>) -> StoreResult<BodyRef>;
             mpu_abort(bucket: &str, upload_id: &str) -> StoreResult<()>;

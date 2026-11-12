@@ -995,8 +995,10 @@ impl S3Service {
                     .map_err(crate::service::persistence_error)?;
             }
             Some(new_bytes) => {
+                // The same version with new bytes: its annotations stay (AWS:
+                // the operation "preserves all object metadata properties").
                 let new_body = crate::service::objects::run_blocking_io(|| {
-                    self.store.put_object(
+                    self.store.replace_object_body(
                         bucket,
                         key,
                         slot,

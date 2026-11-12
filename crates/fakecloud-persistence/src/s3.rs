@@ -536,6 +536,19 @@ pub trait S3Store: Send + Sync {
         body: BodySource,
         meta: &ObjectMeta,
     ) -> StoreResult<BodyRef>;
+    /// Replace the body and metadata of the object version in a slot that
+    /// stays the same object: unlike [`Self::put_object`], which starts a new
+    /// object in the slot, its annotations are kept. For a change that
+    /// rewrites an existing version's bytes (UpdateObjectEncryption resealing
+    /// it under another key).
+    fn replace_object_body(
+        &self,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+        body: BodySource,
+        meta: &ObjectMeta,
+    ) -> StoreResult<BodyRef>;
     fn put_object_meta(
         &self,
         bucket: &str,
@@ -649,6 +662,17 @@ impl S3Store for MemoryS3Store {
     }
 
     fn put_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+        _version: Option<&str>,
+        body: BodySource,
+        _meta: &ObjectMeta,
+    ) -> StoreResult<BodyRef> {
+        Ok(BodyRef::Memory(read_body_source(body)?))
+    }
+    /// Annotations live in the runtime state alone, which the caller keeps.
+    fn replace_object_body(
         &self,
         _bucket: &str,
         _key: &str,
@@ -1264,11 +1288,24 @@ impl S3Store for DiskS3Store {
         body: BodySource,
         meta: &ObjectMeta,
     ) -> StoreResult<BodyRef> {
-        let (dir, bin_path, toml_path) = self.object_paths(bucket, key, version);
-        std::fs::create_dir_all(&dir)?;
         // A new object in this slot starts without annotations; the replaced
         // object's go with it.
         remove_dir_if_present(&self.annotation_dir(bucket, key, version))?;
+        self.replace_object_body(bucket, key, version, body, meta)
+    }
+
+    /// The same files [`S3Store::put_object`] writes, with the slot's
+    /// annotation records left where they are.
+    fn replace_object_body(
+        &self,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+        body: BodySource,
+        meta: &ObjectMeta,
+    ) -> StoreResult<BodyRef> {
+        let (dir, bin_path, toml_path) = self.object_paths(bucket, key, version);
+        std::fs::create_dir_all(&dir)?;
 
         if meta.is_delete_marker {
             crate::atomic::write_atomic_toml(&toml_path, meta)?;
@@ -2125,6 +2162,82 @@ mod disk_tests {
             .unwrap();
         store.delete_object("b", "k", None).unwrap();
         assert!(!store.annotation_dir("b", "k", None).exists());
+    }
+
+    /// Replacing a slot's body keeps it the same object: the new bytes and
+    /// metadata are stored and read back, and its annotations stay, in an
+    /// unversioned slot and a version's own slot alike.
+    #[test]
+    fn replacing_an_objects_body_keeps_its_annotations() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_with_object(&tmp);
+        store
+            .put_annotation("b", "k", None, &annotation("a"), b"kept")
+            .unwrap();
+        let mut meta = sample_meta("k", 5);
+        meta.content_type = "text/x-resealed".to_string();
+        let body = store
+            .replace_object_body(
+                "b",
+                "k",
+                None,
+                BodySource::Bytes(Bytes::from_static(b"sealx")),
+                &meta,
+            )
+            .unwrap();
+        assert_eq!(&store.open_object_body(&body).unwrap()[..], b"sealx");
+        assert_eq!(
+            loaded_annotations(&store),
+            vec![("a".to_string(), b"kept".to_vec())]
+        );
+        let loaded = store.load().unwrap();
+        let obj = &loaded.buckets["b"].objects["k"];
+        assert_eq!(obj.meta.content_type, "text/x-resealed");
+        assert_eq!(&store.open_object_body(&obj.body).unwrap()[..], b"sealx");
+
+        // A version's slot.
+        store
+            .put_object(
+                "b",
+                "v",
+                Some("v1"),
+                BodySource::Bytes(Bytes::from_static(b"one")),
+                &sample_meta("v", 3),
+            )
+            .unwrap();
+        store
+            .put_annotation("b", "v", Some("v1"), &annotation("n"), b"note")
+            .unwrap();
+        store
+            .replace_object_body(
+                "b",
+                "v",
+                Some("v1"),
+                BodySource::Bytes(Bytes::from_static(b"two")),
+                &sample_meta("v", 3),
+            )
+            .unwrap();
+        let dir = store.annotation_dir("b", "v", Some("v1"));
+        assert!(dir
+            .join(format!("{}.bin", DiskS3Store::annotation_file_stem("n")))
+            .exists());
+    }
+
+    /// The memory store keeps annotations in the runtime state only: replacing
+    /// a body just hands back the new bytes.
+    #[test]
+    fn memory_store_replaces_a_body() {
+        let store = MemoryS3Store::new();
+        let body = store
+            .replace_object_body(
+                "b",
+                "k",
+                None,
+                BodySource::Bytes(Bytes::from_static(b"sealed")),
+                &sample_meta("k", 6),
+            )
+            .unwrap();
+        assert_eq!(&store.open_object_body(&body).unwrap()[..], b"sealed");
     }
 
     #[test]

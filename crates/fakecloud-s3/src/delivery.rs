@@ -1429,6 +1429,20 @@ mod tests {
             }
             self.inner.put_object(bucket, key, version, body, meta)
         }
+        fn replace_object_body(
+            &self,
+            bucket: &str,
+            key: &str,
+            version: Option<&str>,
+            body: fakecloud_persistence::BodySource,
+            meta: &fakecloud_persistence::ObjectMeta,
+        ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
+            if self.only_bucket.is_none_or(|b| b == bucket) {
+                return Err(disk_full());
+            }
+            self.inner
+                .replace_object_body(bucket, key, version, body, meta)
+        }
         fn put_object_meta(
             &self,
             bucket: &str,
