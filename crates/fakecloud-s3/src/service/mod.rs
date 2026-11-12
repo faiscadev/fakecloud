@@ -691,12 +691,10 @@ impl S3Service {
         if self.kms_hook.is_none() {
             return Ok(bytes::Bytes::copy_from_slice(plaintext));
         }
-        let key = kms_key_id.filter(|k| !k.is_empty()).unwrap_or("aws/s3");
         // A key or alias ARN names its own account (it may be the
         // requester's, outside the bucket owner's); a bare key id or alias
-        // resolves in the bucket owner's account.
-        let key_account = kms_reference_account(key).unwrap_or(account_id);
-        self.authorize_kms_key_use(req, key_account, region, key, "GenerateDataKey")?;
+        // resolves in the bucket owner's account. The KMS hook decides
+        // whether the requester may use the key.
         crate::side_effects::kms_encrypt(
             self.kms_hook.as_ref(),
             account_id,
@@ -705,7 +703,7 @@ impl S3Service {
             object_key,
             bucket_key,
             plaintext,
-            Some(key),
+            kms_key_id,
             req.principal.as_ref().map(|p| p.arn.as_str()),
         )
         .map_err(|err| {
@@ -747,10 +745,6 @@ impl S3Service {
         };
         let key = kms_key_id.filter(|k| !k.is_empty()).unwrap_or("aws/s3");
         let key_account = kms_reference_account(key).unwrap_or(account_id);
-        let region = self
-            .bucket_region(bucket)
-            .unwrap_or_else(|| req.region.clone());
-        self.authorize_kms_key_use(req, key_account, &region, key, "Decrypt")?;
         let ctx = crate::side_effects::s3_encryption_context(bucket, object_key, bucket_key);
         hook.decrypt(
             key_account,
@@ -766,123 +760,6 @@ impl S3Service {
             tracing::warn!(bucket = %bucket, error = %err, "SSE-KMS decrypt failed");
             kms_hook_error(&err)
         })
-    }
-
-    /// Authorize the requester's use of a KMS key that another account owns
-    /// for SSE-KMS (`kms:GenerateDataKey` to write, `kms:Decrypt` to read).
-    ///
-    /// Using a key across accounts is a cross-account KMS request, which on
-    /// AWS needs the key policy to grant the requester -- a default key
-    /// policy (and an AWS-managed `aws/s3` key's) trusts only its own
-    /// account, so another account's writes under it are refused. A key in
-    /// the requester's own account is governed by the requester's own
-    /// permissions and is not checked here. Enforced under `--iam strict`,
-    /// logged under `--iam soft`, skipped with IAM off and for the `test*`
-    /// root-bypass credentials.
-    fn authorize_kms_key_use(
-        &self,
-        req: &AwsRequest,
-        key_account: &str,
-        region: &str,
-        key: &str,
-        action: &str,
-    ) -> Result<(), AwsServiceError> {
-        if !self.iam_mode.is_enabled()
-            || key_account == req.account_id
-            || req
-                .access_key_id
-                .as_deref()
-                .is_some_and(fakecloud_core::auth::is_root_bypass)
-        {
-            return Ok(());
-        }
-        let Some(kms) = &self.kms_state else {
-            return Ok(());
-        };
-        let key_ref =
-            if !key.starts_with("arn:") && !key.starts_with("alias/") && key.starts_with("aws/") {
-                format!("alias/{key}")
-            } else {
-                key.to_string()
-            };
-        let key_region = fakecloud_kms::parse_kms_arn(&key_ref).map_or(region, |(r, _, _)| r);
-        let (key_arn, policy) = {
-            let accounts = kms.read();
-            let found = accounts.get(key_account).and_then(|state| {
-                let arn = state.resolve_key_arn(key_region, &key_ref)?.to_string();
-                let id = arn.rsplit('/').next().unwrap_or_default().to_string();
-                Some((arn, state.keys.get(&id).map(|k| k.policy.clone())))
-            });
-            match found {
-                Some((arn, policy)) => (arn, policy.unwrap_or_default()),
-                // An AWS-managed key not minted yet has the managed-key
-                // policy, which trusts only its own account.
-                None if key_ref.starts_with("alias/aws/") => (key_ref.clone(), String::new()),
-                None => return Err(kms_not_found(key_account, key_region, &key_ref)),
-            }
-        };
-        let principal = req
-            .principal
-            .clone()
-            .unwrap_or_else(|| fakecloud_core::auth::Principal {
-                arn: Arn::global_in(&req.region, "iam", &req.account_id, "root").to_string(),
-                user_id: req.account_id.clone(),
-                account_id: req.account_id.clone(),
-                principal_type: fakecloud_core::auth::PrincipalType::Root,
-                source_identity: None,
-                tags: None,
-            });
-        let action = format!("kms:{action}");
-        let mut context = fakecloud_iam::evaluator::RequestContext {
-            aws_principal_arn: Some(principal.arn.clone()),
-            aws_principal_account: Some(principal.account_id.clone()),
-            aws_requested_region: Some(region.to_string()),
-            ..Default::default()
-        };
-        context.service_keys.insert(
-            "kms:calleraccount".to_string(),
-            vec![principal.account_id.clone()],
-        );
-        context.service_keys.insert(
-            "kms:viaservice".to_string(),
-            vec![format!("s3.{region}.amazonaws.com")],
-        );
-        let allowed = !policy.is_empty() && {
-            let doc = fakecloud_iam::evaluator::PolicyDocument::parse(&policy);
-            let request = fakecloud_iam::evaluator::EvalRequest {
-                principal: &principal,
-                action: action.clone(),
-                resource: key_arn.clone(),
-                context,
-            };
-            matches!(
-                fakecloud_iam::evaluator::evaluate_resource_policy_only(&doc, &request),
-                fakecloud_iam::evaluator::Decision::Allow
-            )
-        };
-        if allowed {
-            return Ok(());
-        }
-        tracing::warn!(
-            target: "fakecloud::iam::audit",
-            principal = %principal.arn,
-            action = %action,
-            key = %key_arn,
-            mode = %self.iam_mode,
-            "SSE-KMS use of another account's key denied: the key policy does not grant it"
-        );
-        if !self.iam_mode.is_strict() {
-            return Ok(());
-        }
-        Err(AwsServiceError::aws_error(
-            StatusCode::FORBIDDEN,
-            "AccessDenied",
-            format!(
-                "User: {} is not authorized to perform: {action} on resource: {key_arn} \
-                 because no resource-based policy allows the {action} action",
-                principal.arn
-            ),
-        ))
     }
 }
 
@@ -3969,15 +3846,6 @@ pub(crate) fn kms_reference_account(key: &str) -> Option<&str> {
     fakecloud_kms::parse_kms_arn(key)
         .map(|(_, account, _)| account)
         .filter(|a| !a.is_empty())
-}
-
-/// `KMS.NotFoundException` for an SSE-KMS key reference that names no key
-/// (recorded: "Alias arn:...:alias/x is not found.", "Key 'arn:...' does not
-/// exist").
-pub(crate) fn kms_not_found(account_id: &str, region: &str, key: &str) -> AwsServiceError {
-    kms_hook_error(&fakecloud_core::delivery::KmsError::not_found(
-        account_id, region, key,
-    ))
 }
 
 /// The S3 error for a failed KMS hook call. Recorded (PutObject with SSE-KMS):

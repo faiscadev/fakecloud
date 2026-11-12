@@ -9958,19 +9958,42 @@ async fn cross_account_put_with_the_callers_key_arn_encrypts_under_that_key() {
     assert_eq!(resp.body.expect_bytes(), b"secret body");
 }
 
+/// `req` signed by the IAM user `name` of the requester's account.
+fn as_user(mut req: AwsRequest, name: &str) -> AwsRequest {
+    req.principal = Some(fakecloud_core::auth::Principal {
+        arn: format!("arn:aws:iam::{}:user/{name}", req.account_id),
+        user_id: "AIDAEXAMPLE".to_string(),
+        account_id: req.account_id.clone(),
+        principal_type: fakecloud_core::auth::PrincipalType::User,
+        source_identity: None,
+        tags: None,
+    });
+    req
+}
+
 #[tokio::test]
 async fn cross_account_put_with_a_bare_alias_uses_the_bucket_owners_key() {
-    // Strict: the owner's aws/s3 key trusts only the owner's account, so the
-    // other account's write under it is AccessDenied -- not a 500.
-    let (svc, _) = kms_service_with_foreign_bucket(fakecloud_core::auth::IamMode::Strict);
-    let err = assert_aws_err(
-        svc.handle(sse_kms_put("/theirs/enc.txt", Some("alias/aws/s3")))
+    // The owner's aws/s3 key trusts only the owner's account, so another
+    // account's identity writing under it is AccessDenied -- not a 500 --
+    // whatever the IAM mode: the key policy decides.
+    for mode in [
+        fakecloud_core::auth::IamMode::Strict,
+        fakecloud_core::auth::IamMode::Off,
+    ] {
+        let (svc, _) = kms_service_with_foreign_bucket(mode);
+        let err = assert_aws_err(
+            svc.handle(as_user(
+                sse_kms_put("/theirs/enc.txt", Some("alias/aws/s3")),
+                "alice",
+            ))
             .await,
-        "AccessDenied",
-    );
-    assert_eq!(err.status(), StatusCode::FORBIDDEN);
+            "AccessDenied",
+        );
+        assert_eq!(err.status(), StatusCode::FORBIDDEN, "{mode}");
+    }
 
-    // IAM off: the alias resolves -- and encrypts -- in the owner's account.
+    // Without an identity (the `test*` root-bypass credentials) the alias
+    // resolves -- and encrypts -- in the owner's account.
     let (svc, kms) = kms_service_with_foreign_bucket(fakecloud_core::auth::IamMode::Off);
     svc.handle(sse_kms_put("/theirs/enc.txt", Some("alias/aws/s3")))
         .await

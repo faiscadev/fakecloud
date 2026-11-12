@@ -829,3 +829,94 @@ async fn resources_use_another_accounts_key_when_its_policy_allows() {
         .await
         .is_err());
 }
+
+/// PutObject with SSE-KMS under `key` into `bucket`, then GetObject; returns
+/// the body read back.
+async fn s3_kms_round_trip(s3: &S3Client, bucket: &str, object: &str, key: &str) -> Vec<u8> {
+    s3.put_object()
+        .bucket(bucket)
+        .key(object)
+        .server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::AwsKms)
+        .ssekms_key_id(key)
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"payload"))
+        .send()
+        .await
+        .unwrap();
+    let got = s3
+        .get_object()
+        .bucket(bucket)
+        .key(object)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.ssekms_key_id(), Some(key));
+    got.body.collect().await.unwrap().into_bytes().to_vec()
+}
+
+/// An object in account A's bucket can be encrypted under a customer key of
+/// account B by its ARN when B's key policy grants A, or when B gives A's
+/// identity a KMS grant for the operations; a key that grants only B refuses
+/// A's write with AccessDenied, and nothing is stored.
+#[tokio::test]
+async fn s3_sse_kms_uses_another_accounts_key_when_its_policy_or_a_grant_allows() {
+    let server = start().await;
+    let (a_akid, a_secret) = server.create_admin(ACCOUNT_A, "admin-a").await;
+    let (b_akid, b_secret) = server.create_admin(ACCOUNT_B, "admin-b").await;
+    let a_cfg = config_with(&server, &a_akid, &a_secret).await;
+    let b_cfg = config_with(&server, &b_akid, &b_secret).await;
+    let kms_b = aws_sdk_kms::Client::new(&b_cfg);
+    let shared = key_in_b(&kms_b, true).await;
+    let private = key_in_b(&kms_b, false).await;
+
+    let s3 = S3Client::new(&a_cfg);
+    s3.create_bucket().bucket("a-bucket").send().await.unwrap();
+    assert_eq!(
+        s3_kms_round_trip(&s3, "a-bucket", "shared.txt", &shared).await,
+        b"payload"
+    );
+
+    let err = s3
+        .put_object()
+        .bucket("a-bucket")
+        .key("private.txt")
+        .server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::AwsKms)
+        .ssekms_key_id(&private)
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"payload"))
+        .send()
+        .await
+        .expect_err("a key whose policy grants only B refuses A");
+    assert_eq!(
+        aws_sdk_s3::error::ProvideErrorMetadata::code(&err),
+        Some("AccessDenied"),
+        "{err:?}"
+    );
+    assert!(s3
+        .head_object()
+        .bucket("a-bucket")
+        .key("private.txt")
+        .send()
+        .await
+        .is_err());
+
+    // B grants A's admin user the data-key operations on the same key.
+    let a_arn = StsClient::new(&a_cfg)
+        .get_caller_identity()
+        .send()
+        .await
+        .unwrap()
+        .arn
+        .unwrap();
+    kms_b
+        .create_grant()
+        .key_id(&private)
+        .grantee_principal(&a_arn)
+        .operations(aws_sdk_kms::types::GrantOperation::GenerateDataKey)
+        .operations(aws_sdk_kms::types::GrantOperation::Decrypt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        s3_kms_round_trip(&s3, "a-bucket", "private.txt", &private).await,
+        b"payload"
+    );
+}

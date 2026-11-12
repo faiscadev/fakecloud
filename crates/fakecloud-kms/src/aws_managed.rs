@@ -197,6 +197,12 @@ pub(crate) fn account_root(account: &str, region: &str) -> Principal {
     }
 }
 
+/// The account of the calling identity `arn`, `fallback` when the ARN names
+/// none.
+fn caller_account<'a>(arn: &'a str, fallback: &'a str) -> &'a str {
+    fakecloud_aws::arn::account_of(arn).unwrap_or(fallback)
+}
+
 /// The principals a key policy can name for the calling identity `arn` of
 /// `account`: the identity itself, and for an assumed-role session
 /// (`arn:<p>:sts::<account>:assumed-role/<role>/<session>`) also its role,
@@ -204,12 +210,6 @@ pub(crate) fn account_root(account: &str, region: &str) -> Principal {
 /// role's IAM ARN with its path, when known, else
 /// `arn:<p>:iam::<account>:role/<role>`. An account-root or bare-account
 /// principal in the policy matches either by account.
-/// The account of the calling identity `arn`, `fallback` when the ARN names
-/// none.
-fn caller_account<'a>(arn: &'a str, fallback: &'a str) -> &'a str {
-    fakecloud_aws::arn::account_of(arn).unwrap_or(fallback)
-}
-
 fn caller_principals(arn: &str, role_arn: Option<&str>, account: &str) -> Vec<Principal> {
     let principal = |arn: String, principal_type: PrincipalType| Principal {
         arn,
