@@ -809,6 +809,21 @@ pub trait AwsService: Send + Sync {
         false
     }
 
+    /// Whether `request` needs authorization at all. A few operations need
+    /// no permission and no policy can deny them (`sts:GetCallerIdentity`);
+    /// dispatch then evaluates no policy for a caller whose credentials
+    /// resolved. Defaults to `true`.
+    fn iam_authorization_required(&self, _request: &AwsRequest) -> bool {
+        true
+    }
+
+    /// Validation AWS performs before authorizing `request`: an error here
+    /// is returned to the caller whatever its permissions. Dispatch calls it
+    /// before IAM enforcement. Defaults to accepting every request.
+    fn validate_before_authorization(&self, _request: &AwsRequest) -> Result<(), AwsServiceError> {
+        Ok(())
+    }
+
     /// Derive the IAM action + resource ARN for an incoming request.
     ///
     /// Only called when [`AwsService::iam_enforceable`] returns `true`

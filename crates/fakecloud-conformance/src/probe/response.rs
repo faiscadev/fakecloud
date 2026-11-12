@@ -431,7 +431,11 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         // lists only enumerate the token/policy exceptions, not AccessDenied. A
         // handler returning AccessDenied to the probes' synthetic (nonexistent)
         // role ARNs ran correctly. Source: STS API "Common Errors" + per-op docs.
-        "sts" => &["AccessDenied"],
+        // ValidationError is in the same Common Errors list
+        // (https://docs.aws.amazon.com/STS/latest/APIReference/CommonErrors.html);
+        // recorded, AssumeRoot answers a TaskPolicyArn that is no root-task
+        // policy with it, which its errors list omits.
+        "sts" => &["AccessDenied", "ValidationError"],
         // DynamoDB returns `ValidationException` across essentially every
         // operation for malformed/under-specified input — it is the service's
         // canonical client-error shape. Most ops declare it, but a few (notably

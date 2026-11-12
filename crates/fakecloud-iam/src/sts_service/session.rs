@@ -102,6 +102,7 @@ impl StsService {
                 // GetSessionToken doesn't federate.
                 federated_provider: None,
                 role_arn: None,
+                federated_parent_arn: None,
             },
         );
 

@@ -3738,7 +3738,7 @@ async fn iam_deny_includes_encoded_auth_failure_message() {
 
     // No identity policy → implicit deny → AccessDeniedException with
     // encoded suffix.
-    let err = sts.get_caller_identity().send().await.unwrap_err();
+    let err = sts.get_session_token().send().await.unwrap_err();
     let raw = format!("{err:?}");
     let marker = "Encoded authorization failure message:";
     let idx = raw
@@ -3761,7 +3761,7 @@ async fn iam_deny_includes_encoded_auth_failure_message() {
         .await
         .unwrap();
     let body = decoded.decoded_message().unwrap();
-    assert!(body.contains("sts:GetCallerIdentity"), "body={body}");
+    assert!(body.contains("sts:GetSessionToken"), "body={body}");
     assert!(body.contains("enc-deny-user"), "body={body}");
 }
 

@@ -307,6 +307,7 @@ impl StsService {
                 // stays absent for the resulting session.
                 federated_provider: None,
                 role_arn: Some(role_iam_arn),
+                federated_parent_arn: None,
             },
         );
 
@@ -633,6 +634,7 @@ impl StsService {
                 issued_at: Utc::now(),
                 federated_provider,
                 role_arn: Some(session_role_arn),
+                federated_parent_arn: None,
             },
         );
 
@@ -883,6 +885,7 @@ impl StsService {
                 issued_at: Utc::now(),
                 federated_provider,
                 role_arn: Some(session_role_arn),
+                federated_parent_arn: None,
             },
         );
 
@@ -961,13 +964,7 @@ impl StsService {
             .map(String::as_str)
             .unwrap_or_default();
         let task_policy = root_task_policy(task_policy_arn, partition_for_region(&req.region))
-            .ok_or_else(|| {
-                sts_assume_root_error(format!(
-                    "TaskPolicyArn {task_policy_arn} is not one of the AWS managed root-task \
-                     policies ({})",
-                    ROOT_TASK_POLICIES.join(", ")
-                ))
-            })?;
+            .ok_or_else(invalid_task_policy_arn)?;
 
         // `RootDurationSecondsType` is @range 0..=900. Reject negative or
         // > 900 inputs up front rather than clamping silently.
@@ -1088,6 +1085,7 @@ impl StsService {
                 issued_at: Utc::now(),
                 federated_provider: None,
                 role_arn: None,
+                federated_parent_arn: None,
             },
         );
 
@@ -1168,6 +1166,7 @@ impl StsService {
                 issued_at: Utc::now(),
                 federated_provider: None,
                 role_arn: None,
+                federated_parent_arn: None,
             },
         );
 
@@ -1190,6 +1189,16 @@ pub(crate) const ROOT_TASK_POLICIES: &[&str] = &[
     "S3UnlockBucketPolicy",
     "SQSUnlockQueuePolicy",
 ];
+
+/// STS's refusal of a `TaskPolicyArn` that names no root-task policy
+/// (recorded).
+pub(crate) fn invalid_task_policy_arn() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ValidationError",
+        "Request must contain valid AWS managed task policy ARN",
+    )
+}
 
 /// The policy an `AssumeRoot` session with the task policy `arn` (an
 /// `arn:<partition>:iam::aws:policy/root-task/<name>` of

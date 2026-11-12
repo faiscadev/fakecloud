@@ -30,6 +30,87 @@ impl IamPolicyEvaluatorImpl {
     }
 }
 
+/// The identity whose permissions `principal`'s are cut from, for a federated
+/// user session (`sts:GetFederationToken`): the IAM user or root user that
+/// federated (`context.federated_parent_arn`). `None` for any other
+/// principal, and for a federated session that recorded none.
+fn federated_parent(principal: &Principal, context: &ConditionContext) -> Option<Principal> {
+    if principal.principal_type != PrincipalType::FederatedUser {
+        return None;
+    }
+    let arn = context.federated_parent_arn.as_deref()?;
+    let principal_type = PrincipalType::from_arn(arn);
+    matches!(principal_type, PrincipalType::User | PrincipalType::Root).then(|| Principal {
+        arn: arn.to_string(),
+        user_id: principal.user_id.clone(),
+        account_id: principal.account_id.clone(),
+        principal_type,
+        source_identity: None,
+        tags: principal.tags.clone(),
+    })
+}
+
+/// The identity-based layers of `principal`'s permissions: its identity
+/// policies, its permissions boundary and its session policies.
+///
+/// A federated user session's are its federating user's identity policies
+/// and boundary (the root user's full access when the root user federated)
+/// intersected with the session policies passed to `GetFederationToken`:
+/// without any session policy the session has no identity-based
+/// permission.
+fn identity_layers(
+    state: &crate::state::IamState,
+    principal: &Principal,
+    context: &ConditionContext,
+    session_policies: &[String],
+) -> IdentityLayers {
+    if principal.principal_type == PrincipalType::FederatedUser {
+        let parent = federated_parent(principal, context);
+        let identity = match &parent {
+            Some(p) if p.principal_type == PrincipalType::Root => {
+                vec![evaluator::PolicyDocument::parse(
+                    r#"{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#,
+                )]
+            }
+            Some(p) => evaluator::collect_identity_policies(state, p),
+            None => Vec::new(),
+        };
+        let boundary = parent
+            .as_ref()
+            .and_then(|p| evaluator::collect_boundary_policies(state, p));
+        let session = Some(parse_session_policies(session_policies).unwrap_or_default());
+        return IdentityLayers {
+            identity,
+            boundary,
+            session,
+            granted_as: parent.map(|p| p.arn),
+        };
+    }
+    IdentityLayers {
+        identity: evaluator::collect_identity_policies(state, principal),
+        boundary: evaluator::collect_boundary_policies(state, principal),
+        session: parse_session_policies(session_policies),
+        granted_as: evaluator::request_role_arn(state, principal, context),
+    }
+}
+
+struct IdentityLayers {
+    identity: Vec<evaluator::PolicyDocument>,
+    boundary: Option<Vec<evaluator::PolicyDocument>>,
+    session: Option<Vec<evaluator::PolicyDocument>>,
+    /// The identity a resource policy can name to grant the principal, with
+    /// the boundary and session policies limiting the grant: an assumed-role
+    /// session's role, a federated user session's federating IAM user.
+    granted_as: Option<String>,
+}
+
+/// A federated user session cannot call IAM, nor STS beyond
+/// `GetCallerIdentity` (which needs no authorization).
+fn federated_user_refused(principal: &Principal, action: &IamAction) -> bool {
+    principal.principal_type == PrincipalType::FederatedUser
+        && (action.service == "iam" || action.service == "sts")
+}
+
 impl IamPolicyEvaluator for IamPolicyEvaluatorImpl {
     fn evaluate(
         &self,
@@ -39,13 +120,19 @@ impl IamPolicyEvaluator for IamPolicyEvaluatorImpl {
         session_policies: &[String],
         scps: Option<&[String]>,
     ) -> IamDecision {
+        if federated_user_refused(principal, action) {
+            return IamDecision::ImplicitDeny;
+        }
         let states = self.state.read();
         let Some(state) = states.get(&principal.account_id) else {
             return IamDecision::ImplicitDeny;
         };
-        let identity_policies = evaluator::collect_identity_policies(state, principal);
-        let boundary = evaluator::collect_boundary_policies(state, principal);
-        let session = parse_session_policies(session_policies);
+        let IdentityLayers {
+            identity: identity_policies,
+            boundary,
+            session,
+            ..
+        } = identity_layers(state, principal, context, session_policies);
         let scp_docs = parse_scp_policies(scps, principal);
         let request = EvalRequest {
             principal,
@@ -72,13 +159,14 @@ impl IamPolicyEvaluator for IamPolicyEvaluatorImpl {
         session_policies: &[String],
         scps: Option<&[String]>,
     ) -> IamDecision {
+        if federated_user_refused(principal, action) {
+            return IamDecision::ImplicitDeny;
+        }
         let states = self.state.read();
         let Some(state) = states.get(&principal.account_id) else {
             return IamDecision::ImplicitDeny;
         };
-        let identity_policies = evaluator::collect_identity_policies(state, principal);
-        let boundary = evaluator::collect_boundary_policies(state, principal);
-        let session = parse_session_policies(session_policies);
+        let layers = identity_layers(state, principal, context, session_policies);
         let scp_docs = parse_scp_policies(scps, principal);
         let request = EvalRequest {
             principal,
@@ -88,12 +176,12 @@ impl IamPolicyEvaluator for IamPolicyEvaluatorImpl {
         };
         let resource_policy = resource_policy_json.map(evaluator::PolicyDocument::parse);
         decision_to_core(evaluator::evaluate_with_resource_policy_for_role(
-            &identity_policies,
-            boundary.as_deref(),
-            session.as_deref(),
+            &layers.identity,
+            layers.boundary.as_deref(),
+            layers.session.as_deref(),
             scp_docs.as_deref(),
             resource_policy.as_ref(),
-            evaluator::request_role_arn(state, principal, context).as_deref(),
+            layers.granted_as.as_deref(),
             &request,
             resource_account_id,
         ))
@@ -113,9 +201,13 @@ impl IamPolicyEvaluator for IamPolicyEvaluatorImpl {
         let boundary = with_boundary
             .then(|| {
                 let states = self.state.read();
-                states
-                    .get(&principal.account_id)
-                    .and_then(|state| evaluator::collect_boundary_policies(state, principal))
+                let parent = federated_parent(principal, context);
+                states.get(&principal.account_id).and_then(|state| {
+                    evaluator::collect_boundary_policies(
+                        state,
+                        parent.as_ref().unwrap_or(principal),
+                    )
+                })
             })
             .flatten();
         let request = EvalRequest {
@@ -998,5 +1090,134 @@ mod tests {
             ),
             IamDecision::Allow
         );
+    }
+
+    /// A federated user session (GetFederationToken) has its federating
+    /// user's identity policies intersected with its session policies (none
+    /// passed: no permission), the user's boundary, and is refused IAM and
+    /// STS. A resource policy naming the federating user reaches the session
+    /// within that ceiling; one naming the session itself stands alone.
+    #[test]
+    fn federated_user_sessions_are_cut_from_their_federating_user() {
+        let state = setup();
+        state
+            .write()
+            .get_or_create("123456789012")
+            .user_inline_policies
+            .insert(
+                "alice".into(),
+                std::collections::BTreeMap::from([(
+                    "S3AndSqs".into(),
+                    r#"{"Statement":[{"Effect":"Allow","Action":["s3:*","sqs:*","iam:*"],"Resource":"*"}]}"#
+                        .into(),
+                )]),
+            );
+        let eval = IamPolicyEvaluatorImpl::new(state.clone());
+        let federated = Principal {
+            arn: "arn:aws:sts::123456789012:federated-user/bob".into(),
+            user_id: "123456789012:bob".into(),
+            account_id: "123456789012".into(),
+            principal_type: PrincipalType::FederatedUser,
+            source_identity: None,
+            tags: None,
+        };
+        let context = ConditionContext {
+            federated_parent_arn: Some("arn:aws:iam::123456789012:user/alice".into()),
+            ..Default::default()
+        };
+        let action = |service: &'static str, action: &'static str| IamAction {
+            service,
+            action,
+            resource: "arn:aws:s3:::bucket/key".into(),
+        };
+        let all = r#"{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#.to_string();
+        let s3_only =
+            r#"{"Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#.to_string();
+        let decide = |a: &IamAction, session: &[String], ctx: &ConditionContext| {
+            eval.evaluate(&federated, a, ctx, session, None)
+        };
+        let get = action("s3", "GetObject");
+        // Parent allows, session allows.
+        assert_eq!(
+            decide(&get, std::slice::from_ref(&all), &context),
+            IamDecision::Allow
+        );
+        // No session policy: no permission.
+        assert_eq!(decide(&get, &[], &context), IamDecision::ImplicitDeny);
+        // The session policy cuts the parent's permissions.
+        assert_eq!(
+            decide(
+                &action("sqs", "SendMessage"),
+                std::slice::from_ref(&s3_only),
+                &context
+            ),
+            IamDecision::ImplicitDeny
+        );
+        // The parent does not allow DynamoDB, whatever the session says.
+        assert_eq!(
+            decide(
+                &action("dynamodb", "GetItem"),
+                std::slice::from_ref(&all),
+                &context
+            ),
+            IamDecision::ImplicitDeny
+        );
+        // No IAM or STS for a federated user.
+        assert_eq!(
+            decide(
+                &action("iam", "ListUsers"),
+                std::slice::from_ref(&all),
+                &context
+            ),
+            IamDecision::ImplicitDeny
+        );
+        // An old session that recorded no parent has no identity permission.
+        assert_eq!(
+            decide(
+                &get,
+                std::slice::from_ref(&all),
+                &ConditionContext::default()
+            ),
+            IamDecision::ImplicitDeny
+        );
+
+        // Resource policies: one naming the federating user reaches the
+        // session, capped by its session policies; one naming the session
+        // stands on its own.
+        let grant = |principal: &str| {
+            format!(
+                r#"{{"Statement":[{{"Effect":"Allow","Principal":{{"AWS":"{principal}"}},"Action":"s3:GetObject","Resource":"*"}}]}}"#
+            )
+        };
+        state
+            .write()
+            .get_or_create("123456789012")
+            .user_inline_policies
+            .clear();
+        let with_policy = |policy: &str, session: &[String]| {
+            eval.evaluate_with_resource_policy(
+                &federated,
+                &get,
+                &context,
+                Some(policy),
+                "123456789012",
+                session,
+                None,
+            )
+        };
+        let to_parent = grant("arn:aws:iam::123456789012:user/alice");
+        let to_session = grant("arn:aws:sts::123456789012:federated-user/bob");
+        assert_eq!(
+            with_policy(&to_parent, std::slice::from_ref(&s3_only)),
+            IamDecision::Allow
+        );
+        assert_eq!(with_policy(&to_parent, &[]), IamDecision::ImplicitDeny);
+        let sqs_only =
+            r#"{"Statement":[{"Effect":"Allow","Action":"sqs:*","Resource":"*"}]}"#.to_string();
+        assert_eq!(
+            with_policy(&to_parent, std::slice::from_ref(&sqs_only)),
+            IamDecision::ImplicitDeny
+        );
+        assert_eq!(with_policy(&to_session, &[]), IamDecision::Allow);
     }
 }

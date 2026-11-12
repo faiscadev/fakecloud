@@ -794,8 +794,17 @@ async fn dispatch_inner(
     // resource's policy (`authorize_root`). Services that haven't opted in via
     // `iam_enforceable()` are transparently skipped — the startup log
     // lists which services are under enforcement so users always know.
+    if let Err(err) = service.validate_before_authorization(&aws_request) {
+        return service_error_response(&err, &request_id, error_envelope);
+    }
+    // An operation that needs no authorization (`sts:GetCallerIdentity`)
+    // evaluates no policy for a caller whose credentials resolved.
+    let authorization_required = aws_request.principal.is_none()
+        || internal_caller.is_some()
+        || service.iam_authorization_required(&aws_request);
     if config.iam_mode.is_enabled()
         && service.iam_enforceable()
+        && authorization_required
         && !is_root_bypass(aws_request.access_key_id.as_deref().unwrap_or(""))
     {
         if let Some(evaluator) = config.policy_evaluator.as_ref() {
@@ -1245,42 +1254,51 @@ async fn dispatch_inner(
                 error = %err,
                 "request failed"
             );
-            let error_headers = err.response_headers().to_vec();
-            let mut resp = build_error_response_with_fields(
-                err.status(),
-                err.code(),
-                &err.message(),
-                &request_id,
-                error_envelope,
-                err.extra_fields(),
-            );
-            for (k, v) in &error_headers {
-                if let (Ok(name), Ok(val)) = (
-                    k.parse::<http::header::HeaderName>(),
-                    v.parse::<http::header::HeaderValue>(),
-                ) {
-                    // `Vary` combines, so two entries for it must both survive
-                    // (S3 adds its CORS value to an error that may carry its
-                    // own) — but an identical value is not worth repeating.
-                    // Everything else replaces, so a service can still override
-                    // a header this builder already set.
-                    if name == http::header::VARY {
-                        let already = resp
-                            .headers()
-                            .get_all(&name)
-                            .iter()
-                            .any(|existing| existing == val);
-                        if !already {
-                            resp.headers_mut().append(name, val);
-                        }
-                    } else {
-                        resp.headers_mut().insert(name, val);
-                    }
-                }
-            }
-            resp
+            service_error_response(&err, &request_id, error_envelope)
         }
     }
+}
+
+/// The wire response for a service's error `err`.
+fn service_error_response(
+    err: &crate::service::AwsServiceError,
+    request_id: &str,
+    error_envelope: ErrorEnvelope,
+) -> Response<Body> {
+    let error_headers = err.response_headers().to_vec();
+    let mut resp = build_error_response_with_fields(
+        err.status(),
+        err.code(),
+        &err.message(),
+        request_id,
+        error_envelope,
+        err.extra_fields(),
+    );
+    for (k, v) in &error_headers {
+        if let (Ok(name), Ok(val)) = (
+            k.parse::<http::header::HeaderName>(),
+            v.parse::<http::header::HeaderValue>(),
+        ) {
+            // `Vary` combines, so two entries for it must both survive
+            // (S3 adds its CORS value to an error that may carry its
+            // own) — but an identical value is not worth repeating.
+            // Everything else replaces, so a service can still override
+            // a header this builder already set.
+            if name == http::header::VARY {
+                let already = resp
+                    .headers()
+                    .get_all(&name)
+                    .iter()
+                    .any(|existing| existing == val);
+                if !already {
+                    resp.headers_mut().append(name, val);
+                }
+            } else {
+                resp.headers_mut().insert(name, val);
+            }
+        }
+    }
+    resp
 }
 
 /// Frame a service response for an rpcv2Cbor caller. A service that renders
@@ -1922,6 +1940,7 @@ fn principal_condition_context(
         if let Some(role_arn) = rc.role_arn.as_ref() {
             ctx.aws_principal_arn = Some(role_arn.clone());
         }
+        ctx.federated_parent_arn = rc.federated_parent_arn.clone();
         ctx.aws_mfa_present = Some(rc.mfa_present);
         ctx.aws_token_issue_time = rc.token_issued_at;
         ctx.aws_federated_provider = rc.federated_provider.clone();
@@ -2309,11 +2328,6 @@ fn authorize_root_scps(
             .then(|| unmapped_action_denial(principal, aws_request, request_id, detected));
     }
     for iam_action in iam_actions {
-        // `sts:GetCallerIdentity` needs no permission and no policy denies
-        // it, so neither the SCPs nor a root-task policy keep root from it.
-        if iam_action.service == "sts" && iam_action.action == "GetCallerIdentity" {
-            continue;
-        }
         let resource_account = config
             .resource_policy_provider
             .as_ref()
@@ -2655,6 +2669,7 @@ fn build_condition_context(
         resource_tags: None,
         request_tags: None,
         principal_tags: None,
+        federated_parent_arn: None,
     }
 }
 
@@ -4282,6 +4297,7 @@ mod tests {
             token_issued_at: Some(issued),
             federated_provider: None,
             role_arn: None,
+            federated_parent_arn: None,
         };
         let evaluator = PolicyEvaluator(parking_lot::Mutex::new(Vec::new()));
         let run = |bucket: &str, mode: IamMode| {

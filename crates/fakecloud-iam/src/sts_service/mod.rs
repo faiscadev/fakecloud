@@ -307,6 +307,31 @@ impl AwsService for StsService {
         true
     }
 
+    /// `GetCallerIdentity` needs no permission, and a policy denying
+    /// `sts:GetCallerIdentity` does not keep a caller from it.
+    fn iam_authorization_required(&self, request: &fakecloud_core::service::AwsRequest) -> bool {
+        request.action != "GetCallerIdentity"
+    }
+
+    /// `AssumeRoot` refuses a `TaskPolicyArn` that is not a root-task
+    /// policy before it authorizes the caller (recorded).
+    fn validate_before_authorization(
+        &self,
+        request: &fakecloud_core::service::AwsRequest,
+    ) -> Result<(), AwsServiceError> {
+        if request.action == "AssumeRoot" {
+            if let Some(arn) = request
+                .query_params
+                .get("TaskPolicyArn.arn")
+                .or_else(|| request.query_params.get("TaskPolicyArn"))
+            {
+                assume::root_task_policy(arn, partition_for_region(&request.region))
+                    .ok_or_else(assume::invalid_task_policy_arn)?;
+            }
+        }
+        Ok(())
+    }
+
     /// STS actions operate on `*` per AWS — see
     /// <https://docs.aws.amazon.com/service-authorization/latest/reference/list_awssecuritytokenservice.html>.
     /// `AssumeRole*` variants additionally carry a role ARN as the
@@ -2954,6 +2979,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn federation_token_records_the_federating_user() {
+        let (svc, state) = make_sts_service();
+        let parent_of = |principal: Option<fakecloud_core::auth::Principal>| {
+            let mut req = sts_request("GetFederationToken", vec![("Name", "bob")]);
+            req.principal = principal;
+            let resp = svc.get_federation_token(&req).unwrap();
+            let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+            let akid = body
+                .split("<AccessKeyId>")
+                .nth(1)
+                .and_then(|rest| rest.split('<').next())
+                .unwrap()
+                .to_string();
+            state
+                .read()
+                .get("123456789012")
+                .unwrap()
+                .sts_temp_credentials[&akid]
+                .federated_parent_arn
+                .clone()
+        };
+        let principal = |arn: &str, principal_type| fakecloud_core::auth::Principal {
+            arn: arn.into(),
+            user_id: "AIDAALICE".into(),
+            account_id: "123456789012".into(),
+            principal_type,
+            source_identity: None,
+            tags: None,
+        };
+        use fakecloud_core::auth::PrincipalType;
+        assert_eq!(
+            parent_of(Some(principal(
+                "arn:aws:iam::123456789012:user/alice",
+                PrincipalType::User
+            )))
+            .as_deref(),
+            Some("arn:aws:iam::123456789012:user/alice")
+        );
+        assert_eq!(
+            parent_of(None).as_deref(),
+            Some("arn:aws:iam::123456789012:root")
+        );
+        // A role session does not federate as anyone.
+        assert_eq!(
+            parent_of(Some(principal(
+                "arn:aws:sts::123456789012:assumed-role/r/s",
+                PrincipalType::AssumedRole
+            ))),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn assume_root_refuses_a_policy_that_is_not_a_root_task_policy() {
         let (svc, _) = make_sts_service();
         for arn in [
@@ -2971,7 +3049,17 @@ mod tests {
                 ],
             );
             let err = svc.assume_root(&req).err().expect(arn);
-            assert_eq!(err.code(), "ExpiredTokenException", "{arn}");
+            assert_eq!(err.code(), "ValidationError", "{arn}");
+            assert_eq!(
+                err.message(),
+                "Request must contain valid AWS managed task policy ARN"
+            );
+            assert_eq!(err.status(), http::StatusCode::BAD_REQUEST);
+            // Refused before the caller is authorized.
+            let err =
+                fakecloud_core::service::AwsService::validate_before_authorization(&svc, &req)
+                    .expect_err(arn);
+            assert_eq!(err.code(), "ValidationError", "{arn}");
         }
     }
 
