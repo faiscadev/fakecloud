@@ -152,11 +152,14 @@ pub(crate) enum KeyCaller<'a> {
     /// A fakecloud service (`service_principal`, `s3.amazonaws.com`) using
     /// the key in `region` on behalf of a caller in `account`, as AWS services
     /// do with the caller's forwarded credentials: `kms:ViaService` is the
-    /// service's regional endpoint.
+    /// service's regional endpoint. The key policy sees the calling identity
+    /// (`caller_arn`, an IAM user or assumed-role session of `account`) when
+    /// it is known, else the account root.
     ViaService {
         service_principal: &'a str,
         region: &'a str,
         account: &'a str,
+        caller_arn: Option<&'a str>,
     },
     /// A service principal acting itself (SES writing received mail to S3)
     /// for its resource `source_arn` owned by `source_account`. Only a
@@ -190,6 +193,36 @@ pub(crate) fn account_root(account: &str, region: &str) -> Principal {
     }
 }
 
+/// The principals a key policy can name for the calling identity `arn` of
+/// `account`: the identity itself, and for an assumed-role session
+/// (`arn:<p>:sts::<account>:assumed-role/<role>/<session>`) also its role
+/// (`arn:<p>:iam::<account>:role/<role>`), which a policy names to grant
+/// every session of the role. An account-root or bare-account principal in
+/// the policy matches either by account.
+fn caller_principals(arn: &str, account: &str) -> Vec<Principal> {
+    let principal = |arn: String, principal_type: PrincipalType| Principal {
+        arn,
+        user_id: account.to_string(),
+        account_id: account.to_string(),
+        principal_type,
+        source_identity: None,
+        tags: None,
+    };
+    let mut principals = vec![principal(arn.to_string(), PrincipalType::from_arn(arn))];
+    if let Some((prefix, rest)) = arn.split_once(":assumed-role/") {
+        let role = rest.split('/').next().unwrap_or(rest);
+        let partition = prefix
+            .strip_prefix("arn:")
+            .and_then(|p| p.split(':').next())
+            .unwrap_or("aws");
+        principals.push(principal(
+            format!("arn:{partition}:iam::{account}:role/{role}"),
+            PrincipalType::Unknown,
+        ));
+    }
+    principals
+}
+
 /// Whether the key policy `policy` of the key `key_arn` lets `caller`
 /// perform `action` (`kms:Encrypt`, ...) with `encryption_context`. `extra`
 /// carries operation-specific keys (`kms:ReEncryptOnSameKey`).
@@ -211,13 +244,17 @@ pub(crate) fn policy_allows(
             service_principal,
             region,
             account,
+            caller_arn,
         } => {
             keys.insert(
                 "kms:ViaService".to_string(),
                 vec![via_service(service_principal, region)],
             );
             keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
-            vec![account_root(account, region)]
+            match caller_arn {
+                Some(arn) => caller_principals(arn, account),
+                None => vec![account_root(account, region)],
+            }
         }
         KeyCaller::Service {
             service_principal,
@@ -403,6 +440,7 @@ mod tests {
                 service_principal: via,
                 region: "us-east-1",
                 account,
+                caller_arn: None,
             },
             action,
             &BTreeMap::new(),

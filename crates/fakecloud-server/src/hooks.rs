@@ -81,11 +81,11 @@ impl KmsHookAdapter {
         region: &str,
         key_id: &str,
     ) -> Result<String, fakecloud_core::delivery::KmsError> {
-        // A key ARN or alias ARN resolves in the account it names.
-        let owner = fakecloud_kms::hook::key_owner_account(account_id, key_id);
+        // A key ARN or alias ARN resolves in the account it names; only the
+        // resource's own account mints an AWS-managed key on first use.
         let (arn, minted) = self
             .inner
-            .resolve_key_arn_tracked(owner, region, key_id, "")?;
+            .resolve_key_arn_tracked(account_id, region, key_id, "")?;
         if minted {
             self.persist_minted_key();
         }
@@ -106,16 +106,12 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
     ) -> Result<String, fakecloud_core::delivery::KmsKeyUnusable> {
         use fakecloud_core::delivery::KmsKeyUnusable;
         // A key ARN names the account (and region) that owns the key.
-        let owner = key_id
-            .strip_prefix("arn:")
-            .and_then(|rest| rest.split(':').nth(3))
-            .filter(|a| !a.is_empty())
-            .unwrap_or(account_id)
-            .to_string();
-        // Resolving an `aws/<service>` alias mints the AWS-managed key on
-        // first use; persist it like every other mint.
+        let owner = fakecloud_kms::hook::key_owner_account(account_id, key_id).to_string();
+        // Resolving an `aws/<service>` alias of the resource's own account
+        // mints the AWS-managed key on first use; persist it like every other
+        // mint. Another account's alias ARN mints nothing.
         let arn = self
-            .resolve_and_persist(&owner, region, key_id, service_principal)
+            .resolve_and_persist(account_id, region, key_id, service_principal)
             .map_err(|_| KmsKeyUnusable::NotFound)?;
         let short = arn.rsplit('/').next().unwrap_or_default().to_string();
         let (state, policy) = {
