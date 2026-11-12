@@ -841,6 +841,7 @@ async fn dispatch_inner(
 /// Everything dispatch needs to authorize IAM actions for one request: the
 /// request's own actions before its handler runs, and any further ones the
 /// handler asks for through [`DispatchAuthorizer`].
+#[derive(Clone)]
 struct IamEnforcement {
     config: Arc<DispatchConfig>,
     service: Arc<dyn crate::service::AwsService>,
@@ -869,6 +870,35 @@ impl crate::auth::RequestAuthorizer for DispatchAuthorizer {
     fn authorize(&self, action: &crate::auth::IamAction) -> bool {
         self.enforcement
             .enforce(&self.request, std::slice::from_ref(action), false)
+            .is_none()
+    }
+
+    fn authorize_as(&self, access_key_id: &str, action: &crate::auth::IamAction) -> bool {
+        // The request as if signed with that key: its resolved credential and
+        // principal, which every enforcement path reads.
+        let resolved = if is_root_bypass(access_key_id) {
+            None
+        } else {
+            self.enforcement
+                .config
+                .credential_resolver
+                .as_ref()
+                .and_then(|r| r.resolve(access_key_id))
+        };
+        let mut request = authorization_copy(&self.request);
+        request.access_key_id = Some(access_key_id.to_string());
+        request.principal = resolved.as_ref().map(|r| r.principal.clone());
+        let enforcement = IamEnforcement {
+            caller_session_policies: resolved
+                .as_ref()
+                .map(|r| r.session_policies.clone())
+                .unwrap_or_default(),
+            resolved,
+            internal_caller: None,
+            ..self.enforcement.clone()
+        };
+        enforcement
+            .enforce(&request, std::slice::from_ref(action), false)
             .is_none()
     }
 }

@@ -14282,3 +14282,24 @@ async fn tagging_the_null_version_on_a_suspended_bucket_reaches_the_current_obje
         assert!(b.objects["k"].tags.contains_key("n"));
     }
 }
+
+/// A request S3 refuses outright is refused before its body is read: a
+/// streamed body that never ends does not hold up the refusal.
+#[tokio::test]
+async fn refused_requests_do_not_read_their_body() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    for query in [
+        vec![("partNumber", "1"), ("uploadId", "u"), ("tagging", "")],
+        vec![("uploadId", "u")],
+        vec![("partNumber", "1")],
+    ] {
+        let req = make_request(Method::PUT, "/b/k", &query, b"");
+        let endless = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+        *req.body_stream.lock() = Some(axum::body::Body::from_stream(endless));
+        let refused = tokio::time::timeout(std::time::Duration::from_secs(5), svc.handle(req))
+            .await
+            .unwrap_or_else(|_| panic!("{query:?} waited for its body"));
+        assert!(refused.is_err(), "{query:?}");
+    }
+}

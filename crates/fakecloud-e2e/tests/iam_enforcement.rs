@@ -1908,11 +1908,13 @@ async fn s3_requests_s3_refuses_before_authorization_change_nothing() {
         ),
         (
             reqwest::Method::PUT,
+            // Recorded: the upload is looked up first; it does not exist.
             "/victim/k?partNumber=x&uploadId=u",
             "",
-            400,
-            "InvalidArgument",
-            "Part number must be an integer between 1 and 10000, inclusive",
+            404,
+            "NoSuchUpload",
+            "The specified upload does not exist. The upload ID may be invalid, \
+             or the upload may have been aborted or completed.",
         ),
         (
             reqwest::Method::GET,
@@ -2008,6 +2010,147 @@ async fn s3_requests_s3_refuses_before_authorization_change_nothing() {
     let names: Vec<_> = buckets.buckets().iter().filter_map(|b| b.name()).collect();
     assert!(names.contains(&"empty1"), "{names:?}");
     assert!(!names.contains(&"newbucket-x"), "{names:?}");
+}
+
+/// The pre-authorization refusals answer as recorded against S3 for an
+/// anonymous caller with an `Origin` on a bucket with CORS: a conflict of
+/// resource types gets no CORS headers, the other refusals (half an upload
+/// part's address, a missing upload, whatever the part number) do.
+#[tokio::test]
+async fn s3_pre_authorization_refusals_and_cors() {
+    use aws_sdk_s3::types::{CorsConfiguration, CorsRule};
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("corsb").send().await.unwrap();
+    boot.put_bucket_cors()
+        .bucket("corsb")
+        .cors_configuration(
+            CorsConfiguration::builder()
+                .cors_rules(
+                    CorsRule::builder()
+                        .allowed_origins("*")
+                        .allowed_methods("GET")
+                        .allowed_methods("PUT")
+                        .allowed_headers("*")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let send = |method: reqwest::Method, path: &str| {
+        http.request(method, format!("{}/corsb{path}", server.endpoint()))
+            .header("origin", "https://example.com")
+            .body("x")
+            .send()
+    };
+    let conflict = send(reqwest::Method::GET, "?cors&versions").await.unwrap();
+    assert_eq!(conflict.status(), 400);
+    assert!(conflict
+        .headers()
+        .get("access-control-allow-origin")
+        .is_none());
+    assert!(conflict.headers().get("vary").is_none());
+    for (method, path, status, needles) in [
+        (
+            reqwest::Method::PUT,
+            "/k?uploadId=u",
+            405,
+            vec![
+                "<Code>MethodNotAllowed</Code>",
+                "<Method>PUT</Method>",
+                "<ResourceType>UPLOAD</ResourceType>",
+            ],
+        ),
+        (
+            reqwest::Method::PUT,
+            "/k?partNumber=1",
+            400,
+            vec![
+                "<Message>This operation does not accept partNumber without uploadId</Message>",
+                "<ArgumentName>partNumber</ArgumentName>",
+                "<ArgumentValue>partNumber</ArgumentValue>",
+            ],
+        ),
+        (
+            reqwest::Method::GET,
+            "/k?uploadId=u",
+            404,
+            vec!["<Code>NoSuchUpload</Code>", "<UploadId>u</UploadId>"],
+        ),
+        (
+            reqwest::Method::PUT,
+            "/k?partNumber=0&uploadId=u",
+            404,
+            vec!["<Code>NoSuchUpload</Code>"],
+        ),
+        (
+            reqwest::Method::PUT,
+            "/k?partNumber=x&uploadId=u",
+            404,
+            vec![
+                "<Code>NoSuchUpload</Code>",
+                "<Message>The specified upload does not exist. The upload ID may be invalid, \
+                 or the upload may have been aborted or completed.</Message>",
+            ],
+        ),
+    ] {
+        let resp = send(method.clone(), path).await.unwrap();
+        assert_eq!(resp.status().as_u16(), status, "{method} {path}");
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+            "{method} {path}"
+        );
+        assert!(resp.headers().get("vary").is_some(), "{method} {path}");
+        let text = resp.text().await.unwrap();
+        for needle in needles {
+            assert!(text.contains(needle), "{method} {path}: {text}");
+        }
+    }
+
+    // With the upload there, an anonymous part is refused by authorization,
+    // and an authorized one with a bad number by the number check.
+    let upload = boot
+        .create_multipart_upload()
+        .bucket("corsb")
+        .key("k")
+        .send()
+        .await
+        .unwrap();
+    let id = upload.upload_id().unwrap();
+    let anon = send(
+        reqwest::Method::PUT,
+        &format!("/k?partNumber=x&uploadId={id}"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(anon.status(), 403);
+    let err = boot
+        .upload_part()
+        .bucket("corsb")
+        .key("k")
+        .upload_id(id)
+        .part_number(1)
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"p"))
+        .customize()
+        .mutate_request(|r| {
+            let uri = r.uri().replace("partNumber=1", "partNumber=x");
+            r.set_uri(uri).unwrap();
+        })
+        .send()
+        .await
+        .unwrap_err();
+    let raw = err.raw_response().unwrap();
+    assert_eq!(raw.status().as_u16(), 400);
+    let body = String::from_utf8_lossy(raw.body().bytes().unwrap()).to_string();
+    assert!(body.contains("<ArgumentValue>x</ArgumentValue>"), "{body}");
 }
 
 /// The website error document is an object read of its own: a caller not

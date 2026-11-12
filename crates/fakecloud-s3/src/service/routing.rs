@@ -30,12 +30,20 @@ impl S3Service {
                 .cloned()
                 .unwrap_or_default()
         };
-        // Validated as an integer in 1..=10000 by the classification.
-        let part_number = || {
-            req.query_params
+        // Recorded: an upload that does not exist is NoSuchUpload before the
+        // part number is looked at (dispatch checks it before authorizing,
+        // too); the handlers check the number's range.
+        if let Some(missing) = self.missing_upload(req, op) {
+            return Err(missing);
+        }
+        let part_number = || -> Result<i64, AwsServiceError> {
+            let raw = req
+                .query_params
                 .get("partNumber")
-                .and_then(|p| p.parse::<i64>().ok())
-                .unwrap_or_default()
+                .map(String::as_str)
+                .unwrap_or_default();
+            raw.parse::<i64>()
+                .map_err(|_| super::multipart::invalid_part_number(raw))
         };
         use S3Op::*;
         match op {
@@ -49,11 +57,11 @@ impl S3Service {
                 self.complete_multipart_upload(account_id, req, b, k, &upload_id())
             }
             UploadPart => {
-                self.upload_part(account_id, req, b, k, &upload_id(), part_number())
+                self.upload_part(account_id, req, b, k, &upload_id(), part_number()?)
                     .await
             }
             UploadPartCopy => {
-                self.upload_part_copy(account_id, req, b, k, &upload_id(), part_number())
+                self.upload_part_copy(account_id, req, b, k, &upload_id(), part_number()?)
             }
             AbortMultipartUpload => self.abort_multipart_upload(account_id, b, k, &upload_id()),
             ListMultipartUploads => self.list_multipart_uploads(account_id, b, &req.query_params),
@@ -205,6 +213,30 @@ impl S3Service {
             PutObjectAnnotation => self.put_object_annotation(account_id, req, b, k),
             DeleteObjectAnnotation => self.delete_object_annotation(account_id, req, b, k),
         }
+    }
+
+    /// For an upload part or a part listing, the NoSuchUpload error when the
+    /// bucket exists but holds no such upload of this key. All this tells a
+    /// caller is whether the upload exists, which S3 answers before
+    /// authorizing the request (recorded, anonymously).
+    pub(super) fn missing_upload(&self, req: &AwsRequest, op: S3Op) -> Option<AwsServiceError> {
+        if !matches!(
+            op,
+            S3Op::UploadPart | S3Op::UploadPartCopy | S3Op::ListParts
+        ) {
+            return None;
+        }
+        let bucket = req.path_segments.first()?;
+        let key = super::request_key(req)?;
+        let upload_id = req.query_params.get("uploadId")?;
+        let accounts = self.state.read();
+        let owner = accounts.find_account(|s| s.buckets.contains_key(bucket.as_str()))?;
+        let b = accounts.get(owner)?.buckets.get(bucket.as_str())?;
+        let exists = b
+            .multipart_uploads
+            .get(upload_id)
+            .is_some_and(|upload| upload.key == key);
+        (!exists).then(|| super::no_such_upload(upload_id))
     }
 
     /// ListObjects, or for a bucket with a website configuration and a

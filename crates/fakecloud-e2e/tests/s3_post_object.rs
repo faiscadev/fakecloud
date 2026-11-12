@@ -641,3 +641,113 @@ async fn post_object_fires_object_created_post_notification() {
         "uploads/form.txt"
     );
 }
+
+/// Under `--iam strict` a browser-form upload is authorized as the PutObject
+/// it is, on the key the form names, for the uploader whose key signed the
+/// policy -- or, for a form with no policy, anonymously on the bucket policy.
+#[tokio::test]
+async fn post_object_is_authorized_as_put_object_under_strict() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let s3 = helpers::root_s3_client(&server).await;
+    s3.create_bucket()
+        .bucket("strict-post")
+        .send()
+        .await
+        .expect("create bucket");
+
+    let iam = aws_sdk_iam::Client::new(&helpers::root_config(&server).await);
+    let mut keys = Vec::new();
+    for (user, resource) in [
+        ("uploader", "arn:aws:s3:::strict-post/uploads/*"),
+        ("elsewhere", "arn:aws:s3:::strict-post/other/*"),
+    ] {
+        iam.create_user().user_name(user).send().await.unwrap();
+        iam.put_user_policy()
+            .user_name(user)
+            .policy_name("put")
+            .policy_document(format!(
+                r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":"s3:PutObject","Resource":"{resource}"}}]}}"#
+            ))
+            .send()
+            .await
+            .unwrap();
+        let ak = iam
+            .create_access_key()
+            .user_name(user)
+            .send()
+            .await
+            .unwrap();
+        let ak = ak.access_key().unwrap();
+        keys.push((
+            ak.access_key_id().to_string(),
+            ak.secret_access_key().to_string(),
+        ));
+    }
+    let signed_post = |akid: &str, secret: &str, key: &str| {
+        let policy = build_policy("strict-post", "uploads/", akid, "us-east-1", 1_000_000);
+        let signature = sign_policy(
+            secret,
+            &policy.date_stamp,
+            &policy.region,
+            "s3",
+            &policy.policy_b64,
+        );
+        let form = post_form(&policy, key, &signature, b"form body".to_vec());
+        reqwest::Client::new()
+            .post(format!("{}/strict-post", server.endpoint()))
+            .multipart(form)
+            .send()
+    };
+    let (akid, secret) = &keys[0];
+    let ok = signed_post(akid, secret, "uploads/a.txt").await.unwrap();
+    assert_eq!(ok.status(), reqwest::StatusCode::CREATED);
+    let (akid, secret) = &keys[1];
+    let denied = signed_post(akid, secret, "uploads/b.txt").await.unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(s3
+        .head_object()
+        .bucket("strict-post")
+        .key("uploads/b.txt")
+        .send()
+        .await
+        .is_err());
+
+    // Anonymous form uploads: only where the bucket policy lets anyone put.
+    s3.delete_public_access_block()
+        .bucket("strict-post")
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_policy()
+        .bucket("strict-post")
+        .policy(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",
+                "Action":"s3:PutObject","Resource":"arn:aws:s3:::strict-post/public/*"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    let anonymous = |key: &str| {
+        let form = reqwest::multipart::Form::new()
+            .text("key", key.to_string())
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(b"anon".to_vec()).file_name("a.txt"),
+            );
+        reqwest::Client::new()
+            .post(format!("{}/strict-post", server.endpoint()))
+            .multipart(form)
+            .send()
+    };
+    let ok = anonymous("public/x.txt").await.unwrap();
+    assert!(ok.status().is_success(), "{:?}", ok.text().await);
+    let denied = anonymous("private/x.txt").await.unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(s3
+        .head_object()
+        .bucket("strict-post")
+        .key("private/x.txt")
+        .send()
+        .await
+        .is_err());
+}

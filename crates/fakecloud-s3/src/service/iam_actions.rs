@@ -275,7 +275,7 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 /// `s3:PutObjectAcl` for an ACL (`x-amz-acl` or any `x-amz-grant-*`),
 /// `s3:PutObjectTagging` for `x-amz-tagging`, `s3:PutObjectRetention` for a
 /// retention mode or date and `s3:PutObjectLegalHold` for a legal hold.
-fn object_write_extras(headers: &HeaderMap) -> Vec<Need> {
+pub(crate) fn object_write_extras(headers: &HeaderMap) -> Vec<Need> {
     write_extras(headers, true)
 }
 

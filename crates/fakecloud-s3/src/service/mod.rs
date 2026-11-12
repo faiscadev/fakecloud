@@ -12,7 +12,6 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_kms::SharedKmsState;
 use fakecloud_persistence::{MemoryS3Store, S3Store, StoreError};
 
-use crate::logging;
 use crate::state::{AclGrant, S3Bucket, S3Object, SharedS3State};
 
 mod access_points;
@@ -25,6 +24,7 @@ mod iam_actions;
 #[rustfmt::skip]
 mod iam_reference;
 mod lock;
+mod response;
 mod route;
 mod routing;
 use crate::state::ObjectLockSettings;
@@ -797,12 +797,30 @@ impl AwsService for S3Service {
         let is_control = fakecloud_core::protocol::is_s3_control_host(&req.headers);
         // The same key IAM authorized the request for (`request_key`).
         let key = request_key(&req);
-        // UploadPart requires both partNumber AND uploadId; a stray PUT
-        // carrying only one of them is not an upload and gets its body
-        // drained like any other.
-        let key_put = request_checks::classify_key_put(&req, !is_control && key.is_some());
-        let is_put_object = key_put == request_checks::KeyPut::PutObject;
-        let is_upload_part = key_put == request_checks::KeyPut::UploadPart;
+        // The operation, from the one classification authorization also uses
+        // (`route::classify`), so the operation dispatch authorized is the one
+        // routed below. Classified before the body is read, so a request S3
+        // refuses outright (conflicting sub-resources, an unsupported method)
+        // is refused without reading its body -- here too, for when IAM
+        // enforcement is off. S3 Control (classified once its own routes are
+        // ruled out), CORS preflights and paths with an empty bucket segment
+        // are handled on their own below.
+        let early_op =
+            if is_control || req.method == Method::OPTIONS || req.raw_path.starts_with("//") {
+                None
+            } else {
+                match classify_request(&req) {
+                    Ok(op) => Some(op),
+                    Err(refusal) => return Err(self.refuse(&req, refusal)),
+                }
+            };
+        // Uploads (PutObject, UploadPart) read their body as a stream; every
+        // other request's body is small and buffered.
+        let is_put_object = early_op == Some(route::S3Op::PutObject);
+        let is_upload_part = matches!(
+            early_op,
+            Some(route::S3Op::UploadPart | route::S3Op::UploadPartCopy)
+        );
         if !is_put_object && !is_upload_part {
             if let Some(stream) = req.take_body_stream() {
                 req.body = fakecloud_core::service::drain_request_stream(stream).await?;
@@ -854,21 +872,14 @@ impl AwsService for S3Service {
             ));
         }
         let bucket = req.path_segments.first().map(|s| s.as_str());
-        // The operation, from the one classification authorization also uses
-        // (`route::classify`), so the operation dispatch authorized is the one
-        // routed below. A request S3 refuses before authorizing (conflicting
-        // sub-resources, an unsupported method) is refused here too, for when
-        // IAM enforcement is off. A CORS preflight is answered on its own.
-        let op = if req.method == Method::OPTIONS {
-            None
-        } else {
-            Some(route::classify(
-                &req.method,
-                bucket,
-                key.as_deref(),
-                &req.query_params,
-                &req.headers,
-            )?)
+        let op = match early_op {
+            Some(op) => Some(op),
+            None if req.method == Method::OPTIONS => None,
+            // An S3 Control request none of its routes took.
+            None => match classify_request(&req) {
+                Ok(op) => Some(op),
+                Err(refusal) => return Err(self.refuse(&req, refusal)),
+            },
         };
 
         // Bucket names are one global namespace, so a bucket-addressed request
@@ -885,10 +896,10 @@ impl AwsService for S3Service {
         let owner_account = bucket.and_then(|b| self.bucket_owner_account(b));
         let account_id = owner_account.as_deref().unwrap_or(caller_account);
 
-        if !is_control && bucket.is_some() {
-            request_checks::check_request(&req, key.as_deref(), key_put)?;
+        if let Some(op) = op.filter(|_| !is_control && bucket.is_some()) {
+            request_checks::check_request(&req, key.as_deref(), op)?;
             if owner_account.is_some() {
-                request_checks::check_existing_bucket_request(&req, key.as_deref())?;
+                request_checks::check_existing_bucket_request(&req, op)?;
             }
         }
 
@@ -900,18 +911,20 @@ impl AwsService for S3Service {
         // describe the assembled object, not its XML body; a POST Object form
         // carries its fields in the body. A request to a bucket that does not
         // exist is left to answer NoSuchBucket.
-        let verifies_own_payload = is_put_object
-            || is_upload_part
-            || key_put == request_checks::KeyPut::Annotation
-            || (req.method == Method::POST && req.query_params.contains_key("uploadId"))
-            // CopyObject / UploadPartCopy carry no body; their checksum header
-            // names the copy's algorithm and is validated by the handler.
-            || req.headers.contains_key("x-amz-copy-source")
-            || req
-                .headers
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("multipart/form-data"));
+        // CopyObject / UploadPartCopy carry no body; their checksum header
+        // names the copy's algorithm and is validated by the handler.
+        let verifies_own_payload = matches!(
+            op,
+            Some(
+                route::S3Op::PutObject
+                    | route::S3Op::UploadPart
+                    | route::S3Op::PutObjectAnnotation
+                    | route::S3Op::CompleteMultipartUpload
+                    | route::S3Op::CopyObject
+                    | route::S3Op::UploadPartCopy
+                    | route::S3Op::PostObject
+            )
+        );
         if !is_control && !verifies_own_payload && (bucket.is_none() || owner_account.is_some()) {
             if let Some(decoded) = crate::checksum::verify_request_body(&req.headers, &req.body)? {
                 req.body = decoded.into();
@@ -1110,14 +1123,6 @@ impl AwsService for S3Service {
             }
         }
 
-        // Capture origin for CORS response headers. A blank `Origin:` is
-        // treated as absent — the request carries nothing to evaluate CORS
-        // against, and letting it through would match a `*` rule and stamp
-        // CORS headers onto a request no browser would have sent that way.
-        // Same single-value read as the preflight path: a request carrying more
-        // than one `Origin` is not a single origin to allow.
-        let origin_header = single_cors_header(&req.headers, "origin").map(str::to_string);
-
         // A preflight with no bucket reaches no operation.
         let Some(op) = op else {
             return Err(AwsServiceError::aws_error(
@@ -1134,95 +1139,14 @@ impl AwsService for S3Service {
         let mut result = self
             .route_operation(op, &req, caller_account, account_id, b, k)
             .await;
-        // Apply CORS headers to the response if Origin was present
-        // Keyed on the raw header, not the usable value: an `Origin` that is
-        // blank, unreadable, or split across conflicting lines still makes the
-        // response origin-dependent, so it needs `Vary` even though it gets no
-        // allow-origin. Skipping the block entirely would ship an ACAO-less
-        // body with no `Vary`, which a shared cache then replays to a
-        // legitimate origin — the hole this whole change exists to close.
-        if let Some(b_name) = bucket.filter(|_| req.headers.contains_key("origin")) {
-            let cors_config = {
-                let accounts = self.state.read();
-                let _empty_s3 = crate::state::S3State::new(account_id, &req.region);
-                let state = accounts.get(account_id).unwrap_or(&_empty_s3);
-                state
-                    .buckets
-                    .get(b_name)
-                    .and_then(|b| b.cors_config.clone())
-            };
-            if let Some(ref config) = cors_config {
-                // `Vary` goes on every response we evaluated CORS for, matching
-                // rule or not: a disallowed origin gets no ACAO, and that
-                // ACAO-less response must not be cached and replayed to an
-                // allowed origin.
-                set_cors_header(&mut result, "vary", CORS_VARY);
-                let rules = parse_cors_config(config);
-                // The actual request is matched on method as well as origin, as
-                // on S3: a rule allowing only GET must not hand an ACAO to a
-                // DELETE from that origin, which would let the browser pass the
-                // response to the page.
-                // Empty requested-headers: only a preflight declares headers.
-                // `origin_header` is `None` when the header was present but
-                // unusable; `find_cors_rule` refuses an empty origin, so such a
-                // request keeps the `Vary` above and gets no allow-origin.
-                let origin = origin_header.as_deref().unwrap_or("");
-                if let Some(rule) = find_cors_rule(&rules, origin, req.method.as_str(), &[]) {
-                    // `*` only when the entry that actually matched is `*`. A rule
-                    // listing both a concrete origin and `*` matches the
-                    // concrete one first, and echoing `*` there would drop
-                    // allow-credentials for an origin the rule names.
-                    let matched_origin = if rule
-                        .allowed_origins
-                        .iter()
-                        .find(|o| origin_matches(origin, o))
-                        .is_some_and(|o| o == "*")
-                    {
-                        "*"
-                    } else {
-                        origin
-                    };
-                    // Errors get the allow-origin too: S3 answers a 404 for an
-                    // allowed origin with ACAO, so a `mode: 'cors'` fetch sees
-                    // a real 404 instead of an opaque CORS network error.
-                    set_cors_header(&mut result, "access-control-allow-origin", matched_origin);
-                    if matched_origin != "*" {
-                        set_cors_header(&mut result, "access-control-allow-credentials", "true");
-                    }
-                    if !rule.expose_headers.is_empty() {
-                        set_cors_header(
-                            &mut result,
-                            "access-control-expose-headers",
-                            &rule.expose_headers.join(", "),
-                        );
-                    }
-                }
-            }
-        }
-
-        // Write S3 access log entry if the source bucket has logging enabled
-        if let Some(b_name) = bucket {
-            let status_code = match &result {
-                Ok(resp) => resp.status.as_u16(),
-                Err(e) => e.status().as_u16(),
-            };
-            let operation = route::access_log_operation(Some(op))
-                .unwrap_or_else(|| logging::operation_name(&req.method, key.as_deref()));
-            logging::maybe_write_access_log(
-                &self.state,
-                &self.store,
-                b_name,
-                &logging::AccessLogRequest {
-                    operation,
-                    key: key.as_deref(),
-                    status: status_code,
-                    request_id: &req.request_id,
-                    method: req.method.as_str(),
-                    path: &req.raw_path,
-                },
-            );
-        }
-
+        self.finish_response(
+            &req,
+            account_id,
+            bucket,
+            key.as_deref(),
+            Some(op),
+            &mut result,
+        );
         result
     }
 
@@ -1441,13 +1365,20 @@ impl AwsService for S3Service {
         !fakecloud_core::protocol::is_s3_control_host(&request.headers)
             && !request.raw_path.starts_with("//")
             && request.method != Method::OPTIONS
-            && s3_operation(request) == Some("DeleteObjects")
+            && matches!(
+                s3_operation(request),
+                // A browser-form upload's key and signer are in its body.
+                Some("DeleteObjects" | "PostObject")
+            )
     }
 
     /// The requests S3 refuses before authorizing anything: conflicting
     /// sub-resource parameters, a sub-resource with a method it does not
-    /// take, an invalid upload part number (see [`route`]). Every caller,
-    /// anonymous included, gets these errors rather than an AccessDenied.
+    /// take, half an upload part's address (see [`route`]), and an upload
+    /// part or part listing of an upload that does not exist (recorded:
+    /// NoSuchUpload, even anonymously and whatever the part number). Every
+    /// caller, anonymous included, gets these errors rather than an
+    /// AccessDenied, answered as the handler answers them.
     fn validate_before_authorization(&self, request: &AwsRequest) -> Result<(), AwsServiceError> {
         if fakecloud_core::protocol::is_s3_control_host(&request.headers)
             || request.method == Method::OPTIONS
@@ -1455,7 +1386,11 @@ impl AwsService for S3Service {
         {
             return Ok(());
         }
-        classify_request(request).map(|_| ())
+        let op = classify_request(request).map_err(|refusal| self.refuse(request, refusal))?;
+        match self.missing_upload(request, op) {
+            Some(error) => Err(self.refuse(request, error.into())),
+            None => Ok(()),
+        }
     }
 
     fn iam_condition_keys_for(
@@ -1548,6 +1483,33 @@ impl S3Service {
             action,
             resource: s3_resource_for(&region, action, Some(bucket), key),
         })
+    }
+
+    /// [`Self::caller_may`] for the uploader whose `access_key` signed a
+    /// browser-form upload's policy (the request itself carries no
+    /// signature): `s3:<action>` on the object `key` of `bucket`.
+    pub(crate) fn uploader_may(
+        &self,
+        req: &AwsRequest,
+        access_key: &str,
+        action: &'static str,
+        bucket: &str,
+        key: &str,
+    ) -> bool {
+        let Some(authorizer) = fakecloud_core::auth::request_authorizer("s3") else {
+            return true;
+        };
+        let region = self
+            .bucket_region(bucket)
+            .unwrap_or_else(|| req.region.clone());
+        authorizer.authorize_as(
+            access_key,
+            &fakecloud_core::auth::IamAction {
+                service: "s3",
+                action,
+                resource: s3_resource_for(&region, action, Some(bucket), Some(key)),
+            },
+        )
     }
 
     /// A read of a key that does not exist answers 404 `NoSuchKey` only to a
@@ -1643,7 +1605,7 @@ pub(crate) fn request_key(req: &AwsRequest) -> Option<String> {
 /// The operation a request invokes, by the one classification the handler
 /// routes on ([`route::classify`]); `Err` is how S3 refuses it before
 /// authorizing anything.
-fn classify_request(request: &AwsRequest) -> Result<route::S3Op, AwsServiceError> {
+fn classify_request(request: &AwsRequest) -> Result<route::S3Op, route::Refusal> {
     route::classify(
         &request.method,
         request.path_segments.first().map(String::as_str),

@@ -423,97 +423,109 @@ impl S3Service {
             .or_else(|| form.file_content_type.clone())
             .unwrap_or_else(|| "binary/octet-stream".to_string());
 
-        // --- Decode the policy document ---
-        let policy_b64 = form
-            .field_lower("policy")
-            .ok_or_else(|| invalid_argument("POST Object requires a `policy` form field"))?
-            .to_string();
-        let policy_bytes = base64::engine::general_purpose::STANDARD
-            .decode(policy_b64.as_bytes())
-            .map_err(|_| invalid_argument("`policy` is not valid base64"))?;
-        let policy: serde_json::Value = serde_json::from_slice(&policy_bytes)
-            .map_err(|_| invalid_argument("`policy` is not valid JSON"))?;
-
-        // --- Signature verification ---
-        // Authenticate the policy signature *before* evaluating the policy's
-        // conditions, matching real S3's precedence: a request that both
-        // carries a bad signature and violates a condition is rejected as
-        // `SignatureDoesNotMatch`, not `AccessDenied`.
-        let algorithm = form.field_lower("x-amz-algorithm").unwrap_or_default();
-        if !algorithm.is_empty() && !algorithm.eq_ignore_ascii_case("AWS4-HMAC-SHA256") {
-            return Err(invalid_argument(format!(
-                "unsupported x-amz-algorithm: {algorithm}"
-            )));
-        }
-        let credential_raw = form.field_lower("x-amz-credential").ok_or_else(|| {
-            invalid_argument("POST Object requires an `x-amz-credential` form field")
-        })?;
-        let credential = parse_credential(credential_raw)?;
-        let signature = form.field_lower("x-amz-signature").ok_or_else(|| {
-            invalid_argument("POST Object requires an `x-amz-signature` form field")
-        })?;
-
-        if is_root_bypass(&credential.access_key) {
-            // Matches the codebase-wide `test*` root-bypass convention
-            // (`fakecloud_core::auth::is_root_bypass`): local-dev root
-            // credentials always pass, signature not cryptographically
-            // checked.
+        // A form with no policy, credential or signature is an anonymous
+        // upload, authorized on the bucket's own policy alone (S3 user guide,
+        // "Browser-based uploads using POST": a POST without them is
+        // anonymous and "requires that the bucket be publicly writable").
+        let anonymous = ["policy", "x-amz-credential", "x-amz-signature"]
+            .iter()
+            .all(|name| form.field_lower(name).is_none());
+        let signer = if anonymous {
+            None
         } else {
-            let resolver = self.credential_resolver.as_ref().ok_or_else(|| {
-                signature_does_not_match(
+            // --- Decode the policy document ---
+            let policy_b64 = form
+                .field_lower("policy")
+                .ok_or_else(|| invalid_argument("POST Object requires a `policy` form field"))?
+                .to_string();
+            let policy_bytes = base64::engine::general_purpose::STANDARD
+                .decode(policy_b64.as_bytes())
+                .map_err(|_| invalid_argument("`policy` is not valid base64"))?;
+            let policy: serde_json::Value = serde_json::from_slice(&policy_bytes)
+                .map_err(|_| invalid_argument("`policy` is not valid JSON"))?;
+
+            // --- Signature verification ---
+            // Authenticate the policy signature *before* evaluating the policy's
+            // conditions, matching real S3's precedence: a request that both
+            // carries a bad signature and violates a condition is rejected as
+            // `SignatureDoesNotMatch`, not `AccessDenied`.
+            let algorithm = form.field_lower("x-amz-algorithm").unwrap_or_default();
+            if !algorithm.is_empty() && !algorithm.eq_ignore_ascii_case("AWS4-HMAC-SHA256") {
+                return Err(invalid_argument(format!(
+                    "unsupported x-amz-algorithm: {algorithm}"
+                )));
+            }
+            let credential_raw = form.field_lower("x-amz-credential").ok_or_else(|| {
+                invalid_argument("POST Object requires an `x-amz-credential` form field")
+            })?;
+            let credential = parse_credential(credential_raw)?;
+            let signature = form.field_lower("x-amz-signature").ok_or_else(|| {
+                invalid_argument("POST Object requires an `x-amz-signature` form field")
+            })?;
+
+            if is_root_bypass(&credential.access_key) {
+                // Matches the codebase-wide `test*` root-bypass convention
+                // (`fakecloud_core::auth::is_root_bypass`): local-dev root
+                // credentials always pass, signature not cryptographically
+                // checked.
+            } else {
+                let resolver = self.credential_resolver.as_ref().ok_or_else(|| {
+                    signature_does_not_match(
                     "The request signature we calculated does not match the signature you provided",
                 )
-            })?;
-            let resolved = resolver.resolve(&credential.access_key).ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::FORBIDDEN,
-                    "InvalidAccessKeyId",
-                    "The AWS Access Key Id you provided does not exist in our records.",
-                )
-            })?;
-            if !fakecloud_aws::sigv4::verify_signature(
-                &resolved.secret_access_key,
-                &credential.date_stamp,
-                &credential.region,
-                &credential.service,
-                &policy_b64,
-                signature,
-            ) {
-                return Err(signature_does_not_match(
+                })?;
+                let resolved = resolver.resolve(&credential.access_key).ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::FORBIDDEN,
+                        "InvalidAccessKeyId",
+                        "The AWS Access Key Id you provided does not exist in our records.",
+                    )
+                })?;
+                if !fakecloud_aws::sigv4::verify_signature(
+                    &resolved.secret_access_key,
+                    &credential.date_stamp,
+                    &credential.region,
+                    &credential.service,
+                    &policy_b64,
+                    signature,
+                ) {
+                    return Err(signature_does_not_match(
                     "The request signature we calculated does not match the signature you provided",
                 ));
+                }
             }
-        }
 
-        // --- Policy validation (expiration + conditions) ---
-        // Real S3 requires the policy to carry an `expiration`; a policy
-        // without one is rejected rather than treated as never-expiring.
-        let expiration = policy
-            .get("expiration")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                invalid_argument("Invalid Policy: policy document must contain an `expiration`")
-            })?;
-        let expires_at = chrono::DateTime::parse_from_rfc3339(expiration)
-            .map_err(|_| invalid_argument("policy `expiration` is not valid RFC3339"))?
-            .with_timezone(&Utc);
-        if Utc::now() > expires_at {
-            return Err(access_denied(
-                "Invalid according to Policy: Policy expired.",
-            ));
-        }
+            // --- Policy validation (expiration + conditions) ---
+            // Real S3 requires the policy to carry an `expiration`; a policy
+            // without one is rejected rather than treated as never-expiring.
+            let expiration = policy
+                .get("expiration")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    invalid_argument("Invalid Policy: policy document must contain an `expiration`")
+                })?;
+            let expires_at = chrono::DateTime::parse_from_rfc3339(expiration)
+                .map_err(|_| invalid_argument("policy `expiration` is not valid RFC3339"))?
+                .with_timezone(&Utc);
+            if Utc::now() > expires_at {
+                return Err(access_denied(
+                    "Invalid according to Policy: Policy expired.",
+                ));
+            }
 
-        let conditions = parse_conditions(&policy)?;
-        enforce_conditions(
-            &conditions,
-            bucket,
-            &resolved_key,
-            &object_content_type,
-            form.file_bytes.len() as u64,
-            &form,
-        )?;
-        // Every submitted field must be authorized by a policy condition.
-        enforce_no_extra_fields(&conditions, &form)?;
+            let conditions = parse_conditions(&policy)?;
+            enforce_conditions(
+                &conditions,
+                bucket,
+                &resolved_key,
+                &object_content_type,
+                form.file_bytes.len() as u64,
+                &form,
+            )?;
+            // Every submitted field must be authorized by a policy condition.
+            enforce_no_extra_fields(&conditions, &form)?;
+            Some(credential.access_key)
+        };
 
         // --- Store the object via the existing PutObject sink ---
         let mut synth_headers = HeaderMap::new();
@@ -553,6 +565,30 @@ impl S3Service {
             ) {
                 synth_headers.insert(name, value);
             }
+        }
+
+        // Authorized as the PutObject it is, on the object the form names,
+        // for the uploader the policy was signed by (or anonymously): AWS
+        // authorizes a POST Object as s3:PutObject, plus s3:PutObjectAcl /
+        // s3:PutObjectTagging / the Object Lock actions for the ACL, tagging
+        // and lock fields it sets, exactly as PutObject's headers. Dispatch
+        // cannot see the key or the signer, so this is the handler's
+        // (`iam_authorized_by_handler`).
+        let mut actions = vec!["PutObject"];
+        actions.extend(
+            crate::service::iam_actions::object_write_extras(&synth_headers)
+                .into_iter()
+                .filter_map(|need| match need {
+                    crate::service::iam_actions::Need::Own(_, action) => Some(action),
+                    _ => None,
+                }),
+        );
+        let allowed = actions.into_iter().all(|action| match signer.as_deref() {
+            Some(access_key) => self.uploader_may(req, access_key, action, bucket, &resolved_key),
+            None => self.caller_may(req, action, bucket, Some(&resolved_key)),
+        });
+        if !allowed {
+            return Err(access_denied("Access Denied"));
         }
 
         let synth_req = AwsRequest {

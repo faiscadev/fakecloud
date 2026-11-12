@@ -231,17 +231,37 @@ enum Target {
     Object,
 }
 
+/// How S3 refuses a request it cannot classify, before authorizing it.
+#[derive(Debug)]
+pub(crate) struct Refusal {
+    pub(crate) error: AwsServiceError,
+    /// Whether the refusal is answered like a request S3 got to the bucket
+    /// with: CORS headers and an access-log record. Recorded: a conflict of
+    /// resource-type parameters gets neither (S3 refuses it before resolving
+    /// the request), the other refusals get the bucket's CORS headers.
+    pub(crate) reaches_bucket: bool,
+}
+
+impl From<AwsServiceError> for Refusal {
+    fn from(error: AwsServiceError) -> Self {
+        Self {
+            error,
+            reaches_bucket: true,
+        }
+    }
+}
+
 /// Classify a non-S3-Control request: `method`, the path's `bucket` and
 /// [`super::request_key`] `key`, its `query`, and the headers that tell a
-/// copy (`x-amz-copy-source`) and a form upload apart. `Err` is the error S3
-/// answers the request with before authorizing it.
+/// copy (`x-amz-copy-source`) and a form upload apart. `Err` is how S3
+/// answers the request before authorizing it.
 pub(crate) fn classify(
     method: &Method,
     bucket: Option<&str>,
     key: Option<&str>,
     query: &HashMap<String, String>,
     headers: &HeaderMap,
-) -> Result<S3Op, AwsServiceError> {
+) -> Result<S3Op, Refusal> {
     let target = match (bucket, key) {
         (None, _) => Target::Service,
         (Some(_), None) => Target::Bucket,
@@ -253,7 +273,8 @@ pub(crate) fn classify(
                 StatusCode::BAD_REQUEST,
                 "InvalidBucketName",
                 "The specified bucket is not valid: bucket name is required for this operation",
-            ));
+            )
+            .into());
         }
         return match *method {
             Method::GET
@@ -283,14 +304,15 @@ pub(crate) fn classify(
 
     if upload_part_address {
         return match *method {
-            Method::PUT if target == Target::Object => {
-                validate_part_number(&query["partNumber"])?;
-                Ok(if copy {
-                    S3Op::UploadPartCopy
-                } else {
-                    S3Op::UploadPart
-                })
-            }
+            // Whatever `partNumber` holds: recorded, an invalid one with an
+            // upload that does not exist is NoSuchUpload, so the upload is
+            // looked up first and the number checked after authorization (by
+            // the handler), and the request is an upload part either way.
+            Method::PUT if target == Target::Object => Ok(if copy {
+                S3Op::UploadPartCopy
+            } else {
+                S3Op::UploadPart
+            }),
             Method::GET if target == Target::Object => Ok(S3Op::ListParts),
             Method::POST if target == Target::Object => Ok(S3Op::CompleteMultipartUpload),
             Method::DELETE if target == Target::Object => Ok(S3Op::AbortMultipartUpload),
@@ -451,13 +473,19 @@ pub(crate) fn classify(
         // An object read of one part.
         (Target::Object, "partNumber", "GET") => GetObject,
         (Target::Object, "partNumber", "HEAD") => HeadObject,
-        // Half an upload part's address (recorded on S3).
+        // Half an upload part's address (recorded on S3, which names the
+        // parameter in both ArgumentName and ArgumentValue).
         (Target::Object, "partNumber", "PUT") => {
-            return Err(AwsServiceError::aws_error(
+            return Err(AwsServiceError::aws_error_with_fields(
                 StatusCode::BAD_REQUEST,
                 "InvalidArgument",
                 "This operation does not accept partNumber without uploadId",
-            ))
+                vec![
+                    ("ArgumentName".to_string(), "partNumber".to_string()),
+                    ("ArgumentValue".to_string(), "partNumber".to_string()),
+                ],
+            )
+            .into())
         }
         (Target::Object, "uploadId", "GET") => ListParts,
         (Target::Object, "uploadId", "POST") => CompleteMultipartUpload,
@@ -494,58 +522,55 @@ fn is_form_upload(headers: &HeaderMap) -> bool {
 }
 
 /// Recorded on S3: "Conflicting query string parameters: <names, sorted>",
-/// `ArgumentName` `ResourceType`, `ArgumentValue` the first name.
-fn conflicting(names: &[&str]) -> AwsServiceError {
-    AwsServiceError::aws_error_with_fields(
-        StatusCode::BAD_REQUEST,
-        "InvalidArgument",
-        format!("Conflicting query string parameters: {}", names.join(", ")),
-        vec![
-            ("ArgumentName".to_string(), "ResourceType".to_string()),
-            ("ArgumentValue".to_string(), names[0].to_string()),
-        ],
-    )
+/// `ArgumentName` `ResourceType`, `ArgumentValue` the first name, with no
+/// CORS headers.
+fn conflicting(names: &[&str]) -> Refusal {
+    Refusal {
+        error: AwsServiceError::aws_error_with_fields(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            format!("Conflicting query string parameters: {}", names.join(", ")),
+            vec![
+                ("ArgumentName".to_string(), "ResourceType".to_string()),
+                ("ArgumentValue".to_string(), names[0].to_string()),
+            ],
+        ),
+        reaches_bucket: false,
+    }
 }
 
-/// Recorded on S3 (`PUT /b?location`): 405 naming the method and the
-/// resource type (`LOCATION`).
-fn method_not_allowed(method: &Method, resource: &str) -> AwsServiceError {
+/// The resource type a 405 names: the parameter upper-cased (recorded:
+/// `LOCATION`), except an upload's `uploadId`, which S3 calls `UPLOAD`.
+fn resource_type_name(resource: &str) -> String {
+    match resource {
+        "uploadId" => "UPLOAD".to_string(),
+        other => other.to_ascii_uppercase(),
+    }
+}
+
+/// Recorded on S3 (`PUT /b?location`, `PUT /b/k?uploadId=u`): 405 naming the
+/// method and the resource type.
+fn method_not_allowed(method: &Method, resource: &str) -> Refusal {
     AwsServiceError::aws_error_with_fields(
         StatusCode::METHOD_NOT_ALLOWED,
         "MethodNotAllowed",
         "The specified method is not allowed against this resource.",
         vec![
             ("Method".to_string(), method.as_str().to_string()),
-            ("ResourceType".to_string(), resource.to_ascii_uppercase()),
+            ("ResourceType".to_string(), resource_type_name(resource)),
         ],
     )
+    .into()
 }
 
 /// A method no operation takes on its target.
-fn method_fallback() -> AwsServiceError {
+fn method_fallback() -> Refusal {
     AwsServiceError::aws_error(
         StatusCode::METHOD_NOT_ALLOWED,
         "MethodNotAllowed",
         "The specified method is not allowed against this resource",
     )
-}
-
-/// An upload part's number: an integer in 1..=10000 (UploadPart API
-/// reference: "Part number of part being uploaded. This is a positive integer
-/// between 1 and 10,000").
-fn validate_part_number(value: &str) -> Result<(), AwsServiceError> {
-    match value.parse::<i64>() {
-        Ok(n) if (1..=10000).contains(&n) => Ok(()),
-        _ => Err(AwsServiceError::aws_error_with_fields(
-            StatusCode::BAD_REQUEST,
-            "InvalidArgument",
-            "Part number must be an integer between 1 and 10000, inclusive",
-            vec![
-                ("ArgumentName".to_string(), "partNumber".to_string()),
-                ("ArgumentValue".to_string(), value.to_string()),
-            ],
-        )),
-    }
+    .into()
 }
 
 #[cfg(test)]
@@ -564,7 +589,21 @@ mod tests {
         target: (Option<&str>, Option<&str>),
         query: &[(&str, &str)],
     ) -> Result<S3Op, AwsServiceError> {
-        classify(&method, target.0, target.1, &q(query), &HeaderMap::new())
+        classify(&method, target.0, target.1, &q(query), &HeaderMap::new()).map_err(|r| r.error)
+    }
+
+    /// Recorded: a conflict gets no CORS headers, the other refusals do.
+    #[test]
+    fn only_conflicts_are_refused_before_reaching_the_bucket() {
+        let reach = |method: Method, query: &[(&str, &str)]| {
+            classify(&method, Some("b"), Some("k"), &q(query), &HeaderMap::new())
+                .unwrap_err()
+                .reaches_bucket
+        };
+        assert!(!reach(Method::GET, &[("acl", ""), ("tagging", "")]));
+        assert!(reach(Method::PUT, &[("uploadId", "u")]));
+        assert!(reach(Method::PUT, &[("partNumber", "1")]));
+        assert!(reach(Method::GET, &[("restore", "")]));
     }
 
     const BUCKET: (Option<&str>, Option<&str>) = (Some("b"), None);
@@ -771,28 +810,17 @@ mod tests {
                 fields(&err),
                 vec![
                     ("Method".to_string(), method.as_str().to_string()),
-                    ("ResourceType".to_string(), resource.to_ascii_uppercase()),
+                    ("ResourceType".to_string(), resource_type_name(resource)),
                 ]
             );
         }
     }
 
     #[test]
-    fn upload_part_numbers_must_be_in_range() {
-        for bad in ["x", "0", "10001", "-1", ""] {
-            let err = run(
-                Method::PUT,
-                OBJECT,
-                &[("partNumber", bad), ("uploadId", "u")],
-            )
-            .unwrap_err();
-            assert_eq!(err.code(), "InvalidArgument", "{bad}");
-            assert_eq!(
-                err.message(),
-                "Part number must be an integer between 1 and 10000, inclusive"
-            );
-        }
-        for good in ["1", "10000"] {
+    fn an_upload_part_address_is_an_upload_part_whatever_its_number() {
+        // The number is checked after the upload lookup and authorization;
+        // the request can be nothing but an upload part.
+        for good in ["x", "0", "10001", "-1", "", "1", "10000"] {
             assert_eq!(
                 run(
                     Method::PUT,
@@ -803,8 +831,29 @@ mod tests {
                 S3Op::UploadPart
             );
         }
+        // Half an address, as recorded.
         let half = run(Method::PUT, OBJECT, &[("partNumber", "1")]).unwrap_err();
         assert_eq!(half.code(), "InvalidArgument");
+        assert_eq!(
+            half.message(),
+            "This operation does not accept partNumber without uploadId"
+        );
+        assert_eq!(
+            fields(&half),
+            vec![
+                ("ArgumentName".to_string(), "partNumber".to_string()),
+                ("ArgumentValue".to_string(), "partNumber".to_string()),
+            ]
+        );
+        let other_half = run(Method::PUT, OBJECT, &[("uploadId", "u")]).unwrap_err();
+        assert_eq!(other_half.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            fields(&other_half),
+            vec![
+                ("Method".to_string(), "PUT".to_string()),
+                ("ResourceType".to_string(), "UPLOAD".to_string()),
+            ]
+        );
     }
 
     #[test]
