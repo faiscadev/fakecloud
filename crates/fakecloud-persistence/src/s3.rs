@@ -870,6 +870,25 @@ impl DiskS3Store {
         }
     }
 
+    /// Remove the temp files ([`crate::atomic::is_temp_file_name`]) directly
+    /// in `dir`: writes a crash cut short before their rename.
+    fn remove_temp_files_in(dir: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(crate::atomic::is_temp_file_name)
+                && path.is_file()
+            {
+                Self::remove_stale_body(&path);
+            }
+        }
+    }
+
     /// Write a slot's body to `bin_path`, then its sidecar (naming
     /// `body_file`) atomically: the sidecar rename is what makes the new body
     /// the slot's. Returns the body ref.
@@ -1236,6 +1255,11 @@ impl S3Store for DiskS3Store {
                                 && !referenced.contains(name)
                             {
                                 Self::remove_stale_body(&path);
+                            } else if crate::atomic::is_temp_file_name(name) && path.is_file() {
+                                // A write that never reached its rename.
+                                Self::remove_stale_body(&path);
+                            } else if name.ends_with(".annotations") && path.is_dir() {
+                                Self::remove_temp_files_in(&path);
                             }
                         }
                         for default in &superseded_defaults {
@@ -2509,6 +2533,40 @@ mod disk_tests {
         assert!(!default_bin.exists());
         assert!(!older.exists());
         assert_eq!(slot_files(&store).len(), 2);
+    }
+
+    /// Temp files a crash left before their rename (`<file>.<pid>.<seq>.tmp`)
+    /// are removed by the load, in an object's directory and its annotation
+    /// directory; other files are left alone.
+    #[test]
+    fn load_removes_temp_files_left_by_interrupted_writes() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_with_object(&tmp);
+        store
+            .put_annotation("b", "k", None, &annotation("a"), b"note")
+            .unwrap();
+        let (dir, _, _) = store.object_paths("b", "k", None);
+        let annotations = store.annotation_dir("b", "k", None);
+        let leftovers = [
+            dir.join("null.toml.4242.7.tmp"),
+            dir.join("null.bin.4242.8.tmp"),
+            annotations.join("deadbeef.toml.4242.9.tmp"),
+        ];
+        for path in &leftovers {
+            std::fs::write(path, b"partial").unwrap();
+        }
+        let unrelated = dir.join("notes.tmp");
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        assert_eq!(reloaded_body(&tmp), b"abc");
+        for path in &leftovers {
+            assert!(!path.exists(), "{}", path.display());
+        }
+        assert!(unrelated.exists());
+        assert_eq!(
+            loaded_annotations(&store),
+            vec![("a".to_string(), b"note".to_vec())]
+        );
     }
 
     /// Deleting a resealed object removes the file its sidecar names (and a

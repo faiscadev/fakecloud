@@ -1586,6 +1586,8 @@ fn read_object_encryption_document(body: &str) -> Option<ObjectEncryptionDocumen
     };
     loop {
         match reader.read_event().ok()? {
+            // A value field (KMSKeyArn, BucketKeyEnabled) holds text only.
+            Event::Start(_) | Event::Empty(_) if field.is_some() => return None,
             Event::Start(e) => {
                 let name = e.local_name().as_ref().to_vec();
                 if path.is_empty() {
@@ -1937,6 +1939,10 @@ mod update_object_encryption_tests {
             "</ObjectEncryption>",
             "<Wrapper><ObjectEncryption/></Wrapper>",
             "<ObjectEncryption><SSE-KMS><KMSKeyArn>&bogus;</KMSKeyArn></SSE-KMS></ObjectEncryption>",
+            // A value field holds text only.
+            "<ObjectEncryption><SSE-KMS><KMSKeyArn>arn:aws:kms:us-east-1:123456789012:key/k<x>y</x></KMSKeyArn></SSE-KMS></ObjectEncryption>",
+            "<ObjectEncryption><SSE-KMS><KMSKeyArn><x/>arn</KMSKeyArn></SSE-KMS></ObjectEncryption>",
+            "<ObjectEncryption><SSE-KMS><BucketKeyEnabled><b>true</b></BucketKeyEnabled></SSE-KMS></ObjectEncryption>",
         ] {
             assert!(read_object_encryption_document(body).is_none(), "{body}");
             assert_eq!(
