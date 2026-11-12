@@ -87,12 +87,13 @@ impl IamPolicyEvaluator for IamPolicyEvaluatorImpl {
             context: context.clone(),
         };
         let resource_policy = resource_policy_json.map(evaluator::PolicyDocument::parse);
-        decision_to_core(evaluator::evaluate_with_resource_policy_and_gates_and_scps(
+        decision_to_core(evaluator::evaluate_with_resource_policy_for_role(
             &identity_policies,
             boundary.as_deref(),
             session.as_deref(),
             scp_docs.as_deref(),
             resource_policy.as_ref(),
+            evaluator::request_role_arn(state, principal, context).as_deref(),
             &request,
             resource_account_id,
         ))
@@ -876,6 +877,126 @@ mod tests {
                 None
             ),
             IamDecision::ImplicitDeny
+        );
+    }
+
+    /// A session whose role is not in IAM (deleted, or never created) still
+    /// carries the role ARN recorded on its credential, which dispatch sets
+    /// as `aws:PrincipalArn`: a Deny naming that role reaches the session.
+    #[test]
+    fn deny_naming_a_deleted_role_reaches_its_session() {
+        const ROLE_ARN: &str = "arn:aws:iam::123456789012:role/gone";
+        let session = Principal {
+            arn: "arn:aws:sts::123456789012:assumed-role/gone/s1".into(),
+            user_id: "AROAGONE:s1".into(),
+            account_id: "123456789012".into(),
+            principal_type: PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        };
+        let policy = format!(
+            r#"{{"Statement":[{{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"*"}},{{"Effect":"Deny","Principal":{{"AWS":"{ROLE_ARN}"}},"Action":"s3:GetObject","Resource":"*"}}]}}"#
+        );
+        let eval = IamPolicyEvaluatorImpl::new(setup());
+        let decide = |context: &ConditionContext| {
+            eval.evaluate_with_resource_policy(
+                &session,
+                &s3_get_object_action(),
+                context,
+                Some(&policy),
+                "123456789012",
+                &[],
+                None,
+            )
+        };
+        let with_role = ConditionContext {
+            aws_principal_arn: Some(ROLE_ARN.into()),
+            ..Default::default()
+        };
+        assert_eq!(decide(&with_role), IamDecision::ExplicitDeny);
+        // Without the recorded ARN the role is unknown, and only the
+        // wildcard grant applies.
+        assert_eq!(decide(&ConditionContext::default()), IamDecision::Allow);
+    }
+
+    /// A same-account bucket policy naming a role (by its ARN, path
+    /// included) grants the role's sessions, capped by the role's
+    /// permissions boundary; every grant is capped by the SCPs.
+    #[test]
+    fn resource_policy_naming_the_role_grants_its_sessions() {
+        use crate::state::IamRole;
+        const ROLE_ARN: &str = "arn:aws:iam::123456789012:role/team/app";
+        let state = setup();
+        state.write().get_or_create("123456789012").roles.insert(
+            "app".into(),
+            IamRole {
+                role_name: "app".into(),
+                role_id: "AROAAPP".into(),
+                arn: ROLE_ARN.into(),
+                path: "/team/".into(),
+                assume_role_policy_document: "{}".into(),
+                description: None,
+                created_at: Utc::now(),
+                max_session_duration: 3600,
+                tags: Vec::new(),
+                permissions_boundary: None,
+            },
+        );
+        let session = Principal {
+            arn: "arn:aws:sts::123456789012:assumed-role/app/s1".into(),
+            user_id: "AROAAPP:s1".into(),
+            account_id: "123456789012".into(),
+            principal_type: PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        };
+        let grant = |principal: &str| {
+            format!(
+                r#"{{"Statement":[{{"Effect":"Allow","Principal":{{"AWS":"{principal}"}},"Action":"s3:GetObject","Resource":"*"}}]}}"#
+            )
+        };
+        let eval = IamPolicyEvaluatorImpl::new(state.clone());
+        let decide = |policy: &str, scps: Option<&[String]>| {
+            eval.evaluate_with_resource_policy(
+                &session,
+                &s3_get_object_action(),
+                &ConditionContext::default(),
+                Some(policy),
+                "123456789012",
+                &[],
+                scps,
+            )
+        };
+        assert_eq!(decide(&grant(ROLE_ARN), None), IamDecision::Allow);
+        // The role ARN without its path names another role.
+        assert_eq!(
+            decide(&grant("arn:aws:iam::123456789012:role/app"), None),
+            IamDecision::ImplicitDeny
+        );
+        // SCPs that do not allow the action cap the grant.
+        let s3_put_only =
+            r#"{"Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]}"#
+                .to_string();
+        assert_eq!(
+            decide(&grant(ROLE_ARN), Some(std::slice::from_ref(&s3_put_only))),
+            IamDecision::ImplicitDeny
+        );
+        // So does the role's boundary, which a grant naming the session
+        // itself escapes.
+        {
+            let mut mas = state.write();
+            let s = mas.get_or_create("123456789012");
+            let boundary_arn = "arn:aws:iam::123456789012:policy/PutOnly";
+            insert_managed_policy(s, boundary_arn, &s3_put_only);
+            s.roles.get_mut("app").unwrap().permissions_boundary = Some(boundary_arn.into());
+        }
+        assert_eq!(decide(&grant(ROLE_ARN), None), IamDecision::ImplicitDeny);
+        assert_eq!(
+            decide(
+                &grant("arn:aws:sts::123456789012:assumed-role/app/s1"),
+                None
+            ),
+            IamDecision::Allow
         );
     }
 }

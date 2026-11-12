@@ -248,6 +248,14 @@ pub struct StsTempCredential {
     /// GetSessionToken / GetFederationToken.
     #[serde(default)]
     pub federated_provider: Option<String>,
+    /// For a role session, the IAM ARN (path included) of the role it
+    /// assumed, recorded when the session is minted: the session's
+    /// `aws:PrincipalArn`, which it keeps whether or not the role exists
+    /// in IAM (a deleted role, the zero-config credentials role). `None`
+    /// for other sessions, and for sessions persisted before the field
+    /// existed (the role is then looked up by name).
+    #[serde(default)]
+    pub role_arn: Option<String>,
 }
 
 /// Default for [`StsTempCredential::issued_at`] when deserializing
@@ -290,6 +298,8 @@ pub struct SecretLookup {
     /// always `None` for IAM user keys, plain AssumeRole, GetSessionToken,
     /// and GetFederationToken.
     pub federated_provider: Option<String>,
+    /// [`StsTempCredential::role_arn`]; `None` for IAM user keys.
+    pub role_arn: Option<String>,
 }
 
 /// Convert a `Vec<Tag>` to a `BTreeMap<String, String>`.
@@ -582,6 +592,7 @@ impl IamState {
                             mfa_present: false,
                             token_issued_at: None,
                             federated_provider: None,
+                            role_arn: None,
                         });
                     }
                 }
@@ -605,6 +616,7 @@ impl IamState {
                     mfa_present: temp.mfa_present,
                     token_issued_at: Some(temp.issued_at),
                     federated_provider: temp.federated_provider.clone(),
+                    role_arn: temp.role_arn.clone(),
                 });
             }
             // Keep the expired entry for a while: a later request with it must
@@ -667,6 +679,7 @@ impl IamState {
                             mfa_present: false,
                             token_issued_at: None,
                             federated_provider: None,
+                            role_arn: None,
                         });
                     }
                 }
@@ -690,7 +703,54 @@ impl IamState {
             mfa_present: temp.mfa_present,
             token_issued_at: Some(temp.issued_at),
             federated_provider: temp.federated_provider.clone(),
+            role_arn: temp.role_arn.clone(),
         })
+    }
+
+    /// The role `role_arn` names, matched on its full `role/<path><name>`
+    /// resource rather than the name alone: IAM role ARNs carry the role's
+    /// path, and an ARN with the wrong path names no role (AWS refuses to
+    /// assume it), even though a role with that name exists under another
+    /// path.
+    pub fn role_by_arn(&self, role_arn: &str) -> Option<&IamRole> {
+        fn resource(arn: &str) -> Option<&str> {
+            arn.split_once(":role/").map(|(_, r)| r)
+        }
+        let requested = resource(role_arn)?;
+        let name = requested.rsplit('/').next()?;
+        let role = self.roles.get(name)?;
+        (resource(&role.arn) == Some(requested)).then_some(role)
+    }
+
+    /// The role ARN a session minted for the configured `role_arn` records
+    /// (outside STS, which refuses an ARN naming no role): the ARN of the
+    /// role whose policies the session gets, a role of that name being
+    /// looked up by name whatever path `role_arn` gives, so the session's
+    /// `aws:PrincipalArn` is always that role's; `role_arn` itself when no
+    /// such role exists (the zero-config credentials role).
+    pub fn minted_session_role_arn(&self, role_arn: &str) -> String {
+        let name = role_arn
+            .split_once(":role/")
+            .and_then(|(_, r)| r.rsplit('/').next());
+        name.and_then(|n| self.roles.get(n))
+            .map(|role| role.arn.clone())
+            .unwrap_or_else(|| role_arn.to_string())
+    }
+
+    /// For an assumed-role session `principal_arn` of this account, the IAM
+    /// ARN (path included) of the role it assumed: the role as IAM holds it,
+    /// else the ARN a live session of it recorded when minted (a deleted
+    /// role, or one never created, like the zero-config credentials role).
+    pub fn session_role_arn(&self, principal_arn: &str) -> Option<String> {
+        let (_, rest) = principal_arn.split_once(":assumed-role/")?;
+        let name = rest.split('/').next()?;
+        if let Some(role) = self.roles.get(name) {
+            return Some(role.arn.clone());
+        }
+        self.sts_temp_credentials
+            .values()
+            .find(|t| t.principal_arn == principal_arn)
+            .and_then(|t| t.role_arn.clone())
     }
 
     /// Resolve role tags from an assumed-role principal ARN.
@@ -827,6 +887,7 @@ mod tests {
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider: None,
+                role_arn: None,
             },
         );
         let lookup = state.credential_secret("FSIATEMPKEY").unwrap();
@@ -855,6 +916,7 @@ mod tests {
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider: None,
+                role_arn: None,
             },
         );
         assert!(state.credential_secret("FSIAOLD").is_none());
@@ -875,6 +937,7 @@ mod tests {
             mfa_present: false,
             issued_at: Utc::now(),
             federated_provider: None,
+            role_arn: None,
         }
     }
 
@@ -937,6 +1000,7 @@ mod tests {
                 mfa_present: false,
                 issued_at: Utc::now(),
                 federated_provider: None,
+                role_arn: None,
             },
         );
         assert!(state.credential_secret_readonly("FSIAOLD").is_none());

@@ -101,6 +101,7 @@ impl StsService {
                 issued_at: Utc::now(),
                 // GetSessionToken doesn't federate.
                 federated_provider: None,
+                role_arn: None,
             },
         );
 

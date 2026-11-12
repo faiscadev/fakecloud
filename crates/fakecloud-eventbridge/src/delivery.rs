@@ -222,6 +222,7 @@ impl EventBridgeDelivery for EventBridgeDeliveryImpl {
                 &event_bus_name,
                 target_region,
                 &event_principal(event),
+                None,
             ) {
                 return Err(EventBridgeDeliveryError::AccessDenied(message));
             }

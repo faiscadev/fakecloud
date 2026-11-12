@@ -788,9 +788,10 @@ async fn dispatch_inner(
     );
 
     // Opt-in IAM identity-policy enforcement. Runs before the service
-    // handler so a deny never reaches business logic. Root principals
-    // (both `test*` bypass AKIDs and the account's IAM root) are exempt,
-    // matching AWS behavior. Services that haven't opted in via
+    // handler so a deny never reaches business logic. `test*` bypass AKIDs
+    // are exempt; the account's IAM root needs no identity policy, as in
+    // AWS, but stays capped by its SCPs and, across accounts, by the
+    // resource's policy (`authorize_root`). Services that haven't opted in via
     // `iam_enforceable()` are transparently skipped — the startup log
     // lists which services are under enforcement so users always know.
     if config.iam_mode.is_enabled()
@@ -812,7 +813,7 @@ async fn dispatch_inner(
                 }
             } else if let Some(principal) = aws_request.principal.as_ref() {
                 if principal.is_root() {
-                    if let Some(denied) = authorize_root_cross_account(
+                    if let Some(denied) = authorize_root(
                         principal,
                         service.as_ref(),
                         &aws_request,
@@ -965,7 +966,10 @@ async fn dispatch_inner(
                                     // existing tooling that decodes deny
                                     // reasons works against fakecloud.
                                     let context_summary = serde_json::json!({
-                                        "aws:PrincipalArn": principal.arn,
+                                        "aws:PrincipalArn": condition_context
+                                            .aws_principal_arn
+                                            .clone()
+                                            .unwrap_or_else(|| principal.arn.clone()),
                                         "aws:PrincipalAccount": principal.account_id,
                                         "aws:RequestedRegion": condition_context
                                             .aws_requested_region
@@ -986,19 +990,32 @@ async fn dispatch_inner(
                                         Vec::new(),
                                         Some(context_summary),
                                     );
-                                    return build_error_response(
-                                    StatusCode::FORBIDDEN,
-                                    "AccessDeniedException",
-                                    &format!(
-                                        "User: {} is not authorized to perform: {} on resource: {} Encoded authorization failure message: {}",
-                                        principal.arn,
-                                        iam_action.action_string(),
-                                        iam_action.resource,
-                                        encoded,
-                                    ),
-                                    &request_id,
-                                    error_envelope,
-                                );
+                                    // When the SCPs are what refused the
+                                    // request, AWS says so.
+                                    let scp_reason = scps.as_deref().and_then(|scps| {
+                                        let ceiling = evaluator.evaluate_ceiling(
+                                            principal,
+                                            iam_action,
+                                            &condition_context,
+                                            &[],
+                                            Some(scps),
+                                            false,
+                                        );
+                                        scp_cause(decision, ceiling)
+                                            .and_then(|d| scp_denial_reason(d, &action_string))
+                                    });
+                                    return access_denied_response(
+                                        &not_authorized_message(
+                                            &principal.arn,
+                                            &action_string,
+                                            &iam_action.resource,
+                                            scp_reason.as_deref(),
+                                            Some(&encoded),
+                                        ),
+                                        &request_id,
+                                        &detected,
+                                        &aws_request.headers,
+                                    );
                                 }
                                 // Soft mode: audit log already emitted; fall
                                 // through to the handler.
@@ -1025,15 +1042,11 @@ async fn dispatch_inner(
                             "service is iam_enforceable but has no IamAction mapping for this action; denying under strict, allowing under soft"
                         );
                         if config.iam_mode.is_strict() {
-                            return build_error_response(
-                                StatusCode::FORBIDDEN,
-                                "AccessDeniedException",
-                                &format!(
-                                    "User: {} is not authorized to perform: {}: no IAM action mapping exists for this operation, so it cannot be authorized under strict IAM enforcement",
-                                    principal.arn, aws_request.action,
-                                ),
+                            return unmapped_action_denial(
+                                principal,
+                                &aws_request,
                                 &request_id,
-                                error_envelope,
+                                &detected,
                             );
                         }
                         // Soft mode: audit log emitted; fall through to the
@@ -1904,6 +1917,11 @@ fn principal_condition_context(
     // and `aws:FederatedProvider`. IAM user access
     // keys carry none of these, matching AWS.
     if let Some(rc) = resolved {
+        // An assumed-role session's `aws:PrincipalArn` is its role's ARN
+        // (path included), not the session ARN.
+        if let Some(role_arn) = rc.role_arn.as_ref() {
+            ctx.aws_principal_arn = Some(role_arn.clone());
+        }
         ctx.aws_mfa_present = Some(rc.mfa_present);
         ctx.aws_token_issue_time = rc.token_issued_at;
         ctx.aws_federated_provider = rc.federated_provider.clone();
@@ -2196,6 +2214,270 @@ fn grant_authorizes(
     }
 }
 
+/// Authorize a request made as an account's root user: its SCPs first, then,
+/// for a resource of another account, that resource's policy (see
+/// [`authorize_root_cross_account`]).
+///
+/// Returns the error response to send when the request is denied under
+/// strict mode; soft mode only logs.
+#[allow(clippy::too_many_arguments)]
+fn authorize_root(
+    principal: &Principal,
+    service: &dyn crate::service::AwsService,
+    aws_request: &AwsRequest,
+    evaluator: &dyn IamPolicyEvaluator,
+    config: &DispatchConfig,
+    detected: &protocol::DetectedRequest,
+    request_id: &str,
+    remote_addr: Option<SocketAddr>,
+    resolved: Option<&crate::auth::ResolvedCredential>,
+) -> Option<Response<Body>> {
+    authorize_root_scps(
+        principal,
+        service,
+        aws_request,
+        evaluator,
+        config,
+        detected,
+        request_id,
+        remote_addr,
+        resolved,
+    )
+    .or_else(|| {
+        authorize_root_cross_account(
+            principal,
+            service,
+            aws_request,
+            evaluator,
+            config,
+            detected,
+            request_id,
+            remote_addr,
+            resolved,
+        )
+    })
+}
+
+/// Cap a root-user request at the account's SCPs.
+///
+/// Root needs no identity policy in its own account, but SCPs restrict
+/// "IAM users and roles in member accounts, including the member account's
+/// root user" (Organizations user guide, "Service control policies"), and
+/// AWS evaluates them before any resource-based policy, so a resource policy
+/// granting root in another account does not reach past them either. The
+/// resolver exempts the management account (and returns nothing outside an
+/// organization), which keeps root there unrestricted.
+#[allow(clippy::too_many_arguments)]
+fn authorize_root_scps(
+    principal: &Principal,
+    service: &dyn crate::service::AwsService,
+    aws_request: &AwsRequest,
+    evaluator: &dyn IamPolicyEvaluator,
+    config: &DispatchConfig,
+    detected: &protocol::DetectedRequest,
+    request_id: &str,
+    remote_addr: Option<SocketAddr>,
+    resolved: Option<&crate::auth::ResolvedCredential>,
+) -> Option<Response<Body>> {
+    let resolver = config.scp_resolver.as_deref()?;
+    let scps = resolver.scps_for(principal)?;
+    let in_caller_account = service.iam_resource_in_caller_account(aws_request);
+    let iam_actions = service.iam_actions_for(aws_request);
+    if iam_actions.is_empty() {
+        // An operation with no IAM action mapping cannot be checked against
+        // the SCPs, so under strict enforcement it fails closed, as it does
+        // for every other principal.
+        tracing::warn!(
+            target: "fakecloud::iam::audit",
+            service = %detected.service,
+            action = %aws_request.action,
+            principal = %principal.arn,
+            mode = %config.iam_mode,
+            request_id = %request_id,
+            "root request under SCPs has no IamAction mapping; denying under strict, allowing under soft"
+        );
+        return config
+            .iam_mode
+            .is_strict()
+            .then(|| unmapped_action_denial(principal, aws_request, request_id, detected));
+    }
+    for iam_action in iam_actions {
+        let resource_account = config
+            .resource_policy_provider
+            .as_ref()
+            .filter(|_| !iam_action.is_pass_role() && !in_caller_account)
+            .and_then(|p| p.resource_owner_account(&detected.service, &iam_action.resource))
+            .or_else(|| parse_account_from_arn(&iam_action.resource))
+            .unwrap_or_else(|| principal.account_id.clone());
+        let mut context = principal_condition_context(
+            principal,
+            resolved,
+            service,
+            aws_request,
+            &iam_action,
+            detected,
+            remote_addr,
+        );
+        add_global_request_keys(&mut context, principal, &resource_account, Some(resolver));
+        let decision =
+            evaluator.evaluate_ceiling(principal, &iam_action, &context, &[], Some(&scps), false);
+        if decision.is_allow() {
+            continue;
+        }
+        tracing::warn!(
+            target: "fakecloud::iam::audit",
+            service = %detected.service,
+            action = %iam_action.action_string(),
+            resource = %iam_action.resource,
+            principal = %principal.arn,
+            decision = ?decision,
+            mode = %config.iam_mode,
+            request_id = %request_id,
+            "root request denied by the account's service control policies"
+        );
+        if config.iam_mode.is_strict() {
+            let action = iam_action.action_string();
+            return Some(access_denied_response(
+                &not_authorized_message(
+                    &principal.arn,
+                    &action,
+                    &iam_action.resource,
+                    scp_denial_reason(decision, &action).as_deref(),
+                    None,
+                ),
+                request_id,
+                detected,
+                &aws_request.headers,
+            ));
+        }
+    }
+    None
+}
+
+/// AWS's wording for a request the SCPs refuse, given the SCP ceiling's
+/// `decision`: `with an explicit deny in a service control policy`, or
+/// `because no service control policy allows the <action> action`. `None`
+/// when the SCPs allow the request.
+fn scp_denial_reason(decision: crate::auth::IamDecision, action: &str) -> Option<String> {
+    match decision {
+        crate::auth::IamDecision::Allow => None,
+        crate::auth::IamDecision::ExplicitDeny => {
+            Some("with an explicit deny in a service control policy".to_string())
+        }
+        crate::auth::IamDecision::ImplicitDeny => Some(format!(
+            "because no service control policy allows the {action} action"
+        )),
+    }
+}
+
+/// The SCP ceiling's decision when the SCP layer itself caused a denial
+/// whose overall decision was `decision`: an SCP that explicitly denies, or
+/// one that doesn't allow when nothing else explicitly denied (an explicit
+/// Deny elsewhere is the cause then). `None` when the SCPs are not the
+/// cause.
+fn scp_cause(
+    decision: crate::auth::IamDecision,
+    ceiling: crate::auth::IamDecision,
+) -> Option<crate::auth::IamDecision> {
+    use crate::auth::IamDecision;
+    match (decision, ceiling) {
+        (_, IamDecision::ExplicitDeny) => Some(IamDecision::ExplicitDeny),
+        (IamDecision::ImplicitDeny, IamDecision::ImplicitDeny) => Some(IamDecision::ImplicitDeny),
+        _ => None,
+    }
+}
+
+/// The message of an `AccessDeniedException` for `principal_arn`:
+/// `User: <arn> is not authorized to perform: <action> on resource:
+/// <resource>`, then the `reason` the request was refused when one is known
+/// (an SCP's), then the encoded authorization failure message if any.
+fn not_authorized_message(
+    principal_arn: &str,
+    action: &str,
+    resource: &str,
+    reason: Option<&str>,
+    encoded: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "User: {principal_arn} is not authorized to perform: {action} on resource: {resource}"
+    );
+    if let Some(reason) = reason {
+        message.push(' ');
+        message.push_str(reason);
+    }
+    if let Some(encoded) = encoded {
+        message.push_str(" Encoded authorization failure message: ");
+        message.push_str(encoded);
+    }
+    message
+}
+
+/// The error code a caller its policies don't authorize is answered with,
+/// by the request's protocol: `AccessDenied` on the awsQuery protocol (IAM,
+/// STS, SQS's query path, ELBv2, ...) and for S3, `AccessDeniedException` on
+/// the JSON and REST protocols (their declared code), except SNS, whose
+/// declared 403 is `AuthorizationError`.
+fn access_denied_code(service: &str, protocol: AwsProtocol) -> &'static str {
+    match (service, protocol) {
+        ("sns", _) => "AuthorizationError",
+        ("s3", _) | (_, AwsProtocol::Query) => "AccessDenied",
+        _ => "AccessDeniedException",
+    }
+}
+
+/// Services that answer the JSON protocol `awsQueryCompatible`: their JSON
+/// errors carry the awsQuery code in `x-amzn-query-error`, which SDKs report
+/// as the error's code.
+const QUERY_COMPATIBLE_JSON_SERVICES: &[&str] = &["sqs"];
+
+/// The strict-mode refusal of a request its caller is not authorized for,
+/// shaped as the service answers it (see [`access_denied_code`]). On the
+/// JSON path of an awsQuery-compatible service (SQS), the body keeps the
+/// JSON `AccessDeniedException` and `x-amzn-query-error: AccessDenied;Sender`
+/// carries the awsQuery code, as SQS does for its own errors.
+fn access_denied_response(
+    message: &str,
+    request_id: &str,
+    detected: &protocol::DetectedRequest,
+    headers: &http::HeaderMap,
+) -> Response<Body> {
+    let mut resp = build_error_response(
+        StatusCode::FORBIDDEN,
+        access_denied_code(&detected.service, detected.protocol),
+        message,
+        request_id,
+        ErrorEnvelope::for_request(detected, headers),
+    );
+    if detected.protocol == AwsProtocol::Json
+        && QUERY_COMPATIBLE_JSON_SERVICES.contains(&detected.service.as_str())
+    {
+        resp.headers_mut().insert(
+            "x-amzn-query-error",
+            http::HeaderValue::from_static("AccessDenied;Sender"),
+        );
+    }
+    resp
+}
+
+/// The strict-mode refusal of an operation with no IAM action mapping,
+/// which cannot be authorized.
+fn unmapped_action_denial(
+    principal: &Principal,
+    aws_request: &AwsRequest,
+    request_id: &str,
+    detected: &protocol::DetectedRequest,
+) -> Response<Body> {
+    access_denied_response(
+        &format!(
+            "User: {} is not authorized to perform: {}: no IAM action mapping exists for this operation, so it cannot be authorized under strict IAM enforcement",
+            principal.arn, aws_request.action,
+        ),
+        request_id,
+        detected,
+        &aws_request.headers,
+    )
+}
+
 /// Authorize an account root reaching a resource ANOTHER account owns.
 ///
 /// Root needs no identity policy in its own account, which is why dispatch
@@ -2291,9 +2573,7 @@ fn authorize_root_cross_account(
             "cross-account root request denied: the resource policy does not grant the action"
         );
         if config.iam_mode.is_strict() {
-            return Some(build_error_response(
-                StatusCode::FORBIDDEN,
-                "AccessDeniedException",
+            return Some(access_denied_response(
                 &format!(
                     "User: {} is not authorized to perform: {} on resource: {} because no resource-based policy allows the {} action",
                     principal.arn,
@@ -2302,7 +2582,8 @@ fn authorize_root_cross_account(
                     iam_action.action_string(),
                 ),
                 request_id,
-                ErrorEnvelope::for_request(detected, &aws_request.headers),
+                detected,
+                &aws_request.headers,
             ));
         }
     }
@@ -3970,6 +4251,7 @@ mod tests {
             mfa_present: true,
             token_issued_at: Some(issued),
             federated_provider: None,
+            role_arn: None,
         };
         let evaluator = PolicyEvaluator(parking_lot::Mutex::new(Vec::new()));
         let run = |bucket: &str, mode: IamMode| {
@@ -4014,6 +4296,367 @@ mod tests {
             assert_eq!(ctx.aws_mfa_present, Some(true));
             assert_eq!(ctx.aws_token_issue_time, Some(issued));
             assert_eq!(ctx.aws_principal_type.as_deref(), Some("Account"));
+        }
+    }
+
+    #[test]
+    fn denial_messages_name_the_scp_when_it_refused() {
+        use crate::auth::IamDecision;
+        assert_eq!(scp_denial_reason(IamDecision::Allow, "s3:GetObject"), None);
+        // The SCP layer is named only when it caused the denial: its own
+        // explicit Deny, or not allowing when nothing else explicitly denied.
+        use IamDecision::{Allow, ExplicitDeny, ImplicitDeny};
+        assert_eq!(scp_cause(ExplicitDeny, ExplicitDeny), Some(ExplicitDeny));
+        assert_eq!(scp_cause(ImplicitDeny, ImplicitDeny), Some(ImplicitDeny));
+        assert_eq!(scp_cause(ExplicitDeny, ImplicitDeny), None);
+        assert_eq!(scp_cause(ImplicitDeny, Allow), None);
+        assert_eq!(scp_cause(ExplicitDeny, Allow), None);
+        // The denial code follows the protocol: awsQuery `AccessDenied`,
+        // JSON/REST `AccessDeniedException`, with S3 and SNS their own.
+        assert_eq!(access_denied_code("s3", AwsProtocol::Rest), "AccessDenied");
+        assert_eq!(
+            access_denied_code("sts", AwsProtocol::Query),
+            "AccessDenied"
+        );
+        assert_eq!(
+            access_denied_code("iam", AwsProtocol::Query),
+            "AccessDenied"
+        );
+        assert_eq!(
+            access_denied_code("elasticloadbalancing", AwsProtocol::Query),
+            "AccessDenied"
+        );
+        assert_eq!(
+            access_denied_code("sqs", AwsProtocol::Query),
+            "AccessDenied"
+        );
+        assert_eq!(
+            access_denied_code("sqs", AwsProtocol::Json),
+            "AccessDeniedException"
+        );
+        assert_eq!(
+            access_denied_code("sns", AwsProtocol::Query),
+            "AuthorizationError"
+        );
+        assert_eq!(
+            access_denied_code("kms", AwsProtocol::Json),
+            "AccessDeniedException"
+        );
+        assert_eq!(
+            access_denied_code("lambda", AwsProtocol::Rest),
+            "AccessDeniedException"
+        );
+        // SQS's JSON path carries the awsQuery code in `x-amzn-query-error`.
+        let detected = |service: &str, protocol| protocol::DetectedRequest {
+            service: service.to_string(),
+            action: "SendMessage".to_string(),
+            protocol,
+        };
+        let headers = http::HeaderMap::new();
+        let sqs_json =
+            access_denied_response("m", "r", &detected("sqs", AwsProtocol::Json), &headers);
+        assert_eq!(
+            sqs_json.headers()["x-amzn-query-error"],
+            "AccessDenied;Sender"
+        );
+        let kms = access_denied_response("m", "r", &detected("kms", AwsProtocol::Json), &headers);
+        assert!(kms.headers().get("x-amzn-query-error").is_none());
+        let explicit = scp_denial_reason(IamDecision::ExplicitDeny, "s3:GetObject");
+        let implicit = scp_denial_reason(IamDecision::ImplicitDeny, "s3:GetObject");
+        let user = "arn:aws:iam::222222222222:user/u";
+        assert_eq!(
+            not_authorized_message(user, "s3:GetObject", "arn:aws:s3:::b/k", explicit.as_deref(), None),
+            "User: arn:aws:iam::222222222222:user/u is not authorized to perform: s3:GetObject on resource: arn:aws:s3:::b/k with an explicit deny in a service control policy"
+        );
+        assert_eq!(
+            not_authorized_message(user, "s3:GetObject", "arn:aws:s3:::b/k", implicit.as_deref(), Some("BLOB")),
+            "User: arn:aws:iam::222222222222:user/u is not authorized to perform: s3:GetObject on resource: arn:aws:s3:::b/k because no service control policy allows the s3:GetObject action Encoded authorization failure message: BLOB"
+        );
+        assert_eq!(
+            not_authorized_message(user, "s3:GetObject", "arn:aws:s3:::b/k", None, Some("BLOB")),
+            "User: arn:aws:iam::222222222222:user/u is not authorized to perform: s3:GetObject on resource: arn:aws:s3:::b/k Encoded authorization failure message: BLOB"
+        );
+    }
+
+    /// SCPs cap a member account's root user as they cap every principal of
+    /// the account: in its own account, and across accounts even where the
+    /// resource policy grants it. No SCPs (the management account, no
+    /// organization) leave root as it was.
+    #[tokio::test]
+    async fn root_requests_are_capped_by_scps() {
+        use crate::auth::IamAction;
+        use crate::service::{AwsResponse, AwsServiceError};
+        struct OwnerProvider;
+        impl crate::auth::ResourcePolicyProvider for OwnerProvider {
+            fn resource_policy(&self, _service: &str, _resource_arn: &str) -> Option<String> {
+                Some("granting-policy".to_string())
+            }
+            fn resource_owner_account(&self, _service: &str, resource_arn: &str) -> Option<String> {
+                let bucket = resource_arn.strip_prefix("arn:aws:s3:::")?;
+                match bucket.split('/').next()? {
+                    "own" => Some("222222222222".to_string()),
+                    _ => Some("111111111111".to_string()),
+                }
+            }
+        }
+        /// Allows what the resource policy grants; the ceiling allows when
+        /// there are SCPs and every one is `allow`, and an SCP `deny` denies
+        /// explicitly.
+        struct PolicyEvaluator(parking_lot::Mutex<Vec<ConditionContext>>);
+        impl IamPolicyEvaluator for PolicyEvaluator {
+            fn evaluate(
+                &self,
+                _: &Principal,
+                _: &IamAction,
+                _: &ConditionContext,
+                _: &[String],
+                _: Option<&[String]>,
+            ) -> crate::auth::IamDecision {
+                crate::auth::IamDecision::ImplicitDeny
+            }
+            fn evaluate_with_resource_policy(
+                &self,
+                _: &Principal,
+                _: &IamAction,
+                _: &ConditionContext,
+                _: Option<&str>,
+                _: &str,
+                _: &[String],
+                _: Option<&[String]>,
+            ) -> crate::auth::IamDecision {
+                crate::auth::IamDecision::ImplicitDeny
+            }
+            fn evaluate_resource_policy_only(
+                &self,
+                _: &Principal,
+                _: &IamAction,
+                _: &ConditionContext,
+                policy: Option<&str>,
+            ) -> crate::auth::IamDecision {
+                if policy == Some("granting-policy") {
+                    crate::auth::IamDecision::Allow
+                } else {
+                    crate::auth::IamDecision::ImplicitDeny
+                }
+            }
+            fn evaluate_ceiling(
+                &self,
+                _: &Principal,
+                _: &IamAction,
+                context: &ConditionContext,
+                session_policies: &[String],
+                scps: Option<&[String]>,
+                with_boundary: bool,
+            ) -> crate::auth::IamDecision {
+                assert!(session_policies.is_empty() && !with_boundary);
+                self.0.lock().push(context.clone());
+                let scps = scps.unwrap_or_default();
+                if scps.iter().any(|s| s == "deny") {
+                    crate::auth::IamDecision::ExplicitDeny
+                } else if !scps.is_empty() && scps.iter().all(|s| s == "allow") {
+                    crate::auth::IamDecision::Allow
+                } else {
+                    crate::auth::IamDecision::ImplicitDeny
+                }
+            }
+        }
+        struct BucketService;
+        #[async_trait::async_trait]
+        impl crate::service::AwsService for BucketService {
+            fn service_name(&self) -> &str {
+                "s3"
+            }
+            async fn handle(&self, _: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+                unreachable!()
+            }
+            fn supported_actions(&self) -> &[&str] {
+                &[]
+            }
+            fn iam_action_for(&self, request: &AwsRequest) -> Option<IamAction> {
+                Some(IamAction {
+                    service: "s3",
+                    action: "GetObject",
+                    resource: format!("arn:aws:s3:::{}", request.path_segments.join("/")),
+                })
+            }
+        }
+        struct Org(Option<Vec<String>>);
+        impl crate::auth::ScpResolver for Org {
+            fn scps_for(&self, _: &Principal) -> Option<Vec<String>> {
+                self.0.clone()
+            }
+            fn principal_org(&self, _: &str) -> Option<(String, String)> {
+                Some(("o-abc".to_string(), "o-abc/r-1/".to_string()))
+            }
+        }
+        let root = Principal {
+            arn: "arn:aws:iam::222222222222:root".to_string(),
+            user_id: "222222222222".to_string(),
+            account_id: "222222222222".to_string(),
+            principal_type: PrincipalType::Root,
+            source_identity: None,
+            tags: None,
+        };
+        let detected = protocol::DetectedRequest {
+            service: "s3".to_string(),
+            action: String::new(),
+            protocol: AwsProtocol::Rest,
+        };
+        let request = |bucket: &str| AwsRequest {
+            service: "s3".to_string(),
+            action: String::new(),
+            region: "us-east-1".to_string(),
+            account_id: "222222222222".to_string(),
+            request_id: "req".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![bucket.to_string(), "key".to_string()],
+            raw_path: format!("/{bucket}/key"),
+            raw_query: String::new(),
+            method: http::Method::GET,
+            is_query_protocol: false,
+            access_key_id: Some("ASIAROOTB".to_string()),
+            principal: Some(root.clone()),
+        };
+        let evaluator = PolicyEvaluator(parking_lot::Mutex::new(Vec::new()));
+        let run = |bucket: &str, scps: Option<&[&str]>, mode: IamMode| {
+            let mut cfg = DispatchConfig::new("us-east-1", "111111111111");
+            cfg.iam_mode = mode;
+            cfg.resource_policy_provider = Some(Arc::new(OwnerProvider));
+            cfg.scp_resolver = Some(Arc::new(Org(
+                scps.map(|s| s.iter().map(|d| d.to_string()).collect())
+            )));
+            authorize_root(
+                &root,
+                &BucketService,
+                &request(bucket),
+                &evaluator,
+                &cfg,
+                &detected,
+                "req",
+                None,
+                None,
+            )
+        };
+        async fn message(resp: Response<Body>) -> String {
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(body.to_vec()).unwrap()
+        }
+        for bucket in ["own", "granted"] {
+            // No SCPs apply (management account, no organization).
+            assert!(run(bucket, None, IamMode::Strict).is_none(), "{bucket}");
+            // SCPs allowing the action.
+            assert!(
+                run(bucket, Some(&["allow"]), IamMode::Strict).is_none(),
+                "{bucket}"
+            );
+            // An SCP denying the action, explicitly or by not allowing it.
+            let explicit = message(
+                run(bucket, Some(&["allow", "deny"]), IamMode::Strict)
+                    .expect("an SCP deny must refuse root"),
+            )
+            .await;
+            assert!(
+                explicit.contains("<Code>AccessDenied</Code>")
+                    && explicit.contains(&format!(
+                        "<Message>User: arn:aws:iam::222222222222:root is not authorized to perform: s3:GetObject on resource: arn:aws:s3:::{bucket}/key with an explicit deny in a service control policy</Message>"
+                    )),
+                "{explicit}"
+            );
+            let implicit = message(
+                run(bucket, Some(&["narrow"]), IamMode::Strict)
+                    .expect("an SCP not allowing the action must refuse root"),
+            )
+            .await;
+            assert!(
+                implicit.contains("<Code>AccessDenied</Code>")
+                    && implicit.contains(&format!(
+                        "<Message>User: arn:aws:iam::222222222222:root is not authorized to perform: s3:GetObject on resource: arn:aws:s3:::{bucket}/key because no service control policy allows the s3:GetObject action</Message>"
+                    )),
+                "{implicit}"
+            );
+            assert!(
+                run(bucket, Some(&[]), IamMode::Strict).is_some(),
+                "{bucket}"
+            );
+            // Soft mode logs and lets the request through.
+            assert!(
+                run(bucket, Some(&["deny"]), IamMode::Soft).is_none(),
+                "{bucket}"
+            );
+        }
+
+        // An operation with no IAM action mapping cannot be checked against
+        // the SCPs: under strict it fails closed, as for any principal.
+        struct UnmappedService;
+        #[async_trait::async_trait]
+        impl crate::service::AwsService for UnmappedService {
+            fn service_name(&self) -> &str {
+                "s3"
+            }
+            async fn handle(&self, _: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+                unreachable!()
+            }
+            fn supported_actions(&self) -> &[&str] {
+                &[]
+            }
+            fn iam_action_for(&self, _: &AwsRequest) -> Option<IamAction> {
+                None
+            }
+        }
+        let unmapped = |scps: Option<&[&str]>, mode: IamMode| {
+            let mut cfg = DispatchConfig::new("us-east-1", "111111111111");
+            cfg.iam_mode = mode;
+            cfg.resource_policy_provider = Some(Arc::new(OwnerProvider));
+            cfg.scp_resolver = Some(Arc::new(Org(
+                scps.map(|s| s.iter().map(|d| d.to_string()).collect())
+            )));
+            authorize_root(
+                &root,
+                &UnmappedService,
+                &request("own"),
+                &evaluator,
+                &cfg,
+                &detected,
+                "req",
+                None,
+                None,
+            )
+        };
+        let refused = message(
+            unmapped(Some(&["allow"]), IamMode::Strict)
+                .expect("an unmapped operation under SCPs must fail closed"),
+        )
+        .await;
+        assert!(
+            refused.contains("<Code>AccessDenied</Code>")
+                && refused.contains("no IAM action mapping exists for this operation"),
+            "{refused}"
+        );
+        assert!(unmapped(Some(&["allow"]), IamMode::Soft).is_none());
+        // No SCPs to apply: root needs no identity policy, so nothing to
+        // check.
+        assert!(unmapped(None, IamMode::Strict).is_none());
+        // The SCPs see the request's global keys: the resource's owner and
+        // the caller's organization.
+        let contexts = evaluator.0.lock();
+        assert!(contexts
+            .iter()
+            .any(|c| c.lookup("aws:ResourceAccount") == Some(vec!["111111111111".into()])));
+        assert!(contexts
+            .iter()
+            .any(|c| c.lookup("aws:ResourceAccount") == Some(vec!["222222222222".into()])));
+        for ctx in contexts.iter() {
+            assert_eq!(ctx.lookup("aws:PrincipalOrgID"), Some(vec!["o-abc".into()]));
+            assert_eq!(
+                ctx.aws_principal_arn.as_deref(),
+                Some("arn:aws:iam::222222222222:root")
+            );
         }
     }
 }

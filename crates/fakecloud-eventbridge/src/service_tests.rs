@@ -4191,6 +4191,57 @@ fn put_events_cross_account_allowed_when_bus_policy_grants_caller() {
     assert_eq!(body["FailedEntryCount"].as_i64().unwrap(), 0);
 }
 
+/// A bus policy naming a role (by its ARN, or as `aws:PrincipalArn`)
+/// grants the role's sessions from another account.
+#[test]
+fn put_events_cross_account_bus_policy_naming_the_role_grants_its_sessions() {
+    const ROLE: &str = "arn:aws:iam::999999999999:role/team/publisher";
+    let put = |svc: &EventBridgeService| {
+        let mut req = make_request(
+            "PutEvents",
+            json!({"Entries": [{"Source": "my.app", "DetailType": "T", "Detail": "{}"}]}),
+        );
+        req.principal = Some(fakecloud_core::auth::Principal {
+            arn: "arn:aws:sts::999999999999:assumed-role/publisher/s1".to_string(),
+            user_id: "AROAPUB:s1".to_string(),
+            account_id: "999999999999".to_string(),
+            principal_type: fakecloud_core::auth::PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        });
+        let resp = svc.put_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        body["FailedEntryCount"].as_i64().unwrap()
+    };
+    let with_roles = || {
+        make_service().with_session_role_resolver(std::sync::Arc::new(
+            |p: &fakecloud_core::auth::Principal| {
+                p.arn
+                    .contains(":assumed-role/publisher/")
+                    .then(|| ROLE.to_string())
+            },
+        ))
+    };
+    let by_role = json!({"Version": "2012-10-17", "Statement": [{
+        "Effect": "Allow", "Principal": {"AWS": ROLE},
+        "Action": "events:PutEvents", "Resource": "*"
+    }]});
+    let by_principal_arn = json!({"Version": "2012-10-17", "Statement": [{
+        "Effect": "Allow", "Principal": "*",
+        "Action": "events:PutEvents", "Resource": "*",
+        "Condition": {"ArnEquals": {"aws:PrincipalArn": ROLE}}
+    }]});
+    for policy in [&by_role, &by_principal_arn] {
+        let svc = with_roles();
+        put_bus_policy(&svc, "default", policy.clone());
+        assert_eq!(put(&svc), 0, "{policy}");
+        // Without knowing the session's role, neither matches.
+        let svc = make_service();
+        put_bus_policy(&svc, "default", policy.clone());
+        assert_eq!(put(&svc), 1, "{policy}");
+    }
+}
+
 #[test]
 fn put_events_cross_account_denied_when_bus_has_no_policy() {
     let svc = make_service();

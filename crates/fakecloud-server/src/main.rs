@@ -2079,7 +2079,10 @@ async fn main() {
             None
         };
     let mut eb_service = EventBridgeService::new(eb_state.clone(), delivery_for_eb.clone())
-        .with_target_wiring(eb_target_wiring.clone());
+        .with_target_wiring(eb_target_wiring.clone())
+        .with_session_role_resolver(fakecloud_iam::evaluator::session_role_resolver(
+            iam_state.clone(),
+        ));
     if let Some(store) = eb_snapshot_store.clone() {
         eb_service = eb_service.with_snapshot_store(store);
     }

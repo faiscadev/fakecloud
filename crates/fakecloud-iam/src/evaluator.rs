@@ -681,10 +681,8 @@ pub fn evaluate_with_resource_policy_and_gates(
 }
 
 /// Full-chain variant of
-/// [`evaluate_with_resource_policy_and_gates`] that also applies an
-/// SCP ceiling on the identity side. SCPs never apply to the
-/// resource-policy branch — AWS evaluates the resource policy in the
-/// resource's account, and the caller's SCPs have no authority there.
+/// [`evaluate_with_resource_policy_and_gates`] that also applies the
+/// caller's SCP ceiling; see [`evaluate_with_resource_policy_for_role`].
 pub fn evaluate_with_resource_policy_and_gates_and_scps(
     identity_policies: &[PolicyDocument],
     boundary: Option<&[PolicyDocument]>,
@@ -694,18 +692,67 @@ pub fn evaluate_with_resource_policy_and_gates_and_scps(
     request: &EvalRequest<'_>,
     resource_account_id: &str,
 ) -> Decision {
+    evaluate_with_resource_policy_for_role(
+        identity_policies,
+        boundary,
+        session,
+        scps,
+        resource_policy,
+        None,
+        request,
+        resource_account_id,
+    )
+}
+
+/// [`evaluate_with_resource_policy_and_gates_and_scps`] for a caller that
+/// may be an assumed-role session of the role `role_arn` (its IAM ARN, path
+/// included), which a resource policy can name to grant the role's sessions.
+///
+/// The SCPs cap every permission of a member-account principal, a resource
+/// policy's included: AWS evaluates them before any resource-based policy,
+/// and SCPs that do not allow the action are a final Deny (IAM user guide,
+/// "How AWS enforcement code logic evaluates requests to allow or deny
+/// access"). Within the same account, a resource-policy grant naming the
+/// role ARN is also "limited by an implicit deny in a permissions boundary
+/// or session policy", while one naming the IAM user or the role session
+/// itself is not.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_with_resource_policy_for_role(
+    identity_policies: &[PolicyDocument],
+    boundary: Option<&[PolicyDocument]>,
+    session: Option<&[PolicyDocument]>,
+    scps: Option<&[PolicyDocument]>,
+    resource_policy: Option<&PolicyDocument>,
+    role_arn: Option<&str>,
+    request: &EvalRequest<'_>,
+    resource_account_id: &str,
+) -> Decision {
     let identity_raw = evaluate_inner(identity_policies, request, false);
     if matches!(identity_raw, Decision::ExplicitDeny) {
         return Decision::ExplicitDeny;
     }
-    // Apply boundary, session, and SCP gates to the identity side.
-    // SCPs only apply to the identity side (never to the resource
-    // policy branch) — they are the caller-account ceiling, and AWS
-    // evaluates the resource policy in the resource's account.
+    // Boundary, session and SCP gates on the identity side; an explicit
+    // Deny in any of them is final.
     let identity_gated = intersect_layers(identity_raw, boundary, session, scps, request);
     if matches!(identity_gated, Decision::ExplicitDeny) {
         return Decision::ExplicitDeny;
     }
+    let resource =
+        resource_policy.map(|policy| ResourcePolicyDecision::new(policy, role_arn, request));
+    if resource
+        .as_ref()
+        .is_some_and(|r| r.either_is(Decision::ExplicitDeny))
+    {
+        return Decision::ExplicitDeny;
+    }
+    // The SCP ceiling, past which no resource policy reaches.
+    if scps.is_some_and(|docs| evaluate_scp_chain(docs, request) != Decision::Allow) {
+        return Decision::ImplicitDeny;
+    }
+    // What a grant to the caller's role is limited by: the role's boundary
+    // and the session's policies.
+    let role_ceiling_allows =
+        intersect_layers(Decision::Allow, boundary, session, None, request) == Decision::Allow;
 
     let same_account = request.principal.account_id == resource_account_id;
     // KMS keys are governed by their key policy. Unlike the generic
@@ -721,29 +768,25 @@ pub fn evaluate_with_resource_policy_and_gates_and_scps(
         .action
         .split_once(':')
         .is_some_and(|(svc, _)| svc.eq_ignore_ascii_case("kms"));
-    if same_account && is_kms {
-        if let Some(policy) = resource_policy {
-            return evaluate_kms_same_account(policy, identity_gated, request);
-        }
-    }
-    // Same-account with no resource policy: preserve the identity-only
-    // path so rollouts without a bucket/topic policy behave as before.
-    if resource_policy.is_none() && same_account {
-        return identity_gated;
-    }
-    let resource = match resource_policy {
-        Some(policy) => evaluate_inner(std::slice::from_ref(policy), request, true),
-        None => Decision::ImplicitDeny,
+    let Some(resource) = resource else {
+        // No resource policy: identity alone decides in the same account; a
+        // cross-account request needs the resource's policy.
+        return if same_account {
+            identity_gated
+        } else {
+            Decision::ImplicitDeny
+        };
     };
-    if matches!(resource, Decision::ExplicitDeny) {
-        return Decision::ExplicitDeny;
+    if same_account && is_kms {
+        return evaluate_kms_same_account(&resource, identity_gated, role_ceiling_allows);
     }
     let identity_allows = matches!(identity_gated, Decision::Allow);
-    let resource_allows = matches!(resource, Decision::Allow);
     let allowed = if same_account {
-        identity_allows || resource_allows
+        identity_allows || resource.grants(role_ceiling_allows)
     } else {
-        identity_allows && resource_allows
+        // The caller's boundary and session policies already cap the
+        // identity side, which must allow as well.
+        identity_allows && resource.grants(true)
     };
     if allowed {
         Decision::Allow
@@ -752,36 +795,223 @@ pub fn evaluate_with_resource_policy_and_gates_and_scps(
     }
 }
 
+/// Evaluate a resource policy alone (as [`evaluate_resource_policy_only`])
+/// for a caller that may be an assumed-role session of the role `role_arn`
+/// (its IAM ARN, path included): a statement naming the role applies to the
+/// session as one naming the session does. Every resource policy evaluated
+/// for a calling identity goes through this, so a policy naming a role
+/// grants (or denies) its sessions everywhere.
+pub fn evaluate_resource_policy_for_role(
+    policy: &PolicyDocument,
+    role_arn: Option<&str>,
+    request: &EvalRequest<'_>,
+) -> Decision {
+    let decision = ResourcePolicyDecision::new(policy, role_arn, request);
+    if decision.either_is(Decision::ExplicitDeny) {
+        Decision::ExplicitDeny
+    } else if decision.either_is(Decision::Allow) {
+        Decision::Allow
+    } else {
+        Decision::ImplicitDeny
+    }
+}
+
+/// For an assumed-role session `principal` of an account whose IAM state is
+/// `state`, the IAM ARN (path included) of the role it assumed: what a
+/// resource policy names to grant the role's sessions, and the session's
+/// `aws:PrincipalArn`.
+pub fn session_role_arn(state: &IamState, principal: &Principal) -> Option<String> {
+    if principal.principal_type != PrincipalType::AssumedRole {
+        return None;
+    }
+    state.session_role_arn(&principal.arn)
+}
+
+/// The role ARN of the assumed-role session `principal` for a request whose
+/// context is `context`: its `aws:PrincipalArn` when dispatch set it from
+/// the session's credential (which records the ARN at mint time), else
+/// [`session_role_arn`].
+pub(crate) fn request_role_arn(
+    state: &IamState,
+    principal: &Principal,
+    context: &RequestContext,
+) -> Option<String> {
+    if principal.principal_type != PrincipalType::AssumedRole {
+        return None;
+    }
+    context
+        .aws_principal_arn
+        .as_ref()
+        .filter(|arn| arn.contains(":role/"))
+        .cloned()
+        .or_else(|| session_role_arn(state, principal))
+}
+
+/// [`session_role_arn`] as a function over the shared IAM state, for
+/// services that evaluate resource policies themselves (EventBridge bus
+/// policies) without access to IAM's state.
+pub type SessionRoleResolver = std::sync::Arc<dyn Fn(&Principal) -> Option<String> + Send + Sync>;
+
+/// The [`SessionRoleResolver`] over `state`.
+pub fn session_role_resolver(state: crate::state::SharedIamState) -> SessionRoleResolver {
+    std::sync::Arc::new(move |principal: &Principal| {
+        let accounts = state.read();
+        session_role_arn(accounts.get(&principal.account_id)?, principal)
+    })
+}
+
+/// A resource policy's decisions on a request, for the calling principal
+/// and, for an assumed-role session, for the role it assumed (named by its
+/// IAM ARN). The role is evaluated only when the policy can tell it apart
+/// from the session: it names the role, or has a `NotPrincipal` statement.
+/// Otherwise only account-wide entries could match the role, and those
+/// match the session alike.
+///
+/// A role-derived Allow comes only from `Principal` elements: an `Allow`
+/// with `NotPrincipal` that excludes the session must not let it in through
+/// its role. For `NotPrincipal` the role counts only in Deny statements,
+/// which exclude a session only when both its role and session ARN are
+/// listed.
+struct ResourcePolicyDecision<'p, 'r, 'a> {
+    policy: &'p PolicyDocument,
+    request: &'r EvalRequest<'a>,
+    /// The role as a principal, with the policy as it applies to the role
+    /// (no `Allow` + `NotPrincipal` statements).
+    role: Option<(Principal, PolicyDocument)>,
+    caller: Decision,
+    role_decision: Decision,
+}
+
+impl<'p, 'r, 'a> ResourcePolicyDecision<'p, 'r, 'a> {
+    fn new(
+        policy: &'p PolicyDocument,
+        role_arn: Option<&str>,
+        request: &'r EvalRequest<'a>,
+    ) -> Self {
+        // The role, as the principal a statement naming it matches. Its
+        // type is left unknown so that it matches no service or federated
+        // principal.
+        let role = role_arn
+            .filter(|arn| policy_distinguishes_role(policy, arn))
+            .map(|arn| {
+                let principal = Principal {
+                    arn: arn.to_string(),
+                    user_id: request.principal.user_id.clone(),
+                    account_id: request.principal.account_id.clone(),
+                    principal_type: PrincipalType::Unknown,
+                    source_identity: None,
+                    tags: request.principal.tags.clone(),
+                };
+                let as_role = PolicyDocument {
+                    statements: policy
+                        .statements
+                        .iter()
+                        .filter(|s| {
+                            !(s.effect == Effect::Allow
+                                && matches!(s.principal, PrincipalPattern::NotPrincipal(_)))
+                        })
+                        .cloned()
+                        .collect(),
+                };
+                (principal, as_role)
+            });
+        let mut decision = Self {
+            policy,
+            request,
+            role,
+            caller: Decision::ImplicitDeny,
+            role_decision: Decision::ImplicitDeny,
+        };
+        decision.caller = decision.evaluate_caller(false);
+        decision.role_decision = decision.evaluate_role(false);
+        decision
+    }
+
+    fn evaluate_caller(&self, specific: bool) -> Decision {
+        evaluate_inner_scoped(
+            std::slice::from_ref(self.policy),
+            self.request,
+            true,
+            specific,
+        )
+    }
+
+    /// The decision for the role (`ImplicitDeny` when it is not evaluated);
+    /// `specific` leaves out the account-wide entries (`"AWS": "*"`, the
+    /// account root).
+    fn evaluate_role(&self, specific: bool) -> Decision {
+        let Some((role, role_policy)) = self.role.as_ref() else {
+            return Decision::ImplicitDeny;
+        };
+        let as_role = EvalRequest {
+            principal: role,
+            action: self.request.action.clone(),
+            resource: self.request.resource.clone(),
+            context: self.request.context.clone(),
+        };
+        evaluate_inner_scoped(std::slice::from_ref(role_policy), &as_role, true, specific)
+    }
+
+    /// Whether the caller's or the role's decision is `decision`.
+    fn either_is(&self, decision: Decision) -> bool {
+        self.caller == decision || self.role_decision == decision
+    }
+
+    /// Whether the policy grants the request: to the caller itself, or to its
+    /// role when what limits a grant to the role (`role_ceiling_allows`)
+    /// allows.
+    fn grants(&self, role_ceiling_allows: bool) -> bool {
+        self.caller == Decision::Allow
+            || (role_ceiling_allows && self.role_decision == Decision::Allow)
+    }
+
+    /// As [`Self::grants`], counting only entries naming the caller or its
+    /// role, not its whole account (a KMS key policy's direct grant).
+    fn grants_specifically(&self, role_ceiling_allows: bool) -> bool {
+        self.evaluate_caller(true) == Decision::Allow
+            || (role_ceiling_allows && self.evaluate_role(true) == Decision::Allow)
+    }
+}
+
+/// Whether evaluating `policy` for the role `role_arn` can differ from
+/// evaluating it for one of the role's sessions: a statement names the role,
+/// or excludes principals with `NotPrincipal`.
+fn policy_distinguishes_role(policy: &PolicyDocument, role_arn: &str) -> bool {
+    policy.statements.iter().any(|s| match &s.principal {
+        PrincipalPattern::NotPrincipal(_) => true,
+        PrincipalPattern::Principal(refs) => refs
+            .iter()
+            .any(|r| matches!(r, PrincipalRef::AwsArn(arn) if arn == role_arn)),
+        PrincipalPattern::None => false,
+    })
+}
+
 /// Same-account KMS authorization. The key policy is the root of trust:
 ///
-/// 1. An explicit `Deny` in the key policy denies.
+/// 1. An explicit `Deny` in the key policy denies (checked by the caller).
 /// 2. A *direct* grant — the key policy names this specific principal (by ARN,
 ///    service, or federation, not the account-wide root entry) — allows on its
-///    own.
+///    own. One naming the caller's role is limited by the role's permissions
+///    boundary and the session's policies (`role_ceiling_allows`).
 /// 3. Otherwise a key-policy `Allow` can only have come from the account-root /
 ///    `"AWS": "*"` delegation, which merely *enables* IAM: the request is
 ///    allowed only if an identity policy (already gated by boundary/session/SCP)
 ///    also allows it.
 /// 4. A key policy that neither grants directly nor delegates denies, even if
 ///    identity policies allow.
+///
+/// The caller's SCPs were applied before: none of these reaches past them.
 fn evaluate_kms_same_account(
-    key_policy: &PolicyDocument,
+    key_policy: &ResourcePolicyDecision<'_, '_, '_>,
     identity_gated: Decision,
-    request: &EvalRequest<'_>,
+    role_ceiling_allows: bool,
 ) -> Decision {
-    let policies = std::slice::from_ref(key_policy);
-    let full = evaluate_inner_scoped(policies, request, true, false);
-    if matches!(full, Decision::ExplicitDeny) {
-        return Decision::ExplicitDeny;
-    }
-    // Direct grant ignores the account-wide delegation entries.
-    let direct = evaluate_inner_scoped(policies, request, true, true);
-    if matches!(direct, Decision::Allow) {
+    if key_policy.grants_specifically(role_ceiling_allows) {
         return Decision::Allow;
     }
     // A non-direct key-policy Allow is the account-root delegation to IAM:
-    // identity policies now decide. No delegation (`full` not Allow) -> deny.
-    if matches!(full, Decision::Allow) && matches!(identity_gated, Decision::Allow) {
+    // identity policies now decide. No delegation -> deny.
+    if key_policy.either_is(Decision::Allow) && identity_gated == Decision::Allow {
         return Decision::Allow;
     }
     Decision::ImplicitDeny
@@ -1257,7 +1487,7 @@ fn user_name_from_arn(arn: &str) -> Option<&str> {
     Some(after.rsplit('/').next().unwrap_or(after))
 }
 
-fn role_name_from_assumed_role_arn(arn: &str) -> Option<&str> {
+pub(crate) fn role_name_from_assumed_role_arn(arn: &str) -> Option<&str> {
     // `arn:aws:sts::<account>:assumed-role/<role-name>/<session>`
     let after = arn.rsplit_once(":assumed-role/")?.1;
     Some(after.split('/').next().unwrap_or(after))

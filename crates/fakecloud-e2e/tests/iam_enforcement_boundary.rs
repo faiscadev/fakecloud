@@ -129,8 +129,8 @@ async fn boundary_caps_identity_allow_all() {
     let err = iam.list_users().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("AccessDeniedException"),
-        "expected AccessDeniedException, got {msg}"
+        msg.contains(r#"code: Some("AccessDenied")"#),
+        "expected AccessDenied, got {msg}"
     );
 }
 
@@ -176,8 +176,8 @@ async fn boundary_cannot_escape_itself() {
         .unwrap_err();
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("AccessDeniedException"),
-        "expected AccessDeniedException, got {msg}"
+        msg.contains(r#"code: Some("AccessDenied")"#),
+        "expected AccessDenied, got {msg}"
     );
 }
 
@@ -219,8 +219,8 @@ async fn dangling_boundary_arn_denies_everything() {
     let err = sts.get_caller_identity().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("AccessDeniedException"),
-        "expected AccessDeniedException, got {msg}"
+        msg.contains(r#"code: Some("AccessDenied")"#),
+        "expected AccessDenied, got {msg}"
     );
 }
 
@@ -258,8 +258,8 @@ async fn boundary_explicit_deny_wins() {
     let err = sts.get_caller_identity().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("AccessDeniedException"),
-        "expected AccessDeniedException, got {msg}"
+        msg.contains(r#"code: Some("AccessDenied")"#),
+        "expected AccessDenied, got {msg}"
     );
 }
 

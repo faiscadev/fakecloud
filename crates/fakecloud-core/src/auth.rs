@@ -139,6 +139,10 @@ pub struct ResolvedCredential {
     /// OIDC provider ARN for AssumeRoleWithWebIdentity. `None` for raw IAM
     /// user keys, plain AssumeRole, GetSessionToken, GetFederationToken.
     pub federated_provider: Option<String>,
+    /// For an assumed-role session, the IAM ARN (path included) of the role
+    /// it assumed: the session's `aws:PrincipalArn`. `None` for any other
+    /// principal, or when the role no longer exists.
+    pub role_arn: Option<String>,
 }
 
 impl ResolvedCredential {
@@ -1333,6 +1337,7 @@ mod tests {
             mfa_present: false,
             token_issued_at: None,
             federated_provider: None,
+            role_arn: None,
         };
         assert_eq!(rc.principal_arn(), "arn:aws:iam::123456789012:user/alice");
         assert_eq!(rc.user_id(), "AIDAALICE");
