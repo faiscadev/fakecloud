@@ -489,18 +489,6 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let sse_kms_key_id = req
-            .headers
-            .get("x-amz-server-side-encryption-aws-kms-key-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        let bucket_key_enabled = req
-            .headers
-            .get("x-amz-server-side-encryption-bucket-key-enabled")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.eq_ignore_ascii_case("true"));
-
         let website_redirect = req
             .headers
             .get("x-amz-website-redirect-location")
@@ -751,47 +739,21 @@ impl S3Service {
             src_obj.tags.clone()
         };
 
-        // Determine bucket default encryption
-        let dest_bucket_encryption = state
+        // The destination's encryption (S3 API reference, CopyObject: "if you
+        // don't specify encryption information in your copy request, the
+        // encryption setting of the target object is set to the default
+        // encryption configuration of the destination bucket"), resolved
+        // once the lock is released: the request's SSE headers, else the
+        // destination bucket's default (algorithm, KMS key, Bucket Key).
+        let dest_encryption_config = state
             .buckets
             .get(dest_bucket)
-            .and_then(|b| b.encryption_config.as_ref())
-            .and_then(|config| {
-                if config.contains("AES256") {
-                    Some("AES256".to_string())
-                } else if config.contains("aws:kms") {
-                    Some("aws:kms".to_string())
-                } else {
-                    None
-                }
-            });
-
-        // For SSE: if explicitly set, use new values; if copy-in-place changed SSE, use new;
-        // otherwise fall back based on source or bucket default
-        let new_sse = if sse_algorithm.is_some() {
-            sse_algorithm
-        } else if src_bucket == dest_bucket && src_key == dest_key {
-            // Copy-in-place without SSE specified: if source had non-AES256 SSE, default to AES256
-            if src_obj.sse_algorithm.is_some() && src_obj.sse_algorithm.as_deref() != Some("AES256")
-            {
-                Some("AES256".to_string())
-            } else if src_obj.sse_algorithm.is_some() {
-                src_obj.sse_algorithm.clone()
-            } else {
-                // Use bucket default encryption if available
-                dest_bucket_encryption.clone()
-            }
-        } else {
-            // For cross-key copy, use bucket default encryption if no explicit SSE
-            dest_bucket_encryption.clone()
-        };
-
-        let new_kms = if sse_kms_key_id.is_some() {
-            sse_kms_key_id
-        } else {
-            None
-        };
-        let new_bke = bucket_key_enabled; // Only set if explicitly provided
+            .and_then(|b| b.encryption_config.clone());
+        // With neither, a copy in place of an encrypted object lands under
+        // the base level of encryption every bucket has (SSE-S3).
+        let base_sse =
+            (src_bucket == dest_bucket && src_key == dest_key && src_obj.sse_algorithm.is_some())
+                .then(|| "AES256".to_string());
         let new_redirect = website_redirect.or_else(|| {
             if metadata_directive == "COPY" {
                 src_obj.website_redirect_location.clone()
@@ -864,15 +826,22 @@ impl S3Service {
         // stored body is a fresh envelope with the destination's encryption
         // context (its object ARN, or bucket ARN under an S3 Bucket Key),
         // under a key in the destination bucket's region.
-        // The destination records the ARN of the key it is sealed under, as
-        // PutObject does (resolved in the destination bucket's region, so a
+        // As PutObject: the request's SSE headers, else the destination
+        // bucket's default, with the key recorded by the ARN of the key it
+        // is sealed under (resolved in the destination bucket's region, so a
         // bare multi-Region key id there names its replica), whatever form
-        // the request named it in; readers then find the key by that ARN.
-        let new_kms = if crate::side_effects::is_sse_kms(new_sse.as_deref()) {
-            self.resolve_object_kms_key(account_id, &dest_region, new_kms)
-        } else {
-            new_kms
-        };
+        // the request or the default named it in.
+        let crate::side_effects::ObjectEncryption {
+            algorithm: new_sse,
+            kms_key_id: new_kms,
+            bucket_key_enabled: new_bke,
+        } = self.object_encryption(
+            &req.headers,
+            dest_encryption_config.as_deref(),
+            account_id,
+            &dest_region,
+        );
+        let new_sse = new_sse.or(base_sse);
         let dest_stored_bytes =
             if crate::side_effects::is_sse_kms(new_sse.as_deref()) && self.kms_hook.is_some() {
                 self.encrypt_object_body(

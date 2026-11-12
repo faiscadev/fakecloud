@@ -1,0 +1,46 @@
+== missing-key
+KMSKeyArn: arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000
+HTTP 400 KMS.NotFoundException
+Key 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000' does not exist
+== missing-key-bucket-key
+KMSKeyArn: arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000
+BucketKeyEnabled: true
+HTTP 400 KMS.NotFoundException
+Key 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000' does not exist
+== not-an-arn
+KMSKeyArn: not-an-arn-but-long-enough
+HTTP 400 InvalidRequest
+Requests modifying object encryption configuration to SSE-KMS require a valid target kms key arn: Malformed ARN - doesn't start with 'arn:'
+== alias-arn
+KMSKeyArn: arn:aws:kms:us-east-1:123456789012:alias/aws/s3
+HTTP 400 InvalidRequest
+Invalid KMS Key ARN format. You must provide the full KMS Key ARN to make an UpdateObjectEncryption request
+== other-account-key
+KMSKeyArn: arn:aws:kms:us-east-1:111122223333:key/00000000-0000-0000-0000-000000000000
+HTTP 403 AccessDenied
+The KMS key must be from the same account as the bucket
+== empty-body
+Body: (empty)
+HTTP 400 MissingRequestBodyError
+Request Body is empty
+== foreign-xml-body
+Body: <Foo/>
+HTTP 400 MalformedXML
+The XML you provided was not well-formed or did not validate against our published schema
+== not-xml-body
+Body: garbage
+HTTP 400 MalformedXML
+The XML you provided was not well-formed or did not validate against our published schema
+== unknown-version-id
+KMSKeyArn: arn:aws:kms:us-east-1:123456789012:key/<an existing key>
+VersionId: nonexistentversion
+HTTP 400 InvalidArgument
+Invalid version id specified
+== delete-marker-current-version
+Setup: versioned bucket, the key's current version a delete marker
+KMSKeyArn: arn:aws:kms:us-east-1:123456789012:key/<an existing key>
+HTTP 400 InvalidRequest
+Unencrypted source objects are not supported.
+== head-object-after
+ServerSideEncryption: AES256
+SSEKMSKeyId: (none)

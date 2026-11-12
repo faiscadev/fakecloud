@@ -626,3 +626,260 @@ async fn s3_default_sse_kms_without_a_key_uses_aws_s3() {
     let body = got.body.collect().await.unwrap().into_bytes();
     assert_eq!(&body[..], b"under the managed key");
 }
+
+// ---- CopyObject and UpdateObjectEncryption under SSE-KMS ----
+
+async fn body_of(s3: &aws_sdk_s3::Client, bucket: &str, key: &str) -> Vec<u8> {
+    s3.get_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .unwrap()
+        .body
+        .collect()
+        .await
+        .unwrap()
+        .into_bytes()
+        .to_vec()
+}
+
+/// A copy that names no encryption takes the destination bucket's default
+/// (S3 API reference, CopyObject): sealed under the default's KMS key with
+/// its S3 Bucket Key setting, reported on the copy and HeadObject, and
+/// readable. A default key whose policy refuses the use fails the copy.
+#[tokio::test]
+async fn s3_copy_without_sse_takes_the_destination_default_kms_key() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    let key = create_kms_key(&server).await;
+    for bucket in ["copy-src", "copy-dst", "copy-denied"] {
+        s3.create_bucket().bucket(bucket).send().await.unwrap();
+    }
+    set_default_encryption(
+        &s3,
+        "copy-dst",
+        ServerSideEncryption::AwsKms,
+        Some(&key),
+        true,
+    )
+    .await;
+    s3.put_object()
+        .bucket("copy-src")
+        .key("a.txt")
+        .body(ByteStream::from_static(b"copied plaintext"))
+        .send()
+        .await
+        .unwrap();
+
+    let copied = s3
+        .copy_object()
+        .bucket("copy-dst")
+        .key("b.txt")
+        .copy_source("copy-src/a.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        copied.server_side_encryption(),
+        Some(&ServerSideEncryption::AwsKms)
+    );
+    assert_eq!(copied.ssekms_key_id(), Some(key.as_str()));
+    assert_eq!(copied.bucket_key_enabled(), Some(true));
+    let head = s3
+        .head_object()
+        .bucket("copy-dst")
+        .key("b.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        head.server_side_encryption(),
+        Some(&ServerSideEncryption::AwsKms)
+    );
+    assert_eq!(head.ssekms_key_id(), Some(key.as_str()));
+    assert_eq!(head.bucket_key_enabled(), Some(true));
+    assert_eq!(body_of(&s3, "copy-dst", "b.txt").await, b"copied plaintext");
+
+    // A default key whose policy denies its use: the copy fails.
+    let refusing = server
+        .kms_client()
+        .await
+        .create_key()
+        .policy(
+            r#"{"Version":"2012-10-17","Statement":[
+                {"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::123456789012:root"},"Action":"kms:*","Resource":"*"},
+                {"Effect":"Deny","Principal":"*","Action":"kms:GenerateDataKey","Resource":"*"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap()
+        .key_metadata()
+        .unwrap()
+        .arn()
+        .unwrap()
+        .to_string();
+    set_default_encryption(
+        &s3,
+        "copy-denied",
+        ServerSideEncryption::AwsKms,
+        Some(&refusing),
+        false,
+    )
+    .await;
+    let err = s3
+        .copy_object()
+        .bucket("copy-denied")
+        .key("b.txt")
+        .copy_source("copy-src/a.txt")
+        .send()
+        .await
+        .expect_err("the default key refuses GenerateDataKey");
+    assert_eq!(
+        aws_sdk_s3::error::ProvideErrorMetadata::code(&err),
+        Some("AccessDenied"),
+        "{err:?}"
+    );
+}
+
+/// UpdateObjectEncryption to another KMS key reseals the object under it:
+/// once the old key is disabled, the object still reads back.
+#[tokio::test]
+async fn s3_update_object_encryption_moves_the_object_to_the_new_key() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    let kms = server.kms_client().await;
+    let old_key = create_kms_key(&server).await;
+    let new_key = create_kms_key(&server).await;
+    s3.create_bucket().bucket("rekey").send().await.unwrap();
+    s3.put_object()
+        .bucket("rekey")
+        .key("doc.txt")
+        .body(ByteStream::from_static(b"rekeyed plaintext"))
+        .server_side_encryption(ServerSideEncryption::AwsKms)
+        .ssekms_key_id(&old_key)
+        .send()
+        .await
+        .unwrap();
+
+    s3.update_object_encryption()
+        .bucket("rekey")
+        .key("doc.txt")
+        .object_encryption(aws_sdk_s3::types::ObjectEncryption::Ssekms(
+            aws_sdk_s3::types::SsekmsEncryption::builder()
+                .kms_key_arn(&new_key)
+                .build()
+                .unwrap(),
+        ))
+        .send()
+        .await
+        .unwrap();
+    let head = s3
+        .head_object()
+        .bucket("rekey")
+        .key("doc.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.ssekms_key_id(), Some(new_key.as_str()));
+
+    kms.disable_key().key_id(&old_key).send().await.unwrap();
+    assert_eq!(body_of(&s3, "rekey", "doc.txt").await, b"rekeyed plaintext");
+    // And the new key is the one it needs.
+    kms.disable_key().key_id(&new_key).send().await.unwrap();
+    s3.get_object()
+        .bucket("rekey")
+        .key("doc.txt")
+        .send()
+        .await
+        .expect_err("the object is sealed under the new key");
+}
+
+/// On a versioned bucket UpdateObjectEncryption reseals the version it
+/// names: an older version moved to the new key reads back by its version
+/// id once the old key is disabled, while the current version, left under
+/// the old key, no longer does.
+#[tokio::test]
+async fn s3_update_object_encryption_reseals_the_named_version() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    let kms = server.kms_client().await;
+    let old_key = create_kms_key(&server).await;
+    let new_key = create_kms_key(&server).await;
+    s3.create_bucket().bucket("rekey-ver").send().await.unwrap();
+    s3.put_bucket_versioning()
+        .bucket("rekey-ver")
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let mut versions = Vec::new();
+    for body in [&b"first version"[..], b"second version"] {
+        let put = s3
+            .put_object()
+            .bucket("rekey-ver")
+            .key("doc.txt")
+            .body(ByteStream::from(body.to_vec()))
+            .server_side_encryption(ServerSideEncryption::AwsKms)
+            .ssekms_key_id(&old_key)
+            .send()
+            .await
+            .unwrap();
+        versions.push(put.version_id().unwrap().to_string());
+    }
+
+    s3.update_object_encryption()
+        .bucket("rekey-ver")
+        .key("doc.txt")
+        .version_id(&versions[0])
+        .object_encryption(aws_sdk_s3::types::ObjectEncryption::Ssekms(
+            aws_sdk_s3::types::SsekmsEncryption::builder()
+                .kms_key_arn(&new_key)
+                .build()
+                .unwrap(),
+        ))
+        .send()
+        .await
+        .unwrap();
+    let head = |version: &str| {
+        s3.head_object()
+            .bucket("rekey-ver")
+            .key("doc.txt")
+            .version_id(version)
+            .send()
+    };
+    assert_eq!(
+        head(&versions[0]).await.unwrap().ssekms_key_id(),
+        Some(new_key.as_str())
+    );
+    assert_eq!(
+        head(&versions[1]).await.unwrap().ssekms_key_id(),
+        Some(old_key.as_str())
+    );
+
+    kms.disable_key().key_id(&old_key).send().await.unwrap();
+    let old_version = s3
+        .get_object()
+        .bucket("rekey-ver")
+        .key("doc.txt")
+        .version_id(&versions[0])
+        .send()
+        .await
+        .expect("the resealed version reads under the new key")
+        .body
+        .collect()
+        .await
+        .unwrap()
+        .into_bytes();
+    assert_eq!(&old_version[..], b"first version");
+    s3.get_object()
+        .bucket("rekey-ver")
+        .key("doc.txt")
+        .send()
+        .await
+        .expect_err("the current version is still under the disabled key");
+}

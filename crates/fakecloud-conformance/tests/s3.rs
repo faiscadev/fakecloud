@@ -2053,11 +2053,23 @@ async fn s3_select_object_content() {
 #[test_action("s3", "UpdateObjectEncryption", checksum = "32f05360")]
 #[tokio::test]
 async fn s3_update_object_encryption() {
-    // The aws-sdk-s3 1.119 release predates UpdateObjectEncryption, so
-    // exercise the route directly with reqwest. The op is PUT
-    // /{bucket}/{key}?encryption with x-amz-server-side-encryption.
+    // Exercise the route directly with reqwest: PUT /{bucket}/{key}?encryption
+    // with the `ObjectEncryption` body the API defines (SSE-KMS under a key
+    // of the bucket's account).
     let server = TestServer::start().await;
     let client = server.s3_client().await;
+    let key_arn = server
+        .kms_client()
+        .await
+        .create_key()
+        .send()
+        .await
+        .unwrap()
+        .key_metadata()
+        .unwrap()
+        .arn()
+        .unwrap()
+        .to_string();
     client
         .create_bucket()
         .bucket("upd-enc-bkt")
@@ -2072,11 +2084,13 @@ async fn s3_update_object_encryption() {
         .send()
         .await
         .unwrap();
+    let body = format!(
+        r#"<ObjectEncryption xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><SSE-KMS><KMSKeyArn>{key_arn}</KMSKeyArn></SSE-KMS></ObjectEncryption>"#
+    );
     let resp = reqwest::Client::new()
         .put(format!("{}/upd-enc-bkt/k?encryption", server.endpoint()))
-        .header("x-amz-server-side-encryption", "AES256")
         .header("Authorization", S3_AUTH)
-        .body(Vec::<u8>::new())
+        .body(body)
         .send()
         .await
         .unwrap();
