@@ -5,10 +5,128 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::persistence::object_meta_snapshot;
 
-use super::{
-    no_such_bucket, no_such_key, no_such_key_with_detail, parse_tagging_xml, s3_xml, xml_escape,
-    S3Service,
-};
+use super::{no_such_bucket, no_such_key, no_such_key_with_detail, s3_xml, xml_escape, S3Service};
+
+fn malformed_xml() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "MalformedXML",
+        "The XML you provided was not well-formed or did not validate against our published \
+         schema",
+    )
+}
+
+fn invalid_tag(message: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidTag", message)
+}
+
+/// An object's tag set from a `Tagging` document (PutObjectTagging's body, a
+/// POST Object form's `tagging` field), read as XML: comments are ignored,
+/// text and CDATA decoded. As recorded on S3: a document that is not
+/// well-formed, has another root, or has a `Tag` without a `Key` or `Value`
+/// is 400 MalformedXML; a repeated key is InvalidTag "Cannot provide multiple
+/// Tags with the same key", an `aws:` key InvalidTag "Your TagKey cannot be
+/// prefixed with aws:"; more than 10 tags is BadRequest.
+pub(crate) fn parse_object_tagging(xml: &str) -> Result<Vec<(String, String)>, AwsServiceError> {
+    use quick_xml::events::Event;
+    let xml = xml.strip_prefix('\u{feff}').unwrap_or(xml);
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut path: Vec<Vec<u8>> = Vec::new();
+    let mut roots = 0usize;
+    let mut tags = Vec::new();
+    // The tag being read, and the text of its Key / Value so far.
+    let mut current: Option<(Option<String>, Option<String>)> = None;
+    let mut text = String::new();
+    loop {
+        match reader.read_event().map_err(|_| malformed_xml())? {
+            Event::Start(e) => {
+                let name = e.local_name().as_ref().to_vec();
+                if path.is_empty() {
+                    roots += 1;
+                    if roots > 1 || name != b"Tagging" {
+                        return Err(malformed_xml());
+                    }
+                }
+                path.push(name);
+                text.clear();
+                if path.len() == 3 && path[1] == b"TagSet" && path[2] == b"Tag" {
+                    current = Some((None, None));
+                }
+            }
+            Event::Empty(e) => {
+                let name = e.local_name().as_ref().to_vec();
+                if path.is_empty() {
+                    return Err(malformed_xml());
+                }
+                match (path.len(), name.as_slice()) {
+                    // `<Tag/>` has no key.
+                    (2, b"Tag") => return Err(malformed_xml()),
+                    // An empty value is a value.
+                    (3, b"Value") if current.is_some() => {
+                        if let Some((_, value)) = current.as_mut() {
+                            *value = Some(String::new());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Event::Text(t) => {
+                let decoded = t.unescape().map_err(|_| malformed_xml())?;
+                if path.is_empty() && !decoded.trim().is_empty() {
+                    return Err(malformed_xml());
+                }
+                text.push_str(&decoded);
+            }
+            Event::CData(c) => {
+                text.push_str(&String::from_utf8_lossy(&c.into_inner()));
+            }
+            Event::End(_) => {
+                let Some(name) = path.pop() else {
+                    return Err(malformed_xml());
+                };
+                match (path.len(), name.as_slice()) {
+                    (3, b"Key") | (3, b"Value") if current.is_some() => {
+                        if let Some((key, value)) = current.as_mut() {
+                            let slot = if name == b"Key" { key } else { value };
+                            *slot = Some(std::mem::take(&mut text));
+                        }
+                    }
+                    (2, b"Tag") => match current.take() {
+                        Some((Some(key), Some(value))) => tags.push((key, value)),
+                        _ => return Err(malformed_xml()),
+                    },
+                    _ => {}
+                }
+                text.clear();
+            }
+            Event::Eof => break,
+            // Comments, processing instructions, the declaration.
+            _ => {}
+        }
+    }
+    if roots != 1 || !path.is_empty() {
+        return Err(malformed_xml());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (key, _) in &tags {
+        if !seen.insert(key.as_str()) {
+            return Err(invalid_tag(
+                "Cannot provide multiple Tags with the same key",
+            ));
+        }
+        if key.starts_with("aws:") {
+            return Err(invalid_tag("Your TagKey cannot be prefixed with aws:"));
+        }
+    }
+    if tags.len() > 10 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "BadRequest",
+            "Object tags cannot be greater than 10",
+        ));
+    }
+    Ok(tags)
+}
 
 impl S3Service {
     pub(super) fn get_object_tagging(
@@ -73,27 +191,7 @@ impl S3Service {
         key: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("");
-        let tags = parse_tagging_xml(body_str);
-
-        // Validate: no aws: prefix
-        for (k, _) in &tags {
-            if k.starts_with("aws:") {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidTag",
-                    "System tags cannot be added/updated by requester",
-                ));
-            }
-        }
-
-        // Validate: max 10 tags
-        if tags.len() > 10 {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "BadRequest",
-                "Object tags cannot be greater than 10",
-            ));
-        }
+        let tags = parse_object_tagging(body_str)?;
 
         let version_id = req.query_params.get("versionId").map(|s| s.to_string());
 

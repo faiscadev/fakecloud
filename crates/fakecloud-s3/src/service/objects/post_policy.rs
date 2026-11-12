@@ -19,9 +19,10 @@ use fakecloud_core::auth::is_root_bypass;
 
 use super::*;
 
-/// One parsed multipart form field: original (as-submitted) name + value.
-/// Lookups against the policy's conditions are case-insensitive per the S3
-/// POST Policy spec, so callers normally match on `name.to_ascii_lowercase()`.
+/// One parsed multipart form field: its name, lower-cased (form field names
+/// are case-insensitive), and its value. Every occurrence of a field is kept:
+/// the policy's conditions are checked against each one, and the upload uses
+/// the first, so what is checked and what is stored are the same values.
 struct FormField {
     name: String,
     value: String,
@@ -36,10 +37,19 @@ struct ParsedForm {
 }
 
 impl ParsedForm {
+    /// The value the upload uses: the field's first occurrence.
     fn field_lower(&self, lower_name: &str) -> Option<&str> {
+        self.values(lower_name).next()
+    }
+
+    /// Every occurrence of a field, in form order.
+    fn values<'a, 'n>(
+        &'a self,
+        lower_name: &'n str,
+    ) -> impl Iterator<Item = &'a str> + use<'a, 'n> {
         self.fields
             .iter()
-            .find(|f| f.name.eq_ignore_ascii_case(lower_name))
+            .filter(move |f| f.name == lower_name)
             .map(|f| f.value.as_str())
     }
 }
@@ -92,7 +102,7 @@ async fn parse_multipart_form(
             .map_err(|err| invalid_argument(format!("malformed multipart body: {err}")))?;
         let Some(field) = next else { break };
 
-        let name = field.name().unwrap_or("").to_string();
+        let name = field.name().unwrap_or("").to_ascii_lowercase();
         if name.eq_ignore_ascii_case("file") {
             file_present = true;
             file_name = field.file_name().map(|s| s.to_string());
@@ -216,48 +226,57 @@ fn parse_conditions(policy: &serde_json::Value) -> Result<Vec<PolicyCondition>, 
     Ok(out)
 }
 
-/// Look up the submitted value for a condition's field name (lowercased),
-/// consulting the well-known derived fields (`bucket`, `key`, `file`'s
-/// resolved content-type) before falling back to the raw submitted form
-/// fields.
-fn submitted_value<'a>(
+/// Every submitted value for a condition's field name (lowercased): the
+/// bucket the form posts to, each `key` field as resolved (`${filename}`),
+/// each `content-type` field (or, with none, the file part's own type), else
+/// each occurrence of the form field.
+fn submitted_values(
     field: &str,
-    bucket: &'a str,
-    resolved_key: &'a str,
-    content_type: &'a str,
-    form: &'a ParsedForm,
-) -> Option<&'a str> {
+    bucket: &str,
+    default_content_type: &str,
+    form: &ParsedForm,
+) -> Vec<String> {
     match field {
-        "bucket" => Some(bucket),
-        "key" => Some(resolved_key),
-        "content-type" => Some(content_type),
-        other => form.field_lower(other),
+        "bucket" => vec![bucket.to_string()],
+        "key" => form
+            .values("key")
+            .map(|k| resolve_key(k, form.file_name.as_deref()))
+            .collect(),
+        "content-type" if form.field_lower("content-type").is_none() => {
+            vec![default_content_type.to_string()]
+        }
+        other => form.values(other).map(str::to_string).collect(),
     }
 }
 
+/// Check the policy's conditions against the form. Every occurrence of a
+/// field is checked (recorded on S3: a second `acl` or
+/// `x-amz-server-side-encryption` field with another value fails the
+/// condition), so whichever value the upload uses, the policy allowed it.
 fn enforce_conditions(
     conditions: &[PolicyCondition],
     bucket: &str,
-    resolved_key: &str,
-    content_type: &str,
+    default_content_type: &str,
     file_size: u64,
     form: &ParsedForm,
 ) -> Result<(), AwsServiceError> {
     for cond in conditions {
         match cond {
             PolicyCondition::Eq { field, value } => {
-                let actual = submitted_value(field, bucket, resolved_key, content_type, form);
-                if actual != Some(value.as_str()) {
+                let actual = submitted_values(field, bucket, default_content_type, form);
+                if actual.is_empty() || actual.iter().any(|v| v != value) {
                     return Err(access_denied(format!(
-                        "Policy Condition failed: [\"eq\", \"${field}\", \"{value}\"]"
+                        "Invalid according to Policy: Policy Condition failed: \
+                         [\"eq\", \"${field}\", \"{value}\"]"
                     )));
                 }
             }
             PolicyCondition::StartsWith { field, prefix } => {
-                let actual = submitted_value(field, bucket, resolved_key, content_type, form);
-                if !actual.is_some_and(|v| v.starts_with(prefix.as_str())) {
+                let actual = submitted_values(field, bucket, default_content_type, form);
+                if actual.is_empty() || !actual.iter().all(|v| v.starts_with(prefix.as_str())) {
                     return Err(access_denied(format!(
-                        "Policy Condition failed: [\"starts-with\", \"${field}\", \"{prefix}\"]"
+                        "Invalid according to Policy: Policy Condition failed: \
+                         [\"starts-with\", \"${field}\", \"{prefix}\"]"
                     )));
                 }
             }
@@ -386,66 +405,10 @@ const PUT_OBJECT_FORM_HEADERS: &[&str] = &[
     "x-amz-write-offset-bytes",
 ];
 
-fn malformed_xml() -> AwsServiceError {
-    AwsServiceError::aws_error(
-        StatusCode::BAD_REQUEST,
-        "MalformedXML",
-        "The XML you provided was not well-formed or did not validate against our published \
-         schema",
-    )
-}
-
-/// A POST Object `tagging` field's tag set: a well-formed `Tagging` document
-/// whose every `Tag` has a key (else 400 MalformedXML), validated as any
-/// object tag set (no duplicate or `aws:` keys, at most 10 tags).
+/// A POST Object `tagging` field's tag set, read as PutObjectTagging reads
+/// its body (one parser for both).
 fn tagging_document(xml: &str) -> Result<Vec<(String, String)>, AwsServiceError> {
-    use quick_xml::events::Event;
-    let mut reader = quick_xml::Reader::from_str(xml);
-    let mut root = None;
-    let mut depth = 0usize;
-    let mut tag_elements = 0usize;
-    loop {
-        match reader.read_event().map_err(|_| malformed_xml())? {
-            Event::Start(e) => {
-                let name = e.local_name().as_ref().to_vec();
-                if depth == 0 {
-                    if root.is_some() {
-                        return Err(malformed_xml());
-                    }
-                    root = Some(name.clone());
-                }
-                if name == b"Tag" {
-                    tag_elements += 1;
-                }
-                depth += 1;
-            }
-            Event::End(_) => depth = depth.saturating_sub(1),
-            Event::Empty(e) if depth == 0 || e.local_name().as_ref() == b"Tag" => {
-                return Err(malformed_xml());
-            }
-            Event::Text(t) if depth == 0 && !t.iter().all(u8::is_ascii_whitespace) => {
-                return Err(malformed_xml());
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-    }
-    if depth != 0 || root.as_deref() != Some(b"Tagging".as_slice()) {
-        return Err(malformed_xml());
-    }
-    let tags = crate::service::parse_tagging_xml(xml);
-    if tags.len() != tag_elements {
-        return Err(malformed_xml());
-    }
-    crate::service::validate_tags(&tags)?;
-    if tags.len() > 10 {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "BadRequest",
-            "Object tags cannot be greater than 10",
-        ));
-    }
-    Ok(tags)
+    crate::service::tags::parse_object_tagging(xml)
 }
 
 /// A tag set as the URL-encoded `key=value&...` PutObject's `x-amz-tagging`
@@ -557,6 +520,11 @@ impl S3Service {
         let anonymous = ["policy", "x-amz-credential", "x-amz-signature"]
             .iter()
             .all(|name| form.field_lower(name).is_none());
+        // The identity of the verified signer (none for the `test*` root
+        // bypass or an anonymous form): what every consumer of the upload --
+        // authorization, the KMS hook, the object's owner, the access log --
+        // sees as its requester.
+        let mut signer_principal = None;
         let signer = if anonymous {
             None
         } else {
@@ -620,6 +588,7 @@ impl S3Service {
                     "The request signature we calculated does not match the signature you provided",
                 ));
                 }
+                signer_principal = Some(resolved.principal.clone());
             }
 
             // --- Policy validation (expiration + conditions) ---
@@ -644,7 +613,6 @@ impl S3Service {
             enforce_conditions(
                 &conditions,
                 bucket,
-                &resolved_key,
                 &object_content_type,
                 form.file_bytes.len() as u64,
                 &form,
@@ -671,8 +639,13 @@ impl S3Service {
         // source or directive, which PutObject has no use for) is not a
         // header of it, though like every field it must be named by the
         // policy's conditions (checked above).
+        // Each field's first occurrence; every occurrence passed the policy.
+        let mut seen = std::collections::HashSet::new();
         for f in &form.fields {
-            let lower = f.name.to_ascii_lowercase();
+            if !seen.insert(f.name.as_str()) {
+                continue;
+            }
+            let lower = f.name.clone();
             if lower == "acl" {
                 if let Ok(value) = f.value.parse::<http::HeaderValue>() {
                     synth_headers.insert("x-amz-acl", value);
@@ -731,11 +704,15 @@ impl S3Service {
                 authorized_headers.insert(name, value.clone());
             }
         }
+        let requester_account = signer_principal
+            .as_ref()
+            .map(|p: &fakecloud_core::auth::Principal| p.account_id.clone())
+            .unwrap_or_else(|| req.account_id.clone());
         let as_put = AwsRequest {
             service: "s3".to_string(),
             action: String::new(),
             region: req.region.clone(),
-            account_id: req.account_id.clone(),
+            account_id: requester_account.clone(),
             request_id: req.request_id.clone(),
             headers: authorized_headers,
             query_params: HashMap::new(),
@@ -757,6 +734,14 @@ impl S3Service {
             Some("PutObject"),
             "a form upload is evaluated as a PutObject"
         );
+        // The checks dispatch applies to a PutObject's headers before
+        // authorizing it (an unknown encryption method, an invalid event
+        // hold, ...), on the form's fields.
+        crate::service::request_checks::check_request(
+            &as_put,
+            Some(&resolved_key),
+            crate::service::route::S3Op::PutObject,
+        )?;
         let mut actions = vec!["PutObject"];
         actions.extend(
             crate::service::iam_actions::object_write_extras(&synth_headers)
@@ -780,9 +765,9 @@ impl S3Service {
             // ObjectCreated:Post on real S3.
             action: "PostObject".to_string(),
             region: req.region.clone(),
-            // The caller, not the bucket owner `account_id` the write is
-            // served in: the object-created event reports this requester.
-            account_id: req.account_id.clone(),
+            // The requester (the signer), not the bucket owner `account_id`
+            // the write is served in: the object-created event reports it.
+            account_id: requester_account,
             request_id: req.request_id.clone(),
             headers: synth_headers,
             query_params: HashMap::new(),
@@ -795,8 +780,8 @@ impl S3Service {
             raw_query: String::new(),
             method: Method::PUT,
             is_query_protocol: false,
-            access_key_id: req.access_key_id.clone(),
-            principal: req.principal.clone(),
+            access_key_id: signer,
+            principal: signer_principal,
         };
 
         let put_response = self
@@ -950,11 +935,30 @@ mod form_tests {
             tagging_document(&doc(&tag("team", "a"))).unwrap(),
             vec![("team".to_string(), "a".to_string())]
         );
+        // Recorded: comments are ignored; CDATA and entities are text.
+        let commented = doc(&format!("{}<!--{}-->", tag("a", "1"), tag("x", "y")));
+        assert_eq!(
+            tagging_document(&commented).unwrap(),
+            vec![("a".to_string(), "1".to_string())]
+        );
+        assert_eq!(
+            tagging_document(&doc(
+                "<Tag><Key><![CDATA[c&d]]></Key><Value>e&amp;f</Value></Tag>"
+            ))
+            .unwrap(),
+            vec![("c&d".to_string(), "e&f".to_string())]
+        );
         for malformed in [
             "not xml".to_string(),
             "<Tagging><TagSet>".to_string(),
             "<Other><TagSet></TagSet></Other>".to_string(),
             doc("<Tag><Value>v</Value></Tag>"),
+            // Recorded: a keyless tag next to a commented-out one.
+            doc(&format!(
+                "<Tag><Value>v</Value></Tag><!--{}-->",
+                tag("x", "y")
+            )),
+            doc("<Tag><Key>k</Key></Tag>"),
             doc("<Tag/>"),
         ] {
             assert_eq!(
