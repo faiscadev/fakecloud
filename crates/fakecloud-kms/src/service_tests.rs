@@ -5402,6 +5402,38 @@ fn legacy_rsa_envelopes_open_without_a_key_id() {
         .unwrap();
     assert_eq!(err.code(), "IncorrectKeyException");
 
+    // An envelope naming a signing key is refused as a KeyId naming it is.
+    let signing = create_key_with_opts(
+        &svc,
+        json!({"KeySpec": "RSA_2048", "KeyUsage": "SIGN_VERIFY"}),
+    );
+    let signing_pub = {
+        let accounts = svc.state.read();
+        accounts.get("123456789012").unwrap().keys[&signing]
+            .asymmetric_public_key_der
+            .clone()
+            .unwrap()
+    };
+    let raw = asym::rsa_oaep_wrap(&signing_pub, "RSAES_OAEP_SHA_256", b"x").unwrap();
+    let signing_blob = base64::engine::general_purpose::STANDARD.encode(
+        format!(
+            "fakecloud-rsa:{signing}:RSAES_OAEP_SHA_256:{}",
+            base64::engine::general_purpose::STANDARD.encode(&raw)
+        )
+        .as_bytes(),
+    );
+    for key_id in [None, Some(signing.as_str())] {
+        let mut body = json!({
+            "CiphertextBlob": signing_blob,
+            "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+        });
+        if let Some(key_id) = key_id {
+            body["KeyId"] = json!(key_id);
+        }
+        let err = svc.decrypt(&make_request("Decrypt", body)).err().unwrap();
+        assert_eq!(err.code(), "InvalidKeyUsageException", "{key_id:?}");
+    }
+
     // Authorized on the key the envelope names.
     let req = make_request("Decrypt", json!({"CiphertextBlob": blob}));
     let action = svc.iam_action_for(&req).unwrap();

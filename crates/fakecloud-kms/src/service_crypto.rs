@@ -1296,6 +1296,25 @@ fn rsa_encrypt(
     ))
 }
 
+/// The check every key that opens a ciphertext passes, whether the request
+/// named it or the ciphertext did: an `ENCRYPT_DECRYPT` key. Its state and
+/// the request's algorithm are checked by the callers, on whichever key
+/// [`open_ciphertext`] returns ([`require_usable_key_state`],
+/// [`require_matching_algorithm`]), so both paths share them too.
+fn require_decrypting_key(key: &KmsKey) -> Result<(), AwsServiceError> {
+    if key.key_usage != "ENCRYPT_DECRYPT" {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidKeyUsageException",
+            format!(
+                "The operation failed because the KMS key {} is not enabled for the requested operation. The key usage must be ENCRYPT_DECRYPT but is {}.",
+                key.arn, key.key_usage
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Open the ciphertext a `Decrypt` (or the source of a `ReEncrypt`) names,
 /// as AWS opens it, returning what it opens to and the key that opens it.
 ///
@@ -1345,6 +1364,9 @@ fn open_ciphertext<'a>(
         // decrypt after an upgrade (authorized on that key like any other).
         let decoded = decode_ciphertext_envelope(state, &req.region, ciphertext_b64, ec_aad)?;
         let key = crate::hook::stored_key(state, "", &decoded.source_arn).map(|(_, key)| key);
+        if let Some(key) = key {
+            require_decrypting_key(key)?;
+        }
         return Ok((decoded, key));
     };
 
@@ -1357,16 +1379,7 @@ fn open_ciphertext<'a>(
                 crate::hook::not_found_message(&req.account_id, &req.region, key_ref),
             )
         })?;
-    if key.key_usage != "ENCRYPT_DECRYPT" {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "InvalidKeyUsageException",
-            format!(
-                "The operation failed because the KMS key {} is not enabled for the requested operation. The key usage must be ENCRYPT_DECRYPT but is {}.",
-                key.arn, key.key_usage
-            ),
-        ));
-    }
+    require_decrypting_key(key)?;
 
     if key.key_spec.starts_with("RSA_") {
         let bytes = base64::engine::general_purpose::STANDARD
