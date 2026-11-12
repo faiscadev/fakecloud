@@ -284,6 +284,18 @@ pub(crate) fn kms_resource_for(
     // uses the key its ciphertext names.
     let body = request.json_body();
     let accts = state.read();
+    // A RetireGrant naming its grant by token (which it uses first) is on
+    // the key of that grant.
+    if action == "RetireGrant" {
+        if let Some(token) = body["GrantToken"].as_str() {
+            return grant_by_token(&accts, request, token)
+                .and_then(|(account, grant)| {
+                    let state = accts.get(account)?;
+                    state.keys.get(&grant.key_id).map(|key| key.arn.clone())
+                })
+                .unwrap_or_else(|| "*".to_string());
+        }
+    }
     let key_ref = match body["KeyId"].as_str() {
         Some(key_ref) => Some(key_ref.to_string()),
         None if action == "Decrypt" => body["CiphertextBlob"].as_str().and_then(ciphertext_key_ref),
@@ -295,6 +307,26 @@ pub(crate) fn kms_resource_for(
     key_ref
         .and_then(|key_ref| key_arn_for_ref(&accts, request, &key_ref))
         .unwrap_or_else(|| "*".to_string())
+}
+
+/// The grant whose token is `token`, and the account holding it: the
+/// caller's own account first, then any other (a grant on another account's
+/// key lives in that account).
+pub(crate) fn grant_by_token<'a>(
+    accounts: &'a fakecloud_core::multi_account::MultiAccountState<KmsState>,
+    request: &AwsRequest,
+    token: &str,
+) -> Option<(&'a str, &'a crate::state::KmsGrant)> {
+    let find = |state: &'a KmsState| state.grants.iter().find(|g| g.grant_token == token);
+    let caller = caller_account(request);
+    if let Some((account, state)) = accounts.iter().find(|(account, _)| *account == caller) {
+        if let Some(grant) = find(state) {
+            return Some((account, grant));
+        }
+    }
+    accounts
+        .iter()
+        .find_map(|(account, state)| find(state).map(|grant| (account, grant)))
 }
 
 /// The two authorizations `ReEncrypt` needs: `kms:ReEncryptFrom` on the key

@@ -9,6 +9,66 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use super::*;
 
+/// The grant operations that take an encryption context, plus those AWS lets
+/// a grant with encryption-context constraints include although they take
+/// none (`DescribeKey`, `RetireGrant`: the constraint does not apply to
+/// them) and `CreateGrant` (the constraint binds the grants it creates).
+const EC_CONSTRAINABLE_OPERATIONS: &[&str] = &[
+    "Decrypt",
+    "Encrypt",
+    "GenerateDataKey",
+    "GenerateDataKeyWithoutPlaintext",
+    "GenerateDataKeyPair",
+    "GenerateDataKeyPairWithoutPlaintext",
+    "ReEncryptFrom",
+    "ReEncryptTo",
+    "CreateGrant",
+    "DescribeKey",
+    "RetireGrant",
+];
+
+/// AWS's rule for encryption-context grant constraints (CreateGrant API
+/// reference, `Constraints`): they are supported only on grant operations
+/// that include an `EncryptionContext` parameter, so only in a grant for a
+/// symmetric encryption key ("You cannot use an encryption context grant
+/// constraint for cryptographic operations with asymmetric KMS keys or HMAC
+/// KMS keys"), and such a grant may include no other operation than
+/// `DescribeKey`, `RetireGrant` and `CreateGrant`. A violation is a
+/// `ValidationException` (AWS documents the error, not its message).
+fn validate_encryption_context_constraints(
+    constraints: &Value,
+    operations: &[String],
+    key_spec: &str,
+) -> Result<(), AwsServiceError> {
+    let constrains_context = ["EncryptionContextSubset", "EncryptionContextEquals"]
+        .iter()
+        .any(|name| !constraints[*name].is_null());
+    if !constrains_context {
+        return Ok(());
+    }
+    let invalid = |detail: String| {
+        Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            format!(
+                "Encryption context grant constraints are supported only on grant operations that include an EncryptionContext parameter: {detail}"
+            ),
+        ))
+    };
+    if key_spec != "SYMMETRIC_DEFAULT" {
+        return invalid(format!(
+            "operations with a {key_spec} KMS key do not support an encryption context."
+        ));
+    }
+    if let Some(op) = operations
+        .iter()
+        .find(|op| !EC_CONSTRAINABLE_OPERATIONS.contains(&op.as_str()))
+    {
+        return invalid(format!("{op} does not support an encryption context."));
+    }
+    Ok(())
+}
+
 impl KmsService {
     pub(super) fn create_grant(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
@@ -40,6 +100,17 @@ impl KmsService {
             Some(body["Constraints"].clone())
         };
         let name = body["Name"].as_str().map(|s| s.to_string());
+        if let Some(constraints) = &constraints {
+            let key_spec = {
+                let accounts = self.state.read();
+                accounts
+                    .get(&req.account_id)
+                    .and_then(|state| state.keys.get(&resolved))
+                    .map(|key| key.key_spec.clone())
+                    .unwrap_or_default()
+            };
+            validate_encryption_context_constraints(constraints, &operations, &key_spec)?;
+        }
 
         let grant_id = Uuid::new_v4().to_string();
         let grant_token = Uuid::new_v4().to_string();

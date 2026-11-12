@@ -98,6 +98,29 @@ impl IamPolicyEvaluator for IamPolicyEvaluatorImpl {
         ))
     }
 
+    fn evaluate_ceiling(
+        &self,
+        principal: &Principal,
+        action: &IamAction,
+        context: &ConditionContext,
+        session_policies: &[String],
+        scps: Option<&[String]>,
+    ) -> IamDecision {
+        let session = parse_session_policies(session_policies);
+        let scp_docs = parse_scp_policies(scps, principal);
+        let request = EvalRequest {
+            principal,
+            action: action.action_string(),
+            resource: action.resource.clone(),
+            context: context.clone(),
+        };
+        decision_to_core(evaluator::evaluate_ceiling(
+            session.as_deref(),
+            scp_docs.as_deref(),
+            &request,
+        ))
+    }
+
     fn evaluate_anonymous(
         &self,
         action: &IamAction,
@@ -264,6 +287,55 @@ mod tests {
             }],
         );
         Arc::new(RwLock::new(mas))
+    }
+
+    /// The ceiling a grant is capped by: the SCPs and session policies alone,
+    /// with no identity policy needed, and no layer at all leaving it be.
+    #[test]
+    fn ceiling_evaluates_only_scps_and_session_policies() {
+        let eval = IamPolicyEvaluatorImpl::new(setup());
+        let action = IamAction {
+            service: "kms",
+            action: "Decrypt",
+            resource: "arn:aws:kms:us-east-1:111111111111:key/k".into(),
+        };
+        let ceiling = |session: &[String], scps: Option<&[String]>| {
+            eval.evaluate_ceiling(
+                &principal(),
+                &action,
+                &ConditionContext::default(),
+                session,
+                scps,
+            )
+        };
+        let allow_kms =
+            r#"{"Statement":[{"Effect":"Allow","Action":"kms:*","Resource":"*"}]}"#.to_string();
+        let allow_s3 =
+            r#"{"Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#.to_string();
+        let deny_decrypt =
+            r#"{"Statement":[{"Effect":"Deny","Action":"kms:Decrypt","Resource":"*"}]}"#
+                .to_string();
+        assert_eq!(ceiling(&[], None), IamDecision::Allow);
+        assert_eq!(
+            ceiling(&[], Some(std::slice::from_ref(&allow_kms))),
+            IamDecision::Allow
+        );
+        assert_eq!(
+            ceiling(&[], Some(std::slice::from_ref(&allow_s3))),
+            IamDecision::ImplicitDeny
+        );
+        assert_eq!(
+            ceiling(&[], Some(&[allow_kms.clone(), deny_decrypt.clone()])),
+            IamDecision::ExplicitDeny
+        );
+        assert_eq!(
+            ceiling(std::slice::from_ref(&allow_kms), None),
+            IamDecision::Allow
+        );
+        assert_eq!(
+            ceiling(std::slice::from_ref(&allow_s3), None),
+            IamDecision::ImplicitDeny
+        );
     }
 
     #[test]

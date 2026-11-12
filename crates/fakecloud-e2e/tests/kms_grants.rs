@@ -381,3 +381,170 @@ async fn a_grant_lets_another_accounts_identity_use_the_key() {
         .await
         .expect("account grant delegated by an IAM policy");
 }
+
+/// RetireGrant is authorized by the grant it retires: its retiring principal
+/// (also from another account, also by grant token), its grantee when the
+/// grant allows RetireGrant, or an IAM-allowed principal of the key's
+/// account. A grant allowing RetireGrant gives its grantee no say over other
+/// grants, and another account's administrator none over the key's grants.
+#[tokio::test]
+async fn retire_grant_follows_the_grant_it_names() {
+    let server = start().await;
+    let (admin_cfg, owner) = admin(&server, ACCOUNT_A).await;
+    let (b_admin_cfg, b_admin) = admin(&server, ACCOUNT_B).await;
+    let key = create_key(&owner, None).await;
+    let (alice_arn, alice) = user(&server, &admin_cfg, "alice", None).await;
+    let (bob_arn, bob) = user(&server, &admin_cfg, "bob", None).await;
+    let (carol_arn, carol) = user(&server, &b_admin_cfg, "carol", None).await;
+
+    let create = |grantee: String, retiring: Option<String>, operations: Vec<GrantOperation>| {
+        let mut req = owner
+            .create_grant()
+            .key_id(&key)
+            .grantee_principal(grantee)
+            .set_operations(Some(operations));
+        if let Some(retiring) = retiring {
+            req = req.retiring_principal(retiring);
+        }
+        async move {
+            let out = req.send().await.unwrap();
+            (
+                out.grant_id().unwrap().to_string(),
+                out.grant_token().unwrap().to_string(),
+            )
+        }
+    };
+    let (alices, _) = create(
+        alice_arn.clone(),
+        None,
+        vec![GrantOperation::Decrypt, GrantOperation::RetireGrant],
+    )
+    .await;
+    let (bobs, bobs_token) = create(
+        bob_arn.clone(),
+        Some(carol_arn.clone()),
+        vec![GrantOperation::Decrypt],
+    )
+    .await;
+    let (bobs_second, _) = create(bob_arn.clone(), None, vec![GrantOperation::Decrypt]).await;
+    let retire =
+        |kms: &KmsClient, grant_id: &str| kms.retire_grant().key_id(&key).grant_id(grant_id).send();
+
+    denied(retire(&alice, &bobs).await, "alice retires bob's grant");
+    denied(
+        retire(&bob, &bobs).await,
+        "bob's grant does not allow RetireGrant",
+    );
+    denied(
+        retire(&b_admin, &bobs_second).await,
+        "another account's admin retires a grant naming nobody of it",
+    );
+    retire(&alice, &alices)
+        .await
+        .expect("alice retires her own grant, which allows RetireGrant");
+    carol
+        .retire_grant()
+        .grant_token(&bobs_token)
+        .send()
+        .await
+        .expect("the retiring principal of another account retires by token");
+    retire(&owner, &bobs_second)
+        .await
+        .expect("an IAM-allowed principal of the key's account retires any grant");
+    let remaining = owner.list_grants().key_id(&key).send().await.unwrap();
+    assert!(remaining.grants().is_empty(), "{remaining:?}");
+}
+
+/// A grant to a role is capped by the session policies of the session using
+/// it, as a grant naming the session itself is not.
+#[tokio::test]
+async fn session_policies_cap_a_grant_to_the_role() {
+    let server = start().await;
+    let (admin_cfg, owner) = admin(&server, ACCOUNT_A).await;
+    let key = create_key(&owner, None).await;
+    let iam = aws_sdk_iam::Client::new(&admin_cfg);
+    let role_arn = iam
+        .create_role()
+        .role_name("grantee-role")
+        .path("/team/")
+        .assume_role_policy_document(format!(
+            r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{ACCOUNT_A}:root"}},"Action":"sts:AssumeRole"}}]}}"#
+        ))
+        .send()
+        .await
+        .unwrap()
+        .role()
+        .unwrap()
+        .arn()
+        .to_string();
+    grant(&owner, &key, &role_arn, &[GrantOperation::Encrypt], None).await;
+    let sts = aws_sdk_sts::Client::new(&admin_cfg);
+    let session = |name: &'static str, policy: Option<&'static str>| {
+        let mut req = sts
+            .assume_role()
+            .role_arn(&role_arn)
+            .role_session_name(name);
+        if let Some(policy) = policy {
+            req = req.policy(policy);
+        }
+        let server = &server;
+        async move {
+            let out = req.send().await.unwrap();
+            let creds = out.credentials().unwrap();
+            let arn = out.assumed_role_user().unwrap().arn().to_string();
+            let cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .endpoint_url(server.endpoint())
+                .region(aws_config::Region::new("us-east-1"))
+                .credentials_provider(Credentials::new(
+                    creds.access_key_id(),
+                    creds.secret_access_key(),
+                    Some(creds.session_token().to_string()),
+                    None,
+                    "kms-grants-session",
+                ))
+                .load()
+                .await;
+            (arn, KmsClient::new(&cfg))
+        }
+    };
+    let s3_only = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+
+    let (_, open) = session("open", None).await;
+    encrypt(&open, &key, None)
+        .await
+        .expect("a session of the role uses the grant to the role");
+    let (capped_arn, capped) = session("capped", Some(s3_only)).await;
+    denied(
+        encrypt(&capped, &key, None).await,
+        "session policy without kms caps the grant to the role",
+    );
+    // A grant naming the session itself is not limited by its session policy.
+    grant(&owner, &key, &capped_arn, &[GrantOperation::Encrypt], None).await;
+    encrypt(&capped, &key, None)
+        .await
+        .expect("a grant to the session itself");
+}
+
+/// Encryption-context constraints are refused on a grant whose operations
+/// include one that takes no encryption context.
+#[tokio::test]
+async fn context_constraints_need_context_operations() {
+    let server = start().await;
+    let (_, owner) = admin(&server, ACCOUNT_A).await;
+    let key = create_key(&owner, None).await;
+    let err = owner
+        .create_grant()
+        .key_id(&key)
+        .grantee_principal(format!("arn:aws:iam::{ACCOUNT_A}:user/nobody"))
+        .operations(GrantOperation::Decrypt)
+        .operations(GrantOperation::GetPublicKey)
+        .constraints(
+            GrantConstraints::builder()
+                .encryption_context_subset("k", "v")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("ValidationException"));
+}

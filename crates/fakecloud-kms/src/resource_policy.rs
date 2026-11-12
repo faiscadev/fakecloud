@@ -41,11 +41,9 @@ impl ResourcePolicyProvider for KmsResourcePolicyProvider {
         if !service.eq_ignore_ascii_case("kms") {
             return None;
         }
-        let key_id = parse_key_id_from_arn(resource_arn)?;
         let account_id = resource_arn.split(':').nth(4)?;
         let accounts = self.state.read();
-        let state = accounts.get(account_id)?;
-        let key = state.keys.get(&key_id)?;
+        let (_, key) = key_named(accounts.get(account_id)?, resource_arn)?;
         Some(key.policy.clone())
     }
 
@@ -56,29 +54,34 @@ impl ResourcePolicyProvider for KmsResourcePolicyProvider {
         if !service.eq_ignore_ascii_case("kms") {
             return None;
         }
-        let key_id = parse_key_id_from_arn(resource_arn)?;
         let account_id = resource_arn.split(':').nth(4)?;
         let accounts = self.state.read();
-        accounts
-            .get(account_id)?
-            .keys
-            .contains_key(&key_id)
-            .then(|| account_id.to_string())
+        key_named(accounts.get(account_id)?, resource_arn)?;
+        Some(account_id.to_string())
+    }
+
+    /// `kms:RetireGrant` is not effective in a key policy: who may retire a
+    /// grant is decided by the grant and by the identity policies of the
+    /// key's account.
+    fn resource_policy_applies(&self, service: &str, action: &IamAction) -> bool {
+        !(service.eq_ignore_ascii_case("kms") && action.action == "RetireGrant")
     }
 
     /// Whether a grant on the key lets `principal` perform `action`.
     ///
     /// Only the grant operations can be granted, and a grant on an
     /// AWS-managed key is for the service it belongs to. A grant naming the
-    /// calling identity (a user, a federated user or assumed-role session,
-    /// or the session's role) authorizes it on its own; one naming the
-    /// caller's account (its root, or the bare account id) delegates to the
-    /// account. Encryption-context constraints are checked against the
-    /// context the operation carries (`SourceEncryptionContext` for
-    /// `ReEncryptFrom`, `DestinationEncryptionContext` for `ReEncryptTo`) and
-    /// ignored for operations without one; a `CreateGrant` only creates a
-    /// grant for some of the parent grant's operations with constraints at
-    /// least as strict.
+    /// calling identity (a user, a federated user or assumed-role session)
+    /// or the session's role authorizes it without an identity policy; one
+    /// naming the caller's account (its root, or the bare account id)
+    /// delegates to the account. Encryption-context constraints are checked
+    /// against the context the operation carries (`SourceEncryptionContext`
+    /// for `ReEncryptFrom`, `DestinationEncryptionContext` for
+    /// `ReEncryptTo`; an operation that takes none carries an empty one) and
+    /// ignored only for `DescribeKey`; a `CreateGrant` only creates a grant
+    /// for some of the parent grant's operations with constraints at least
+    /// as strict. `RetireGrant` is authorized by the grant it retires (see
+    /// [`retire_grant_authorization`]).
     fn grant_authorization(
         &self,
         service: &str,
@@ -89,9 +92,17 @@ impl ResourcePolicyProvider for KmsResourcePolicyProvider {
         if !service.eq_ignore_ascii_case("kms") {
             return None;
         }
-        let key_id = parse_key_id_from_arn(&action.resource)?;
         let account_id = action.resource.split(':').nth(4)?;
         let body = request.json_body();
+        if action.action == "RetireGrant" {
+            let accounts = self.state.read();
+            return retire_grant_authorization(
+                accounts.get(account_id)?,
+                &action.resource,
+                &body,
+                principal,
+            );
+        }
         let context_of = |field: &str| -> HashMap<String, String> {
             crate::aws_managed::encryption_context_map(&body[field])
                 .into_iter()
@@ -117,8 +128,13 @@ impl ResourcePolicyProvider for KmsResourcePolicyProvider {
                 context = context_of("DestinationEncryptionContext");
                 GrantRequest::Context(&context)
             }
+            "DescribeKey" => GrantRequest::NoContext,
+            // No encryption context: a constrained grant never covers them.
             "Sign" | "Verify" | "GetPublicKey" | "GenerateMac" | "VerifyMac"
-            | "DeriveSharedSecret" | "DescribeKey" | "RetireGrant" => GrantRequest::NoContext,
+            | "DeriveSharedSecret" => {
+                context = HashMap::new();
+                GrantRequest::Context(&context)
+            }
             "CreateGrant" => {
                 operations = body["Operations"]
                     .as_array()
@@ -137,62 +153,117 @@ impl ResourcePolicyProvider for KmsResourcePolicyProvider {
         };
         let accounts = self.state.read();
         let state = accounts.get(account_id)?;
-        let key = state.keys.get(&key_id)?;
+        let (storage_id, key) = key_named(state, &action.resource)?;
         if key.key_manager == "AWS" {
             return None;
         }
-        let grants = |names_grantee: &dyn Fn(&str) -> bool| {
+        [
+            GrantAuthorization::Grantee,
+            GrantAuthorization::GranteeRole,
+            GrantAuthorization::Account,
+        ]
+        .into_iter()
+        .find(|kind| {
             crate::hook::grant_allows(
                 &state.grants,
-                key,
-                names_grantee,
+                &storage_id,
+                &key.arn,
+                |grantee| principal_match(grantee, principal) == Some(*kind),
                 action.action,
                 grant_request,
             )
-        };
-        if grants(&|grantee| names_identity(grantee, principal)) {
-            return Some(GrantAuthorization::Grantee);
-        }
-        if grants(&|grantee| names_account(grantee, principal)) {
-            return Some(GrantAuthorization::Account);
-        }
-        None
+        })
     }
 }
 
-/// Whether a grant's `grantee` principal names the calling identity: its
-/// ARN, or for an assumed-role session the role it assumed (named by its IAM
-/// ARN, whose path the session ARN leaves out; a role name is unique in its
-/// account whatever its path).
-fn names_identity(grantee: &str, principal: &Principal) -> bool {
-    if grantee == principal.arn {
-        return true;
-    }
-    let Some((account, role)) = crate::hook::assumed_role_parts(&principal.arn) else {
-        return false;
-    };
-    let mut fields = grantee.splitn(6, ':');
-    let (Some("arn"), Some(_), Some("iam"), Some(""), Some(grantee_account), Some(resource)) = (
-        fields.next(),
-        fields.next(),
-        fields.next(),
-        fields.next(),
-        fields.next(),
-        fields.next(),
-    ) else {
-        return false;
-    };
-    grantee_account == account
-        && resource.starts_with("role/")
-        && resource.rsplit('/').next() == Some(role)
+/// The key a key ARN names in its account's `state`, with the id it is
+/// stored under (a multi-Region replica apart from its primary).
+fn key_named<'a>(
+    state: &'a crate::state::KmsState,
+    key_arn: &str,
+) -> Option<(String, &'a crate::state::KmsKey)> {
+    parse_key_id_from_arn(key_arn)?;
+    crate::hook::stored_key(state, key_arn)
 }
 
-/// Whether a grant's `grantee` principal names the caller's account: its
-/// root ARN in the caller's partition, or the bare account id.
-fn names_account(grantee: &str, principal: &Principal) -> bool {
+/// Who may retire a grant (KMS developer guide, "Retiring and revoking
+/// grants"): its retiring principal, its grantee principal when the grant
+/// allows `RetireGrant`, and the account the grant was created in (whose
+/// identity policies dispatch evaluates, with no key policy). The grant is
+/// the one the request names, by `GrantToken` or by `GrantId` on the key
+/// `key_arn` names; any other grant on the key has no say.
+fn retire_grant_authorization(
+    state: &crate::state::KmsState,
+    key_arn: &str,
+    body: &serde_json::Value,
+    principal: &Principal,
+) -> Option<GrantAuthorization> {
+    let grant = match body["GrantToken"].as_str() {
+        Some(token) => state.grants.iter().find(|g| g.grant_token == token)?,
+        None => {
+            let (storage_id, _) = key_named(state, key_arn)?;
+            let grant_id = body["GrantId"].as_str()?;
+            state
+                .grants
+                .iter()
+                .find(|g| g.grant_id == grant_id && g.key_id == storage_id)?
+        }
+    };
+    let retiring = grant
+        .retiring_principal
+        .as_deref()
+        .and_then(|retiring| principal_match(retiring, principal));
+    let grantee = grant
+        .operations
+        .iter()
+        .any(|op| op == "RetireGrant")
+        .then(|| principal_match(&grant.grantee_principal, principal))
+        .flatten();
+    GrantAuthorization::strongest(retiring, grantee)
+}
+
+/// How a principal named in a grant (its grantee or retiring principal)
+/// names the caller: by its ARN ([`GrantAuthorization::Grantee`]), as the
+/// role an assumed-role session assumed ([`GrantAuthorization::GranteeRole`];
+/// the role's IAM ARN carries a path the session ARN leaves out, and a role
+/// name is unique in its account whatever its path), or as its account (its
+/// root ARN or bare account id, [`GrantAuthorization::Account`]). Every ARN
+/// form must be in the caller's partition.
+fn principal_match(named: &str, principal: &Principal) -> Option<GrantAuthorization> {
+    if named == principal.arn {
+        return Some(GrantAuthorization::Grantee);
+    }
     let partition = principal.arn.split(':').nth(1).unwrap_or("aws");
-    grantee == principal.account_id
-        || grantee == format!("arn:{partition}:iam::{}:root", principal.account_id)
+    if named == principal.account_id
+        || named == format!("arn:{partition}:iam::{}:root", principal.account_id)
+    {
+        return Some(GrantAuthorization::Account);
+    }
+    let (account, role) = crate::hook::assumed_role_parts(&principal.arn)?;
+    let mut fields = named.splitn(6, ':');
+    let (
+        Some("arn"),
+        Some(named_partition),
+        Some("iam"),
+        Some(""),
+        Some(named_account),
+        Some(resource),
+    ) = (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    )
+    else {
+        return None;
+    };
+    (named_partition == partition
+        && named_account == account
+        && resource.starts_with("role/")
+        && resource.rsplit('/').next() == Some(role))
+    .then_some(GrantAuthorization::GranteeRole)
 }
 
 /// Extract the key UUID from a KMS key ARN.
@@ -472,9 +543,24 @@ mod tests {
             &["Encrypt"],
             None,
         )]);
+        // A grant to the role is capped by the session's policies.
         assert_eq!(
             ask(&state, session, "Encrypt", serde_json::json!({})),
+            Some(GrantAuthorization::GranteeRole)
+        );
+        // A grant naming the session itself is not.
+        let to_session = state_with_grants(&[(session, &["Encrypt"], None)]);
+        assert_eq!(
+            ask(&to_session, session, "Encrypt", serde_json::json!({})),
             Some(GrantAuthorization::Grantee)
+        );
+        // A role of the same account and name in another partition is
+        // another role.
+        let other_partition =
+            state_with_grants(&[("arn:aws-cn:iam::111111111111:role/app", &["Encrypt"], None)]);
+        assert_eq!(
+            ask(&other_partition, session, "Encrypt", serde_json::json!({})),
+            None
         );
         assert_eq!(
             ask(
@@ -628,6 +714,209 @@ mod tests {
         assert_eq!(
             create_equals(serde_json::json!({"EncryptionContextSubset": {"Department": "IT"}})),
             None
+        );
+    }
+
+    /// An operation that takes no encryption context is never covered by a
+    /// grant with encryption-context constraints (CreateGrant refuses to
+    /// create one), except DescribeKey, for which the constraint is ignored.
+    #[test]
+    fn constrained_grants_cover_no_context_free_operation_but_describe_key() {
+        let operations = [
+            "Sign",
+            "Verify",
+            "GetPublicKey",
+            "GenerateMac",
+            "VerifyMac",
+            "DeriveSharedSecret",
+            "DescribeKey",
+        ];
+        for constraint in ["EncryptionContextSubset", "EncryptionContextEquals"] {
+            let state = state_with_grants(&[(
+                USER,
+                &operations,
+                Some(serde_json::json!({constraint: {"k": "v"}})),
+            )]);
+            for op in &operations[..6] {
+                assert_eq!(
+                    ask(&state, USER, op, serde_json::json!({})),
+                    None,
+                    "{constraint} {op}"
+                );
+            }
+            assert_eq!(
+                ask(&state, USER, "DescribeKey", serde_json::json!({})),
+                Some(GrantAuthorization::Grantee)
+            );
+        }
+        // Unconstrained, they are covered.
+        let open = state_with_grants(&[(USER, &operations, None)]);
+        for op in operations {
+            assert_eq!(
+                ask(&open, USER, op, serde_json::json!({})),
+                Some(GrantAuthorization::Grantee),
+                "{op}"
+            );
+        }
+    }
+
+    /// A grant with `retiring` as its retiring principal, on the test key.
+    fn push_grant(
+        state: &SharedKmsState,
+        grantee: &str,
+        retiring: Option<&str>,
+        operations: &[&str],
+    ) -> (String, String) {
+        let grant = crate::state::KmsGrant {
+            grant_id: uuid::Uuid::new_v4().to_string(),
+            grant_token: uuid::Uuid::new_v4().to_string(),
+            key_id: KEY_ID.to_string(),
+            grantee_principal: grantee.to_string(),
+            retiring_principal: retiring.map(str::to_string),
+            operations: operations.iter().map(|o| o.to_string()).collect(),
+            constraints: None,
+            name: None,
+            creation_date: 0.0,
+        };
+        let ids = (grant.grant_id.clone(), grant.grant_token.clone());
+        state.write().get_or_create(KEY_ACCOUNT).grants.push(grant);
+        ids
+    }
+
+    /// RetireGrant is authorized by the grant it retires: its retiring
+    /// principal, or its grantee when it allows RetireGrant, by grant id or
+    /// token; a grant allowing RetireGrant gives no say over another grant.
+    #[test]
+    fn retire_grant_is_authorized_by_the_grant_it_names() {
+        let state = state_with_grants(&[]);
+        let bob = "arn:aws:iam::111111111111:user/bob";
+        let other_account_user = "arn:aws:iam::222222222222:user/carol";
+        // Alice may retire her own grant (it allows RetireGrant).
+        let (own_id, own_token) = push_grant(&state, USER, None, &["Decrypt", "RetireGrant"]);
+        // Bob's grant names Carol as its retiring principal.
+        let (bobs_id, bobs_token) = push_grant(&state, bob, Some(other_account_user), &["Decrypt"]);
+        // A grant to Bob that does not allow RetireGrant.
+        let (plain_id, _) = push_grant(&state, bob, None, &["Decrypt"]);
+        let by_id = |id: &str| serde_json::json!({"KeyId": key_arn(), "GrantId": id});
+        let by_token = |token: &str| serde_json::json!({"GrantToken": token});
+        let granted = Some(GrantAuthorization::Grantee);
+
+        assert_eq!(ask(&state, USER, "RetireGrant", by_id(&own_id)), granted);
+        assert_eq!(
+            ask(&state, USER, "RetireGrant", by_token(&own_token)),
+            granted
+        );
+        // Alice's RetireGrant on her grant is no licence for Bob's grants.
+        assert_eq!(ask(&state, USER, "RetireGrant", by_id(&bobs_id)), None);
+        assert_eq!(
+            ask(&state, USER, "RetireGrant", by_token(&bobs_token)),
+            None
+        );
+        assert_eq!(ask(&state, USER, "RetireGrant", by_id(&plain_id)), None);
+        // The retiring principal retires it, from its own account.
+        assert_eq!(
+            ask(&state, other_account_user, "RetireGrant", by_id(&bobs_id)),
+            granted
+        );
+        assert_eq!(
+            ask(
+                &state,
+                other_account_user,
+                "RetireGrant",
+                by_token(&bobs_token)
+            ),
+            granted
+        );
+        // A grantee whose grant does not allow RetireGrant cannot.
+        assert_eq!(ask(&state, bob, "RetireGrant", by_id(&plain_id)), None);
+        assert_eq!(ask(&state, bob, "RetireGrant", by_id(&bobs_id)), None);
+        // A retiring account delegates through IAM.
+        let (account_id, _) = push_grant(&state, bob, Some("222222222222"), &["Decrypt"]);
+        assert_eq!(
+            ask(
+                &state,
+                other_account_user,
+                "RetireGrant",
+                by_id(&account_id)
+            ),
+            Some(GrantAuthorization::Account)
+        );
+        // An unknown grant is nobody's.
+        assert_eq!(ask(&state, USER, "RetireGrant", by_id("missing")), None);
+        // The key policy has no say in RetireGrant.
+        let provider = KmsResourcePolicyProvider::new(state);
+        let action = |action: &'static str| IamAction {
+            service: "kms",
+            action,
+            resource: key_arn(),
+        };
+        assert!(!provider.resource_policy_applies("kms", &action("RetireGrant")));
+        assert!(provider.resource_policy_applies("kms", &action("RevokeGrant")));
+        assert!(provider.resource_policy_applies("s3", &action("RetireGrant")));
+    }
+
+    /// Each key of a multi-Region set has its own grants and policy: a grant
+    /// on the primary does not authorize use of its replica, and the
+    /// replica's own grant does.
+    #[test]
+    fn multi_region_replicas_have_their_own_grants() {
+        let state = state_with_grants(&[(USER, &["Encrypt"], None)]);
+        let replica_arn = format!("arn:aws:kms:us-west-2:{KEY_ACCOUNT}:key/{KEY_ID}");
+        let replica_storage = format!("us-west-2:{KEY_ID}");
+        {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(KEY_ACCOUNT);
+            let mut replica = s.keys[KEY_ID].clone();
+            replica.arn = replica_arn.clone();
+            replica.policy = "replica-policy".into();
+            s.keys.insert(replica_storage.clone(), replica);
+        }
+        let on_replica = |action: &'static str, caller: &str| {
+            KmsResourcePolicyProvider::new(state.clone()).grant_authorization(
+                "kms",
+                &request(serde_json::json!({})),
+                &IamAction {
+                    service: "kms",
+                    action,
+                    resource: replica_arn.clone(),
+                },
+                &principal(caller),
+            )
+        };
+        assert_eq!(on_replica("Encrypt", USER), None);
+        assert_eq!(
+            ask(&state, USER, "Encrypt", serde_json::json!({})),
+            Some(GrantAuthorization::Grantee)
+        );
+        state
+            .write()
+            .get_or_create(KEY_ACCOUNT)
+            .grants
+            .push(crate::state::KmsGrant {
+                grant_id: "replica-grant".into(),
+                grant_token: "replica-token".into(),
+                key_id: replica_storage,
+                grantee_principal: USER.into(),
+                retiring_principal: None,
+                operations: vec!["Decrypt".into()],
+                constraints: None,
+                name: None,
+                creation_date: 0.0,
+            });
+        assert_eq!(
+            on_replica("Decrypt", USER),
+            Some(GrantAuthorization::Grantee)
+        );
+        assert_eq!(ask(&state, USER, "Decrypt", serde_json::json!({})), None);
+        // The replica's key policy is its own too.
+        let provider = KmsResourcePolicyProvider::new(state);
+        assert_eq!(
+            provider.resource_policy("kms", &replica_arn).as_deref(),
+            Some("replica-policy")
+        );
+        assert_ne!(
+            provider.resource_policy("kms", &key_arn()).as_deref(),
+            Some("replica-policy")
         );
     }
 

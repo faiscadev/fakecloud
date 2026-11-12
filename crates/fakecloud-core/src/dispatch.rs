@@ -859,6 +859,9 @@ async fn dispatch_inner(
                                 .resource_policy_provider
                                 .as_ref()
                                 .filter(|_| service_resource && !in_caller_account)
+                                .filter(|p| {
+                                    p.resource_policy_applies(&detected.service, iam_action)
+                                })
                                 .and_then(|p| {
                                     p.resource_policy(&detected.service, &iam_action.resource)
                                 });
@@ -2156,10 +2159,12 @@ fn authorize_internal_caller(
 
 /// Whether a grant on `action.resource` authorizes a request its policies
 /// left implicitly denied (see [`ResourcePolicyProvider::grant_authorization`]).
-/// A grant naming the caller itself authorizes it on its own, in the key's
-/// account or another; one naming the caller's account only lets the account
-/// delegate, so the caller's identity policies (with their boundary, session
-/// and SCP gates) must also allow the action.
+/// A grant naming the caller itself authorizes it without an identity
+/// policy, in the key's account or another, but never past the caller's SCP
+/// ceiling; a grant naming the role of an assumed-role session is also
+/// capped by the session's session policies. One naming the caller's account
+/// only lets the account delegate, so the caller's identity policies (with
+/// their boundary, session and SCP gates) must also allow the action.
 #[allow(clippy::too_many_arguments)]
 fn grant_authorizes(
     provider: Option<&dyn ResourcePolicyProvider>,
@@ -2176,7 +2181,12 @@ fn grant_authorizes(
         return false;
     };
     match provider.grant_authorization(service, request, action, principal) {
-        Some(crate::auth::GrantAuthorization::Grantee) => true,
+        Some(crate::auth::GrantAuthorization::Grantee) => evaluator
+            .evaluate_ceiling(principal, action, context, &[], scps)
+            .is_allow(),
+        Some(crate::auth::GrantAuthorization::GranteeRole) => evaluator
+            .evaluate_ceiling(principal, action, context, session_policies, scps)
+            .is_allow(),
         Some(crate::auth::GrantAuthorization::Account) => evaluator
             .evaluate(principal, action, context, session_policies, scps)
             .is_allow(),
@@ -2238,8 +2248,10 @@ fn authorize_root_cross_account(
             &owner,
             config.scp_resolver.as_deref(),
         );
-        let resource_policy_json =
-            provider.resource_policy(&detected.service, &iam_action.resource);
+        let resource_policy_json = provider
+            .resource_policy_applies(&detected.service, &iam_action)
+            .then(|| provider.resource_policy(&detected.service, &iam_action.resource))
+            .flatten();
         let decision = evaluator.evaluate_resource_policy_only(
             principal,
             &iam_action,
@@ -2799,8 +2811,14 @@ mod tests {
         assert_eq!(cfg.iam_mode, IamMode::Off);
     }
 
-    /// An evaluator whose identity-only decision is fixed.
-    struct IdentityOnly(crate::auth::IamDecision);
+    /// An evaluator whose identity-only decision is fixed, and whose ceiling
+    /// allows unless the SCPs (any `scps` given) or the session policies
+    /// (any given) are set to deny.
+    struct IdentityOnly {
+        identity: crate::auth::IamDecision,
+        scp_allows: bool,
+        session_allows: bool,
+    }
 
     impl IamPolicyEvaluator for IdentityOnly {
         fn evaluate(
@@ -2811,7 +2829,24 @@ mod tests {
             _: &[String],
             _: Option<&[String]>,
         ) -> crate::auth::IamDecision {
-            self.0
+            self.identity
+        }
+
+        fn evaluate_ceiling(
+            &self,
+            _: &Principal,
+            _: &crate::auth::IamAction,
+            _: &ConditionContext,
+            session_policies: &[String],
+            scps: Option<&[String]>,
+        ) -> crate::auth::IamDecision {
+            let scp_ok = scps.is_none() || self.scp_allows;
+            let session_ok = session_policies.is_empty() || self.session_allows;
+            if scp_ok && session_ok {
+                crate::auth::IamDecision::Allow
+            } else {
+                crate::auth::IamDecision::ImplicitDeny
+            }
         }
 
         fn evaluate_with_resource_policy(
@@ -2883,28 +2918,61 @@ mod tests {
             source_identity: None,
             tags: None,
         };
+        let session = vec!["{}".to_string()];
+        let scps = vec!["{}".to_string()];
+        let check = |grant: Option<GrantAuthorization>,
+                     evaluator: IdentityOnly,
+                     provided: bool,
+                     session_policies: &[String],
+                     scps: Option<&[String]>| {
+            let provider = Grants(grant);
+            grant_authorizes(
+                provided.then_some(&provider as &dyn ResourcePolicyProvider),
+                &evaluator,
+                "kms",
+                &request,
+                &action,
+                &principal,
+                &ConditionContext::default(),
+                session_policies,
+                scps,
+            )
+        };
+        let open = |identity| IdentityOnly {
+            identity,
+            scp_allows: true,
+            session_allows: true,
+        };
         let authorizes =
-            |grant: Option<GrantAuthorization>, identity: IamDecision, provided: bool| {
-                let provider = Grants(grant);
-                grant_authorizes(
-                    provided.then_some(&provider as &dyn ResourcePolicyProvider),
-                    &IdentityOnly(identity),
-                    "kms",
-                    &request,
-                    &action,
-                    &principal,
-                    &ConditionContext::default(),
-                    &[],
-                    None,
-                )
-            };
+            |grant, identity, provided| check(grant, open(identity), provided, &[], None);
         let grantee = Some(GrantAuthorization::Grantee);
+        let role = Some(GrantAuthorization::GranteeRole);
         let account = Some(GrantAuthorization::Account);
         assert!(authorizes(grantee, IamDecision::ImplicitDeny, true));
+        assert!(authorizes(role, IamDecision::ImplicitDeny, true));
         assert!(authorizes(account, IamDecision::Allow, true));
         assert!(!authorizes(account, IamDecision::ImplicitDeny, true));
         assert!(!authorizes(None, IamDecision::Allow, true));
         assert!(!authorizes(grantee, IamDecision::Allow, false));
+
+        // An SCP that does not allow the action caps every grant match.
+        let scp_denies = || IdentityOnly {
+            identity: IamDecision::ImplicitDeny,
+            scp_allows: false,
+            session_allows: true,
+        };
+        for grant in [grantee, role] {
+            assert!(!check(grant, scp_denies(), true, &[], Some(&scps)));
+        }
+        // Session policies cap a grant to the session's role, not one naming
+        // the session itself.
+        let session_denies = || IdentityOnly {
+            identity: IamDecision::ImplicitDeny,
+            scp_allows: true,
+            session_allows: false,
+        };
+        assert!(!check(role, session_denies(), true, &session, None));
+        assert!(check(grantee, session_denies(), true, &session, None));
     }
 
     #[test]

@@ -257,7 +257,7 @@ impl KmsServiceHook {
                     not_found_message(account_id, region, key_id),
                 )
             })?;
-            let key = state.keys.get(&key_short).ok_or_else(|| {
+            let (storage_id, key) = stored_key(state, &key_arn).ok_or_else(|| {
                 KmsError::new(
                     KmsErrorKind::NotFound,
                     not_found_message(account_id, region, key_id),
@@ -265,6 +265,7 @@ impl KmsServiceHook {
             })?;
             authorize(
                 key,
+                &storage_id,
                 &state.grants,
                 account_id,
                 caller,
@@ -326,12 +327,11 @@ impl KmsServiceHook {
             let owner_state = mas
                 .get(key_owner_account(account_id, &key_ref))
                 .ok_or_else(invalid_ciphertext)?;
-            let key = owner_state
-                .keys
-                .get(key_id_from_arn(&key_ref))
-                .ok_or_else(invalid_ciphertext)?;
+            let (storage_id, key) =
+                stored_key(owner_state, &key_ref).ok_or_else(invalid_ciphertext)?;
             authorize(
                 key,
+                &storage_id,
                 &owner_state.grants,
                 account_id,
                 caller,
@@ -389,13 +389,11 @@ impl KmsServiceHook {
             )
         };
         let owner_state = mas.get(owner).ok_or_else(not_found)?;
-        let key = owner_state
-            .keys
-            .get(key_id_from_arn(&key_arn))
-            .ok_or_else(not_found)?;
+        let (storage_id, key) = stored_key(owner_state, &key_arn).ok_or_else(not_found)?;
         for action in actions {
             authorize(
                 key,
+                &storage_id,
                 &owner_state.grants,
                 account_id,
                 caller,
@@ -628,6 +626,7 @@ fn names_an_alias(key_ref: &str) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn authorize(
     key: &KmsKey,
+    key_storage_id: &str,
     grants: &[crate::state::KmsGrant],
     account_id: &str,
     caller: KmsCaller<'_>,
@@ -712,7 +711,8 @@ fn authorize(
                 let forms = grantee_forms(caller_arn, role_arn, account_id, partition);
                 grant_allows(
                     grants,
-                    key,
+                    key_storage_id,
+                    &key.arn,
                     |grantee| forms.iter().any(|form| form == grantee),
                     action,
                     GrantRequest::Context(encryption_context),
@@ -777,9 +777,12 @@ pub(crate) enum GrantRequest<'a> {
     /// An operation that takes an encryption context, with the one it
     /// carries (empty when the request has none).
     Context(&'a HashMap<String, String>),
-    /// An operation with no encryption context (`DescribeKey`,
-    /// `RetireGrant`, `GetPublicKey`, `Sign`, ...): AWS ignores
-    /// encryption-context constraints for it.
+    /// `DescribeKey` (or `RetireGrant`), the operations AWS lets a grant with
+    /// encryption-context constraints include although they take no
+    /// encryption context: the constraints do not apply to them. Every other
+    /// operation without an encryption context (`Sign`, `GenerateMac`, ...)
+    /// is checked as [`Self::Context`] with an empty context, which a
+    /// constrained grant (one `CreateGrant` refuses to create) never meets.
     NoContext,
     /// `CreateGrant`, with the constraints of the grant it creates (JSON
     /// `null` for none) and its operations: a grant only lets its grantee
@@ -791,22 +794,24 @@ pub(crate) enum GrantRequest<'a> {
     },
 }
 
-/// Whether a grant on `key` whose grantee principal satisfies
-/// `names_grantee` lets it perform `action` (`kms:GenerateDataKey`, ...) as
-/// `request` asks: the grant names the key, a matching grantee, and the
-/// operation, and its constraints (`EncryptionContextSubset` /
-/// `EncryptionContextEquals`) hold.
+/// Whether a grant on the key stored as `key_storage_id` (ARN `key_arn`)
+/// whose grantee principal satisfies `names_grantee` lets it perform
+/// `action` (`kms:GenerateDataKey`, ...) as `request` asks: the grant names
+/// the key, a matching grantee, and the operation, and its constraints
+/// (`EncryptionContextSubset` / `EncryptionContextEquals`) hold. A replica
+/// of a multi-Region key is stored apart from its primary
+/// (`<region>:<id>`), and each has its own grants.
 pub(crate) fn grant_allows(
     grants: &[crate::state::KmsGrant],
-    key: &KmsKey,
+    key_storage_id: &str,
+    key_arn: &str,
     names_grantee: impl Fn(&str) -> bool,
     action: &str,
     request: GrantRequest<'_>,
 ) -> bool {
     let operation = action.strip_prefix("kms:").unwrap_or(action);
-    let key_id = key_id_from_arn(&key.arn);
     grants.iter().any(|grant| {
-        let names_key = grant.key_id == key_id || grant.key_id == key.arn;
+        let names_key = grant.key_id == key_storage_id || grant.key_id == key_arn;
         let covers = grant.operations.iter().any(|op| op == operation);
         names_key
             && covers
@@ -1206,6 +1211,17 @@ fn mint_aws_managed_key(state: &mut KmsState, region: &str, alias: &str) -> Stri
 
 fn key_id_from_arn(arn: &str) -> &str {
     arn.rsplit_once('/').map(|(_, k)| k).unwrap_or(arn)
+}
+
+/// The key `key_ref` (a key id or key ARN) names in `state`, with the id it
+/// is stored under: a replica's ARN names the replica (`<region>:<id>`),
+/// not the primary that shares its id.
+pub(crate) fn stored_key<'a>(state: &'a KmsState, key_ref: &str) -> Option<(String, &'a KmsKey)> {
+    let id = state
+        .resolve_key_id("", key_ref)
+        .unwrap_or_else(|| key_id_from_arn(key_ref).to_string());
+    let key = state.keys.get(&id)?;
+    Some((id, key))
 }
 
 #[cfg(test)]
@@ -2283,6 +2299,68 @@ mod tests {
             .encrypt(a, "us-east-1", &key, b"hello", caller, ctx.clone())
             .unwrap();
         assert_eq!(hook.decrypt(a, &sealed, caller, ctx).unwrap(), b"hello");
+    }
+
+    /// A replica of a multi-Region key has its own grants: a grant on the
+    /// primary does not let a service use the replica for its caller, the
+    /// replica's own grant does.
+    #[test]
+    fn replica_grants_are_the_replicas_own() {
+        let a = "111111111111";
+        let b = "222222222222";
+        let (state, _) = crate::test_support::kms_hook(a);
+        let hook = KmsServiceHook::new(state.clone(), Default::default());
+        let (primary, replica) = {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(b);
+            let arn = mint_aws_managed_key(s, "us-east-1", "multi-region");
+            let id = key_id_from_arn(&arn).to_string();
+            let key = s.keys.get_mut(&id).unwrap();
+            key.key_manager = "CUSTOMER".into();
+            key.multi_region = true;
+            key.policy = format!(
+                r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{b}:root"}},"Action":"kms:*","Resource":"*"}}]}}"#
+            );
+            let mut replica = key.clone();
+            replica.arn = format!("arn:aws:kms:us-west-2:{b}:key/{id}");
+            let replica_arn = replica.arn.clone();
+            s.keys.insert(format!("us-west-2:{id}"), replica);
+            (id, replica_arn)
+        };
+        let grant = |key_id: String| crate::state::KmsGrant {
+            grant_id: uuid::Uuid::new_v4().to_string(),
+            grant_token: uuid::Uuid::new_v4().to_string(),
+            key_id,
+            grantee_principal: format!("arn:aws:iam::{a}:root"),
+            retiring_principal: None,
+            operations: vec!["GenerateDataKey".into()],
+            constraints: None,
+            name: None,
+            creation_date: 0.0,
+        };
+        let caller = KmsCaller::via_for(
+            "sqs.amazonaws.com",
+            Some("arn:aws:iam::111111111111:user/u"),
+        );
+        let encrypt = |hook: &KmsServiceHook| {
+            hook.encrypt(a, "us-west-2", &replica, b"x", caller, HashMap::new())
+        };
+        state
+            .write()
+            .get_or_create(b)
+            .grants
+            .push(grant(primary.clone()));
+        assert_eq!(
+            encrypt(&hook).unwrap_err().kind,
+            KmsErrorKind::AccessDenied,
+            "a grant on the primary does not cover the replica"
+        );
+        state
+            .write()
+            .get_or_create(b)
+            .grants
+            .push(grant(format!("us-west-2:{primary}")));
+        encrypt(&hook).expect("the replica's own grant covers it");
     }
 
     /// A customer key in account B with `policy` (statements as JSON

@@ -652,7 +652,9 @@ impl KmsService {
     /// `DescribeKey` and `GetPublicKey` naming the key by its key ARN or
     /// alias ARN, and `CreateGrant`, `GetKeyRotationStatus`, `ListGrants`,
     /// `RevokeGrant` and `RetireGrant` naming it by its key ARN. A `Decrypt`
-    /// naming no key uses the key its ciphertext names, and a `ReEncrypt` is
+    /// naming no key uses the key its ciphertext names, a `RetireGrant`
+    /// naming its grant by `GrantToken` the account holding that grant, and a
+    /// `ReEncrypt` is
     /// served in another account only when its source and destination keys
     /// are both there. A key id or alias name is always the caller's own
     /// account's. Whether the caller may use the key is decided by IAM
@@ -682,6 +684,15 @@ impl KmsService {
             _ => return None,
         };
         let body = req.json_body();
+        // A RetireGrant naming its grant by token is served where the grant
+        // is (the account of its key).
+        if req.action == "RetireGrant" {
+            if let Some(token) = body["GrantToken"].as_str() {
+                let accounts = self.state.read();
+                let (account, _) = grant_by_token(&accounts, req, token)?;
+                return (account != caller).then(|| account.to_string());
+            }
+        }
         let from_ciphertext = || body["CiphertextBlob"].as_str().and_then(ciphertext_key_ref);
         let key_refs: Vec<String> = match req.action.as_str() {
             "ReEncrypt" => {

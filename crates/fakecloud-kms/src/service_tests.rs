@@ -5022,3 +5022,60 @@ fn re_encrypt_and_decrypt_authorize_the_keys_they_use() {
     assert_eq!(to["kms:encryptioncontext:d"], vec!["2".to_string()]);
     assert!(!to.contains_key("kms:encryptioncontext:s"));
 }
+
+/// Encryption-context grant constraints are refused for an operation that
+/// takes no encryption context (DescribeKey, RetireGrant and CreateGrant
+/// excepted) and on a key other than a symmetric encryption key.
+#[test]
+fn create_grant_refuses_context_constraints_on_operations_without_a_context() {
+    let svc = make_service();
+    let symmetric = create_key(&svc);
+    let create = |key: &str, operations: Value, constraints: Value| {
+        svc.create_grant(&make_request(
+            "CreateGrant",
+            json!({
+                "KeyId": key,
+                "GranteePrincipal": "arn:aws:iam::123456789012:user/u",
+                "Operations": operations,
+                "Constraints": constraints,
+            }),
+        ))
+    };
+    let subset = json!({"EncryptionContextSubset": {"k": "v"}});
+    let equals = json!({"EncryptionContextEquals": {"k": "v"}});
+    for constraints in [&subset, &equals] {
+        create(
+            &symmetric,
+            json!([
+                "Decrypt",
+                "Encrypt",
+                "DescribeKey",
+                "RetireGrant",
+                "CreateGrant"
+            ]),
+            constraints.clone(),
+        )
+        .expect("context operations plus DescribeKey/RetireGrant/CreateGrant");
+        for op in ["GetPublicKey", "Sign", "GenerateMac"] {
+            let err = create(&symmetric, json!(["Decrypt", op]), constraints.clone())
+                .err()
+                .unwrap();
+            assert_eq!(err.code(), "ValidationException", "{op}");
+        }
+    }
+    // A SourceArn constraint alone is not an encryption-context constraint.
+    create(
+        &symmetric,
+        json!(["Sign"]),
+        json!({"SourceArn": "arn:aws:s3:::bucket"}),
+    )
+    .expect("SourceArn constraint");
+    // Constraints on an asymmetric key are refused whatever the operations.
+    let rsa = create_key_with_opts(
+        &svc,
+        json!({"KeySpec": "RSA_2048", "KeyUsage": "ENCRYPT_DECRYPT"}),
+    );
+    let err = create(&rsa, json!(["Decrypt"]), subset).err().unwrap();
+    assert_eq!(err.code(), "ValidationException");
+    create(&rsa, json!(["Decrypt"]), Value::Null).expect("an unconstrained grant");
+}
