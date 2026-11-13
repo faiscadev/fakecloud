@@ -228,7 +228,7 @@ async fn dispatch_inner(
         && rpc_v2_cbor.is_none()
         && header_only.is_none()
         && !parts.headers.contains_key("x-amz-target")
-        && !is_form_urlencoded(&parts.headers))
+        && !protocol::is_form_content_type(&parts.headers))
     .then(|| {
         unrouted_target(
             &parts.method,
@@ -2574,11 +2574,13 @@ fn unrouted_target(
         return Some("s3");
     }
     let fakecloud_endpoint = path.starts_with("/_");
-    if !fakecloud_endpoint
-        && registry.get("s3").is_some()
-        && (has_s3_query_auth(headers, query_params)
-            || (is_unsigned(headers, query_params) && claim.is_none()))
-    {
+    let s3_takes_it = match claim {
+        // A path API Gateway claims (a deployed stage, an invocation URL)
+        // stays the API's unless the query is unmistakably S3 auth.
+        Some(_) => is_unmistakable_s3_query_auth(headers, query_params),
+        None => has_s3_query_auth(headers, query_params) || is_unsigned(headers, query_params),
+    };
+    if !fakecloud_endpoint && registry.get("s3").is_some() && s3_takes_it {
         return Some("s3");
     }
     if !fakecloud_endpoint || path.starts_with("/_aws/execute-api/") {
@@ -2598,19 +2600,6 @@ fn unrouted_detection(service: &str) -> protocol::DetectedRequest {
             AwsProtocol::Rest
         },
     }
-}
-
-/// Whether the body is a form, which may name a Query service (`Action=`)
-/// that only buffered detection can see.
-fn is_form_urlencoded(headers: &http::HeaderMap) -> bool {
-    headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| {
-            ct.trim_start()
-                .to_ascii_lowercase()
-                .starts_with("application/x-www-form-urlencoded")
-        })
 }
 
 /// Whether the request carries no credential at all: no `Authorization`
@@ -2652,6 +2641,31 @@ fn has_s3_query_auth(headers: &http::HeaderMap, query_params: &HashMap<String, S
             .get("X-Amz-Credential")
             .and_then(|c| c.split('/').nth(3))
             .is_none_or(|service| service == "s3")
+}
+
+/// Whether an `Authorization`-less request's query is unmistakably S3 query
+/// authentication -- a SigV4 `X-Amz-Credential` scoped to `s3`, or at least
+/// two of the SigV2 trio (`AWSAccessKeyId`, `Signature`, `Expires`) -- rather
+/// than a stray parameter an API invocation may carry (`?Signature=abc`).
+fn is_unmistakable_s3_query_auth(
+    headers: &http::HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> bool {
+    if headers
+        .get(http::header::AUTHORIZATION)
+        .is_some_and(|v| !v.as_bytes().is_empty())
+    {
+        return false;
+    }
+    let sigv4_s3 = query_params
+        .get("X-Amz-Credential")
+        .and_then(|c| c.split('/').nth(3))
+        .is_some_and(|service| service == "s3");
+    let sigv2_parts = ["AWSAccessKeyId", "Signature", "Expires"]
+        .iter()
+        .filter(|k| query_params.contains_key(**k))
+        .count();
+    sigv4_s3 || sigv2_parts >= 2
 }
 
 /// The `AccessDenied` S3 answers before anything else (credential lookup
@@ -4661,19 +4675,30 @@ mod tests {
                 "AKID/20240101/us-east-1/execute-api/aws4_request"
             )]
         ));
-        // S3 query authentication, even incomplete, is S3's -- on a claimed
-        // stage path too -- unless the host is API Gateway's.
-        for query in [
-            &[("AWSAccessKeyId", "AKID"), ("Signature", "x")][..],
-            &[("AWSAccessKeyId", "AKID")][..],
-            &[("X-Amz-Signature", "abc")][..],
-            &[(
-                "X-Amz-Credential",
-                "AKID/20240101/us-east-1/s3/aws4_request",
-            )][..],
+        // S3 query authentication, even incomplete, is S3's on a path API
+        // Gateway does not claim; on a claimed stage path only when it is
+        // unmistakable (an s3-scoped credential, two of the SigV2 trio).
+        for (query, beats_stage) in [
+            (&[("AWSAccessKeyId", "AKID"), ("Signature", "x")][..], true),
+            (&[("Signature", "x"), ("Expires", "1")][..], true),
+            (
+                &[(
+                    "X-Amz-Credential",
+                    "AKID/20240101/us-east-1/s3/aws4_request",
+                )][..],
+                true,
+            ),
+            (&[("AWSAccessKeyId", "AKID")][..], false),
+            (&[("Signature", "abc")][..], false),
+            (&[("X-Amz-Algorithm", "AWS4-HMAC-SHA256")][..], false),
+            (&[("X-Amz-Signature", "abc")][..], false),
         ] {
             assert!(is_s3(http::Method::GET, "/ghost-bucket/k", &none, query));
-            assert!(is_s3(http::Method::GET, "/prod/items", &none, query));
+            assert_eq!(
+                is_s3(http::Method::GET, "/prod/items", &none, query),
+                beats_stage,
+                "{query:?}"
+            );
         }
         let exec = {
             let mut h = http::HeaderMap::new();
@@ -4753,8 +4778,8 @@ mod tests {
                 .parse()
                 .unwrap(),
         );
-        assert!(is_form_urlencoded(&form));
-        assert!(!is_form_urlencoded(&none));
+        assert!(protocol::is_form_content_type(&form));
+        assert!(!protocol::is_form_content_type(&none));
 
         // Without an S3 service registered nothing is routed to it.
         let registry = unsigned_routing_registry(false);

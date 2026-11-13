@@ -1381,6 +1381,12 @@ async fn unsigned_requests_split_between_api_invocations_and_s3() {
 
     for req in [
         http.get(format!("{base}/prod/items")),
+        // A lone parameter named like S3 query auth is the API's to read.
+        http.get(format!("{base}/prod/items?Signature=abc")),
+        http.get(format!("{base}/prod/items?AWSAccessKeyId=abc")),
+        http.get(format!(
+            "{base}/prod/items?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        )),
         http.get(format!(
             "{base}/restapis/{api_id}/prod/_user_request_/items"
         )),
@@ -1413,6 +1419,16 @@ async fn unsigned_requests_split_between_api_invocations_and_s3() {
         assert_eq!(status, 404, "{body}");
         assert!(body.contains(&format!("<Code>{code}</Code>")), "{body}");
     }
+
+    // Unmistakable S3 query auth (two of the SigV2 trio) on a stage path is
+    // S3's, which refuses the incomplete set.
+    let (status, body) =
+        get_body(http.get(format!("{base}/prod/items?AWSAccessKeyId=AKID&Signature=x"))).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(
+        body.contains("Query-string authentication requires the Signature, Expires and"),
+        "{body}"
+    );
 }
 
 /// A bucket named like a stage takes the plain-host `/{stage}/{path}` request

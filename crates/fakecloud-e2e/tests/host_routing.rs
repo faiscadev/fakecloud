@@ -20,6 +20,37 @@ fn aws_host(sub: &str) -> String {
     format!("{sub}.amazonaws.com")
 }
 
+/// A Query `Action` in the body is an API call only when the body is declared
+/// a form (`application/x-www-form-urlencoded`), before and after the body is
+/// read alike, as on AWS (recorded: the same STS body as `text/plain` or
+/// untyped is not processed as an API call). Under `--iam strict` too, the
+/// form reaches STS and the rest never does.
+#[tokio::test]
+async fn query_body_needs_a_form_content_type() {
+    for env in [&[][..], &[("FAKECLOUD_IAM", "strict")][..]] {
+        let server = TestServer::start_with_env(env).await;
+        let http = reqwest::Client::new();
+        let body = "Action=GetCallerIdentity&Version=2011-06-15";
+        for content_type in [
+            Some("application/x-www-form-urlencoded"),
+            Some("application/x-www-form-urlencoded; charset=utf-8"),
+            Some("text/plain"),
+            None,
+        ] {
+            let mut req = http.post(format!("{}/", server.endpoint())).body(body);
+            if let Some(ct) = content_type {
+                req = req.header("Content-Type", ct);
+            }
+            let resp = req.send().await.unwrap();
+            let text = resp.text().await.unwrap();
+            let reached_sts = text.contains("GetCallerIdentityResponse")
+                || (text.contains("<ErrorResponse") && text.contains("<Type>Sender</Type>"));
+            let is_form = content_type.is_some_and(|ct| ct.starts_with("application/x-www"));
+            assert_eq!(reached_sts, is_form, "{env:?} {content_type:?}: {text}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn unsigned_sqs_list_queues_via_host_header() {
     let server = TestServer::start().await;

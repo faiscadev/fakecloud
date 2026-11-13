@@ -239,14 +239,15 @@ pub fn detect_service_headers_only(
 /// header detection rests on an `X-Amz-Target`, a query `Action` that names
 /// a service, or a SigV4 `Authorization` scope, each of which `detect_service`
 /// honors ahead of (or, for the scope, inside) its form-body sniff. A
-/// detection resting on a presigned URL or the Host header alone is not
-/// final: a form body naming an `Action` routes the request to that
-/// action's service instead.
+/// detection resting on a presigned URL or the Host header alone is final
+/// only without a form body ([`is_form_content_type`]): a form body naming an
+/// `Action` routes the request to that action's service instead.
 pub fn headers_name_final_service(
     headers: &HeaderMap,
     query_params: &HashMap<String, String>,
 ) -> bool {
-    headers.contains_key("x-amz-target")
+    !is_form_content_type(headers)
+        || headers.contains_key("x-amz-target")
         || query_params.get("Action").is_some_and(|action| {
             extract_service_from_auth(headers)
                 .or_else(|| infer_service_from_action(action))
@@ -254,6 +255,22 @@ pub fn headers_name_final_service(
                 .is_some()
         })
         || extract_service_from_auth(headers).is_some()
+}
+
+/// Whether the request declares a form body
+/// (`application/x-www-form-urlencoded`, parameters such as `charset`
+/// allowed): the only body Query detection reads an `Action` from, before or
+/// after the body is read.
+pub fn is_form_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|ct| ct.split(';').next())
+        .is_some_and(|media| {
+            media
+                .trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        })
 }
 
 /// Detect the target service and action from HTTP request components.
@@ -282,8 +299,10 @@ pub fn detect_service(
         }
     }
 
-    // 3. Try form-encoded body
-    {
+    // 3. Try a form-encoded body. Only a body declared as a form is one: real
+    //    AWS does not read `Action=...` from a `text/plain` (or untyped) body
+    //    as an API call at all.
+    if is_form_content_type(headers) {
         let form_params = decode_form_urlencoded(body);
 
         if let Some(action) = form_params.get("Action") {
@@ -1096,8 +1115,15 @@ mod tests {
     fn headers_settle_the_service_only_when_no_form_body_can_change_it() {
         // An unsigned POST whose Host says S3 but whose form body names an
         // STS action is routed to STS: header detection alone is not final.
-        let mut host_only = HeaderMap::new();
-        host_only.insert("host", "b.s3.us-east-1.amazonaws.com".parse().unwrap());
+        let mut plain_host = HeaderMap::new();
+        plain_host.insert("host", "b.s3.us-east-1.amazonaws.com".parse().unwrap());
+        let mut host_only = plain_host.clone();
+        host_only.insert(
+            "content-type",
+            "application/x-www-form-urlencoded; charset=utf-8"
+                .parse()
+                .unwrap(),
+        );
         let none = HashMap::new();
         let body = Bytes::from("Action=GetCallerIdentity&Version=2011-06-15");
         assert_eq!(
@@ -1109,13 +1135,28 @@ mod tests {
             Some("sts".to_string())
         );
         assert!(!headers_name_final_service(&host_only, &none));
+        // Without a form Content-Type the body is no Query call (real AWS does
+        // not treat it as one), so the Host settles it.
+        assert_eq!(
+            detect_service(&plain_host, &none, &body).map(|d| d.service),
+            Some("s3".to_string())
+        );
+        assert!(headers_name_final_service(&plain_host, &none));
+        let mut text = plain_host.clone();
+        text.insert("content-type", "text/plain".parse().unwrap());
+        assert!(headers_name_final_service(&text, &none));
         // Likewise a presigned URL: its scope is not the Authorization header.
         let presigned: HashMap<String, String> = [(
             "X-Amz-Credential".to_string(),
             "AKID/20240101/us-east-1/s3/aws4_request".to_string(),
         )]
         .into();
-        assert!(!headers_name_final_service(&HeaderMap::new(), &presigned));
+        let mut form = HeaderMap::new();
+        form.insert(
+            "content-type",
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        assert!(!headers_name_final_service(&form, &presigned));
 
         // A SigV4 scope, a target or a resolvable query Action settles it.
         let mut signed = host_only.clone();
@@ -1557,12 +1598,30 @@ mod tests {
 
     #[test]
     fn detect_service_via_form_body() {
-        let headers = HeaderMap::new();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "Application/X-WWW-Form-Urlencoded ; charset=UTF-8"
+                .parse()
+                .unwrap(),
+        );
         let query = HashMap::new();
         let body = Bytes::from("Action=SendEmail&Source=x%40y.com");
         let detected = detect_service(&headers, &query, &body).unwrap();
         assert_eq!(detected.service, "ses");
         assert_eq!(detected.action, "SendEmail");
+        // The same body declared as anything else, or untyped, is no Query
+        // call.
+        for content_type in [None, Some("text/plain"), Some("application/json")] {
+            let mut headers = HeaderMap::new();
+            if let Some(ct) = content_type {
+                headers.insert("content-type", ct.parse().unwrap());
+            }
+            assert!(
+                detect_service(&headers, &query, &body).is_none(),
+                "{content_type:?}"
+            );
+        }
     }
 
     #[test]
