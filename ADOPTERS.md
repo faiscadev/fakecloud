@@ -8,4 +8,4 @@ issue instead. Opt-in; you can ask to be removed at any time.
 
 | Organization / project | How they use fakecloud |
 |------------------------|------------------------|
-| (none yet) |  |
+| [CMW Digital](https://cmwdigital.com) | Local AWS integration testing and backend synchronization workflows |
