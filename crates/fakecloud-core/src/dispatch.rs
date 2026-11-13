@@ -551,10 +551,22 @@ async fn dispatch_inner(
     // parsers above return None. Recover the key here so a SigV2-presigned
     // request is attributed to its caller instead of being treated as
     // anonymous (which would deny it under the object read auth gate).
+    // SigV2 Query authentication (`SignatureVersion=2`, in the query string
+    // or a Query call's form body) names its key the same way.
+    let form_sigv2_key = (sigv4_info.is_none()
+        && matches!(
+            detected.protocol,
+            AwsProtocol::Query | AwsProtocol::Ec2Query
+        )
+        && protocol::is_form_content_type(&parts.headers))
+    .then(|| sigv2_query_access_key(&protocol::parse_query_body(&body_bytes)))
+    .flatten();
     let access_key_id = sigv4_info
         .as_ref()
         .map(|info| info.access_key.clone())
-        .or_else(|| sigv2_presigned_access_key(&query_params));
+        .or_else(|| sigv2_presigned_access_key(&query_params))
+        .or_else(|| sigv2_query_access_key(&query_params))
+        .or_else(|| form_sigv2_key.clone());
 
     // Host-header routing hint: LocalStack-shaped
     // `<svc>.<region>.localhost.localstack.cloud[:port]`, real-AWS
@@ -600,7 +612,8 @@ async fn dispatch_inner(
     // otherwise denies. A request that DID present a credential but failed to
     // parse is NOT anonymous (`Authorization` non-empty or a presign query
     // present) and still returns the malformed-signature error below.
-    let is_fully_anonymous = presents_no_credential(&parts.headers, &query_params);
+    let is_fully_anonymous =
+        presents_no_credential(&parts.headers, &query_params) && form_sigv2_key.is_none();
     if config.verify_sigv4
         && !is_fully_anonymous
         && !is_root_bypass(caller_akid)
@@ -2022,8 +2035,9 @@ fn request_region(
 }
 
 /// Whether a request presents no credential: no `Authorization` header and
-/// no presigned credential (SigV4 `X-Amz-Credential` or SigV2
-/// `AWSAccessKeyId`).
+/// no query authentication (SigV4 `X-Amz-Credential`, a SigV2 presign's
+/// `AWSAccessKeyId`, or SigV2 Query authentication). SigV2 Query
+/// authentication in a form body is checked once the body is read.
 fn presents_no_credential(
     headers: &http::HeaderMap,
     query_params: &HashMap<String, String>,
@@ -2035,6 +2049,7 @@ fn presents_no_credential(
         .is_empty()
         && !query_params.contains_key("X-Amz-Credential")
         && sigv2_presigned_access_key(query_params).is_none()
+        && sigv2_query_access_key(query_params).is_none()
 }
 
 /// The SigV4 query-authentication parameters themselves. They authenticate
@@ -2405,6 +2420,19 @@ fn sigv2_presigned_access_key(query_params: &HashMap<String, String>) -> Option<
     } else {
         None
     }
+}
+
+/// Recover the access key from SigV2 Query authentication (`AWSAccessKeyId`,
+/// `Signature`, `SignatureVersion=2`, `SignatureMethod`, and a `Timestamp`
+/// or `Expires`), carried in the query string or a form body. The request is
+/// signed by that key like a SigV4 one; its SigV2 signature is not verified
+/// (`--verify-sigv4` verifies SigV4 only).
+fn sigv2_query_access_key(params: &HashMap<String, String>) -> Option<String> {
+    (params.get("SignatureVersion").map(String::as_str) == Some("2")
+        && params.contains_key("Signature"))
+    .then(|| params.get("AWSAccessKeyId").cloned())
+    .flatten()
+    .filter(|key| !key.is_empty())
 }
 
 /// True when `s` is a 64-character lowercase-hex SHA-256 digest — the form a
@@ -4001,6 +4029,39 @@ mod tests {
             sigv2_presigned_access_key(&q),
             None,
             "missing Signature must not qualify"
+        );
+    }
+
+    #[test]
+    fn sigv2_query_auth_names_its_key() {
+        let q = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let signed = q(&[
+            ("Action", "ListQueues"),
+            ("AWSAccessKeyId", "AKIDSIGV2"),
+            ("Signature", "abc"),
+            ("SignatureVersion", "2"),
+            ("SignatureMethod", "HmacSHA256"),
+            ("Timestamp", "2026-11-13T00:00:00Z"),
+        ]);
+        assert_eq!(
+            sigv2_query_access_key(&signed).as_deref(),
+            Some("AKIDSIGV2")
+        );
+        assert!(!presents_no_credential(&http::HeaderMap::new(), &signed));
+        // Without SignatureVersion=2 (or a Signature) it is not SigV2 Query
+        // authentication.
+        assert_eq!(
+            sigv2_query_access_key(&q(&[("AWSAccessKeyId", "A"), ("Signature", "s")])),
+            None
+        );
+        assert_eq!(
+            sigv2_query_access_key(&q(&[("AWSAccessKeyId", "A"), ("SignatureVersion", "2")])),
+            None
         );
     }
 

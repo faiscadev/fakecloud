@@ -751,6 +751,83 @@ async fn presigned_get_caller_identity_is_answered() {
     assert!(resp.body.contains(":user/presigner</Arn>"), "{}", resp.body);
 }
 
+/// SigV2 Query authentication (`AWSAccessKeyId`, `Signature`,
+/// `SignatureVersion=2`, `SignatureMethod`, `Timestamp`), in the query string
+/// or a form body, is signed: the caller is the key's identity, authorized by
+/// its policies, and an unknown key is `InvalidClientTokenId`, as for SigV4.
+#[tokio::test]
+async fn sigv2_query_auth_is_authenticated_as_its_key() {
+    let server = start_strict().await;
+    let iam = aws_sdk_iam::Client::new(&helpers::root_config(&server).await);
+    let mut keys = Vec::new();
+    for (user, allowed) in [("sigv2-allowed", true), ("sigv2-denied", false)] {
+        iam.create_user().user_name(user).send().await.unwrap();
+        if allowed {
+            iam.put_user_policy()
+                .user_name(user)
+                .policy_name("list")
+                .policy_document(
+                    r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sqs:ListQueues","Resource":"*"}]}"#,
+                )
+                .send()
+                .await
+                .unwrap();
+        }
+        let key = iam
+            .create_access_key()
+            .user_name(user)
+            .send()
+            .await
+            .unwrap();
+        keys.push(key.access_key().unwrap().access_key_id().to_string());
+    }
+    let sigv2 = |akid: &str| {
+        format!(
+            "Action=ListQueues&Version=2012-11-05&AWSAccessKeyId={akid}\
+             &SignatureVersion=2&SignatureMethod=HmacSHA256\
+             &Timestamp=2026-11-13T00%3A00%3A00Z&Signature=abc"
+        )
+    };
+    let host = Some("sqs.us-east-1.amazonaws.com");
+    // In the query string, and in a form body.
+    let get = |query: String| {
+        let server = &server;
+        async move {
+            unsigned(
+                server,
+                reqwest::Method::GET,
+                &format!("/?{query}"),
+                host,
+                &[],
+                "",
+            )
+            .await
+        }
+    };
+    let resp = get(sigv2(&keys[0])).await;
+    assert_eq!(resp.status, 200, "{}", resp.body);
+    assert!(resp.body.contains("<ListQueuesResponse"), "{}", resp.body);
+    let resp = query(&server, host, &sigv2(&keys[0])).await;
+    assert_eq!(resp.status, 200, "{}", resp.body);
+    // The other user's policies do not allow it.
+    let resp = get(sigv2(&keys[1])).await;
+    assert_eq!(resp.status, 403, "{}", resp.body);
+    assert!(
+        resp.body.contains("<Code>AccessDenied</Code>"),
+        "{}",
+        resp.body
+    );
+    assert!(resp.body.contains("sigv2-denied"), "{}", resp.body);
+    // A key that resolves to no identity.
+    let resp = get(sigv2("AKIAUNKNOWNSIGV20000")).await;
+    assert_eq!(resp.status, 403, "{}", resp.body);
+    assert!(
+        resp.body.contains("<Code>InvalidClientTokenId</Code>"),
+        "{}",
+        resp.body
+    );
+}
+
 /// Soft mode logs the missing token and serves the request.
 #[tokio::test]
 async fn soft_mode_serves_unsigned_requests() {
