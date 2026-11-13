@@ -155,6 +155,50 @@ const REST_JSON_SERVICES: &[&str] = &[
     "iotwireless",
 ];
 
+/// The service a request names by its SigV4 credential scope (header or
+/// presign), a SigV2 presign (S3's), or its endpoint `Host`.
+fn named_service(headers: &HeaderMap, query_params: &HashMap<String, String>) -> Option<String> {
+    extract_service_from_auth(headers)
+        .or_else(|| {
+            let credential = query_params.get("X-Amz-Credential")?;
+            let scope = credential.split('/').nth(3)?;
+            Some(normalize_service_name(scope).to_string())
+        })
+        .or_else(|| {
+            (query_params.contains_key("AWSAccessKeyId") && query_params.contains_key("Signature"))
+                .then(|| "s3".to_string())
+        })
+        .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service))
+}
+
+/// A query-string `Action` makes the request a Query call of the service the
+/// request names ([`named_service`]), unless that service's API is REST (S3,
+/// API Gateway, ...), for which `Action` is just one more query parameter.
+/// A request naming no service is routed by its `Action` alone only by
+/// dispatch, which knows whether its path is an S3 bucket or an API
+/// Gateway invocation first ([`query_action_detection`]).
+fn query_string_action(
+    headers: &HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> Option<DetectedRequest> {
+    let action = query_params.get("Action")?;
+    let service = named_service(headers, query_params)?;
+    // An execute-api host names an API Gateway invocation.
+    if rest_protocol_for(&service).is_some() || service == "execute-api" {
+        return None;
+    }
+    Some(query_action_detection(&service, action))
+}
+
+/// A Query-protocol call of `action` on `service`.
+pub fn query_action_detection(service: &str, action: &str) -> DetectedRequest {
+    DetectedRequest {
+        service: service.to_string(),
+        action: action.to_string(),
+        protocol: query_protocol_for(service),
+    }
+}
+
 /// Detected service name and action from an incoming HTTP request.
 #[derive(Debug, Clone)]
 pub struct DetectedRequest {
@@ -177,18 +221,8 @@ pub fn detect_service_headers_only(
     if let Some(target) = headers.get("x-amz-target").and_then(|v| v.to_str().ok()) {
         return parse_amz_target(target);
     }
-    if let Some(action) = query_params.get("Action") {
-        let service = extract_service_from_auth(headers)
-            .or_else(|| infer_service_from_action(action))
-            .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service));
-        if let Some(service) = service {
-            let protocol = query_protocol_for(&service);
-            return Some(DetectedRequest {
-                service,
-                action: action.clone(),
-                protocol,
-            });
-        }
+    if let Some(detected) = query_string_action(headers, query_params) {
+        return Some(detected);
     }
     if let Some(service) = extract_service_from_auth(headers) {
         if let Some(protocol) = rest_protocol_for(&service) {
@@ -284,19 +318,10 @@ pub fn detect_service(
         return parse_amz_target(target);
     }
 
-    // 2. Check for Query protocol (Action parameter in query string or form body)
-    if let Some(action) = query_params.get("Action") {
-        let service = extract_service_from_auth(headers)
-            .or_else(|| infer_service_from_action(action))
-            .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service));
-        if let Some(service) = service {
-            let protocol = query_protocol_for(&service);
-            return Some(DetectedRequest {
-                service,
-                action: action.clone(),
-                protocol,
-            });
-        }
+    // 2. A Query `Action` in the query string, for the service the request
+    //    names (see [`query_string_action`]).
+    if let Some(detected) = query_string_action(headers, query_params) {
+        return Some(detected);
     }
 
     // 3. Try a form-encoded body. Only a body declared as a form is one: real
@@ -875,7 +900,7 @@ fn rest_protocol_for(service: &str) -> Option<AwsProtocol> {
 /// Infer service from the action name when no SigV4 auth is present.
 /// Some AWS operations (e.g., AssumeRoleWithSAML, AssumeRoleWithWebIdentity)
 /// do not require authentication and won't have an Authorization header.
-fn infer_service_from_action(action: &str) -> Option<String> {
+pub fn infer_service_from_action(action: &str) -> Option<String> {
     match action {
         "AssumeRole"
         | "AssumeRoleWithSAML"
@@ -1585,23 +1610,22 @@ mod tests {
     }
 
     #[test]
-    fn detect_service_routes_unsigned_confirm_subscription_to_sns() {
-        // Mirror the bare GET an HTTP/S subscriber issues at the SubscribeURL:
-        // no Authorization header, bare-localhost Host, Action in the query.
+    fn detect_service_leaves_an_unnamed_query_action_to_dispatch() {
+        // The bare GET an HTTP/S subscriber issues at the SubscribeURL: no
+        // Authorization header, bare-localhost Host, Action in the query.
+        // Nothing names a service, so dispatch routes it by its Action once
+        // it knows the path is no bucket or API invocation
+        // (`dispatch::unsigned_query_action`).
         let mut headers = HeaderMap::new();
         headers.insert("host", "localhost:4566".parse().unwrap());
         let mut query_params = HashMap::new();
         query_params.insert("Action".to_string(), "ConfirmSubscription".to_string());
-        query_params.insert(
-            "TopicArn".to_string(),
-            "arn:aws:sns:us-east-1:000000000000:t".to_string(),
+        assert!(detect_service(&headers, &query_params, &Bytes::new()).is_none());
+        let detected = query_action_detection(
+            &infer_service_from_action("ConfirmSubscription").unwrap(),
+            "ConfirmSubscription",
         );
-        query_params.insert("Token".to_string(), "abc123".to_string());
-
-        let detected = detect_service(&headers, &query_params, &Bytes::new())
-            .expect("ConfirmSubscription must route to a service");
         assert_eq!(detected.service, "sns");
-        assert_eq!(detected.action, "ConfirmSubscription");
         assert_eq!(detected.protocol, AwsProtocol::Query);
     }
 
@@ -1653,8 +1677,9 @@ mod tests {
     }
 
     #[test]
-    fn detect_service_via_query_action_with_inferred_service() {
-        let headers = HeaderMap::new();
+    fn detect_service_via_query_action_with_named_service() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "sts.amazonaws.com".parse().unwrap());
         let mut query = HashMap::new();
         query.insert("Action".to_string(), "AssumeRole".to_string());
         let body = Bytes::new();
@@ -1944,6 +1969,95 @@ mod tests {
         assert_eq!(h.service, "s3");
         assert_eq!(h.region, "us-east-1");
         assert_eq!(h.bucket.as_deref(), Some("a.b.c"));
+    }
+
+    #[test]
+    fn query_string_action_follows_the_named_service() {
+        let detect = |host: Option<&str>, auth: Option<&str>, query: &[(&str, &str)]| {
+            let mut headers = HeaderMap::new();
+            if let Some(host) = host {
+                headers.insert(http::header::HOST, host.parse().unwrap());
+            }
+            if let Some(auth) = auth {
+                headers.insert(http::header::AUTHORIZATION, auth.parse().unwrap());
+            }
+            let params: HashMap<String, String> = query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let full =
+                detect_service(&headers, &params, &Bytes::new()).map(|d| (d.service, d.action));
+            let head =
+                detect_service_headers_only(&headers, &params).map(|d| (d.service, d.action));
+            assert_eq!(full, head, "{host:?} {query:?}");
+            full
+        };
+        let s = |svc: &str, action: &str| Some((svc.to_string(), action.to_string()));
+        // Nothing names a service: dispatch decides (bucket, API, Action).
+        assert_eq!(detect(None, None, &[("Action", "ListQueues")]), None);
+        // A REST service's request keeps it: `Action` is just a parameter.
+        assert_eq!(
+            detect(
+                Some("pubb.s3.us-east-1.amazonaws.com"),
+                None,
+                &[("Action", "DescribeRegions")]
+            ),
+            s("s3", "")
+        );
+        assert_eq!(
+            detect(
+                Some("abc123.execute-api.us-east-1.amazonaws.com"),
+                None,
+                &[("Action", "Publish")]
+            ),
+            None,
+            "an invocation: dispatch hands it to API Gateway"
+        );
+        assert_eq!(
+            detect(
+                None,
+                None,
+                &[
+                    ("Action", "ListQueues"),
+                    (
+                        "X-Amz-Credential",
+                        "AKID/20261113/us-east-1/s3/aws4_request"
+                    ),
+                ]
+            ),
+            s("s3", "")
+        );
+        assert_eq!(
+            detect(
+                None,
+                Some("AWS4-HMAC-SHA256 Credential=AKID/20261113/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=x"),
+                &[("Action", "ListTopics")]
+            ),
+            s("s3", "")
+        );
+        // A Query service's request is its Query call.
+        assert_eq!(
+            detect(
+                Some("sqs.us-east-1.amazonaws.com"),
+                None,
+                &[("Action", "ListQueues")]
+            ),
+            s("sqs", "ListQueues")
+        );
+        assert_eq!(
+            detect(
+                None,
+                None,
+                &[
+                    ("Action", "GetCallerIdentity"),
+                    (
+                        "X-Amz-Credential",
+                        "AKID/20261113/us-east-1/sts/aws4_request"
+                    ),
+                ]
+            ),
+            s("sts", "GetCallerIdentity")
+        );
     }
 
     #[test]
