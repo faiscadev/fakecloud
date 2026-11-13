@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use fakecloud_aws::arn::{arn_resource, partition_of, Arn};
+use fakecloud_aws::arn::{arn_resource, Arn};
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
@@ -114,6 +114,9 @@ pub struct SecretsManagerService {
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
     kms_hook: Option<Arc<dyn fakecloud_core::delivery::KmsHook>>,
+    /// The role of an assumed-role caller, which another account's secret
+    /// policy names to grant the role's sessions.
+    session_roles: Option<fakecloud_iam::evaluator::SessionRoleResolver>,
 }
 
 impl SecretsManagerService {
@@ -124,7 +127,18 @@ impl SecretsManagerService {
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             kms_hook: None,
+            session_roles: None,
         }
+    }
+
+    /// Resolve assumed-role callers to their roles (IAM ARNs with paths)
+    /// when another account's secret policy is evaluated for them.
+    pub fn with_session_role_resolver(
+        mut self,
+        resolver: fakecloud_iam::evaluator::SessionRoleResolver,
+    ) -> Self {
+        self.session_roles = Some(resolver);
+        self
     }
 
     pub fn with_delivery(mut self, delivery_bus: Arc<DeliveryBus>) -> Self {
@@ -404,6 +418,11 @@ impl SecretsManagerService {
         {
             return Err(secret_not_found());
         }
+        let role_arn = req
+            .principal
+            .as_ref()
+            .zip(self.session_roles.as_ref())
+            .and_then(|(principal, resolve)| resolve(principal));
         let value = crate::value::read_secret_value(
             &self.state,
             self.kms_hook.as_deref(),
@@ -413,6 +432,12 @@ impl SecretsManagerService {
             body["VersionId"].as_str(),
             body["VersionStage"].as_str(),
             req.principal.as_ref().map(|p| p.arn.as_str()),
+            req.principal
+                .as_ref()
+                .map(|principal| fakecloud_iam::evaluator::PolicyCaller {
+                    principal,
+                    role_arn: role_arn.as_deref(),
+                }),
         )?;
 
         let mut response = json!({
@@ -2655,42 +2680,25 @@ pub(crate) fn secret_owner_account(secret_id: &str, caller_account: &str) -> Str
     }
 }
 
-/// Evaluate a Secrets Manager resource policy against a cross-account
-/// caller. Empty policy implicitly denies (real AWS behaviour). Uses
-/// the shared IAM evaluator so the same policy semantics apply
-/// service-wide.
+/// Evaluate a Secrets Manager resource policy for a cross-account `caller`
+/// (the calling principal, and its role for a role session). Empty policy
+/// implicitly denies (real AWS behaviour). Uses the shared IAM evaluator so
+/// the same policy semantics apply service-wide.
 pub(crate) fn resource_policy_allows(
     policy_doc: &str,
-    caller_account: &str,
+    caller: fakecloud_iam::evaluator::PolicyCaller<'_>,
     secret_arn: &str,
 ) -> bool {
     if policy_doc.is_empty() {
         return false;
     }
-    use fakecloud_core::auth::{Principal, PrincipalType};
-    use fakecloud_iam::evaluator::{evaluate, EvalRequest, PolicyDocument};
-    let doc = PolicyDocument::parse(policy_doc);
-    let principal_arn = Arn::global("iam", caller_account, "root")
-        .with_partition(partition_of(secret_arn))
-        .to_string();
-    let principal = Principal {
-        arn: principal_arn.clone(),
-        user_id: principal_arn.clone(),
-        account_id: caller_account.to_string(),
-        principal_type: PrincipalType::User,
-        source_identity: None,
-        tags: None,
-    };
-    let req = EvalRequest {
-        principal: &principal,
-        action: "secretsmanager:GetSecretValue".to_string(),
-        resource: secret_arn.to_string(),
-        context: Default::default(),
-    };
-    matches!(
-        evaluate(&[doc], &req),
-        fakecloud_iam::evaluator::Decision::Allow
-    )
+    use fakecloud_iam::evaluator::{evaluate_resource_policy_for_caller, Decision, PolicyDocument};
+    evaluate_resource_policy_for_caller(
+        &PolicyDocument::parse(policy_doc),
+        caller,
+        "secretsmanager:GetSecretValue",
+        secret_arn,
+    ) == Decision::Allow
 }
 
 #[cfg(test)]

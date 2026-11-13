@@ -227,6 +227,7 @@ pub fn mint_session_credentials(
                 // when it exists; the configured one otherwise (the default
                 // `role/fakecloud` never does).
                 role_arn: Some(session_role_arn),
+                federated_parent_arn: None,
             },
         );
     }

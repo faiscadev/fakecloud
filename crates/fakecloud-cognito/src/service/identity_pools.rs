@@ -884,6 +884,7 @@ impl CognitoIdentityService {
                     issued_at: Utc::now(),
                     federated_provider: Some("cognito-identity.amazonaws.com".to_string()),
                     role_arn: Some(session_role_arn),
+                    federated_parent_arn: None,
                 },
             );
         }

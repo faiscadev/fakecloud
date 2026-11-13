@@ -377,9 +377,24 @@ pub(crate) fn iam_action_resource(
     ];
 
     if user_scoped.contains(&action) {
+        // Without `UserName` the operation acts on the calling IAM user or
+        // root user, which is then its resource.
         return params
             .get("UserName")
             .map(|n| user_arn(n))
+            .or_else(|| {
+                request
+                    .principal
+                    .as_ref()
+                    .filter(|p| {
+                        matches!(
+                            p.principal_type,
+                            fakecloud_core::auth::PrincipalType::User
+                                | fakecloud_core::auth::PrincipalType::Root
+                        )
+                    })
+                    .map(|p| p.arn.clone())
+            })
             .unwrap_or_else(wildcard);
     }
     if role_scoped.contains(&action) {

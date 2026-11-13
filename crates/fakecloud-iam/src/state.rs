@@ -256,6 +256,14 @@ pub struct StsTempCredential {
     /// existed (the role is then looked up by name).
     #[serde(default)]
     pub role_arn: Option<String>,
+    /// For a federated user session (`GetFederationToken`), the ARN of the
+    /// IAM user (or root user) that federated: the session's permissions are
+    /// its identity policies cut down by the session policies, and a
+    /// resource policy naming it reaches the session. `None` for other
+    /// sessions, and for federated sessions persisted before the field
+    /// existed (which then have no identity-based permissions).
+    #[serde(default)]
+    pub federated_parent_arn: Option<String>,
 }
 
 /// Default for [`StsTempCredential::issued_at`] when deserializing
@@ -300,6 +308,9 @@ pub struct SecretLookup {
     pub federated_provider: Option<String>,
     /// [`StsTempCredential::role_arn`]; `None` for IAM user keys.
     pub role_arn: Option<String>,
+    /// [`StsTempCredential::federated_parent_arn`]; `None` for IAM user
+    /// keys.
+    pub federated_parent_arn: Option<String>,
 }
 
 /// Convert a `Vec<Tag>` to a `BTreeMap<String, String>`.
@@ -593,6 +604,7 @@ impl IamState {
                             token_issued_at: None,
                             federated_provider: None,
                             role_arn: None,
+                            federated_parent_arn: None,
                         });
                     }
                 }
@@ -617,6 +629,7 @@ impl IamState {
                     token_issued_at: Some(temp.issued_at),
                     federated_provider: temp.federated_provider.clone(),
                     role_arn: temp.role_arn.clone(),
+                    federated_parent_arn: temp.federated_parent_arn.clone(),
                 });
             }
             // Keep the expired entry for a while: a later request with it must
@@ -680,6 +693,7 @@ impl IamState {
                             token_issued_at: None,
                             federated_provider: None,
                             role_arn: None,
+                            federated_parent_arn: None,
                         });
                     }
                 }
@@ -704,6 +718,7 @@ impl IamState {
             token_issued_at: Some(temp.issued_at),
             federated_provider: temp.federated_provider.clone(),
             role_arn: temp.role_arn.clone(),
+            federated_parent_arn: temp.federated_parent_arn.clone(),
         })
     }
 
@@ -888,6 +903,7 @@ mod tests {
                 issued_at: Utc::now(),
                 federated_provider: None,
                 role_arn: None,
+                federated_parent_arn: None,
             },
         );
         let lookup = state.credential_secret("FSIATEMPKEY").unwrap();
@@ -917,6 +933,7 @@ mod tests {
                 issued_at: Utc::now(),
                 federated_provider: None,
                 role_arn: None,
+                federated_parent_arn: None,
             },
         );
         assert!(state.credential_secret("FSIAOLD").is_none());
@@ -938,6 +955,7 @@ mod tests {
             issued_at: Utc::now(),
             federated_provider: None,
             role_arn: None,
+            federated_parent_arn: None,
         }
     }
 
@@ -1001,6 +1019,7 @@ mod tests {
                 issued_at: Utc::now(),
                 federated_provider: None,
                 role_arn: None,
+                federated_parent_arn: None,
             },
         );
         assert!(state.credential_secret_readonly("FSIAOLD").is_none());

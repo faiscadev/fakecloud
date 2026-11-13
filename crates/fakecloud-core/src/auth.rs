@@ -143,6 +143,10 @@ pub struct ResolvedCredential {
     /// it assumed: the session's `aws:PrincipalArn`. `None` for any other
     /// principal, or when the role no longer exists.
     pub role_arn: Option<String>,
+    /// For a federated user session, the ARN of the IAM user (or root user)
+    /// that called `GetFederationToken`. `None` for any other principal, and
+    /// for federated sessions minted before it was recorded.
+    pub federated_parent_arn: Option<String>,
 }
 
 impl ResolvedCredential {
@@ -349,6 +353,11 @@ pub struct ConditionContext {
     /// `aws:PrincipalTag/<key>` — tags on the calling IAM user or role.
     /// Populated from [`Principal::tags`] at dispatch time.
     pub principal_tags: Option<HashMap<String, String>>,
+    /// Not a condition key: for a federated user session
+    /// (`sts:GetFederationToken`), the ARN of the IAM user (or root user)
+    /// who federated, whose permissions the session's are cut from. Set
+    /// from [`ResolvedCredential::federated_parent_arn`] at dispatch time.
+    pub federated_parent_arn: Option<String>,
 }
 
 /// Whether two condition key names are the same key: the `service:name`
@@ -446,6 +455,8 @@ impl ConditionContext {
                     Some(self.aws_called_via.clone())
                 }
             }
+            "aws:calledviafirst" => self.aws_called_via.first().map(|s| vec![s.clone()]),
+            "aws:calledvialast" => self.aws_called_via.last().map(|s| vec![s.clone()]),
             "aws:sourcevpce" => self.aws_source_vpce.as_deref().and_then(one),
             "aws:sourcevpc" => self.aws_source_vpc.as_deref().and_then(one),
             "aws:vpcsourceip" => self.aws_vpc_source_ip.map(|ip| vec![ip.to_string()]),
@@ -1338,6 +1349,7 @@ mod tests {
             token_issued_at: None,
             federated_provider: None,
             role_arn: None,
+            federated_parent_arn: None,
         };
         assert_eq!(rc.principal_arn(), "arn:aws:iam::123456789012:user/alice");
         assert_eq!(rc.user_id(), "AIDAALICE");

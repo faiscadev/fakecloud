@@ -794,8 +794,19 @@ async fn dispatch_inner(
     // resource's policy (`authorize_root`). Services that haven't opted in via
     // `iam_enforceable()` are transparently skipped — the startup log
     // lists which services are under enforcement so users always know.
+    // An operation that needs no authorization (`sts:GetCallerIdentity`)
+    // evaluates no policy for a caller whose credentials resolved.
+    // Whether `validate_before_authorization` ran ahead of the
+    // authorization of an authenticated caller; otherwise it runs just
+    // before the handler (no enforcement, or a request enforcement let
+    // through without an identity).
+    let mut validated = false;
+    let authorization_required = aws_request.principal.is_none()
+        || internal_caller.is_some()
+        || service.iam_authorization_required(&aws_request);
     if config.iam_mode.is_enabled()
         && service.iam_enforceable()
+        && authorization_required
         && !is_root_bypass(aws_request.access_key_id.as_deref().unwrap_or(""))
     {
         if let Some(evaluator) = config.policy_evaluator.as_ref() {
@@ -812,6 +823,13 @@ async fn dispatch_inner(
                     return denied;
                 }
             } else if let Some(principal) = aws_request.principal.as_ref() {
+                // Validation AWS performs before authorizing, once the
+                // caller is authenticated (an unresolved key or an anonymous
+                // request is refused first, in the branches below).
+                validated = true;
+                if let Err(err) = service.validate_before_authorization(&aws_request) {
+                    return service_error_response(&err, &request_id, error_envelope);
+                }
                 if principal.is_root() {
                     if let Some(denied) = authorize_root(
                         principal,
@@ -1201,6 +1219,12 @@ async fn dispatch_inner(
         }
     }
 
+    if !validated {
+        if let Err(err) = service.validate_before_authorization(&aws_request) {
+            return service_error_response(&err, &request_id, error_envelope);
+        }
+    }
+
     match service.handle(aws_request).await {
         Ok(resp) => {
             let resp = if detected.protocol == AwsProtocol::RpcV2Cbor {
@@ -1245,42 +1269,51 @@ async fn dispatch_inner(
                 error = %err,
                 "request failed"
             );
-            let error_headers = err.response_headers().to_vec();
-            let mut resp = build_error_response_with_fields(
-                err.status(),
-                err.code(),
-                &err.message(),
-                &request_id,
-                error_envelope,
-                err.extra_fields(),
-            );
-            for (k, v) in &error_headers {
-                if let (Ok(name), Ok(val)) = (
-                    k.parse::<http::header::HeaderName>(),
-                    v.parse::<http::header::HeaderValue>(),
-                ) {
-                    // `Vary` combines, so two entries for it must both survive
-                    // (S3 adds its CORS value to an error that may carry its
-                    // own) — but an identical value is not worth repeating.
-                    // Everything else replaces, so a service can still override
-                    // a header this builder already set.
-                    if name == http::header::VARY {
-                        let already = resp
-                            .headers()
-                            .get_all(&name)
-                            .iter()
-                            .any(|existing| existing == val);
-                        if !already {
-                            resp.headers_mut().append(name, val);
-                        }
-                    } else {
-                        resp.headers_mut().insert(name, val);
-                    }
-                }
-            }
-            resp
+            service_error_response(&err, &request_id, error_envelope)
         }
     }
+}
+
+/// The wire response for a service's error `err`.
+fn service_error_response(
+    err: &crate::service::AwsServiceError,
+    request_id: &str,
+    error_envelope: ErrorEnvelope,
+) -> Response<Body> {
+    let error_headers = err.response_headers().to_vec();
+    let mut resp = build_error_response_with_fields(
+        err.status(),
+        err.code(),
+        &err.message(),
+        request_id,
+        error_envelope,
+        err.extra_fields(),
+    );
+    for (k, v) in &error_headers {
+        if let (Ok(name), Ok(val)) = (
+            k.parse::<http::header::HeaderName>(),
+            v.parse::<http::header::HeaderValue>(),
+        ) {
+            // `Vary` combines, so two entries for it must both survive
+            // (S3 adds its CORS value to an error that may carry its
+            // own) — but an identical value is not worth repeating.
+            // Everything else replaces, so a service can still override
+            // a header this builder already set.
+            if name == http::header::VARY {
+                let already = resp
+                    .headers()
+                    .get_all(&name)
+                    .iter()
+                    .any(|existing| existing == val);
+                if !already {
+                    resp.headers_mut().append(name, val);
+                }
+            } else {
+                resp.headers_mut().insert(name, val);
+            }
+        }
+    }
+    resp
 }
 
 /// Frame a service response for an rpcv2Cbor caller. A service that renders
@@ -1922,6 +1955,7 @@ fn principal_condition_context(
         if let Some(role_arn) = rc.role_arn.as_ref() {
             ctx.aws_principal_arn = Some(role_arn.clone());
         }
+        ctx.federated_parent_arn = rc.federated_parent_arn.clone();
         ctx.aws_mfa_present = Some(rc.mfa_present);
         ctx.aws_token_issue_time = rc.token_issued_at;
         ctx.aws_federated_provider = rc.federated_provider.clone();
@@ -1977,30 +2011,50 @@ fn principal_condition_context(
     ctx
 }
 
-/// Populate `aws:ResourceAccount` (the account owning the target resource)
-/// and, when the principal's account is in an organization,
-/// `aws:PrincipalOrgID` / `aws:PrincipalOrgPaths`. A value the service
-/// already supplied wins.
+/// [`global_request_keys`] for a request dispatch received directly from
+/// `principal`.
 fn add_global_request_keys(
     ctx: &mut ConditionContext,
     principal: &Principal,
     resource_account_id: &str,
     scp_resolver: Option<&dyn crate::auth::ScpResolver>,
 ) {
+    global_request_keys(ctx, &principal.account_id, resource_account_id, |account| {
+        scp_resolver.and_then(|r| r.principal_org(account))
+    });
+}
+
+/// Populate the global keys AWS sets on every request from who makes it and
+/// what it is made on: `aws:ResourceAccount` (the account owning the target
+/// resource), `aws:PrincipalOrgID` / `aws:PrincipalOrgPaths` when the
+/// principal's account (`principal_account`) is in an organization,
+/// `aws:ResourceOrgID` / `aws:ResourceOrgPaths` when the resource's account
+/// is, and `aws:ViaAWSService` (`false` unless a service set it for a call it
+/// forwards). `org_of` gives an account's organization id and path. A value
+/// already present wins.
+pub fn global_request_keys(
+    ctx: &mut ConditionContext,
+    principal_account: &str,
+    resource_account_id: &str,
+    org_of: impl Fn(&str) -> Option<(String, String)>,
+) {
+    let mut set = |key: &str, value: String| {
+        ctx.service_keys
+            .entry(key.to_string())
+            .or_insert_with(|| vec![value]);
+    };
     if !resource_account_id.is_empty() {
-        ctx.service_keys
-            .entry("aws:resourceaccount".to_string())
-            .or_insert_with(|| vec![resource_account_id.to_string()]);
+        set("aws:resourceaccount", resource_account_id.to_string());
+        if let Some((org_id, path)) = org_of(resource_account_id) {
+            set("aws:resourceorgid", org_id);
+            set("aws:resourceorgpaths", path);
+        }
     }
-    if let Some((org_id, path)) = scp_resolver.and_then(|r| r.principal_org(&principal.account_id))
-    {
-        ctx.service_keys
-            .entry("aws:principalorgid".to_string())
-            .or_insert_with(|| vec![org_id]);
-        ctx.service_keys
-            .entry("aws:principalorgpaths".to_string())
-            .or_insert_with(|| vec![path]);
+    if let Some((org_id, path)) = org_of(principal_account) {
+        set("aws:principalorgid", org_id);
+        set("aws:principalorgpaths", path);
     }
+    set("aws:viaawsservice", "false".to_string());
 }
 
 /// The AWS error for a request whose access key resolves to no identity:
@@ -2214,9 +2268,9 @@ fn grant_authorizes(
     }
 }
 
-/// Authorize a request made as an account's root user: its SCPs first, then,
-/// for a resource of another account, that resource's policy (see
-/// [`authorize_root_cross_account`]).
+/// Authorize a request made as an account's root user: its SCPs and its
+/// session's policies first, then, for a resource of another account, that
+/// resource's policy (see [`authorize_root_cross_account`]).
 ///
 /// Returns the error response to send when the request is denied under
 /// strict mode; soft mode only logs.
@@ -2258,7 +2312,8 @@ fn authorize_root(
     })
 }
 
-/// Cap a root-user request at the account's SCPs.
+/// Cap a root-user request at the account's SCPs and at the policies of the
+/// session it is made with.
 ///
 /// Root needs no identity policy in its own account, but SCPs restrict
 /// "IAM users and roles in member accounts, including the member account's
@@ -2266,7 +2321,9 @@ fn authorize_root(
 /// AWS evaluates them before any resource-based policy, so a resource policy
 /// granting root in another account does not reach past them either. The
 /// resolver exempts the management account (and returns nothing outside an
-/// organization), which keeps root there unrestricted.
+/// organization), which keeps root there unrestricted. A root session minted
+/// by `sts:AssumeRoot` carries its task policy as its session policy, which
+/// scopes it to that privileged task.
 #[allow(clippy::too_many_arguments)]
 fn authorize_root_scps(
     principal: &Principal,
@@ -2279,8 +2336,12 @@ fn authorize_root_scps(
     remote_addr: Option<SocketAddr>,
     resolved: Option<&crate::auth::ResolvedCredential>,
 ) -> Option<Response<Body>> {
-    let resolver = config.scp_resolver.as_deref()?;
-    let scps = resolver.scps_for(principal)?;
+    let resolver = config.scp_resolver.as_deref();
+    let scps = resolver.and_then(|r| r.scps_for(principal));
+    let session_policies = resolved.map_or(&[][..], |r| r.session_policies.as_slice());
+    if scps.is_none() && session_policies.is_empty() {
+        return None;
+    }
     let in_caller_account = service.iam_resource_in_caller_account(aws_request);
     let iam_actions = service.iam_actions_for(aws_request);
     if iam_actions.is_empty() {
@@ -2294,7 +2355,7 @@ fn authorize_root_scps(
             principal = %principal.arn,
             mode = %config.iam_mode,
             request_id = %request_id,
-            "root request under SCPs has no IamAction mapping; denying under strict, allowing under soft"
+            "root request under SCPs or session policies has no IamAction mapping; denying under strict, allowing under soft"
         );
         return config
             .iam_mode
@@ -2318,9 +2379,15 @@ fn authorize_root_scps(
             detected,
             remote_addr,
         );
-        add_global_request_keys(&mut context, principal, &resource_account, Some(resolver));
-        let decision =
-            evaluator.evaluate_ceiling(principal, &iam_action, &context, &[], Some(&scps), false);
+        add_global_request_keys(&mut context, principal, &resource_account, resolver);
+        let decision = evaluator.evaluate_ceiling(
+            principal,
+            &iam_action,
+            &context,
+            session_policies,
+            scps.as_deref(),
+            false,
+        );
         if decision.is_allow() {
             continue;
         }
@@ -2333,16 +2400,28 @@ fn authorize_root_scps(
             decision = ?decision,
             mode = %config.iam_mode,
             request_id = %request_id,
-            "root request denied by the account's service control policies"
+            "root request denied by the account's service control policies or its session policies"
         );
         if config.iam_mode.is_strict() {
             let action = iam_action.action_string();
+            // Name the SCPs only when they are what refused the request.
+            let scp_reason = scps.as_deref().and_then(|scps| {
+                let ceiling = evaluator.evaluate_ceiling(
+                    principal,
+                    &iam_action,
+                    &context,
+                    &[],
+                    Some(scps),
+                    false,
+                );
+                scp_cause(decision, ceiling).and_then(|d| scp_denial_reason(d, &action))
+            });
             return Some(access_denied_response(
                 &not_authorized_message(
                     &principal.arn,
                     &action,
                     &iam_action.resource,
-                    scp_denial_reason(decision, &action).as_deref(),
+                    scp_reason.as_deref(),
                     None,
                 ),
                 request_id,
@@ -2625,6 +2704,7 @@ fn build_condition_context(
         resource_tags: None,
         request_tags: None,
         principal_tags: None,
+        federated_parent_arn: None,
     }
 }
 
@@ -4252,6 +4332,7 @@ mod tests {
             token_issued_at: Some(issued),
             federated_provider: None,
             role_arn: None,
+            federated_parent_arn: None,
         };
         let evaluator = PolicyEvaluator(parking_lot::Mutex::new(Vec::new()));
         let run = |bucket: &str, mode: IamMode| {

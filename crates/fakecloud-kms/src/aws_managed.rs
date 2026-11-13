@@ -267,7 +267,28 @@ pub(crate) fn policy_decision(
     encryption_context: &BTreeMap<String, String>,
     extra: &[(&str, &str)],
 ) -> Decision {
-    let mut keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    policy_decision_with_orgs(
+        policy,
+        key_arn,
+        caller,
+        action,
+        encryption_context,
+        extra,
+        &|_| None,
+    )
+}
+
+/// [`policy_decision`] with the organizations of accounts known (`org_of`),
+/// for `aws:PrincipalOrgID` / `aws:ResourceOrgID` (see [`request_context`]).
+pub(crate) fn policy_decision_with_orgs(
+    policy: &str,
+    key_arn: &str,
+    caller: &KeyCaller<'_>,
+    action: &str,
+    encryption_context: &BTreeMap<String, String>,
+    extra: &[(&str, &str)],
+    org_of: &dyn Fn(&str) -> Option<(String, String)>,
+) -> Decision {
     // Forms that can only deny: when an assumed-role caller's role path is
     // unknown (the role is not in fakecloud's IAM, or was deleted), a Deny
     // naming that role under any path applies, failing closed, while an
@@ -299,55 +320,22 @@ pub(crate) fn policy_decision(
                 .collect();
         }
     }
-    // The global keys AWS sets from the calling identity (`aws:PrincipalArn`,
-    // `aws:PrincipalAccount`, `aws:PrincipalType`, `aws:userid`,
-    // `aws:PrincipalTag/*`, `aws:PrincipalOrgID`, ...): guard statements
-    // such as `Deny ... ArnNotLike aws:PrincipalArn` would otherwise match
-    // every caller, a negated operator on a missing key being true.
-    let mut base = RequestContext::default();
+    let context = request_context(caller, key_arn, encryption_context, extra, org_of);
     let principals: Vec<Principal> = match caller {
-        KeyCaller::Direct { principal, account } => {
-            let account = caller_account(&principal.arn, account);
-            keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
-            base = principal_context(
-                &principal.arn,
-                account,
-                &CallerFacts {
-                    user_id: Some(principal.user_id.clone()),
-                    tags: principal.tags.clone(),
-                    ..Default::default()
-                },
-            );
-            vec![(*principal).clone()]
-        }
+        KeyCaller::Direct { principal, .. } => vec![(*principal).clone()],
         KeyCaller::ViaService {
-            service_principal,
             region,
             account,
             caller_arn,
             facts,
+            ..
         } => {
-            keys.insert(
-                "kms:ViaService".to_string(),
-                vec![via_service(service_principal, region)],
-            );
-            // The caller's own account, not the account of the resource the
-            // service acts on (an S3 bucket, an SQS queue), which may be
-            // the key's.
             let account = caller_arn.map_or(*account, |arn| caller_account(arn, account));
-            keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
-            let none = CallerFacts::default();
-            let facts = facts.unwrap_or(&none);
             match caller_arn {
                 Some(arn) => {
-                    base = principal_context(arn, account, facts);
-                    caller_principals(arn, facts.role_arn.as_deref(), account)
+                    caller_principals(arn, facts.and_then(|f| f.role_arn.as_deref()), account)
                 }
-                None => {
-                    let root = account_root(account, region);
-                    base = principal_context(&root.arn, account, facts);
-                    vec![root]
-                }
+                None => vec![account_root(account, region)],
             }
         }
         KeyCaller::Service {
@@ -355,51 +343,24 @@ pub(crate) fn policy_decision(
             region,
             source_arn,
             source_account,
-            via_service: via,
-        } => {
-            if let Some(via) = via {
-                keys.insert("kms:ViaService".to_string(), vec![via_service(via, region)]);
-            }
-            let internal = InternalCaller::Service {
-                service: service_principal.to_string(),
-                source_arn: source_arn.to_string(),
-                source_account: source_account.to_string(),
-            };
-            keys.extend(internal.condition_keys());
-            service_principal_forms(service_principal, region)
-                .into_iter()
-                .map(|service| {
-                    InternalCaller::Service {
-                        service,
-                        source_arn: source_arn.to_string(),
-                        source_account: source_account.to_string(),
-                    }
-                    .principal()
-                })
-                .collect()
-        }
+            ..
+        } => service_principal_forms(service_principal, region)
+            .into_iter()
+            .map(|service| {
+                InternalCaller::Service {
+                    service,
+                    source_arn: source_arn.to_string(),
+                    source_account: source_account.to_string(),
+                }
+                .principal()
+            })
+            .collect(),
     };
-    for (k, v) in encryption_context {
-        keys.insert(format!("kms:EncryptionContext:{k}"), vec![v.clone()]);
-    }
-    keys.insert(
-        "kms:EncryptionContextKeys".to_string(),
-        encryption_context.keys().cloned().collect(),
-    );
-    for (k, v) in extra {
-        keys.insert((*k).to_string(), vec![(*v).to_string()]);
-    }
     let document = PolicyDocument::parse(policy);
     // One request whose principal is every form of the caller: a statement
     // applies when its Principal names any of them. A Deny that applies to
     // any form denies, whatever another form is allowed; otherwise any
     // Allow allows; otherwise nothing grants it (implicit deny).
-    let mut service_keys = base.service_keys.clone();
-    service_keys.extend(keys);
-    let context = RequestContext {
-        service_keys,
-        ..base
-    };
     let evaluate = |principal: &Principal| {
         let request = EvalRequest {
             principal,
@@ -424,6 +385,165 @@ pub(crate) fn policy_decision(
         }
     }
     decision
+}
+
+/// The request context of `caller` using a key with `encryption_context`
+/// (`extra`: operation-specific keys such as `kms:ReEncryptOnSameKey`): what
+/// the key policy, and the caller's SCPs, are evaluated with.
+///
+/// It carries the global keys AWS sets from the calling identity
+/// (`aws:PrincipalArn`, `aws:PrincipalAccount`, `aws:PrincipalType`,
+/// `aws:userid`, `aws:PrincipalTag/*`, `aws:PrincipalOrgID`, ...): guard
+/// statements such as `Deny ... ArnNotLike aws:PrincipalArn` would otherwise
+/// match every caller, a negated operator on a missing key being true.
+///
+/// It also carries the global keys of the request itself, as dispatch sets
+/// them for a direct call (`fakecloud_core::dispatch::global_request_keys`):
+/// `aws:RequestedRegion` (the key's region), `aws:ResourceAccount` and
+/// `aws:ResourceOrgID` / `aws:ResourceOrgPaths` (the key's account and its
+/// organization, from `org_of`), and `aws:ViaAWSService`, `true` for a call
+/// a service forwards with the caller's credentials, whose `aws:CalledVia`
+/// (and `aws:CalledViaFirst` / `aws:CalledViaLast`) is that service's
+/// principal.
+pub(crate) fn request_context(
+    caller: &KeyCaller<'_>,
+    key_arn: &str,
+    encryption_context: &BTreeMap<String, String>,
+    extra: &[(&str, &str)],
+    org_of: &dyn Fn(&str) -> Option<(String, String)>,
+) -> RequestContext {
+    let mut context = caller_context(caller, encryption_context, extra);
+    let key_account = fakecloud_aws::arn::account_of(key_arn).unwrap_or_default();
+    let key_region = fakecloud_aws::arn::region_of(key_arn).map(str::to_string);
+    let principal_account = match caller {
+        KeyCaller::Direct { principal, account } => {
+            caller_account(&principal.arn, account).to_string()
+        }
+        KeyCaller::ViaService {
+            account,
+            caller_arn,
+            ..
+        } => caller_arn
+            .map_or(*account, |arn| caller_account(arn, account))
+            .to_string(),
+        KeyCaller::Service { .. } => String::new(),
+    };
+    if let KeyCaller::ViaService {
+        service_principal, ..
+    } = caller
+    {
+        context
+            .service_keys
+            .insert("aws:viaawsservice".to_string(), vec!["true".to_string()]);
+        let region = key_region.as_deref().unwrap_or("us-east-1");
+        context.aws_called_via = vec![called_via(service_principal, region).to_string()];
+    }
+    context.aws_requested_region = context.aws_requested_region.take().or(key_region);
+    fakecloud_core::dispatch::global_request_keys(
+        &mut context,
+        &principal_account,
+        key_account,
+        org_of,
+    );
+    context
+}
+
+/// The `aws:CalledVia` value of a KMS call the service `service_principal`
+/// forwards in `region` with its caller's credentials. Each service names
+/// itself its own way, recorded against real AWS in
+/// `tests/fixtures/forwarded-kms-condition-keys/`: S3 as
+/// `fas.s3.amazonaws.com`, SQS and SNS by their service principal, SSM by an
+/// AWS-owned account id (recorded in us-east-1 only). DynamoDB's
+/// `dynamodb.amazonaws.com` is the IAM user guide's. A service with no
+/// recording (Secrets Manager, ...), and SSM in another region, is named by
+/// its service principal.
+pub(crate) fn called_via<'a>(service_principal: &'a str, region: &str) -> &'a str {
+    match (service_principal, region) {
+        ("s3.amazonaws.com", _) => "fas.s3.amazonaws.com",
+        ("ssm.amazonaws.com", "us-east-1") => "556613725826",
+        (principal, _) => principal,
+    }
+}
+
+/// [`request_context`]'s keys that come from the caller alone.
+fn caller_context(
+    caller: &KeyCaller<'_>,
+    encryption_context: &BTreeMap<String, String>,
+    extra: &[(&str, &str)],
+) -> RequestContext {
+    let mut keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let base = match caller {
+        KeyCaller::Direct { principal, account } => {
+            let account = caller_account(&principal.arn, account);
+            keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
+            principal_context(
+                &principal.arn,
+                account,
+                &CallerFacts {
+                    user_id: Some(principal.user_id.clone()),
+                    tags: principal.tags.clone(),
+                    ..Default::default()
+                },
+            )
+        }
+        KeyCaller::ViaService {
+            service_principal,
+            region,
+            account,
+            caller_arn,
+            facts,
+        } => {
+            keys.insert(
+                "kms:ViaService".to_string(),
+                vec![via_service(service_principal, region)],
+            );
+            // The caller's own account, not the account of the resource the
+            // service acts on (an S3 bucket, an SQS queue), which may be
+            // the key's.
+            let account = caller_arn.map_or(*account, |arn| caller_account(arn, account));
+            keys.insert("kms:CallerAccount".to_string(), vec![account.to_string()]);
+            let none = CallerFacts::default();
+            let facts = facts.unwrap_or(&none);
+            match caller_arn {
+                Some(arn) => principal_context(arn, account, facts),
+                None => principal_context(&account_root(account, region).arn, account, facts),
+            }
+        }
+        KeyCaller::Service {
+            service_principal,
+            region,
+            source_arn,
+            source_account,
+            via_service: via,
+        } => {
+            if let Some(via) = via {
+                keys.insert("kms:ViaService".to_string(), vec![via_service(via, region)]);
+            }
+            let internal = InternalCaller::Service {
+                service: service_principal.to_string(),
+                source_arn: source_arn.to_string(),
+                source_account: source_account.to_string(),
+            };
+            keys.extend(internal.condition_keys());
+            RequestContext::default()
+        }
+    };
+    for (k, v) in encryption_context {
+        keys.insert(format!("kms:EncryptionContext:{k}"), vec![v.clone()]);
+    }
+    keys.insert(
+        "kms:EncryptionContextKeys".to_string(),
+        encryption_context.keys().cloned().collect(),
+    );
+    for (k, v) in extra {
+        keys.insert((*k).to_string(), vec![(*v).to_string()]);
+    }
+    let mut service_keys = base.service_keys.clone();
+    service_keys.extend(keys);
+    RequestContext {
+        service_keys,
+        ..base
+    }
 }
 
 /// The request context a key policy sees for the calling identity `arn` of
@@ -529,6 +649,161 @@ mod tests {
     use super::*;
 
     const ACCOUNT: &str = "123456789012";
+
+    /// The recorded `aws:CalledVia` of each service's forwarded KMS calls
+    /// (`tests/fixtures/forwarded-kms-condition-keys/recordings.md`), and
+    /// how the recorded conditions evaluate against them.
+    #[test]
+    fn called_via_follows_the_recordings() {
+        let recordings =
+            include_str!("../tests/fixtures/forwarded-kms-condition-keys/recordings.md");
+        for (principal, region, value) in [
+            ("s3.amazonaws.com", "us-east-1", "fas.s3.amazonaws.com"),
+            ("sqs.amazonaws.com", "us-east-1", "sqs.amazonaws.com"),
+            ("sns.amazonaws.com", "us-east-1", "sns.amazonaws.com"),
+            ("ssm.amazonaws.com", "us-east-1", "556613725826"),
+        ] {
+            assert_eq!(called_via(principal, region), value);
+            assert!(recordings.contains(value), "{value} is recorded");
+        }
+        // Not recorded: the service principal.
+        assert_eq!(
+            called_via("dynamodb.amazonaws.com", "us-east-1"),
+            "dynamodb.amazonaws.com"
+        );
+        assert_eq!(
+            called_via("secretsmanager.amazonaws.com", "us-east-1"),
+            "secretsmanager.amazonaws.com"
+        );
+        assert_eq!(
+            called_via("ssm.amazonaws.com", "eu-west-1"),
+            "ssm.amazonaws.com"
+        );
+
+        // As recorded on S3's forwarded call: a Deny naming s3.amazonaws.com
+        // does not match, one naming fas.s3.amazonaws.com does.
+        let caller = KeyCaller::ViaService {
+            service_principal: "s3.amazonaws.com",
+            region: "us-east-1",
+            account: ACCOUNT,
+            caller_arn: Some("arn:aws:iam::123456789012:user/alice"),
+            facts: None,
+        };
+        let key = "arn:aws:kms:us-east-1:123456789012:key/k";
+        let deny_unless = |operator: &str, key_name: &str, value: &str| {
+            format!(
+                r#"{{"Statement":[
+                    {{"Effect":"Allow","Principal":{{"AWS":"*"}},"Action":"kms:*","Resource":"*"}},
+                    {{"Effect":"Deny","Principal":{{"AWS":"*"}},"Action":"kms:*","Resource":"*",
+                      "Condition":{{"{operator}":{{"{key_name}":"{value}"}}}}}}]}}"#
+            )
+        };
+        let decide = |policy: String| {
+            policy_decision(
+                &policy,
+                key,
+                &caller,
+                "kms:GenerateDataKey",
+                &BTreeMap::new(),
+                &[],
+            )
+        };
+        for (operator, key_name, value, denied) in [
+            (
+                "ForAnyValue:StringEquals",
+                "aws:CalledVia",
+                "s3.amazonaws.com",
+                false,
+            ),
+            (
+                "ForAnyValue:StringEquals",
+                "aws:CalledVia",
+                "fas.s3.amazonaws.com",
+                true,
+            ),
+            (
+                "StringEquals",
+                "aws:CalledViaFirst",
+                "fas.s3.amazonaws.com",
+                true,
+            ),
+            (
+                "StringEquals",
+                "aws:CalledViaLast",
+                "s3.amazonaws.com",
+                false,
+            ),
+            ("Bool", "aws:ViaAWSService", "true", true),
+            ("Bool", "aws:PrincipalIsAWSService", "true", false),
+            (
+                "StringEquals",
+                "kms:ViaService",
+                "s3.us-east-1.amazonaws.com",
+                true,
+            ),
+            ("StringEquals", "aws:RequestedRegion", "us-east-1", true),
+        ] {
+            assert_eq!(
+                decide(deny_unless(operator, key_name, value)) == Decision::ExplicitDeny,
+                denied,
+                "{operator} {key_name} {value}"
+            );
+        }
+    }
+
+    /// A call a service forwards carries the global keys of a forwarded
+    /// request; a direct call says it was not forwarded.
+    #[test]
+    fn request_context_carries_the_global_keys_of_the_call() {
+        let key_arn = "arn:aws:kms:eu-west-1:222222222222:key/k";
+        let org_of = |account: &str| {
+            (account == "222222222222" || account == ACCOUNT)
+                .then(|| ("o-abc".to_string(), "o-abc/r-1/".to_string()))
+        };
+        let via = KeyCaller::ViaService {
+            service_principal: "s3.amazonaws.com",
+            region: "eu-west-1",
+            account: ACCOUNT,
+            caller_arn: Some("arn:aws:iam::123456789012:user/alice"),
+            facts: None,
+        };
+        let ctx = request_context(&via, key_arn, &BTreeMap::new(), &[], &org_of);
+        let one = |k: &str| ctx.lookup(k).map(|v| v.join(","));
+        assert_eq!(one("aws:ViaAWSService").as_deref(), Some("true"));
+        assert_eq!(
+            one("aws:CalledVia").as_deref(),
+            Some("fas.s3.amazonaws.com")
+        );
+        assert_eq!(
+            one("aws:CalledViaFirst").as_deref(),
+            Some("fas.s3.amazonaws.com")
+        );
+        assert_eq!(
+            one("aws:CalledViaLast").as_deref(),
+            Some("fas.s3.amazonaws.com")
+        );
+        assert_eq!(one("aws:RequestedRegion").as_deref(), Some("eu-west-1"));
+        assert_eq!(one("aws:ResourceAccount").as_deref(), Some("222222222222"));
+        assert_eq!(one("aws:ResourceOrgID").as_deref(), Some("o-abc"));
+        assert_eq!(one("aws:PrincipalOrgID").as_deref(), Some("o-abc"));
+        assert_eq!(
+            one("kms:ViaService").as_deref(),
+            Some("s3.eu-west-1.amazonaws.com")
+        );
+
+        let principal = account_root(ACCOUNT, "eu-west-1");
+        let direct = KeyCaller::Direct {
+            principal: &principal,
+            account: ACCOUNT,
+        };
+        let ctx = request_context(&direct, key_arn, &BTreeMap::new(), &[], &|_| None);
+        assert_eq!(
+            ctx.lookup("aws:ViaAWSService"),
+            Some(vec!["false".to_string()])
+        );
+        assert_eq!(ctx.lookup("aws:CalledVia"), None);
+        assert_eq!(ctx.lookup("aws:ResourceOrgID"), None);
+    }
 
     fn fixtures() -> Vec<(String, Value)> {
         let dir = format!(

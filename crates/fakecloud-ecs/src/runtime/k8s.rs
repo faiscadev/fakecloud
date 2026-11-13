@@ -442,12 +442,13 @@ impl EcsRuntime {
         // (reached in-cluster at self_url), mirroring the Docker path.
         let mut resolved: Vec<(ContainerPlan, Vec<(String, String)>)> =
             Vec::with_capacity(plans.len());
+        let reader = super::secrets::execution_role_reader(state, account_id, task_id);
         for plan in plans {
             let mut env = plan.env.clone();
             for (name, value_from) in &plan.secrets_refs {
                 env.push((
                     name.clone(),
-                    self.resolve_secret(account_id, &region, value_from)?,
+                    self.resolve_secret(account_id, &region, value_from, reader.as_ref())?,
                 ));
             }
             let base = backend.self_url.trim_end_matches('/');

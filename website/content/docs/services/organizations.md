@@ -33,7 +33,7 @@ Service Control Policies aren't just stored — they're a real permission ceilin
 - Cross-level SCPs are **intersected** (a permission must be allowed at every level — root, parent OU, account — to survive).
 - The management account and service-linked roles are exempt, just like AWS.
 - An explicit `Deny` at any level wins.
-- Every principal of a member account is capped, its root user included, and no resource policy reaches past the ceiling: a bucket, queue, topic, key or table policy (or a KMS grant, on a direct KMS call) naming a member-account principal, in its own account or another, grants it nothing its SCPs don't allow. The KMS key use a service makes on a caller's behalf (S3 SSE-KMS, SQS, SNS, DynamoDB encryption) is not yet capped by the caller's SCPs.
+- Every principal of a member account is capped, its root user included, and no resource policy reaches past the ceiling: a bucket, queue, topic, key or table policy (or a KMS grant, on a direct KMS call) naming a member-account principal, in its own account or another, grants it nothing its SCPs don't allow. The KMS key use a service makes on a caller's behalf (S3 SSE-KMS, SQS, SNS, Secrets Manager and SSM encryption, and the `kms:CreateGrant` DynamoDB makes when a table is created or updated with a key) is capped by the caller's SCPs too, with `kms:ViaService` naming the service, so an SCP can deny `kms:GenerateDataKey` through S3 alone.
 
 This means a parent OU with `Deny: s3:DeleteBucket` actually blocks the call in a member account even when the member's IAM policy grants `s3:*`. The same machinery enforces TAG_POLICY constraints on `TagResource` calls when strict mode is on.
 
