@@ -200,7 +200,29 @@ async fn dispatch_inner(
         &parts.headers,
         &query_params,
     );
-    let header_only = protocol::detect_service_headers_only(&parts.headers, &query_params);
+    // An unsigned plain-host request addressed to an existing bucket, or one
+    // on an API Gateway custom domain, is S3's or the API's even when its
+    // query carries an `Action` (protocol detection handles every case it
+    // can tell from the request alone): detect its service without it.
+    let action_detection_params;
+    let detect_params = if pinned.is_none()
+        && query_params.contains_key("Action")
+        && unsigned_action_is_a_parameter(
+            &parts.method,
+            &parts.uri,
+            &parts.headers,
+            &query_params,
+            &registry,
+            &config,
+        ) {
+        let mut params = query_params.clone();
+        params.remove("Action");
+        action_detection_params = params;
+        &action_detection_params
+    } else {
+        &query_params
+    };
+    let header_only = protocol::detect_service_headers_only(&parts.headers, detect_params);
     let early_region = request_region(&parts.headers, &query_params, &config.region);
     let early = EarlyRequest {
         method: &parts.method,
@@ -223,24 +245,10 @@ async fn dispatch_inner(
     // service host) goes by the unrouted-request rule ([`unrouted_target`]),
     // which reads no body: settle it now -- an unsigned path-style S3 request
     // is then judged and streamed like any other S3 request -- unless a form
-    // body could still name a Query service, or a query-string `Action`
-    // names one ([`unsigned_query_action`]).
-    let query_action = (pinned.is_none() && rpc_v2_cbor.is_none() && header_only.is_none())
-        .then(|| {
-            unsigned_query_action(
-                &parts.method,
-                &parts.uri,
-                &parts.headers,
-                &query_params,
-                &registry,
-                &config,
-            )
-        })
-        .flatten();
+    // body could still name a Query service.
     let unrouted = (pinned.is_none()
         && rpc_v2_cbor.is_none()
         && header_only.is_none()
-        && query_action.is_none()
         && !parts.headers.contains_key("x-amz-target")
         && !protocol::is_form_content_type(&parts.headers))
     .then(|| {
@@ -396,10 +404,8 @@ async fn dispatch_inner(
         d
     } else if let Some(d) = stream_dispatch {
         d
-    } else if let Some(d) = query_action {
-        d
     } else {
-        match protocol::detect_service(&parts.headers, &query_params, &body_bytes) {
+        match protocol::detect_service(&parts.headers, detect_params, &body_bytes) {
             Some(d) => d,
             None => {
                 // A request carrying X-Amz-Target is unambiguously an awsJson
@@ -2665,40 +2671,31 @@ fn unrouted_target(
     None
 }
 
-/// The Query call an unsigned request names by its query-string `Action`
-/// alone (`GET /?Action=ListTopics`, the SNS `SubscribeURL`), when nothing
-/// else routes it: no signature or presign (whose scope names a service), no
-/// service endpoint `Host`, a path that is not an existing S3 bucket (a
-/// path-style object with an `Action` parameter stays S3's), and no API
-/// Gateway invocation. The action must be one exactly one Query service has
-/// ([`protocol::infer_service_from_action`]).
-fn unsigned_query_action(
+/// Whether a query-string `Action` is only a parameter of an unsigned request
+/// that is S3's or API Gateway's by what only dispatch can tell: on the plain
+/// host, a path addressing an existing bucket (`GET /pubb/k.txt?Action=...`
+/// is the object), or an API Gateway custom-domain `Host`. (An S3 or
+/// execute-api host or signature scope, or an S3 SigV2 presign, is
+/// [`protocol::query_action_is_a_parameter`].) An SQS queue path whose first
+/// segment is an account ID is the queue's unless a bucket of that name
+/// exists.
+fn unsigned_action_is_a_parameter(
     method: &http::Method,
     uri: &http::Uri,
     headers: &http::HeaderMap,
     query_params: &HashMap<String, String>,
     registry: &ServiceRegistry,
     config: &DispatchConfig,
-) -> Option<protocol::DetectedRequest> {
-    let action = query_params.get("Action")?;
-    if !is_unsigned(headers, query_params)
-        || protocol::parse_routing_host_from_headers(headers).is_some()
-        || is_execute_api_host(headers)
-        || headers.contains_key("x-amz-target")
-    {
-        return None;
+) -> bool {
+    if !is_unsigned(headers, query_params) || headers.contains_key("x-amz-target") {
+        return false;
     }
-    let service = protocol::infer_service_from_action(action)?;
-    if anonymous_s3_bucket(uri, config).is_some()
+    let plain_host = protocol::parse_routing_host_from_headers(headers).is_none();
+    (plain_host && anonymous_s3_bucket(uri, config).is_some())
         || registry.get("apigateway").is_some_and(|apigw| {
-            apigw
-                .claim_unrouted_request(method, uri.path(), headers, &config.account_id)
-                .is_some()
+            apigw.claim_unrouted_request(method, uri.path(), headers, &config.account_id)
+                == Some(crate::service::DataPlaneClaim::Host)
         })
-    {
-        return None;
-    }
-    Some(protocol::query_action_detection(&service, action))
 }
 
 /// The detection for a service [`unrouted_target`] picked.
@@ -5432,7 +5429,7 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_query_action_routes_only_unnamed_requests() {
+    fn query_action_stays_a_query_call_without_a_bucket_or_api() {
         let config = DispatchConfig {
             region: "us-east-1".to_string(),
             account_id: "123456789012".to_string(),
@@ -5460,51 +5457,21 @@ mod tests {
                     v.parse().unwrap(),
                 );
             }
-            unsigned_query_action(&http::Method::GET, &uri, &h, &query, &registry, &config)
-                .map(|d| d.service)
+            unsigned_action_is_a_parameter(&http::Method::GET, &uri, &h, &query, &registry, &config)
         };
-        assert_eq!(
-            route("/?Action=ListTopics&Version=2010-03-31", &[]).as_deref(),
-            Some("sns")
-        );
-        assert_eq!(
-            route("/123456789012/q?Action=SendMessage", &[]).as_deref(),
-            Some("sqs")
-        );
-        // Signed, presigned, or addressed to an endpoint host: not this rule.
-        assert_eq!(
-            route(
-                "/?Action=ListTopics",
-                &[(
-                    "authorization",
-                    "AWS4-HMAC-SHA256 Credential=a/b/c/s3/aws4_request"
-                )]
-            ),
-            None
-        );
-        assert_eq!(
-            route(
-                "/b/k?Action=ListQueues&X-Amz-Credential=a/b/c/s3/aws4_request",
-                &[]
-            ),
-            None
-        );
-        assert_eq!(
-            route(
-                "/k?Action=DescribeRegions",
-                &[("host", "b.s3.us-east-1.amazonaws.com")]
-            ),
-            None
-        );
-        assert_eq!(
-            route(
-                "/prod/x?Action=Publish",
-                &[("host", "abc.execute-api.us-east-1.amazonaws.com")]
-            ),
-            None
-        );
-        // An action several services share names none.
-        assert_eq!(route("/?Action=ListTagsForResource", &[]), None);
+        // No bucket and no API Gateway: the Action is the request's.
+        // (The bucket and custom-domain cases are end-to-end tested in
+        // host_routing.rs.)
+        assert!(!route("/?Action=ListTopics&Version=2010-03-31", &[]));
+        assert!(!route("/123456789012/q?Action=SendMessage", &[]));
+        // Only an unsigned request is judged here.
+        assert!(!route(
+            "/b/k?Action=ListQueues",
+            &[(
+                "authorization",
+                "AWS4-HMAC-SHA256 Credential=a/b/c/s3/aws4_request"
+            )]
+        ));
     }
 
     #[test]

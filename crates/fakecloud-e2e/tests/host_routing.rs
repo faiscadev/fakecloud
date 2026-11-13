@@ -577,6 +577,71 @@ async fn query_string_action_does_not_hijack_s3_or_api_gateway() {
     assert!(!body.contains("PublishResponse"), "{body}");
 }
 
+/// SES v1 is Query on SES's signing scope (v2 is restJson1 on the same
+/// scope): an `Action` in the URL of a signed GET, a presigned GET, or a POST
+/// whose other parameters are in the body is SES v1's.
+#[tokio::test]
+async fn ses_v1_query_action_in_the_url_reaches_ses() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let scope = format!("test/{}/us-east-1/ses/aws4_request", &date[..8]);
+    let auth = format!("AWS4-HMAC-SHA256 Credential={scope}, SignedHeaders=host, Signature=00");
+    let base = server.endpoint();
+
+    let signed_get = http
+        .get(format!("{base}/?Action=ListIdentities&Version=2010-12-01"))
+        .header("authorization", &auth);
+    let presigned_get = http.get(format!(
+        "{base}/?Action=ListIdentities&Version=2010-12-01&X-Amz-Algorithm=AWS4-HMAC-SHA256\
+         &X-Amz-Credential={}&X-Amz-Date={date}&X-Amz-Expires=300\
+         &X-Amz-SignedHeaders=host&X-Amz-Signature=00",
+        scope.replace('/', "%2F")
+    ));
+    let post = http
+        .post(format!("{base}/?Action=ListIdentities"))
+        .header("authorization", &auth)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body("Version=2010-12-01&IdentityType=EmailAddress");
+    for (name, req) in [
+        ("signed GET", signed_get),
+        ("presigned GET", presigned_get),
+        ("POST", post),
+    ] {
+        let resp = req.send().await.unwrap();
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap();
+        assert_eq!(status, 200, "{name}: {body}");
+        assert!(body.contains("<ListIdentitiesResponse"), "{name}: {body}");
+    }
+}
+
+/// SigV2 Query authentication (`SignatureVersion=2` + `Timestamp`, no
+/// `Expires`) is not an S3 presign: the request is its Action's service's.
+#[tokio::test]
+async fn sigv2_query_auth_routes_by_action() {
+    let server = TestServer::start().await;
+    for (action, version, marker) in [
+        ("ListQueues", "2012-11-05", "<ListQueuesResponse"),
+        ("DescribeRegions", "2016-11-15", "<DescribeRegionsResponse"),
+    ] {
+        let resp = reqwest::Client::new()
+            .get(format!(
+                "{}/?Action={action}&Version={version}&AWSAccessKeyId=test\
+                 &SignatureVersion=2&SignatureMethod=HmacSHA256\
+                 &Timestamp=2026-11-13T00%3A00%3A00Z&Signature=abc",
+                server.endpoint()
+            ))
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap();
+        assert_eq!(status, 200, "{action}: {body}");
+        assert!(body.contains(marker), "{action}: {body}");
+    }
+}
+
 /// SES (v1 and v2) is served at `email.<region>`: an unsigned SES v2 REST
 /// call on that host is SES's, not the ECR registry's `/v2/`.
 #[tokio::test]

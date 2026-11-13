@@ -155,48 +155,60 @@ const REST_JSON_SERVICES: &[&str] = &[
     "iotwireless",
 ];
 
-/// The service a request names by its SigV4 credential scope (header or
-/// presign), a SigV2 presign (S3's), or its endpoint `Host`.
-fn named_service(headers: &HeaderMap, query_params: &HashMap<String, String>) -> Option<String> {
-    extract_service_from_auth(headers)
+/// Whether the request is an S3 or API Gateway request on which a
+/// query-string `Action` is only a parameter, never a Query call: its `Host`
+/// is an S3 endpoint (path-style or a bucket's virtual host) or an
+/// execute-api host, its SigV4 scope (header or presign) is `s3` or
+/// `execute-api`, or it is an S3 SigV2 presign (`AWSAccessKeyId`,
+/// `Signature` and `Expires`; a SigV2 Query signature carries
+/// `SignatureVersion` and `Timestamp` instead). Dispatch adds the cases it
+/// alone can tell: an unsigned plain-host path addressing an existing bucket,
+/// and an API Gateway custom-domain host.
+pub fn query_action_is_a_parameter(
+    headers: &HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> bool {
+    const PARAMETER_SERVICES: &[&str] = &["s3", "execute-api"];
+    let host = parse_routing_host_from_headers(headers)
+        .is_some_and(|h| PARAMETER_SERVICES.contains(&h.service.as_str()) || h.bucket.is_some())
+        || headers
+            .get(http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|h| h.contains(".execute-api."));
+    let scope = extract_service_from_auth(headers)
         .or_else(|| {
             let credential = query_params.get("X-Amz-Credential")?;
-            let scope = credential.split('/').nth(3)?;
-            Some(normalize_service_name(scope).to_string())
+            Some(normalize_service_name(credential.split('/').nth(3)?).to_string())
         })
-        .or_else(|| {
-            (query_params.contains_key("AWSAccessKeyId") && query_params.contains_key("Signature"))
-                .then(|| "s3".to_string())
-        })
-        .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service))
+        .is_some_and(|s| PARAMETER_SERVICES.contains(&s.as_str()));
+    let sigv2_presign = query_params.contains_key("AWSAccessKeyId")
+        && query_params.contains_key("Signature")
+        && query_params.contains_key("Expires")
+        && !query_params.contains_key("SignatureVersion");
+    host || scope || sigv2_presign
 }
 
-/// A query-string `Action` makes the request a Query call of the service the
-/// request names ([`named_service`]), unless that service's API is REST (S3,
-/// API Gateway, ...), for which `Action` is just one more query parameter.
-/// A request naming no service is routed by its `Action` alone only by
-/// dispatch, which knows whether its path is an S3 bucket or an API
-/// Gateway invocation first ([`query_action_detection`]).
+/// A query-string `Action` as a Query call: of the service the signature
+/// names, else the one the action names, else the one the `Host` names --
+/// unless the request is S3's or API Gateway's
+/// ([`query_action_is_a_parameter`]).
 fn query_string_action(
     headers: &HeaderMap,
     query_params: &HashMap<String, String>,
 ) -> Option<DetectedRequest> {
     let action = query_params.get("Action")?;
-    let service = named_service(headers, query_params)?;
-    // An execute-api host names an API Gateway invocation.
-    if rest_protocol_for(&service).is_some() || service == "execute-api" {
+    if query_action_is_a_parameter(headers, query_params) {
         return None;
     }
-    Some(query_action_detection(&service, action))
-}
-
-/// A Query-protocol call of `action` on `service`.
-pub fn query_action_detection(service: &str, action: &str) -> DetectedRequest {
-    DetectedRequest {
-        service: service.to_string(),
-        action: action.to_string(),
-        protocol: query_protocol_for(service),
-    }
+    let service = extract_service_from_auth(headers)
+        .or_else(|| infer_service_from_action(action))
+        .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service))?;
+    let protocol = query_protocol_for(&service);
+    Some(DetectedRequest {
+        service,
+        action: action.clone(),
+        protocol,
+    })
 }
 
 /// Detected service name and action from an incoming HTTP request.
@@ -900,7 +912,7 @@ fn rest_protocol_for(service: &str) -> Option<AwsProtocol> {
 /// Infer service from the action name when no SigV4 auth is present.
 /// Some AWS operations (e.g., AssumeRoleWithSAML, AssumeRoleWithWebIdentity)
 /// do not require authentication and won't have an Authorization header.
-pub fn infer_service_from_action(action: &str) -> Option<String> {
+fn infer_service_from_action(action: &str) -> Option<String> {
     match action {
         "AssumeRole"
         | "AssumeRoleWithSAML"
@@ -1610,22 +1622,23 @@ mod tests {
     }
 
     #[test]
-    fn detect_service_leaves_an_unnamed_query_action_to_dispatch() {
-        // The bare GET an HTTP/S subscriber issues at the SubscribeURL: no
-        // Authorization header, bare-localhost Host, Action in the query.
-        // Nothing names a service, so dispatch routes it by its Action once
-        // it knows the path is no bucket or API invocation
-        // (`dispatch::unsigned_query_action`).
+    fn detect_service_routes_unsigned_confirm_subscription_to_sns() {
+        // Mirror the bare GET an HTTP/S subscriber issues at the SubscribeURL:
+        // no Authorization header, bare-localhost Host, Action in the query.
         let mut headers = HeaderMap::new();
         headers.insert("host", "localhost:4566".parse().unwrap());
         let mut query_params = HashMap::new();
         query_params.insert("Action".to_string(), "ConfirmSubscription".to_string());
-        assert!(detect_service(&headers, &query_params, &Bytes::new()).is_none());
-        let detected = query_action_detection(
-            &infer_service_from_action("ConfirmSubscription").unwrap(),
-            "ConfirmSubscription",
+        query_params.insert(
+            "TopicArn".to_string(),
+            "arn:aws:sns:us-east-1:000000000000:t".to_string(),
         );
+        query_params.insert("Token".to_string(), "abc123".to_string());
+
+        let detected = detect_service(&headers, &query_params, &Bytes::new())
+            .expect("ConfirmSubscription must route to a service");
         assert_eq!(detected.service, "sns");
+        assert_eq!(detected.action, "ConfirmSubscription");
         assert_eq!(detected.protocol, AwsProtocol::Query);
     }
 
@@ -1677,9 +1690,8 @@ mod tests {
     }
 
     #[test]
-    fn detect_service_via_query_action_with_named_service() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", "sts.amazonaws.com".parse().unwrap());
+    fn detect_service_via_query_action_with_inferred_service() {
+        let headers = HeaderMap::new();
         let mut query = HashMap::new();
         query.insert("Action".to_string(), "AssumeRole".to_string());
         let body = Bytes::new();
@@ -1972,7 +1984,7 @@ mod tests {
     }
 
     #[test]
-    fn query_string_action_follows_the_named_service() {
+    fn query_string_action_is_a_parameter_only_of_s3_and_api_gateway() {
         let detect = |host: Option<&str>, auth: Option<&str>, query: &[(&str, &str)]| {
             let mut headers = HeaderMap::new();
             if let Some(host) = host {
@@ -1993,9 +2005,76 @@ mod tests {
             full
         };
         let s = |svc: &str, action: &str| Some((svc.to_string(), action.to_string()));
-        // Nothing names a service: dispatch decides (bucket, API, Action).
-        assert_eq!(detect(None, None, &[("Action", "ListQueues")]), None);
-        // A REST service's request keeps it: `Action` is just a parameter.
+        // Nothing else names a service: the Action does (dispatch first
+        // takes out a plain-host path naming an existing bucket).
+        assert_eq!(
+            detect(None, None, &[("Action", "ListQueues")]),
+            s("sqs", "ListQueues")
+        );
+        // SES v1 is Query on SES's scope and host (v2 is restJson1 there).
+        assert_eq!(
+            detect(
+                None,
+                Some("AWS4-HMAC-SHA256 Credential=AKID/20261113/us-east-1/ses/aws4_request, SignedHeaders=host, Signature=x"),
+                &[("Action", "ListIdentities")]
+            ),
+            s("ses", "ListIdentities")
+        );
+        assert_eq!(
+            detect(
+                Some("email.us-east-1.amazonaws.com"),
+                None,
+                &[("Action", "ListIdentities")]
+            ),
+            s("ses", "ListIdentities")
+        );
+        assert_eq!(
+            detect(
+                None,
+                None,
+                &[
+                    ("Action", "ListIdentities"),
+                    (
+                        "X-Amz-Credential",
+                        "AKID/20261113/us-east-1/ses/aws4_request"
+                    ),
+                ]
+            ),
+            s("ses", "ListIdentities")
+        );
+        // SigV2 Query authentication (SignatureVersion + Timestamp) is the
+        // Action's service's; an S3 SigV2 presign (Expires) is S3's.
+        for (action, service) in [("ListQueues", "sqs"), ("DescribeRegions", "ec2")] {
+            assert_eq!(
+                detect(
+                    None,
+                    None,
+                    &[
+                        ("Action", action),
+                        ("AWSAccessKeyId", "AKID"),
+                        ("Signature", "x"),
+                        ("SignatureVersion", "2"),
+                        ("SignatureMethod", "HmacSHA256"),
+                        ("Timestamp", "2026-11-13T00:00:00Z"),
+                    ]
+                ),
+                s(service, action)
+            );
+        }
+        assert_eq!(
+            detect(
+                None,
+                None,
+                &[
+                    ("Action", "ListQueues"),
+                    ("AWSAccessKeyId", "AKID"),
+                    ("Signature", "x"),
+                    ("Expires", "1900000000"),
+                ]
+            ),
+            s("s3", "")
+        );
+        // An S3 or API Gateway request keeps it: `Action` is a parameter.
         assert_eq!(
             detect(
                 Some("pubb.s3.us-east-1.amazonaws.com"),
