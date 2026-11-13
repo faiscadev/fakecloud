@@ -328,7 +328,14 @@ async fn unsigned_assume_root_is_refused_before_its_task_policy_is_validated() {
     let status = resp.status().as_u16();
     let body = resp.text().await.unwrap();
     assert_eq!(status, 403, "{body}");
-    assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+    assert!(
+        body.contains("<Code>MissingAuthenticationToken</Code>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<Message>Request is missing Authentication Token</Message>"),
+        "{body}"
+    );
     assert!(!body.contains("ValidationError"), "{body}");
 }
 

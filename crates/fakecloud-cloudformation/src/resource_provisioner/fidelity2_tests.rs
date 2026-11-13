@@ -710,6 +710,7 @@ fn sns_topic_update_applies_tags_and_diffs_inline_subscriptions() {
                 attributes: BTreeMap::new(),
                 confirmed: true,
                 confirmation_token: None,
+                confirmation_auth: Default::default(),
             },
         );
     }

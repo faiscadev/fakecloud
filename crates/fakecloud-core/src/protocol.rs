@@ -155,6 +155,62 @@ const REST_JSON_SERVICES: &[&str] = &[
     "iotwireless",
 ];
 
+/// Whether the request is an S3 or API Gateway request on which a
+/// query-string `Action` is only a parameter, never a Query call: its `Host`
+/// is an S3 endpoint (path-style or a bucket's virtual host) or an
+/// execute-api host, its SigV4 scope (header or presign) is `s3` or
+/// `execute-api`, or it is an S3 SigV2 presign (`AWSAccessKeyId`,
+/// `Signature` and `Expires`; a SigV2 Query signature carries
+/// `SignatureVersion` and `Timestamp` instead). Dispatch adds the cases it
+/// alone can tell: an unsigned plain-host path addressing an existing bucket,
+/// and an API Gateway custom-domain host.
+pub fn query_action_is_a_parameter(
+    headers: &HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> bool {
+    const PARAMETER_SERVICES: &[&str] = &["s3", "execute-api"];
+    let host = parse_routing_host_from_headers(headers)
+        .is_some_and(|h| PARAMETER_SERVICES.contains(&h.service.as_str()) || h.bucket.is_some())
+        || headers
+            .get(http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|h| h.contains(".execute-api."));
+    let scope = extract_service_from_auth(headers)
+        .or_else(|| {
+            let credential = query_params.get("X-Amz-Credential")?;
+            Some(normalize_service_name(credential.split('/').nth(3)?).to_string())
+        })
+        .is_some_and(|s| PARAMETER_SERVICES.contains(&s.as_str()));
+    let sigv2_presign = query_params.contains_key("AWSAccessKeyId")
+        && query_params.contains_key("Signature")
+        && query_params.contains_key("Expires")
+        && !query_params.contains_key("SignatureVersion");
+    host || scope || sigv2_presign
+}
+
+/// A query-string `Action` as a Query call: of the service the signature
+/// names, else the one the action names, else the one the `Host` names --
+/// unless the request is S3's or API Gateway's
+/// ([`query_action_is_a_parameter`]).
+fn query_string_action(
+    headers: &HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> Option<DetectedRequest> {
+    let action = query_params.get("Action")?;
+    if query_action_is_a_parameter(headers, query_params) {
+        return None;
+    }
+    let service = extract_service_from_auth(headers)
+        .or_else(|| infer_service_from_action(action))
+        .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service))?;
+    let protocol = query_protocol_for(&service);
+    Some(DetectedRequest {
+        service,
+        action: action.clone(),
+        protocol,
+    })
+}
+
 /// Detected service name and action from an incoming HTTP request.
 #[derive(Debug, Clone)]
 pub struct DetectedRequest {
@@ -177,18 +233,8 @@ pub fn detect_service_headers_only(
     if let Some(target) = headers.get("x-amz-target").and_then(|v| v.to_str().ok()) {
         return parse_amz_target(target);
     }
-    if let Some(action) = query_params.get("Action") {
-        let service = extract_service_from_auth(headers)
-            .or_else(|| infer_service_from_action(action))
-            .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service));
-        if let Some(service) = service {
-            let protocol = query_protocol_for(&service);
-            return Some(DetectedRequest {
-                service,
-                action: action.clone(),
-                protocol,
-            });
-        }
+    if let Some(detected) = query_string_action(headers, query_params) {
+        return Some(detected);
     }
     if let Some(service) = extract_service_from_auth(headers) {
         if let Some(protocol) = rest_protocol_for(&service) {
@@ -284,19 +330,10 @@ pub fn detect_service(
         return parse_amz_target(target);
     }
 
-    // 2. Check for Query protocol (Action parameter in query string or form body)
-    if let Some(action) = query_params.get("Action") {
-        let service = extract_service_from_auth(headers)
-            .or_else(|| infer_service_from_action(action))
-            .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service));
-        if let Some(service) = service {
-            let protocol = query_protocol_for(&service);
-            return Some(DetectedRequest {
-                service,
-                action: action.clone(),
-                protocol,
-            });
-        }
+    // 2. A Query `Action` in the query string, for the service the request
+    //    names (see [`query_string_action`]).
+    if let Some(detected) = query_string_action(headers, query_params) {
+        return Some(detected);
     }
 
     // 3. Try a form-encoded body. Only a body declared as a form is one: real
@@ -396,6 +433,20 @@ pub struct RoutingHost {
 
 const LOCALSTACK_SUFFIX: &str = ".localhost.localstack.cloud";
 
+/// The service an endpoint's leading label names. SES (v1 and v2) is served
+/// at `email.<region>`; every other label is the service's own name.
+fn host_label_service(label: &str) -> String {
+    match label {
+        "email" => "ses".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Services whose commercial-partition endpoint is the region-less
+/// `<service>.amazonaws.com` (`s3.amazonaws.com` is handled with S3's other
+/// hosts).
+const GLOBAL_ENDPOINT_SERVICES: &[&str] = &["iam", "sts", "route53", "cloudfront"];
+
 /// Parse a `Host` header value for a LocalStack- or AWS-shaped hostname.
 /// Returns `None` for anything that doesn't match — callers fall through
 /// to their existing detection path.
@@ -407,6 +458,18 @@ pub fn parse_routing_host(host: &str) -> Option<RoutingHost> {
     let hostname = hostname.to_ascii_lowercase();
     if let Some(prefix) = hostname.strip_suffix(LOCALSTACK_SUFFIX) {
         return parse_localstack_prefix(prefix);
+    }
+    // The commercial partition's global endpoints carry no region
+    // (`route53.amazonaws.com`); they sign for us-east-1.
+    if let Some(service) = hostname
+        .strip_suffix(".amazonaws.com")
+        .filter(|s| GLOBAL_ENDPOINT_SERVICES.contains(s))
+    {
+        return Some(RoutingHost {
+            service: service.to_string(),
+            region: "us-east-1".to_string(),
+            bucket: None,
+        });
     }
     // Endpoint hostnames share one shape across partitions; only the DNS
     // suffix differs, so accept every partition's.
@@ -487,7 +550,7 @@ fn parse_localstack_prefix(prefix: &str) -> Option<RoutingHost> {
     }
     match labels.len() {
         2 => Some(RoutingHost {
-            service: labels[0].to_string(),
+            service: host_label_service(labels[0]),
             region: labels[1].to_string(),
             bucket: None,
         }),
@@ -666,7 +729,7 @@ fn parse_aws_prefix(prefix: &str) -> Option<RoutingHost> {
     // `<service>.<region>` — the common case for every other service.
     match labels.as_slice() {
         [service, region] => Some(RoutingHost {
-            service: service.to_string(),
+            service: host_label_service(service),
             region: region.to_string(),
             bucket: None,
         }),
@@ -829,6 +892,13 @@ pub(crate) fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
 }
 
 /// Returns the REST protocol variant for a service, or None if not a REST service.
+/// Whether `service`'s API is a REST protocol (restXml or restJson1), so a
+/// REST request to its API host is one of its operations. ECR's API is
+/// awsJson: a REST request routed to ECR is its OCI registry.
+pub fn is_rest_api_service(service: &str) -> bool {
+    rest_protocol_for(service).is_some()
+}
+
 fn rest_protocol_for(service: &str) -> Option<AwsProtocol> {
     if REST_XML_SERVICES.contains(&service) {
         Some(AwsProtocol::Rest)
@@ -851,7 +921,10 @@ fn infer_service_from_action(action: &str) -> Option<String> {
         | "GetSessionToken"
         | "GetFederationToken"
         | "GetAccessKeyInfo"
-        | "DecodeAuthorizationMessage" => Some("sts".to_string()),
+        | "DecodeAuthorizationMessage"
+        | "AssumeRoot"
+        | "GetWebIdentityToken"
+        | "GetDelegatedAccessToken" => Some("sts".to_string()),
         "CreateUser" | "DeleteUser" | "GetUser" | "ListUsers" | "CreateRole" | "DeleteRole"
         | "GetRole" | "ListRoles" | "CreatePolicy" | "DeletePolicy" | "GetPolicy"
         | "ListPolicies" | "AttachRolePolicy" | "DetachRolePolicy" | "CreateAccessKey"
@@ -907,9 +980,17 @@ fn infer_service_from_action(action: &str) -> Option<String> {
         // hands to HTTP/S and email subscribers are unsigned bare GETs (no auth
         // header), so the service must be inferred from the action alone.
         "ConfirmSubscription" | "Unsubscribe" => Some("sns".to_string()),
-        _ => None,
+        // Any other Query operation name exactly one modeled Query service
+        // has (generated from aws-models).
+        _ => query_actions::QUERY_ACTION_SERVICES
+            .binary_search_by(|(a, _)| (*a).cmp(action))
+            .ok()
+            .map(|i| query_actions::QUERY_ACTION_SERVICES[i].1.to_string()),
     }
 }
+
+#[path = "query_actions_gen.rs"]
+mod query_actions;
 
 /// Extract service name from the SigV4 Authorization header credential scope.
 pub(crate) fn extract_service_from_auth(headers: &HeaderMap) -> Option<String> {
@@ -1476,6 +1557,30 @@ mod tests {
             infer_service_from_action("GetCallerIdentity").as_deref(),
             Some("sts")
         );
+        // Any Query operation name one modeled service has routes too.
+        for (action, service) in [
+            ("ListTopics", "sns"),
+            ("ListQueues", "sqs"),
+            ("DescribeRegions", "ec2"),
+            ("DescribeStacks", "cloudformation"),
+            ("DescribeLoadBalancers", "elasticloadbalancing"),
+        ] {
+            assert_eq!(
+                infer_service_from_action(action).as_deref(),
+                Some(service),
+                "{action}"
+            );
+        }
+        // A name several services share does not.
+        assert_eq!(infer_service_from_action("ListTagsForResource"), None);
+        // Every STS operation routes an unsigned form POST on the plain host.
+        for action in [
+            "AssumeRoot",
+            "GetWebIdentityToken",
+            "GetDelegatedAccessToken",
+        ] {
+            assert_eq!(infer_service_from_action(action).as_deref(), Some("sts"));
+        }
     }
 
     #[test]
@@ -1876,6 +1981,241 @@ mod tests {
         assert_eq!(h.service, "s3");
         assert_eq!(h.region, "us-east-1");
         assert_eq!(h.bucket.as_deref(), Some("a.b.c"));
+    }
+
+    #[test]
+    fn query_string_action_is_a_parameter_only_of_s3_and_api_gateway() {
+        let detect = |host: Option<&str>, auth: Option<&str>, query: &[(&str, &str)]| {
+            let mut headers = HeaderMap::new();
+            if let Some(host) = host {
+                headers.insert(http::header::HOST, host.parse().unwrap());
+            }
+            if let Some(auth) = auth {
+                headers.insert(http::header::AUTHORIZATION, auth.parse().unwrap());
+            }
+            let params: HashMap<String, String> = query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let full =
+                detect_service(&headers, &params, &Bytes::new()).map(|d| (d.service, d.action));
+            let head =
+                detect_service_headers_only(&headers, &params).map(|d| (d.service, d.action));
+            assert_eq!(full, head, "{host:?} {query:?}");
+            full
+        };
+        let s = |svc: &str, action: &str| Some((svc.to_string(), action.to_string()));
+        // Nothing else names a service: the Action does (dispatch first
+        // takes out a plain-host path naming an existing bucket).
+        assert_eq!(
+            detect(None, None, &[("Action", "ListQueues")]),
+            s("sqs", "ListQueues")
+        );
+        // SES v1 is Query on SES's scope and host (v2 is restJson1 there).
+        assert_eq!(
+            detect(
+                None,
+                Some("AWS4-HMAC-SHA256 Credential=AKID/20261113/us-east-1/ses/aws4_request, SignedHeaders=host, Signature=x"),
+                &[("Action", "ListIdentities")]
+            ),
+            s("ses", "ListIdentities")
+        );
+        assert_eq!(
+            detect(
+                Some("email.us-east-1.amazonaws.com"),
+                None,
+                &[("Action", "ListIdentities")]
+            ),
+            s("ses", "ListIdentities")
+        );
+        assert_eq!(
+            detect(
+                None,
+                None,
+                &[
+                    ("Action", "ListIdentities"),
+                    (
+                        "X-Amz-Credential",
+                        "AKID/20261113/us-east-1/ses/aws4_request"
+                    ),
+                ]
+            ),
+            s("ses", "ListIdentities")
+        );
+        // SigV2 Query authentication (SignatureVersion + Timestamp) is the
+        // Action's service's; an S3 SigV2 presign (Expires) is S3's.
+        for (action, service) in [("ListQueues", "sqs"), ("DescribeRegions", "ec2")] {
+            assert_eq!(
+                detect(
+                    None,
+                    None,
+                    &[
+                        ("Action", action),
+                        ("AWSAccessKeyId", "AKID"),
+                        ("Signature", "x"),
+                        ("SignatureVersion", "2"),
+                        ("SignatureMethod", "HmacSHA256"),
+                        ("Timestamp", "2026-11-13T00:00:00Z"),
+                    ]
+                ),
+                s(service, action)
+            );
+        }
+        assert_eq!(
+            detect(
+                None,
+                None,
+                &[
+                    ("Action", "ListQueues"),
+                    ("AWSAccessKeyId", "AKID"),
+                    ("Signature", "x"),
+                    ("Expires", "1900000000"),
+                ]
+            ),
+            s("s3", "")
+        );
+        // An S3 or API Gateway request keeps it: `Action` is a parameter.
+        assert_eq!(
+            detect(
+                Some("pubb.s3.us-east-1.amazonaws.com"),
+                None,
+                &[("Action", "DescribeRegions")]
+            ),
+            s("s3", "")
+        );
+        assert_eq!(
+            detect(
+                Some("abc123.execute-api.us-east-1.amazonaws.com"),
+                None,
+                &[("Action", "Publish")]
+            ),
+            None,
+            "an invocation: dispatch hands it to API Gateway"
+        );
+        assert_eq!(
+            detect(
+                None,
+                None,
+                &[
+                    ("Action", "ListQueues"),
+                    (
+                        "X-Amz-Credential",
+                        "AKID/20261113/us-east-1/s3/aws4_request"
+                    ),
+                ]
+            ),
+            s("s3", "")
+        );
+        assert_eq!(
+            detect(
+                None,
+                Some("AWS4-HMAC-SHA256 Credential=AKID/20261113/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=x"),
+                &[("Action", "ListTopics")]
+            ),
+            s("s3", "")
+        );
+        // A Query service's request is its Query call.
+        assert_eq!(
+            detect(
+                Some("sqs.us-east-1.amazonaws.com"),
+                None,
+                &[("Action", "ListQueues")]
+            ),
+            s("sqs", "ListQueues")
+        );
+        assert_eq!(
+            detect(
+                None,
+                None,
+                &[
+                    ("Action", "GetCallerIdentity"),
+                    (
+                        "X-Amz-Credential",
+                        "AKID/20261113/us-east-1/sts/aws4_request"
+                    ),
+                ]
+            ),
+            s("sts", "GetCallerIdentity")
+        );
+    }
+
+    #[test]
+    fn query_action_table_matches_the_models() {
+        // Re-derives the table: rerun scripts/generate-query-action-services.py
+        // after a model refresh.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../aws-models");
+        let mut owners: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            Default::default();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            if !["awsQuery\"", "ec2Query\"", "awsQueryCompatible\""]
+                .iter()
+                .any(|p| text.contains(&format!("aws.protocols#{p}")))
+            {
+                continue;
+            }
+            let model: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let shapes = model["shapes"].as_object().unwrap();
+            let service = shapes.values().find(|s| s["type"] == "service").unwrap();
+            let traits = service["traits"].as_object().unwrap();
+            if ![
+                "aws.protocols#awsQuery",
+                "aws.protocols#ec2Query",
+                "aws.protocols#awsQueryCompatible",
+            ]
+            .iter()
+            .any(|p| traits.contains_key(*p))
+            {
+                continue;
+            }
+            let signing = traits["aws.auth#sigv4"]["name"].as_str().unwrap();
+            for (id, shape) in shapes {
+                if shape["type"] == "operation" {
+                    let op = id.split_once('#').unwrap().1;
+                    owners
+                        .entry(op.to_string())
+                        .or_default()
+                        .insert(signing.to_string());
+                }
+            }
+        }
+        let derived: Vec<(String, String)> = owners
+            .into_iter()
+            .filter(|(_, s)| s.len() == 1)
+            .map(|(op, s)| (op, s.into_iter().next().unwrap()))
+            .collect();
+        let table: Vec<(String, String)> = query_actions::QUERY_ACTION_SERVICES
+            .iter()
+            .map(|(a, s)| (a.to_string(), s.to_string()))
+            .collect();
+        assert_eq!(
+            table, derived,
+            "rerun scripts/generate-query-action-services.py"
+        );
+    }
+
+    #[test]
+    fn parse_routing_host_email_is_ses() {
+        for host in [
+            "email.us-east-1.amazonaws.com",
+            "email.eu-west-1.localhost.localstack.cloud:4566",
+        ] {
+            assert_eq!(parse_routing_host(host).unwrap().service, "ses", "{host}");
+        }
+    }
+
+    #[test]
+    fn parse_routing_host_global_endpoints() {
+        for service in ["iam", "sts", "route53", "cloudfront"] {
+            let h = parse_routing_host(&format!("{service}.amazonaws.com:443")).unwrap();
+            assert_eq!(h.service, service);
+            assert_eq!(h.region, "us-east-1");
+            assert_eq!(h.bucket, None);
+        }
+        // Only those services have a region-less endpoint.
+        assert!(parse_routing_host("lambda.amazonaws.com").is_none());
+        assert!(parse_routing_host("route53.amazonaws.com.cn").is_none());
     }
 
     #[test]

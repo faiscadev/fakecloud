@@ -1,3 +1,4 @@
+pub mod anonymous;
 pub mod auth;
 pub mod auth_message;
 pub mod cbor;

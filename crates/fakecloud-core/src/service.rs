@@ -960,6 +960,37 @@ pub trait AwsService: Send + Sync {
         false
     }
 
+    /// Whether a REST request addressed to this service's API host is one of
+    /// its modeled control-plane operations, rather than a data-plane request
+    /// the service also serves there (an API Gateway invocation). Only a
+    /// control-plane request is refused for missing credentials
+    /// ([`AwsService::anonymous_access`]). Defaults to `true`.
+    fn is_control_plane_request(&self, _request: &AwsRequest) -> bool {
+        true
+    }
+
+    /// What this service does with an unsigned request to the operation
+    /// `request` names, under `--iam soft|strict` (with enforcement off every
+    /// unsigned request is served). Dispatch asks for a request that carries
+    /// no credential at all and names an API operation: an awsJson target, a
+    /// Query `Action`, or a REST request addressed to this service's API
+    /// host. [`AnonymousAccess::Refused`] answers it with the service's
+    /// missing-credentials error before validation, authorization or the
+    /// handler (strict; soft logs it); [`AnonymousAccess::Authorized`]
+    /// authorizes the anonymous principal against the resource's policy;
+    /// [`AnonymousAccess::Unauthenticated`] serves it without authorization.
+    /// Defaults to the Smithy model's verdict
+    /// ([`AnonymousAccess::for_operation`]): unauthenticated for an operation
+    /// marked `optionalAuth` or `auth: []`, refused otherwise.
+    ///
+    /// [`AnonymousAccess::Refused`]: crate::anonymous::AnonymousAccess::Refused
+    /// [`AnonymousAccess::Authorized`]: crate::anonymous::AnonymousAccess::Authorized
+    /// [`AnonymousAccess::Unauthenticated`]: crate::anonymous::AnonymousAccess::Unauthenticated
+    /// [`AnonymousAccess::for_operation`]: crate::anonymous::AnonymousAccess::for_operation
+    fn anonymous_access(&self, request: &AwsRequest) -> crate::anonymous::AnonymousAccess {
+        crate::anonymous::AnonymousAccess::for_operation(&request.service, &request.action)
+    }
+
     /// Validation AWS performs before authorizing `request`: an error here
     /// is returned to the caller whatever its permissions, anonymous callers
     /// included where the service validates them first

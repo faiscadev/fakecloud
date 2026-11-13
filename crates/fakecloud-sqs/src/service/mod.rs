@@ -246,6 +246,18 @@ impl AwsService for SqsService {
         true
     }
 
+    /// SQS authorizes an unsigned request as the anonymous principal against
+    /// the queue's policy rather than refusing it for its missing
+    /// credentials (recorded: an unsigned `ListQueues` is 403 `AccessDenied`
+    /// "Access to the resource https://sqs.us-east-1.amazonaws.com/ is
+    /// denied.").
+    fn anonymous_access(
+        &self,
+        _request: &AwsRequest,
+    ) -> fakecloud_core::anonymous::AnonymousAccess {
+        fakecloud_core::anonymous::AnonymousAccess::Authorized
+    }
+
     /// SQS resources are queue ARNs of the form
     /// `arn:{partition}:sqs:{region}:{account}:{queue-name}`. The queue
     /// name is carried differently depending on the action: queue-targeted

@@ -1607,6 +1607,7 @@ mod xml_escape_render_tests {
             attributes: BTreeMap::new(),
             confirmed: true,
             confirmation_token: None,
+            confirmation_auth: Default::default(),
         };
         let out = format_sub_member(&sub);
         assert!(out.contains("<Endpoint>https://example.com/hook?a=1&amp;b=2</Endpoint>"));
@@ -1649,6 +1650,7 @@ mod filter_consistency_tests {
             attributes,
             confirmed: true,
             confirmation_token: None,
+            confirmation_auth: Default::default(),
         }
     }
 

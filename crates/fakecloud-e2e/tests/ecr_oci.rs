@@ -53,6 +53,28 @@ async fn api_version_probe_without_auth_is_challenged() {
     assert!(resp.headers().contains_key("www-authenticate"));
 }
 
+/// The registry challenge is the registry's own, under `--iam strict` and on
+/// an ECR host too: ECR's API is awsJson, so an unsigned REST request to ECR
+/// is a registry call, never refused for missing AWS credentials.
+#[tokio::test]
+async fn api_version_probe_is_challenged_under_strict_on_ecr_hosts() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    for host in [
+        None,
+        Some("ecr.us-east-1.amazonaws.com"),
+        Some("ecr.us-east-1.localhost.localstack.cloud"),
+        Some("123456789012.dkr.ecr.us-east-1.amazonaws.com"),
+    ] {
+        let mut req = reqwest::Client::new().get(format!("{}/v2/", server.endpoint()));
+        if let Some(host) = host {
+            req = req.header("host", host);
+        }
+        let resp = req.send().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED, "{host:?}");
+        assert!(resp.headers().contains_key("www-authenticate"), "{host:?}");
+    }
+}
+
 #[tokio::test]
 async fn api_version_probe_with_bad_credentials_is_rejected() {
     let server = TestServer::start().await;

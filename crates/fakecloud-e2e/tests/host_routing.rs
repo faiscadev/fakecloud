@@ -490,3 +490,175 @@ async fn s3_virtual_hosted_put_get_via_aws_dash_separated() {
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), "dashed");
 }
+
+/// A Query `Action` in the query string routes an unsigned GET by the
+/// action's service, as a form body does: `ListTopics` is SNS's, on the
+/// plain host too (it used to fall to S3's ListBuckets).
+#[tokio::test]
+async fn unsigned_query_string_action_routes_by_action() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    for (query, marker) in [
+        (
+            "Action=ListTopics&Version=2010-03-31",
+            "<ListTopicsResponse",
+        ),
+        (
+            "Action=ListQueues&Version=2012-11-05",
+            "<ListQueuesResponse",
+        ),
+    ] {
+        let resp = http
+            .get(format!("{}/?{query}", server.endpoint()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{query}");
+        let body = resp.text().await.unwrap();
+        assert!(body.contains(marker), "{query}: {body}");
+    }
+}
+
+/// A query-string `Action` routes only a request nothing else routes: an S3
+/// object (path-style on the plain host, virtual-hosted, or presigned) or an
+/// API Gateway invocation carrying an `Action` parameter stays theirs.
+#[tokio::test]
+async fn query_string_action_does_not_hijack_s3_or_api_gateway() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    s3.create_bucket().bucket("pubb").send().await.unwrap();
+    s3.put_object()
+        .bucket("pubb")
+        .key("k.txt")
+        .body(ByteStream::from_static(b"object body"))
+        .send()
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let get = |path: String, host: Option<String>| {
+        let mut req = http.get(format!("{}{path}", server.endpoint()));
+        if let Some(host) = host {
+            req = req.header("Host", host);
+        }
+        async move {
+            let resp = req.send().await.unwrap();
+            (resp.status().as_u16(), resp.text().await.unwrap())
+        }
+    };
+
+    // Path-style on the plain host: the bucket exists, so it is S3's.
+    let (status, body) = get("/pubb/k.txt?Action=ListQueues".into(), None).await;
+    assert_eq!((status, body.as_str()), (200, "object body"));
+    // Virtual-hosted.
+    let (status, body) = get(
+        "/k.txt?Action=DescribeRegions".into(),
+        Some(aws_host("pubb.s3.us-east-1")),
+    )
+    .await;
+    assert_eq!((status, body.as_str()), (200, "object body"));
+    // Presigned (unverified without --verify-sigv4): its scope names S3.
+    let date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let presigned = format!(
+        "/pubb/k.txt?Action=ListQueues&X-Amz-Algorithm=AWS4-HMAC-SHA256\
+         &X-Amz-Credential=test%2F{}%2Fus-east-1%2Fs3%2Faws4_request\
+         &X-Amz-Date={date}&X-Amz-Expires=300&X-Amz-SignedHeaders=host\
+         &X-Amz-Signature=00",
+        &date[..8]
+    );
+    let (status, body) = get(presigned, None).await;
+    assert_eq!((status, body.as_str()), (200, "object body"));
+    // An execute-api host is the API's: SNS never sees the Publish.
+    let (_, body) = get(
+        "/prod/items?Action=Publish&Message=x".into(),
+        Some(aws_host("abc123.execute-api.us-east-1")),
+    )
+    .await;
+    assert!(!body.contains("sns.amazonaws.com"), "{body}");
+    assert!(!body.contains("PublishResponse"), "{body}");
+}
+
+/// SES v1 is Query on SES's signing scope (v2 is restJson1 on the same
+/// scope): an `Action` in the URL of a signed GET, a presigned GET, or a POST
+/// whose other parameters are in the body is SES v1's.
+#[tokio::test]
+async fn ses_v1_query_action_in_the_url_reaches_ses() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let scope = format!("test/{}/us-east-1/ses/aws4_request", &date[..8]);
+    let auth = format!("AWS4-HMAC-SHA256 Credential={scope}, SignedHeaders=host, Signature=00");
+    let base = server.endpoint();
+
+    let signed_get = http
+        .get(format!("{base}/?Action=ListIdentities&Version=2010-12-01"))
+        .header("authorization", &auth);
+    let presigned_get = http.get(format!(
+        "{base}/?Action=ListIdentities&Version=2010-12-01&X-Amz-Algorithm=AWS4-HMAC-SHA256\
+         &X-Amz-Credential={}&X-Amz-Date={date}&X-Amz-Expires=300\
+         &X-Amz-SignedHeaders=host&X-Amz-Signature=00",
+        scope.replace('/', "%2F")
+    ));
+    let post = http
+        .post(format!("{base}/?Action=ListIdentities"))
+        .header("authorization", &auth)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body("Version=2010-12-01&IdentityType=EmailAddress");
+    for (name, req) in [
+        ("signed GET", signed_get),
+        ("presigned GET", presigned_get),
+        ("POST", post),
+    ] {
+        let resp = req.send().await.unwrap();
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap();
+        assert_eq!(status, 200, "{name}: {body}");
+        assert!(body.contains("<ListIdentitiesResponse"), "{name}: {body}");
+    }
+}
+
+/// SigV2 Query authentication (`SignatureVersion=2` + `Timestamp`, no
+/// `Expires`) is not an S3 presign: the request is its Action's service's.
+#[tokio::test]
+async fn sigv2_query_auth_routes_by_action() {
+    let server = TestServer::start().await;
+    for (action, version, marker) in [
+        ("ListQueues", "2012-11-05", "<ListQueuesResponse"),
+        ("DescribeRegions", "2016-11-15", "<DescribeRegionsResponse"),
+    ] {
+        let resp = reqwest::Client::new()
+            .get(format!(
+                "{}/?Action={action}&Version={version}&AWSAccessKeyId=test\
+                 &SignatureVersion=2&SignatureMethod=HmacSHA256\
+                 &Timestamp=2026-11-13T00%3A00%3A00Z&Signature=abc",
+                server.endpoint()
+            ))
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap();
+        assert_eq!(status, 200, "{action}: {body}");
+        assert!(body.contains(marker), "{action}: {body}");
+    }
+}
+
+/// SES (v1 and v2) is served at `email.<region>`: an unsigned SES v2 REST
+/// call on that host is SES's, not the ECR registry's `/v2/`.
+#[tokio::test]
+async fn unsigned_sesv2_on_the_email_host_reaches_ses() {
+    let server = TestServer::start().await;
+    for host in [
+        aws_host("email.us-east-1"),
+        localstack_host("email.us-east-1", 4566),
+    ] {
+        let resp = reqwest::Client::new()
+            .get(format!("{}/v2/email/identities", server.endpoint()))
+            .header("Host", &host)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{host}");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["EmailIdentities"].is_array(), "{host}: {body}");
+    }
+}

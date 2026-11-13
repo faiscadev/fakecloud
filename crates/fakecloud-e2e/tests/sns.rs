@@ -1097,6 +1097,129 @@ async fn sns_confirm_subscription() {
     );
 }
 
+/// `AuthenticateOnUnsubscribe=true` on a signed ConfirmSubscription
+/// "disallows unauthenticated unsubscribes": the unsigned UnsubscribeURL GET
+/// is refused, a signed Unsubscribe works. Only the delivered token confirms:
+/// the (public) subscription ARN does not.
+#[tokio::test]
+async fn sns_authenticate_on_unsubscribe() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+    let topic_arn = client
+        .create_topic()
+        .name("guarded")
+        .send()
+        .await
+        .unwrap()
+        .topic_arn()
+        .unwrap()
+        .to_string();
+    let sub_arn = client
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("http")
+        .endpoint("http://example.com/guarded")
+        .return_subscription_arn(true)
+        .send()
+        .await
+        .unwrap()
+        .subscription_arn()
+        .unwrap()
+        .to_string();
+
+    let err = client
+        .confirm_subscription()
+        .topic_arn(&topic_arn)
+        .token(&sub_arn)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        aws_sdk_sns::error::ProvideErrorMetadata::code(&err.into_service_error()),
+        Some("InvalidParameter")
+    );
+
+    let http = reqwest::Client::new();
+    let pending: serde_json::Value = http
+        .get(format!(
+            "{}/_fakecloud/sns/pending-confirmations",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = pending["pendingConfirmations"][0]["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client
+        .confirm_subscription()
+        .topic_arn(&topic_arn)
+        .token(&token)
+        .authenticate_on_unsubscribe("true")
+        .send()
+        .await
+        .unwrap();
+    let attrs = client
+        .get_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        attrs
+            .attributes()
+            .unwrap()
+            .get("ConfirmationWasAuthenticated")
+            .map(String::as_str),
+        Some("true")
+    );
+
+    let encoded: String = sub_arn
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    let resp = http
+        .get(format!(
+            "{}/?Action=Unsubscribe&SubscriptionArn={encoded}",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<Code>MissingAuthenticationToken</Code>"),
+        "{body}"
+    );
+    assert!(client
+        .get_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .send()
+        .await
+        .is_ok());
+
+    client
+        .unsubscribe()
+        .subscription_arn(&sub_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(client
+        .get_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .send()
+        .await
+        .is_err());
+}
+
 /// Regression: binary message attributes should be preserved when delivered to SQS
 /// via raw message delivery.
 #[tokio::test]

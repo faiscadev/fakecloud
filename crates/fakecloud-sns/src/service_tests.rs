@@ -1605,8 +1605,119 @@ fn confirm_subscription_matches_correct_pending_sub() {
     }
 }
 
+/// A pending HTTP subscription's ARN and confirmation token.
+fn pending_http_subscription(
+    svc: &SnsService,
+    state: &crate::state::SharedSnsState,
+    topic: &str,
+) -> (String, String, String) {
+    assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", topic)])));
+    let topic_arn = format!("arn:aws:sns:us-east-1:123456789012:{topic}");
+    assert_ok(&svc.subscribe(&sns_request(
+        "Subscribe",
+        vec![
+            ("TopicArn", &topic_arn),
+            ("Protocol", "http"),
+            ("Endpoint", "http://example.com/hook"),
+        ],
+    )));
+    let s = state.read();
+    let sub = s
+        .default_regional()
+        .unwrap()
+        .subscriptions
+        .values()
+        .find(|sub| sub.topic_arn == topic_arn)
+        .unwrap();
+    (
+        topic_arn,
+        sub.subscription_arn.clone(),
+        sub.confirmation_token.clone().unwrap(),
+    )
+}
+
+fn signed(mut req: AwsRequest) -> AwsRequest {
+    req.access_key_id = Some("AKIAIOSFODNN7EXAMPLE".to_string());
+    req
+}
+
+fn confirmation_was_authenticated(svc: &SnsService, sub_arn: &str) -> bool {
+    let result = svc.get_subscription_attributes(&sns_request(
+        "GetSubscriptionAttributes",
+        vec![("SubscriptionArn", sub_arn)],
+    ));
+    let body = response_body(&result);
+    let marker = "<key>ConfirmationWasAuthenticated</key><value>";
+    let at = body.find(marker).expect("attribute listed") + marker.len();
+    body[at..].starts_with("true")
+}
+
 #[test]
-fn confirm_subscription_accepts_sub_arn_as_token() {
+fn authenticate_on_unsubscribe_refuses_unsigned_unsubscribes() {
+    let (svc, state) = make_sns();
+    let (topic_arn, sub_arn, token) = pending_http_subscription(&svc, &state, "auth-unsub");
+    assert_ok(&svc.confirm_subscription(&signed(sns_request(
+        "ConfirmSubscription",
+        vec![
+            ("TopicArn", &topic_arn),
+            ("Token", &token),
+            ("AuthenticateOnUnsubscribe", "true"),
+        ],
+    ))));
+    assert!(confirmation_was_authenticated(&svc, &sub_arn));
+    let unsubscribe = || sns_request("Unsubscribe", vec![("SubscriptionArn", &sub_arn)]);
+    let Err(err) = svc.unsubscribe(&unsubscribe()) else {
+        panic!("an unsigned unsubscribe must be refused");
+    };
+    assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    assert_eq!(err.code(), "MissingAuthenticationToken");
+    assert_eq!(
+        svc.anonymous_access(&unsubscribe()),
+        fakecloud_core::anonymous::AnonymousAccess::Refused
+    );
+    // A junk Authorization header is no signature.
+    let mut junk = unsubscribe();
+    junk.headers
+        .insert(http::header::AUTHORIZATION, "garbage".parse().unwrap());
+    let Err(err) = svc.unsubscribe(&junk) else {
+        panic!("an unparseable Authorization header must not pass");
+    };
+    assert_eq!(err.code(), "MissingAuthenticationToken");
+    // A signed unsubscribe goes through.
+    assert_ok(&svc.unsubscribe(&signed(unsubscribe())));
+    assert!(state
+        .read()
+        .default_regional()
+        .unwrap()
+        .subscriptions
+        .is_empty());
+}
+
+#[test]
+fn unsigned_confirmation_is_unauthenticated_and_cannot_require_auth() {
+    let (svc, state) = make_sns();
+    let (topic_arn, sub_arn, token) = pending_http_subscription(&svc, &state, "link-confirm");
+    // The SubscribeURL link: unsigned. AuthenticateOnUnsubscribe needs a
+    // signed confirmation, so it is ignored here.
+    assert_ok(&svc.confirm_subscription(&sns_request(
+        "ConfirmSubscription",
+        vec![
+            ("TopicArn", &topic_arn),
+            ("Token", &token),
+            ("AuthenticateOnUnsubscribe", "true"),
+        ],
+    )));
+    assert!(!confirmation_was_authenticated(&svc, &sub_arn));
+    let unsubscribe = sns_request("Unsubscribe", vec![("SubscriptionArn", &sub_arn)]);
+    assert_eq!(
+        svc.anonymous_access(&unsubscribe),
+        fakecloud_core::anonymous::AnonymousAccess::Unauthenticated
+    );
+    assert_ok(&svc.unsubscribe(&unsubscribe));
+}
+
+#[test]
+fn confirm_subscription_refuses_the_sub_arn_as_token() {
     let (svc, state) = make_sns();
     assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "arn-token")])));
 
@@ -1635,15 +1746,18 @@ fn confirm_subscription_accepts_sub_arn_as_token() {
             .clone()
     };
 
-    // Confirm using the subscription ARN as the token (AWS-compatible behavior)
+    // The subscription ARN is public (it is in the confirmation message and
+    // ListSubscriptions); only the unguessable token delivered to the
+    // endpoint confirms it.
     let req = sns_request(
         "ConfirmSubscription",
         vec![("TopicArn", topic_arn), ("Token", &sub_arn)],
     );
-    let result = svc.confirm_subscription(&req);
-    assert_ok(&result);
+    let Err(err) = svc.confirm_subscription(&req) else {
+        panic!("the subscription ARN must not confirm");
+    };
+    assert_eq!(err.code(), "InvalidParameter");
 
-    // Verify the subscription is now confirmed
     let s = state.read();
     let sub = s
         .default_regional()
@@ -1652,7 +1766,7 @@ fn confirm_subscription_accepts_sub_arn_as_token() {
         .values()
         .find(|sub| sub.topic_arn == topic_arn)
         .expect("subscription should exist");
-    assert!(sub.confirmed, "subscription should be confirmed");
+    assert!(!sub.confirmed, "subscription must stay pending");
 }
 
 // --- CreateTopic / DeleteTopic / ListTopics ---
@@ -1929,6 +2043,7 @@ fn malformed_filter_policy_does_not_match() {
         )]),
         confirmed: true,
         confirmation_token: None,
+        confirmation_auth: Default::default(),
     };
     let attrs = BTreeMap::new();
     assert!(
@@ -3675,6 +3790,7 @@ fn subscription_recorded_in_the_callers_account_is_still_found() {
                 attributes: std::collections::BTreeMap::new(),
                 confirmed: true,
                 confirmation_token: None,
+                confirmation_auth: Default::default(),
             },
         );
     let get = sns_request(

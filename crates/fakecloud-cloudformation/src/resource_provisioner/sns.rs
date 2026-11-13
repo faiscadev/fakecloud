@@ -262,6 +262,7 @@ impl ResourceProvisioner {
                             attributes: BTreeMap::new(),
                             confirmed: true,
                             confirmation_token: None,
+                            confirmation_auth: Default::default(),
                         },
                     );
                     sub_arn
@@ -338,6 +339,7 @@ impl ResourceProvisioner {
                     attributes: BTreeMap::new(),
                     confirmed: true,
                     confirmation_token: None,
+                    confirmation_auth: Default::default(),
                 },
             );
             inline_arns.push(sub_arn);
@@ -432,6 +434,7 @@ impl ResourceProvisioner {
             attributes: sns_subscription_attributes(props),
             confirmed: true,
             confirmation_token: None,
+            confirmation_auth: Default::default(),
         };
 
         state.subscriptions.insert(sub_arn.clone(), subscription);
