@@ -2335,6 +2335,47 @@ fn bucket_website_put_get_delete_round_trip() {
     );
 }
 
+#[test]
+fn put_bucket_website_refusals_match_the_recordings() {
+    // Recorded on S3: every one is 400 InvalidArgument with this message.
+    let svc = make_service();
+    seed_bucket(&svc, "rules");
+    let index = |suffix: &str| format!("<IndexDocument><Suffix>{suffix}</Suffix></IndexDocument>");
+    let redirect =
+        "<RedirectAllRequestsTo><HostName>example.com</HostName></RedirectAllRequestsTo>";
+    let conjunction =
+        "RedirectAllRequestsTo cannot be provided in conjunction with other Routing Rules.";
+    for (members, message) in [
+        (index("a/b"), "The IndexDocument Suffix is not well formed"),
+        (index(""), "The IndexDocument Suffix is not well formed"),
+        (
+            "<ErrorDocument><Key>e.html</Key></ErrorDocument>".to_string(),
+            "A value for IndexDocument Suffix must be provided if RedirectAllRequestsTo is empty",
+        ),
+        (format!("{redirect}{}", index("index.html")), conjunction),
+        (
+            format!("{redirect}<ErrorDocument><Key>e.html</Key></ErrorDocument>"),
+            conjunction,
+        ),
+        (
+            format!(
+                "{redirect}<RoutingRules><RoutingRule><Redirect><HostName>h</HostName>\
+                 </Redirect></RoutingRule></RoutingRules>"
+            ),
+            conjunction,
+        ),
+    ] {
+        let body = format!("<WebsiteConfiguration>{members}</WebsiteConfiguration>");
+        let req = make_request(Method::PUT, "/rules", &[("website", "")], body.as_bytes());
+        let err = assert_aws_err(
+            svc.put_bucket_website("123456789012", &req, "rules"),
+            "InvalidArgument",
+        );
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(err.message(), message, "{body}");
+    }
+}
+
 #[tokio::test]
 async fn website_configuration_is_read_as_xml_and_validated() {
     // The error document's key is the `Key` element's text, whatever text

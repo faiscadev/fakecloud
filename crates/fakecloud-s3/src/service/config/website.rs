@@ -14,6 +14,9 @@ pub(crate) struct WebsiteConfig {
     pub error_key: Option<String>,
     /// Whether `RedirectAllRequestsTo` is present.
     redirect_all: bool,
+    /// Whether any other member (`IndexDocument`, `ErrorDocument`,
+    /// `RoutingRules`) is present.
+    others: bool,
 }
 
 fn malformed_xml() -> AwsServiceError {
@@ -60,6 +63,12 @@ impl WebsiteConfig {
                     path.push(name);
                     text.clear();
                     let root = "WebsiteConfiguration";
+                    if at(&path, &[root, "IndexDocument"])
+                        || at(&path, &[root, "ErrorDocument"])
+                        || at(&path, &[root, "RoutingRules"])
+                    {
+                        config.others = true;
+                    }
                     if at(&path, &[root, "IndexDocument"]) {
                         index = Some(false);
                     } else if at(&path, &[root, "ErrorDocument"]) {
@@ -87,6 +96,9 @@ impl WebsiteConfig {
                         || at(&child, &[root, "RoutingRules", "RoutingRule"])
                     {
                         return Err(malformed_xml());
+                    }
+                    if at(&child, &[root, "RoutingRules"]) {
+                        config.others = true;
                     }
                     if at(&child, &[root, "IndexDocument", "Suffix"]) {
                         config.index_suffix = Some(String::new());
@@ -154,14 +166,19 @@ impl WebsiteConfig {
         Ok(config)
     }
 
-    /// The rules PutBucketWebsite applies beyond the schema (S3 API
-    /// reference, `IndexDocument`: "The suffix must not be empty and must not
-    /// include a slash character"; a configuration with no
-    /// `RedirectAllRequestsTo` must name an index document).
+    /// The rules PutBucketWebsite applies beyond the schema, all 400
+    /// InvalidArgument (recorded): `RedirectAllRequestsTo` alongside any
+    /// other member; no index document without `RedirectAllRequestsTo`; an
+    /// index suffix that is empty or has a slash.
     pub(crate) fn validate(self) -> Result<Self, AwsServiceError> {
         let invalid = |message: &str| {
             AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidArgument", message)
         };
+        if self.redirect_all && self.others {
+            return Err(invalid(
+                "RedirectAllRequestsTo cannot be provided in conjunction with other Routing Rules.",
+            ));
+        }
         match self.index_suffix.as_deref() {
             None if !self.redirect_all => Err(invalid(
                 "A value for IndexDocument Suffix must be provided if RedirectAllRequestsTo is empty",
