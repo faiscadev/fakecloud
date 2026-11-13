@@ -146,27 +146,50 @@ async fn sns_confirm_subscription() {
         .unwrap();
     let arn = topic.topic_arn().unwrap();
 
-    // Subscribe an SQS endpoint — SQS subscriptions auto-confirm in fakecloud,
-    // but we can still call ConfirmSubscription on any subscription.
-    // Use a fake token; fakecloud accepts the subscription ARN as a valid token.
-    let sub = client
+    // An HTTP subscription is pending until the endpoint confirms it with
+    // the token SNS delivered to it (only that token confirms; the
+    // subscription ARN does not). The pending-confirmations introspection
+    // endpoint hands the token to the test.
+    let sub_arn = client
         .subscribe()
         .topic_arn(arn)
-        .protocol("sqs")
-        .endpoint("arn:aws:sqs:us-east-1:000000000000:confirm-queue")
+        .protocol("http")
+        .endpoint("http://example.com/confirm-hook")
+        .return_subscription_arn(true)
         .send()
         .await
+        .unwrap()
+        .subscription_arn()
+        .unwrap()
+        .to_string();
+    let pending: serde_json::Value = reqwest::Client::new()
+        .get(format!(
+            "{}/_fakecloud/sns/pending-confirmations",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
-    let sub_arn = sub.subscription_arn().unwrap();
+    let token = pending["pendingConfirmations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["subscriptionArn"] == sub_arn.as_str())
+        .and_then(|p| p["token"].as_str())
+        .unwrap_or_else(|| panic!("no pending confirmation for {sub_arn}: {pending}"))
+        .to_string();
 
     let resp = client
         .confirm_subscription()
         .topic_arn(arn)
-        .token(sub_arn)
+        .token(&token)
         .send()
         .await
         .unwrap();
-    assert!(resp.subscription_arn().is_some());
+    assert_eq!(resp.subscription_arn(), Some(sub_arn.as_str()));
 }
 
 #[test_action("sns", "Unsubscribe", checksum = "59a84ca0")]
