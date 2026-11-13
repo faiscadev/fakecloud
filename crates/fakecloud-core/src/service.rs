@@ -886,10 +886,19 @@ pub trait AwsService: Send + Sync {
     /// a resource type does not take, a missing upload, a missing bucket for
     /// an anonymous caller), so a request refused for its URL is never
     /// buffered (up to the request-size cap) first. Dispatch calls it for a
-    /// request its headers already route to this service, IAM enforcement on
+    /// request its headers alone settle as this service's
+    /// ([`crate::protocol::headers_name_final_service`]), IAM enforcement on
     /// or off, and answers `Err` as the service's error. The later
-    /// validation must refuse the same requests the same way. Default:
-    /// nothing to refuse.
+    /// validation must refuse the same requests the same way.
+    ///
+    /// It runs before SigV4 verification and before authentication: the
+    /// caller's identity is not resolved yet, and [`RequestHead::anonymous`]
+    /// says only whether a credential was presented. That is the order S3
+    /// answers in (recorded): a request signed with an unknown key and
+    /// conflicting resource-type parameters, or a `PUT` with `partNumber`
+    /// and no `uploadId`, is 400 for its URL, not `InvalidClientTokenId`.
+    /// A service whose URL refusals come after authentication must not
+    /// refuse here. Default: nothing to refuse.
     fn refuse_before_body(&self, _head: &RequestHead<'_>) -> Result<(), AwsServiceError> {
         Ok(())
     }

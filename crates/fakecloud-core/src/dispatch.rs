@@ -215,11 +215,14 @@ async fn dispatch_inner(
     // A request its headers route to a service is first judged on its head
     // alone, so one refused for its URL (S3's conflicting resource-type
     // parameters, say) is not read in full -- up to the request-size cap --
-    // just to be refused.
-    if let Some(detected) = header_only
-        .as_ref()
-        .filter(|_| pinned.is_none() && rpc_v2_cbor.is_none())
-    {
+    // just to be refused. Only when the headers settle the service: a
+    // request whose detection rests on a presigned URL or the Host header
+    // alone may name another service in a form body, and goes there.
+    if let Some(detected) = header_only.as_ref().filter(|_| {
+        pinned.is_none()
+            && rpc_v2_cbor.is_none()
+            && protocol::headers_name_final_service(&parts.headers, &query_params)
+    }) {
         if let Some(service) = registry.get(&detected.service) {
             if let Err(err) = with_request_head(service.as_ref(), &early, |head| {
                 service.refuse_before_body(head)
