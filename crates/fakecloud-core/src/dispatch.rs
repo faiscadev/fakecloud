@@ -2702,7 +2702,8 @@ fn unrouted_target(
 /// Whether a query-string `Action` is only a parameter of an unsigned request
 /// that is S3's or API Gateway's by what only dispatch can tell: on the plain
 /// host, a path addressing an existing bucket (`GET /pubb/k.txt?Action=...`
-/// is the object), or an API Gateway custom-domain `Host`. (An S3 or
+/// is the object), or a request API Gateway claims: a custom-domain `Host`,
+/// a deployed stage's path, or a path-style invocation URL. (An S3 or
 /// execute-api host or signature scope, or an S3 SigV2 presign, is
 /// [`protocol::query_action_is_a_parameter`].) An SQS queue path whose first
 /// segment is an account ID is the queue's unless a bucket of that name
@@ -2721,8 +2722,12 @@ fn unsigned_action_is_a_parameter(
     let plain_host = protocol::parse_routing_host_from_headers(headers).is_none();
     (plain_host && anonymous_s3_bucket(uri, config).is_some())
         || registry.get("apigateway").is_some_and(|apigw| {
-            apigw.claim_unrouted_request(method, uri.path(), headers, &config.account_id)
-                == Some(crate::service::DataPlaneClaim::Host)
+            // Any claim, by host or by path (a deployed stage, a path-style
+            // invocation URL): a Query call on the plain host goes to `/`,
+            // which API Gateway never claims.
+            apigw
+                .claim_unrouted_request(method, uri.path(), headers, &config.account_id)
+                .is_some()
         })
 }
 

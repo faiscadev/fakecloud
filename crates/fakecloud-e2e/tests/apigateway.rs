@@ -1319,6 +1319,30 @@ async fn unsigned_invocations_on_the_api_host_are_served_under_strict() {
     assert_eq!(body, r#"{"message":"Missing Authentication Token"}"#);
 }
 
+/// An invocation carrying an `Action` query parameter is still the API's on
+/// the plain host, by any path API Gateway claims (path-style invocation
+/// URLs, a deployed stage): `Action=ListQueues` is not an SQS call there.
+#[tokio::test]
+async fn invocations_with_an_action_parameter_stay_the_apis() {
+    for env in [&[][..], &[("FAKECLOUD_IAM", "strict")][..]] {
+        let server = TestServer::start_with_env(env).await;
+        let client = server.apigateway_client().await;
+        let api_id = provision_mock_items_api(&client, "action-param").await;
+        let base = server.endpoint();
+        for path in [
+            format!("/restapis/{api_id}/prod/_user_request_/items"),
+            format!("/_aws/execute-api/{api_id}/prod/items"),
+            "/prod/items".to_string(),
+        ] {
+            let (status, body) =
+                get_body(reqwest::Client::new().get(format!("{base}{path}?Action=ListQueues")))
+                    .await;
+            assert_eq!(status, 200, "{env:?} {path}: {body}");
+            assert_eq!(body, r#"{"api":"action-param"}"#, "{env:?} {path}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn rest_api_invocable_without_execute_api_host() {
     let server = TestServer::start().await;
