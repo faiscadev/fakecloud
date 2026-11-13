@@ -1434,6 +1434,23 @@ mod tests {
         assert_eq!(err.message(), "Request is missing Authentication Token");
     }
 
+    #[tokio::test]
+    async fn get_caller_identity_accepts_a_presigned_request() {
+        // A presigned URL carries its signature in the query: it is signed,
+        // and a key that resolves to nothing is answered as the root.
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "GetCallerIdentity",
+            vec![(
+                "X-Amz-Credential",
+                "test/20261113/us-east-1/sts/aws4_request",
+            )],
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(body.contains("<GetCallerIdentityResult>"), "{body}");
+    }
+
     // ── AssumeRole ──
 
     #[tokio::test]

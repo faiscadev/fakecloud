@@ -259,6 +259,31 @@ async fn unsigned_rest_requests_to_an_api_host_are_refused() {
         resp.error_type.as_deref(),
         Some("MissingAuthenticationTokenException")
     );
+    // Browsers never sign a CORS preflight: it is not refused.
+    let resp = unsigned(
+        &server,
+        reqwest::Method::OPTIONS,
+        "/2015-03-31/functions/",
+        Some("lambda.us-east-1.amazonaws.com"),
+        &[
+            ("origin", "https://app.example"),
+            ("access-control-request-method", "GET"),
+        ],
+        "",
+    )
+    .await;
+    assert_ne!(
+        resp.error_type.as_deref(),
+        Some("MissingAuthenticationTokenException"),
+        "{} {}",
+        resp.status,
+        resp.body
+    );
+    assert!(
+        !resp.body.contains("Missing Authentication Token"),
+        "{}",
+        resp.body
+    );
 
     let resp = unsigned(
         &server,
@@ -642,6 +667,88 @@ async fn unsigned_sns_unsubscribe_link_is_served() {
         .await
         .unwrap();
     assert!(subs.subscriptions().is_empty());
+}
+
+/// A presigned `GetCallerIdentity` URL (the EKS / Vault IAM-auth pattern)
+/// for `akid`, signed for `secret`, as a path-and-query on the bare host.
+fn presigned_get_caller_identity(host: &str, akid: &str, secret: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
+    let hmac = |key: &[u8], data: &[u8]| {
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+        mac.update(data);
+        mac.finalize().into_bytes().to_vec()
+    };
+    let amz_date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let date = &amz_date[..8];
+    let scope = format!("{date}/us-east-1/sts/aws4_request");
+    let mut params = [
+        ("Action", "GetCallerIdentity".to_string()),
+        ("Version", "2011-06-15".to_string()),
+        ("X-Amz-Algorithm", "AWS4-HMAC-SHA256".to_string()),
+        ("X-Amz-Credential", format!("{akid}/{scope}")),
+        ("X-Amz-Date", amz_date.clone()),
+        ("X-Amz-Expires", "60".to_string()),
+        ("X-Amz-SignedHeaders", "host".to_string()),
+    ]
+    .map(|(k, v)| (encoded(k), encoded(&v)));
+    params.sort();
+    let query = params
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let empty = hex::encode(Sha256::digest(b""));
+    let canonical = format!("GET\n/\n{query}\nhost:{host}\n\nhost\n{empty}");
+    let to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        hex::encode(Sha256::digest(canonical.as_bytes()))
+    );
+    let mut key = hmac(format!("AWS4{secret}").as_bytes(), date.as_bytes());
+    for part in ["us-east-1", "sts", "aws4_request"] {
+        key = hmac(&key, part.as_bytes());
+    }
+    let signature = hex::encode(hmac(&key, to_sign.as_bytes()));
+    format!("/?{query}&X-Amz-Signature={signature}")
+}
+
+/// A presigned URL is signed: `GetCallerIdentity` answers it with the key's
+/// identity, the account root for a key that resolves to none (`test`, or
+/// any key with enforcement off).
+#[tokio::test]
+async fn presigned_get_caller_identity_is_answered() {
+    let off = TestServer::start().await;
+    let host = off.endpoint().trim_start_matches("http://").to_string();
+    for akid in ["test", "AKIAIOSFODNN7EXAMPLE"] {
+        let path = presigned_get_caller_identity(&host, akid, "secret");
+        let resp = unsigned(&off, reqwest::Method::GET, &path, None, &[], "").await;
+        assert_eq!(resp.status, 200, "{akid}: {}", resp.body);
+        assert!(resp.body.contains(":root</Arn>"), "{}", resp.body);
+    }
+
+    let strict = start_strict().await;
+    let host = strict.endpoint().trim_start_matches("http://").to_string();
+    let path = presigned_get_caller_identity(&host, "test", "test");
+    let resp = unsigned(&strict, reqwest::Method::GET, &path, None, &[], "").await;
+    assert_eq!(resp.status, 200, "{}", resp.body);
+    // A user's own key reports the user.
+    let iam = aws_sdk_iam::Client::new(&helpers::root_config(&strict).await);
+    iam.create_user()
+        .user_name("presigner")
+        .send()
+        .await
+        .unwrap();
+    let key = iam
+        .create_access_key()
+        .user_name("presigner")
+        .send()
+        .await
+        .unwrap();
+    let key = key.access_key().unwrap();
+    let path = presigned_get_caller_identity(&host, key.access_key_id(), key.secret_access_key());
+    let resp = unsigned(&strict, reqwest::Method::GET, &path, None, &[], "").await;
+    assert_eq!(resp.status, 200, "{}", resp.body);
+    assert!(resp.body.contains(":user/presigner</Arn>"), "{}", resp.body);
 }
 
 /// Soft mode logs the missing token and serves the request.
