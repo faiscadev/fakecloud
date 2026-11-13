@@ -2169,6 +2169,8 @@ struct ErrorEnvelope {
     s3_control: bool,
     /// A REST-JSON service whose errors use Lambda's body shape.
     lambda_body: bool,
+    /// An awsQuery service's namespace and `<Detail/>`.
+    query: fakecloud_aws::error::QueryErrorShape,
 }
 
 impl ErrorEnvelope {
@@ -2187,6 +2189,11 @@ impl ErrorEnvelope {
                 && protocol::is_s3_control_host(headers),
             lambda_body: detected.protocol == AwsProtocol::RestJson
                 && fakecloud_aws::error::uses_lambda_error_body(&detected.service),
+            query: if detected.protocol == AwsProtocol::Query {
+                fakecloud_aws::error::QueryErrorShape::for_service(&detected.service)
+            } else {
+                Default::default()
+            },
         }
     }
 }
@@ -2198,6 +2205,7 @@ impl From<AwsProtocol> for ErrorEnvelope {
             rest_xml_namespace: None,
             s3_control: false,
             lambda_body: false,
+            query: Default::default(),
         }
     }
 }
@@ -2224,9 +2232,13 @@ fn build_error_response_with_fields(
     let (status, content_type, body) = match (envelope.protocol, envelope.rest_xml_namespace) {
         // awsQuery services (SQS, SNS, IAM, STS, RDS, ELBv2, CloudWatch,
         // AutoScaling, ...) share the `<ErrorResponse>` envelope.
-        (AwsProtocol::Query, _) => {
-            fakecloud_aws::error::xml_error_response(status, code, message, request_id)
-        }
+        (AwsProtocol::Query, _) => fakecloud_aws::error::query_error_response(
+            status,
+            code,
+            message,
+            request_id,
+            envelope.query,
+        ),
         // EC2 uses the distinct ec2Query error envelope
         // (`<Response><Errors><Error>...</Errors><RequestID>`). Only EC2 is
         // classified `Ec2Query`, so the other Query-protocol services above are
@@ -2768,9 +2780,12 @@ fn s3_sigv2_query_auth_error(
 /// The `AccessDenied` message for an anonymous request authorization refused.
 /// S3 refuses an anonymous `CreateBucket` outright with its own message
 /// (recorded in us-east-1); everything else is S3's generic "Access Denied".
-/// SQS names the resource by its URL (recorded for `ListQueues`: the
-/// endpoint's root, "Access to the resource https://sqs.us-east-1.amazonaws.com/
-/// is denied."); a queue is named by its queue URL.
+/// SQS (recorded): a queue operation names the lowercased action and the
+/// queue ARN ("User: anonymous is not authorized to perform:
+/// sqs:receivemessage on resource: arn:aws:sqs:...:q because no
+/// resource-based policy allows the sqs:receivemessage action"); the
+/// service-level `ListQueues` names the endpoint ("Access to the resource
+/// https://sqs.us-east-1.amazonaws.com/ is denied.").
 fn anonymous_denied_message(
     service: &str,
     action: &crate::auth::IamAction,
@@ -2779,23 +2794,21 @@ fn anonymous_denied_message(
     if service == "s3" && action.service == "s3" && action.action == "CreateBucket" {
         "Anonymous users cannot invoke this API. Please authenticate.".into()
     } else if service == "sqs" {
-        let queue = action
-            .resource
-            .parse::<fakecloud_aws::arn::Arn>()
-            .ok()
-            .filter(|arn| arn.service == "sqs" && !arn.account_id.is_empty());
-        let (region, path) = match &queue {
-            Some(arn) => (
-                arn.region.as_str(),
-                format!("{}/{}", arn.account_id, arn.resource),
-            ),
-            None => (region, String::new()),
-        };
-        format!(
-            "Access to the resource https://sqs.{region}.{}/{path} is denied.",
-            fakecloud_aws::endpoint::dns_suffix_for_region(region)
-        )
-        .into()
+        if action.resource.starts_with("arn:") {
+            let name = format!("sqs:{}", action.action.to_ascii_lowercase());
+            format!(
+                "User: anonymous is not authorized to perform: {name} on resource: {} \
+                 because no resource-based policy allows the {name} action",
+                action.resource,
+            )
+            .into()
+        } else {
+            format!(
+                "Access to the resource https://sqs.{region}.{}/ is denied.",
+                fakecloud_aws::endpoint::dns_suffix_for_region(region)
+            )
+            .into()
+        }
     } else {
         "Access Denied".into()
     }
@@ -2825,7 +2838,8 @@ fn names_api_operation(
 }
 
 /// The refusal of an unsigned request to an operation that needs
-/// credentials, as each service answers it (recorded in us-east-1):
+/// credentials, as each service answers it (recorded in us-east-1,
+/// `tests/fixtures/anonymous-requests/README.md`):
 ///
 /// - awsQuery: 403 `MissingAuthenticationToken` "Request is missing
 ///   Authentication Token" (STS, IAM, SNS);
@@ -3740,6 +3754,76 @@ mod tests {
         );
         assert_eq!(REQUEST_COMPRESSION_SERVICES, &["monitoring"]);
     }
+    #[test]
+    fn query_error_namespaces_match_the_models() {
+        // Every vendored awsQuery model's `smithy.api#xmlNamespace` is the
+        // namespace its errors carry, by fakecloud service name (DocumentDB
+        // and Neptune sign as `rds` but are their own services).
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../aws-models");
+        let mut from_models = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            if !text.contains("\"aws.protocols#awsQuery\"") {
+                continue;
+            }
+            let model: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let shapes = model["shapes"].as_object().unwrap();
+            let service = shapes.values().find(|s| s["type"] == "service").unwrap();
+            let traits = &service["traits"];
+            if traits.get("aws.protocols#awsQuery").is_none() {
+                continue;
+            }
+            let stem = path.file_stem().unwrap().to_str().unwrap().to_string();
+            let name = if stem == "docdb" || stem == "neptune" {
+                stem
+            } else {
+                traits["aws.auth#sigv4"]["name"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            };
+            let ns = traits["smithy.api#xmlNamespace"]["uri"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            from_models.push((name, ns));
+        }
+        assert!(from_models.len() >= 10, "{from_models:?}");
+        for (name, ns) in from_models {
+            assert_eq!(
+                fakecloud_aws::error::QueryErrorShape::for_service(&name).namespace,
+                Some(ns.as_str()),
+                "{name}: update QUERY_XML_NAMESPACES"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn query_errors_carry_the_service_namespace() {
+        let detected = protocol::DetectedRequest {
+            service: "sqs".to_string(),
+            action: "ListQueues".to_string(),
+            protocol: AwsProtocol::Query,
+        };
+        let resp = build_error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            "bad",
+            "rid",
+            ErrorEnvelope::for_request(&detected, &http::HeaderMap::new()),
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains(r#"<ErrorResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">"#),
+            "{body}"
+        );
+        assert!(body.contains("<Detail/>"), "{body}");
+    }
+
     #[test]
     fn bedrock_agent_paths_split_between_runtime_and_control_plane() {
         use http::Method;
@@ -5050,29 +5134,36 @@ mod tests {
     }
 
     #[test]
-    fn sqs_anonymous_denial_names_the_resource_url() {
-        let action = |resource: &str| crate::auth::IamAction {
+    fn sqs_anonymous_denial_messages() {
+        // Recorded: tests/fixtures/anonymous-requests/README.md.
+        let action = |action: &'static str, resource: &str| crate::auth::IamAction {
             service: "sqs",
-            action: "ListQueues",
+            action,
             resource: resource.to_string(),
         };
-        // Recorded for ListQueues: the endpoint root.
         assert_eq!(
-            anonymous_denied_message("sqs", &action("*"), "us-east-1"),
+            anonymous_denied_message("sqs", &action("ListQueues", "*"), "us-east-1"),
             "Access to the resource https://sqs.us-east-1.amazonaws.com/ is denied."
         );
         assert_eq!(
-            anonymous_denied_message(
-                "sqs",
-                &action("arn:aws:sqs:eu-west-1:123456789012:jobs"),
-                "us-east-1"
-            ),
-            "Access to the resource https://sqs.eu-west-1.amazonaws.com/123456789012/jobs is denied."
-        );
-        assert_eq!(
-            anonymous_denied_message("sqs", &action("*"), "cn-north-1"),
+            anonymous_denied_message("sqs", &action("ListQueues", "*"), "cn-north-1"),
             "Access to the resource https://sqs.cn-north-1.amazonaws.com.cn/ is denied."
         );
+        for op in ["ReceiveMessage", "SendMessage", "GetQueueAttributes"] {
+            let lower = op.to_ascii_lowercase();
+            assert_eq!(
+                anonymous_denied_message(
+                    "sqs",
+                    &action(op, "arn:aws:sqs:us-east-1:123456789012:jobs"),
+                    "us-east-1"
+                ),
+                format!(
+                    "User: anonymous is not authorized to perform: sqs:{lower} on resource: \
+                     arn:aws:sqs:us-east-1:123456789012:jobs because no resource-based policy \
+                     allows the sqs:{lower} action"
+                )
+            );
+        }
     }
 
     async fn missing_auth(
@@ -5096,10 +5187,18 @@ mod tests {
 
     #[tokio::test]
     async fn missing_authentication_query_shape() {
-        for service in ["sts", "iam", "sns"] {
+        // Recorded: tests/fixtures/anonymous-requests/README.md.
+        for (service, ns) in [
+            ("sts", "https://sts.amazonaws.com/doc/2011-06-15/"),
+            ("iam", "https://iam.amazonaws.com/doc/2010-05-08/"),
+            ("sns", "http://sns.amazonaws.com/doc/2010-03-31/"),
+        ] {
             let (status, _, body) = missing_auth(service, "ListUsers", AwsProtocol::Query).await;
             assert_eq!(status, StatusCode::FORBIDDEN);
-            assert!(body.contains("<ErrorResponse"), "{body}");
+            assert!(
+                body.contains(&format!(r#"<ErrorResponse xmlns="{ns}">"#)),
+                "{body}"
+            );
             assert!(body.contains("<Type>Sender</Type>"), "{body}");
             assert!(
                 body.contains("<Code>MissingAuthenticationToken</Code>"),

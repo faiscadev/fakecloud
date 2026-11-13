@@ -3,21 +3,115 @@ use http::StatusCode;
 use quick_xml::se::Serializer as XmlSerializer;
 use serde::Serialize;
 
-/// Build an AWS XML error response (used by Query protocol services: SQS, SNS, IAM, STS).
+/// Build an AWS XML error response (used by Query protocol services: SQS, SNS, IAM, STS),
+/// with no namespace. A response for a known service uses
+/// [`query_error_response`] with the service's [`QueryErrorShape`].
 pub fn xml_error_response(
     status: StatusCode,
     code: &str,
     message: &str,
     request_id: &str,
 ) -> (StatusCode, String, Bytes) {
+    query_error_response(
+        status,
+        code,
+        message,
+        request_id,
+        QueryErrorShape::default(),
+    )
+}
+
+/// What a Query service's `<ErrorResponse>` carries beyond the code and
+/// message: its API's XML namespace, and (SQS) an empty `<Detail/>`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryErrorShape {
+    pub namespace: Option<&'static str>,
+    pub detail: bool,
+}
+
+/// The XML namespace of each awsQuery service's API, by fakecloud service
+/// name: the `smithy.api#xmlNamespace` of its model (checked against
+/// `aws-models/` by a test in `fakecloud-core`), and for the services whose
+/// model is not vendored the namespace their responses use. SQS is modeled as
+/// awsJson with no namespace; its awsQuery errors use `queue.amazonaws.com`'s
+/// (recorded).
+pub const QUERY_XML_NAMESPACES: &[(&str, &str)] = &[
+    (
+        "autoscaling",
+        "http://autoscaling.amazonaws.com/doc/2011-01-01/",
+    ),
+    (
+        "cloudformation",
+        "http://cloudformation.amazonaws.com/doc/2010-05-15/",
+    ),
+    ("docdb", "http://rds.amazonaws.com/doc/2014-10-31/"),
+    (
+        "elasticache",
+        "http://elasticache.amazonaws.com/doc/2015-02-02/",
+    ),
+    (
+        "elasticbeanstalk",
+        "http://elasticbeanstalk.amazonaws.com/docs/2010-12-01/",
+    ),
+    (
+        "elasticloadbalancing",
+        "http://elasticloadbalancing.amazonaws.com/doc/2015-12-01/",
+    ),
+    ("iam", "https://iam.amazonaws.com/doc/2010-05-08/"),
+    (
+        "monitoring",
+        "http://monitoring.amazonaws.com/doc/2010-08-01/",
+    ),
+    ("neptune", "http://rds.amazonaws.com/doc/2014-10-31/"),
+    ("rds", "http://rds.amazonaws.com/doc/2014-10-31/"),
+    ("redshift", "http://redshift.amazonaws.com/doc/2012-12-01/"),
+    ("ses", "http://ses.amazonaws.com/doc/2010-12-01/"),
+    ("sns", "http://sns.amazonaws.com/doc/2010-03-31/"),
+    ("sqs", "http://queue.amazonaws.com/doc/2012-11-05/"),
+    ("sts", "https://sts.amazonaws.com/doc/2011-06-15/"),
+];
+
+impl QueryErrorShape {
+    /// The shape of `service`'s awsQuery errors.
+    pub fn for_service(service: &str) -> Self {
+        Self {
+            namespace: QUERY_XML_NAMESPACES
+                .iter()
+                .find(|(s, _)| *s == service)
+                .map(|(_, ns)| *ns),
+            detail: service == "sqs",
+        }
+    }
+}
+
+/// Build a Query `<ErrorResponse>` in `shape`:
+///
+/// ```xml
+/// <ErrorResponse xmlns="{namespace}">
+///   <Error><Type>Sender</Type><Code>..</Code><Message>..</Message><Detail/></Error>
+///   <RequestId>..</RequestId>
+/// </ErrorResponse>
+/// ```
+pub fn query_error_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    request_id: &str,
+    shape: QueryErrorShape,
+) -> (StatusCode, String, Bytes) {
     #[derive(Serialize)]
     #[serde(rename = "ErrorResponse")]
     struct ErrorResponse<'a> {
+        #[serde(rename = "@xmlns", skip_serializing_if = "Option::is_none")]
+        xmlns: Option<&'a str>,
         #[serde(rename = "Error")]
         error: ErrorBody<'a>,
         #[serde(rename = "RequestId")]
         request_id: &'a str,
     }
+
+    #[derive(Serialize)]
+    struct Empty;
 
     #[derive(Serialize)]
     struct ErrorBody<'a> {
@@ -27,6 +121,8 @@ pub fn xml_error_response(
         code: &'a str,
         #[serde(rename = "Message")]
         message: &'a str,
+        #[serde(rename = "Detail", skip_serializing_if = "Option::is_none")]
+        detail: Option<Empty>,
     }
 
     let error_type = if status.is_server_error() {
@@ -36,10 +132,12 @@ pub fn xml_error_response(
     };
 
     let resp = ErrorResponse {
+        xmlns: shape.namespace,
         error: ErrorBody {
             error_type,
             code,
             message,
+            detail: shape.detail.then_some(Empty),
         },
         request_id,
     };
@@ -367,6 +465,38 @@ mod tests {
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("<Code>InvalidAction</Code>"));
         assert!(body_str.contains("<RequestId>req-1</RequestId>"));
+    }
+
+    #[test]
+    fn query_error_carries_the_service_namespace_and_sqs_detail() {
+        let body = |service: &str| {
+            let (_, _, body) = query_error_response(
+                StatusCode::FORBIDDEN,
+                "AccessDenied",
+                "no",
+                "req-1",
+                QueryErrorShape::for_service(service),
+            );
+            String::from_utf8(body.to_vec()).unwrap()
+        };
+        let sts = body("sts");
+        assert!(
+            sts.contains(r#"<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">"#),
+            "{sts}"
+        );
+        assert!(!sts.contains("Detail"), "{sts}");
+        let sqs = body("sqs");
+        assert!(
+            sqs.contains(r#"<ErrorResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">"#),
+            "{sqs}"
+        );
+        assert!(sqs.contains("<Message>no</Message>"), "{sqs}");
+        assert!(sqs.contains("<Detail/>"), "{sqs}");
+        // An unknown service keeps the bare envelope.
+        let other = body("unknown");
+        assert!(other.contains("<ErrorResponse>"), "{other}");
+        let sorted = QUERY_XML_NAMESPACES.windows(2).all(|w| w[0].0 < w[1].0);
+        assert!(sorted, "keep QUERY_XML_NAMESPACES sorted");
     }
 
     #[test]

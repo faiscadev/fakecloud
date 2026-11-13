@@ -1,7 +1,9 @@
 //! Unsigned (anonymous) requests to services other than S3, under
 //! `--iam strict`, `soft` and `off`.
 //!
-//! Recorded against real AWS (us-east-1): an unsigned API request is refused
+//! Recorded against real AWS (us-east-1), see
+//! `crates/fakecloud-core/tests/fixtures/anonymous-requests/README.md`: an
+//! unsigned API request is refused
 //! for its missing credentials before anything looks at it, in a shape that
 //! depends on the protocol and the service; SQS instead authorizes the
 //! anonymous principal against the queue policy; the operations the Smithy
@@ -96,9 +98,17 @@ fn encoded(s: &str) -> String {
         .collect()
 }
 
-fn assert_query_missing_token(resp: &Unsigned) {
+const STS_NS: &str = "https://sts.amazonaws.com/doc/2011-06-15/";
+
+/// The recorded awsQuery refusal, in the service's namespaced envelope.
+fn assert_query_missing_token(resp: &Unsigned, namespace: &str) {
     assert_eq!(resp.status, 403, "{}", resp.body);
-    assert!(resp.body.contains("<ErrorResponse"), "{}", resp.body);
+    assert!(
+        resp.body
+            .contains(&format!(r#"<ErrorResponse xmlns="{namespace}">"#)),
+        "{}",
+        resp.body
+    );
     assert!(resp.body.contains("<Type>Sender</Type>"), "{}", resp.body);
     assert!(
         resp.body
@@ -119,7 +129,7 @@ async fn unsigned_sts_requests_on_the_plain_host_are_refused_before_validation()
     let server = start_strict().await;
     // A form POST to the bare endpoint reaches STS by its Action.
     let resp = query(&server, None, "Action=GetCallerIdentity&Version=2011-06-15").await;
-    assert_query_missing_token(&resp);
+    assert_query_missing_token(&resp, STS_NS);
     // Recorded: the missing token comes before the TaskPolicyArn check.
     let resp = query(
         &server,
@@ -128,7 +138,7 @@ async fn unsigned_sts_requests_on_the_plain_host_are_refused_before_validation()
          &TaskPolicyArn.arn=bogus",
     )
     .await;
-    assert_query_missing_token(&resp);
+    assert_query_missing_token(&resp, STS_NS);
     assert!(!resp.body.contains("ValidationError"), "{}", resp.body);
 }
 
@@ -141,14 +151,14 @@ async fn unsigned_iam_and_sns_requests_are_refused() {
         "Action=ListUsers&Version=2010-05-08",
     )
     .await;
-    assert_query_missing_token(&resp);
+    assert_query_missing_token(&resp, "https://iam.amazonaws.com/doc/2010-05-08/");
     let resp = query(
         &server,
         Some("sns.us-east-1.amazonaws.com"),
         "Action=ListTopics&Version=2010-03-31",
     )
     .await;
-    assert_query_missing_token(&resp);
+    assert_query_missing_token(&resp, "http://sns.amazonaws.com/doc/2010-03-31/");
 }
 
 #[tokio::test]
@@ -300,6 +310,13 @@ async fn unsigned_sqs_requests_are_authorized_by_the_queue_policy() {
         "{}",
         resp.body
     );
+    assert!(
+        resp.body
+            .contains(r#"<ErrorResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">"#),
+        "{}",
+        resp.body
+    );
+    assert!(resp.body.contains("<Detail/>"), "{}", resp.body);
 
     let sqs = aws_sdk_sqs::Client::new(&helpers::root_config(&server).await);
     let open = sqs
@@ -363,20 +380,67 @@ async fn unsigned_sqs_requests_are_authorized_by_the_queue_policy() {
         ),
     )
     .await;
+    assert_sqs_anonymous_denied(&resp, "receivemessage", &arn);
+
+    // A queue with no policy refuses every queue operation, naming the
+    // lowercased action and the queue ARN (recorded).
+    let closed = sqs
+        .create_queue()
+        .queue_name("closed")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let closed_arn = arn.replace("open-to-all", "closed");
+    for (action, extra, iam) in [
+        ("ReceiveMessage", "", "receivemessage"),
+        ("SendMessage", "&MessageBody=hi", "sendmessage"),
+        (
+            "GetQueueAttributes",
+            "&AttributeName.1=All",
+            "getqueueattributes",
+        ),
+    ] {
+        let resp = query(
+            &server,
+            host,
+            &format!(
+                "Action={action}&Version=2012-11-05&QueueUrl={}{extra}",
+                encoded(&closed)
+            ),
+        )
+        .await;
+        assert_sqs_anonymous_denied(&resp, iam, &closed_arn);
+    }
+}
+
+/// The recorded SQS anonymous denial of a queue operation, in SQS's
+/// namespaced envelope with its `<Detail/>`.
+fn assert_sqs_anonymous_denied(resp: &Unsigned, iam_action: &str, queue_arn: &str) {
     assert_eq!(resp.status, 403, "{}", resp.body);
+    assert!(
+        resp.body
+            .contains(r#"<ErrorResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">"#),
+        "{}",
+        resp.body
+    );
     assert!(
         resp.body.contains("<Code>AccessDenied</Code>"),
         "{}",
         resp.body
     );
-    let account = arn.split(':').nth(4).unwrap();
     assert!(
         resp.body.contains(&format!(
-            "Access to the resource https://sqs.us-east-1.amazonaws.com/{account}/open-to-all is denied."
+            "<Message>User: anonymous is not authorized to perform: sqs:{iam_action} on \
+             resource: {queue_arn} because no resource-based policy allows the \
+             sqs:{iam_action} action</Message>"
         )),
         "{}",
         resp.body
     );
+    assert!(resp.body.contains("<Detail/>"), "{}", resp.body);
 }
 
 #[tokio::test]
@@ -612,7 +676,7 @@ async fn off_mode_serves_unsigned_requests() {
     let resp = query(&server, None, "Action=ListUsers&Version=2010-05-08").await;
     assert_eq!(resp.status, 200, "{}", resp.body);
     let resp = query(&server, None, "Action=GetCallerIdentity&Version=2011-06-15").await;
-    assert_query_missing_token(&resp);
+    assert_query_missing_token(&resp, STS_NS);
     let resp = query(
         &server,
         Some("ec2.us-east-1.amazonaws.com"),
