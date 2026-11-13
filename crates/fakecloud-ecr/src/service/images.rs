@@ -71,7 +71,7 @@ impl EcrService {
 
         check_repo_policy(
             &account,
-            &request.account_id,
+            self.policy_caller(request).as_policy_caller(),
             &repo.repository_arn,
             &name,
             repo.policy.as_deref(),
@@ -311,7 +311,7 @@ impl EcrService {
 
         check_repo_policy(
             &account,
-            &request.account_id,
+            self.policy_caller(request).as_policy_caller(),
             &repo.repository_arn,
             &name,
             repo.policy.as_deref(),
@@ -373,7 +373,7 @@ impl EcrService {
 
         check_repo_policy(
             &account,
-            &request.account_id,
+            self.policy_caller(request).as_policy_caller(),
             &repo.repository_arn,
             &name,
             repo.policy.as_deref(),

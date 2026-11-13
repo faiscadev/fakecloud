@@ -2716,12 +2716,17 @@ pub struct ParameterValue {
 /// `SecureString` KMS will not decrypt: `GetParameters` lists it under
 /// `InvalidParameters` like a missing name (recorded in
 /// `fakecloud-codebuild/tests/fixtures/env-var-resolution-direct-reads.txt`).
+///
+/// `caller` is the identity reading it (an ECS task's execution role
+/// session), whom another account's resource policy must allow; `None` reads
+/// as `caller_account`'s root user.
 pub fn read_parameter_value(
     state: &crate::state::SharedSsmState,
     kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
     caller_account: &str,
     caller_region: &str,
     name: &str,
+    caller: Option<fakecloud_iam::evaluator::PolicyCaller<'_>>,
 ) -> Result<ParameterValue, AwsServiceError> {
     let owner_region = if arn_resource(name, "ssm").is_some() {
         fakecloud_aws::arn::region_of(name).unwrap_or(caller_region)
@@ -2757,18 +2762,26 @@ pub fn read_parameter_value(
         purge_expired_params(state);
         let param =
             lookup_param(&state.parameters, base_name).ok_or_else(|| param_not_found(name))?;
-        if owner_account != caller_account && !parameter_shared_with(state, param, caller_account) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "AccessDeniedException",
-                format!(
-                    "User: {} is not authorized to perform: ssm:GetParameters on resource: {} \
-                     because no resource-based policy allows the ssm:GetParameters action",
-                    Arn::global("iam", caller_account, "root")
-                        .with_partition(fakecloud_aws::arn::partition_of(&param.arn)),
-                    param.arn
-                ),
-            ));
+        if owner_account != caller_account {
+            let root = fakecloud_iam::evaluator::account_root_principal(
+                caller_account,
+                fakecloud_aws::arn::partition_of(&param.arn),
+            );
+            let caller = caller.unwrap_or(fakecloud_iam::evaluator::PolicyCaller {
+                principal: &root,
+                role_arn: None,
+            });
+            if !parameter_shared_with(state, param, caller) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "AccessDeniedException",
+                    format!(
+                        "User: {} is not authorized to perform: ssm:GetParameters on resource: {} \
+                         because no resource-based policy allows the ssm:GetParameters action",
+                        caller.principal.arn, param.arn
+                    ),
+                ));
+            }
         }
         let current = || ParameterValue {
             name: param.name.clone(),
@@ -2927,40 +2940,30 @@ pub(crate) fn ssm_kms_error(err: &fakecloud_core::delivery::KmsError) -> AwsServ
     AwsServiceError::aws_error(status, code, err.relayed_message())
 }
 
-/// Whether a resource policy attached to `param` (in its owner's state)
-/// allows `caller_account` to read it: how a parameter is shared across
-/// accounts.
-fn parameter_shared_with(state: &SsmState, param: &SsmParameter, caller_account: &str) -> bool {
-    use fakecloud_core::auth::{Principal, PrincipalType};
-    use fakecloud_iam::evaluator::{evaluate, Decision, EvalRequest, PolicyDocument};
-    let docs: Vec<PolicyDocument> = state
+/// Whether the resource policies attached to `param` (in its owner's state)
+/// allow `caller` to read it: how a parameter is shared across accounts. A
+/// Deny in any of them wins.
+fn parameter_shared_with(
+    state: &SsmState,
+    param: &SsmParameter,
+    caller: fakecloud_iam::evaluator::PolicyCaller<'_>,
+) -> bool {
+    use fakecloud_iam::evaluator::{evaluate_resource_policy_for_caller, Decision, PolicyDocument};
+    let decisions: Vec<Decision> = state
         .resource_policies
         .iter()
         .filter(|p| {
             resolve_param_by_name_or_arn(state, &p.resource_arn)
                 .is_ok_and(|shared| shared.name == param.name)
         })
-        .map(|p| PolicyDocument::parse(&p.policy))
+        .map(|p| {
+            evaluate_resource_policy_for_caller(
+                &PolicyDocument::parse(&p.policy),
+                caller,
+                "ssm:GetParameters",
+                &param.arn,
+            )
+        })
         .collect();
-    if docs.is_empty() {
-        return false;
-    }
-    let principal_arn = Arn::global("iam", caller_account, "root")
-        .with_partition(fakecloud_aws::arn::partition_of(&param.arn))
-        .to_string();
-    let principal = Principal {
-        arn: principal_arn.clone(),
-        user_id: principal_arn,
-        account_id: caller_account.to_string(),
-        principal_type: PrincipalType::User,
-        source_identity: None,
-        tags: None,
-    };
-    let req = EvalRequest {
-        principal: &principal,
-        action: "ssm:GetParameters".to_string(),
-        resource: param.arn.clone(),
-        context: Default::default(),
-    };
-    matches!(evaluate(&docs, &req), Decision::Allow)
+    !decisions.contains(&Decision::ExplicitDeny) && decisions.contains(&Decision::Allow)
 }

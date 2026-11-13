@@ -880,6 +880,380 @@ async fn scp_caps_member_account_root() {
     );
 }
 
+/// The KMS key use S3 makes for a member-account caller (SSE-KMS) is capped
+/// by the caller's SCPs, which see `kms:ViaService`; `SimulatePrincipalPolicy`
+/// includes the SCPs and says whether they allow each action.
+#[tokio::test]
+async fn scps_cap_service_key_use_and_show_in_the_simulator() {
+    let server = start().await;
+    let (root_id, a_cfg, b_cfg) = org_with_member(&server).await;
+    let s3 = path_style_s3(&b_cfg);
+    s3.create_bucket().bucket("scp-sse").send().await.unwrap();
+    let put = |sse: bool| {
+        let mut req = s3
+            .put_object()
+            .bucket("scp-sse")
+            .key("k")
+            .body(ByteStream::from_static(b"x"));
+        if sse {
+            req = req.server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::AwsKms);
+        }
+        req.send()
+    };
+    put(true).await.expect("SSE-KMS before any SCP");
+
+    // Region and data-perimeter guardrails see the forwarded KMS call's
+    // global keys (its region, the key's account and organization,
+    // aws:ViaAWSService), so they let SSE-KMS through.
+    let orgs = OrgsClient::new(&a_cfg);
+    let guardrails = attach_root_scp(
+        &orgs,
+        &root_id,
+        "RegionAndPerimeter",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Deny","Action":"*","Resource":"*",
+             "Condition":{"StringNotEquals":{"aws:RequestedRegion":"us-east-1"}}},
+            {"Effect":"Deny","Action":"*","Resource":"*",
+             "Condition":{"StringNotEqualsIfExists":{"aws:ResourceOrgID":"${aws:PrincipalOrgID}"}}},
+            {"Effect":"Deny","Action":"*","Resource":"*",
+             "Condition":{"StringNotEqualsIfExists":{"aws:ResourceAccount":"222222222222"},
+                          "BoolIfExists":{"aws:ViaAWSService":"false"}}},
+            {"Effect":"Deny","Action":"kms:*","Resource":"*",
+             "Condition":{"ForAnyValue:StringEquals":{"aws:CalledVia":"s3.amazonaws.com"}}}
+        ]}"#,
+    )
+    .await;
+    put(true).await.expect(
+        "SSE-KMS inside the region and the perimeter; S3 is not s3.amazonaws.com in CalledVia",
+    );
+    detach_root_scp(&orgs, &root_id, &guardrails).await;
+    // S3's forwarded calls name it fas.s3.amazonaws.com (recorded).
+    let fas = attach_root_scp(
+        &orgs,
+        &root_id,
+        "DenyKmsCalledViaS3",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Deny","Action":"kms:*","Resource":"*",
+             "Condition":{"ForAnyValue:StringEquals":{"aws:CalledVia":"fas.s3.amazonaws.com"}}}
+        ]}"#,
+    )
+    .await;
+    assert_scp_denied(
+        put(true).await,
+        S3_DENIED,
+        "with an explicit deny in a service control policy",
+        "SSE-KMS write called via fas.s3.amazonaws.com",
+    );
+    detach_root_scp(&orgs, &root_id, &fas).await;
+
+    attach_root_scp(
+        &orgs,
+        &root_id,
+        "DenyKmsThroughS3",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"*","Resource":"*"},
+            {"Effect":"Deny","Action":"kms:GenerateDataKey","Resource":"*",
+             "Condition":{"StringLike":{"kms:ViaService":"s3.*.amazonaws.com"}}},
+            {"Effect":"Deny","Action":"kms:CreateGrant","Resource":"*",
+             "Condition":{"StringEquals":{"aws:CalledViaLast":"dynamodb.amazonaws.com"}}},
+            {"Effect":"Deny","Action":"sqs:DeleteQueue","Resource":"*"}
+        ]}"#,
+    )
+    .await;
+    // DynamoDB creates a table's KMS grant with the caller's credentials.
+    let err = aws_sdk_dynamodb::Client::new(&b_cfg)
+        .create_table()
+        .table_name("scp-sse-table")
+        .attribute_definitions(
+            aws_sdk_dynamodb::types::AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(aws_sdk_dynamodb::types::ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            aws_sdk_dynamodb::types::KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(aws_sdk_dynamodb::types::KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+        .sse_specification(
+            aws_sdk_dynamodb::types::SseSpecification::builder()
+                .enabled(true)
+                .sse_type(aws_sdk_dynamodb::types::SseType::Kms)
+                .kms_master_key_id("alias/aws/dynamodb")
+                .build(),
+        )
+        .send()
+        .await
+        .expect_err("the SCP denies DynamoDB's kms:CreateGrant");
+    assert_eq!(err.code(), Some(JSON_DENIED), "{err:?}");
+    assert!(
+        err.message()
+            .unwrap_or_default()
+            .contains("with an explicit deny in a service control policy"),
+        "{err:?}"
+    );
+    assert_scp_denied(
+        put(true).await,
+        S3_DENIED,
+        "with an explicit deny in a service control policy",
+        "SSE-KMS write through S3",
+    );
+    put(false).await.expect("an SSE-S3 write calls no KMS");
+
+    let results = IamClient::new(&b_cfg)
+        .simulate_principal_policy()
+        .policy_source_arn(format!("arn:aws:iam::{ACCOUNT_B}:user/admin-b"))
+        .action_names("s3:GetObject")
+        .action_names("sqs:DeleteQueue")
+        .send()
+        .await
+        .unwrap();
+    let decisions: Vec<(String, String, Option<bool>)> = results
+        .evaluation_results()
+        .iter()
+        .map(|r| {
+            (
+                r.eval_action_name().to_string(),
+                r.eval_decision().as_str().to_string(),
+                r.organizations_decision_detail()
+                    .map(|d| d.allowed_by_organizations()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        decisions,
+        vec![
+            (
+                "s3:GetObject".to_string(),
+                "allowed".to_string(),
+                Some(true)
+            ),
+            (
+                "sqs:DeleteQueue".to_string(),
+                "explicitDeny".to_string(),
+                Some(false)
+            ),
+        ]
+    );
+}
+
+/// A forwarded KMS call the caller's SCPs refuse fails with each service's
+/// own code, as recorded: S3 403 `AccessDenied`, SQS
+/// `KMS.AccessDeniedException`, SNS `KMSAccessDenied`, SSM
+/// `AccessDeniedException` naming `kms:Encrypt` (what SSM calls for a
+/// SecureString), each relaying KMS's message.
+#[tokio::test]
+async fn refused_forwarded_kms_calls_use_each_services_code() {
+    let server = start().await;
+    let (root_id, a_cfg, b_cfg) = org_with_member(&server).await;
+    let s3 = path_style_s3(&b_cfg);
+    s3.create_bucket().bucket("scp-codes").send().await.unwrap();
+    let sqs = SqsClient::new(&b_cfg);
+    let queue_url = sqs
+        .create_queue()
+        .queue_name("scp-codes")
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId,
+            "alias/aws/sqs",
+        )
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let sns = aws_sdk_sns::Client::new(&b_cfg);
+    let topic_arn = sns
+        .create_topic()
+        .name("scp-codes")
+        .attributes("KmsMasterKeyId", "alias/aws/sns")
+        .send()
+        .await
+        .unwrap()
+        .topic_arn()
+        .unwrap()
+        .to_string();
+    attach_root_scp(
+        &OrgsClient::new(&a_cfg),
+        &root_id,
+        "DenyForwardedKms",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"*","Resource":"*"},
+            {"Effect":"Deny","Action":"kms:*","Resource":"*",
+             "Condition":{"Bool":{"aws:ViaAWSService":"true"}}}
+        ]}"#,
+    )
+    .await;
+    let reason = "with an explicit deny in a service control policy";
+    let names = |message: Option<&str>, action: &str| {
+        let message = message.unwrap_or_default();
+        assert!(
+            message.starts_with(&format!(
+                "User: arn:aws:iam::{ACCOUNT_B}:user/admin-b is not authorized to perform: {action} on resource: arn:aws:kms:"
+            )) && message.contains(reason),
+            "{message}"
+        );
+    };
+
+    let err = s3
+        .put_object()
+        .bucket("scp-codes")
+        .key("k")
+        .body(ByteStream::from_static(b"x"))
+        .server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::AwsKms)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.raw_response().map(|r| r.status().as_u16()), Some(403));
+    assert_eq!(err.code(), Some("AccessDenied"), "{err:?}");
+    names(err.message(), "kms:GenerateDataKey");
+
+    let err = sqs
+        .send_message()
+        .queue_url(&queue_url)
+        .message_body("x")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("KMS.AccessDeniedException"), "{err:?}");
+    names(err.message(), "kms:GenerateDataKey");
+
+    let err = sns
+        .publish()
+        .topic_arn(&topic_arn)
+        .message("x")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("KMSAccessDenied"), "{err:?}");
+    names(err.message(), "kms:GenerateDataKey");
+
+    let err = aws_sdk_ssm::Client::new(&b_cfg)
+        .put_parameter()
+        .name("/scp/codes")
+        .value("secret")
+        .r#type(aws_sdk_ssm::types::ParameterType::SecureString)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("AccessDeniedException"), "{err:?}");
+    names(err.message(), "kms:Encrypt");
+}
+
+/// An `sts:AssumeRoot` session is scoped by its root-task policy: it performs
+/// the privileged task the policy names and nothing else, while
+/// `sts:GetCallerIdentity` needs no permission.
+#[tokio::test]
+async fn assume_root_session_is_scoped_to_its_task_policy() {
+    let server = start().await;
+    let (_, a_cfg, b_cfg) = org_with_member(&server).await;
+    IamClient::new(&a_cfg)
+        .enable_organizations_root_sessions()
+        .send()
+        .await
+        .unwrap();
+    let queue_url = SqsClient::new(&b_cfg)
+        .create_queue()
+        .queue_name("task-scoped-queue")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    seed_bucket(
+        &path_style_s3(&b_cfg),
+        "task-scoped-bucket",
+        read_grant(
+            "task-scoped-bucket",
+            &[&format!("arn:aws:iam::{ACCOUNT_B}:user/admin-b")],
+        ),
+    )
+    .await;
+
+    // S3UnlockBucketPolicy: read and delete the bucket policy.
+    let s3_root = root_session(&server, &a_cfg, ACCOUNT_B, "S3UnlockBucketPolicy").await;
+    let caller = StsClient::new(&s3_root)
+        .get_caller_identity()
+        .send()
+        .await
+        .expect("GetCallerIdentity needs no permission");
+    assert_eq!(
+        caller.arn(),
+        Some(format!("arn:aws:iam::{ACCOUNT_B}:root").as_str())
+    );
+    let s3 = path_style_s3(&s3_root);
+    s3.get_bucket_policy()
+        .bucket("task-scoped-bucket")
+        .send()
+        .await
+        .expect("s3:GetBucketPolicy");
+    let err = s3
+        .get_object()
+        .bucket("task-scoped-bucket")
+        .key("k")
+        .send()
+        .await
+        .expect_err("the task policy denies s3:GetObject");
+    assert_eq!(err.code(), Some(S3_DENIED), "{err:?}");
+    let err = SqsClient::new(&s3_root)
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .send()
+        .await
+        .expect_err("an S3 task session cannot use SQS");
+    assert_eq!(err.code(), Some(SQS_DENIED), "{err:?}");
+    s3.delete_bucket_policy()
+        .bucket("task-scoped-bucket")
+        .send()
+        .await
+        .expect("s3:DeleteBucketPolicy");
+
+    // SQSUnlockQueuePolicy: read the queue's attributes, not send to it.
+    let sqs_root = root_session(&server, &a_cfg, ACCOUNT_B, "SQSUnlockQueuePolicy").await;
+    let sqs = SqsClient::new(&sqs_root);
+    sqs.get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::All)
+        .send()
+        .await
+        .expect("sqs:GetQueueAttributes");
+    let err = sqs
+        .send_message()
+        .queue_url(&queue_url)
+        .message_body("x")
+        .send()
+        .await
+        .expect_err("the task policy denies sqs:SendMessage");
+    assert_eq!(err.code(), Some(SQS_DENIED), "{err:?}");
+
+    // IAMAuditRootUserCredentials: audit the root user's own credentials
+    // (no UserName: the calling root user), not other IAM users.
+    let iam_root = root_session(&server, &a_cfg, ACCOUNT_B, "IAMAuditRootUserCredentials").await;
+    let iam = IamClient::new(&iam_root);
+    iam.list_access_keys()
+        .send()
+        .await
+        .expect("iam:ListAccessKeys on the root user");
+    let err = iam
+        .list_access_keys()
+        .user_name("admin-b")
+        .send()
+        .await
+        .expect_err("auditing another user is denied");
+    assert_eq!(err.code(), Some("AccessDenied"), "{err:?}");
+    let err = iam
+        .list_users()
+        .send()
+        .await
+        .expect_err("iam:ListUsers is outside the task");
+    assert_eq!(err.code(), Some("AccessDenied"), "{err:?}");
+}
+
 /// Create role `name` (under `path`) in `cfg`'s account, trusted by the
 /// account and with `policy` inline when given, and return a session of it
 /// assumed by `cfg`'s admin together with the role's ARN.

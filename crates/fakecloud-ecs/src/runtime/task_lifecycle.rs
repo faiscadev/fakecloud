@@ -59,12 +59,13 @@ impl EcsRuntime {
         // match real ECS's "failed to retrieve secret" behaviour — there's
         // no point starting a sidecar when the app container will fail.
         let mut resolved_plans: Vec<ResolvedContainerPlan> = Vec::with_capacity(plans.len());
+        let reader = super::secrets::execution_role_reader(state, account_id, task_id);
         for plan in plans {
             let mut env = plan.env.clone();
             for (name, value_from) in &plan.secrets_refs {
                 env.push((
                     name.clone(),
-                    self.resolve_secret(account_id, &region, value_from)?,
+                    self.resolve_secret(account_id, &region, value_from, reader.as_ref())?,
                 ));
             }
             // The agent/metadata endpoints live on fakecloud (the host);

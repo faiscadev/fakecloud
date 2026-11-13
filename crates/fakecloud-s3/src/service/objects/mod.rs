@@ -12,12 +12,11 @@ use crate::state::{AclGrant, S3Object};
 
 use super::{
     check_get_conditionals, check_head_conditionals, check_object_lock_for_overwrite,
-    deliver_notifications, etag_matches, extract_user_metadata, extract_xml_value,
-    governance_bypass_requested, has_object_lock_headers, insert_user_metadata_headers, is_frozen,
-    is_valid_storage_class, make_delete_marker, no_such_bucket, no_such_key,
-    parse_delete_objects_quiet, parse_delete_objects_xml, parse_range_header,
-    parse_url_encoded_tags, precondition_failed, resolve_object, s3_xml, url_encode_s3_key,
-    xml_escape, ObjectLockSettings, RangeResult, S3Service,
+    deliver_notifications, etag_matches, extract_user_metadata, governance_bypass_requested,
+    has_object_lock_headers, insert_user_metadata_headers, is_frozen, is_valid_storage_class,
+    make_delete_marker, no_such_bucket, no_such_key, parse_delete_objects_quiet,
+    parse_delete_objects_xml, parse_range_header, precondition_failed, resolve_object, s3_xml,
+    url_encode_s3_key, xml_escape, ObjectLockSettings, RangeResult, S3Service,
 };
 
 mod delete;

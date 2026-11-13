@@ -817,71 +817,128 @@ fn check_content_sha256(
     Ok(())
 }
 
-/// A buffered payload with its integrity assertions verified: the decoded
-/// body (aws-chunked framing removed) and its digests.
-#[derive(Debug)]
-pub(crate) struct VerifiedPayload {
-    pub payload: Vec<u8>,
-    pub digests: Digests,
-}
-
-/// The buffered twin of [`spool_verified`], for streaming-payload operations
-/// whose (small) body reaches the handler already in memory, such as
-/// `PutObjectAnnotation`.
+/// The buffered twin of [`spool_verified`], for a body that reaches the
+/// handler already in memory: a small XML body, or a streaming-payload
+/// operation's such as `PutObjectAnnotation`. The body is already unframed
+/// ([`deframe_buffered`]); a trailing checksum is a header by now. Returns
+/// the body's digests, `store`'s among them.
 pub(crate) fn verify_buffered(
     headers: &HeaderMap,
     body: &[u8],
     checks: &ChecksumHeaders,
     store: Option<ChecksumAlgorithm>,
-) -> Result<VerifiedPayload, AwsServiceError> {
-    let aws_chunked = fakecloud_core::service::is_aws_chunked(headers);
-    let (payload, trailers) = if aws_chunked {
-        let decoded = fakecloud_core::service::decode_aws_chunked(body).map_err(|_| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidChunkSizeError",
-                "Malformed aws-chunked request body",
-            )
-        })?;
-        (decoded.payload, decoded.trailers)
-    } else {
-        (body.to_vec(), Vec::new())
-    };
-    let asserted_sha256 = asserted_content_sha256(headers, aws_chunked);
+) -> Result<Digests, AwsServiceError> {
+    let asserted_sha256 = asserted_content_sha256(headers, false);
     let mut algorithms = checks.algorithms_to_compute(store);
     if asserted_sha256.is_some() && !algorithms.contains(&ChecksumAlgorithm::Sha256) {
         algorithms.push(ChecksumAlgorithm::Sha256);
     }
     let mut hasher = MultiHasher::new(algorithms);
-    hasher.update(&payload);
+    hasher.update(body);
     let digests = hasher.finish();
     check_content_sha256(asserted_sha256.as_ref(), &digests)?;
-    checks.verify(&digests, &trailers)?;
-    Ok(VerifiedPayload { payload, digests })
+    checks.verify(&digests, &[])?;
+    Ok(digests)
+}
+
+/// Remove the `aws-chunked` framing of a buffered request body, so the
+/// payload is what every reader of the request sees: pre-authorization
+/// validation and IAM derivation (the tag set of PutObjectTagging) as much as
+/// the handler. Done once, by [`crate::S3Service`]'s `prepare_request`; a
+/// request no longer framed is left alone, so running it again is a no-op.
+///
+/// The request becomes the unframed request it is equivalent to:
+/// `aws-chunked` leaves `Content-Encoding`, and the trailing checksum the
+/// `x-amz-trailer` header announces becomes that checksum's header, checked
+/// later exactly as a header value is. Headers that do not parse are left as
+/// they are, for the handler to refuse as before, and so is an announced
+/// trailer that never came (the handler answers it as a missing trailer).
+///
+/// All or nothing: a body whose framing is broken, or whose trailing value
+/// is no digest of its algorithm (refused with the trailing-header message),
+/// leaves the request exactly as it was, still framed. Its error is S3's to
+/// return only once the bucket's existence and the caller's authorization
+/// have been judged (recorded: NoSuchBucket and AccessDenied come first), so
+/// the handler unframes again at that point and gets the same error.
+pub(crate) fn deframe_buffered(
+    headers: &mut HeaderMap,
+    body: &mut bytes::Bytes,
+) -> Result<(), AwsServiceError> {
+    if !fakecloud_core::service::is_aws_chunked(headers) {
+        return Ok(());
+    }
+    let decoded = fakecloud_core::service::decode_aws_chunked(body).map_err(|_| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidChunkSizeError",
+            "Malformed aws-chunked request body",
+        )
+    })?;
+    let mut unframed = headers.clone();
+    let encoding = fakecloud_core::service::strip_aws_chunked_encoding(
+        unframed
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok()),
+    );
+    match encoding.and_then(|e| http::HeaderValue::from_str(&e).ok()) {
+        Some(value) => unframed.insert("content-encoding", value),
+        None => unframed.remove("content-encoding"),
+    };
+    // A `STREAMING-...` payload hash names the framing, whose chunk
+    // signatures were the payload's assertion; the unframed body asserts no
+    // hash of its own.
+    unframed.insert(
+        "x-amz-content-sha256",
+        http::HeaderValue::from_static("UNSIGNED-PAYLOAD"),
+    );
+    let trailer = match ChecksumHeaders::parse(&unframed) {
+        Ok(ChecksumHeaders {
+            trailer: Some(algorithm),
+            ..
+        }) => decoded
+            .trailers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(algorithm.header_name()))
+            .map(|(_, value)| (algorithm, value)),
+        _ => None,
+    };
+    if let Some((algorithm, value)) = trailer {
+        let invalid = || {
+            invalid_request(format!(
+                "Value for {} trailing header is invalid.",
+                algorithm.header_name()
+            ))
+        };
+        if decode(algorithm, value).is_none() {
+            return Err(invalid());
+        }
+        let value = http::HeaderValue::from_str(value).map_err(|_| invalid())?;
+        unframed.remove("x-amz-trailer");
+        unframed.insert(algorithm.header_name(), value);
+    }
+    *headers = unframed;
+    *body = decoded.payload.into();
+    Ok(())
+}
+
+/// Whether a request's body is still `aws-chunked` framed, buffered: one
+/// [`deframe_buffered`] could not unframe. Nothing may read its body before
+/// the handler refuses it.
+pub(crate) fn still_framed(headers: &HeaderMap) -> bool {
+    fakecloud_core::service::is_aws_chunked(headers)
 }
 
 /// Verify the integrity headers of a small, fully buffered request body (the
 /// XML of PutBucketCors, DeleteObjects, PutObjectTagging, ...): a
 /// `Content-MD5` and/or `x-amz-checksum-<algorithm>` value, or a trailing
-/// checksum, must match the body. An `aws-chunked` body is de-framed the same
-/// way as on the streaming path; the decoded payload is returned so the
-/// caller can hand the handler the real body. A bare
-/// `x-amz-sdk-checksum-algorithm` asserts nothing to check.
-pub(crate) fn verify_request_body(
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<Option<Vec<u8>>, AwsServiceError> {
+/// checksum, must match the body (already unframed, [`deframe_buffered`]).
+/// A bare `x-amz-sdk-checksum-algorithm` asserts nothing to check.
+pub(crate) fn verify_request_body(headers: &HeaderMap, body: &[u8]) -> Result<(), AwsServiceError> {
     let checks = ChecksumHeaders::parse(headers)?;
-    let aws_chunked = fakecloud_core::service::is_aws_chunked(headers);
-    if !aws_chunked
-        && checks.value.is_none()
-        && checks.trailer.is_none()
-        && checks.content_md5.is_none()
-    {
-        return Ok(None);
+    if checks.value.is_none() && checks.trailer.is_none() && checks.content_md5.is_none() {
+        return Ok(());
     }
-    let verified = verify_buffered(headers, body, &checks, None)?;
-    Ok(aws_chunked.then_some(verified.payload))
+    verify_buffered(headers, body, &checks, None).map(drop)
 }
 
 /// Parse the `x-amz-checksum-type` header.
@@ -1181,18 +1238,31 @@ mod tests {
             payload.len(),
             std::str::from_utf8(payload).unwrap()
         );
-        let h = headers(&[
-            ("content-encoding", "aws-chunked"),
+        let framed_headers = headers(&[
+            ("content-encoding", "aws-chunked, gzip"),
             ("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"),
             ("x-amz-trailer", "x-amz-checksum-sha512"),
         ]);
+        let deframe = |text: &str| {
+            let mut h = framed_headers.clone();
+            let mut body = bytes::Bytes::from(text.to_string());
+            deframe_buffered(&mut h, &mut body).map(|()| (h, body))
+        };
+        let (h, body) = deframe(&framed).unwrap();
+        assert_eq!(&body[..], payload);
+        assert_eq!(h["content-encoding"], "gzip");
+        assert!(h.get("x-amz-trailer").is_none());
+        assert_eq!(h["x-amz-checksum-sha512"], good.as_str());
         let checks = ChecksumHeaders::parse(&h).unwrap();
-        let v = verify_buffered(&h, framed.as_bytes(), &checks, checks.algorithm()).unwrap();
-        assert_eq!(v.payload, payload);
-        assert_eq!(v.digests.encoded(ChecksumAlgorithm::Sha512), Some(good));
+        let digests = verify_buffered(&h, &body, &checks, checks.algorithm()).unwrap();
+        assert_eq!(digests.encoded(ChecksumAlgorithm::Sha512), Some(good));
+        // Idempotent: an unframed request is left as it is.
+        let (mut again, mut same) = (h.clone(), body.clone());
+        deframe_buffered(&mut again, &mut same).unwrap();
+        assert_eq!((again, same), (h, body));
 
         let bad = framed.replace("x-amz-checksum-sha512:", "x-amz-checksum-sha512:A");
-        let err = verify_buffered(&h, bad.as_bytes(), &checks, checks.algorithm()).unwrap_err();
+        let err = deframe(&bad).unwrap_err();
         assert_eq!(code(err), "InvalidRequest");
         let other = format!(
             "{:x}\r\n{}\r\n0\r\nx-amz-checksum-sha512:{}\r\n\r\n",
@@ -1200,8 +1270,26 @@ mod tests {
             std::str::from_utf8(payload).unwrap(),
             checksum(ChecksumAlgorithm::Sha512, b"tampered")
         );
-        let err = verify_buffered(&h, other.as_bytes(), &checks, None).unwrap_err();
+        let (h, body) = deframe(&other).unwrap();
+        let checks = ChecksumHeaders::parse(&h).unwrap();
+        let err = verify_buffered(&h, &body, &checks, None).unwrap_err();
         assert_eq!(code(err), "BadDigest");
+        // An announced trailer that never came stays announced, and is
+        // answered as a missing trailer.
+        let missing = format!(
+            "{:x}\r\n{}\r\n0\r\n\r\n",
+            payload.len(),
+            std::str::from_utf8(payload).unwrap()
+        );
+        let (h, body) = deframe(&missing).unwrap();
+        assert_eq!(h["x-amz-trailer"], "x-amz-checksum-sha512");
+        let checks = ChecksumHeaders::parse(&h).unwrap();
+        let err = verify_buffered(&h, &body, &checks, None).unwrap_err();
+        assert_eq!(code(err), "MalformedTrailerError");
+        assert_eq!(
+            code(deframe("zz\r\n").unwrap_err()),
+            "InvalidChunkSizeError"
+        );
     }
 
     #[test]

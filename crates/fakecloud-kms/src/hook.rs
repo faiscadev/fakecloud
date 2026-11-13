@@ -69,7 +69,13 @@ pub struct KmsServiceHook {
     state: SharedKmsState,
     usage: SharedKmsUsageState,
     caller_facts: Option<CallerResolver>,
+    org_of: Option<OrgResolver>,
 }
+
+/// The organization id and path (`o-xxx/r-xxx/ou-xxx/.../`) of an account,
+/// `None` when it belongs to none: a key's account's for
+/// `aws:ResourceOrgID` / `aws:ResourceOrgPaths`.
+pub type OrgResolver = Arc<dyn Fn(&str) -> Option<(String, String)> + Send + Sync>;
 
 /// The ARN (path included) of the IAM role `role_name` in `account_id`, as
 /// IAM holds it: an assumed-role session ARN names its role without the
@@ -90,6 +96,14 @@ pub struct CallerFacts {
     /// `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` of the caller's
     /// account.
     pub org: Option<(String, String)>,
+    /// The service control policies that cap the caller (its organization's
+    /// chain, root first) when IAM enforcement is on and they apply to it:
+    /// no key policy or grant lets a service use a key on its behalf past
+    /// them. `None` when they do not.
+    pub scps: Option<Vec<String>>,
+    /// Whether a key use the SCPs refuse is denied (`--iam strict`) rather
+    /// than only logged (`soft`).
+    pub enforce_scps: bool,
 }
 
 /// Resolves a calling identity ARN to its [`CallerFacts`].
@@ -170,7 +184,20 @@ impl KmsServiceHook {
             state,
             usage,
             caller_facts: None,
+            org_of: None,
         }
+    }
+
+    /// Resolve accounts to their organizations, for the global keys a key's
+    /// policy and the caller's SCPs see.
+    pub fn with_org_resolver(mut self, resolver: OrgResolver) -> Self {
+        self.org_of = Some(resolver);
+        self
+    }
+
+    /// The organization of `account`, when an org resolver is wired.
+    fn org_of(&self, account: &str) -> Option<(String, String)> {
+        self.org_of.as_ref().and_then(|resolve| resolve(account))
     }
 
     /// Resolve calling identities to what IAM and Organizations know about
@@ -272,6 +299,7 @@ impl KmsServiceHook {
                 &facts,
                 &format!("kms:{operation}"),
                 &encryption_context,
+                &|account| self.org_of(account),
             )?;
             require_enabled(key)?;
             require_symmetric_encryption_key(key, operation)?;
@@ -354,6 +382,7 @@ impl KmsServiceHook {
                 &facts,
                 "kms:Decrypt",
                 &encryption_context,
+                &|account| self.org_of(account),
             )?;
             // A disabled / pending-deletion key can't decrypt: real KMS
             // rejects the operation, and SSE-KMS consumers (SQS/SNS/...) must
@@ -416,6 +445,7 @@ impl KmsServiceHook {
                 &facts,
                 action,
                 encryption_context,
+                &|account| self.org_of(account),
             )?;
         }
         require_enabled(key)?;
@@ -639,6 +669,10 @@ fn names_an_alias(key_ref: &str) -> bool {
 /// - [`KmsCaller::Service`]: the service principal acts itself, and only a
 ///   key policy statement naming it can allow that, so every key's policy
 ///   is checked (a customer key's default policy grants only the account).
+///
+/// A caller's service control policies ([`CallerFacts::scps`]) cap the key
+/// use the service makes for it, whichever of the above allows it: the KMS
+/// request is made with the caller's identity.
 #[allow(clippy::too_many_arguments)]
 fn authorize(
     key: &KmsKey,
@@ -649,6 +683,7 @@ fn authorize(
     facts: &CallerFacts,
     action: &str,
     encryption_context: &HashMap<String, String>,
+    org_of: &dyn Fn(&str) -> Option<(String, String)>,
 ) -> Result<(), KmsError> {
     let role_arn = facts.role_arn.as_deref();
     let caller_arn = match caller {
@@ -705,8 +740,86 @@ fn authorize(
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let decision =
-        crate::aws_managed::policy_decision(&key.policy, &key.arn, &caller, action, &context, &[]);
+    // The caller's SCPs cap the key use whatever allows it: an explicit Deny
+    // in them is final, and what they do not allow nothing else grants.
+    let scp_decision = (!service_caller)
+        .then_some(facts.scps.as_deref())
+        .flatten()
+        .map(|scps| {
+            let docs: Vec<_> = scps
+                .iter()
+                .map(|s| fakecloud_iam::evaluator::PolicyDocument::parse(s))
+                .collect();
+            let caller_arn = caller_arn.flatten().unwrap_or(root.as_str());
+            let principal = fakecloud_core::auth::Principal {
+                arn: caller_arn.to_string(),
+                user_id: facts.user_id.clone().unwrap_or_default(),
+                account_id: account_id.to_string(),
+                principal_type: fakecloud_core::auth::PrincipalType::from_arn(caller_arn),
+                source_identity: None,
+                tags: facts.tags.clone(),
+            };
+            let request = fakecloud_iam::evaluator::EvalRequest {
+                principal: &principal,
+                action: action.to_string(),
+                resource: key.arn.clone(),
+                context: crate::aws_managed::request_context(
+                    &caller,
+                    &key.arn,
+                    &context,
+                    &[],
+                    org_of,
+                ),
+            };
+            fakecloud_iam::evaluator::evaluate_ceiling(None, None, Some(&docs), &request)
+        });
+    let scp_refusal = |scp: fakecloud_iam::evaluator::Decision| -> Option<KmsError> {
+        let reason = match scp {
+            fakecloud_iam::evaluator::Decision::Allow => return None,
+            fakecloud_iam::evaluator::Decision::ExplicitDeny => {
+                "with an explicit deny in a service control policy".to_string()
+            }
+            fakecloud_iam::evaluator::Decision::ImplicitDeny => {
+                format!("because no service control policy allows the {action} action")
+            }
+        };
+        tracing::warn!(
+            target: "fakecloud::iam::audit",
+            action = %action,
+            resource = %key.arn,
+            principal = %who,
+            enforced = facts.enforce_scps,
+            "service control policies refuse a service's key use on the caller's behalf"
+        );
+        facts.enforce_scps.then(|| {
+            KmsError::new(
+                KmsErrorKind::AccessDenied,
+                format!(
+                    "{who} is not authorized to perform: {action} on resource: {} {reason}",
+                    key.arn
+                ),
+            )
+        })
+    };
+    let scp_explicit_deny = scp_decision == Some(fakecloud_iam::evaluator::Decision::ExplicitDeny);
+    if scp_explicit_deny {
+        if let Some(err) = scp_refusal(fakecloud_iam::evaluator::Decision::ExplicitDeny) {
+            return Err(err);
+        }
+    }
+    let allowed = || match scp_decision {
+        Some(scp) if !scp_explicit_deny => scp_refusal(scp).map_or(Ok(()), Err),
+        _ => Ok(()),
+    };
+    let decision = crate::aws_managed::policy_decision_with_orgs(
+        &key.policy,
+        &key.arn,
+        &caller,
+        action,
+        &context,
+        &[],
+        org_of,
+    );
     let explicit_deny = decision == fakecloud_iam::evaluator::Decision::ExplicitDeny;
     // A customer key of the caller's own account is left to IAM (see above),
     // except that an explicit Deny in its key policy always wins.
@@ -714,28 +827,70 @@ fn authorize(
     let own_customer_key =
         !service_caller && key.key_manager != "AWS" && key_account == Some(account_id);
     if decision.is_allow() || (own_customer_key && !explicit_deny) {
-        return Ok(());
+        return allowed();
     }
     // A grant on the key lets an identity of the caller's account use it for
-    // the operations it covers (AWS principals only; a service principal
-    // acting itself is not a grantee). Grants only add permission: a key
-    // policy that explicitly denies the caller is never overridden.
-    if let Some(caller_arn) = caller_arn {
-        if decision == fakecloud_iam::evaluator::Decision::ImplicitDeny
-            && key.key_manager != "AWS"
-            && {
+    // the operations it covers, and a grant to a service principal
+    // (`GranteeServicePrincipal`) lets that service, acting itself for the
+    // resource its `SourceArn` constraint names, use it. Grants only add
+    // permission: a key policy that explicitly denies the caller is never
+    // overridden. A service acting for a caller makes no request on behalf
+    // of a resource of its own, so a grant bound to a `SourceArn` does not
+    // cover it.
+    if decision == fakecloud_iam::evaluator::Decision::ImplicitDeny && key.key_manager != "AWS" {
+        let granted = match (caller_arn, caller) {
+            (Some(caller_arn), _) => {
                 let forms = grantee_forms(caller_arn, role_arn, account_id, partition);
+                // A grant naming a user or role covers the principal of the
+                // unique ID it recorded: the caller's `aws:userid` (the
+                // user's ID, or `<role id>:<session>`), when IAM knows it.
+                let caller_id = facts.user_id.as_deref().and_then(|id| id.split(':').next());
                 grant_allows(
                     grants,
                     key_storage_id,
                     &key.arn,
-                    |grantee| forms.iter().any(|form| form == grantee),
+                    |grant| {
+                        forms.contains(&grant.grantee_principal)
+                            && match (&grant.grantee_principal_id, caller_id) {
+                                (Some(id), Some(caller_id)) => id == caller_id,
+                                _ => true,
+                            }
+                    },
                     action,
                     GrantRequest::Context(encryption_context),
+                    None,
                 )
             }
-        {
-            return Ok(());
+            (
+                None,
+                crate::aws_managed::KeyCaller::Service {
+                    service_principal,
+                    region,
+                    source_arn,
+                    ..
+                },
+            ) => {
+                let forms = crate::aws_managed::service_principal_forms(service_principal, region);
+                grant_allows(
+                    grants,
+                    key_storage_id,
+                    &key.arn,
+                    |grant| {
+                        grant
+                            .grantee_service_principal
+                            .as_ref()
+                            .is_some_and(|named| forms.contains(named))
+                    },
+                    action,
+                    GrantRequest::Context(encryption_context),
+                    Some(source_arn),
+                )
+            }
+            _ => false,
+        };
+        if granted {
+            // The caller's SCPs cap a grant as they cap the key policy.
+            return allowed();
         }
     }
     let message = if service_caller {
@@ -811,19 +966,24 @@ pub(crate) enum GrantRequest<'a> {
 }
 
 /// Whether a grant on the key stored as `key_storage_id` (ARN `key_arn`)
-/// whose grantee principal satisfies `names_grantee` lets it perform
-/// `action` (`kms:GenerateDataKey`, ...) as `request` asks: the grant names
-/// the key, a matching grantee, and the operation, and its constraints
-/// (`EncryptionContextSubset` / `EncryptionContextEquals`) hold. A replica
-/// of a multi-Region key is stored apart from its primary
-/// (`<region>:<id>`), and each has its own grants.
+/// whose grantee satisfies `names_grantee` lets it perform `action`
+/// (`kms:GenerateDataKey`, ...) as `request` asks, for a request made on
+/// behalf of the resource `source_arn` (its `aws:SourceArn`; `None` for a
+/// request no service makes for a resource of its own): the grant names the
+/// key, a matching grantee, and the operation, and its constraints
+/// (`EncryptionContextSubset` / `EncryptionContextEquals`, and `SourceArn`,
+/// which "allows the permissions in the grant only when the request is made
+/// on behalf of" that resource) hold. A replica of a multi-Region key is
+/// stored apart from its primary (`<region>:<id>`), and each has its own
+/// grants.
 pub(crate) fn grant_allows(
     grants: &[crate::state::KmsGrant],
     key_storage_id: &str,
     key_arn: &str,
-    names_grantee: impl Fn(&str) -> bool,
+    names_grantee: impl Fn(&crate::state::KmsGrant) -> bool,
     action: &str,
     request: GrantRequest<'_>,
+    source_arn: Option<&str>,
 ) -> bool {
     let operation = action.strip_prefix("kms:").unwrap_or(action);
     grants.iter().any(|grant| {
@@ -831,7 +991,8 @@ pub(crate) fn grant_allows(
         let covers = grant.operations.iter().any(|op| op == operation);
         names_key
             && covers
-            && names_grantee(&grant.grantee_principal)
+            && names_grantee(grant)
+            && grant_source_arn(grant).is_none_or(|required| source_arn == Some(required))
             && match request {
                 GrantRequest::Context(context) => grant_constraints_hold(grant, context),
                 GrantRequest::NoContext => true,
@@ -846,6 +1007,11 @@ pub(crate) fn grant_allows(
                 }
             }
     })
+}
+
+/// The resource a grant's `SourceArn` constraint names, if it has one.
+fn grant_source_arn(grant: &crate::state::KmsGrant) -> Option<&str> {
+    grant.constraints.as_ref()?.get("SourceArn")?.as_str()
 }
 
 /// The pairs of the `name` encryption-context constraint in `constraints`.
@@ -892,6 +1058,12 @@ fn grant_constraints_hold(
 /// `EncryptionContextEquals` holding those pairs; a parent's
 /// `EncryptionContextEquals` must be kept exactly.
 fn child_constraints_as_strict(parent: &crate::state::KmsGrant, child: &serde_json::Value) -> bool {
+    // A parent bound to a resource only creates grants bound to it.
+    if let Some(source_arn) = grant_source_arn(parent) {
+        if child.get("SourceArn").and_then(|v| v.as_str()) != Some(source_arn) {
+            return false;
+        }
+    }
     let Some(parent) = &parent.constraints else {
         return true;
     };
@@ -2111,6 +2283,276 @@ mod tests {
             .unwrap();
     }
 
+    /// The key use a service makes for a caller is capped by the caller's
+    /// SCPs, whatever key policy allows it: an explicit Deny is refused,
+    /// naming the SCP, as is an action no SCP allows; under `soft` the
+    /// refusal is only logged.
+    #[test]
+    fn a_callers_scps_cap_the_key_use_a_service_makes_for_it() {
+        let acct = "123456789012";
+        let alice = "arn:aws:iam::123456789012:user/alice";
+        let (state, _) = crate::test_support::kms_hook(acct);
+        let hook_with = |scp: &'static str, enforce: bool| {
+            KmsServiceHook::new(state.clone(), Default::default()).with_caller_resolver(Arc::new(
+                move |_arn: &str| CallerFacts {
+                    scps: Some(vec![scp.to_string()]),
+                    enforce_scps: enforce,
+                    ..Default::default()
+                },
+            ))
+        };
+        let s3 = KmsCaller::OnBehalfOf {
+            service_principal: "s3.amazonaws.com",
+            caller_arn: Some(alice),
+        };
+        let ctx: HashMap<String, String> =
+            [("aws:s3:arn".to_string(), "arn:aws:s3:::b/k".to_string())].into();
+        let customer = {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(acct);
+            let arn = mint_aws_managed_key(s, "us-east-1", "custom");
+            let key = s.keys.get_mut(key_id_from_arn(&arn)).unwrap();
+            key.key_manager = "CUSTOMER".into();
+            key.policy = format!(
+                r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{acct}:root"}},"Action":"kms:*","Resource":"*"}}]}}"#
+            );
+            arn
+        };
+        let allow_all = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
+        let deny_via_s3 = r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"*","Resource":"*"},
+            {"Effect":"Deny","Action":"kms:GenerateDataKey","Resource":"*",
+             "Condition":{"StringLike":{"kms:ViaService":"s3.*.amazonaws.com"}}}
+        ]}"#;
+        let no_kms = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+        for key in ["alias/aws/s3", customer.as_str()] {
+            hook_with(allow_all, true)
+                .encrypt(acct, "us-east-1", key, b"x", s3, ctx.clone())
+                .unwrap_or_else(|e| panic!("{key}: {e:?}"));
+            let err = hook_with(deny_via_s3, true)
+                .encrypt(acct, "us-east-1", key, b"x", s3, ctx.clone())
+                .unwrap_err();
+            assert_eq!(err.kind, KmsErrorKind::AccessDenied, "{key}");
+            assert!(
+                err.message.starts_with(&format!(
+                    "User: {alice} is not authorized to perform: kms:GenerateDataKey on resource: "
+                )) && err
+                    .message
+                    .ends_with(" with an explicit deny in a service control policy"),
+                "{key}: {}",
+                err.message
+            );
+            let err = hook_with(no_kms, true)
+                .encrypt(acct, "us-east-1", key, b"x", s3, ctx.clone())
+                .unwrap_err();
+            assert!(
+                err.message.ends_with(
+                    " because no service control policy allows the kms:GenerateDataKey action"
+                ),
+                "{key}: {}",
+                err.message
+            );
+            // `soft` logs the refusal and lets the key use through.
+            hook_with(no_kms, false)
+                .encrypt(acct, "us-east-1", key, b"x", s3, ctx.clone())
+                .unwrap_or_else(|e| panic!("{key}: {e:?}"));
+        }
+        // Decrypting through the service is capped the same way.
+        let sealed = hook_with(allow_all, true)
+            .encrypt(acct, "us-east-1", &customer, b"x", s3, ctx.clone())
+            .unwrap();
+        let err = hook_with(no_kms, true)
+            .decrypt(acct, &sealed, s3, ctx.clone())
+            .unwrap_err();
+        assert!(
+            err.message
+                .ends_with(" because no service control policy allows the kms:Decrypt action"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// A grant to a service principal (`GranteeServicePrincipal`) lets that
+    /// service, acting itself for the resource its `SourceArn` constraint
+    /// names (in its regional or global name), use a key whose policy does
+    /// not name it, for the grant's operations only; acting for another
+    /// resource it is refused. A grant to an AWS principal bound to a
+    /// `SourceArn` does not cover a service acting for a caller, which makes
+    /// the request on behalf of no resource.
+    #[test]
+    fn service_principal_grants_hold_for_their_source_arn() {
+        let acct = "123456789012";
+        let (state, _) = crate::test_support::kms_hook(acct);
+        let hook = KmsServiceHook::new(state.clone(), Default::default());
+        let rule = "arn:aws:ses:us-east-1:123456789012:receipt-rule-set/s:receipt-rule/r";
+        let other_rule = "arn:aws:ses:us-east-1:123456789012:receipt-rule-set/s:receipt-rule/x";
+        let (customer, storage_id) = {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(acct);
+            let arn = mint_aws_managed_key(s, "us-east-1", "granted");
+            let id = key_id_from_arn(&arn).to_string();
+            let key = s.keys.get_mut(&id).unwrap();
+            key.key_manager = "CUSTOMER".into();
+            key.policy = format!(
+                r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{acct}:root"}},"Action":"kms:*","Resource":"*"}}]}}"#
+            );
+            (arn, id)
+        };
+        let push = |grantee: &str,
+                    service: Option<&str>,
+                    operations: &[&str],
+                    source_arn: Option<&str>| {
+            let mut accounts = state.write();
+            accounts
+                .get_or_create(acct)
+                .grants
+                .push(crate::state::KmsGrant {
+                    grant_id: format!("g-{}", operations.join("-")),
+                    grant_token: "t".into(),
+                    key_id: storage_id.clone(),
+                    grantee_principal: grantee.into(),
+                    grantee_principal_id: None,
+                    grantee_service_principal: service.map(str::to_string),
+                    retiring_principal: Some(format!("arn:aws:iam::{acct}:root")),
+                    retiring_service_principal: None,
+                    operations: operations.iter().map(|o| o.to_string()).collect(),
+                    constraints: source_arn.map(|arn| serde_json::json!({ "SourceArn": arn })),
+                    name: None,
+                    creation_date: 0.0,
+                });
+        };
+        let ses = |principal: &'static str, source_arn: &'static str| KmsCaller::Service {
+            service_principal: principal,
+            source_arn,
+            source_account: acct,
+            via_service: None,
+        };
+        let encrypt = |caller| {
+            hook.encrypt(
+                acct,
+                "us-east-1",
+                &customer,
+                b"mail",
+                caller,
+                HashMap::new(),
+            )
+        };
+
+        assert_eq!(
+            encrypt(ses("ses.amazonaws.com", rule)).unwrap_err().kind,
+            KmsErrorKind::AccessDenied
+        );
+        push(
+            "",
+            Some("ses.amazonaws.com"),
+            &["GenerateDataKey"],
+            Some(rule),
+        );
+        encrypt(ses("ses.amazonaws.com", rule)).expect("the grant's service and resource");
+        encrypt(ses("ses.us-east-1.amazonaws.com", rule)).expect("its regional name");
+        assert_eq!(
+            encrypt(ses("ses.amazonaws.com", other_rule))
+                .unwrap_err()
+                .kind,
+            KmsErrorKind::AccessDenied,
+            "another resource"
+        );
+        assert_eq!(
+            encrypt(ses("sns.amazonaws.com", rule)).unwrap_err().kind,
+            KmsErrorKind::AccessDenied,
+            "another service"
+        );
+        let blob = encrypt(ses("ses.amazonaws.com", rule)).unwrap();
+        assert_eq!(
+            hook.decrypt(acct, &blob, ses("ses.amazonaws.com", rule), HashMap::new())
+                .unwrap_err()
+                .kind,
+            KmsErrorKind::AccessDenied,
+            "an operation outside the grant"
+        );
+
+        // A grant to a user of another account, bound to the resource: the
+        // user's calls through a service are not on behalf of it. The same
+        // grant without the constraint covers them.
+        let other = "222222222222";
+        let user = format!("arn:aws:iam::{other}:user/u");
+        let as_user = || {
+            hook.encrypt(
+                other,
+                "us-east-1",
+                &customer,
+                b"x",
+                KmsCaller::via_for("s3.amazonaws.com", Some(&user)),
+                HashMap::new(),
+            )
+        };
+        push(&user, None, &["GenerateDataKey"], Some(rule));
+        assert_eq!(as_user().unwrap_err().kind, KmsErrorKind::AccessDenied);
+        push(&user, None, &["GenerateDataKey"], None);
+        as_user().expect("an unbound grant to the user");
+    }
+
+    /// Through a service, a grant naming a role covers sessions of the role
+    /// with the unique ID it recorded (the caller's `aws:userid` as IAM
+    /// reports it), not those of a role recreated under the same name.
+    #[test]
+    fn grants_through_a_service_follow_the_grantees_unique_id() {
+        let (a, b) = ("111111111111", "222222222222");
+        let (state, _) = crate::test_support::kms_hook(a);
+        let current_id = Arc::new(parking_lot::Mutex::new("AROAOLD".to_string()));
+        let resolver_id = current_id.clone();
+        let hook = KmsServiceHook::new(state.clone(), Default::default()).with_caller_resolver(
+            Arc::new(move |arn: &str| CallerFacts {
+                user_id: Some(format!(
+                    "{}:{}",
+                    resolver_id.lock(),
+                    arn.rsplit('/').next().unwrap_or_default()
+                )),
+                ..Default::default()
+            }),
+        );
+        let key = {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(b);
+            let arn = mint_aws_managed_key(s, "us-east-1", "by-id");
+            let id = key_id_from_arn(&arn).to_string();
+            let key = s.keys.get_mut(&id).unwrap();
+            key.key_manager = "CUSTOMER".into();
+            key.policy = format!(
+                r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{b}:root"}},"Action":"kms:*","Resource":"*"}}]}}"#
+            );
+            s.grants.push(crate::state::KmsGrant {
+                grant_id: "g".into(),
+                grant_token: "t".into(),
+                key_id: id,
+                grantee_principal: format!("arn:aws:iam::{a}:role/app"),
+                grantee_principal_id: Some("AROAOLD".into()),
+                grantee_service_principal: None,
+                retiring_principal: None,
+                retiring_service_principal: None,
+                operations: vec!["GenerateDataKey".into()],
+                constraints: None,
+                name: None,
+                creation_date: 0.0,
+            });
+            arn
+        };
+        let session = format!("arn:aws:sts::{a}:assumed-role/app/s");
+        let encrypt = || {
+            hook.encrypt(
+                a,
+                "us-east-1",
+                &key,
+                b"x",
+                KmsCaller::via_for("sqs.amazonaws.com", Some(&session)),
+                HashMap::new(),
+            )
+        };
+        encrypt().expect("a session of the granted role");
+        *current_id.lock() = "AROANEW".into();
+        assert_eq!(encrypt().unwrap_err().kind, KmsErrorKind::AccessDenied);
+    }
+
     /// A resource in one account encrypted under a customer key ARN of
     /// another account uses that account's key: allowed when the key policy
     /// grants the resource's account, refused (AccessDenied naming the key)
@@ -2325,6 +2767,9 @@ mod tests {
                     key_id: key_id_from_arn(&key).to_string(),
                     grantee_principal: grantee,
                     retiring_principal: None,
+                    grantee_service_principal: None,
+                    grantee_principal_id: None,
+                    retiring_service_principal: None,
                     operations: operations.iter().map(|o| o.to_string()).collect(),
                     constraints,
                     name: None,
@@ -2388,6 +2833,9 @@ mod tests {
             key_id,
             grantee_principal: format!("arn:aws:iam::{a}:root"),
             retiring_principal: None,
+            grantee_service_principal: None,
+            grantee_principal_id: None,
+            retiring_service_principal: None,
             operations: vec!["GenerateDataKey".into()],
             constraints: None,
             name: None,
@@ -2452,6 +2900,9 @@ mod tests {
             key_id,
             grantee_principal: format!("arn:aws:iam::{a}:root"),
             retiring_principal: None,
+            grantee_service_principal: None,
+            grantee_principal_id: None,
+            retiring_service_principal: None,
             operations: operations.iter().map(|o| o.to_string()).collect(),
             constraints: None,
             name: None,
@@ -2534,6 +2985,9 @@ mod tests {
                 key_id: key_id_from_arn(&key).to_string(),
                 grantee_principal: "arn:aws:iam::111111111111:root".into(),
                 retiring_principal: None,
+                grantee_service_principal: None,
+                grantee_principal_id: None,
+                retiring_service_principal: None,
                 operations: vec!["GenerateDataKey".into()],
                 constraints: None,
                 name: None,

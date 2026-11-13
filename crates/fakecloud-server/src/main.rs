@@ -515,7 +515,8 @@ async fn main() {
     // initialized (depends on the persistence config). The OnceLock wiring
     // lets us hand the same Arc to all services up-front.
     let kms_hook_adapter = Arc::new(
-        KmsHookAdapter::new(kms_state.clone(), kms_usage_state.clone()).with_iam(iam_state.clone()),
+        KmsHookAdapter::new(kms_state.clone(), kms_usage_state.clone())
+            .with_iam(iam_state.clone(), cli.iam_mode()),
     );
     let kms_hook_for_services: Arc<dyn fakecloud_core::delivery::KmsHook> =
         kms_hook_adapter.clone();
@@ -2163,8 +2164,13 @@ async fn main() {
         } else {
             None
         };
-    let mut iam_service =
-        IamService::new(iam_state.clone()).with_quota_provider(Some(quota_provider.clone()));
+    let mut iam_service = IamService::new(iam_state.clone())
+        .with_quota_provider(Some(quota_provider.clone()))
+        .with_scp_resolver(
+            fakecloud_organizations::resolver::OrganizationsScpResolver::shared(
+                organizations_state.clone(),
+            ),
+        );
     if let Some(ref store) = iam_snapshot_store {
         iam_service = iam_service.with_snapshot_store(store.clone());
     }
@@ -2465,7 +2471,11 @@ async fn main() {
     let secretsmanager_rotation_snapshot_store = secretsmanager_snapshot_store.clone();
     let mut secretsmanager_service =
         SecretsManagerService::new(secretsmanager_state).with_delivery(delivery_for_secretsmanager);
-    secretsmanager_service = secretsmanager_service.with_kms_hook(kms_hook_for_services.clone());
+    secretsmanager_service = secretsmanager_service
+        .with_kms_hook(kms_hook_for_services.clone())
+        .with_session_role_resolver(fakecloud_iam::evaluator::session_role_resolver(
+            iam_state.clone(),
+        ));
     if let Some(store) = secretsmanager_snapshot_store {
         secretsmanager_service = secretsmanager_service.with_snapshot_store(store);
     }
@@ -2542,8 +2552,9 @@ async fn main() {
         } else {
             None
         };
-    let mut kms_service =
-        KmsService::new(kms_state.clone()).with_quota_provider(Some(quota_provider.clone()));
+    let mut kms_service = KmsService::new(kms_state.clone())
+        .with_quota_provider(Some(quota_provider.clone()))
+        .with_iam(iam_state.clone());
     if let Some(store) = kms_snapshot_store {
         // Hook-driven auto-provisioning (`aws/<service>` first use) saves
         // KMS state durably before the hook call returns.
@@ -3655,7 +3666,11 @@ async fn main() {
         } else {
             None
         };
-    let mut ecr_service = EcrService::new(ecr_state.clone()).with_kms(kms_state.clone());
+    let mut ecr_service = EcrService::new(ecr_state.clone())
+        .with_kms(kms_state.clone())
+        .with_session_role_resolver(fakecloud_iam::evaluator::session_role_resolver(
+            iam_state.clone(),
+        ));
     if let Some(store) = ecr_snapshot_store.clone() {
         ecr_service = ecr_service.with_snapshot_store(store);
     }

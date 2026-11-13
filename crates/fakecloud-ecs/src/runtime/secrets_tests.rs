@@ -132,9 +132,92 @@ impl Fixture {
     }
 
     fn resolve(&self, value_from: &str) -> Result<String, String> {
+        self.resolve_as(value_from, None)
+    }
+
+    fn resolve_as(
+        &self,
+        value_from: &str,
+        reader: Option<&fakecloud_iam::evaluator::RequestCaller>,
+    ) -> Result<String, String> {
         self.runtime
-            .resolve_secret(ACCOUNT, REGION, value_from)
+            .resolve_secret(ACCOUNT, REGION, value_from, reader)
             .map_err(|e| e.to_string())
+    }
+}
+
+/// A session of the execution role `role` (under `/ecs/`) of `ACCOUNT`, as
+/// a task reads its secrets.
+fn execution_role(role: &str) -> fakecloud_iam::evaluator::RequestCaller {
+    fakecloud_iam::evaluator::RequestCaller {
+        principal: fakecloud_core::auth::Principal {
+            arn: format!("arn:aws:sts::{ACCOUNT}:assumed-role/{role}/task-1"),
+            user_id: String::new(),
+            account_id: ACCOUNT.to_string(),
+            principal_type: fakecloud_core::auth::PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        },
+        role_arn: Some(format!("arn:aws:iam::{ACCOUNT}:role/ecs/{role}")),
+    }
+}
+
+#[tokio::test]
+async fn cross_account_reads_are_authorized_for_the_execution_role() {
+    let f = Fixture::new();
+    let secret = f
+        .sm_call(
+            "CreateSecret",
+            OTHER_ACCOUNT,
+            REGION,
+            json!({"Name": "for-exec", "SecretString": "exec-only"}),
+        )
+        .await["ARN"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.ssm_call(
+        "PutParameter",
+        OTHER_ACCOUNT,
+        json!({"Name": "/for/exec", "Value": "exec-param", "Type": "String", "Tier": "Advanced"}),
+    )
+    .await;
+    let parameter = format!("arn:aws:ssm:us-east-1:{OTHER_ACCOUNT}:parameter/for/exec");
+    let grant = |action: &str| {
+        json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"AWS": format!("arn:aws:iam::{ACCOUNT}:role/ecs/exec")},
+                "Action": action,
+                "Resource": "*"
+            }]
+        })
+        .to_string()
+    };
+    f.sm_call(
+        "PutResourcePolicy",
+        OTHER_ACCOUNT,
+        REGION,
+        json!({"SecretId": secret.clone(), "ResourcePolicy": grant("secretsmanager:GetSecretValue")}),
+    )
+    .await;
+    f.ssm_call(
+        "PutResourcePolicy",
+        OTHER_ACCOUNT,
+        json!({"ResourceArn": parameter.clone(), "Policy": grant("ssm:GetParameters")}),
+    )
+    .await;
+
+    let exec = execution_role("exec");
+    assert_eq!(f.resolve_as(&secret, Some(&exec)).unwrap(), "exec-only");
+    assert_eq!(f.resolve_as(&parameter, Some(&exec)).unwrap(), "exec-param");
+    // Another execution role, or a task reading as the account, is not
+    // named by the policies.
+    let other = execution_role("other");
+    for reader in [Some(&other), None] {
+        assert_err_contains(f.resolve_as(&secret, reader), "AccessDeniedException");
+        assert_err_contains(f.resolve_as(&parameter, reader), "AccessDeniedException");
     }
 }
 

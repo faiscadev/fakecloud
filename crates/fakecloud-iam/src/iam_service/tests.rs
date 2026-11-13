@@ -4280,6 +4280,122 @@ fn simulate_principal_policy_uses_principals_attached_managed_policy() {
     );
 }
 
+/// An organization whose SCP chain for every account but the management
+/// account (`000000000000`) is `scps`.
+struct FixedScps(Vec<String>);
+
+impl fakecloud_core::auth::ScpResolver for FixedScps {
+    fn scps_for(&self, principal: &fakecloud_core::auth::Principal) -> Option<Vec<String>> {
+        (principal.account_id != "000000000000").then(|| self.0.clone())
+    }
+
+    fn principal_org(&self, _account_id: &str) -> Option<(String, String)> {
+        Some(("o-example".to_string(), "o-example/r-root/".to_string()))
+    }
+}
+
+#[test]
+fn simulate_principal_policy_includes_the_accounts_scps() {
+    let scp = r#"{"Version":"2012-10-17","Statement":[
+        {"Effect":"Allow","Action":["s3:*","sqs:*"],"Resource":"*"},
+        {"Effect":"Deny","Action":"s3:DeleteObject","Resource":"*"}
+    ]}"#;
+    let svc = make_service().with_scp_resolver(Arc::new(FixedScps(vec![scp.to_string()])));
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "alice")]))
+        .unwrap();
+    svc.put_user_policy(&make_request(
+        "PutUserPolicy",
+        vec![
+            ("UserName", "alice"),
+            ("PolicyName", "all"),
+            (
+                "PolicyDocument",
+                r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#,
+            ),
+        ],
+    ))
+    .unwrap();
+    let resp = svc
+        .simulate_principal_policy(&make_request(
+            "SimulatePrincipalPolicy",
+            vec![
+                ("PolicySourceArn", "arn:aws:iam::123456789012:user/alice"),
+                ("ActionNames.member.1", "s3:GetObject"),
+                ("ActionNames.member.2", "s3:DeleteObject"),
+                ("ActionNames.member.3", "dynamodb:GetItem"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    let results: Vec<&str> = body.split("<EvalActionName>").skip(1).collect();
+    assert_eq!(results.len(), 3, "{body}");
+    let expect = [
+        ("s3:GetObject", "allowed", "true"),
+        ("s3:DeleteObject", "explicitDeny", "false"),
+        ("dynamodb:GetItem", "implicitDeny", "false"),
+    ];
+    for (result, (action, decision, by_orgs)) in results.iter().zip(expect) {
+        assert!(result.starts_with(action), "{result}");
+        assert!(
+            result.contains(&format!("<EvalDecision>{decision}</EvalDecision>")),
+            "{action}: {result}"
+        );
+        assert!(
+            result.contains(&format!(
+                "<OrganizationsDecisionDetail><AllowedByOrganizations>{by_orgs}</AllowedByOrganizations></OrganizationsDecisionDetail>"
+            )),
+            "{action}: {result}"
+        );
+    }
+
+    // The custom-policy simulation has no principal account to apply SCPs to.
+    let resp = svc
+        .simulate_custom_policy(&make_request(
+            "SimulateCustomPolicy",
+            vec![
+                (
+                    "PolicyInputList.member.1",
+                    r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#,
+                ),
+                ("ActionNames.member.1", "s3:DeleteObject"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<EvalDecision>allowed</EvalDecision>"),
+        "{body}"
+    );
+    assert!(!body.contains("OrganizationsDecisionDetail"), "{body}");
+}
+
+#[test]
+fn simulate_principal_policy_management_account_is_allowed_by_organizations() {
+    let svc = make_service().with_scp_resolver(Arc::new(FixedScps(Vec::new())));
+    let resp = svc
+        .simulate_principal_policy(&make_request(
+            "SimulatePrincipalPolicy",
+            vec![
+                ("PolicySourceArn", "arn:aws:iam::000000000000:user/admin"),
+                (
+                    "PolicyInputList.member.1",
+                    r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#,
+                ),
+                ("ActionNames.member.1", "s3:GetObject"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<EvalDecision>allowed</EvalDecision>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<AllowedByOrganizations>true</AllowedByOrganizations>"),
+        "{body}"
+    );
+}
+
 #[test]
 fn simulate_principal_policy_unknown_principal_returns_implicit_deny() {
     let svc = make_service();

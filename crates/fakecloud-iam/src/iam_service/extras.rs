@@ -1008,7 +1008,8 @@ impl IamService {
         action: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         use crate::evaluator::{
-            evaluate_with_gates, evaluate_with_resource_policy_and_gates, Decision, EvalRequest,
+            evaluate_ceiling, evaluate_with_gates_and_scps,
+            evaluate_with_resource_policy_and_gates_and_scps, Decision, EvalRequest,
             PolicyDocument,
         };
         use fakecloud_core::auth::{ConditionContext, Principal, PrincipalType};
@@ -1222,6 +1223,31 @@ impl IamService {
         // to for any key it doesn't recognize.
         apply_context_entries(req, &mut ctx);
 
+        // SimulatePrincipalPolicy includes the service control policies of
+        // the simulated principal's organization: `None` when its account is
+        // in no organization, `Some(None)` when SCPs do not apply to it (the
+        // management account, a service-linked role), else the SCP chain.
+        let scp_chain: Option<Option<Vec<PolicyDocument>>> =
+            match (action, self.scp_resolver.as_ref()) {
+                ("SimulatePrincipalPolicy", Some(resolver))
+                    if resolver.principal_org(&principal_account).is_some() =>
+                {
+                    let service_linked = matches!(
+                        parse_principal_arn(&principal_arn_str),
+                        Some((PrincipalKind::Role, name)) if name.starts_with("AWSServiceRoleFor")
+                    );
+                    let scps = (!service_linked)
+                        .then(|| resolver.scps_for(&principal))
+                        .flatten();
+                    if let Some(raw) = &scps {
+                        raw_policy_jsons.extend(raw.iter().cloned());
+                    }
+                    Some(scps.map(|raw| raw.iter().map(|s| PolicyDocument::parse(s)).collect()))
+                }
+                _ => None,
+            };
+        let scp_docs: Option<&[PolicyDocument]> = scp_chain.as_ref().and_then(|c| c.as_deref());
+
         // Pre-compute the set of condition keys referenced by every
         // resolved policy doc (PolicyInputList + boundary inputs for
         // SimulateCustomPolicy; principal/group/boundary policies +
@@ -1240,21 +1266,36 @@ impl IamService {
                     context: ctx.clone(),
                 };
                 let decision = match &resource_policy_doc {
-                    Some(rp) => evaluate_with_resource_policy_and_gates(
+                    Some(rp) => evaluate_with_resource_policy_and_gates_and_scps(
                         &identity_docs,
                         boundary_docs.as_deref(),
                         None,
+                        scp_docs,
                         Some(rp),
                         &eval_req,
                         &resource_account_for(resource),
                     ),
-                    None => evaluate_with_gates(
+                    None => evaluate_with_gates_and_scps(
                         &identity_docs,
                         boundary_docs.as_deref(),
                         None,
+                        scp_docs,
                         &eval_req,
                     ),
                 };
+                // For a principal of an organization: whether its SCPs
+                // allow the action (true when none apply to it).
+                let organizations_xml = scp_chain
+                    .as_ref()
+                    .map(|chain| {
+                        let allowed = chain.as_deref().is_none_or(|docs| {
+                            evaluate_ceiling(None, None, Some(docs), &eval_req) == Decision::Allow
+                        });
+                        format!(
+                            "<OrganizationsDecisionDetail><AllowedByOrganizations>{allowed}</AllowedByOrganizations></OrganizationsDecisionDetail>"
+                        )
+                    })
+                    .unwrap_or_default();
                 let decision_str = match decision {
                     Decision::Allow => "allowed",
                     Decision::ImplicitDeny => "implicitDeny",
@@ -1288,12 +1329,13 @@ impl IamService {
                     .map(|k| format!("<member>{}</member>", xml_escape(k)))
                     .collect();
                 results.push(format!(
-                    "<member><EvalActionName>{}</EvalActionName><EvalResourceName>{}</EvalResourceName><EvalDecision>{}</EvalDecision><MatchedStatements>{}</MatchedStatements><MissingContextValues>{}</MissingContextValues></member>",
+                    "<member><EvalActionName>{}</EvalActionName><EvalResourceName>{}</EvalResourceName><EvalDecision>{}</EvalDecision><MatchedStatements>{}</MatchedStatements><MissingContextValues>{}</MissingContextValues>{}</member>",
                     xml_escape(action_name),
                     xml_escape(resource),
                     decision_str,
                     matched_xml,
                     missing_xml,
+                    organizations_xml,
                 ));
             }
         }

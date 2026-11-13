@@ -822,7 +822,12 @@ impl DynamoDbService {
             &req.account_id,
             &req.region,
             wanted,
-            fakecloud_core::delivery::KmsCaller::via("dynamodb.amazonaws.com"),
+            // DynamoDB creates the table's grant with the caller's
+            // credentials, so the caller's key policy grants and SCPs apply.
+            fakecloud_core::delivery::KmsCaller::via_for(
+                "dynamodb.amazonaws.com",
+                req.principal.as_ref().map(|p| p.arn.as_str()),
+            ),
             &["kms:CreateGrant"],
             &HashMap::new(),
         ) {

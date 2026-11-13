@@ -77,11 +77,14 @@ impl ResourcePolicyProvider for S3ResourcePolicyProvider {
         if !service.eq_ignore_ascii_case("s3") {
             return false;
         }
-        // Which canned grant satisfies the action: object-read actions need
-        // an object (or bucket) ACL; bucket-list actions need a bucket ACL.
+        // Which canned grant satisfies the policy action, per AWS's mapping of
+        // ACL permissions to policy actions: READ on an object grants
+        // s3:GetObject / GetObjectVersion / GetObjectTorrent (HeadObject is
+        // authorized as s3:GetObject), READ on a bucket grants s3:ListBucket /
+        // ListBucketVersions / ListBucketMultipartUploads.
         let needs_object = match action {
-            "GetObject" | "GetObjectVersion" | "HeadObject" => true,
-            "ListBucket" | "ListObjects" | "ListObjectsV2" | "ListObjectVersions" => false,
+            "GetObject" | "GetObjectVersion" | "GetObjectTorrent" => true,
+            "ListBucket" | "ListBucketVersions" | "ListBucketMultipartUploads" => false,
             // Other actions are not granted anonymously via a public-read ACL.
             _ => return false,
         };
@@ -167,6 +170,12 @@ fn grants_all_users_read(grants: &[crate::state::AclGrant]) -> bool {
 /// caller treats that as "no resource policy attached," which falls
 /// through to identity-only evaluation rather than silently allowing.
 fn parse_bucket_name(arn: &str) -> Option<&str> {
+    // A directory bucket's ARN (`arn:aws:s3express:<region>:<account>:bucket/<name>`),
+    // which `s3express:CreateSession` is authorized on.
+    if let Some(rest) = arn_resource(arn, "s3express") {
+        let bucket = rest.splitn(3, ':').nth(2)?.strip_prefix("bucket/")?;
+        return Some(bucket).filter(|b| !b.is_empty() && !b.contains('/'));
+    }
     let rest = arn_resource(arn, "s3")?.strip_prefix("::")?;
     if rest.is_empty() {
         return None;
@@ -264,6 +273,10 @@ mod tests {
         let state = state_with_object("b", "k.txt", vec![], vec![public_read_grant()], None);
         let provider = S3ResourcePolicyProvider::new(state);
         assert!(provider.public_acl_allows("s3", "arn:aws:s3:::b", "ListBucket"));
+        assert!(provider.public_acl_allows("s3", "arn:aws:s3:::b", "ListBucketVersions"));
+        // Operation names are not policy actions.
+        assert!(!provider.public_acl_allows("s3", "arn:aws:s3:::b", "ListObjectsV2"));
+        assert!(!provider.public_acl_allows("s3", "arn:aws:s3:::b/k.txt", "HeadObject"));
         // A bucket-only public ACL does not expose unrelated write actions.
         assert!(!provider.public_acl_allows("s3", "arn:aws:s3:::b/k.txt", "PutObject"));
     }
@@ -298,6 +311,22 @@ mod tests {
             Some("some/key")
         );
         assert_eq!(parse_bucket_name("arn:bogus:s3:::my-bucket"), None);
+    }
+
+    #[test]
+    fn parse_bucket_name_reads_directory_bucket_arns() {
+        assert_eq!(
+            parse_bucket_name("arn:aws:s3express:us-east-1:123456789012:bucket/b--use1-az4--x-s3"),
+            Some("b--use1-az4--x-s3")
+        );
+        assert_eq!(
+            parse_bucket_name("arn:aws:s3express:us-east-1:123456789012:bucket/"),
+            None
+        );
+        assert_eq!(
+            parse_bucket_name("arn:aws:s3express:us-east-1:123456789012:accesspoint/a--xa-s3"),
+            None
+        );
     }
 
     #[test]

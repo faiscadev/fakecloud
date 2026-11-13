@@ -12,8 +12,8 @@ use crate::persistence::{bucket_meta_snapshot, object_meta_snapshot};
 use super::{
     build_acl_xml, canned_acl_grants, empty_response, extract_xml_value, has_grant_headers,
     no_such_bucket, normalize_notification_ids, normalize_replication_xml, parse_acl_xml,
-    parse_tagging_xml, reject_conflicting_acl_sources, resolved_grant_headers, s3_xml,
-    validate_lifecycle_xml, validate_tags, xml_escape, S3Service, BUCKET_CANNED_ACLS,
+    reject_conflicting_acl_sources, resolved_grant_headers, s3_xml, validate_lifecycle_xml,
+    validate_tags, xml_escape, S3Service, BUCKET_CANNED_ACLS,
 };
 
 /// Decoded `PublicAccessBlockConfiguration` flags read by the request
@@ -174,6 +174,7 @@ mod request_payment;
 mod tagging;
 mod versioning;
 mod website;
+pub(crate) use website::WebsiteConfig;
 
 impl S3Service {
     // ---- ObjectLockConfiguration ----

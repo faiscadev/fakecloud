@@ -2491,6 +2491,89 @@ async fn cross_account_get_secret_value_allowed_with_matching_policy() {
 }
 
 #[tokio::test]
+async fn cross_account_secret_policy_is_evaluated_for_the_calling_principal() {
+    use fakecloud_core::auth::{Principal, PrincipalType};
+    let svc = SecretsManagerService::new(make_state()).with_session_role_resolver(
+        std::sync::Arc::new(|principal: &Principal| {
+            principal
+                .arn
+                .contains(":assumed-role/reader/")
+                .then(|| "arn:aws:iam::222222222222:role/apps/reader".to_string())
+        }),
+    );
+    let resp = svc
+        .handle(make_request_for(
+            "CreateSecret",
+            "111111111111",
+            r#"{"Name": "shared/role", "SecretString": "shhh"}"#,
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let arn = body["ARN"].as_str().unwrap().to_string();
+    let policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"AWS": [
+                    "arn:aws:iam::222222222222:role/apps/reader",
+                    "arn:aws:iam::222222222222:user/alice"
+                ]},
+                "Action": "secretsmanager:GetSecretValue",
+                "Resource": "*"
+            }
+        ]
+    });
+    svc.handle(make_request_for(
+        "PutResourcePolicy",
+        "111111111111",
+        &format!(
+            r#"{{"SecretId": "{arn}", "ResourcePolicy": {}}}"#,
+            serde_json::to_string(&policy.to_string()).unwrap()
+        ),
+    ))
+    .await
+    .unwrap();
+    let as_caller = |arn: &str, principal_type: PrincipalType| {
+        let mut req = make_request_for(
+            "GetSecretValue",
+            "222222222222",
+            &format!(r#"{{"SecretId": "{}"}}"#, body["ARN"].as_str().unwrap()),
+        );
+        req.principal = Some(Principal {
+            arn: arn.to_string(),
+            user_id: "AIDAEXAMPLE".to_string(),
+            account_id: "222222222222".to_string(),
+            principal_type,
+            source_identity: None,
+            tags: None,
+        });
+        req
+    };
+    // The role's sessions and the named user read it.
+    for (arn, kind) in [
+        (
+            "arn:aws:sts::222222222222:assumed-role/reader/s1",
+            PrincipalType::AssumedRole,
+        ),
+        ("arn:aws:iam::222222222222:user/alice", PrincipalType::User),
+    ] {
+        let resp = svc.handle(as_caller(arn, kind)).await.unwrap();
+        let got: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(got["SecretString"], "shhh", "{arn}");
+    }
+    // Another user of the account, and the account's root, do not.
+    for (arn, kind) in [
+        ("arn:aws:iam::222222222222:user/bob", PrincipalType::User),
+        ("arn:aws:iam::222222222222:root", PrincipalType::Root),
+    ] {
+        let err = expect_err(svc.handle(as_caller(arn, kind)).await);
+        assert_eq!(err.code(), "AccessDeniedException", "{arn}");
+    }
+}
+
+#[tokio::test]
 async fn china_region_secret_arn_round_trips_across_accounts() {
     let svc = SecretsManagerService::new(make_state());
     let in_cn = |action: &str, account: &str, body: &str| {
@@ -3702,7 +3785,17 @@ async fn read_secret_value_resolves_names_in_the_caller_region_and_arns_in_their
     )
     .await;
     let read = |region: &str, id: &str| {
-        crate::value::read_secret_value(&state, None, "123456789012", region, id, None, None, None)
+        crate::value::read_secret_value(
+            &state,
+            None,
+            "123456789012",
+            region,
+            id,
+            None,
+            None,
+            None,
+            None,
+        )
     };
     assert_eq!(
         read("us-east-1", "app").unwrap().secret_string.as_deref(),

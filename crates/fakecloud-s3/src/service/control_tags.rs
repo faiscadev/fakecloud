@@ -17,7 +17,7 @@ use fakecloud_persistence::{BucketSubresource, TagsSnapshot};
 
 use crate::state::S3State;
 
-use super::{no_such_bucket, parse_tagging_xml, s3_xml, validate_tags, xml_escape, S3Service};
+use super::{no_such_bucket, s3_xml, validate_tags, xml_escape, S3Service};
 
 /// Most tags an S3 resource can carry through S3 Control.
 const MAX_TAGS: usize = 50;
@@ -182,7 +182,7 @@ impl S3Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let resource = parse_resource_arn(arn, account_id)?;
         let body_str = std::str::from_utf8(&req.body).unwrap_or("");
-        let new_tags = parse_tagging_xml(body_str);
+        let new_tags = super::tags::read_tag_set(body_str, "TagResourceRequest", "Tags")?;
         validate_tags(&new_tags)?;
 
         let mut accts = self.state.write();

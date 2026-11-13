@@ -6179,7 +6179,7 @@ fn read_parameter_value_resolves_names_in_the_caller_region_and_arns_in_theirs()
         .unwrap();
     }
     let read = |region: &str, name: &str| {
-        crate::read_parameter_value(&svc.state, None, "123456789012", region, name)
+        crate::read_parameter_value(&svc.state, None, "123456789012", region, name, None)
     };
     assert_eq!(read("eu-west-1", "/shared").unwrap().value, "west");
     assert_eq!(read("us-east-1", "/shared").unwrap().value, "east");
@@ -6196,6 +6196,87 @@ fn read_parameter_value_resolves_names_in_the_caller_region_and_arns_in_theirs()
     assert_eq!(
         read("ap-south-1", "/shared").unwrap_err().code(),
         "ParameterNotFound"
+    );
+}
+
+#[test]
+fn read_parameter_value_across_accounts_evaluates_the_policy_for_the_reader() {
+    use fakecloud_core::auth::{Principal, PrincipalType};
+    use fakecloud_iam::evaluator::{account_root_principal, PolicyCaller};
+    let svc = make_service();
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({"Name": "/shared/db", "Value": "secret", "Type": "String", "Tier": "Advanced"}),
+    ))
+    .unwrap();
+    let arn = "arn:aws:ssm:us-east-1:123456789012:parameter/shared/db";
+    let share = |principal: &str| {
+        let policy = json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"AWS": principal},
+                "Action": "ssm:GetParameters",
+                "Resource": arn,
+            }]
+        })
+        .to_string();
+        svc.put_resource_policy(&make_request(
+            "PutResourcePolicy",
+            json!({"ResourceArn": arn, "Policy": policy}),
+        ))
+        .unwrap();
+    };
+    let session = |role: &str| Principal {
+        arn: format!("arn:aws:sts::444455556666:assumed-role/{role}/task-1"),
+        user_id: format!("AROAEXAMPLE:{role}"),
+        account_id: "444455556666".into(),
+        principal_type: PrincipalType::AssumedRole,
+        source_identity: None,
+        tags: None,
+    };
+    let exec = session("exec");
+    let other = session("other");
+    let root = account_root_principal("444455556666", "aws");
+    let read = |caller: PolicyCaller<'_>| {
+        crate::read_parameter_value(
+            &svc.state,
+            None,
+            "444455556666",
+            "us-east-1",
+            arn,
+            Some(caller),
+        )
+    };
+    let exec_caller = PolicyCaller {
+        principal: &exec,
+        role_arn: Some("arn:aws:iam::444455556666:role/team/exec"),
+    };
+    let other_caller = PolicyCaller {
+        principal: &other,
+        role_arn: Some("arn:aws:iam::444455556666:role/other"),
+    };
+    let root_caller = PolicyCaller {
+        principal: &root,
+        role_arn: None,
+    };
+
+    // Shared with the execution role (its ARN with its path): its sessions
+    // read it, nobody else of the account does.
+    share("arn:aws:iam::444455556666:role/team/exec");
+    assert_eq!(read(exec_caller).unwrap().value, "secret");
+    let err = read(other_caller).unwrap_err();
+    assert_eq!(err.code(), "AccessDeniedException");
+    assert!(
+        err.message().starts_with(
+            "User: arn:aws:sts::444455556666:assumed-role/other/task-1 is not authorized"
+        ),
+        "{}",
+        err.message()
+    );
+    assert_eq!(
+        read(root_caller).unwrap_err().code(),
+        "AccessDeniedException"
     );
 }
 

@@ -182,7 +182,7 @@ async fn sts_assume_root() {
         .target_principal("123456789012")
         .task_policy_arn(
             aws_sdk_sts::types::PolicyDescriptorType::builder()
-                .arn("arn:aws:iam::aws:policy/IAMAuditRootUserCredentials")
+                .arn("arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials")
                 .build(),
         )
         .send()

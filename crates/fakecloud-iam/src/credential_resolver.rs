@@ -67,6 +67,7 @@ impl CredentialResolver for IamCredentialResolver {
                     token_issued_at: lookup.token_issued_at,
                     federated_provider: lookup.federated_provider,
                     role_arn,
+                    federated_parent_arn: lookup.federated_parent_arn,
                 });
             }
         }
@@ -166,6 +167,7 @@ mod tests {
                 issued_at: Utc::now(),
                 federated_provider: None,
                 role_arn: None,
+                federated_parent_arn: None,
             },
         );
         let resolver = IamCredentialResolver::new(shared(state));
@@ -202,6 +204,7 @@ mod tests {
                 issued_at: Utc::now(),
                 federated_provider: None,
                 role_arn: Some("arn:aws:iam::123456789012:role/fakecloud".into()),
+                federated_parent_arn: None,
             },
         );
         let resolver = IamCredentialResolver::new(shared(state));
@@ -362,6 +365,7 @@ mod tests {
                 issued_at: Utc::now(),
                 federated_provider: None,
                 role_arn: None,
+                federated_parent_arn: None,
             },
         );
         let resolver = IamCredentialResolver::new(shared(state));

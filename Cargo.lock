@@ -5555,6 +5555,7 @@ dependencies = [
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
+ "fakecloud-iam",
  "fakecloud-k8s",
  "fakecloud-logs",
  "fakecloud-persistence",

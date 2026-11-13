@@ -187,12 +187,20 @@ pub fn mint_session_credentials(
     let expiration = issued_at + duration;
     let (account_id, assumed_role_arn) =
         session_principal(default_account_id, role_arn, session_name);
-    let user_id = format!("{}:{}", deterministic_role_id(role_arn), session_name);
-
+    let user_id;
     {
         let mut accounts = iam.write();
         let state = accounts.get_or_create(&account_id);
         let session_role_arn = state.minted_session_role_arn(role_arn);
+        // `aws:userid` is `<role id>:<session>`, as AssumeRole issues it: the
+        // unique ID of the role whose policies the session gets when it
+        // exists in IAM (what key policies and KMS grants naming the role
+        // recorded), a stable stand-in for a role that was never created
+        // (the default `role/fakecloud`).
+        let role_id = super::role_for_arn(state, &session_role_arn)
+            .map(|role| role.role_id.clone())
+            .unwrap_or_else(|| deterministic_role_id(role_arn));
+        user_id = format!("{role_id}:{session_name}");
         state.credential_identities.insert(
             creds.access_key_id.clone(),
             CredentialIdentity {
@@ -219,6 +227,7 @@ pub fn mint_session_credentials(
                 // when it exists; the configured one otherwise (the default
                 // `role/fakecloud` never does).
                 role_arn: Some(session_role_arn),
+                federated_parent_arn: None,
             },
         );
     }
@@ -718,6 +727,64 @@ mod tests {
         assert_eq!(
             minted.assumed_role_arn,
             "arn:aws-cn:sts::123456789012:assumed-role/fakecloud/fakecloud-local"
+        );
+    }
+
+    /// A minted session's `aws:userid` is `<role id>:<session>` with the
+    /// unique ID of the role when it exists in IAM (also when the configured
+    /// ARN leaves out its path), as AssumeRole issues it, so policies and
+    /// grants that recorded the role's ID match; a role never created keeps
+    /// the stable stand-in.
+    #[test]
+    fn minted_sessions_carry_the_roles_unique_id() {
+        let iam = shared();
+        iam.write().get_or_create("123456789012").roles.insert(
+            "app".to_string(),
+            crate::state::IamRole {
+                role_name: "app".into(),
+                role_id: "AROAREALAPPROLEID".into(),
+                arn: "arn:aws:iam::123456789012:role/team/app".into(),
+                path: "/team/".into(),
+                assume_role_policy_document: "{}".into(),
+                created_at: Utc::now(),
+                tags: Vec::new(),
+                max_session_duration: 3600,
+                permissions_boundary: None,
+                description: None,
+            },
+        );
+        let resolver = IamCredentialResolver::new(iam.clone());
+        for configured in [
+            "arn:aws:iam::123456789012:role/team/app",
+            "arn:aws:iam::123456789012:role/app",
+        ] {
+            let minted = mint_session_credentials(
+                &iam,
+                "123456789012",
+                configured,
+                "fn",
+                DEFAULT_CONTAINER_CREDENTIALS_DURATION,
+            );
+            let resolved = resolver.resolve(&minted.access_key_id).unwrap();
+            assert_eq!(
+                resolved.principal.user_id, "AROAREALAPPROLEID:fn",
+                "{configured}"
+            );
+        }
+        let default_role = "arn:aws:iam::123456789012:role/fakecloud";
+        let minted = mint_container_credentials(
+            &iam,
+            "123456789012",
+            default_role,
+            DEFAULT_CONTAINER_CREDENTIALS_DURATION,
+        );
+        let resolved = resolver.resolve(&minted.access_key_id).unwrap();
+        assert_eq!(
+            resolved.principal.user_id,
+            format!(
+                "{}:{CONTAINER_CREDENTIALS_SESSION_NAME}",
+                deterministic_role_id(default_role)
+            )
         );
     }
 

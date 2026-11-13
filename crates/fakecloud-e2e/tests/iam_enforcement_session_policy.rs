@@ -110,9 +110,8 @@ async fn assume_role_with_policy(
 #[tokio::test]
 async fn session_policy_caps_assumed_role_permissions() {
     // Role has Allow-all identity policy. AssumeRole with a session
-    // policy that only allows sts:GetCallerIdentity. The returned
-    // credentials should be denied on iam:ListUsers but allowed on
-    // sts:GetCallerIdentity.
+    // policy that only allows iam:ListRoles. The returned credentials
+    // should be denied on iam:ListUsers but allowed on iam:ListRoles.
     let server = start_strict().await;
     setup_role(&server, "wide-role").await;
 
@@ -120,13 +119,13 @@ async fn session_policy_caps_assumed_role_permissions() {
         &server,
         "wide-role",
         "narrow-session",
-        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:GetCallerIdentity","Resource":"*"}]}"#,
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"iam:ListRoles","Resource":"*"}]}"#,
     )
     .await;
 
     let cfg = sdk_config_with_session(&server, &akid, &secret, &token).await;
 
-    // Allowed by both role policy and session policy.
+    // The session's identity (GetCallerIdentity needs no permission).
     let sts = StsClient::new(&cfg);
     let identity = sts.get_caller_identity().send().await.unwrap();
     assert!(identity
@@ -134,8 +133,11 @@ async fn session_policy_caps_assumed_role_permissions() {
         .unwrap()
         .contains("assumed-role/wide-role/narrow-session"));
 
-    // Denied by session policy (even though role has Allow-all).
+    // Allowed by both role policy and session policy.
     let iam = IamClient::new(&cfg);
+    iam.list_roles().send().await.unwrap();
+
+    // Denied by session policy (even though role has Allow-all).
     let err = iam.list_users().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
@@ -157,15 +159,14 @@ async fn session_policy_explicit_deny_wins() {
             "Version":"2012-10-17",
             "Statement":[
                 {"Effect":"Allow","Action":"*","Resource":"*"},
-                {"Effect":"Deny","Action":"sts:GetCallerIdentity","Resource":"*"}
+                {"Effect":"Deny","Action":"iam:ListRoles","Resource":"*"}
             ]
         }"#,
     )
     .await;
 
     let cfg = sdk_config_with_session(&server, &akid, &secret, &token).await;
-    let sts = StsClient::new(&cfg);
-    let err = sts.get_caller_identity().send().await.unwrap_err();
+    let err = IamClient::new(&cfg).list_roles().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
         msg.contains(r#"code: Some("AccessDenied")"#),
@@ -257,14 +258,132 @@ async fn get_federation_token_session_policy_restricts() {
     .await;
 
     // Session policy explicit Deny must block even though the calling
-    // user had Allow-all. (The federated-user identity-policy path
-    // is a known gap — FederatedUser principals don't inherit the
-    // calling user's policies yet.)
+    // user had Allow-all. (A federated user cannot call IAM at all.)
     let iam_fed = IamClient::new(&fed_cfg);
     let err = iam_fed.list_users().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
         msg.contains(r#"code: Some("AccessDenied")"#),
         "expected AccessDenied, got {msg}"
+    );
+}
+
+#[tokio::test]
+async fn federated_user_has_its_users_permissions_cut_by_the_session_policy() {
+    // The federated session's permissions are the intersection of the
+    // federating user's policies and the session policies; with no session
+    // policy it has none. GetCallerIdentity always works.
+    let server = start_strict().await;
+    let iam = root_client(&server).await;
+    iam.create_user().user_name("broker").send().await.unwrap();
+    let key = iam
+        .create_access_key()
+        .user_name("broker")
+        .send()
+        .await
+        .unwrap();
+    let key = key.access_key().unwrap();
+    iam.put_user_policy()
+        .user_name("broker")
+        .policy_name("SqsAndFederate")
+        .policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["sqs:*","sts:GetFederationToken"],"Resource":"*"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    let user_cfg = sdk_config_with(&server, key.access_key_id(), key.secret_access_key()).await;
+    let federate = |name: &'static str, policy: Option<&'static str>| {
+        let sts = StsClient::new(&user_cfg);
+        let server = &server;
+        async move {
+            let mut req = sts.get_federation_token().name(name);
+            if let Some(policy) = policy {
+                req = req.policy(policy);
+            }
+            let resp = req.send().await.unwrap();
+            let creds = resp.credentials().unwrap();
+            sdk_config_with_session(
+                server,
+                creds.access_key_id(),
+                creds.secret_access_key(),
+                creds.session_token(),
+            )
+            .await
+        }
+    };
+    let denied = |msg: String, what: &str| {
+        assert!(
+            msg.contains(r#"code: Some("AccessDenied")"#),
+            "{what}: expected AccessDenied, got {msg}"
+        );
+    };
+
+    // Session policy allows everything: the user's SQS permission applies,
+    // nothing beyond it.
+    let wide = federate(
+        "wide",
+        Some(r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#),
+    )
+    .await;
+    let identity = StsClient::new(&wide)
+        .get_caller_identity()
+        .send()
+        .await
+        .unwrap();
+    assert!(identity.arn().unwrap().ends_with(":federated-user/wide"));
+    let sqs = aws_sdk_sqs::Client::new(&wide);
+    sqs.create_queue()
+        .queue_name("fed-queue")
+        .send()
+        .await
+        .expect("the user allows sqs:*");
+    denied(
+        format!(
+            "{:?}",
+            aws_sdk_s3::Client::new(&wide)
+                .list_buckets()
+                .send()
+                .await
+                .unwrap_err()
+        ),
+        "the user allows no S3",
+    );
+
+    // Session policy narrower than the user: only what both allow.
+    let narrow = federate(
+        "narrow",
+        Some(r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sqs:ListQueues","Resource":"*"}]}"#),
+    )
+    .await;
+    let sqs = aws_sdk_sqs::Client::new(&narrow);
+    sqs.list_queues()
+        .send()
+        .await
+        .expect("both allow ListQueues");
+    denied(
+        format!(
+            "{:?}",
+            sqs.create_queue()
+                .queue_name("fed-queue-2")
+                .send()
+                .await
+                .unwrap_err()
+        ),
+        "the session policy does not allow CreateQueue",
+    );
+
+    // No session policy: no permissions at all.
+    let bare = federate("bare", None).await;
+    denied(
+        format!(
+            "{:?}",
+            aws_sdk_sqs::Client::new(&bare)
+                .list_queues()
+                .send()
+                .await
+                .unwrap_err()
+        ),
+        "a federated session without session policy",
     );
 }

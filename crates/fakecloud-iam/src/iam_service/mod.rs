@@ -32,6 +32,9 @@ pub struct IamService {
     /// the quotas IAM enforces. Without one (a bare `IamService`) the AWS
     /// defaults are reported and nothing is enforced.
     quota_provider: Option<Arc<dyn fakecloud_core::quota::QuotaProvider>>,
+    /// Organizations, for the SCPs `SimulatePrincipalPolicy` includes.
+    /// Without one no SCPs apply.
+    scp_resolver: Option<Arc<dyn fakecloud_core::auth::ScpResolver>>,
 }
 
 impl IamService {
@@ -41,7 +44,19 @@ impl IamService {
             snapshot_store: None,
             snapshot_lock: crate::persistence::new_snapshot_lock(),
             quota_provider: None,
+            scp_resolver: None,
         }
+    }
+
+    /// Attach Organizations so `SimulatePrincipalPolicy` evaluates the
+    /// service control policies that apply to the simulated principal's
+    /// account and reports their effect (`OrganizationsDecisionDetail`).
+    pub fn with_scp_resolver(
+        mut self,
+        resolver: Arc<dyn fakecloud_core::auth::ScpResolver>,
+    ) -> Self {
+        self.scp_resolver = Some(resolver);
+        self
     }
 
     /// Attach Service Quotas so `GetAccountSummary` reports each account's

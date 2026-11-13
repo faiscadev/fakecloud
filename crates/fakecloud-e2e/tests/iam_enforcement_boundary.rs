@@ -96,7 +96,7 @@ async fn set_boundary(server: &TestServer, user: &str, boundary_arn: &str) {
 #[tokio::test]
 async fn boundary_caps_identity_allow_all() {
     // alice has Allow-all on her identity side, but a boundary that
-    // only permits sts:GetCallerIdentity. GetCallerIdentity must
+    // only permits sts:GetSessionToken. GetSessionToken must
     // succeed; everything else must be implicit-denied.
     let server = start_strict().await;
     let (akid, secret) = bootstrap_user(&server, "alice").await;
@@ -111,8 +111,8 @@ async fn boundary_caps_identity_allow_all() {
 
     let boundary_arn = create_managed_policy(
         &server,
-        "BoundaryOnlyGetCallerIdentity",
-        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:GetCallerIdentity","Resource":"*"}]}"#,
+        "BoundaryOnlyGetSessionToken",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:GetSessionToken","Resource":"*"}]}"#,
     )
     .await;
     set_boundary(&server, "alice", &boundary_arn).await;
@@ -121,8 +121,8 @@ async fn boundary_caps_identity_allow_all() {
 
     // Allowed: action covered by both identity and boundary.
     let sts = StsClient::new(&cfg);
-    let identity = sts.get_caller_identity().send().await.unwrap();
-    assert!(identity.arn().unwrap().contains("user/alice"));
+    let session = sts.get_session_token().send().await.unwrap();
+    assert!(session.credentials().is_some());
 
     // Denied: action allowed by identity but not by boundary.
     let iam = IamClient::new(&cfg);
@@ -216,7 +216,7 @@ async fn dangling_boundary_arn_denies_everything() {
 
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
-    let err = sts.get_caller_identity().send().await.unwrap_err();
+    let err = sts.get_session_token().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
         msg.contains(r#"code: Some("AccessDenied")"#),
@@ -241,12 +241,12 @@ async fn boundary_explicit_deny_wins() {
 
     let boundary_arn = create_managed_policy(
         &server,
-        "BoundaryDenyCallerIdentity",
+        "BoundaryDenySessionToken",
         r#"{
             "Version":"2012-10-17",
             "Statement":[
                 {"Effect":"Allow","Action":"*","Resource":"*"},
-                {"Effect":"Deny","Action":"sts:GetCallerIdentity","Resource":"*"}
+                {"Effect":"Deny","Action":"sts:GetSessionToken","Resource":"*"}
             ]
         }"#,
     )
@@ -255,7 +255,7 @@ async fn boundary_explicit_deny_wins() {
 
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
-    let err = sts.get_caller_identity().send().await.unwrap_err();
+    let err = sts.get_session_token().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
         msg.contains(r#"code: Some("AccessDenied")"#),
@@ -272,13 +272,13 @@ async fn no_boundary_unchanged_behavior() {
     attach_inline(
         &server,
         "eve",
-        "AllowGetCallerIdentity",
-        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:GetCallerIdentity","Resource":"*"}]}"#,
+        "AllowGetSessionToken",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:GetSessionToken","Resource":"*"}]}"#,
     )
     .await;
 
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
-    let identity = sts.get_caller_identity().send().await.unwrap();
-    assert!(identity.arn().unwrap().contains("user/eve"));
+    let session = sts.get_session_token().send().await.unwrap();
+    assert!(session.credentials().is_some());
 }

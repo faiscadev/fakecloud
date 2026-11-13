@@ -226,6 +226,95 @@ async fn credentials_endpoint_respects_configured_role() {
     );
 }
 
+/// A workload session of an existing role carries the role's real unique ID
+/// (`GetCallerIdentity` `UserId` `<role id>:<session>`), as an AssumeRole
+/// session does, so a KMS grant naming the role (which records that ID)
+/// authorizes the workload's direct KMS calls under `--iam strict`.
+#[tokio::test]
+async fn workload_sessions_of_a_granted_role_use_the_key() {
+    let role = "arn:aws:iam::123456789012:role/workload/app-role";
+    let server = TestServer::start_full(
+        &[("FAKECLOUD_IAM", "strict")],
+        &["--credentials-role-arn", role],
+    )
+    .await;
+    let root = helpers::root_config(&server).await;
+    let created = aws_sdk_iam::Client::new(&root)
+        .create_role()
+        .role_name("app-role")
+        .path("/workload/")
+        .assume_role_policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    let role_id = created.role().unwrap().role_id().to_string();
+    // Its only identity permission; kms:Decrypt comes from the grant alone.
+    aws_sdk_iam::Client::new(&root)
+        .put_role_policy()
+        .role_name("app-role")
+        .policy_name("whoami")
+        .policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:GetCallerIdentity","Resource":"*"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    let owner = aws_sdk_kms::Client::new(&root);
+    let key = owner
+        .create_key()
+        .send()
+        .await
+        .unwrap()
+        .key_metadata()
+        .unwrap()
+        .arn()
+        .unwrap()
+        .to_string();
+    let sealed = owner
+        .encrypt()
+        .key_id(&key)
+        .plaintext(aws_sdk_kms::primitives::Blob::new(b"workload".to_vec()))
+        .send()
+        .await
+        .unwrap();
+    owner
+        .create_grant()
+        .key_id(&key)
+        .grantee_principal(role)
+        .operations(aws_sdk_kms::types::GrantOperation::Decrypt)
+        .send()
+        .await
+        .unwrap();
+
+    let creds = fetch_credentials(server.endpoint()).await;
+    let conf = sdk_config_with_temp(
+        server.endpoint(),
+        creds["AccessKeyId"].as_str().unwrap(),
+        creds["SecretAccessKey"].as_str().unwrap(),
+        creds["Token"].as_str().unwrap(),
+    )
+    .load()
+    .await;
+    let ident = StsClient::new(&conf)
+        .get_caller_identity()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        ident.user_id(),
+        Some(format!("{role_id}:fakecloud-local").as_str())
+    );
+    let opened = aws_sdk_kms::Client::new(&conf)
+        .decrypt()
+        .ciphertext_blob(sealed.ciphertext_blob().unwrap().clone())
+        .send()
+        .await
+        .expect("the grant to the role authorizes its workload session");
+    assert_eq!(opened.plaintext().unwrap().as_ref(), b"workload");
+}
+
 /// The real AWS SDK default credential chain resolves against the endpoint with
 /// no static keys, driven only by `AWS_CONTAINER_CREDENTIALS_FULL_URI` — the
 /// "run my app unmodified" story. Exercised through the `aws` CLI so the

@@ -791,6 +791,25 @@ pub enum DataPlaneClaim {
     Path,
 }
 
+/// What dispatch knows of a request before reading its body: enough for a
+/// service to classify it ([`AwsService::streams_request_body`]).
+pub struct RequestHead<'a> {
+    pub method: &'a Method,
+    /// The raw (undecoded) path the request is routed on; for S3 the
+    /// virtual-hosted bucket is already prefixed, as in
+    /// [`AwsRequest::raw_path`].
+    pub raw_path: &'a str,
+    /// The request's headers, a presigned URL's `x-amz-*` query parameters
+    /// among them, as in [`AwsRequest::headers`].
+    pub headers: &'a HeaderMap,
+    pub query_params: &'a HashMap<String, String>,
+    /// Whether the request presents no credentials at all (no signature,
+    /// no presigned credential, no in-process caller).
+    pub anonymous: bool,
+    pub region: &'a str,
+    pub request_id: &'a str,
+}
+
 /// Trait that every AWS service implements.
 #[async_trait]
 pub trait AwsService: Send + Sync {
@@ -842,6 +861,17 @@ pub trait AwsService: Send + Sync {
         false
     }
 
+    /// Whether `request` needs authorization at all. A few requests need no
+    /// permission and no policy can deny them; dispatch then evaluates no
+    /// policy for the request. The service decides for every caller:
+    /// `sts:GetCallerIdentity` needs none from a caller whose credentials
+    /// resolved but still refuses an anonymous one (so it answers `true`
+    /// for that), while an S3 CORS preflight is never authorized, whoever
+    /// sends it. Defaults to `true`.
+    fn iam_authorization_required(&self, _request: &AwsRequest) -> bool {
+        true
+    }
+
     /// Derive the IAM action + resource ARN for an incoming request.
     ///
     /// Only called when [`AwsService::iam_enforceable`] returns `true`
@@ -870,6 +900,92 @@ pub trait AwsService: Send + Sync {
     /// mapping, which strict enforcement denies.
     fn iam_actions_for(&self, request: &AwsRequest) -> Vec<crate::auth::IamAction> {
         self.iam_action_for(request).into_iter().collect()
+    }
+
+    /// Whether the handler reads this request's body as a stream
+    /// ([`AwsRequest::take_body_stream`]) instead of from a buffered
+    /// [`AwsRequest::body`]. Dispatch asks only for a request its headers
+    /// already route to this service, and buffers the body otherwise, so
+    /// everything that runs before the handler (IAM enforcement reading the
+    /// request's tags, for one) sees it. The service decides by the same
+    /// classification its handler routes on. Default `false`.
+    fn streams_request_body(&self, _head: &RequestHead<'_>) -> bool {
+        false
+    }
+
+    /// Refuse a request from its head alone, before dispatch reads its body:
+    /// what [`AwsService::validate_before_authorization`] refuses without
+    /// needing the body (S3: conflicting resource-type parameters, a method
+    /// a resource type does not take, a missing upload, a missing bucket for
+    /// an anonymous caller), so a request refused for its URL is never
+    /// buffered (up to the request-size cap) first. Dispatch calls it for a
+    /// request its headers alone settle as this service's
+    /// ([`crate::protocol::headers_name_final_service`]), IAM enforcement on
+    /// or off, and answers `Err` as the service's error. The later
+    /// validation must refuse the same requests the same way.
+    ///
+    /// It runs before SigV4 verification and before authentication: the
+    /// caller's identity is not resolved yet, and [`RequestHead::anonymous`]
+    /// says only whether a credential was presented. That is the order S3
+    /// answers in (recorded): a request signed with an unknown key and
+    /// conflicting resource-type parameters, or a `PUT` with `partNumber`
+    /// and no `uploadId`, is 400 for its URL, not `InvalidClientTokenId`.
+    /// A service whose URL refusals come after authentication must not
+    /// refuse here. Default: nothing to refuse.
+    fn refuse_before_body(&self, _head: &RequestHead<'_>) -> Result<(), AwsServiceError> {
+        Ok(())
+    }
+
+    /// Put a buffered request into the form every later consumer reads --
+    /// pre-authorization validation, IAM derivation and the handler alike --
+    /// so none of them works on a different body than the others (S3
+    /// removes the `aws-chunked` framing of a small XML body here). Dispatch
+    /// calls it first, IAM enforcement on or off, and answers `Err` as the
+    /// service's error. It must be idempotent: a handler called directly
+    /// may run it again. Default: nothing to do.
+    fn prepare_request(&self, _request: &mut AwsRequest) -> Result<(), AwsServiceError> {
+        Ok(())
+    }
+
+    /// Whether an anonymous (unsigned) request is validated
+    /// ([`AwsService::validate_before_authorization`]) before it is
+    /// authorized, rather than refused as anonymous first. Only a service
+    /// that serves anonymous requests itself and judges them like any other
+    /// opts in (S3: a missing bucket is NoSuchBucket, an unclassifiable
+    /// request its 400, whoever asks). Every other service refuses an
+    /// unsigned request before looking at it (recorded: an unsigned STS
+    /// `AssumeRoot` with an invalid `TaskPolicyArn` is refused for its
+    /// missing credentials, not validated). Default `false`.
+    fn validates_anonymous_before_authorization(&self) -> bool {
+        false
+    }
+
+    /// Validation AWS performs before authorizing `request`: an error here
+    /// is returned to the caller whatever its permissions, anonymous callers
+    /// included where the service validates them first
+    /// ([`AwsService::validates_anonymous_before_authorization`]) -- a
+    /// request the service cannot classify into an operation
+    /// (S3 answers conflicting sub-resource parameters with 400
+    /// `InvalidArgument` whoever asks), or one carrying an invalid parameter
+    /// AWS checks first (STS `AssumeRoot`'s `TaskPolicyArn`). Dispatch calls
+    /// it for every request, once: after authentication (a key that resolves
+    /// to no identity is refused before it) and before authorization under
+    /// IAM enforcement, just before the handler otherwise. `Err` is answered
+    /// as the service's error, so such a request gets it rather than an
+    /// `AccessDenied` and is never authorized as some other operation.
+    /// Default: nothing to refuse.
+    fn validate_before_authorization(&self, _request: &AwsRequest) -> Result<(), AwsServiceError> {
+        Ok(())
+    }
+
+    /// Whether the handler authorizes this request itself, item by item,
+    /// through [`crate::auth::request_authorizer`] -- an operation AWS
+    /// authorizes per item and answers with per-item errors (S3
+    /// `DeleteObjects` reports a denied key as an `AccessDenied` entry of a
+    /// 200 response). Dispatch then evaluates no action for the request
+    /// (the caller's credentials are still checked). Default `false`.
+    fn iam_authorized_by_handler(&self, _request: &AwsRequest) -> bool {
+        false
     }
 
     /// Whether the request creates its resource in the CALLER's account, so

@@ -510,37 +510,22 @@ pub(crate) fn decode_plaintext(plaintext_b64: &str) -> Result<Vec<u8>, AwsServic
     Ok(bytes)
 }
 
-/// Build the base64-encoded ciphertext envelope for `Encrypt`. Two
-/// shapes: when imported key material is present, XOR the plaintext
-/// against the material so the ciphertext is deterministic in the
-/// imported key; otherwise the fakecloud envelope just wraps the
-/// original base64 plaintext under a fixed prefix. `embedded` is the key
-/// reference the blob names (see [`sealed_key_ref`]).
+/// Build the base64-encoded symmetric ciphertext `Encrypt` and `ReEncrypt`
+/// return: the AWS-shaped binary blob, AES-256-GCM under the master key of
+/// the key's account (`state`), naming the key as `embedded` (see
+/// [`sealed_key_ref`]) and binding the encryption context. A key with
+/// imported material (`EXTERNAL` origin) seals the same way, as
+/// `GenerateDataKey` always has, so its ciphertext names its key (and opens
+/// from another account, or with the encryption context it was sealed with)
+/// like any symmetric ciphertext; a key whose material was deleted is
+/// `PendingImport`, which refuses the decrypt. The textual
+/// `fakecloud-imported:` envelope earlier builds produced still decrypts.
 pub(crate) fn build_encrypt_ciphertext(
     state: &KmsState,
-    key: &KmsKey,
     embedded: &str,
     plaintext_bytes: &[u8],
     encryption_context_aad: &[u8],
 ) -> String {
-    if let Some(ref material) = key.imported_material_bytes {
-        // Imported key material path: legacy XOR envelope wrapped in the
-        // textual `fakecloud-imported:<key>:<b64>` form, base64-encoded for
-        // wire transport. This format is preserved for back-compat with
-        // snapshots and external callers that may already have stored
-        // ciphertexts produced before the AES-GCM blob format landed.
-        let xored: Vec<u8> = plaintext_bytes
-            .iter()
-            .enumerate()
-            .map(|(i, b)| b ^ material[i % material.len()])
-            .collect();
-        let xored_b64 = base64::engine::general_purpose::STANDARD.encode(&xored);
-        let envelope = format!("fakecloud-imported:{}:{xored_b64}", key.key_id);
-        return base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
-    }
-    // Default path: AWS-shaped binary blob with AES-256-GCM under the
-    // per-account master key persisted in `KmsState`. Round-trips through
-    // real SDKs and does not leak plaintext to anyone inspecting the bytes.
     let blob = crate::blob::encode_with_context(
         &state.master_key_bytes,
         embedded,
@@ -560,15 +545,15 @@ pub(crate) fn caller_account(req: &AwsRequest) -> &str {
         .map_or(req.account_id.as_str(), |p| p.account_id.as_str())
 }
 
-/// The key reference a ciphertext sealed for `req` under `key` names: the key
-/// id, or the key ARN when the caller belongs to another account than the
-/// key, so that the caller's own `Decrypt`, which names no key, finds the
-/// key's account (as a hook-sealed blob does).
-pub(crate) fn sealed_key_ref<'a>(req: &AwsRequest, key: &'a KmsKey) -> &'a str {
-    match parse_kms_arn(&key.arn) {
-        Some((_, account, _)) if account != caller_account(req) => &key.arn,
-        _ => &key.key_id,
-    }
+/// The key reference a ciphertext sealed under `key` names: the key ARN, as
+/// the metadata of an AWS symmetric ciphertext identifies its key whoever
+/// sealed it, so a `Decrypt` naming no key finds the key's account from any
+/// account the ciphertext is handed to (as a hook-sealed blob does). A
+/// multi-Region key's ciphertext is still opened by the related key of the
+/// region of the call. Blobs earlier builds sealed for a caller of the
+/// key's own account name the bare key id, which opens in that account.
+pub(crate) fn sealed_key_ref(key: &KmsKey) -> &str {
+    &key.arn
 }
 
 /// The ARN of the key `key_ref` (key id, key ARN, alias name or alias ARN)
@@ -931,9 +916,39 @@ pub(crate) fn fmt_enum_set(items: &[String]) -> String {
     format!("[{}]", inner.join(", "))
 }
 
+/// The unique ID IAM gave the user or role an IAM ARN names (`AIDA...` /
+/// `AROA...`), while one by that name exists (a name is unique in its
+/// account whatever its path). `None` for any other principal.
+pub(crate) fn principal_unique_id(
+    iam: &fakecloud_iam::SharedIamState,
+    arn: &str,
+) -> Option<String> {
+    let account = fakecloud_aws::arn::account_of(arn)?;
+    let resource = fakecloud_aws::arn::arn_resource(arn, "iam")?
+        .rsplit(':')
+        .next()?;
+    let (kind, rest) = resource.split_once('/')?;
+    let name = rest.rsplit('/').next()?;
+    let accounts = iam.read();
+    let state = accounts.get(account)?;
+    match kind {
+        "role" => state.roles.get(name).map(|role| role.role_id.clone()),
+        "user" => state.users.get(name).map(|user| user.user_id.clone()),
+        _ => None,
+    }
+}
+
 /// A grant as the API reports it. `IssuingAccount` is the account root in the
-/// partition of the granted key (`region`'s, if the key is gone).
-pub(crate) fn grant_to_json(grant: &KmsGrant, state: &KmsState, region: &str) -> Value {
+/// partition of the granted key (`region`'s, if the key is gone). A grantee
+/// user or role that no longer exists under the unique ID the grant
+/// recorded (deleted, or deleted and recreated) is shown by that ID, as a
+/// policy shows a principal it can no longer resolve.
+pub(crate) fn grant_to_json(
+    grant: &KmsGrant,
+    state: &KmsState,
+    region: &str,
+    iam: Option<&fakecloud_iam::SharedIamState>,
+) -> Value {
     let key = state.keys.get(&grant.key_id);
     let partition = key.map_or_else(|| partition_for(region), |k| partition_of(&k.arn));
     // ListGrants / ListRetirableGrants name the key by its ARN, as AWS does;
@@ -941,14 +956,32 @@ pub(crate) fn grant_to_json(grant: &KmsGrant, state: &KmsState, region: &str) ->
     let mut v = json!({
         "KeyId": key.map_or(grant.key_id.as_str(), |k| k.arn.as_str()),
         "GrantId": grant.grant_id,
-        "GranteePrincipal": grant.grantee_principal,
         "Operations": grant.operations,
         "IssuingAccount": Arn::global("iam", &state.account_id, "root").with_partition(partition).to_string(),
         "CreationDate": grant.creation_date,
     });
 
+    match grant.grantee_service_principal {
+        Some(ref sp) => v["GranteeServicePrincipal"] = json!(sp),
+        None => {
+            let gone = match (&grant.grantee_principal_id, iam) {
+                (Some(id), Some(iam)) => {
+                    principal_unique_id(iam, &grant.grantee_principal).as_ref() != Some(id)
+                }
+                _ => false,
+            };
+            v["GranteePrincipal"] = if gone {
+                json!(grant.grantee_principal_id)
+            } else {
+                json!(grant.grantee_principal)
+            };
+        }
+    }
     if let Some(ref rp) = grant.retiring_principal {
         v["RetiringPrincipal"] = json!(rp);
+    }
+    if let Some(ref sp) = grant.retiring_service_principal {
+        v["RetiringServicePrincipal"] = json!(sp);
     }
     if let Some(ref c) = grant.constraints {
         v["Constraints"] = c.clone();
