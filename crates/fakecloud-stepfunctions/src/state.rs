@@ -255,10 +255,6 @@ tokio::task_local! {
     /// The execution whose Task is calling StartExecution, set only around that
     /// call. A new execution records it as its `parent_execution_arn`.
     pub(crate) static STARTED_BY_EXECUTION: String;
-    /// Set only while a `states:startExecution.sync` Task polls its child.
-    /// AWS refuses DescribeExecution on an EXPRESS execution, but a `.sync`
-    /// Task still sees its EXPRESS child finish.
-    pub(crate) static SYNC_CHILD_POLL: ();
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -15,18 +15,15 @@ impl StepFunctionsService {
 
         // AWS records an omitted input as `{}` (DescribeExecution, history and
         // a `.sync` parent's view of its child all show it).
-        let input = Some(body["input"].as_str().unwrap_or("{}").to_string());
-
-        // Validate input is valid JSON if provided
-        if let Some(ref input_str) = input {
-            let _: serde_json::Value = serde_json::from_str(input_str).map_err(|_| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidExecutionInput",
-                    "Invalid execution input: must be valid JSON".to_string(),
-                )
-            })?;
-        }
+        let input_text = body["input"].as_str().unwrap_or("{}");
+        serde_json::from_str::<serde_json::Value>(input_text).map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidExecutionInput",
+                "Invalid execution input: must be valid JSON".to_string(),
+            )
+        })?;
+        let input = Some(input_text.to_string());
 
         let execution_name = body["name"]
             .as_str()
@@ -189,9 +186,7 @@ impl StepFunctionsService {
         let exec_arn = body["executionArn"]
             .as_str()
             .ok_or_else(|| missing("executionArn"))?;
-        if crate::state::SYNC_CHILD_POLL.try_with(|_| ()).is_err() {
-            reject_express_execution_arn(exec_arn)?;
-        }
+        reject_express_execution_arn(exec_arn)?;
 
         let accounts = self.state.read();
         let empty = StepFunctionsState::new(&req.account_id, &req.region);
@@ -230,9 +225,7 @@ impl StepFunctionsService {
             .get(sm_arn)
             .ok_or_else(|| state_machine_not_found(sm_arn))?;
         if sm.machine_type == crate::state::StateMachineType::Express {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "StateMachineTypeNotSupported",
+            return Err(state_machine_type_not_supported(
                 "This operation is not supported by this type of state machine",
             ));
         }
@@ -345,6 +338,7 @@ impl StepFunctionsService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
+        validate_required("executionArn", &body["executionArn"])?;
         let arn = body["executionArn"]
             .as_str()
             .ok_or_else(|| missing("executionArn"))?
@@ -461,9 +455,7 @@ impl StepFunctionsService {
                 .get(&sm_arn)
                 .ok_or_else(|| state_machine_not_found(&sm_arn))?;
             if sm.machine_type != crate::state::StateMachineType::Express {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "StateMachineTypeNotSupported",
+                return Err(state_machine_type_not_supported(
                     "StartSyncExecution is only supported for EXPRESS state machines.",
                 ));
             }

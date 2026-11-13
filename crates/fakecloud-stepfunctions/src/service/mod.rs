@@ -1422,6 +1422,14 @@ fn reject_express_execution_arn(arn: &str) -> Result<(), AwsServiceError> {
     Ok(())
 }
 
+fn state_machine_type_not_supported(message: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "StateMachineTypeNotSupported",
+        message,
+    )
+}
+
 fn execution_not_found(arn: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -1430,7 +1438,7 @@ fn execution_not_found(arn: &str) -> AwsServiceError {
     )
 }
 
-fn execution_to_json(exec: &Execution) -> Value {
+pub(crate) fn execution_to_json(exec: &Execution) -> Value {
     let mut resp = json!({
         "executionArn": exec.execution_arn,
         "stateMachineArn": exec.state_machine_arn,

@@ -196,6 +196,12 @@ pub(crate) fn start_execution_result(service: &SdkService, response: &Value) -> 
     result
 }
 
+/// An EXPRESS execution can't be redriven, and AWS reports none of the
+/// redrive fields for one.
+fn strip_redrive_fields(result: &mut serde_json::Map<String, Value>) {
+    result.retain(|key, _| !key.starts_with("Redrive"));
+}
+
 fn is_express_child(described: &Value) -> bool {
     described["executionArn"]
         .as_str()
@@ -212,12 +218,11 @@ pub(crate) fn sync_failure_cause(service: &SdkService, described: &Value) -> Str
     };
     result.remove("BillingDetails");
     result.insert("InputDetails".to_string(), json!({"Included": true}));
-    // An EXPRESS child can't be redriven, and AWS reports no redrive fields.
     if !is_express_child(described) {
         result.insert("RedriveCount".to_string(), json!(0));
         result.insert("RedriveStatus".to_string(), json!("REDRIVABLE"));
     } else {
-        result.remove("RedriveCount");
+        strip_redrive_fields(&mut result);
     }
     Value::Object(result).to_string()
 }
@@ -244,7 +249,7 @@ pub(crate) fn sync_execution_result(
             json!("Execution is SUCCEEDED and cannot be redriven"),
         );
     } else {
-        result.remove("RedriveCount");
+        strip_redrive_fields(&mut result);
     }
     if form == SyncForm::Json {
         parse_json_member(&mut result, "Input");

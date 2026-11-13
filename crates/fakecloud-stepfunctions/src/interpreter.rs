@@ -2083,6 +2083,7 @@ async fn invoke_resource(
                 tail,
                 input,
                 registry,
+                shared_state,
                 &account_id,
                 region,
                 timeout_seconds,
@@ -2106,6 +2107,7 @@ async fn invoke_resource(
             rest,
             input,
             registry,
+            shared_state,
             &account_id,
             region,
             timeout_seconds,
@@ -2130,6 +2132,7 @@ async fn invoke_resource(
                 tail,
                 input,
                 registry,
+                shared_state,
                 &account_id,
                 region,
                 timeout_seconds,
@@ -2224,6 +2227,7 @@ async fn invoke_aws_sdk_integration(
     tail: &str,
     input: &Value,
     registry: &Option<SharedServiceRegistry>,
+    shared_state: &SharedStepFunctionsState,
     account_id: &str,
     region: &str,
     timeout_seconds: Option<u64>,
@@ -2354,6 +2358,7 @@ async fn invoke_aws_sdk_integration(
     // `States.TaskFailed`.
     let described = sync_wait(
         &registry_arc,
+        shared_state,
         &service_name,
         &operation,
         &initial,
@@ -2636,6 +2641,7 @@ async fn sync_wait_codebuild_build(
 #[allow(clippy::too_many_arguments)]
 async fn sync_wait(
     registry: &Arc<fakecloud_core::registry::ServiceRegistry>,
+    shared_state: &SharedStepFunctionsState,
     service_name: &str,
     action_pascal: &str,
     initial: &Value,
@@ -2652,7 +2658,7 @@ async fn sync_wait(
             sync_wait_athena_query(registry, initial, account_id, region, timeout_seconds).await
         }
         ("states", "StartExecution") => {
-            sync_wait_states_start_execution(registry, initial, account_id, region, timeout_seconds).await
+            sync_wait_states_start_execution(shared_state, initial, timeout_seconds).await
         }
         ("codebuild", "StartBuild") => {
             sync_wait_codebuild_build(registry, initial, account_id, region, timeout_seconds).await
@@ -2898,13 +2904,13 @@ async fn sync_wait_athena_query(
 /// Wait for a nested Step Functions execution to reach a terminal
 /// state, then return the bubbled `Output` like AWS does for
 /// `arn:aws:states:::states:startExecution.sync`. The initial
-/// `StartExecution` response carries `executionArn`; we poll
-/// `DescribeExecution` until status leaves `RUNNING`.
+/// `StartExecution` response carries `executionArn`; we poll the
+/// child's record until its status leaves `RUNNING`. It reads the record
+/// directly rather than through `DescribeExecution`, which AWS refuses for an
+/// EXPRESS child that a `.sync` Task still waits for.
 async fn sync_wait_states_start_execution(
-    registry: &Arc<fakecloud_core::registry::ServiceRegistry>,
+    shared_state: &SharedStepFunctionsState,
     initial: &Value,
-    account_id: &str,
-    region: &str,
     timeout_seconds: Option<u64>,
 ) -> Result<Value, (String, String)> {
     let exec_arn = initial
@@ -2921,19 +2927,19 @@ async fn sync_wait_states_start_execution(
 
     let deadline = sync_deadline(timeout_seconds);
     loop {
-        let described = crate::state::SYNC_CHILD_POLL
-            .scope(
-                (),
-                call_sdk_action(
-                    registry,
-                    "states",
-                    "DescribeExecution",
-                    &json!({ "executionArn": exec_arn }),
-                    account_id,
-                    region,
-                ),
+        let described = {
+            let accounts = shared_state.read();
+            accounts
+                .by_arn(&exec_arn)
+                .and_then(|state| state.executions.get(&exec_arn))
+                .map(crate::service::execution_to_json)
+        }
+        .ok_or_else(|| {
+            (
+                "States.TaskFailed".to_string(),
+                format!("Execution Does Not Exist: '{exec_arn}'"),
             )
-            .await?;
+        })?;
         let status = described
             .get("status")
             .or_else(|| described.get("Status"))
