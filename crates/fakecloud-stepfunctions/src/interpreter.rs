@@ -2921,15 +2921,19 @@ async fn sync_wait_states_start_execution(
 
     let deadline = sync_deadline(timeout_seconds);
     loop {
-        let described = call_sdk_action(
-            registry,
-            "states",
-            "DescribeExecution",
-            &json!({ "executionArn": exec_arn }),
-            account_id,
-            region,
-        )
-        .await?;
+        let described = crate::state::SYNC_CHILD_POLL
+            .scope(
+                (),
+                call_sdk_action(
+                    registry,
+                    "states",
+                    "DescribeExecution",
+                    &json!({ "executionArn": exec_arn }),
+                    account_id,
+                    region,
+                ),
+            )
+            .await?;
         let status = described
             .get("status")
             .or_else(|| described.get("Status"))
