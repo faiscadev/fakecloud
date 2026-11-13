@@ -72,6 +72,56 @@ impl Drop for Planted {
     }
 }
 
+fn owner(kind: &str, name: &str) -> Option<String> {
+    let out = cli(&[
+        kind,
+        "inspect",
+        "--format",
+        "{{index .Labels \"fakecloud-instance\"}}",
+        name,
+    ]);
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Plant a container owned by a dead process, attached to a network and
+/// mounting a volume with the same owner, so neither can be removed before
+/// the container (on Docker only the volume: a created container holds no
+/// network endpoint until it starts). Until the container exists the network
+/// and volume are unused orphans another test's server may reap, and a
+/// reaped volume would be silently recreated without its label, so an
+/// attempt counts only if both still carry it afterwards.
+fn plant_orphans(planted: &mut Planted, suffix: &str) -> Option<(String, String, String)> {
+    let label = format!("fakecloud-instance={DEAD_OWNER}");
+    let net = format!("fc-reaper-n-{suffix}");
+    let vol = format!("fc-reaper-v-{suffix}");
+    let container = format!("fc-reaper-c-{suffix}");
+    planted.networks.push(net.clone());
+    planted.volumes.push(vol.clone());
+    planted.containers.push(container.clone());
+    must(&["network", "create", "--label", &label, &net]);
+    must(&["volume", "create", "--label", &label, &vol]);
+    let mount = format!("{vol}:/data");
+    let created = cli(&[
+        "create",
+        "--name",
+        &container,
+        "--label",
+        &label,
+        "--network",
+        &net,
+        "-v",
+        &mount,
+        "alpine:3.20",
+        "true",
+    ]);
+    let intact = created.status.success()
+        && owner("network", &net).as_deref() == Some(DEAD_OWNER)
+        && owner("volume", &vol).as_deref() == Some(DEAD_OWNER);
+    intact.then_some((container, net, vol))
+}
+
 #[tokio::test]
 async fn startup_reaps_objects_of_dead_owners_only() {
     let suffix = format!(
@@ -82,40 +132,19 @@ async fn startup_reaps_objects_of_dead_owners_only() {
             .unwrap()
             .as_nanos()
     );
-    let dead_label = format!("fakecloud-instance={DEAD_OWNER}");
     let live_label = format!("fakecloud-instance=fakecloud-{}", std::process::id());
-    let dead_net = format!("fc-reaper-n-{suffix}");
     let live_net = format!("fc-reaper-live-n-{suffix}");
-    let dead_vol = format!("fc-reaper-v-{suffix}");
     let live_vol = format!("fc-reaper-live-v-{suffix}");
-    let dead_container = format!("fc-reaper-c-{suffix}");
     let mut planted = Planted::default();
 
-    for (net, label) in [(&dead_net, &dead_label), (&live_net, &live_label)] {
-        planted.networks.push(net.clone());
-        must(&["network", "create", "--label", label, net]);
-    }
-    for (vol, label) in [(&dead_vol, &dead_label), (&live_vol, &live_label)] {
-        planted.volumes.push(vol.clone());
-        must(&["volume", "create", "--label", label, vol]);
-    }
-    // Attached to the network and mounting the volume, so neither can be
-    // removed before the container is: the reap must keep that order.
-    planted.containers.push(dead_container.clone());
-    let mount = format!("{dead_vol}:/data");
-    must(&[
-        "create",
-        "--name",
-        &dead_container,
-        "--label",
-        &dead_label,
-        "--network",
-        &dead_net,
-        "-v",
-        &mount,
-        "alpine:3.20",
-        "true",
-    ]);
+    planted.networks.push(live_net.clone());
+    must(&["network", "create", "--label", &live_label, &live_net]);
+    planted.volumes.push(live_vol.clone());
+    must(&["volume", "create", "--label", &live_label, &live_vol]);
+
+    let (dead_container, dead_net, dead_vol) = (0..5)
+        .find_map(|attempt| plant_orphans(&mut planted, &format!("{suffix}-{attempt}")))
+        .expect("could not plant orphaned objects in 5 attempts");
 
     let server = TestServer::start().await;
     // The reap finishes before the server answers its first request.
