@@ -417,6 +417,11 @@ pub fn execution_arn(
     )
 }
 
+/// Whether `arn` is an EXPRESS execution ARN (`...:express:<machine>:...`).
+pub fn is_express_execution_arn(arn: &str) -> bool {
+    arn.split(':').nth(5) == Some("express")
+}
+
 /// A fresh ARN for one EXPRESS execution: `express:<machine>:<name>:<id>`.
 ///
 /// EXPRESS names can be reused immediately and StartExecution is never
