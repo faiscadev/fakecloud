@@ -13,8 +13,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    MessageAttribute, PlatformApplication, PlatformEndpoint, PublishedMessage, SharedSnsState,
-    SnsSnapshot, SnsSubscription, SnsTopic, SNS_SNAPSHOT_SCHEMA_VERSION,
+    ConfirmationAuth, MessageAttribute, PlatformApplication, PlatformEndpoint, PublishedMessage,
+    SharedSnsState, SnsSnapshot, SnsSubscription, SnsTopic, SNS_SNAPSHOT_SCHEMA_VERSION,
 };
 
 pub struct SnsService {
@@ -444,12 +444,29 @@ impl AwsService for SnsService {
     /// are plain unsigned GETs (`?Action=ConfirmSubscription&Token=...`,
     /// `?Action=Unsubscribe&SubscriptionArn=...`): the AWS API reference
     /// documents both as callable without a signature (the token, or the
-    /// subscription ARN, is the proof). Every other unsigned SNS request is
-    /// refused for its missing credentials.
+    /// subscription ARN, is the proof), except an `Unsubscribe` of a
+    /// subscription confirmed with `AuthenticateOnUnsubscribe=true`. Every
+    /// other unsigned SNS request is refused for its missing credentials.
     fn anonymous_access(&self, request: &AwsRequest) -> fakecloud_core::anonymous::AnonymousAccess {
+        use fakecloud_core::anonymous::AnonymousAccess;
         match request.action.as_str() {
-            "ConfirmSubscription" | "Unsubscribe" => {
-                fakecloud_core::anonymous::AnonymousAccess::Unauthenticated
+            "ConfirmSubscription" => AnonymousAccess::Unauthenticated,
+            "Unsubscribe" => {
+                let needs_auth = param(request, "SubscriptionArn").is_some_and(|arn| {
+                    let accts = self.state.read();
+                    let region = fakecloud_aws::arn::region_of(&arn).unwrap_or(&request.region);
+                    let account = subscription_account(&accts, &arn, &request.account_id, region);
+                    accts.regional(&account, region).is_some_and(|s| {
+                        s.subscriptions.get(&arn).is_some_and(|sub| {
+                            sub.confirmation_auth == ConfirmationAuth::AuthenticatedUnsubscribe
+                        })
+                    })
+                });
+                if needs_auth {
+                    AnonymousAccess::Refused
+                } else {
+                    AnonymousAccess::Unauthenticated
+                }
             }
             _ => fakecloud_core::anonymous::AnonymousAccess::for_operation(
                 &request.service,
@@ -1128,6 +1145,7 @@ impl SnsService {
             attributes,
             confirmed,
             confirmation_token: confirmation_token.clone(),
+            confirmation_auth: Default::default(),
         };
 
         state.subscriptions.insert(sub_arn.clone(), sub);
@@ -1209,24 +1227,34 @@ impl SnsService {
             )
         };
         let state = accounts.by_arn_mut(&topic_arn).ok_or_else(invalid_token)?;
-        // AWS accepts both the confirmation token and the subscription ARN as the Token parameter.
-        // Confirming an already-confirmed subscription is a no-op (idempotent).
+        // Only the opaque token delivered to the endpoint confirms a
+        // subscription: its ARN is public (in the confirmation message, in
+        // ListSubscriptions), so it must not let anyone confirm it.
+        // Confirming an already-confirmed subscription again is a no-op.
         let sub_arn = state
             .subscriptions
             .values()
-            .find(|s| {
-                s.topic_arn == topic_arn
-                    && (s.confirmation_token.as_deref() == Some(&token)
-                        || s.subscription_arn == token)
-            })
+            .find(|s| s.topic_arn == topic_arn && s.confirmation_token.as_deref() == Some(&token))
             .map(|s| s.subscription_arn.clone())
             // AWS returns InvalidParameterException for unknown or expired
             // confirmation tokens; matching the wire format lets client SDKs
             // surface the right error type.
             .ok_or_else(invalid_token)?;
 
-        // Mark the subscription as confirmed
+        // A signed confirmation is authenticated, and only a signed one can
+        // ask for unsubscribes to be authenticated too
+        // (`AuthenticateOnUnsubscribe`).
+        let signed = request_is_signed(req);
+        let authenticate_on_unsubscribe =
+            param(req, "AuthenticateOnUnsubscribe").is_some_and(|v| v.eq_ignore_ascii_case("true"));
         if let Some(sub) = state.subscriptions.get_mut(&sub_arn) {
+            if !sub.confirmed {
+                sub.confirmation_auth = match (signed, authenticate_on_unsubscribe) {
+                    (true, true) => ConfirmationAuth::AuthenticatedUnsubscribe,
+                    (true, false) => ConfirmationAuth::Authenticated,
+                    (false, _) => ConfirmationAuth::Unauthenticated,
+                };
+            }
             sub.confirmed = true;
         }
 
@@ -1274,6 +1302,17 @@ impl SnsService {
         // Snapshot the parent topic ARN before removing the subscription
         // so we can bump SubscriptionsDeleted on the right topic. Real
         // SNS exposes this counter on GetTopicAttributes.
+        // A subscription confirmed with `AuthenticateOnUnsubscribe=true`
+        // "disallows unauthenticated unsubscribes": an unsigned request is
+        // refused for its missing credentials, whatever the IAM mode.
+        if state
+            .subscriptions
+            .get(&sub_arn)
+            .is_some_and(|s| s.confirmation_auth == ConfirmationAuth::AuthenticatedUnsubscribe)
+            && !request_is_signed(req)
+        {
+            return Err(missing_authentication_token());
+        }
         let parent_topic = state
             .subscriptions
             .get(&sub_arn)
@@ -1449,7 +1488,14 @@ impl SnsService {
             format_attr("Protocol", &sub.protocol),
             format_attr("Endpoint", &sub.endpoint),
             format_attr("Owner", &sub.owner),
-            format_attr("ConfirmationWasAuthenticated", "true"),
+            format_attr(
+                "ConfirmationWasAuthenticated",
+                if sub.confirmation_auth.was_authenticated() {
+                    "true"
+                } else {
+                    "false"
+                },
+            ),
             format_attr("PendingConfirmation", pending),
         ];
 
@@ -2057,6 +2103,27 @@ pub(crate) use helpers::*;
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod tests;
+
+/// Whether the request carries a credential (a SigV4 `Authorization` header,
+/// or query authentication), as opposed to the unsigned `SubscribeURL` /
+/// `UnsubscribeURL` GETs an endpoint follows.
+fn request_is_signed(req: &AwsRequest) -> bool {
+    req.access_key_id.is_some()
+        || req
+            .headers
+            .get(http::header::AUTHORIZATION)
+            .is_some_and(|v| !v.is_empty())
+}
+
+/// The refusal of an unsigned request that needs credentials (the awsQuery
+/// shape AWS answers with).
+fn missing_authentication_token() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::FORBIDDEN,
+        "MissingAuthenticationToken",
+        "Request is missing Authentication Token",
+    )
+}
 
 /// The account a topic or subscription ARN belongs to (its topic owner's),
 /// or `caller` when the ARN carries none.

@@ -53,6 +53,33 @@ pub struct SnsSubscription {
     pub confirmed: bool,
     /// Token used for HTTP/HTTPS subscription confirmation.
     pub confirmation_token: Option<String>,
+    /// How the subscription was confirmed, which decides
+    /// `ConfirmationWasAuthenticated` and whether `Unsubscribe` needs a
+    /// signature.
+    #[serde(default)]
+    pub confirmation_auth: ConfirmationAuth,
+}
+
+/// How a subscription's confirmation was authenticated.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ConfirmationAuth {
+    /// Confirmed by a signed request, or needing no confirmation (created by
+    /// its topic's owner, or for a protocol AWS confirms itself).
+    #[default]
+    Authenticated,
+    /// Confirmed by a signed `ConfirmSubscription` with
+    /// `AuthenticateOnUnsubscribe=true`: an unsigned `Unsubscribe` is
+    /// refused.
+    AuthenticatedUnsubscribe,
+    /// Confirmed through the unsigned `SubscribeURL` link.
+    Unauthenticated,
+}
+
+impl ConfirmationAuth {
+    /// The `ConfirmationWasAuthenticated` attribute.
+    pub fn was_authenticated(self) -> bool {
+        self != Self::Unauthenticated
+    }
 }
 
 /// An SNS message attribute (key-value with a data type).

@@ -186,6 +186,7 @@ mod tests {
             attributes: BTreeMap::new(),
             confirmed,
             confirmation_token: None,
+            confirmation_auth: Default::default(),
         }
     }
 
