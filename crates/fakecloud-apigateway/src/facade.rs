@@ -23,7 +23,9 @@ use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::service::{
+    AwsRequest, AwsResponse, AwsService, AwsServiceError, DataPlaneClaim,
+};
 
 use crate::ApiGatewayService;
 
@@ -109,12 +111,15 @@ impl ApiGatewayFacade {
     /// Whether the `Host` names a v1 custom domain (its name or its regional
     /// domain name), which the v1 data plane resolves via base path mappings.
     fn host_is_v1_custom_domain(&self, req: &AwsRequest) -> bool {
-        let Some(host) = fakecloud_core::protocol::normalized_host_from_headers(&req.headers)
-        else {
+        self.headers_name_v1_custom_domain(&req.headers, &req.account_id)
+    }
+
+    fn headers_name_v1_custom_domain(&self, headers: &http::HeaderMap, account_id: &str) -> bool {
+        let Some(host) = fakecloud_core::protocol::normalized_host_from_headers(headers) else {
             return false;
         };
         let accounts = self.v1.state_handle().read();
-        let Some(state) = accounts.get(&req.account_id) else {
+        let Some(state) = accounts.get(account_id) else {
             return false;
         };
         state
@@ -124,11 +129,67 @@ impl ApiGatewayFacade {
     }
 
     fn host_is_v2_custom_domain(&self, req: &AwsRequest) -> bool {
+        self.headers_name_v2_custom_domain(&req.headers, &req.account_id)
+    }
+
+    fn headers_name_v2_custom_domain(&self, headers: &http::HeaderMap, account_id: &str) -> bool {
         let Some(lookup) = self.v2_has_domain.as_ref() else {
             return false;
         };
-        fakecloud_core::protocol::normalized_host_from_headers(&req.headers)
-            .is_some_and(|h| lookup(&req.account_id, &h))
+        fakecloud_core::protocol::normalized_host_from_headers(headers)
+            .is_some_and(|h| lookup(account_id, &h))
+    }
+
+    /// Whether any REST API (v1) or HTTP/WebSocket API (v2) in `account_id`
+    /// has a stage named `stage`.
+    fn any_api_has_stage(&self, account_id: &str, stage: &str) -> bool {
+        let v1_has = {
+            let accounts = self.v1.state_handle().read();
+            accounts
+                .get(account_id)
+                .is_some_and(|state| state.stages.values().any(|s| s.contains_key(stage)))
+        };
+        v1_has
+            || self
+                .v2_has_stage
+                .as_ref()
+                .is_some_and(|lookup| lookup(account_id, stage))
+    }
+
+    /// The rule deciding whether an unrouted request on the shared listener is
+    /// an API invocation (rather than an S3 path-style request). API Gateway
+    /// claims it by host when the `Host` is an execute-api endpoint
+    /// (`{api-id}.execute-api...`) or a v1/v2 custom domain name -- such a
+    /// request is never S3's -- and by path when:
+    ///
+    /// - the path is a path-style invocation URL (`/restapis/...`,
+    ///   `/_aws/execute-api/...`), or
+    /// - the first path segment is a stage some API in the account has
+    ///   (`/{stage}/{path}` on a plain host).
+    ///
+    /// A path claim yields to an existing bucket of that name. Anything
+    /// unclaimed -- notably `/{bucket}/{key}` for a bucket that does not exist
+    /// -- is left to S3.
+    fn invocation_claim(
+        &self,
+        raw_path: &str,
+        headers: &http::HeaderMap,
+        account_id: &str,
+    ) -> Option<DataPlaneClaim> {
+        if headers_name_execute_api(headers)
+            || self.headers_name_v1_custom_domain(headers, account_id)
+            || self.headers_name_v2_custom_domain(headers, account_id)
+        {
+            return Some(DataPlaneClaim::Host);
+        }
+        let segments = fakecloud_core::path::split_path_segments(raw_path);
+        let by_path = match segments.first().map(String::as_str) {
+            None => false,
+            Some("restapis") => true,
+            Some("_aws") => segments.get(1).is_some_and(|s| s == "execute-api"),
+            Some(stage) => self.any_api_has_stage(account_id, stage),
+        };
+        by_path.then_some(DataPlaneClaim::Path)
     }
 
     /// Rewrite a path-style invocation URL to the canonical execute-api form:
@@ -254,7 +315,11 @@ impl ApiGatewayFacade {
 /// Whether the request's `Host` is an execute-api endpoint
 /// (`{api-id}.execute-api...`), which names the API being invoked.
 fn host_is_execute_api(req: &AwsRequest) -> bool {
-    req.headers
+    headers_name_execute_api(&req.headers)
+}
+
+fn headers_name_execute_api(headers: &http::HeaderMap) -> bool {
+    headers
         .get("host")
         .and_then(|v| v.to_str().ok())
         .and_then(|h| h.split('.').nth(1))
@@ -269,6 +334,16 @@ impl AwsService for ApiGatewayFacade {
 
     fn supported_actions(&self) -> &[&str] {
         &self.actions
+    }
+
+    fn claim_unrouted_request(
+        &self,
+        _method: &http::Method,
+        raw_path: &str,
+        headers: &http::HeaderMap,
+        account_id: &str,
+    ) -> Option<DataPlaneClaim> {
+        self.invocation_claim(raw_path, headers, account_id)
     }
 
     async fn handle(&self, mut req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -478,6 +553,72 @@ mod tests {
             "zzz.execute-api.us-east-1.amazonaws.com".parse().unwrap(),
         );
         assert!(!f.plain_host_stage_owned_by_v1(&pinned));
+    }
+
+    fn host_headers(host: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("host", host.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn unsigned_invocations_are_claimed_and_s3_path_style_is_not() {
+        let f = facade()
+            .with_v2_stage_lookup(Arc::new(|_, stage| stage == "v2stage"))
+            .with_v2_domain_lookup(Arc::new(|_, host| host == "http.example.com"));
+        f.v1.state_handle()
+            .write()
+            .get_or_create(ACCOUNT)
+            .domain_names
+            .insert("rest.example.com".to_string(), serde_json::json!({}));
+        let plain = host_headers("localhost:4566");
+        let claim = |path: &str, headers: &HeaderMap| {
+            f.claim_unrouted_request(&Method::GET, path, headers, ACCOUNT)
+        };
+        let by_path = Some(DataPlaneClaim::Path);
+        let by_host = Some(DataPlaneClaim::Host);
+
+        // Documented invocation shapes on a plain host.
+        assert_eq!(claim("/prod/items", &plain), by_path, "v1 stage");
+        assert_eq!(claim("/v2stage/items", &plain), by_path, "v2 stage");
+        for path in [
+            "/restapis/abc123/prod/_user_request_/items",
+            "/restapis/abc123/dev/_user_request_/items",
+            "/_aws/execute-api/abc123/prod/items",
+        ] {
+            assert_eq!(claim(path, &plain), by_path, "{path}");
+        }
+        // Host-addressed invocations, whatever the path (a stage path too).
+        let exec = host_headers("abc123.execute-api.us-east-1.amazonaws.com");
+        assert_eq!(claim("/ghost-bucket/k", &exec), by_host);
+        assert_eq!(claim("/prod/items", &exec), by_host);
+        let ls_exec = host_headers("abc123.execute-api.localhost.localstack.cloud:4566");
+        assert_eq!(claim("/anything", &ls_exec), by_host);
+        assert_eq!(
+            claim("/v1/items", &host_headers("Rest.Example.com:4566")),
+            by_host
+        );
+        assert_eq!(
+            claim("/hello/one", &host_headers("http.example.com:4566")),
+            by_host
+        );
+
+        // S3 path-style: missing bucket, root, no matching stage, and a
+        // stage that exists only in another account.
+        for path in [
+            "/ghost-bucket/k.txt",
+            "/ghost-bucket",
+            "/",
+            "/dev/items",
+            "/_aws/other",
+        ] {
+            assert_eq!(claim(path, &plain), None, "{path}");
+        }
+        assert_eq!(claim("/ghost-bucket/k", &HeaderMap::new()), None);
+        assert_eq!(
+            f.claim_unrouted_request(&Method::GET, "/prod/items", &plain, "999999999999"),
+            None
+        );
     }
 
     #[test]

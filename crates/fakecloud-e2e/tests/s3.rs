@@ -4071,24 +4071,31 @@ async fn s3_sigv2_requires_expires_param() {
 
     let http = reqwest::Client::new();
 
-    // Request with AWSAccessKeyId + Signature but NO Expires should not be routed to S3
-    let resp = http
-        .get(format!(
-            "{}/?AWSAccessKeyId=AKID&Signature=sig",
-            server.endpoint()
-        ))
-        .send()
-        .await
-        .unwrap();
-    // Without Expires, the server should not identify this as a valid S3 SigV2 request.
-    // It may return 403/400/404 depending on fallback, but NOT a successful S3 response.
-    assert_ne!(
-        resp.status(),
-        200,
-        "Request with only AWSAccessKeyId+Signature (no Expires) should not be treated as S3 presigned"
-    );
+    // Recorded against real S3 (us-east-1): an incomplete SigV2 parameter set
+    // is 403 AccessDenied, at the root and on a missing bucket alike, and is
+    // never served as an anonymous request.
+    for path in ["/", "/test-bucket/key"] {
+        let resp = http
+            .get(format!(
+                "{}{path}?AWSAccessKeyId=AKID&Signature=sig",
+                server.endpoint()
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403, "{path}");
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+        assert!(
+            body.contains(
+                "<Message>Query-string authentication requires the Signature, Expires and \
+                 AWSAccessKeyId parameters</Message>"
+            ),
+            "{body}"
+        );
+    }
 
-    // Request with all three SigV2 params should be routed to S3
+    // An Expires that is no valid epoch time is rejected the same way.
     let resp = http
         .get(format!(
             "{}/test-bucket/key?AWSAccessKeyId=AKID&Signature=sig&Expires=9999999999",
@@ -4097,7 +4104,25 @@ async fn s3_sigv2_requires_expires_param() {
         .send()
         .await
         .unwrap();
-    // This will get a 404 (NoSuchBucket) which confirms it was routed to S3
+    assert_eq!(resp.status(), 403);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+    assert!(
+        body.contains(
+            "<Message>Invalid date (should be seconds since epoch): 9999999999</Message>"
+        ),
+        "{body}"
+    );
+
+    // A complete, well-formed set reaches S3 (missing bucket -> 404).
+    let resp = http
+        .get(format!(
+            "{}/test-bucket/key?AWSAccessKeyId=AKID&Signature=sig&Expires=2000000000",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(
         resp.status(),
         404,

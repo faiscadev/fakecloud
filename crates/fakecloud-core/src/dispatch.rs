@@ -218,11 +218,59 @@ async fn dispatch_inner(
     // just to be refused. Only when the headers settle the service: a
     // request whose detection rests on a presigned URL or the Host header
     // alone may name another service in a form body, and goes there.
-    if let Some(detected) = header_only.as_ref().filter(|_| {
-        pinned.is_none()
-            && rpc_v2_cbor.is_none()
-            && protocol::headers_name_final_service(&parts.headers, &query_params)
-    }) {
+    //
+    // A request nothing in its head routes (no signature, target header or
+    // service host) goes by the unrouted-request rule ([`unrouted_target`]),
+    // which reads no body: settle it now -- an unsigned path-style S3 request
+    // is then judged and streamed like any other S3 request -- unless a form
+    // body could still name a Query service.
+    let unrouted = (pinned.is_none()
+        && rpc_v2_cbor.is_none()
+        && header_only.is_none()
+        && !parts.headers.contains_key("x-amz-target")
+        && !protocol::is_form_content_type(&parts.headers))
+    .then(|| {
+        unrouted_target(
+            &parts.method,
+            &parts.uri,
+            &parts.headers,
+            &query_params,
+            &registry,
+            &config,
+        )
+    })
+    .flatten();
+    let unrouted_detected = unrouted.map(unrouted_detection);
+    let head_detected = header_only
+        .as_ref()
+        .filter(|_| {
+            pinned.is_none()
+                && rpc_v2_cbor.is_none()
+                && protocol::headers_name_final_service(&parts.headers, &query_params)
+        })
+        .or(unrouted_detected.as_ref());
+    // SigV2 query authentication S3 cannot accept is refused ahead of
+    // everything S3 judges on the head (an anonymous caller's NoSuchBucket
+    // included), as S3 does. Checked again once detection settles.
+    if pinned.is_none()
+        && head_detected
+            .or(header_only.as_ref())
+            .is_some_and(|d| d.service == "s3")
+    {
+        if let Some((message, fields)) =
+            s3_sigv2_query_auth_error(&parts.headers, &query_params, chrono::Utc::now())
+        {
+            return build_error_response_with_fields(
+                StatusCode::FORBIDDEN,
+                "AccessDenied",
+                &message,
+                &request_id,
+                AwsProtocol::Rest,
+                &fields,
+            );
+        }
+    }
+    if let Some(detected) = head_detected {
         if let Some(service) = registry.get(&detected.service) {
             if let Err(err) = with_request_head(service.as_ref(), &early, |head| {
                 service.refuse_before_body(head)
@@ -261,6 +309,21 @@ async fn dispatch_inner(
             action: String::new(),
             protocol: AwsProtocol::Rest,
         }),
+        // An unsigned request S3 serves -- path-style on the shared listener
+        // (settled above) or addressed to an S3 endpoint host -- streams when
+        // S3 says so, like a signed one.
+        (None, header_only)
+            if early.anonymous
+                && match header_only {
+                    Some(detected) => detected.service == "s3",
+                    None => unrouted == Some("s3"),
+                }
+                && registry
+                    .get("s3")
+                    .is_some_and(|s3| service_streams_body(s3.as_ref(), &early)) =>
+        {
+            Some(unrouted_detection("s3"))
+        }
         _ => None,
     };
 
@@ -341,67 +404,26 @@ async fn dispatch_inner(
                         AwsProtocol::Json,
                     );
                 }
-                // OPTIONS requests (CORS preflight) don't carry Authorization headers.
-                // One addressed to an API's `{api-id}.execute-api.` host is that
-                // API's preflight (its OPTIONS method, e.g. a MOCK CORS
-                // integration); any other unsigned OPTIONS goes to S3, the other
-                // REST service that answers CORS preflights.
-                if parts.method == http::Method::OPTIONS && is_execute_api_host(&parts.headers) {
-                    protocol::DetectedRequest {
-                        service: "apigateway".to_string(),
-                        action: String::new(),
-                        protocol: AwsProtocol::RestJson,
+                match unrouted.or_else(|| {
+                    unrouted_target(
+                        &parts.method,
+                        &parts.uri,
+                        &parts.headers,
+                        &query_params,
+                        &registry,
+                        &config,
+                    )
+                }) {
+                    Some(service) => unrouted_detection(service),
+                    None => {
+                        return build_error_response(
+                            StatusCode::BAD_REQUEST,
+                            "MissingAction",
+                            "Could not determine target service or action from request",
+                            &request_id,
+                            AwsProtocol::Query,
+                        );
                     }
-                } else if parts.method == http::Method::OPTIONS {
-                    protocol::DetectedRequest {
-                        service: "s3".to_string(),
-                        action: String::new(),
-                        protocol: AwsProtocol::Rest,
-                    }
-                } else if parts.uri.path() == "/v2" || parts.uri.path().starts_with("/v2/") {
-                    // OCI Distribution v2 protocol. Docker CLI / OCI clients
-                    // use Basic auth (not SigV4) and GET /v2/ with no body,
-                    // so this must be matched before the apigateway fallback.
-                    protocol::DetectedRequest {
-                        service: "ecr".to_string(),
-                        action: String::new(),
-                        protocol: AwsProtocol::Rest,
-                    }
-                } else if let Some(bucket) = anonymous_s3_bucket(&parts.uri, &config) {
-                    // Unsigned request whose first path segment names an
-                    // existing S3 bucket: an anonymous path-style S3 access
-                    // (e.g. serving a public-read object to a browser). Without
-                    // this it would fall through to the apigateway catch-all
-                    // below and 404 with "Stage not found" (#1707). Authorization
-                    // for the anonymous caller still runs in the IAM block.
-                    tracing::debug!(bucket = %bucket, "routing unsigned request to S3 (existing bucket)");
-                    protocol::DetectedRequest {
-                        service: "s3".to_string(),
-                        action: String::new(),
-                        protocol: AwsProtocol::Rest,
-                    }
-                } else if !parts.uri.path().starts_with("/_")
-                    || parts.uri.path().starts_with("/_aws/execute-api/")
-                {
-                    // Requests without AWS auth that don't match any service might be
-                    // API Gateway execute API calls (plain HTTP without signatures).
-                    // Route them to apigateway service which will validate if a matching
-                    // API/stage exists. Skip special FakeCloud endpoints (/_*),
-                    // except LocalStack's path-style execute-api invocation URL
-                    // `/_aws/execute-api/{api-id}/{stage}/{path}`.
-                    protocol::DetectedRequest {
-                        service: "apigateway".to_string(),
-                        action: String::new(),
-                        protocol: AwsProtocol::RestJson,
-                    }
-                } else {
-                    return build_error_response(
-                        StatusCode::BAD_REQUEST,
-                        "MissingAction",
-                        "Could not determine target service or action from request",
-                        &request_id,
-                        AwsProtocol::Query,
-                    );
                 }
             }
         }
@@ -455,6 +477,24 @@ async fn dispatch_inner(
     } else {
         detected
     };
+
+    // SigV2 query authentication S3 cannot accept is rejected before anything
+    // reads the request (credential resolution, authorization, the bucket),
+    // as S3 does.
+    if detected.service == "s3" && pinned.is_none() {
+        if let Some((message, fields)) =
+            s3_sigv2_query_auth_error(&parts.headers, &query_params, chrono::Utc::now())
+        {
+            return build_error_response_with_fields(
+                StatusCode::FORBIDDEN,
+                "AccessDenied",
+                &message,
+                &request_id,
+                AwsProtocol::Rest,
+                &fields,
+            );
+        }
+    }
 
     // Look up service
     let service = match registry.get(&detected.service) {
@@ -659,13 +699,32 @@ async fn dispatch_inner(
                     ErrorEnvelope::for_request(&detected, &parts.headers),
                 );
             }
-            Err(fakecloud_aws::sigv4::SigV4Error::PresignedUrlExpired { .. }) => {
-                return build_error_response(
+            Err(fakecloud_aws::sigv4::SigV4Error::PresignedUrlExpired {
+                signed,
+                server,
+                expires_secs,
+            }) => {
+                // S3's error document names the lifetime, the expiry and the
+                // server's clock, as for an expired SigV2 URL.
+                let fields = if detected.service == "s3" {
+                    vec![
+                        ("X-Amz-Expires".to_string(), expires_secs.to_string()),
+                        (
+                            "Expires".to_string(),
+                            s3_error_time(signed + chrono::Duration::seconds(expires_secs)),
+                        ),
+                        ("ServerTime".to_string(), s3_error_time(server)),
+                    ]
+                } else {
+                    Vec::new()
+                };
+                return build_error_response_with_fields(
                     StatusCode::FORBIDDEN,
                     "AccessDenied",
                     "Request has expired",
                     &request_id,
                     ErrorEnvelope::for_request(&detected, &parts.headers),
+                    &fields,
                 );
             }
             Err(fakecloud_aws::sigv4::SigV4Error::InvalidPresignExpires(_)) => {
@@ -1456,7 +1515,7 @@ impl IamEnforcement {
                                     return Some(build_error_response(
                                         StatusCode::FORBIDDEN,
                                         "AccessDenied",
-                                        "Access Denied",
+                                        anonymous_denied_message(&detected.service, iam_action),
                                         request_id,
                                         error_envelope,
                                     ));
@@ -2464,6 +2523,220 @@ fn invalid_token_error(envelope: &ErrorEnvelope) -> (&'static str, &'static str)
             "The security token included in the request is invalid",
         )
     }
+}
+
+/// The service for a request no protocol signal (target header, `Action`,
+/// signing scope, AWS endpoint host) routed, in this order:
+///
+/// 1. API Gateway when its data plane claims the `Host` (execute-api or custom
+///    domain): nothing sent to such a host is S3's, whatever the path.
+/// 2. S3 for any other `OPTIONS` (CORS preflight; API Gateway answers its own
+///    on its hosts above).
+/// 3. ECR for the OCI Distribution `/v2` API (Basic auth, no SigV4).
+/// 4. S3 when the first path segment names an existing bucket (#1707), which
+///    beats a stage of the same name.
+/// 5. S3 when the request carries S3 query authentication (SigV2 or SigV4
+///    parameters, even an incomplete set, which S3 then rejects as AWS does),
+///    or is fully unsigned and API Gateway does not claim its path
+///    (`/restapis/...`, `/_aws/execute-api/...`, a deployed stage): an
+///    unsigned path-style request to S3's endpoint, existing bucket or not.
+/// 6. API Gateway for the rest outside `/_*`: claimed paths and signed requests
+///    whose scope named no REST service (an IAM-auth API signed for
+///    `execute-api`), plus LocalStack's `/_aws/execute-api/...` URL.
+///
+/// `None` for an unrouted fakecloud endpoint (`/_*`).
+fn unrouted_target(
+    method: &http::Method,
+    uri: &http::Uri,
+    headers: &http::HeaderMap,
+    query_params: &HashMap<String, String>,
+    registry: &ServiceRegistry,
+    config: &DispatchConfig,
+) -> Option<&'static str> {
+    use crate::service::DataPlaneClaim;
+    let path = uri.path();
+    let claim = registry
+        .get("apigateway")
+        .and_then(|apigw| apigw.claim_unrouted_request(method, path, headers, &config.account_id));
+    if claim == Some(DataPlaneClaim::Host)
+        || (*method == http::Method::OPTIONS && is_execute_api_host(headers))
+    {
+        return Some("apigateway");
+    }
+    if *method == http::Method::OPTIONS {
+        return Some("s3");
+    }
+    if path == "/v2" || path.starts_with("/v2/") {
+        return Some("ecr");
+    }
+    if let Some(bucket) = anonymous_s3_bucket(uri, config) {
+        tracing::debug!(bucket = %bucket, "routing unrouted request to S3 (existing bucket)");
+        return Some("s3");
+    }
+    let fakecloud_endpoint = path.starts_with("/_");
+    let s3_takes_it = match claim {
+        // A path API Gateway claims (a deployed stage, an invocation URL)
+        // stays the API's unless the query is unmistakably S3 auth.
+        Some(_) => is_unmistakable_s3_query_auth(headers, query_params),
+        None => has_s3_query_auth(headers, query_params) || is_unsigned(headers, query_params),
+    };
+    if !fakecloud_endpoint && registry.get("s3").is_some() && s3_takes_it {
+        return Some("s3");
+    }
+    if !fakecloud_endpoint || path.starts_with("/_aws/execute-api/") {
+        return Some("apigateway");
+    }
+    None
+}
+
+/// The detection for a service [`unrouted_target`] picked.
+fn unrouted_detection(service: &str) -> protocol::DetectedRequest {
+    protocol::DetectedRequest {
+        service: service.to_string(),
+        action: String::new(),
+        protocol: if service == "apigateway" {
+            AwsProtocol::RestJson
+        } else {
+            AwsProtocol::Rest
+        },
+    }
+}
+
+/// Whether the request carries no credential at all: no `Authorization`
+/// header and no SigV4 or SigV2 query-authentication parameter, not even an
+/// incomplete set (`AWSAccessKeyId` + `Signature` without `Expires` is a
+/// broken presign, not an anonymous request).
+fn is_unsigned(headers: &http::HeaderMap, query_params: &HashMap<String, String>) -> bool {
+    const QUERY_AUTH: &[&str] = &[
+        "X-Amz-Credential",
+        "X-Amz-Signature",
+        "AWSAccessKeyId",
+        "Signature",
+    ];
+    headers
+        .get(http::header::AUTHORIZATION)
+        .is_none_or(|v| v.as_bytes().is_empty())
+        && !QUERY_AUTH.iter().any(|k| query_params.contains_key(*k))
+}
+
+/// Whether an `Authorization`-less request carries S3 query authentication:
+/// any SigV2 parameter (`AWSAccessKeyId`, `Signature`) or SigV4 one whose
+/// credential scope, if readable, is S3's (a scope naming another service is
+/// that service's presign, e.g. `execute-api`).
+fn has_s3_query_auth(headers: &http::HeaderMap, query_params: &HashMap<String, String>) -> bool {
+    if headers
+        .get(http::header::AUTHORIZATION)
+        .is_some_and(|v| !v.as_bytes().is_empty())
+    {
+        return false;
+    }
+    if query_params.contains_key("AWSAccessKeyId") || query_params.contains_key("Signature") {
+        return true;
+    }
+    let sigv4 = query_params.contains_key("X-Amz-Credential")
+        || query_params.contains_key("X-Amz-Signature")
+        || query_params.contains_key("X-Amz-Algorithm");
+    sigv4
+        && query_params
+            .get("X-Amz-Credential")
+            .and_then(|c| c.split('/').nth(3))
+            .is_none_or(|service| service == "s3")
+}
+
+/// Whether an `Authorization`-less request's query is unmistakably S3 query
+/// authentication -- a SigV4 `X-Amz-Credential` scoped to `s3`, or at least
+/// two of the SigV2 trio (`AWSAccessKeyId`, `Signature`, `Expires`) -- rather
+/// than a stray parameter an API invocation may carry (`?Signature=abc`).
+fn is_unmistakable_s3_query_auth(
+    headers: &http::HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> bool {
+    if headers
+        .get(http::header::AUTHORIZATION)
+        .is_some_and(|v| !v.as_bytes().is_empty())
+    {
+        return false;
+    }
+    let sigv4_s3 = query_params
+        .get("X-Amz-Credential")
+        .and_then(|c| c.split('/').nth(3))
+        .is_some_and(|service| service == "s3");
+    let sigv2_parts = ["AWSAccessKeyId", "Signature", "Expires"]
+        .iter()
+        .filter(|k| query_params.contains_key(**k))
+        .count();
+    sigv4_s3 || sigv2_parts >= 2
+}
+
+/// The `AccessDenied` S3 answers before anything else (credential lookup
+/// included) for SigV2 query authentication it cannot accept, as recorded
+/// against us-east-1, with the extra `<Error>` elements it carries:
+///
+/// - an incomplete parameter set (`AWSAccessKeyId` / `Signature` / `Expires`,
+///   any missing): "Query-string authentication requires the Signature,
+///   Expires and AWSAccessKeyId parameters";
+/// - an `Expires` that is not a 32-bit signed epoch-seconds value
+///   (`2147483647` passes; `2147483648`, `9999999999`, `abc` do not):
+///   "Invalid date (should be seconds since epoch): <value>";
+/// - an `Expires` in the past (`-1` included): "Request has expired", with
+///   `<Expires>` (the expiry) and `<ServerTime>` (now), both ISO-8601 UTC.
+///
+/// Requests with an `Authorization` header, or with no SigV2 parameter, are
+/// not SigV2 query authentication.
+fn s3_sigv2_query_auth_error(
+    headers: &http::HeaderMap,
+    query_params: &HashMap<String, String>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<(String, Vec<(String, String)>)> {
+    if headers.contains_key(http::header::AUTHORIZATION)
+        || !(query_params.contains_key("AWSAccessKeyId") || query_params.contains_key("Signature"))
+    {
+        return None;
+    }
+    let (Some(_), Some(_), Some(expires)) = (
+        query_params.get("AWSAccessKeyId"),
+        query_params.get("Signature"),
+        query_params.get("Expires"),
+    ) else {
+        return Some((
+            "Query-string authentication requires the Signature, Expires and AWSAccessKeyId \
+             parameters"
+                .to_string(),
+            Vec::new(),
+        ));
+    };
+    let Ok(secs) = expires.parse::<i32>() else {
+        return Some((
+            format!("Invalid date (should be seconds since epoch): {expires}"),
+            Vec::new(),
+        ));
+    };
+    let expiry = chrono::DateTime::from_timestamp(i64::from(secs), 0)?;
+    (expiry < now).then(|| {
+        (
+            "Request has expired".to_string(),
+            vec![
+                ("Expires".to_string(), s3_error_time(expiry)),
+                ("ServerTime".to_string(), s3_error_time(now)),
+            ],
+        )
+    })
+}
+
+/// The `AccessDenied` message for an anonymous request authorization refused.
+/// S3 refuses an anonymous `CreateBucket` outright with its own message
+/// (recorded in us-east-1); everything else is S3's generic "Access Denied".
+fn anonymous_denied_message(service: &str, action: &crate::auth::IamAction) -> &'static str {
+    if service == "s3" && action.service == "s3" && action.action == "CreateBucket" {
+        "Anonymous users cannot invoke this API. Please authenticate."
+    } else {
+        "Access Denied"
+    }
+}
+
+/// A timestamp as S3 writes it in an error document (`1969-12-31T23:59:59Z`).
+fn s3_error_time(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn anonymous_s3_bucket(uri: &http::Uri, config: &DispatchConfig) -> Option<String> {
@@ -4277,6 +4550,340 @@ mod tests {
         assert_eq!(
             *provider.0.lock(),
             vec!["arn:aws:s3:::my-bucket".to_string()]
+        );
+    }
+
+    /// A registry with an `s3` service and an `apigateway` one that claims an
+    /// execute-api `Host`, and by path a first segment `prod` (a deployed
+    /// stage).
+    fn unsigned_routing_registry(with_s3: bool) -> ServiceRegistry {
+        struct Named(&'static str);
+        #[async_trait::async_trait]
+        impl crate::service::AwsService for Named {
+            fn service_name(&self) -> &str {
+                self.0
+            }
+            async fn handle(
+                &self,
+                _req: AwsRequest,
+            ) -> Result<crate::service::AwsResponse, crate::service::AwsServiceError> {
+                unreachable!("routing only")
+            }
+            fn supported_actions(&self) -> &[&str] {
+                &[]
+            }
+            fn claim_unrouted_request(
+                &self,
+                _method: &http::Method,
+                raw_path: &str,
+                headers: &http::HeaderMap,
+                account_id: &str,
+            ) -> Option<crate::service::DataPlaneClaim> {
+                assert_eq!(account_id, "000000000000");
+                if self.0 != "apigateway" {
+                    None
+                } else if is_execute_api_host(headers) {
+                    Some(crate::service::DataPlaneClaim::Host)
+                } else if raw_path.starts_with("/prod/") {
+                    Some(crate::service::DataPlaneClaim::Path)
+                } else {
+                    None
+                }
+            }
+        }
+        let mut registry = ServiceRegistry::new();
+        registry.register(Arc::new(Named("apigateway")));
+        if with_s3 {
+            registry.register(Arc::new(Named("s3")));
+        }
+        registry
+    }
+
+    #[test]
+    fn unsigned_path_style_requests_go_to_s3_unless_api_gateway_claims_them() {
+        // Bucket `prod` exists only when the test says so.
+        struct Buckets(&'static [&'static str]);
+        impl crate::auth::ResourcePolicyProvider for Buckets {
+            fn resource_policy(&self, _service: &str, _resource_arn: &str) -> Option<String> {
+                None
+            }
+            fn resource_owner_account(&self, _service: &str, resource_arn: &str) -> Option<String> {
+                resource_arn
+                    .strip_prefix("arn:aws:s3:::")
+                    .filter(|b| self.0.contains(b))
+                    .map(|_| "000000000000".to_string())
+            }
+        }
+        let registry = unsigned_routing_registry(true);
+        let mut cfg = DispatchConfig::new("us-east-1", "000000000000");
+        cfg.resource_policy_provider = Some(Arc::new(Buckets(&[])));
+        let target = |cfg: &DispatchConfig,
+                      method: http::Method,
+                      uri: &str,
+                      headers: &http::HeaderMap,
+                      query: &[(&str, &str)]| {
+            let query: HashMap<String, String> = query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            unrouted_target(
+                &method,
+                &uri.parse().unwrap(),
+                headers,
+                &query,
+                &registry,
+                cfg,
+            )
+        };
+        let is_s3 =
+            |method: http::Method, uri: &str, headers: &http::HeaderMap, query: &[(&str, &str)]| {
+                target(&cfg, method, uri, headers, query) == Some("s3")
+            };
+        let none = http::HeaderMap::new();
+        // Missing bucket, any method, and the bare root (ListBuckets).
+        assert!(is_s3(http::Method::GET, "/ghost-bucket/k.txt", &none, &[]));
+        assert!(is_s3(http::Method::PUT, "/ghost-bucket/k.txt", &none, &[]));
+        assert!(is_s3(http::Method::PUT, "/ghost-bucket", &none, &[]));
+        assert!(is_s3(http::Method::GET, "/", &none, &[]));
+        // A plain query string (not a presign) keeps it unsigned.
+        assert!(is_s3(
+            http::Method::GET,
+            "/ghost-bucket",
+            &none,
+            &[("list-type", "2")]
+        ));
+        // API Gateway claims its invocation.
+        assert!(!is_s3(http::Method::GET, "/prod/items", &none, &[]));
+        // fakecloud endpoints are never S3.
+        assert!(!is_s3(http::Method::GET, "/_fakecloud/health", &none, &[]));
+        // Signed or presigned requests keep the catch-all (an IAM-auth API
+        // signed for `execute-api` must reach API Gateway).
+        let mut signed = http::HeaderMap::new();
+        signed.insert(
+            http::header::AUTHORIZATION,
+            "AWS4-HMAC-SHA256 Credential=AKID/20240101/us-east-1/execute-api/aws4_request"
+                .parse()
+                .unwrap(),
+        );
+        assert!(!is_s3(http::Method::GET, "/ghost-bucket/k", &signed, &[]));
+        assert!(!is_s3(
+            http::Method::GET,
+            "/ghost-bucket/k",
+            &none,
+            &[(
+                "X-Amz-Credential",
+                "AKID/20240101/us-east-1/execute-api/aws4_request"
+            )]
+        ));
+        // S3 query authentication, even incomplete, is S3's on a path API
+        // Gateway does not claim; on a claimed stage path only when it is
+        // unmistakable (an s3-scoped credential, two of the SigV2 trio).
+        for (query, beats_stage) in [
+            (&[("AWSAccessKeyId", "AKID"), ("Signature", "x")][..], true),
+            (&[("Signature", "x"), ("Expires", "1")][..], true),
+            (
+                &[(
+                    "X-Amz-Credential",
+                    "AKID/20240101/us-east-1/s3/aws4_request",
+                )][..],
+                true,
+            ),
+            (&[("AWSAccessKeyId", "AKID")][..], false),
+            (&[("Signature", "abc")][..], false),
+            (&[("X-Amz-Algorithm", "AWS4-HMAC-SHA256")][..], false),
+            (&[("X-Amz-Signature", "abc")][..], false),
+        ] {
+            assert!(is_s3(http::Method::GET, "/ghost-bucket/k", &none, query));
+            assert_eq!(
+                is_s3(http::Method::GET, "/prod/items", &none, query),
+                beats_stage,
+                "{query:?}"
+            );
+        }
+        let exec = {
+            let mut h = http::HeaderMap::new();
+            h.insert(
+                "host",
+                "abc123.execute-api.us-east-1.amazonaws.com"
+                    .parse()
+                    .unwrap(),
+            );
+            h
+        };
+        assert_eq!(
+            target(
+                &cfg,
+                http::Method::GET,
+                "/ghost-bucket/k",
+                &exec,
+                &[("AWSAccessKeyId", "AKID")]
+            ),
+            Some("apigateway")
+        );
+
+        // An existing bucket beats a stage-name guess but never an
+        // API Gateway host.
+        let mut with_prod = DispatchConfig::new("us-east-1", "000000000000");
+        with_prod.resource_policy_provider = Some(Arc::new(Buckets(&["prod"])));
+        for method in [http::Method::GET, http::Method::PUT] {
+            assert_eq!(
+                target(&with_prod, method.clone(), "/prod/items", &none, &[]),
+                Some("s3")
+            );
+            assert_eq!(
+                target(&with_prod, method.clone(), "/prod/items", &exec, &[]),
+                Some("apigateway")
+            );
+            assert_eq!(
+                target(&cfg, method, "/prod/items", &none, &[]),
+                Some("apigateway")
+            );
+        }
+        // OPTIONS: an API Gateway host's preflight, else S3's; `/v2` is ECR.
+        assert_eq!(
+            target(&cfg, http::Method::OPTIONS, "/prod/items", &exec, &[]),
+            Some("apigateway")
+        );
+        assert_eq!(
+            target(&cfg, http::Method::OPTIONS, "/prod/items", &none, &[]),
+            Some("s3")
+        );
+        assert_eq!(
+            target(&cfg, http::Method::GET, "/v2/", &none, &[]),
+            Some("ecr")
+        );
+        assert_eq!(
+            target(&cfg, http::Method::GET, "/_fakecloud/x", &none, &[]),
+            None
+        );
+        assert_eq!(
+            target(&cfg, http::Method::GET, "/_aws/execute-api/a/b", &none, &[]),
+            Some("apigateway")
+        );
+
+        assert!(is_unsigned(&none, &HashMap::new()));
+        assert!(!is_unsigned(&signed, &HashMap::new()));
+        // An incomplete SigV2 presign is not anonymous.
+        assert!(!is_unsigned(
+            &none,
+            &[("AWSAccessKeyId".to_string(), "AKID".to_string())]
+                .into_iter()
+                .collect()
+        ));
+        // A form body may still name a Query service.
+        let mut form = http::HeaderMap::new();
+        form.insert(
+            http::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded; charset=utf-8"
+                .parse()
+                .unwrap(),
+        );
+        assert!(protocol::is_form_content_type(&form));
+        assert!(!protocol::is_form_content_type(&none));
+
+        // Without an S3 service registered nothing is routed to it.
+        let registry = unsigned_routing_registry(false);
+        assert_eq!(
+            unrouted_target(
+                &http::Method::GET,
+                &"/ghost-bucket/k".parse().unwrap(),
+                &none,
+                &HashMap::new(),
+                &registry,
+                &cfg,
+            ),
+            Some("apigateway")
+        );
+    }
+
+    #[test]
+    fn malformed_sigv2_query_auth_is_rejected_as_recorded() {
+        let q = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let none = http::HeaderMap::new();
+        let now = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let message = |headers: &http::HeaderMap, pairs: &[(&str, &str)]| {
+            s3_sigv2_query_auth_error(headers, &q(pairs), now).map(|(m, _)| m)
+        };
+        let incomplete = "Query-string authentication requires the Signature, Expires and \
+                          AWSAccessKeyId parameters";
+        for pairs in [
+            &[("AWSAccessKeyId", "AKID"), ("Signature", "x")][..],
+            &[("AWSAccessKeyId", "AKID"), ("Expires", "1700000000")][..],
+            &[("Signature", "x")][..],
+        ] {
+            assert_eq!(message(&none, pairs).as_deref(), Some(incomplete));
+        }
+        let full = |expires: &str| {
+            s3_sigv2_query_auth_error(
+                &none,
+                &q(&[
+                    ("AWSAccessKeyId", "AKID"),
+                    ("Signature", "x"),
+                    ("Expires", expires),
+                ]),
+                now,
+            )
+        };
+        // Recorded: 2147483647 is accepted; anything past i32, or not a
+        // number, is an invalid date.
+        assert_eq!(full("2147483647"), None);
+        for bad in [
+            "2147483648",
+            "4294967295",
+            "4294967296",
+            "9999999999",
+            "abc",
+        ] {
+            assert_eq!(
+                full(bad),
+                Some((
+                    format!("Invalid date (should be seconds since epoch): {bad}"),
+                    Vec::new()
+                )),
+                "{bad}"
+            );
+        }
+        // Recorded: -1 (or any past time) has expired, naming both times.
+        assert_eq!(
+            full("-1"),
+            Some((
+                "Request has expired".to_string(),
+                vec![
+                    ("Expires".to_string(), "1969-12-31T23:59:59Z".to_string()),
+                    ("ServerTime".to_string(), "2027-01-15T08:00:00Z".to_string()),
+                ]
+            ))
+        );
+        assert_eq!(
+            full("1700000000").map(|(m, _)| m).as_deref(),
+            Some("Request has expired")
+        );
+        // Not SigV2 query authentication.
+        assert_eq!(message(&none, &[("Expires", "x")]), None);
+        let mut signed = http::HeaderMap::new();
+        signed.insert(
+            http::header::AUTHORIZATION,
+            "AWS4-HMAC-SHA256 x".parse().unwrap(),
+        );
+        assert_eq!(message(&signed, &[("Signature", "x")]), None);
+
+        let action = |service: &'static str, action: &'static str| crate::auth::IamAction {
+            service,
+            action,
+            resource: "arn:aws:s3:::b".to_string(),
+        };
+        assert_eq!(
+            anonymous_denied_message("s3", &action("s3", "CreateBucket")),
+            "Anonymous users cannot invoke this API. Please authenticate."
+        );
+        assert_eq!(
+            anonymous_denied_message("s3", &action("s3", "GetObject")),
+            "Access Denied"
         );
     }
 
