@@ -821,8 +821,11 @@ async fn dispatch_inner(
     // 1. authentication: a key that resolves to no identity is refused
     //    first (`InvalidClientTokenId` / `ExpiredToken`, strict only);
     // 2. `validate_before_authorization`: what the service refuses whoever
-    //    asks, anonymous callers included (S3's unclassifiable requests and
-    //    a missing bucket, STS's invalid `TaskPolicyArn`);
+    //    asks (S3's unclassifiable requests and a missing bucket, STS's
+    //    invalid `TaskPolicyArn`). An anonymous request is validated here
+    //    only by a service that judges anonymous requests itself
+    //    (`validates_anonymous_before_authorization`, S3); every other
+    //    service refuses it as anonymous first and validates after step 3;
     // 3. authorization of the request's actions;
     // 4. the handler, which refuses the payload itself (S3's broken
     //    aws-chunked framing) only after all of the above.
@@ -840,8 +843,15 @@ async fn dispatch_inner(
             return denied;
         }
     }
-    if let Err(err) = service.validate_before_authorization(&aws_request) {
-        return service_error_response(&err, &detected, &request_id, error_envelope);
+    let anonymous = aws_request.access_key_id.is_none()
+        && aws_request.principal.is_none()
+        && enforcement.internal_caller.is_none();
+    let refuse_anonymous_first =
+        authorizes && anonymous && !service.validates_anonymous_before_authorization();
+    if !refuse_anonymous_first {
+        if let Err(err) = service.validate_before_authorization(&aws_request) {
+            return service_error_response(&err, &detected, &request_id, error_envelope);
+        }
     }
     if authorizes {
         // A request whose handler authorizes it per item (S3 DeleteObjects,
@@ -855,6 +865,13 @@ async fn dispatch_inner(
         };
         if let Some(denied) = enforcement.enforce(&aws_request, &iam_actions, deferred) {
             return denied;
+        }
+    }
+    // An anonymous request authorization let through (a resource made
+    // public, or soft mode) is validated now, before its handler.
+    if refuse_anonymous_first {
+        if let Err(err) = service.validate_before_authorization(&aws_request) {
+            return service_error_response(&err, &detected, &request_id, error_envelope);
         }
     }
     // Handlers that authorize further actions (per item, or to decide what a

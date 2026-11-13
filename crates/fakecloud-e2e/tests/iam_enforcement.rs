@@ -249,6 +249,31 @@ async fn assume_root_validates_the_task_policy_before_authorizing() {
     );
 }
 
+#[tokio::test]
+async fn unsigned_assume_root_is_refused_before_its_task_policy_is_validated() {
+    // Recorded: an unsigned AssumeRoot with an invalid TaskPolicyArn is
+    // refused for its missing credentials (403), not a ValidationError. STS
+    // refuses an anonymous request before looking at it.
+    let server = start_strict().await;
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        // Unsigned, the request names its service by its endpoint.
+        .header("host", "sts.us-east-1.amazonaws.com")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(
+            "Action=AssumeRoot&Version=2011-06-15&TargetPrincipal=111122223333\
+             &TaskPolicyArn.arn=bogus",
+        )
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap();
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+    assert!(!body.contains("ValidationError"), "{body}");
+}
+
 /// bug-hunt 2026-06-13, finding 5.1: enabling `--verify-sigv4` alongside
 /// `--iam` binds a request to a real identity -- an unknown access key id is
 /// rejected with InvalidClientTokenId before any handler runs. (Without

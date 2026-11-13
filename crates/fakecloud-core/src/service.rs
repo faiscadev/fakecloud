@@ -881,9 +881,24 @@ pub trait AwsService: Send + Sync {
         Ok(())
     }
 
+    /// Whether an anonymous (unsigned) request is validated
+    /// ([`AwsService::validate_before_authorization`]) before it is
+    /// authorized, rather than refused as anonymous first. Only a service
+    /// that serves anonymous requests itself and judges them like any other
+    /// opts in (S3: a missing bucket is NoSuchBucket, an unclassifiable
+    /// request its 400, whoever asks). Every other service refuses an
+    /// unsigned request before looking at it (recorded: an unsigned STS
+    /// `AssumeRoot` with an invalid `TaskPolicyArn` is refused for its
+    /// missing credentials, not validated). Default `false`.
+    fn validates_anonymous_before_authorization(&self) -> bool {
+        false
+    }
+
     /// Validation AWS performs before authorizing `request`: an error here
     /// is returned to the caller whatever its permissions, anonymous callers
-    /// included -- a request the service cannot classify into an operation
+    /// included where the service validates them first
+    /// ([`AwsService::validates_anonymous_before_authorization`]) -- a
+    /// request the service cannot classify into an operation
     /// (S3 answers conflicting sub-resource parameters with 400
     /// `InvalidArgument` whoever asks), or one carrying an invalid parameter
     /// AWS checks first (STS `AssumeRoot`'s `TaskPolicyArn`). Dispatch calls

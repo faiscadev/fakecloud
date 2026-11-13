@@ -1409,6 +1409,13 @@ impl AwsService for S3Service {
     /// NoSuchUpload, even anonymously and whatever the part number). Every
     /// caller, anonymous included, gets these errors rather than an
     /// AccessDenied, answered as the handler answers them.
+    /// S3 serves anonymous requests and judges them like any other: a
+    /// missing bucket is NoSuchBucket and an unclassifiable request its 400
+    /// before any AccessDenied (recorded).
+    fn validates_anonymous_before_authorization(&self) -> bool {
+        true
+    }
+
     fn streams_request_body(&self, head: &fakecloud_core::service::RequestHead<'_>) -> bool {
         // Only an upload streams; every other request's body is small and
         // buffered, so what runs before the handler (IAM reading the tag set
