@@ -386,9 +386,18 @@ async fn drain<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) -> std::io::Res
 /// resource it can't prove is orphaned.
 #[cfg(unix)]
 pub fn pid_alive(pid: u32) -> bool {
+    // A value that is not a positive pid_t names no process: cast as is, 0
+    // would probe our own process group and anything above i32::MAX a
+    // negative one (`kill(-pgid, 0)`), answering for a group, not a process.
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
     // SAFETY: `kill` with signal 0 is a liveness probe; it does not
     // actually deliver a signal. Any PID value is safe to pass.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    let rc = unsafe { libc::kill(pid, 0) };
     if rc == 0 {
         return true;
     }
@@ -1291,6 +1300,12 @@ mod tests {
     #[test]
     fn pid_alive_probes_real_processes() {
         assert!(pid_alive(std::process::id()));
+        // Above any pid_max (Linux caps it at 2^22).
+        assert!(!pid_alive(i32::MAX as u32));
+        // Not process IDs: 0 is our process group, and values above i32::MAX
+        // would be negative group IDs if cast, with group 1 (init's) alive.
+        assert!(!pid_alive(0));
+        assert!(!pid_alive(u32::MAX));
         assert!(!pid_alive(u32::MAX - 1));
     }
 

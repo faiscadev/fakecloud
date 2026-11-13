@@ -76,9 +76,15 @@ pub fn reap_stale_containers() {
 /// Networks or volumes (`kind`) labelled `fakecloud-instance=<owner>` whose
 /// owner is gone. Their `ls` can't print one label portably (docker formats
 /// `.Label`; podman's listing has neither `.Label` nor an indexable `.Labels`,
-/// so the template fails), so the owner is read per object with
-/// `<kind> inspect`, whose `.Labels` is a map on both engines.
+/// so the template fails), so the owners are read with `<kind> inspect`, whose
+/// `.Labels` is a map on both engines. Networks are named by ID (older Docker
+/// engines allow two networks with one name); volumes only have names.
 fn orphans_by_inspect(cli: &str, kind: &str, alive: fn(u32) -> bool) -> Vec<String> {
+    let key = if kind == "network" {
+        "{{.ID}}"
+    } else {
+        "{{.Name}}"
+    };
     let Some(listing) = bounded_output(
         cli,
         &[
@@ -87,29 +93,49 @@ fn orphans_by_inspect(cli: &str, kind: &str, alive: fn(u32) -> bool) -> Vec<Stri
             "--filter",
             "label=fakecloud-instance",
             "--format",
-            "{{.Name}}",
+            key,
         ],
     ) else {
         return Vec::new();
     };
-    listing
+    let ids: Vec<&str> = listing
         .lines()
         .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .filter(|name| {
-            bounded_output(
-                cli,
-                &[
-                    kind,
-                    "inspect",
-                    "--format",
-                    "{{index .Labels \"fakecloud-instance\"}}",
-                    name,
-                ],
-            )
-            .is_some_and(|owner| owned_by_dead_process(owner.trim(), alive))
+        .filter(|id| !id.is_empty())
+        .collect();
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    owners(cli, kind, &ids)
+        .into_iter()
+        .filter(|(_, owner)| owned_by_dead_process(owner, alive))
+        .map(|(id, _)| id.to_string())
+        .collect()
+}
+
+/// The `fakecloud-instance` label of each object, read in one `inspect` call
+/// (each call is a daemon round trip, and live servers' objects are listed
+/// too). If that call fails, an object went away after the listing, so each
+/// is read on its own and the missing ones are dropped.
+fn owners<'a>(cli: &str, kind: &str, ids: &[&'a str]) -> Vec<(&'a str, String)> {
+    const FORMAT: &str = "{{index .Labels \"fakecloud-instance\"}}";
+    let mut args = vec![kind, "inspect", "--format", FORMAT];
+    args.extend_from_slice(ids);
+    if let Some(out) = bounded_output(cli, &args) {
+        let lines: Vec<&str> = out.lines().map(str::trim).collect();
+        if lines.len() == ids.len() {
+            return ids
+                .iter()
+                .zip(lines)
+                .map(|(id, owner)| (*id, owner.to_string()))
+                .collect();
+        }
+    }
+    ids.iter()
+        .filter_map(|id| {
+            bounded_output(cli, &[kind, "inspect", "--format", FORMAT, id])
+                .map(|owner| (*id, owner.trim().to_string()))
         })
-        .map(str::to_string)
         .collect()
 }
 
@@ -174,13 +200,14 @@ mod tests {
     #[test]
     fn huge_pid_is_dead() {
         // Max u32 is far outside any reasonable PID range on any OS.
-        assert!(!pid_alive(u32::MAX - 1));
+        // Above any pid_max (Linux caps it at 2^22).
+        assert!(!pid_alive(i32::MAX as u32));
     }
 
     #[test]
     fn orphan_ids_keeps_only_dead_owners() {
         let me = std::process::id();
-        let dead = u32::MAX - 1;
+        let dead = i32::MAX as u32;
         let listing = format!(
             "aaa fakecloud-{dead}\nbbb fakecloud-{me}\nccc fakecloud-1\nmalformed\nddd fakecloud-{dead}\n"
         );
