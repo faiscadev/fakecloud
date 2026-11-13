@@ -5,8 +5,9 @@
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use http::StatusCode;
 
+use super::config::WebsiteConfig;
 use super::route::S3Op;
-use super::{extract_xml_value, S3Service};
+use super::S3Service;
 
 impl S3Service {
     /// Run `op` for `req`, on bucket `b` and key `k` (empty when the
@@ -252,21 +253,12 @@ impl S3Service {
             .is_empty()
             .then(|| self.website_config(account_id, req, b))
             .flatten();
-        let index = website_config.as_deref().and_then(|config| {
-            extract_xml_value(config, "Suffix").or_else(|| {
-                extract_xml_value(config, "IndexDocument").and_then(|inner| {
-                    let open = "<Suffix>";
-                    let close = "</Suffix>";
-                    let s = inner.find(open)? + open.len();
-                    let e = inner.find(close)?;
-                    Some(inner[s..e].trim().to_string())
-                })
-            })
-        });
-        match (index, website_config) {
-            (Some(index), Some(config)) => {
-                self.serve_website_object(account_id, req, b, &index, &config)
-            }
+        match website_config {
+            Some(WebsiteConfig {
+                index_suffix: Some(index),
+                error_key,
+                ..
+            }) => self.serve_website_object(account_id, req, b, &index, error_key.as_deref()),
             _ => self.list_objects_v1(account_id, req, b),
         }
     }
@@ -295,34 +287,23 @@ impl S3Service {
             .map_or(StatusCode::NOT_FOUND, |e| e.status());
         let error_key = self
             .website_config(account_id, req, b)
-            .and_then(|config| website_error_key(&config));
+            .and_then(|config| config.error_key);
         match error_key {
             Some(error_key) => self.serve_website_error(account_id, req, b, &error_key, status),
             None => result,
         }
     }
 
-    /// The bucket's website configuration, if any.
-    fn website_config(&self, account_id: &str, req: &AwsRequest, b: &str) -> Option<String> {
+    /// The bucket's website configuration, if any, read by the one reader
+    /// of website configurations ([`WebsiteConfig`]).
+    fn website_config(&self, account_id: &str, req: &AwsRequest, b: &str) -> Option<WebsiteConfig> {
         let accounts = self.state.read();
         let empty = crate::state::S3State::new(account_id, &req.region);
         let state = accounts.get(account_id).unwrap_or(&empty);
         state
             .buckets
             .get(b)
-            .and_then(|bucket| bucket.website_config.clone())
+            .and_then(|bucket| bucket.website_config.as_deref())
+            .and_then(WebsiteConfig::of_stored)
     }
-}
-
-/// The error document's key of a website configuration.
-pub(super) fn website_error_key(config: &str) -> Option<String> {
-    extract_xml_value(config, "ErrorDocument")
-        .and_then(|inner| {
-            let open = "<Key>";
-            let close = "</Key>";
-            let s = inner.find(open)? + open.len();
-            let e = inner.find(close)?;
-            Some(inner[s..e].trim().to_string())
-        })
-        .or_else(|| extract_xml_value(config, "Key"))
 }

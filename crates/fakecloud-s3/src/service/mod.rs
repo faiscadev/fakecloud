@@ -3601,8 +3601,10 @@ pub(crate) fn validate_lifecycle_xml(xml: &str) -> Result<(), AwsServiceError> {
                     // Remove the Filter block and check if Prefix remains
                     let mut stripped = rule_body.to_string();
                     // Remove <Filter>...</Filter> or self-closing variants
+                    // The closing tag is searched after the opening one, so
+                    // a `</Filter>` ahead of it cannot splice the wrong span.
                     if let Some(fs) = stripped.find("<Filter") {
-                        if let Some(fe) = stripped.find("</Filter>") {
+                        if let Some(fe) = stripped[fs..].find("</Filter>").map(|e| fs + e) {
                             stripped = format!("{}{}", &stripped[..fs], &stripped[fe + 9..]);
                         }
                     }

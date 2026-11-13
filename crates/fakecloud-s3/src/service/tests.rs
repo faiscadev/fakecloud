@@ -2335,6 +2335,108 @@ fn bucket_website_put_get_delete_round_trip() {
     );
 }
 
+#[tokio::test]
+async fn website_configuration_is_read_as_xml_and_validated() {
+    // The error document's key is the `Key` element's text, whatever text
+    // around it says: an escaped `</Key>` ahead of the element once made the
+    // hand-sliced span end before it began, a panic on every missing-key GET.
+    let svc = make_service();
+    seed_bucket(&svc, "site");
+    seed_object(&svc, "site", "e.html", b"error page");
+    seed_object(&svc, "site", "index.html", b"home");
+    let config =
+        b"<WebsiteConfiguration><IndexDocument><Suffix>index.html</Suffix></IndexDocument>\
+        <ErrorDocument>&lt;/Key&gt;<Key>e.html</Key></ErrorDocument></WebsiteConfiguration>";
+    let req = make_request(Method::PUT, "/site", &[("website", "")], config);
+    svc.put_bucket_website("123456789012", &req, "site")
+        .unwrap();
+    let resp = svc
+        .handle(make_request(Method::GET, "/site/missing", &[], b""))
+        .await
+        .unwrap();
+    assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    assert_eq!(resp.body.expect_bytes(), b"error page");
+    let resp = svc
+        .handle(make_request(Method::GET, "/site", &[], b""))
+        .await
+        .unwrap();
+    assert_eq!(resp.body.expect_bytes(), b"home");
+
+    // A configuration stored before it was validated serves as none, and
+    // never panics: the plain GetObject error comes back.
+    svc.state
+        .write()
+        .default_mut()
+        .buckets
+        .get_mut("site")
+        .unwrap()
+        .website_config =
+        Some("<WebsiteConfiguration><ErrorDocument></Key><Key>e.html</ErrorDocument>".to_string());
+    assert_aws_err(
+        svc.handle(make_request(Method::GET, "/site/missing", &[], b""))
+            .await,
+        "NoSuchKey",
+    );
+
+    // PutBucketWebsite refuses what does not read, and what S3's rules
+    // refuse, storing nothing.
+    for (body, code) in [
+        ("<WebsiteConfiguration><IndexDocument>", "MalformedXML"),
+        ("<Other/>", "MalformedXML"),
+        (
+            "<WebsiteConfiguration><IndexDocument><Suffix>i</Suffix></IndexDocument>\
+             <ErrorDocument></ErrorDocument></WebsiteConfiguration>",
+            "MalformedXML",
+        ),
+        (
+            "<WebsiteConfiguration><IndexDocument></IndexDocument></WebsiteConfiguration>",
+            "MalformedXML",
+        ),
+        (
+            "<WebsiteConfiguration><RedirectAllRequestsTo><Protocol>https</Protocol>\
+             </RedirectAllRequestsTo></WebsiteConfiguration>",
+            "MalformedXML",
+        ),
+        (
+            "<WebsiteConfiguration><ErrorDocument><Key>e</Key></ErrorDocument>\
+             </WebsiteConfiguration>",
+            "InvalidArgument",
+        ),
+        (
+            "<WebsiteConfiguration><IndexDocument><Suffix>a/b</Suffix></IndexDocument>\
+             </WebsiteConfiguration>",
+            "InvalidArgument",
+        ),
+        (
+            "<WebsiteConfiguration><IndexDocument><Suffix></Suffix></IndexDocument>\
+             </WebsiteConfiguration>",
+            "InvalidArgument",
+        ),
+    ] {
+        seed_bucket(&svc, "strict-site");
+        let req = make_request(
+            Method::PUT,
+            "/strict-site",
+            &[("website", "")],
+            body.as_bytes(),
+        );
+        assert_aws_err(
+            svc.put_bucket_website("123456789012", &req, "strict-site"),
+            code,
+        );
+        assert_aws_err(
+            svc.get_bucket_website("123456789012", "strict-site"),
+            "NoSuchWebsiteConfiguration",
+        );
+    }
+    // A redirect-only configuration needs no index document.
+    let redirect = b"<WebsiteConfiguration><RedirectAllRequestsTo><HostName>example.com</HostName>\
+        </RedirectAllRequestsTo></WebsiteConfiguration>";
+    let req = make_request(Method::PUT, "/strict-site", &[("website", "")], redirect);
+    svc.put_bucket_website("123456789012", &req, "strict-site")
+        .unwrap();
+}
+
 #[test]
 fn bucket_replication_requires_existing_bucket() {
     let svc = make_service();

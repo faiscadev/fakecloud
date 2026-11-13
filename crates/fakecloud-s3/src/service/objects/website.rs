@@ -13,14 +13,14 @@ impl S3Service {
         req: &AwsRequest,
         bucket: &str,
         key: &str,
-        website_config: &str,
+        error_key: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
         if !self.caller_may(req, "GetObject", bucket, Some(key)) {
             return Err(access_denied());
         }
         let result = self.get_object(account_id, req, bucket, key);
         if result.is_err() {
-            if let Some(error_key) = crate::service::routing::website_error_key(website_config) {
+            if let Some(error_key) = error_key {
                 return self.serve_website_error(
                     account_id,
                     req,

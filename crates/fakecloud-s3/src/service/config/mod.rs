@@ -174,6 +174,7 @@ mod request_payment;
 mod tagging;
 mod versioning;
 mod website;
+pub(crate) use website::WebsiteConfig;
 
 impl S3Service {
     // ---- ObjectLockConfiguration ----
