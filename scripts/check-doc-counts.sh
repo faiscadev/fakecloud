@@ -32,11 +32,14 @@ fi
 # --- Performance metrics ---
 # These have no in-repo source of truth. When re-measurement establishes a new
 # number, update these constants and audit every page in FILES in the same PR.
-# Measured on an Apple M1 Max release build, 2026-11-10: a first SQS request
-# answered in a median 255 ms over 12 runs, idle RSS 31.5 MiB, 128 MB on disk
-# (122 MiB). The size is rounded to the nearest 10 MB. Measure startup with a
-# polling client that does not fork per probe, since forking curl and python
-# added about 130 ms.
+# Measured on an Apple M1 Max release build, 2026-11-13, with podman as the
+# container runtime: a first SQS request answered in a median 229 ms over 12
+# runs, idle RSS 32.1 MiB, 131 MB on disk (125 MiB). The size is rounded to the
+# nearest 10 MB. Measure startup with a polling client that does not fork per
+# probe, since forking curl and python added about 130 ms. Startup includes the
+# container runtime probe and the orphan reap (one `info` call plus three
+# concurrent listings), so it depends on how fast the daemon answers; with no
+# runtime it is about 60 ms.
 STARTUP_MS=300
 IDLE_MEM_MIB=30
 BINARY_MB=130
