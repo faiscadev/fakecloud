@@ -51,6 +51,13 @@ impl S3Service {
             ListBuckets => self.list_buckets(caller_account, req),
             ListDirectoryBuckets => self.list_directory_buckets(caller_account, req),
             WriteGetObjectResponse => self.write_get_object_response(account_id, req),
+            // The handler answers a bucket's preflight from its CORS rules
+            // before routing; one addressing no bucket reaches no operation.
+            CorsPreflight => Err(AwsServiceError::aws_error(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "MethodNotAllowed",
+                "The specified method is not allowed against this resource",
+            )),
 
             // Multipart uploads.
             CreateMultipartUpload => self.create_multipart_upload(account_id, req, b, k),

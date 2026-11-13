@@ -5949,6 +5949,9 @@ fn only_uploads_stream_their_body() {
             raw_path: path,
             headers: &map,
             query_params: &query,
+            anonymous: false,
+            region: "us-east-1",
+            request_id: "r",
         })
     };
     for (path, query) in [

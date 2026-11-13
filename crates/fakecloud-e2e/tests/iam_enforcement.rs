@@ -249,6 +249,64 @@ async fn assume_root_validates_the_task_policy_before_authorizing() {
     );
 }
 
+/// A CORS preflight is never authorized (browsers send it unsigned): under
+/// strict it is answered from the bucket's CORS rules alone, 200 with the
+/// `Access-Control-*` headers for a matching rule, S3's 403 CORSResponse
+/// for one no rule matches -- as with enforcement off.
+#[tokio::test]
+async fn s3_cors_preflight_is_answered_by_the_cors_rules_under_strict() {
+    use aws_sdk_s3::types::{CorsConfiguration, CorsRule};
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket()
+        .bucket("preflighted")
+        .send()
+        .await
+        .unwrap();
+    boot.put_bucket_cors()
+        .bucket("preflighted")
+        .cors_configuration(
+            CorsConfiguration::builder()
+                .cors_rules(
+                    CorsRule::builder()
+                        .allowed_origins("https://app.example")
+                        .allowed_methods("PUT")
+                        .allowed_headers("*")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let preflight = |origin: &str| {
+        reqwest::Client::new()
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("{}/preflighted/k", server.endpoint()),
+            )
+            .header("origin", origin)
+            .header("access-control-request-method", "PUT")
+            .send()
+    };
+    let resp = preflight("https://app.example").await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()["access-control-allow-origin"],
+        "https://app.example"
+    );
+    assert_eq!(resp.headers()["access-control-allow-methods"], "PUT");
+    let resp = preflight("https://other.example").await.unwrap();
+    assert_eq!(resp.status(), 403);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("CORSResponse: This CORS request is not allowed"),
+        "{body}"
+    );
+}
+
 #[tokio::test]
 async fn unsigned_assume_root_is_refused_before_its_task_policy_is_validated() {
     // Recorded: an unsigned AssumeRoot with an invalid TaskPolicyArn is

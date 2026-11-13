@@ -30,7 +30,9 @@ use http::{HeaderMap, Method, StatusCode};
 macro_rules! s3_ops {
     ($($op:ident),* $(,)?) => {
         /// An S3 API operation (the model's operation names), plus the
-        /// browser-form POST Object upload.
+        /// browser-form POST Object upload and the CORS preflight
+        /// (`OPTIONS`, which S3 answers from the bucket's CORS rules and
+        /// never authorizes).
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub(crate) enum S3Op {
             $($op),*
@@ -58,6 +60,7 @@ s3_ops!(
     CreateBucket,
     CreateBucketMetadataConfiguration,
     CreateBucketMetadataTableConfiguration,
+    CorsPreflight,
     CreateMultipartUpload,
     CreateSession,
     DeleteBucket,
@@ -262,6 +265,11 @@ pub(crate) fn classify(
     query: &HashMap<String, String>,
     headers: &HeaderMap,
 ) -> Result<S3Op, Refusal> {
+    // A browser's CORS preflight, whatever its path and query: answered from
+    // the bucket's CORS configuration alone.
+    if *method == Method::OPTIONS {
+        return Ok(S3Op::CorsPreflight);
+    }
     let target = match (bucket, key) {
         (None, _) => Target::Service,
         (Some(_), None) => Target::Bucket,
@@ -704,7 +712,11 @@ mod tests {
             assert_eq!(got.name(), op);
             seen += 1;
         }
-        assert_eq!(seen, S3Op::ALL.len() - 1, "every operation but PostObject");
+        assert_eq!(
+            seen,
+            S3Op::ALL.len() - 2,
+            "every operation but PostObject and CorsPreflight"
+        );
     }
 
     #[test]

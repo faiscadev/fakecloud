@@ -201,6 +201,38 @@ async fn dispatch_inner(
         &query_params,
     );
     let header_only = protocol::detect_service_headers_only(&parts.headers, &query_params);
+    let early_region = request_region(&parts.headers, &query_params, &config.region);
+    let early = EarlyRequest {
+        method: &parts.method,
+        wire_path: parts.uri.path(),
+        headers: &parts.headers,
+        query_params: &query_params,
+        anonymous: presents_no_credential(&parts.headers, &query_params)
+            && parts.extensions.get::<InternalCaller>().is_none(),
+        region: &early_region,
+        request_id: &request_id,
+    };
+    // A request its headers route to a service is first judged on its head
+    // alone, so one refused for its URL (S3's conflicting resource-type
+    // parameters, say) is not read in full -- up to the request-size cap --
+    // just to be refused.
+    if let Some(detected) = header_only
+        .as_ref()
+        .filter(|_| pinned.is_none() && rpc_v2_cbor.is_none())
+    {
+        if let Some(service) = registry.get(&detected.service) {
+            if let Err(err) = with_request_head(service.as_ref(), &early, |head| {
+                service.refuse_before_body(head)
+            }) {
+                return service_error_response(
+                    &err,
+                    detected,
+                    &request_id,
+                    ErrorEnvelope::for_request(detected, &parts.headers),
+                );
+            }
+        }
+    }
     let stream_dispatch = match (&stream_route, &header_only) {
         // A pinned request is always buffered: its caller already holds the
         // whole body, and header detection must not pick its service.
@@ -210,15 +242,9 @@ async fn dispatch_inner(
         // service=s3 in Authorization), and the service streams this request.
         (Some(sr), Some(detected))
             if sr.0 == detected.service
-                && registry.get(&detected.service).is_some_and(|service| {
-                    service_streams_body(
-                        service.as_ref(),
-                        &parts.method,
-                        parts.uri.path(),
-                        &parts.headers,
-                        &query_params,
-                    )
-                }) =>
+                && registry
+                    .get(&detected.service)
+                    .is_some_and(|service| service_streams_body(service.as_ref(), &early)) =>
         {
             Some(detected.clone())
         }
@@ -472,11 +498,7 @@ async fn dispatch_inner(
     // virtual-hosted S3 path rewrite.
     let host_info = protocol::parse_routing_host_from_headers(&parts.headers);
 
-    let region = sigv4_info
-        .map(|info| info.region)
-        .or_else(|| host_info.as_ref().map(|h| h.region.clone()))
-        .or_else(|| extract_region_from_user_agent(&parts.headers))
-        .unwrap_or_else(|| config.region.clone());
+    let region = early_region;
 
     // Resolve the caller's principal up front so both SigV4 verification
     // (which needs the secret) and the service handler (which needs the
@@ -513,9 +535,7 @@ async fn dispatch_inner(
     // otherwise denies. A request that DID present a credential but failed to
     // parse is NOT anonymous (`Authorization` non-empty or a presign query
     // present) and still returns the malformed-signature error below.
-    let is_fully_anonymous = auth_header.is_empty()
-        && !query_params.contains_key("X-Amz-Credential")
-        && sigv2_presigned_access_key(&query_params).is_none();
+    let is_fully_anonymous = presents_no_credential(&parts.headers, &query_params);
     if config.verify_sigv4
         && !is_fully_anonymous
         && !is_root_bypass(caller_akid)
@@ -834,9 +854,7 @@ async fn dispatch_inner(
     // authorization, `sts:GetCallerIdentity`, from a caller whose
     // credentials resolved) steps 1 and 3 do not apply and validation runs
     // just before the handler.
-    let authorization_required = aws_request.principal.is_none()
-        || enforcement.internal_caller.is_some()
-        || service.iam_authorization_required(&aws_request);
+    let authorization_required = service.iam_authorization_required(&aws_request);
     let authorizes = enforcement.is_active(&aws_request) && authorization_required;
     if authorizes {
         if let Some(denied) = enforcement.unauthenticated(&aws_request) {
@@ -1782,22 +1800,47 @@ fn streaming_route(
     None
 }
 
+/// What dispatch knows of a request before reading its body, to build the
+/// [`crate::service::RequestHead`] a service judges it by.
+struct EarlyRequest<'a> {
+    method: &'a http::Method,
+    wire_path: &'a str,
+    headers: &'a http::HeaderMap,
+    query_params: &'a HashMap<String, String>,
+    anonymous: bool,
+    region: &'a str,
+    request_id: &'a str,
+}
+
 /// Whether `service` reads this request's body as a stream, asked of the
-/// service itself with the request as its handler will see it: the S3 path
+/// service itself ([`with_request_head`]). Keeping the decision with the
+/// service's own classification is what keeps the two from drifting: a
+/// request dispatch streams but the handler reads buffered arrives with no
+/// body, and one dispatch buffers but the handler streams is refused as
+/// having no body stream.
+fn service_streams_body(service: &dyn crate::service::AwsService, early: &EarlyRequest) -> bool {
+    with_request_head(service, early, |head| service.streams_request_body(head))
+}
+
+/// Run `f` on the request's head as its handler will see it: the S3 path
 /// carries the virtual-hosted bucket ([`s3_routing_path`]) and a presigned
 /// URL's `x-amz-*` query parameters count as headers
 /// ([`hoist_presigned_query_headers`]), as they do once the request is
-/// routed. Keeping the decision with the service's own classification is what
-/// keeps the two from drifting: a request dispatch streams but the handler
-/// reads buffered arrives with no body, and one dispatch buffers but the
-/// handler streams is refused as having no body stream.
-fn service_streams_body(
+/// routed.
+fn with_request_head<R>(
     service: &dyn crate::service::AwsService,
-    method: &http::Method,
-    wire_path: &str,
-    headers: &http::HeaderMap,
-    query_params: &HashMap<String, String>,
-) -> bool {
+    early: &EarlyRequest,
+    f: impl FnOnce(&crate::service::RequestHead<'_>) -> R,
+) -> R {
+    let EarlyRequest {
+        method,
+        wire_path,
+        headers,
+        query_params,
+        anonymous,
+        region,
+        request_id,
+    } = *early;
     let is_s3 = service.service_name() == "s3";
     let path = if is_s3 {
         let host_bucket = protocol::parse_routing_host_from_headers(headers)
@@ -1816,12 +1859,50 @@ fn service_streams_body(
     } else {
         headers
     };
-    service.streams_request_body(&crate::service::RequestHead {
+    f(&crate::service::RequestHead {
         method,
         raw_path: &path,
         headers,
         query_params,
+        anonymous,
+        region,
+        request_id,
     })
+}
+
+/// The region a request is made in: its SigV4 scope (header or presigned
+/// URL), else its host, else its user agent, else the server's.
+fn request_region(
+    headers: &http::HeaderMap,
+    query_params: &HashMap<String, String>,
+    default_region: &str,
+) -> String {
+    let auth_header = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    fakecloud_aws::sigv4::parse_sigv4(auth_header)
+        .or_else(|| fakecloud_aws::sigv4::parse_sigv4_presigned(query_params).map(|p| p.as_info()))
+        .map(|info| info.region)
+        .or_else(|| protocol::parse_routing_host_from_headers(headers).map(|h| h.region))
+        .or_else(|| extract_region_from_user_agent(headers))
+        .unwrap_or_else(|| default_region.to_string())
+}
+
+/// Whether a request presents no credential: no `Authorization` header and
+/// no presigned credential (SigV4 `X-Amz-Credential` or SigV2
+/// `AWSAccessKeyId`).
+fn presents_no_credential(
+    headers: &http::HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> bool {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .is_empty()
+        && !query_params.contains_key("X-Amz-Credential")
+        && sigv2_presigned_access_key(query_params).is_none()
 }
 
 /// The SigV4 query-authentication parameters themselves. They authenticate
@@ -4316,16 +4397,18 @@ mod tests {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
         let put = http::Method::PUT;
-        assert!(service_streams_body(
-            &s3, &put, "/upload", &headers, &presigned
-        ));
-        assert!(!service_streams_body(
-            &s3,
-            &put,
-            "/",
-            &headers,
-            &HashMap::new()
-        ));
+        let empty = HashMap::new();
+        let request = |wire_path, query_params| EarlyRequest {
+            method: &put,
+            wire_path,
+            headers: &headers,
+            query_params,
+            anonymous: false,
+            region: "us-east-1",
+            request_id: "r",
+        };
+        assert!(service_streams_body(&s3, &request("/upload", &presigned)));
+        assert!(!service_streams_body(&s3, &request("/", &empty)));
         assert_eq!(
             *s3.seen.lock(),
             vec![
@@ -4343,10 +4426,7 @@ mod tests {
         };
         assert!(!service_streams_body(
             &other,
-            &put,
-            "/my-bucket/k",
-            &headers,
-            &presigned
+            &request("/my-bucket/k", &presigned)
         ));
         assert_eq!(*other.seen.lock(), vec![("/my-bucket/k".to_string(), None)]);
     }

@@ -1416,6 +1416,14 @@ impl AwsService for S3Service {
         true
     }
 
+    /// A CORS preflight is never authorized, whoever sends it (browsers send
+    /// it unsigned): the bucket's CORS rules alone answer it, 200 with the
+    /// `Access-Control-*` headers or 403 CORSResponse.
+    fn iam_authorization_required(&self, request: &AwsRequest) -> bool {
+        fakecloud_core::protocol::is_s3_control_host(&request.headers)
+            || !matches!(classify_request(request), Ok(route::S3Op::CorsPreflight))
+    }
+
     fn streams_request_body(&self, head: &fakecloud_core::service::RequestHead<'_>) -> bool {
         // Only an upload streams; every other request's body is small and
         // buffered, so what runs before the handler (IAM reading the tag set
@@ -1462,6 +1470,13 @@ impl AwsService for S3Service {
         Ok(())
     }
 
+    fn refuse_before_body(
+        &self,
+        head: &fakecloud_core::service::RequestHead<'_>,
+    ) -> Result<(), AwsServiceError> {
+        self.validate_head(&head_request(head)).map(drop)
+    }
+
     fn validate_before_authorization(&self, request: &AwsRequest) -> Result<(), AwsServiceError> {
         // S3 Control TagResource: as for the S3 tagging writes below, a tag
         // set the handler cannot read is refused before its request tags are
@@ -1473,39 +1488,9 @@ impl AwsService for S3Service {
             let body = std::str::from_utf8(&request.body).unwrap_or("");
             tags::read_tag_set(body, "TagResourceRequest", "Tags")?;
         }
-        if fakecloud_core::protocol::is_s3_control_host(&request.headers)
-            || request.method == Method::OPTIONS
-            || request.raw_path.starts_with("//")
-        {
+        let Some(op) = self.validate_head(request)? else {
             return Ok(());
-        }
-        let op = classify_request(request).map_err(|refusal| self.refuse(request, refusal))?;
-        if let Some(error) = self.missing_upload(request, op) {
-            return Err(self.refuse(request, error.into()));
-        }
-        let bucket = request.path_segments.first();
-        let bucket_exists = bucket.is_some_and(|b| self.bucket_owner_account(b).is_some());
-        // An anonymous request to a bucket that does not exist is
-        // NoSuchBucket, not AccessDenied (recorded, PutObject and ?tagging).
-        // An access-point alias is resolved by the handler, not here.
-        let via_access_point = request
-            .headers
-            .get("host")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|h| h.to_ascii_lowercase().contains("s3-accesspoint"));
-        if let Some(b) = bucket.filter(|_| {
-            !bucket_exists
-                && !via_access_point
-                && is_anonymous(request)
-                && op != route::S3Op::CreateBucket
-        }) {
-            return Err(no_such_bucket(b));
-        }
-        if bucket_exists {
-            if let Some(error) = streaming_payload_refused(request, op) {
-                return Err(self.refuse(request, error.into()));
-            }
-        }
+        };
         // A body still framed could not be unframed (`prepare_request`): its
         // error comes after authorization, from the handler, and its tag set
         // is evaluated as none (the request fails and writes nothing).
@@ -1734,6 +1719,79 @@ impl S3Service {
 pub(crate) fn request_key(req: &AwsRequest) -> Option<String> {
     req.path_segments.first()?;
     key_of_raw_path(&req.raw_path)
+}
+
+/// A request built from its head alone ([`AwsService::refuse_before_body`]),
+/// for the checks that read no body: no body, and for a request presenting a
+/// credential an `access_key_id` placeholder whose presence alone is read
+/// ([`is_anonymous`]); its identity is not resolved yet.
+fn head_request(head: &fakecloud_core::service::RequestHead<'_>) -> AwsRequest {
+    AwsRequest {
+        service: "s3".to_string(),
+        action: String::new(),
+        region: head.region.to_string(),
+        account_id: String::new(),
+        request_id: head.request_id.to_string(),
+        headers: head.headers.clone(),
+        query_params: head.query_params.clone(),
+        body: bytes::Bytes::new(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: fakecloud_core::path::split_path_segments(head.raw_path),
+        raw_path: head.raw_path.to_string(),
+        raw_query: String::new(),
+        method: head.method.clone(),
+        is_query_protocol: false,
+        access_key_id: (!head.anonymous).then(String::new),
+        principal: None,
+    }
+}
+
+impl S3Service {
+    /// The refusals S3 makes before authorization that read only the
+    /// request's head, for every caller: conflicting resource-type
+    /// parameters, a method a resource type does not take, a malformed part
+    /// number (`route::classify`), a missing upload, a missing bucket for an
+    /// anonymous caller, an anonymous streaming-payload declaration. Run
+    /// before dispatch reads the body (`refuse_before_body`) and again by
+    /// `validate_before_authorization`. Returns the request's operation, or
+    /// `None` for one judged elsewhere (S3 Control, a preflight, an empty
+    /// bucket segment).
+    fn validate_head(&self, request: &AwsRequest) -> Result<Option<route::S3Op>, AwsServiceError> {
+        if fakecloud_core::protocol::is_s3_control_host(&request.headers)
+            || request.method == Method::OPTIONS
+            || request.raw_path.starts_with("//")
+        {
+            return Ok(None);
+        }
+        let op = classify_request(request).map_err(|refusal| self.refuse(request, refusal))?;
+        if let Some(error) = self.missing_upload(request, op) {
+            return Err(self.refuse(request, error.into()));
+        }
+        let bucket = request.path_segments.first();
+        let bucket_exists = bucket.is_some_and(|b| self.bucket_owner_account(b).is_some());
+        // An anonymous request to a bucket that does not exist is
+        // NoSuchBucket, not AccessDenied (recorded, PutObject and ?tagging).
+        // An access-point alias is resolved by the handler, not here.
+        let via_access_point = request
+            .headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|h| h.to_ascii_lowercase().contains("s3-accesspoint"));
+        if let Some(b) = bucket.filter(|_| {
+            !bucket_exists
+                && !via_access_point
+                && is_anonymous(request)
+                && op != route::S3Op::CreateBucket
+        }) {
+            return Err(no_such_bucket(b));
+        }
+        if bucket_exists {
+            if let Some(error) = streaming_payload_refused(request, op) {
+                return Err(self.refuse(request, error.into()));
+            }
+        }
+        Ok(Some(op))
+    }
 }
 
 /// A request that presents no credentials (and is no in-process service

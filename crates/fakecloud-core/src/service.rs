@@ -787,8 +787,15 @@ pub struct RequestHead<'a> {
     /// virtual-hosted bucket is already prefixed, as in
     /// [`AwsRequest::raw_path`].
     pub raw_path: &'a str,
+    /// The request's headers, a presigned URL's `x-amz-*` query parameters
+    /// among them, as in [`AwsRequest::headers`].
     pub headers: &'a HeaderMap,
     pub query_params: &'a HashMap<String, String>,
+    /// Whether the request presents no credentials at all (no signature,
+    /// no presigned credential, no in-process caller).
+    pub anonymous: bool,
+    pub region: &'a str,
+    pub request_id: &'a str,
 }
 
 /// Trait that every AWS service implements.
@@ -821,10 +828,13 @@ pub trait AwsService: Send + Sync {
         false
     }
 
-    /// Whether `request` needs authorization at all. A few operations need
-    /// no permission and no policy can deny them (`sts:GetCallerIdentity`);
-    /// dispatch then evaluates no policy for a caller whose credentials
-    /// resolved. Defaults to `true`.
+    /// Whether `request` needs authorization at all. A few requests need no
+    /// permission and no policy can deny them; dispatch then evaluates no
+    /// policy for the request. The service decides for every caller:
+    /// `sts:GetCallerIdentity` needs none from a caller whose credentials
+    /// resolved but still refuses an anonymous one (so it answers `true`
+    /// for that), while an S3 CORS preflight is never authorized, whoever
+    /// sends it. Defaults to `true`.
     fn iam_authorization_required(&self, _request: &AwsRequest) -> bool {
         true
     }
@@ -868,6 +878,20 @@ pub trait AwsService: Send + Sync {
     /// classification its handler routes on. Default `false`.
     fn streams_request_body(&self, _head: &RequestHead<'_>) -> bool {
         false
+    }
+
+    /// Refuse a request from its head alone, before dispatch reads its body:
+    /// what [`AwsService::validate_before_authorization`] refuses without
+    /// needing the body (S3: conflicting resource-type parameters, a method
+    /// a resource type does not take, a missing upload, a missing bucket for
+    /// an anonymous caller), so a request refused for its URL is never
+    /// buffered (up to the request-size cap) first. Dispatch calls it for a
+    /// request its headers already route to this service, IAM enforcement on
+    /// or off, and answers `Err` as the service's error. The later
+    /// validation must refuse the same requests the same way. Default:
+    /// nothing to refuse.
+    fn refuse_before_body(&self, _head: &RequestHead<'_>) -> Result<(), AwsServiceError> {
+        Ok(())
     }
 
     /// Put a buffered request into the form every later consumer reads --
