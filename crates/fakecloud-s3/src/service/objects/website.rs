@@ -25,7 +25,7 @@ impl S3Service {
                     account_id,
                     req,
                     bucket,
-                    &error_key,
+                    error_key,
                     StatusCode::NOT_FOUND,
                 );
             }
