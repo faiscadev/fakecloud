@@ -58,6 +58,15 @@ impl StsService {
             partition, account_id, name
         );
         let federated_user_id = format!("{}:{}", account_id, name);
+        // Only an IAM user or root user federates; a session of any other
+        // principal gets no identity-based permissions.
+        let federated_parent_arn = match req.principal.as_ref() {
+            Some(p) if matches!(p.principal_type, PrincipalType::User | PrincipalType::Root) => {
+                Some(p.arn.clone())
+            }
+            Some(_) => None,
+            None => Some(format!("arn:{partition}:iam::{account_id}:root")),
+        };
 
         state.credential_identities.insert(
             creds.access_key_id.clone(),
@@ -84,6 +93,10 @@ impl StsService {
                 // provider — `aws:FederatedProvider` stays absent.
                 federated_provider: None,
                 role_arn: None,
+                // The IAM user (or root user) whose long-term key called
+                // GetFederationToken; the account root when the call
+                // carried no resolved identity.
+                federated_parent_arn,
             },
         );
 

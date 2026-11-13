@@ -816,26 +816,46 @@ async fn dispatch_inner(
         caller_session_policies,
         internal_caller,
     };
-    // A request the service refuses before authorizing anything gets that
-    // refusal, whoever sends it, rather than being authorized at all (as
-    // some operation it is not).
-    if enforcement.is_active(&aws_request) {
-        if let Err(err) = service.validate_before_authorization(&aws_request) {
-            return service_error_response(&err, &detected, &request_id, error_envelope);
+    // One order for every request, whatever the enforcement mode:
+    //
+    // 1. authentication: a key that resolves to no identity is refused
+    //    first (`InvalidClientTokenId` / `ExpiredToken`, strict only);
+    // 2. `validate_before_authorization`: what the service refuses whoever
+    //    asks, anonymous callers included (S3's unclassifiable requests and
+    //    a missing bucket, STS's invalid `TaskPolicyArn`);
+    // 3. authorization of the request's actions;
+    // 4. the handler, which refuses the payload itself (S3's broken
+    //    aws-chunked framing) only after all of the above.
+    //
+    // With enforcement off (or for an operation that needs no
+    // authorization, `sts:GetCallerIdentity`, from a caller whose
+    // credentials resolved) steps 1 and 3 do not apply and validation runs
+    // just before the handler.
+    let authorization_required = aws_request.principal.is_none()
+        || enforcement.internal_caller.is_some()
+        || service.iam_authorization_required(&aws_request);
+    let authorizes = enforcement.is_active(&aws_request) && authorization_required;
+    if authorizes {
+        if let Some(denied) = enforcement.unauthenticated(&aws_request) {
+            return denied;
         }
     }
-    // A request whose handler authorizes it per item (S3 DeleteObjects, per
-    // key) needs no authorization of its own here; the handler asks the
-    // request's authorizer instead.
-    let deferred =
-        enforcement.is_active(&aws_request) && service.iam_authorized_by_handler(&aws_request);
-    let iam_actions = if !enforcement.is_active(&aws_request) || deferred {
-        Vec::new()
-    } else {
-        service.iam_actions_for(&aws_request)
-    };
-    if let Some(denied) = enforcement.enforce(&aws_request, &iam_actions, deferred) {
-        return denied;
+    if let Err(err) = service.validate_before_authorization(&aws_request) {
+        return service_error_response(&err, &detected, &request_id, error_envelope);
+    }
+    if authorizes {
+        // A request whose handler authorizes it per item (S3 DeleteObjects,
+        // per key) needs no authorization of its own here; the handler asks
+        // the request's authorizer instead.
+        let deferred = service.iam_authorized_by_handler(&aws_request);
+        let iam_actions = if deferred {
+            Vec::new()
+        } else {
+            service.iam_actions_for(&aws_request)
+        };
+        if let Some(denied) = enforcement.enforce(&aws_request, &iam_actions, deferred) {
+            return denied;
+        }
     }
     // Handlers that authorize further actions (per item, or to decide what a
     // response may reveal) evaluate them exactly as above.
@@ -956,6 +976,40 @@ impl IamEnforcement {
             && self.config.policy_evaluator.is_some()
             && self.service.iam_enforceable()
             && !is_root_bypass(aws_request.access_key_id.as_deref().unwrap_or(""))
+    }
+
+    /// The refusal of a request whose access key resolves to no identity,
+    /// under strict enforcement: AWS authenticates before anything else, so
+    /// this comes ahead of validation and authorization. `None` for any other
+    /// request, and under soft mode (where [`IamEnforcement::enforce`] logs
+    /// it and lets it through).
+    fn unauthenticated(&self, aws_request: &AwsRequest) -> Option<Response<Body>> {
+        if !self.config.iam_mode.is_strict()
+            || self.internal_caller.is_some()
+            || aws_request.principal.is_some()
+        {
+            return None;
+        }
+        let akid = aws_request.access_key_id.as_deref()?;
+        Some(self.unresolved_credential(aws_request, akid))
+    }
+
+    /// Log and refuse a request whose key `akid` resolves to no identity.
+    fn unresolved_credential(&self, aws_request: &AwsRequest, akid: &str) -> Response<Body> {
+        tracing::warn!(
+            target: "fakecloud::iam::audit",
+            service = %self.detected.service,
+            action = %aws_request.action,
+            mode = %self.config.iam_mode,
+            request_id = %self.request_id,
+            "request credential does not resolve to an identity; denying under strict, allowing under soft"
+        );
+        unresolved_credential_response(
+            &self.config,
+            akid,
+            &self.request_id,
+            ErrorEnvelope::for_request(&self.detected, &aws_request.headers),
+        )
     }
 
     /// Authorize `iam_actions` for `aws_request`. Returns the error response
@@ -2168,6 +2222,7 @@ fn principal_condition_context(
         if let Some(role_arn) = rc.role_arn.as_ref() {
             ctx.aws_principal_arn = Some(role_arn.clone());
         }
+        ctx.federated_parent_arn = rc.federated_parent_arn.clone();
         ctx.aws_mfa_present = Some(rc.mfa_present);
         ctx.aws_token_issue_time = rc.token_issued_at;
         ctx.aws_federated_provider = rc.federated_provider.clone();
@@ -2223,30 +2278,50 @@ fn principal_condition_context(
     ctx
 }
 
-/// Populate `aws:ResourceAccount` (the account owning the target resource)
-/// and, when the principal's account is in an organization,
-/// `aws:PrincipalOrgID` / `aws:PrincipalOrgPaths`. A value the service
-/// already supplied wins.
+/// [`global_request_keys`] for a request dispatch received directly from
+/// `principal`.
 fn add_global_request_keys(
     ctx: &mut ConditionContext,
     principal: &Principal,
     resource_account_id: &str,
     scp_resolver: Option<&dyn crate::auth::ScpResolver>,
 ) {
+    global_request_keys(ctx, &principal.account_id, resource_account_id, |account| {
+        scp_resolver.and_then(|r| r.principal_org(account))
+    });
+}
+
+/// Populate the global keys AWS sets on every request from who makes it and
+/// what it is made on: `aws:ResourceAccount` (the account owning the target
+/// resource), `aws:PrincipalOrgID` / `aws:PrincipalOrgPaths` when the
+/// principal's account (`principal_account`) is in an organization,
+/// `aws:ResourceOrgID` / `aws:ResourceOrgPaths` when the resource's account
+/// is, and `aws:ViaAWSService` (`false` unless a service set it for a call it
+/// forwards). `org_of` gives an account's organization id and path. A value
+/// already present wins.
+pub fn global_request_keys(
+    ctx: &mut ConditionContext,
+    principal_account: &str,
+    resource_account_id: &str,
+    org_of: impl Fn(&str) -> Option<(String, String)>,
+) {
+    let mut set = |key: &str, value: String| {
+        ctx.service_keys
+            .entry(key.to_string())
+            .or_insert_with(|| vec![value]);
+    };
     if !resource_account_id.is_empty() {
-        ctx.service_keys
-            .entry("aws:resourceaccount".to_string())
-            .or_insert_with(|| vec![resource_account_id.to_string()]);
+        set("aws:resourceaccount", resource_account_id.to_string());
+        if let Some((org_id, path)) = org_of(resource_account_id) {
+            set("aws:resourceorgid", org_id);
+            set("aws:resourceorgpaths", path);
+        }
     }
-    if let Some((org_id, path)) = scp_resolver.and_then(|r| r.principal_org(&principal.account_id))
-    {
-        ctx.service_keys
-            .entry("aws:principalorgid".to_string())
-            .or_insert_with(|| vec![org_id]);
-        ctx.service_keys
-            .entry("aws:principalorgpaths".to_string())
-            .or_insert_with(|| vec![path]);
+    if let Some((org_id, path)) = org_of(principal_account) {
+        set("aws:principalorgid", org_id);
+        set("aws:principalorgpaths", path);
     }
+    set("aws:viaawsservice", "false".to_string());
 }
 
 /// The AWS error for a request whose access key resolves to no identity:
@@ -2462,9 +2537,9 @@ fn grant_authorizes(
     }
 }
 
-/// Authorize a request made as an account's root user: its SCPs first, then,
-/// for a resource of another account, that resource's policy (see
-/// [`authorize_root_cross_account`]).
+/// Authorize a request made as an account's root user: its SCPs and its
+/// session's policies first, then, for a resource of another account, that
+/// resource's policy (see [`authorize_root_cross_account`]).
 ///
 /// Returns the error response to send when the request is denied under
 /// strict mode; soft mode only logs.
@@ -2511,7 +2586,8 @@ fn authorize_root(
     })
 }
 
-/// Cap a root-user request at the account's SCPs.
+/// Cap a root-user request at the account's SCPs and at the policies of the
+/// session it is made with.
 ///
 /// Root needs no identity policy in its own account, but SCPs restrict
 /// "IAM users and roles in member accounts, including the member account's
@@ -2519,7 +2595,9 @@ fn authorize_root(
 /// AWS evaluates them before any resource-based policy, so a resource policy
 /// granting root in another account does not reach past them either. The
 /// resolver exempts the management account (and returns nothing outside an
-/// organization), which keeps root there unrestricted.
+/// organization), which keeps root there unrestricted. A root session minted
+/// by `sts:AssumeRoot` carries its task policy as its session policy, which
+/// scopes it to that privileged task.
 #[allow(clippy::too_many_arguments)]
 fn authorize_root_scps(
     principal: &Principal,
@@ -2534,8 +2612,12 @@ fn authorize_root_scps(
     iam_actions: &[crate::auth::IamAction],
     deferred: bool,
 ) -> Option<Response<Body>> {
-    let resolver = config.scp_resolver.as_deref()?;
-    let scps = resolver.scps_for(principal)?;
+    let resolver = config.scp_resolver.as_deref();
+    let scps = resolver.and_then(|r| r.scps_for(principal));
+    let session_policies = resolved.map_or(&[][..], |r| r.session_policies.as_slice());
+    if scps.is_none() && session_policies.is_empty() {
+        return None;
+    }
     let in_caller_account = service.iam_resource_in_caller_account(aws_request);
     if iam_actions.is_empty() && !deferred {
         // An operation with no IAM action mapping cannot be checked against
@@ -2548,7 +2630,7 @@ fn authorize_root_scps(
             principal = %principal.arn,
             mode = %config.iam_mode,
             request_id = %request_id,
-            "root request under SCPs has no IamAction mapping; denying under strict, allowing under soft"
+            "root request under SCPs or session policies has no IamAction mapping; denying under strict, allowing under soft"
         );
         return config
             .iam_mode
@@ -2572,9 +2654,15 @@ fn authorize_root_scps(
             detected,
             remote_addr,
         );
-        add_global_request_keys(&mut context, principal, &resource_account, Some(resolver));
-        let decision =
-            evaluator.evaluate_ceiling(principal, iam_action, &context, &[], Some(&scps), false);
+        add_global_request_keys(&mut context, principal, &resource_account, resolver);
+        let decision = evaluator.evaluate_ceiling(
+            principal,
+            iam_action,
+            &context,
+            session_policies,
+            scps.as_deref(),
+            false,
+        );
         if decision.is_allow() {
             continue;
         }
@@ -2587,16 +2675,28 @@ fn authorize_root_scps(
             decision = ?decision,
             mode = %config.iam_mode,
             request_id = %request_id,
-            "root request denied by the account's service control policies"
+            "root request denied by the account's service control policies or its session policies"
         );
         if config.iam_mode.is_strict() {
             let action = iam_action.action_string();
+            // Name the SCPs only when they are what refused the request.
+            let scp_reason = scps.as_deref().and_then(|scps| {
+                let ceiling = evaluator.evaluate_ceiling(
+                    principal,
+                    iam_action,
+                    &context,
+                    &[],
+                    Some(scps),
+                    false,
+                );
+                scp_cause(decision, ceiling).and_then(|d| scp_denial_reason(d, &action))
+            });
             return Some(access_denied_response(
                 &not_authorized_message(
                     &principal.arn,
                     &action,
                     &iam_action.resource,
-                    scp_denial_reason(decision, &action).as_deref(),
+                    scp_reason.as_deref(),
                     None,
                 ),
                 request_id,
@@ -2880,6 +2980,7 @@ fn build_condition_context(
         resource_tags: None,
         request_tags: None,
         principal_tags: None,
+        federated_parent_arn: None,
     }
 }
 
@@ -4543,6 +4644,7 @@ mod tests {
             token_issued_at: Some(issued),
             federated_provider: None,
             role_arn: None,
+            federated_parent_arn: None,
         };
         let evaluator = PolicyEvaluator(parking_lot::Mutex::new(Vec::new()));
         let run = |bucket: &str, mode: IamMode| {

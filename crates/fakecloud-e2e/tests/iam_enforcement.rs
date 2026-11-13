@@ -77,19 +77,175 @@ async fn attach_inline_policy(server: &TestServer, user: &str, name: &str, docum
 // ======================================================================
 
 #[tokio::test]
-async fn sts_get_caller_identity_denied_without_policy() {
+async fn sts_get_session_token_denied_without_policy() {
     // A user with no attached policies has implicit-deny on STS actions
-    // in strict mode. GetCallerIdentity with their credentials must fail.
+    // in strict mode: GetSessionToken with their credentials must fail.
+    // GetCallerIdentity needs no permission, so it still works.
     let server = start_strict().await;
     let (akid, secret) = bootstrap_user(&server, "alice").await;
 
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
-    let err = sts.get_caller_identity().send().await.unwrap_err();
+    let err = sts.get_session_token().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(
         msg.contains(r#"code: Some("AccessDenied")"#),
         "expected STS's AccessDenied, got {msg}"
+    );
+    let identity = sts.get_caller_identity().send().await.unwrap();
+    assert!(identity.arn().unwrap().contains("user/alice"));
+}
+
+#[tokio::test]
+async fn sts_get_caller_identity_is_never_denied() {
+    // AWS: no permission is required, and a policy explicitly denying
+    // sts:GetCallerIdentity does not keep the caller from it.
+    let server = start_strict().await;
+    let (akid, secret) = bootstrap_user(&server, "dave").await;
+    attach_inline_policy(
+        &server,
+        "dave",
+        "DenyEverything",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"*","Resource":"*"}]}"#,
+    )
+    .await;
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let identity = StsClient::new(&cfg)
+        .get_caller_identity()
+        .send()
+        .await
+        .unwrap();
+    assert!(identity.arn().unwrap().contains("user/dave"));
+}
+
+#[tokio::test]
+async fn same_account_trust_policy_naming_the_account_needs_identity_permission() {
+    // A trust policy naming the account delegates to the account's IAM: a
+    // user of the account also needs sts:AssumeRole in an identity policy.
+    // One naming the user itself needs no identity permission. The trust
+    // policy must allow in every case.
+    let server = start_strict().await;
+    let (akid, secret) = bootstrap_user(&server, "frank").await;
+    bootstrap_user(&server, "nobody").await;
+    let root = IamClient::new(&sdk_config_with(&server, "test", "test").await);
+    let trust = |principal: &str| {
+        format!(
+            r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"{principal}"}},"Action":"sts:AssumeRole"}}]}}"#
+        )
+    };
+    for (role, principal) in [
+        ("trusts-account", "arn:aws:iam::123456789012:root"),
+        ("trusts-frank", "arn:aws:iam::123456789012:user/frank"),
+        ("trusts-other", "arn:aws:iam::123456789012:user/nobody"),
+    ] {
+        root.create_role()
+            .role_name(role)
+            .assume_role_policy_document(trust(principal))
+            .send()
+            .await
+            .unwrap();
+    }
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let sts = StsClient::new(&cfg);
+    let assume = |role: &str| {
+        sts.assume_role()
+            .role_arn(format!("arn:aws:iam::123456789012:role/{role}"))
+            .role_session_name("s1")
+            .send()
+    };
+    let denied = |result: Result<_, aws_sdk_sts::error::SdkError<_>>, what: &str| {
+        let err = result.expect_err(what);
+        assert!(
+            format!("{err:?}").contains(r#"code: Some("AccessDenied")"#),
+            "{what}: {err:?}"
+        );
+    };
+    denied(
+        assume("trusts-account").await,
+        "account-named trust without an identity policy",
+    );
+    assume("trusts-frank")
+        .await
+        .expect("a trust policy naming the user grants on its own");
+
+    attach_inline_policy(
+        &server,
+        "frank",
+        "AssumeAny",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole","Resource":"*"}]}"#,
+    )
+    .await;
+    assume("trusts-account")
+        .await
+        .expect("account-named trust plus an identity policy");
+    denied(
+        assume("trusts-other").await,
+        "the trust policy must allow the caller",
+    );
+}
+
+#[tokio::test]
+async fn assume_root_authenticates_before_validating_the_task_policy() {
+    // An unknown access key is refused as such before the request is
+    // validated, as AWS authenticates first.
+    let server = start_strict().await;
+    let cfg = sdk_config_with(&server, "AKIAUNKNOWNKEY000000", "secret").await;
+    let err = StsClient::new(&cfg)
+        .assume_root()
+        .target_principal("123456789012")
+        .task_policy_arn(
+            aws_sdk_sts::types::PolicyDescriptorType::builder()
+                .arn("arn:aws:iam::aws:policy/NotATaskPolicy")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    assert_eq!(
+        aws_sdk_sts::error::ProvideErrorMetadata::code(&err),
+        Some("InvalidClientTokenId")
+    );
+}
+
+#[tokio::test]
+async fn assume_root_validates_the_task_policy_before_authorizing() {
+    // Recorded: an invalid TaskPolicyArn is a ValidationError even for a
+    // caller with no sts:AssumeRoot permission; a valid one is then
+    // refused as AccessDenied.
+    let server = start_strict().await;
+    let (akid, secret) = bootstrap_user(&server, "erin").await;
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let sts = StsClient::new(&cfg);
+    let assume = |arn: &str| {
+        sts.assume_root()
+            .target_principal("123456789012")
+            .task_policy_arn(
+                aws_sdk_sts::types::PolicyDescriptorType::builder()
+                    .arn(arn)
+                    .build(),
+            )
+            .send()
+    };
+    let err = assume("arn:aws:iam::aws:policy/IAMAuditRootUserCredentials")
+        .await
+        .unwrap_err();
+    let err = err.into_service_error();
+    assert_eq!(
+        aws_sdk_sts::error::ProvideErrorMetadata::code(&err),
+        Some("ValidationError")
+    );
+    assert_eq!(
+        aws_sdk_sts::error::ProvideErrorMetadata::message(&err),
+        Some("Request must contain valid AWS managed task policy ARN")
+    );
+    let err = assume("arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials")
+        .await
+        .unwrap_err();
+    let err = err.into_service_error();
+    assert_eq!(
+        aws_sdk_sts::error::ProvideErrorMetadata::code(&err),
+        Some("AccessDenied")
     );
 }
 
@@ -336,21 +492,21 @@ async fn resource_account_perimeter_allows_own_account_requests() {
 }
 
 #[tokio::test]
-async fn sts_get_caller_identity_allowed_with_explicit_policy() {
+async fn sts_get_session_token_allowed_with_explicit_policy() {
     let server = start_strict().await;
     let (akid, secret) = bootstrap_user(&server, "bob").await;
     attach_inline_policy(
         &server,
         "bob",
-        "AllowGetCallerIdentity",
-        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:GetCallerIdentity","Resource":"*"}]}"#,
+        "AllowGetSessionToken",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:GetSessionToken","Resource":"*"}]}"#,
     )
     .await;
 
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
-    let identity = sts.get_caller_identity().send().await.unwrap();
-    assert!(identity.arn().unwrap().contains("user/bob"));
+    let session = sts.get_session_token().send().await.unwrap();
+    assert!(session.credentials().is_some());
 }
 
 #[tokio::test]
@@ -368,13 +524,13 @@ async fn sts_explicit_deny_beats_allow_all() {
         &server,
         "carol",
         "DenySts",
-        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"sts:GetCallerIdentity","Resource":"*"}]}"#,
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"sts:GetSessionToken","Resource":"*"}]}"#,
     )
     .await;
 
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
-    let err = sts.get_caller_identity().send().await.unwrap_err();
+    let err = sts.get_session_token().send().await.unwrap_err();
     let msg = format!("{err:?}");
     assert!(msg.contains(r#"code: Some("AccessDenied")"#), "got {msg}");
 }
@@ -2530,7 +2686,7 @@ async fn condition_string_equals_username_allows_owner() {
         "AllowIfDana",
         r#"{"Version":"2012-10-17","Statement":[{
             "Effect":"Allow",
-            "Action":"sts:GetCallerIdentity",
+            "Action":"sts:GetSessionToken",
             "Resource":"*",
             "Condition":{"StringEquals":{"aws:username":"dana"}}
         }]}"#,
@@ -2538,8 +2694,8 @@ async fn condition_string_equals_username_allows_owner() {
     .await;
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
-    let identity = sts.get_caller_identity().send().await.unwrap();
-    assert!(identity.arn().unwrap().contains("user/dana"));
+    let session = sts.get_session_token().send().await.unwrap();
+    assert!(session.credentials().is_some());
 }
 
 #[tokio::test]
@@ -2554,7 +2710,7 @@ async fn condition_string_equals_username_denies_other_user() {
         "AllowIfDana",
         r#"{"Version":"2012-10-17","Statement":[{
             "Effect":"Allow",
-            "Action":"sts:GetCallerIdentity",
+            "Action":"sts:GetSessionToken",
             "Resource":"*",
             "Condition":{"StringEquals":{"aws:username":"dana"}}
         }]}"#,
@@ -2562,7 +2718,7 @@ async fn condition_string_equals_username_denies_other_user() {
     .await;
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
-    let err = sts.get_caller_identity().send().await.unwrap_err();
+    let err = sts.get_session_token().send().await.unwrap_err();
     assert!(format!("{err:?}").contains(r#"code: Some("AccessDenied")"#));
 }
 
@@ -2579,7 +2735,7 @@ async fn condition_ip_address_loopback_allows() {
         "AllowFromLoopback",
         r#"{"Version":"2012-10-17","Statement":[{
             "Effect":"Allow",
-            "Action":"sts:GetCallerIdentity",
+            "Action":"sts:GetSessionToken",
             "Resource":"*",
             "Condition":{"IpAddress":{"aws:SourceIp":"127.0.0.0/8"}}
         }]}"#,
@@ -2587,8 +2743,8 @@ async fn condition_ip_address_loopback_allows() {
     .await;
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
-    let identity = sts.get_caller_identity().send().await.unwrap();
-    assert!(identity.arn().unwrap().contains("user/frank"));
+    let session = sts.get_session_token().send().await.unwrap();
+    assert!(session.credentials().is_some());
 }
 
 #[tokio::test]
@@ -2604,7 +2760,7 @@ async fn condition_ip_address_non_matching_cidr_denies() {
         "AllowFromExternal",
         r#"{"Version":"2012-10-17","Statement":[{
             "Effect":"Allow",
-            "Action":"sts:GetCallerIdentity",
+            "Action":"sts:GetSessionToken",
             "Resource":"*",
             "Condition":{"IpAddress":{"aws:SourceIp":"203.0.113.0/24"}}
         }]}"#,
@@ -2612,7 +2768,7 @@ async fn condition_ip_address_non_matching_cidr_denies() {
     .await;
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
-    let err = sts.get_caller_identity().send().await.unwrap_err();
+    let err = sts.get_session_token().send().await.unwrap_err();
     assert!(format!("{err:?}").contains(r#"code: Some("AccessDenied")"#));
 }
 
@@ -2628,7 +2784,7 @@ async fn condition_date_less_than_past_deadline_denies() {
         "AllowBefore2020",
         r#"{"Version":"2012-10-17","Statement":[{
             "Effect":"Allow",
-            "Action":"sts:GetCallerIdentity",
+            "Action":"sts:GetSessionToken",
             "Resource":"*",
             "Condition":{"DateLessThan":{"aws:CurrentTime":"2020-01-01T00:00:00Z"}}
         }]}"#,
@@ -2636,7 +2792,7 @@ async fn condition_date_less_than_past_deadline_denies() {
     .await;
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
-    let err = sts.get_caller_identity().send().await.unwrap_err();
+    let err = sts.get_session_token().send().await.unwrap_err();
     assert!(format!("{err:?}").contains(r#"code: Some("AccessDenied")"#));
 }
 
@@ -2660,7 +2816,7 @@ async fn condition_bool_secure_transport_deny_fires_over_http() {
     .await;
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let sts = StsClient::new(&cfg);
-    let err = sts.get_caller_identity().send().await.unwrap_err();
+    let err = sts.get_session_token().send().await.unwrap_err();
     assert!(format!("{err:?}").contains(r#"code: Some("AccessDenied")"#));
 }
 
@@ -2742,6 +2898,50 @@ async fn bucket_policy_grants_access_without_identity_policy() {
         .unwrap();
     let body = resp.body.collect().await.unwrap().into_bytes();
     assert_eq!(body.as_ref(), b"hi");
+}
+
+#[tokio::test]
+async fn bucket_policy_naming_the_own_account_delegates_to_iam() {
+    // A same-account bucket policy naming the account (its root ARN or bare
+    // id) grants a user nothing by itself: it delegates to the account's
+    // IAM, so the user's identity policy decides.
+    let server = start_strict().await;
+    let (akid, secret) = bootstrap_user(&server, "acct_reader").await;
+    seed_bucket_with_policy(
+        &server,
+        "bp-account-docs",
+        r#"{"Version":"2012-10-17","Statement":[{
+            "Effect":"Allow",
+            "Principal":{"AWS":["arn:aws:iam::123456789012:root","123456789012"]},
+            "Action":"s3:GetObject",
+            "Resource":"arn:aws:s3:::bp-account-docs/*"
+        }]}"#,
+    )
+    .await;
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let s3 = aws_sdk_s3::Client::new(&cfg);
+    let get = || {
+        s3.get_object()
+            .bucket("bp-account-docs")
+            .key("readme.md")
+            .send()
+    };
+    let err = get()
+        .await
+        .expect_err("an account-root grant is no grant to the user");
+    assert_eq!(
+        aws_sdk_s3::error::ProvideErrorMetadata::code(&err),
+        Some("AccessDenied"),
+        "{err:?}"
+    );
+    attach_inline_policy(
+        &server,
+        "acct_reader",
+        "ReadDocs",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::bp-account-docs/*"}]}"#,
+    )
+    .await;
+    get().await.expect("the identity policy allows the read");
 }
 
 #[tokio::test]

@@ -90,6 +90,9 @@ pub struct EcrService {
     /// blobs encrypted under the configured CMK via
     /// `fakecloud_kms::api::encrypt_blob` / `decrypt_blob`.
     kms_state: Option<fakecloud_kms::SharedKmsState>,
+    /// The role of an assumed-role caller, which another account's
+    /// repository policy names to grant the role's sessions.
+    session_roles: Option<fakecloud_iam::evaluator::SessionRoleResolver>,
 }
 
 mod images;
@@ -112,12 +115,38 @@ impl EcrService {
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             kms_state: None,
+            session_roles: None,
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
+    }
+
+    /// Resolve assumed-role callers to their roles (IAM ARNs with paths)
+    /// when another account's repository policy is evaluated for them.
+    pub fn with_session_role_resolver(
+        mut self,
+        resolver: fakecloud_iam::evaluator::SessionRoleResolver,
+    ) -> Self {
+        self.session_roles = Some(resolver);
+        self
+    }
+
+    /// The identity a repository policy of another account is evaluated
+    /// for: the request's caller (its account's root user when it resolved
+    /// none) and, for a role session, its role.
+    pub(crate) fn policy_caller(
+        &self,
+        request: &AwsRequest,
+    ) -> fakecloud_iam::evaluator::RequestCaller {
+        fakecloud_iam::evaluator::RequestCaller::new(
+            request.principal.as_ref(),
+            &request.account_id,
+            fakecloud_aws::arn::partition_for(&request.region),
+            self.session_roles.as_ref(),
+        )
     }
 
     pub fn with_kms(mut self, kms: fakecloud_kms::SharedKmsState) -> Self {

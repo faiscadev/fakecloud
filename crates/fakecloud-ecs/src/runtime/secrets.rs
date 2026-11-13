@@ -118,19 +118,52 @@ fn go_float_text(f: f64) -> String {
     }
 }
 
+/// The identity task `task_id` of `account_id` reads its secrets as: a
+/// session of its execution role, named after the task, whom another
+/// account's secret or parameter policy must allow. `None` for a task
+/// without an execution role (it reads as the account).
+pub(super) fn execution_role_reader(
+    state: &SharedEcsState,
+    account_id: &str,
+    task_id: &str,
+) -> Option<fakecloud_iam::evaluator::RequestCaller> {
+    let role_arn = state
+        .read()
+        .get(account_id)
+        .and_then(|s| s.tasks.get(task_id))
+        .and_then(|t| t.execution_role_arn.clone())?;
+    let role_name = role_arn.rsplit('/').next()?.to_string();
+    let partition = fakecloud_aws::arn::partition_of(&role_arn);
+    let role_account = fakecloud_aws::arn::account_of(&role_arn).unwrap_or(account_id);
+    Some(fakecloud_iam::evaluator::RequestCaller {
+        principal: fakecloud_core::auth::Principal {
+            arn: format!("arn:{partition}:sts::{role_account}:assumed-role/{role_name}/{task_id}"),
+            user_id: String::new(),
+            account_id: role_account.to_string(),
+            principal_type: fakecloud_core::auth::PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        },
+        role_arn: Some(role_arn),
+    })
+}
+
 impl EcsRuntime {
     /// Resolve a `secrets[].valueFrom` reference to the value injected into
     /// the container, reading as `account_id` in `region` (the task's account
     /// and region): a name resolves in the task's region, a full ARN in the
     /// region it names (how ECS reaches a secret or parameter in another
-    /// region). The error becomes the task's `stoppedReason`.
+    /// region). Another account's secret or parameter policy is evaluated
+    /// for `reader` (the task's execution role session; `None`: the
+    /// account). The error becomes the task's `stoppedReason`.
     pub(super) fn resolve_secret(
         &self,
         account_id: &str,
         region: &str,
         value_from: &str,
+        reader: Option<&fakecloud_iam::evaluator::RequestCaller>,
     ) -> Result<String, RuntimeError> {
-        self.resolve_secret_value(account_id, region, value_from)
+        self.resolve_secret_value(account_id, region, value_from, reader)
             .map_err(RuntimeError::SecretRetrieval)
     }
 
@@ -139,6 +172,7 @@ impl EcsRuntime {
         account_id: &str,
         region: &str,
         value_from: &str,
+        reader: Option<&fakecloud_iam::evaluator::RequestCaller>,
     ) -> Result<String, String> {
         match parse_value_from(value_from)? {
             SecretReference::SecretsManager {
@@ -154,10 +188,11 @@ impl EcsRuntime {
                     json_key,
                     version_stage,
                     version_id,
+                    reader,
                 )
                 .map_err(|e| format!("unable to retrieve secret from asm: {e}")),
             SecretReference::Parameter(name) => self
-                .read_ssm_parameter(account_id, region, name)
+                .read_ssm_parameter(account_id, region, name, reader)
                 .map_err(|e| {
                     format!(
                         "unable to retrieve secrets from ssm: fetching secret data from SSM \
@@ -168,6 +203,7 @@ impl EcsRuntime {
     }
 
     /// `GetSecretValue` + json-key extraction, with the agent's errors.
+    #[allow(clippy::too_many_arguments)]
     fn read_asm_secret(
         &self,
         account_id: &str,
@@ -176,6 +212,7 @@ impl EcsRuntime {
         json_key: Option<&str>,
         version_stage: Option<&str>,
         version_id: Option<&str>,
+        reader: Option<&fakecloud_iam::evaluator::RequestCaller>,
     ) -> Result<String, String> {
         let not_found = |detail: &str| {
             format!(
@@ -199,6 +236,7 @@ impl EcsRuntime {
             // The task's execution role reads the secret, an identity of
             // the account.
             None,
+            reader.map(|r| r.as_policy_caller()),
         )
         .map_err(|e| {
             if e.code() == "ResourceNotFoundException" {
@@ -228,6 +266,7 @@ impl EcsRuntime {
         account_id: &str,
         region: &str,
         name: &str,
+        reader: Option<&fakecloud_iam::evaluator::RequestCaller>,
     ) -> Result<String, String> {
         let invalid = || format!("invalid parameters: {name}");
         let state = self.ssm_state.as_ref().ok_or_else(invalid)?;
@@ -237,6 +276,7 @@ impl EcsRuntime {
             account_id,
             region,
             name,
+            reader.map(|r| r.as_policy_caller()),
         )
         .map(|p| p.value)
         .map_err(|e| {

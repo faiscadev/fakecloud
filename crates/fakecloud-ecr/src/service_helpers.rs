@@ -1,5 +1,4 @@
 use super::*;
-use fakecloud_aws::arn::Arn;
 
 /// Actions that mutate persisted state. Only these trigger a snapshot save.
 /// Pull-shaped reads (`BatchGetImage`, `GetDownloadUrlForLayer`) are listed
@@ -839,16 +838,16 @@ pub(crate) fn repository_filters_match(
 ///   deny).
 pub(crate) fn check_repo_policy(
     repo_owner_account: &str,
-    caller_account: &str,
+    caller: fakecloud_iam::evaluator::PolicyCaller<'_>,
     repo_arn: &str,
     repo_name: &str,
     policy_doc: Option<&str>,
     action: &str,
 ) -> Result<(), AwsServiceError> {
-    if caller_account == repo_owner_account {
+    if caller.principal.account_id == repo_owner_account {
         return Ok(());
     }
-    match repository_policy_decision(policy_doc, caller_account, repo_arn, action) {
+    match repository_policy_decision(policy_doc, caller, repo_arn, action) {
         RepoPolicyDecision::Allow => Ok(()),
         RepoPolicyDecision::NoPolicy => Err(repository_policy_not_found(repo_name)),
         RepoPolicyDecision::Deny => Err(repository_policy_denied(repo_name, action)),
@@ -872,14 +871,15 @@ pub(crate) enum RepoPolicyDecision {
     Deny,
 }
 
-/// Cross-account ECR repository policy decision. When the caller's
-/// account differs from the repository's owning account, the repo
-/// must have a resource policy that explicitly Allows the requested
-/// action — empty / missing policies map to [`RepoPolicyDecision::NoPolicy`]
-/// so the handler can return the more specific AWS error code.
+/// Cross-account ECR repository policy decision for `caller` (the calling
+/// principal, and its role for a role session). When the caller's account
+/// differs from the repository's owning account, the repo must have a
+/// resource policy that explicitly Allows the requested action — empty /
+/// missing policies map to [`RepoPolicyDecision::NoPolicy`] so the handler
+/// can return the more specific AWS error code.
 pub(crate) fn repository_policy_decision(
     policy_doc: Option<&str>,
-    caller_account: &str,
+    caller: fakecloud_iam::evaluator::PolicyCaller<'_>,
     repo_arn: &str,
     action: &str,
 ) -> RepoPolicyDecision {
@@ -887,35 +887,17 @@ pub(crate) fn repository_policy_decision(
         Some(d) if !d.is_empty() => d,
         _ => return RepoPolicyDecision::NoPolicy,
     };
-    use fakecloud_core::auth::{Principal, PrincipalType};
-    use fakecloud_iam::evaluator::{evaluate, Decision, EvalRequest, PolicyDocument};
-    let parsed = PolicyDocument::parse(doc);
-    let principal_arn = Arn::global("iam", caller_account, "root")
-        .with_partition(fakecloud_aws::arn::partition_of(repo_arn))
-        .to_string();
-    let principal = Principal {
-        arn: principal_arn.clone(),
-        user_id: principal_arn,
-        account_id: caller_account.to_string(),
-        principal_type: PrincipalType::User,
-        source_identity: None,
-        tags: None,
-    };
-    let req = EvalRequest {
-        principal: &principal,
-        action: action.to_string(),
-        resource: repo_arn.to_string(),
-        context: Default::default(),
-    };
-    match evaluate(&[parsed], &req) {
+    use fakecloud_iam::evaluator::{evaluate_resource_policy_for_caller, Decision, PolicyDocument};
+    match evaluate_resource_policy_for_caller(&PolicyDocument::parse(doc), caller, action, repo_arn)
+    {
         Decision::Allow => RepoPolicyDecision::Allow,
         Decision::ImplicitDeny | Decision::ExplicitDeny => RepoPolicyDecision::Deny,
     }
 }
 
 /// Boolean shim retained for the existing unit tests (and any callers
-/// that only need a yes/no answer). Returns `true` only when the
-/// repository policy explicitly allows the action.
+/// that only need a yes/no answer): whether the repository policy
+/// explicitly allows the action to the root user of `caller_account`.
 #[cfg(test)]
 pub(crate) fn repository_policy_allows(
     policy_doc: Option<&str>,
@@ -923,8 +905,16 @@ pub(crate) fn repository_policy_allows(
     repo_arn: &str,
     action: &str,
 ) -> bool {
+    let root = fakecloud_iam::evaluator::account_root_principal(
+        caller_account,
+        fakecloud_aws::arn::partition_of(repo_arn),
+    );
+    let caller = fakecloud_iam::evaluator::PolicyCaller {
+        principal: &root,
+        role_arn: None,
+    };
     matches!(
-        repository_policy_decision(policy_doc, caller_account, repo_arn, action),
+        repository_policy_decision(policy_doc, caller, repo_arn, action),
         RepoPolicyDecision::Allow
     )
 }

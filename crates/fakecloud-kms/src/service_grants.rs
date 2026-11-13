@@ -69,48 +69,94 @@ fn validate_encryption_context_constraints(
     Ok(())
 }
 
-/// The grantee and retiring principals `CreateGrant` takes, as its API
-/// reference requires them: exactly one of `GranteePrincipal` (an AWS
-/// principal) and `GranteeServicePrincipal` (an AWS service principal), at
-/// most one of `RetiringPrincipal` and `RetiringServicePrincipal`, and a
-/// grant to a service principal also needs a `SourceArn` constraint and a
-/// retiring principal of either kind. A violation is a `ValidationException`
-/// (AWS documents the rules, not its messages).
-fn validate_grant_principals(
-    body: &Value,
-    service_grantee: bool,
-    retiring: bool,
-    retiring_service: bool,
-) -> Result<(), AwsServiceError> {
-    let invalid = |message: &str| {
+/// The `GrantConstraintSourceArnType` pattern of the KMS model.
+const SOURCE_ARN_PATTERN: &str = "^arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$";
+
+/// Whether `arn` matches [`SOURCE_ARN_PATTERN`]: none of the first five
+/// fields may hold a `:`, so they are its first five `:`-separated parts.
+fn is_grant_source_arn(arn: &str) -> bool {
+    let token = |s: &str| {
+        s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    let mut parts = arn.splitn(6, ':');
+    let (Some("arn"), Some(partition), Some(service), Some(region), Some(account), Some(rest)) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return false;
+    };
+    partition.strip_prefix("aws").is_some_and(token)
+        && !service.is_empty()
+        && token(service)
+        && token(region)
+        && account.len() == 12
+        && account.bytes().all(|b| b.is_ascii_digit())
+        && !rest.is_empty()
+        && !rest.contains('\n')
+}
+
+/// `CreateGrant`'s refusals of its principals and `SourceArn` constraint,
+/// as recorded against KMS (`tests/fixtures/create-grant/refusals.txt`):
+/// a `SourceArn` off its pattern first, then exactly one of
+/// `GranteePrincipal` / `GranteeServicePrincipal`, a grant to a service
+/// principal with a `SourceArn` constraint and a retiring principal of
+/// either kind, and at most one of `RetiringPrincipal` /
+/// `RetiringServicePrincipal`; all `ValidationException`, and all before the
+/// key is looked up. A `SourceArn` is accepted with a grantee of either
+/// kind and alongside encryption-context constraints.
+fn validate_grant_principals(body: &Value) -> Result<(), AwsServiceError> {
+    let invalid = |message: String| {
         Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "ValidationException",
             message,
         ))
     };
-    let aws_grantee = body["GranteePrincipal"].as_str().is_some();
-    if aws_grantee == service_grantee {
+    let source_arn = body["Constraints"]["SourceArn"].as_str();
+    if let Some(arn) = source_arn {
+        if !is_grant_source_arn(arn) {
+            return invalid(format!(
+                "1 validation error detected: Value '{arn}' at 'constraints.sourceArn' failed to satisfy constraint: Member must satisfy regular expression pattern: {SOURCE_ARN_PATTERN}"
+            ));
+        }
+    }
+    let grantee = body["GranteePrincipal"].as_str().is_some();
+    let service_grantee = body["GranteeServicePrincipal"].as_str().is_some();
+    let retiring = body["RetiringPrincipal"].as_str().is_some();
+    let retiring_service = body["RetiringServicePrincipal"].as_str().is_some();
+    if grantee && service_grantee {
         return invalid(
-            "You must specify either GranteePrincipal or GranteeServicePrincipal, but not both.",
+            "Cannot specify both GranteePrincipal and GranteeServicePrincipal.".to_string(),
         );
     }
-    if retiring && retiring_service {
+    if !grantee && !service_grantee {
         return invalid(
-            "You can specify either RetiringPrincipal or RetiringServicePrincipal, but not both.",
+            "Must include either GranteePrincipal or GranteeServicePrincipal.".to_string(),
         );
     }
     if service_grantee {
-        if body["Constraints"]["SourceArn"].as_str().is_none() {
+        if source_arn.is_none() {
             return invalid(
-                "When you specify a GranteeServicePrincipal, you must also specify a SourceArn grant constraint.",
+                "Must include SourceArn constraint when GranteeServicePrincipal is supplied."
+                    .to_string(),
             );
         }
         if !retiring && !retiring_service {
             return invalid(
-                "When you specify a GranteeServicePrincipal, you must specify either a RetiringPrincipal or a RetiringServicePrincipal.",
+                "RetiringServicePrincipal or RetiringPrincipal must be specified when GranteeServicePrincipal is supplied."
+                    .to_string(),
             );
         }
+    }
+    if retiring && retiring_service {
+        return invalid(
+            "Cannot specify both RetiringPrincipal and RetiringServicePrincipal.".to_string(),
+        );
     }
     Ok(())
 }
@@ -119,6 +165,7 @@ impl KmsService {
     pub(super) fn create_grant(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let key_id = Self::require_key_id(&body)?;
+        validate_grant_principals(&body)?;
 
         let resolved = self
             .resolve_key_id_for(&req.account_id, &req.region, &key_id)
@@ -137,12 +184,6 @@ impl KmsService {
         let retiring_service_principal = body["RetiringServicePrincipal"]
             .as_str()
             .map(str::to_string);
-        validate_grant_principals(
-            &body,
-            grantee_service_principal.is_some(),
-            retiring_principal.is_some(),
-            retiring_service_principal.is_some(),
-        )?;
         let operations: Vec<String> = body["Operations"]
             .as_array()
             .map(|arr| {
@@ -429,6 +470,35 @@ impl KmsService {
                 "NotFoundException",
                 "Grant not found",
             )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod source_arn_tests {
+    use super::is_grant_source_arn;
+
+    /// Exactly the ARNs the model's pattern matches.
+    #[test]
+    fn source_arns_follow_the_model_pattern() {
+        for ok in [
+            "arn:aws:sqs:us-east-1:123456789012:queue",
+            "arn:aws-cn:s3::123456789012:a:b/c",
+            "arn:aws-us-gov:ses:us-gov-west-1:123456789012:receipt-rule-set/s",
+        ] {
+            assert!(is_grant_source_arn(ok), "{ok}");
+        }
+        for bad in [
+            "arn:aws:s3:::bucket",
+            "arn:aws:sqs:us-east-1:12345678901:queue",
+            "arn:aws:sqs:us-east-1:123456789012:",
+            "arn:aws::us-east-1:123456789012:q",
+            "arn:other:sqs:us-east-1:123456789012:q",
+            "arn:aws:SQS:us-east-1:123456789012:q",
+            "arn:aws:sqs:us-east-1:123456789012:q\nr",
+            "not-an-arn",
+        ] {
+            assert!(!is_grant_source_arn(bad), "{bad}");
         }
     }
 }

@@ -1078,12 +1078,90 @@ fn principal_aws_star_matches_any_principal() {
 }
 
 #[test]
-fn principal_account_root_matches_any_user_in_account() {
+fn same_account_policy_naming_the_account_delegates_to_iam() {
+    // Naming the caller's own account (root ARN or bare id) grants nothing
+    // by itself: the user's identity policies decide.
+    let p = principal_in(ACCT_A, "alice");
+    for named in ["arn:aws:iam::111111111111:root", "111111111111"] {
+        let resource = resource_allow_for(named);
+        assert_eq!(
+            eval_cross(None, Some(resource.clone()), &p, ACCT_A),
+            Decision::ImplicitDeny,
+            "{named}"
+        );
+        assert_eq!(
+            eval_cross(Some(allow_get_wildcard()), Some(resource), &p, ACCT_A),
+            Decision::Allow,
+            "{named}"
+        );
+    }
+    // Same for a role session, through its role too.
+    let session = assumed_role_principal(ACCT_A, "app/s1");
+    let resource = doc(resource_allow_for("arn:aws:iam::111111111111:root"));
+    let request = req(&session, "s3:GetObject", "arn:aws:s3:::bucket/key");
+    assert_eq!(
+        evaluate_with_resource_policy_for_role(
+            &[],
+            None,
+            None,
+            None,
+            Some(&resource),
+            Some("arn:aws:iam::111111111111:role/app"),
+            &request,
+            ACCT_A,
+        ),
+        Decision::ImplicitDeny
+    );
+}
+
+#[test]
+fn same_account_policy_naming_the_account_still_denies() {
+    let p = principal_in(ACCT_A, "alice");
+    let deny = json!({"Statement": [{
+        "Effect": "Deny",
+        "Principal": {"AWS": "111111111111"},
+        "Action": "s3:GetObject",
+        "Resource": "*"
+    }]});
+    assert_eq!(
+        eval_cross(Some(allow_get_wildcard()), Some(deny), &p, ACCT_A),
+        Decision::ExplicitDeny
+    );
+}
+
+#[test]
+fn same_account_policy_naming_the_account_admits_its_root() {
+    let root = Principal {
+        arn: "arn:aws:iam::111111111111:root".into(),
+        user_id: ACCT_A.into(),
+        account_id: ACCT_A.into(),
+        principal_type: PrincipalType::Root,
+        source_identity: None,
+        tags: None,
+    };
+    let resource = resource_allow_for("arn:aws:iam::111111111111:root");
+    assert_eq!(
+        eval_cross(None, Some(resource), &root, ACCT_A),
+        Decision::Allow
+    );
+}
+
+#[test]
+fn cross_account_policy_naming_the_account_grants_with_identity() {
     let p = principal_in(ACCT_A, "alice");
     let resource = resource_allow_for("arn:aws:iam::111111111111:root");
     assert_eq!(
-        eval_cross(None, Some(resource), &p, ACCT_A),
+        eval_cross(
+            Some(allow_get_wildcard()),
+            Some(resource.clone()),
+            &p,
+            ACCT_B
+        ),
         Decision::Allow
+    );
+    assert_eq!(
+        eval_cross(None, Some(resource), &p, ACCT_B),
+        Decision::ImplicitDeny
     );
 }
 

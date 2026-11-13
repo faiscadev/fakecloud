@@ -5352,6 +5352,97 @@ async fn rsa_ciphertexts_are_opened_by_the_key_named() {
     assert_eq!(opened["Plaintext"], json!(plaintext));
 }
 
+/// A `fakecloud-rsa:<key id>:<algorithm>:<raw>` ciphertext earlier builds
+/// produced (and may have persisted) names its key, so it keeps opening
+/// without `KeyId` after an upgrade, authorized on that key; its algorithm
+/// must still match, and a `KeyId` naming another key is
+/// IncorrectKeyException.
+#[test]
+fn legacy_rsa_envelopes_open_without_a_key_id() {
+    let svc = make_service();
+    let rsa = json!({"KeySpec": "RSA_2048", "KeyUsage": "ENCRYPT_DECRYPT"});
+    let key_id = create_key_with_opts(&svc, rsa.clone());
+    let other = create_key_with_opts(&svc, rsa);
+    let pub_der = {
+        let accounts = svc.state.read();
+        accounts.get("123456789012").unwrap().keys[&key_id]
+            .asymmetric_public_key_der
+            .clone()
+            .unwrap()
+    };
+    let raw = asym::rsa_oaep_wrap(&pub_der, "RSAES_OAEP_SHA_256", b"persisted").unwrap();
+    let envelope = format!(
+        "fakecloud-rsa:{key_id}:RSAES_OAEP_SHA_256:{}",
+        base64::engine::general_purpose::STANDARD.encode(&raw)
+    );
+    let blob = base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+    let decrypt = |extra: Value| {
+        let mut body = json!({"CiphertextBlob": blob});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        svc.decrypt(&make_request("Decrypt", body))
+    };
+
+    let opened = body_json(decrypt(json!({"EncryptionAlgorithm": "RSAES_OAEP_SHA_256"})).unwrap());
+    assert_eq!(
+        opened["Plaintext"],
+        json!(base64::engine::general_purpose::STANDARD.encode(b"persisted"))
+    );
+    assert_eq!(
+        opened["KeyId"],
+        json!(format!("arn:aws:kms:us-east-1:123456789012:key/{key_id}"))
+    );
+    decrypt(json!({"KeyId": key_id, "EncryptionAlgorithm": "RSAES_OAEP_SHA_256"}))
+        .expect("naming its key");
+    let err = decrypt(json!({})).err().unwrap();
+    assert_eq!(err.code(), "InvalidCiphertextException");
+    let err = decrypt(json!({"KeyId": other, "EncryptionAlgorithm": "RSAES_OAEP_SHA_256"}))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "IncorrectKeyException");
+
+    // An envelope naming a signing key is refused as a KeyId naming it is.
+    let signing = create_key_with_opts(
+        &svc,
+        json!({"KeySpec": "RSA_2048", "KeyUsage": "SIGN_VERIFY"}),
+    );
+    let signing_pub = {
+        let accounts = svc.state.read();
+        accounts.get("123456789012").unwrap().keys[&signing]
+            .asymmetric_public_key_der
+            .clone()
+            .unwrap()
+    };
+    let raw = asym::rsa_oaep_wrap(&signing_pub, "RSAES_OAEP_SHA_256", b"x").unwrap();
+    let signing_blob = base64::engine::general_purpose::STANDARD.encode(
+        format!(
+            "fakecloud-rsa:{signing}:RSAES_OAEP_SHA_256:{}",
+            base64::engine::general_purpose::STANDARD.encode(&raw)
+        )
+        .as_bytes(),
+    );
+    for key_id in [None, Some(signing.as_str())] {
+        let mut body = json!({
+            "CiphertextBlob": signing_blob,
+            "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+        });
+        if let Some(key_id) = key_id {
+            body["KeyId"] = json!(key_id);
+        }
+        let err = svc.decrypt(&make_request("Decrypt", body)).err().unwrap();
+        assert_eq!(err.code(), "InvalidKeyUsageException", "{key_id:?}");
+    }
+
+    // Authorized on the key the envelope names.
+    let req = make_request("Decrypt", json!({"CiphertextBlob": blob}));
+    let action = svc.iam_action_for(&req).unwrap();
+    assert_eq!(
+        action.resource,
+        format!("arn:aws:kms:us-east-1:123456789012:key/{key_id}")
+    );
+}
+
 /// `ReEncrypt` is authorized as `kms:ReEncryptFrom` on the source key with
 /// the source context and `kms:ReEncryptTo` on the destination key with the
 /// destination context; a `Decrypt` naming no key is authorized on the key
@@ -5404,6 +5495,39 @@ fn re_encrypt_and_decrypt_authorize_the_keys_they_use() {
     let to = svc.iam_condition_keys_for(&req, &actions[1]);
     assert_eq!(to["kms:encryptioncontext:d"], vec!["2".to_string()]);
     assert!(!to.contains_key("kms:encryptioncontext:s"));
+}
+
+/// Every `CreateGrant` recorded against KMS
+/// (`tests/fixtures/create-grant/refusals.txt`) is answered with the
+/// recorded status, code and message: the principal and `SourceArn`
+/// refusals come before the key lookup, so the recordings made against a
+/// missing key replay as they were.
+#[test]
+fn create_grant_refusals_match_the_recordings() {
+    let svc = make_service();
+    let recording = include_str!("../tests/fixtures/create-grant/refusals.txt");
+    let mut cases = 0;
+    for block in recording.split("== ").filter(|b| !b.trim().is_empty()) {
+        let mut lines = block.lines();
+        let name = lines.next().unwrap().trim();
+        let request = lines.next().unwrap().strip_prefix("Request: ").unwrap();
+        let status = lines.next().unwrap().strip_prefix("HTTP ").unwrap();
+        let (status, code) = status.split_once(' ').unwrap();
+        let message = lines.next().unwrap();
+        let mut body: Value = serde_json::from_str(request).unwrap();
+        body["KeyId"] =
+            json!("arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000");
+        body["Operations"] = json!(["Decrypt"]);
+        let err = svc
+            .create_grant(&make_request("CreateGrant", body))
+            .err()
+            .unwrap_or_else(|| panic!("{name}: accepted"));
+        assert_eq!(err.status().as_str(), status, "{name}");
+        assert_eq!(err.code(), code, "{name}");
+        assert_eq!(err.message(), message, "{name}");
+        cases += 1;
+    }
+    assert_eq!(cases, 9);
 }
 
 /// `CreateGrant` takes exactly one of `GranteePrincipal` and
@@ -5559,7 +5683,7 @@ fn create_grant_refuses_context_constraints_on_operations_without_a_context() {
     create(
         &symmetric,
         json!(["Sign"]),
-        json!({"SourceArn": "arn:aws:s3:::bucket"}),
+        json!({"SourceArn": "arn:aws:sqs:us-east-1:123456789012:queue"}),
     )
     .expect("SourceArn constraint");
     // Constraints on an asymmetric key are refused whatever the operations.

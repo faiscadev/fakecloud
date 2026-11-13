@@ -821,6 +821,14 @@ pub trait AwsService: Send + Sync {
         false
     }
 
+    /// Whether `request` needs authorization at all. A few operations need
+    /// no permission and no policy can deny them (`sts:GetCallerIdentity`);
+    /// dispatch then evaluates no policy for a caller whose credentials
+    /// resolved. Defaults to `true`.
+    fn iam_authorization_required(&self, _request: &AwsRequest) -> bool {
+        true
+    }
+
     /// Derive the IAM action + resource ARN for an incoming request.
     ///
     /// Only called when [`AwsService::iam_enforceable`] returns `true`
@@ -873,14 +881,18 @@ pub trait AwsService: Send + Sync {
         Ok(())
     }
 
-    /// Refuse a request the service rejects before authorizing anything --
-    /// one it cannot classify into an operation, say (S3 answers conflicting
-    /// sub-resource parameters with 400 `InvalidArgument` whoever asks).
-    /// Dispatch calls it before IAM evaluation and answers `Err` as the
-    /// service's error, so such a request gets the service's error rather
-    /// than an `AccessDenied` and is never authorized as some other
-    /// operation. The handler must refuse the same requests the same way
-    /// (it runs without IAM). Default: nothing to refuse.
+    /// Validation AWS performs before authorizing `request`: an error here
+    /// is returned to the caller whatever its permissions, anonymous callers
+    /// included -- a request the service cannot classify into an operation
+    /// (S3 answers conflicting sub-resource parameters with 400
+    /// `InvalidArgument` whoever asks), or one carrying an invalid parameter
+    /// AWS checks first (STS `AssumeRoot`'s `TaskPolicyArn`). Dispatch calls
+    /// it for every request, once: after authentication (a key that resolves
+    /// to no identity is refused before it) and before authorization under
+    /// IAM enforcement, just before the handler otherwise. `Err` is answered
+    /// as the service's error, so such a request gets it rather than an
+    /// `AccessDenied` and is never authorized as some other operation.
+    /// Default: nothing to refuse.
     fn validate_before_authorization(&self, _request: &AwsRequest) -> Result<(), AwsServiceError> {
         Ok(())
     }
