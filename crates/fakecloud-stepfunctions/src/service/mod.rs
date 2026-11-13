@@ -1407,6 +1407,29 @@ fn invalid_reference_path(state_name: &str, field: &str, path: &str) -> AwsServi
     )
 }
 
+/// AWS keeps no EXPRESS execution records, so the execution operations refuse
+/// an EXPRESS execution ARN outright (recorded against AWS for
+/// DescribeExecution, GetExecutionHistory, StopExecution, RedriveExecution and
+/// DescribeStateMachineForExecution).
+fn reject_express_execution_arn(arn: &str) -> Result<(), AwsServiceError> {
+    if crate::state::is_express_execution_arn(arn) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidArn",
+            "Invalid Arn: 'Resource type not valid in this context: express'",
+        ));
+    }
+    Ok(())
+}
+
+fn state_machine_type_not_supported(message: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "StateMachineTypeNotSupported",
+        message,
+    )
+}
+
 fn execution_not_found(arn: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -1415,7 +1438,7 @@ fn execution_not_found(arn: &str) -> AwsServiceError {
     )
 }
 
-fn execution_to_json(exec: &Execution) -> Value {
+pub(crate) fn execution_to_json(exec: &Execution) -> Value {
     let mut resp = json!({
         "executionArn": exec.execution_arn,
         "stateMachineArn": exec.state_machine_arn,
@@ -2854,6 +2877,67 @@ mod tests {
         );
         let err = expect_err(svc.start_execution(&req));
         assert!(err.to_string().contains("ExecutionAlreadyExists"));
+    }
+
+    /// Recorded against AWS: every execution operation refuses an EXPRESS
+    /// execution ARN, and ListExecutions refuses an EXPRESS state machine.
+    #[tokio::test]
+    async fn express_executions_refuse_the_execution_operations() {
+        let svc = StepFunctionsService::new(make_state());
+        let sm = create_express_sm(&svc, "express-ops");
+        let req = make_request(
+            "StartExecution",
+            &json!({"stateMachineArn": sm, "name": "run"}).to_string(),
+        );
+        let started = body_json(&svc.start_execution(&req).unwrap());
+        let exec_arn = started["executionArn"].as_str().unwrap();
+        let body = json!({"executionArn": exec_arn}).to_string();
+
+        for (action, result) in [
+            (
+                "DescribeExecution",
+                svc.describe_execution(&make_request("DescribeExecution", &body)),
+            ),
+            (
+                "GetExecutionHistory",
+                svc.get_execution_history(&make_request("GetExecutionHistory", &body)),
+            ),
+            (
+                "StopExecution",
+                svc.stop_execution(&make_request("StopExecution", &body)),
+            ),
+            (
+                "RedriveExecution",
+                svc.redrive_execution(&make_request("RedriveExecution", &body)),
+            ),
+            (
+                "DescribeStateMachineForExecution",
+                svc.describe_state_machine_for_execution(&make_request(
+                    "DescribeStateMachineForExecution",
+                    &body,
+                )),
+            ),
+        ] {
+            let err = expect_err(result);
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{action}");
+            assert!(
+                err.to_string()
+                    .contains("Resource type not valid in this context: express"),
+                "{action}: {err}"
+            );
+            assert!(err.to_string().contains("InvalidArn"), "{action}: {err}");
+        }
+
+        let req = make_request(
+            "ListExecutions",
+            &json!({"stateMachineArn": sm}).to_string(),
+        );
+        let err = expect_err(svc.list_executions(&req));
+        assert!(
+            err.to_string().contains("StateMachineTypeNotSupported"),
+            "{err}"
+        );
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

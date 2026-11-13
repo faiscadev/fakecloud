@@ -1744,3 +1744,210 @@ async fn task_retry_applies_to_query_errors_in_arguments() {
         "no retry happened"
     );
 }
+
+async fn create_express_machine(
+    client: &aws_sdk_sfn::Client,
+    name: &str,
+    definition: Value,
+) -> String {
+    client
+        .create_state_machine()
+        .name(name)
+        .definition(definition.to_string())
+        .role_arn(ROLE)
+        .r#type(aws_sdk_sfn::types::StateMachineType::Express)
+        .send()
+        .await
+        .unwrap()
+        .state_machine_arn()
+        .to_string()
+}
+
+fn sorted_keys(v: &Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    keys
+}
+
+/// Recorded against AWS: a STANDARD parent runs an EXPRESS child through
+/// `.sync` and `.sync:2`, and catches an EXPRESS child's failure. The
+/// results carry no redrive fields, as an EXPRESS execution can't be
+/// redriven, and the child's ARN is `express:<machine>:<name>:<id>`.
+#[tokio::test]
+async fn sync_waits_for_an_express_child_as_recorded() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let child = create_express_machine(
+        &client,
+        "express-child",
+        json!({"StartAt":"P","States":{"P":{"Type":"Pass","Result":{"ok":1},"End":true}}}),
+    )
+    .await;
+    let failing = create_express_machine(
+        &client,
+        "express-child-fail",
+        json!({"StartAt":"F","States":{"F":{"Type":"Fail","Error":"Boom","Cause":"bad"}}}),
+    )
+    .await;
+
+    let output = run_parent(
+        &client,
+        json!({"StartAt":"A","States":{
+            "A":{"Type":"Task","Resource":"arn:aws:states:::states:startExecution.sync",
+                 "Parameters":{"StateMachineArn": child, "Input":{"x":1}},
+                 "ResultPath":"$.a","Next":"B"},
+            "B":{"Type":"Task","Resource":"arn:aws:states:::states:startExecution.sync:2",
+                 "Parameters":{"StateMachineArn": child, "Input":{"x":2}},
+                 "ResultPath":"$.b","Next":"C"},
+            "C":{"Type":"Task","Resource":"arn:aws:states:::states:startExecution.sync:2",
+                 "Parameters":{"StateMachineArn": failing},
+                 "Catch":[{"ErrorEquals":["States.ALL"],"ResultPath":"$.c","Next":"D"}],
+                 "End":true},
+            "D":{"Type":"Pass","End":true}
+        }}),
+    )
+    .await;
+
+    let success_keys = [
+        "ExecutionArn",
+        "Input",
+        "InputDetails",
+        "Name",
+        "Output",
+        "OutputDetails",
+        "StartDate",
+        "StateMachineArn",
+        "Status",
+        "StopDate",
+    ];
+    let (sync, sync2) = (&output["a"], &output["b"]);
+    assert_eq!(sorted_keys(sync), success_keys, "{sync}");
+    assert_eq!(sorted_keys(sync2), success_keys, "{sync2}");
+    assert_eq!(sync["Output"], r#"{"ok":1}"#);
+    assert_eq!(sync["Input"], r#"{"x":1}"#);
+    assert_eq!(sync2["Output"], json!({"ok": 1}));
+    assert_eq!(sync2["Input"], json!({"x": 2}));
+    for result in [sync, sync2] {
+        let arn = result["ExecutionArn"].as_str().unwrap();
+        let name = result["Name"].as_str().unwrap();
+        assert!(
+            arn.starts_with(&format!(
+                "arn:aws:states:us-east-1:123456789012:express:express-child:{name}:"
+            )),
+            "{arn}"
+        );
+        assert_eq!(result["Status"], "SUCCEEDED");
+    }
+
+    assert_eq!(output["c"]["Error"], "States.TaskFailed");
+    let cause: Value = serde_json::from_str(output["c"]["Cause"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        sorted_keys(&cause),
+        [
+            "Cause",
+            "Error",
+            "ExecutionArn",
+            "Input",
+            "InputDetails",
+            "Name",
+            "StartDate",
+            "StateMachineArn",
+            "Status",
+            "StopDate",
+        ],
+        "{cause}"
+    );
+    assert_eq!(cause["Error"], "Boom");
+    assert_eq!(cause["Cause"], "bad");
+    assert_eq!(cause["Status"], "FAILED");
+}
+
+/// Recorded against AWS: the execution operations refuse an EXPRESS
+/// execution ARN, and ListExecutions refuses an EXPRESS state machine.
+#[tokio::test]
+async fn express_executions_refuse_the_execution_operations() {
+    use aws_sdk_sfn::error::ProvideErrorMetadata;
+
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+    let sm = create_express_machine(
+        &client,
+        "express-ops",
+        json!({"StartAt":"W","States":{"W":{"Type":"Wait","Seconds":5,"End":true}}}),
+    )
+    .await;
+    let started = client
+        .start_execution()
+        .state_machine_arn(&sm)
+        .name("run")
+        .send()
+        .await
+        .unwrap();
+    let arn = started.execution_arn();
+    let message = "Invalid Arn: 'Resource type not valid in this context: express'";
+
+    let err = client
+        .describe_execution()
+        .execution_arn(arn)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.code(), err.message()),
+        (Some("InvalidArn"), Some(message))
+    );
+    let err = client
+        .get_execution_history()
+        .execution_arn(arn)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.code(), err.message()),
+        (Some("InvalidArn"), Some(message))
+    );
+    let err = client
+        .stop_execution()
+        .execution_arn(arn)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.code(), err.message()),
+        (Some("InvalidArn"), Some(message))
+    );
+    let err = client
+        .redrive_execution()
+        .execution_arn(arn)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.code(), err.message()),
+        (Some("InvalidArn"), Some(message))
+    );
+    let err = client
+        .describe_state_machine_for_execution()
+        .execution_arn(arn)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.code(), err.message()),
+        (Some("InvalidArn"), Some(message))
+    );
+
+    let err = client
+        .list_executions()
+        .state_machine_arn(&sm)
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.code(), err.message()),
+        (
+            Some("StateMachineTypeNotSupported"),
+            Some("This operation is not supported by this type of state machine")
+        )
+    );
+}

@@ -196,6 +196,18 @@ pub(crate) fn start_execution_result(service: &SdkService, response: &Value) -> 
     result
 }
 
+/// An EXPRESS execution can't be redriven, and AWS reports none of the
+/// redrive fields for one.
+fn strip_redrive_fields(result: &mut serde_json::Map<String, Value>) {
+    result.retain(|key, _| !key.starts_with("Redrive"));
+}
+
+fn is_express_child(described: &Value) -> bool {
+    described["executionArn"]
+        .as_str()
+        .is_some_and(crate::state::is_express_execution_arn)
+}
+
 /// The cause a `.sync[:2]` Task fails with when its child did: the child's
 /// description as JSON text, for both forms.
 pub(crate) fn sync_failure_cause(service: &SdkService, described: &Value) -> String {
@@ -206,8 +218,12 @@ pub(crate) fn sync_failure_cause(service: &SdkService, described: &Value) -> Str
     };
     result.remove("BillingDetails");
     result.insert("InputDetails".to_string(), json!({"Included": true}));
-    result.insert("RedriveCount".to_string(), json!(0));
-    result.insert("RedriveStatus".to_string(), json!("REDRIVABLE"));
+    if !is_express_child(described) {
+        result.insert("RedriveCount".to_string(), json!(0));
+        result.insert("RedriveStatus".to_string(), json!("REDRIVABLE"));
+    } else {
+        strip_redrive_fields(&mut result);
+    }
     Value::Object(result).to_string()
 }
 
@@ -225,12 +241,16 @@ pub(crate) fn sync_execution_result(
     result.remove("BillingDetails");
     result.insert("InputDetails".to_string(), json!({"Included": true}));
     result.insert("OutputDetails".to_string(), json!({"Included": true}));
-    result.insert("RedriveCount".to_string(), json!(0));
-    result.insert("RedriveStatus".to_string(), json!("NOT_REDRIVABLE"));
-    result.insert(
-        "RedriveStatusReason".to_string(),
-        json!("Execution is SUCCEEDED and cannot be redriven"),
-    );
+    if !is_express_child(described) {
+        result.insert("RedriveCount".to_string(), json!(0));
+        result.insert("RedriveStatus".to_string(), json!("NOT_REDRIVABLE"));
+        result.insert(
+            "RedriveStatusReason".to_string(),
+            json!("Execution is SUCCEEDED and cannot be redriven"),
+        );
+    } else {
+        strip_redrive_fields(&mut result);
+    }
     if form == SyncForm::Json {
         parse_json_member(&mut result, "Input");
         parse_json_member(&mut result, "Output");
@@ -326,6 +346,70 @@ mod tests {
         assert_eq!(
             &result["SdkHttpMetadata"]["AllHttpHeaders"]["x-amzn-RequestId"][0],
             id
+        );
+    }
+
+    fn sorted_keys(v: &Value) -> Vec<String> {
+        let mut keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// The key sets AWS returned for an EXPRESS child of `.sync[:2]`: no
+    /// redrive fields, as an EXPRESS execution can't be redriven.
+    #[test]
+    fn express_child_sync_results_match_the_recording() {
+        let express = "arn:aws:states:us-east-1:123456789012:express:child:n:0b1c2d3e";
+        let mut described = describe_response();
+        described["executionArn"] = json!(express);
+        let result = sync_execution_result(&sfn(), &described, SyncForm::Escaped);
+        assert_eq!(
+            sorted_keys(&result),
+            [
+                "ExecutionArn",
+                "Input",
+                "InputDetails",
+                "Name",
+                "Output",
+                "OutputDetails",
+                "StartDate",
+                "StateMachineArn",
+                "Status",
+                "StopDate",
+            ]
+        );
+
+        let cause = sync_failure_cause(
+            &sfn(),
+            &json!({
+                "executionArn": express,
+                "stateMachineArn": "s",
+                "name": "n",
+                "startDate": 10.5,
+                "stopDate": 11,
+                "status": "FAILED",
+                "input": "{}",
+                "error": "Boom",
+                "cause": "bad",
+                "redriveCount": 0,
+                "billingDetails": {"billedMemoryUsedInMB": 64}
+            }),
+        );
+        let cause: Value = serde_json::from_str(&cause).unwrap();
+        assert_eq!(
+            sorted_keys(&cause),
+            [
+                "Cause",
+                "Error",
+                "ExecutionArn",
+                "Input",
+                "InputDetails",
+                "Name",
+                "StartDate",
+                "StateMachineArn",
+                "Status",
+                "StopDate",
+            ]
         );
     }
 

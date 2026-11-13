@@ -272,6 +272,7 @@ impl StepFunctionsService {
         let exec_arn = body["executionArn"]
             .as_str()
             .ok_or_else(|| missing("executionArn"))?;
+        reject_express_execution_arn(exec_arn)?;
 
         let accounts = self.state.read();
         let empty = StepFunctionsState::new(&req.account_id, &req.region);
