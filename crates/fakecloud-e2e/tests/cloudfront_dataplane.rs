@@ -579,7 +579,7 @@ async fn serves_s3_rest_origin_dualstack_key_prefixed_by_bucket_name() {
     assert!(wait_for_served(&server, missing.id(), Duration::from_secs(10)).await);
     let r = viewer_get(&server, missing.domain_name(), "/x.html").await;
     // The local S3 answers the missing bucket with its 404 `NoSuchBucket`
-    // error document, not a proxy error or real AWS.
+    // error document (as recorded on S3), not a proxy error or real AWS.
     assert_eq!(r.status(), 404);
     let body = r.text().await.unwrap();
     assert!(
