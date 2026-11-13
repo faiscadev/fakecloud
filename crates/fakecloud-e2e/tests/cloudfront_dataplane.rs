@@ -578,12 +578,13 @@ async fn serves_s3_rest_origin_dualstack_key_prefixed_by_bucket_name() {
         make_spa_distribution(&cf, "no-such-bucket.s3.us-east-1.amazonaws.com", None).await;
     assert!(wait_for_served(&server, missing.id(), Duration::from_secs(10)).await);
     let r = viewer_get(&server, missing.domain_name(), "/x.html").await;
-    // The local S3 answers the missing bucket with a 404 S3 error document
-    // (GetObject reports it as `NoSuchKey`), not a proxy error or real AWS.
+    // The local S3 answers the missing bucket with its 404 `NoSuchBucket`
+    // error document (as recorded on S3), not a proxy error or real AWS.
     assert_eq!(r.status(), 404);
     let body = r.text().await.unwrap();
     assert!(
-        body.contains("<Error>") && body.contains("<Key>x.html</Key>"),
+        body.contains("<Code>NoSuchBucket</Code>")
+            && body.contains("<BucketName>no-such-bucket</BucketName>"),
         "{body}"
     );
 }

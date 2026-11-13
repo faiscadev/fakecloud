@@ -77,11 +77,14 @@ impl ResourcePolicyProvider for S3ResourcePolicyProvider {
         if !service.eq_ignore_ascii_case("s3") {
             return false;
         }
-        // Which canned grant satisfies the action: object-read actions need
-        // an object (or bucket) ACL; bucket-list actions need a bucket ACL.
+        // Which canned grant satisfies the policy action, per AWS's mapping of
+        // ACL permissions to policy actions: READ on an object grants
+        // s3:GetObject / GetObjectVersion / GetObjectTorrent (HeadObject is
+        // authorized as s3:GetObject), READ on a bucket grants s3:ListBucket /
+        // ListBucketVersions / ListBucketMultipartUploads.
         let needs_object = match action {
-            "GetObject" | "GetObjectVersion" | "HeadObject" => true,
-            "ListBucket" | "ListObjects" | "ListObjectsV2" | "ListObjectVersions" => false,
+            "GetObject" | "GetObjectVersion" | "GetObjectTorrent" => true,
+            "ListBucket" | "ListBucketVersions" | "ListBucketMultipartUploads" => false,
             // Other actions are not granted anonymously via a public-read ACL.
             _ => return false,
         };
@@ -270,6 +273,10 @@ mod tests {
         let state = state_with_object("b", "k.txt", vec![], vec![public_read_grant()], None);
         let provider = S3ResourcePolicyProvider::new(state);
         assert!(provider.public_acl_allows("s3", "arn:aws:s3:::b", "ListBucket"));
+        assert!(provider.public_acl_allows("s3", "arn:aws:s3:::b", "ListBucketVersions"));
+        // Operation names are not policy actions.
+        assert!(!provider.public_acl_allows("s3", "arn:aws:s3:::b", "ListObjectsV2"));
+        assert!(!provider.public_acl_allows("s3", "arn:aws:s3:::b/k.txt", "HeadObject"));
         // A bucket-only public ACL does not expose unrelated write actions.
         assert!(!provider.public_acl_allows("s3", "arn:aws:s3:::b/k.txt", "PutObject"));
     }

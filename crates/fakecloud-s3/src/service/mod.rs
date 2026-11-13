@@ -12,7 +12,6 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_kms::SharedKmsState;
 use fakecloud_persistence::{MemoryS3Store, S3Store, StoreError};
 
-use crate::logging;
 use crate::state::{AclGrant, S3Bucket, S3Object, SharedS3State};
 
 mod access_points;
@@ -21,7 +20,13 @@ mod annotations;
 mod buckets;
 pub(crate) mod config;
 mod control_tags;
+mod iam_actions;
+#[rustfmt::skip]
+mod iam_reference;
 mod lock;
+mod response;
+mod route;
+mod routing;
 use crate::state::ObjectLockSettings;
 use lock::has_object_lock_headers;
 mod multipart;
@@ -456,7 +461,7 @@ impl S3Service {
         request: &AwsRequest,
     ) -> Option<fakecloud_core::auth::IamAction> {
         if request.method != Method::PUT
-            || request.path_segments.len() < 2
+            || request_key(request).is_none()
             || fakecloud_core::protocol::is_s3_control_host(&request.headers)
         {
             return None;
@@ -779,44 +784,47 @@ impl AwsService for S3Service {
 
     async fn handle(&self, mut req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         // PutObject / UploadPart enter dispatch via the streaming path
-        // with `body = Bytes::new()` and the raw HTTP body available on
-        // `req.body_stream`. Those handlers consume the stream directly
-        // — spooling chunks to disk while computing MD5 + size in
-        // constant memory — so a 1 GiB upload never materializes into
-        // RAM. Every *other* PUT-on-bucket-key the streaming dispatch
-        // flagged (PutObjectTagging, PutObjectAcl, PutObjectRetention,
-        // PutObjectLegalHold, CopyObject, …) reads a small XML/JSON
-        // body from `req.body`, so drain the stream for them.
+        // (`streams_request_body`) with `body = Bytes::new()` and the raw
+        // HTTP body available on `req.body_stream`. Those handlers consume
+        // the stream directly -- spooling chunks to disk while computing
+        // MD5 + size in constant memory -- so a 1 GiB upload never
+        // materializes into RAM. Every other request reads a small XML/JSON
+        // body from `req.body`; a stream reaching one of them (a direct
+        // call) is drained.
         // S3 Control (`s3-control` host) shares this handler; its PUTs
         // (CreateAccessPoint, ...) carry an XML body, never object data.
         let is_control = fakecloud_core::protocol::is_s3_control_host(&req.headers);
-        // Extract the key from the RAW path (everything after the first
-        // segment), decoded exactly once. This preserves leading slashes and
-        // empty segments inside the key that `path_segments` drops, and it
-        // stays correct when an access-point alias in the first segment is
-        // rewritten to its bucket in `path_segments` (below) but not in
-        // `raw_path`.
-        let key = req.path_segments.first().and_then(|_| {
-            let rest = req.raw_path.strip_prefix('/').unwrap_or(&req.raw_path);
-            let (_, raw_key) = rest.split_once('/')?;
-            (!raw_key.is_empty()).then(|| {
-                percent_encoding::percent_decode_str(raw_key)
-                    .decode_utf8_lossy()
-                    .into_owned()
-            })
-        });
-        // UploadPart requires both partNumber AND uploadId; a stray PUT
-        // carrying only one of them is not an upload and gets its body
-        // drained like any other.
-        let key_put = request_checks::classify_key_put(&req, !is_control && key.is_some());
-        let is_put_object = key_put == request_checks::KeyPut::PutObject;
-        let is_upload_part = key_put == request_checks::KeyPut::UploadPart;
+        // The same key IAM authorized the request for (`request_key`).
+        let key = request_key(&req);
+        // The operation, from the one classification authorization also uses
+        // (`route::classify`), so the operation dispatch authorized is the one
+        // routed below. Classified before the body is read, so a request S3
+        // refuses outright (conflicting sub-resources, an unsupported method)
+        // is refused without reading its body -- here too, for when IAM
+        // enforcement is off. S3 Control (classified once its own routes are
+        // ruled out), CORS preflights and paths with an empty bucket segment
+        // are handled on their own below.
+        let early_op =
+            if is_control || req.method == Method::OPTIONS || req.raw_path.starts_with("//") {
+                None
+            } else {
+                match classify_request(&req) {
+                    Ok(op) => Some(op),
+                    Err(refusal) => return Err(self.refuse(&req, refusal)),
+                }
+            };
+        // Uploads (PutObject, UploadPart) read their body as a stream; every
+        // other request's body is small and buffered.
+        let is_put_object = early_op == Some(route::S3Op::PutObject);
+        let is_upload_part = matches!(
+            early_op,
+            Some(route::S3Op::UploadPart | route::S3Op::UploadPartCopy)
+        );
         if !is_put_object && !is_upload_part {
             if let Some(stream) = req.take_body_stream() {
                 req.body = fakecloud_core::service::drain_request_stream(stream).await?;
             }
         }
-
         // Access point data plane: resolve alias -> bucket before routing.
         access_points::resolve_access_point(self, &mut req)?;
 
@@ -862,6 +870,15 @@ impl AwsService for S3Service {
             ));
         }
         let bucket = req.path_segments.first().map(|s| s.as_str());
+        let op = match early_op {
+            Some(op) => Some(op),
+            None if req.method == Method::OPTIONS => None,
+            // An S3 Control request none of its routes took.
+            None => match classify_request(&req) {
+                Ok(op) => Some(op),
+                Err(refusal) => return Err(self.refuse(&req, refusal)),
+            },
+        };
 
         // Bucket names are one global namespace, so a bucket-addressed request
         // is served in the account that OWNS the bucket, not the caller's: a
@@ -877,10 +894,44 @@ impl AwsService for S3Service {
         let owner_account = bucket.and_then(|b| self.bucket_owner_account(b));
         let account_id = owner_account.as_deref().unwrap_or(caller_account);
 
-        if !is_control && bucket.is_some() {
-            request_checks::check_request(&req, key.as_deref(), key_put)?;
+        // The payload's own refusals come once the bucket is known to exist
+        // and the caller is authorized (dispatch has run), as recorded on S3:
+        // a missing bucket is NoSuchBucket and an unauthorized caller
+        // AccessDenied whatever the framing. A request to a missing bucket is
+        // left to answer NoSuchBucket (CreateBucket creates its bucket).
+        if !is_control
+            && (bucket.is_none()
+                || owner_account.is_some()
+                || op == Some(route::S3Op::CreateBucket))
+        {
+            if let Some(error) = op.and_then(|op| streaming_payload_refused(&req, op)) {
+                return Err(self.refuse(&req, error.into()));
+            }
+            // Dispatch unframed an aws-chunked body already
+            // (`prepare_request`); one still framed here is broken, and this
+            // returns its error. A direct call is unframed here.
+            if req.body_stream.lock().is_none() {
+                let mut body = std::mem::take(&mut req.body);
+                let unframed = crate::checksum::deframe_buffered(&mut req.headers, &mut body);
+                req.body = body;
+                if let Err(error) = unframed {
+                    return Err(self.refuse(&req, error.into()));
+                }
+            }
+        } else if let Some(b) = bucket.filter(|_| {
+            !is_control
+                && req.body_stream.lock().is_none()
+                && crate::checksum::still_framed(&req.headers)
+        }) {
+            // A body still framed to a missing bucket: NoSuchBucket, before
+            // anything reads the body (recorded, PutObject and ?tagging).
+            return Err(no_such_bucket(b));
+        }
+
+        if let Some(op) = op.filter(|_| !is_control && bucket.is_some()) {
+            request_checks::check_request(&req, key.as_deref(), op)?;
             if owner_account.is_some() {
-                request_checks::check_existing_bucket_request(&req, key.as_deref())?;
+                request_checks::check_existing_bucket_request(&req, op)?;
             }
         }
 
@@ -892,151 +943,23 @@ impl AwsService for S3Service {
         // describe the assembled object, not its XML body; a POST Object form
         // carries its fields in the body. A request to a bucket that does not
         // exist is left to answer NoSuchBucket.
-        let verifies_own_payload = is_put_object
-            || is_upload_part
-            || key_put == request_checks::KeyPut::Annotation
-            || (req.method == Method::POST && req.query_params.contains_key("uploadId"))
-            // CopyObject / UploadPartCopy carry no body; their checksum header
-            // names the copy's algorithm and is validated by the handler.
-            || req.headers.contains_key("x-amz-copy-source")
-            || req
-                .headers
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("multipart/form-data"));
+        // CopyObject / UploadPartCopy carry no body; their checksum header
+        // names the copy's algorithm and is validated by the handler.
+        let verifies_own_payload = matches!(
+            op,
+            Some(
+                route::S3Op::PutObject
+                    | route::S3Op::UploadPart
+                    | route::S3Op::PutObjectAnnotation
+                    | route::S3Op::CompleteMultipartUpload
+                    | route::S3Op::CopyObject
+                    | route::S3Op::UploadPartCopy
+                    | route::S3Op::PostObject
+            )
+        );
         if !is_control && !verifies_own_payload && (bucket.is_none() || owner_account.is_some()) {
-            if let Some(decoded) = crate::checksum::verify_request_body(&req.headers, &req.body)? {
-                req.body = decoded.into();
-            }
+            crate::checksum::verify_request_body(&req.headers, &req.body)?;
         }
-
-        // Multipart upload operations (checked before main match). Held in an
-        // Option rather than returned directly so these responses still reach
-        // the shared tail below (CORS headers, access logging) — browser
-        // multipart upload is the single most common reason a bucket has a CORS
-        // config at all, so skipping it here is exactly the wrong place.
-        //
-        // Each arm carries its own access-log operation name: method + key
-        // alone cannot tell `AbortMultipartUpload` from a real object DELETE,
-        // and logging the former as `DELETE.OBJECT` would show a log consumer a
-        // live object being deleted.
-        #[allow(clippy::type_complexity)]
-        let multipart: Option<(&'static str, Result<AwsResponse, AwsServiceError>)> = 'multipart: {
-            let Some(b) = bucket else {
-                break 'multipart None;
-            };
-            // POST /{bucket}/{key}?uploads — CreateMultipartUpload
-            if req.method == Method::POST
-                && key.is_some()
-                && req.query_params.contains_key("uploads")
-            {
-                break 'multipart Some((
-                    "POST.UPLOADS",
-                    self.create_multipart_upload(account_id, &req, b, key.as_deref().unwrap()),
-                ));
-            }
-
-            // POST /{bucket}/{key}?restore
-            if req.method == Method::POST
-                && key.is_some()
-                && req.query_params.contains_key("restore")
-            {
-                break 'multipart Some((
-                    "POST.RESTORE",
-                    self.restore_object(account_id, &req, b, key.as_deref().unwrap()),
-                ));
-            }
-
-            // POST /{bucket}/{key}?uploadId=X — CompleteMultipartUpload
-            if req.method == Method::POST && key.is_some() {
-                if let Some(upload_id) = req.query_params.get("uploadId").cloned() {
-                    break 'multipart Some((
-                        "POST.UPLOAD",
-                        self.complete_multipart_upload(
-                            account_id,
-                            &req,
-                            b,
-                            key.as_deref().unwrap(),
-                            &upload_id,
-                        ),
-                    ));
-                }
-            }
-
-            // PUT /{bucket}/{key}?partNumber=N&uploadId=X — UploadPart or UploadPartCopy
-            if req.method == Method::PUT && key.is_some() {
-                if let (Some(part_num_str), Some(upload_id)) = (
-                    req.query_params.get("partNumber").cloned(),
-                    req.query_params.get("uploadId").cloned(),
-                ) {
-                    if let Ok(part_number) = part_num_str.parse::<i64>() {
-                        if req.headers.contains_key("x-amz-copy-source") {
-                            break 'multipart Some((
-                                "COPY.PART",
-                                self.upload_part_copy(
-                                    account_id,
-                                    &req,
-                                    b,
-                                    key.as_deref().unwrap(),
-                                    &upload_id,
-                                    part_number,
-                                ),
-                            ));
-                        }
-                        break 'multipart Some((
-                            "PUT.PART",
-                            self.upload_part(
-                                account_id,
-                                &req,
-                                b,
-                                key.as_deref().unwrap(),
-                                &upload_id,
-                                part_number,
-                            )
-                            .await,
-                        ));
-                    }
-                }
-            }
-
-            // DELETE /{bucket}/{key}?uploadId=X — AbortMultipartUpload
-            if req.method == Method::DELETE && key.is_some() {
-                if let Some(upload_id) = req.query_params.get("uploadId").cloned() {
-                    break 'multipart Some((
-                        "DELETE.UPLOAD",
-                        self.abort_multipart_upload(
-                            account_id,
-                            b,
-                            key.as_deref().unwrap(),
-                            &upload_id,
-                        ),
-                    ));
-                }
-            }
-
-            // GET /{bucket}?uploads — ListMultipartUploads
-            if req.method == Method::GET
-                && key.is_none()
-                && req.query_params.contains_key("uploads")
-            {
-                break 'multipart Some((
-                    "GET.UPLOADS",
-                    self.list_multipart_uploads(account_id, b, &req.query_params),
-                ));
-            }
-
-            // GET /{bucket}/{key}?uploadId=X — ListParts
-            if req.method == Method::GET && key.is_some() {
-                if let Some(upload_id) = req.query_params.get("uploadId").cloned() {
-                    break 'multipart Some((
-                        "GET.UPLOAD",
-                        self.list_parts(account_id, &req, b, key.as_deref().unwrap(), &upload_id),
-                    ));
-                }
-            }
-
-            None
-        };
 
         // Handle OPTIONS preflight requests (CORS)
         if req.method == Method::OPTIONS {
@@ -1230,532 +1153,30 @@ impl AwsService for S3Service {
             }
         }
 
-        // Capture origin for CORS response headers. A blank `Origin:` is
-        // treated as absent — the request carries nothing to evaluate CORS
-        // against, and letting it through would match a `*` rule and stamp
-        // CORS headers onto a request no browser would have sent that way.
-        // Same single-value read as the preflight path: a request carrying more
-        // than one `Origin` is not a single origin to allow.
-        let origin_header = single_cors_header(&req.headers, "origin").map(str::to_string);
-
-        // Bucket-scoped sub-resource query params. If a request targets one
-        // of these without a bucket in the path, S3 returns an error rather
-        // than silently treating it as a top-level (service) operation.
-        // Real AWS rejects e.g. `GET /?tagging` with a routing/validation
-        // error; mirroring that prevents bucket-required ops from being
-        // accidentally answered by ListBuckets / WriteGetObjectResponse.
-        let bucket_subresources: &[&str] = &[
-            "metadataAnnotationTable",
-            "tagging",
-            "acl",
-            "versioning",
-            "cors",
-            "notification",
-            "website",
-            "accelerate",
-            "publicAccessBlock",
-            "encryption",
-            "lifecycle",
-            "logging",
-            "policy",
-            "policyStatus",
-            "replication",
-            "ownershipControls",
-            "inventory",
-            "analytics",
-            "intelligent-tiering",
-            "metrics",
-            "requestPayment",
-            "abac",
-            "metadataConfiguration",
-            "metadataTable",
-            "metadataInventoryTable",
-            "metadataJournalTable",
-            "object-lock",
-            "versions",
-            "session",
-            "retention",
-            "legal-hold",
-            "attributes",
-            "torrent",
-            "renameObject",
-            "uploads",
-            "restore",
-            "select",
-            // Bucket-required ops the earlier list missed: their query
-            // markers (e.g. `?location` for GetBucketLocation,
-            // `?delete` for DeleteObjects, `?list-type=2` for
-            // ListObjectsV2) signal a bucket op so a request with the
-            // marker but no bucket segment is malformed, not a service-
-            // level call.
-            "location",
-            "delete",
-            "list-type",
-        ];
-        if bucket.is_none()
-            && bucket_subresources
-                .iter()
-                .any(|q| req.query_params.contains_key(*q))
-        {
+        // A preflight with no bucket reaches no operation.
+        let Some(op) = op else {
             return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidBucketName",
-                "The specified bucket is not valid: bucket name is required for this operation",
+                StatusCode::METHOD_NOT_ALLOWED,
+                "MethodNotAllowed",
+                "The specified method is not allowed against this resource",
             ));
-        }
-
-        let multipart_op = multipart.as_ref().map(|(op, _)| *op);
-        let mut result = match multipart {
-            Some((_, r)) => r,
-            None => match (&req.method, bucket, key.as_deref()) {
-                // ListBuckets: GET /
-                (&Method::GET, None, None) => {
-                    if req.query_params.get("x-id").map(|s| s.as_str())
-                        == Some("ListDirectoryBuckets")
-                    {
-                        self.list_directory_buckets(caller_account, &req)
-                    } else {
-                        self.list_buckets(caller_account, &req)
-                    }
-                }
-
-                // Bucket-level operations (no key)
-                (&Method::PUT, Some(b), None) => {
-                    if req.query_params.contains_key("metadataAnnotationTable") {
-                        self.update_bucket_metadata_annotation_table_configuration(
-                            account_id, &req, b,
-                        )
-                    } else if req.query_params.contains_key("tagging") {
-                        self.put_bucket_tagging(account_id, &req, b)
-                    } else if req.query_params.contains_key("acl") {
-                        self.put_bucket_acl(account_id, &req, b)
-                    } else if req.query_params.contains_key("versioning") {
-                        self.put_bucket_versioning(account_id, &req, b)
-                    } else if req.query_params.contains_key("cors") {
-                        self.put_bucket_cors(account_id, &req, b)
-                    } else if req.query_params.contains_key("notification") {
-                        self.put_bucket_notification(account_id, &req, b)
-                    } else if req.query_params.contains_key("website") {
-                        self.put_bucket_website(account_id, &req, b)
-                    } else if req.query_params.contains_key("accelerate") {
-                        self.put_bucket_accelerate(account_id, &req, b)
-                    } else if req.query_params.contains_key("publicAccessBlock") {
-                        self.put_public_access_block(account_id, &req, b)
-                    } else if req.query_params.contains_key("encryption") {
-                        self.put_bucket_encryption(account_id, &req, b)
-                    } else if req.query_params.contains_key("lifecycle") {
-                        self.put_bucket_lifecycle(account_id, &req, b)
-                    } else if req.query_params.contains_key("logging") {
-                        self.put_bucket_logging(account_id, &req, b)
-                    } else if req.query_params.contains_key("policy") {
-                        self.put_bucket_policy(account_id, &req, b)
-                    } else if req.query_params.contains_key("object-lock") {
-                        self.put_object_lock_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("replication") {
-                        self.put_bucket_replication(account_id, &req, b)
-                    } else if req.query_params.contains_key("ownershipControls") {
-                        self.put_bucket_ownership_controls(account_id, &req, b)
-                    } else if req.query_params.contains_key("inventory") {
-                        self.put_bucket_inventory(account_id, &req, b)
-                    } else if req.query_params.contains_key("analytics") {
-                        self.put_bucket_analytics_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("intelligent-tiering") {
-                        self.put_bucket_intelligent_tiering_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("metrics") {
-                        self.put_bucket_metrics_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("requestPayment") {
-                        self.put_bucket_request_payment(account_id, &req, b)
-                    } else if req.query_params.contains_key("abac") {
-                        self.put_bucket_abac(account_id, &req, b)
-                    } else if req.query_params.contains_key("metadataInventoryTable") {
-                        self.update_bucket_metadata_inventory_table(account_id, &req, b)
-                    } else if req.query_params.contains_key("metadataJournalTable") {
-                        self.update_bucket_metadata_journal_table(account_id, &req, b)
-                    } else {
-                        self.create_bucket(caller_account, &req, b)
-                    }
-                }
-                (&Method::DELETE, Some(b), None) => {
-                    if req.query_params.contains_key("tagging") {
-                        self.delete_bucket_tagging(account_id, &req, b)
-                    } else if req.query_params.contains_key("cors") {
-                        self.delete_bucket_cors(account_id, b)
-                    } else if req.query_params.contains_key("website") {
-                        self.delete_bucket_website(account_id, b)
-                    } else if req.query_params.contains_key("publicAccessBlock") {
-                        self.delete_public_access_block(account_id, b)
-                    } else if req.query_params.contains_key("encryption") {
-                        self.delete_bucket_encryption(account_id, b)
-                    } else if req.query_params.contains_key("lifecycle") {
-                        self.delete_bucket_lifecycle(account_id, b)
-                    } else if req.query_params.contains_key("policy") {
-                        self.delete_bucket_policy(account_id, b)
-                    } else if req.query_params.contains_key("replication") {
-                        self.delete_bucket_replication(account_id, b)
-                    } else if req.query_params.contains_key("ownershipControls") {
-                        self.delete_bucket_ownership_controls(account_id, b)
-                    } else if req.query_params.contains_key("inventory") {
-                        self.delete_bucket_inventory(account_id, &req, b)
-                    } else if req.query_params.contains_key("analytics") {
-                        self.delete_bucket_analytics_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("intelligent-tiering") {
-                        self.delete_bucket_intelligent_tiering_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("metrics") {
-                        self.delete_bucket_metrics_config(account_id, &req, b)
-                    } else if req.query_params.contains_key("metadataConfiguration") {
-                        self.delete_bucket_metadata_config(account_id, b)
-                    } else if req.query_params.contains_key("metadataTable") {
-                        self.delete_bucket_metadata_table_config(account_id, b)
-                    } else {
-                        self.delete_bucket(account_id, &req, b)
-                    }
-                }
-                (&Method::HEAD, Some(b), None) => self.head_bucket(account_id, b),
-                (&Method::GET, Some(b), None) => {
-                    if req.query_params.contains_key("tagging") {
-                        self.get_bucket_tagging(account_id, &req, b)
-                    } else if req.query_params.contains_key("location") {
-                        self.get_bucket_location(account_id, b)
-                    } else if req.query_params.contains_key("acl") {
-                        self.get_bucket_acl(account_id, &req, b)
-                    } else if req.query_params.contains_key("versioning") {
-                        self.get_bucket_versioning(account_id, b)
-                    } else if req.query_params.contains_key("versions") {
-                        self.list_object_versions(account_id, &req, b)
-                    } else if req.query_params.contains_key("object-lock") {
-                        self.get_object_lock_configuration(account_id, b)
-                    } else if req.query_params.contains_key("cors") {
-                        self.get_bucket_cors(account_id, b)
-                    } else if req.query_params.contains_key("notification") {
-                        self.get_bucket_notification(account_id, b)
-                    } else if req.query_params.contains_key("website") {
-                        self.get_bucket_website(account_id, b)
-                    } else if req.query_params.contains_key("accelerate") {
-                        self.get_bucket_accelerate(account_id, b)
-                    } else if req.query_params.contains_key("publicAccessBlock") {
-                        self.get_public_access_block(account_id, b)
-                    } else if req.query_params.contains_key("encryption") {
-                        self.get_bucket_encryption(account_id, b)
-                    } else if req.query_params.contains_key("lifecycle") {
-                        self.get_bucket_lifecycle(account_id, b)
-                    } else if req.query_params.contains_key("logging") {
-                        self.get_bucket_logging(account_id, b)
-                    } else if req.query_params.contains_key("policy") {
-                        self.get_bucket_policy(account_id, b)
-                    } else if req.query_params.contains_key("replication") {
-                        self.get_bucket_replication(account_id, b)
-                    } else if req.query_params.contains_key("ownershipControls") {
-                        self.get_bucket_ownership_controls(account_id, b)
-                    } else if req.query_params.contains_key("inventory") {
-                        if req.query_params.contains_key("id") {
-                            self.get_bucket_inventory(account_id, &req, b)
-                        } else {
-                            self.list_bucket_inventory_configurations(account_id, b)
-                        }
-                    } else if req.query_params.contains_key("analytics") {
-                        if req.query_params.contains_key("id") {
-                            self.get_bucket_analytics_config(account_id, &req, b)
-                        } else {
-                            self.list_bucket_analytics_configurations(account_id, b)
-                        }
-                    } else if req.query_params.contains_key("intelligent-tiering") {
-                        if req.query_params.contains_key("id") {
-                            self.get_bucket_intelligent_tiering_config(account_id, &req, b)
-                        } else {
-                            self.list_bucket_intelligent_tiering_configurations(account_id, b)
-                        }
-                    } else if req.query_params.contains_key("metrics") {
-                        if req.query_params.contains_key("id") {
-                            self.get_bucket_metrics_config(account_id, &req, b)
-                        } else {
-                            self.list_bucket_metrics_configurations(account_id, b)
-                        }
-                    } else if req.query_params.contains_key("requestPayment") {
-                        self.get_bucket_request_payment(account_id, b)
-                    } else if req.query_params.contains_key("abac") {
-                        self.get_bucket_abac(account_id, b)
-                    } else if req.query_params.contains_key("policyStatus") {
-                        self.get_bucket_policy_status(account_id, b)
-                    } else if req.query_params.contains_key("metadataConfiguration") {
-                        self.get_bucket_metadata_config(account_id, b)
-                    } else if req.query_params.contains_key("metadataTable") {
-                        self.get_bucket_metadata_table_config(account_id, b)
-                    } else if req.query_params.contains_key("session") {
-                        self.create_session(account_id, &req, b)
-                    } else if req.query_params.get("list-type").map(|s| s.as_str()) == Some("2") {
-                        self.list_objects_v2(account_id, &req, b)
-                    } else if req.query_params.is_empty() {
-                        // If bucket has website config and no query params, serve index document
-                        let website_config = {
-                            let accounts = self.state.read();
-                            let _empty_s3 = crate::state::S3State::new(account_id, &req.region);
-                            let state = accounts.get(account_id).unwrap_or(&_empty_s3);
-                            state
-                                .buckets
-                                .get(b)
-                                .and_then(|bkt| bkt.website_config.clone())
-                        };
-                        if let Some(ref config) = website_config {
-                            if let Some(index_doc) =
-                                extract_xml_value(config, "Suffix").or_else(|| {
-                                    extract_xml_value(config, "IndexDocument").and_then(|inner| {
-                                        let open = "<Suffix>";
-                                        let close = "</Suffix>";
-                                        let s = inner.find(open)? + open.len();
-                                        let e = inner.find(close)?;
-                                        Some(inner[s..e].trim().to_string())
-                                    })
-                                })
-                            {
-                                self.serve_website_object(account_id, &req, b, &index_doc, config)
-                            } else {
-                                self.list_objects_v1(account_id, &req, b)
-                            }
-                        } else {
-                            self.list_objects_v1(account_id, &req, b)
-                        }
-                    } else {
-                        self.list_objects_v1(account_id, &req, b)
-                    }
-                }
-
-                // Object-level operations
-                (&Method::PUT, Some(b), Some(k)) => {
-                    if req.query_params.contains_key("annotation") {
-                        self.put_object_annotation(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("tagging") {
-                        self.put_object_tagging(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("acl") {
-                        self.put_object_acl(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("retention") {
-                        self.put_object_retention(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("legal-hold") {
-                        self.put_object_legal_hold(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("renameObject") {
-                        self.rename_object(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("encryption") {
-                        self.update_object_encryption(account_id, &req, b, k)
-                    } else if req.headers.contains_key("x-amz-copy-source") {
-                        self.copy_object(account_id, &req, b, k)
-                    } else {
-                        self.put_object(account_id, &req, b, k).await
-                    }
-                }
-                (&Method::GET, Some(b), Some(k)) => {
-                    if req.query_params.contains_key("annotation") {
-                        // Both `?annotation` reads share a URI; `annotationName`
-                        // selects one annotation, its absence lists them.
-                        if req
-                            .query_params
-                            .contains_key(annotations::ANNOTATION_NAME_QUERY)
-                        {
-                            self.get_object_annotation(account_id, &req, b, k)
-                        } else {
-                            self.list_object_annotations(account_id, &req, b, k)
-                        }
-                    } else if req.query_params.contains_key("tagging") {
-                        self.get_object_tagging(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("acl") {
-                        self.get_object_acl(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("retention") {
-                        self.get_object_retention(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("legal-hold") {
-                        self.get_object_legal_hold(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("attributes") {
-                        self.get_object_attributes(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("torrent") {
-                        self.get_object_torrent(account_id, &req, b, k)
-                    } else {
-                        let result = self.get_object(account_id, &req, b, k);
-                        // If object not found and bucket has website config, serve error document
-                        let is_not_found = matches!(
-                            &result,
-                            Err(e) if e.code() == "NoSuchKey"
-                        );
-                        let mut return_website_error = None;
-                        if is_not_found {
-                            let website_config = {
-                                let accounts = self.state.read();
-                                let _empty_s3 = crate::state::S3State::new(account_id, &req.region);
-                                let state = accounts.get(account_id).unwrap_or(&_empty_s3);
-                                state
-                                    .buckets
-                                    .get(b)
-                                    .and_then(|bkt| bkt.website_config.clone())
-                            };
-                            if let Some(ref config) = website_config {
-                                if let Some(error_key) = extract_xml_value(config, "ErrorDocument")
-                                    .and_then(|inner| {
-                                        let open = "<Key>";
-                                        let close = "</Key>";
-                                        let s = inner.find(open)? + open.len();
-                                        let e = inner.find(close)?;
-                                        Some(inner[s..e].trim().to_string())
-                                    })
-                                    .or_else(|| extract_xml_value(config, "Key"))
-                                {
-                                    // Fall through to the shared tail (CORS headers,
-                                    // access logging) rather than returning early,
-                                    // so a website error document is treated like
-                                    // any other response.
-                                    return_website_error = Some(
-                                        self.serve_website_error(account_id, &req, b, &error_key),
-                                    );
-                                }
-                            }
-                        }
-                        return_website_error.unwrap_or(result)
-                    }
-                }
-                (&Method::DELETE, Some(b), Some(k)) => {
-                    if req.query_params.contains_key("annotation") {
-                        self.delete_object_annotation(account_id, &req, b, k)
-                    } else if req.query_params.contains_key("tagging") {
-                        self.delete_object_tagging(account_id, &req, b, k)
-                    } else {
-                        self.delete_object(account_id, &req, b, k)
-                    }
-                }
-                (&Method::HEAD, Some(b), Some(k)) => self.head_object(account_id, &req, b, k),
-
-                // POST /{bucket}?delete — batch delete
-                (&Method::POST, Some(b), None) if req.query_params.contains_key("delete") => {
-                    self.delete_objects(account_id, &req, b)
-                }
-                (&Method::POST, Some(b), None)
-                    if req.query_params.contains_key("metadataConfiguration") =>
-                {
-                    self.create_bucket_metadata_config(account_id, &req, b)
-                }
-                (&Method::POST, Some(b), None)
-                    if req.query_params.contains_key("metadataTable") =>
-                {
-                    self.create_bucket_metadata_table_config(account_id, &req, b)
-                }
-                (&Method::POST, Some(b), Some(k))
-                    if req.query_params.get("select-type").map(|s| s.as_str()) == Some("2") =>
-                {
-                    self.select_object_content(account_id, &req, b, k)
-                }
-                (&Method::POST, Some("WriteGetObjectResponse"), None) => {
-                    self.write_get_object_response(account_id, &req)
-                }
-
-                // POST /{bucket} with a multipart/form-data body — POST Object
-                // (browser-form "POST Policy" upload, the target of boto3's
-                // `generate_presigned_post`). Guarded on Content-Type so it
-                // doesn't shadow the `?delete` / metadata-config arms above,
-                // which also match `(POST, Some(b), None)` but carry their own
-                // query-param guards.
-                (&Method::POST, Some(b), None)
-                    if req
-                        .headers
-                        .get(http::header::CONTENT_TYPE)
-                        .and_then(|v| v.to_str().ok())
-                        .is_some_and(|ct| {
-                            ct.to_ascii_lowercase().starts_with("multipart/form-data")
-                        }) =>
-                {
-                    self.post_object(account_id, &req, b).await
-                }
-
-                _ => Err(AwsServiceError::aws_error(
-                    StatusCode::METHOD_NOT_ALLOWED,
-                    "MethodNotAllowed",
-                    "The specified method is not allowed against this resource",
-                )),
-            },
         };
-
-        // Apply CORS headers to the response if Origin was present
-        // Keyed on the raw header, not the usable value: an `Origin` that is
-        // blank, unreadable, or split across conflicting lines still makes the
-        // response origin-dependent, so it needs `Vary` even though it gets no
-        // allow-origin. Skipping the block entirely would ship an ACAO-less
-        // body with no `Vary`, which a shared cache then replays to a
-        // legitimate origin — the hole this whole change exists to close.
-        if let Some(b_name) = bucket.filter(|_| req.headers.contains_key("origin")) {
-            let cors_config = {
-                let accounts = self.state.read();
-                let _empty_s3 = crate::state::S3State::new(account_id, &req.region);
-                let state = accounts.get(account_id).unwrap_or(&_empty_s3);
-                state
-                    .buckets
-                    .get(b_name)
-                    .and_then(|b| b.cors_config.clone())
-            };
-            if let Some(ref config) = cors_config {
-                // `Vary` goes on every response we evaluated CORS for, matching
-                // rule or not: a disallowed origin gets no ACAO, and that
-                // ACAO-less response must not be cached and replayed to an
-                // allowed origin.
-                set_cors_header(&mut result, "vary", CORS_VARY);
-                let rules = parse_cors_config(config);
-                // The actual request is matched on method as well as origin, as
-                // on S3: a rule allowing only GET must not hand an ACAO to a
-                // DELETE from that origin, which would let the browser pass the
-                // response to the page.
-                // Empty requested-headers: only a preflight declares headers.
-                // `origin_header` is `None` when the header was present but
-                // unusable; `find_cors_rule` refuses an empty origin, so such a
-                // request keeps the `Vary` above and gets no allow-origin.
-                let origin = origin_header.as_deref().unwrap_or("");
-                if let Some(rule) = find_cors_rule(&rules, origin, req.method.as_str(), &[]) {
-                    // `*` only when the entry that actually matched is `*`. A rule
-                    // listing both a concrete origin and `*` matches the
-                    // concrete one first, and echoing `*` there would drop
-                    // allow-credentials for an origin the rule names.
-                    let matched_origin = if rule
-                        .allowed_origins
-                        .iter()
-                        .find(|o| origin_matches(origin, o))
-                        .is_some_and(|o| o == "*")
-                    {
-                        "*"
-                    } else {
-                        origin
-                    };
-                    // Errors get the allow-origin too: S3 answers a 404 for an
-                    // allowed origin with ACAO, so a `mode: 'cors'` fetch sees
-                    // a real 404 instead of an opaque CORS network error.
-                    set_cors_header(&mut result, "access-control-allow-origin", matched_origin);
-                    if matched_origin != "*" {
-                        set_cors_header(&mut result, "access-control-allow-credentials", "true");
-                    }
-                    if !rule.expose_headers.is_empty() {
-                        set_cors_header(
-                            &mut result,
-                            "access-control-expose-headers",
-                            &rule.expose_headers.join(", "),
-                        );
-                    }
-                }
-            }
-        }
-
-        // Write S3 access log entry if the source bucket has logging enabled
-        if let Some(b_name) = bucket {
-            let status_code = match &result {
-                Ok(resp) => resp.status.as_u16(),
-                Err(e) => e.status().as_u16(),
-            };
-            let op = multipart_op
-                .unwrap_or_else(|| logging::operation_name(&req.method, key.as_deref()));
-            logging::maybe_write_access_log(
-                &self.state,
-                &self.store,
-                b_name,
-                &logging::AccessLogRequest {
-                    operation: op,
-                    key: key.as_deref(),
-                    status: status_code,
-                    request_id: &req.request_id,
-                    method: req.method.as_str(),
-                    path: &req.raw_path,
-                },
-            );
-        }
-
+        // Every operation that addresses a bucket (or an object in one) was
+        // classified from a path naming them, so these are only empty for the
+        // service-level listings, which use neither.
+        let b = bucket.unwrap_or_default();
+        let k = key.as_deref().unwrap_or_default();
+        let mut result = self
+            .route_operation(op, &req, caller_account, account_id, b, k)
+            .await;
+        self.finish_response(
+            &req,
+            account_id,
+            bucket,
+            key.as_deref(),
+            Some(op),
+            &mut result,
+        );
         result
     }
 
@@ -1886,241 +1307,215 @@ impl AwsService for S3Service {
         true
     }
 
-    /// S3 resources are either:
-    /// - Bucket ARN (`arn:aws:s3:::bucket`) for bucket-level actions
-    /// - Object ARN (`arn:aws:s3:::bucket/key`) for object-level actions
-    /// - Wildcard (`*`) for `ListBuckets` which doesn't target a specific
-    ///   resource
-    ///
-    /// S3 ARNs notably omit the account id and region — this is the one
-    /// AWS service that carries neither in its ARN, because bucket names
-    /// are globally unique.
+    /// The request's primary authorization: the operation's own required
+    /// action (see [`AwsService::iam_actions_for`] for the full set).
     fn iam_action_for(&self, request: &AwsRequest) -> Option<fakecloud_core::auth::IamAction> {
-        // S3 doesn't set `request.action` — the handler dispatches on
-        // method + path + query params directly. Re-derive the action
-        // name here so enforcement can match against IAM policies the
-        // same way the real service would.
+        self.iam_actions_for(request).into_iter().next()
+    }
+
+    /// Every IAM authorization an S3 request needs, under S3's policy action
+    /// names (not its operation names: `ListObjectsV2` is `s3:ListBucket`,
+    /// `HeadObject` is `s3:GetObject`, ...; see [`iam_actions`]). Dispatch
+    /// requires every one, so a request that also sets an ACL, tags, Object
+    /// Lock settings or bypasses governance retention needs those permissions
+    /// too, a copy needs the source read, and DeleteObjects needs the delete
+    /// on each key.
+    ///
+    /// Resources are the bucket ARN (`arn:aws:s3:::bucket`) for bucket-level
+    /// actions, the object ARN (`arn:aws:s3:::bucket/key`) for object-level
+    /// ones and `*` for account-level ones (`s3:ListAllMyBuckets`), by the
+    /// action's resource type in the service authorization reference. S3
+    /// ARNs carry neither account nor region, since bucket names are global.
+    fn iam_actions_for(&self, request: &AwsRequest) -> Vec<fakecloud_core::auth::IamAction> {
+        if let Some(action) = control_iam_action(request) {
+            return vec![action];
+        }
+        // S3 doesn't set `request.action` -- the handler dispatches on
+        // method + path + query params directly -- so the operation is
+        // re-derived here.
+        let Some(op) = s3_operation(request) else {
+            return Vec::new();
+        };
         let bucket = request.path_segments.first().map(|s| s.as_str());
-        let key = if request.path_segments.len() > 1 {
-            Some(request.path_segments[1..].join("/"))
-        } else {
-            None
-        };
-        // S3 Control access-point management (host `s3-control...`, path
-        // `/v20180820/accesspoint[/name]`) is authorized under the dedicated
-        // s3:CreateAccessPoint / GetAccessPoint / DeleteAccessPoint /
-        // ListAccessPoints actions — NOT the object-level GetObject/PutObject/
-        // DeleteObject the generic method-based detection would pick, which made
-        // access-point policies ineffective.
-        let is_control = fakecloud_core::protocol::is_s3_control_host(&request.headers)
-            && request.path_segments.first().map(|s| s.as_str()) == Some("v20180820");
-        // S3 Control resource tagging is authorized as s3:TagResource /
-        // UntagResource / ListTagsForResource on the tagged resource's ARN.
-        if is_control && request.path_segments.get(1).map(|s| s.as_str()) == Some("tags") {
-            let action = match request.method.as_str() {
-                "GET" => Some("ListTagsForResource"),
-                "POST" => Some("TagResource"),
-                "DELETE" => Some("UntagResource"),
-                _ => None,
-            };
-            if let Some(action) = action {
-                let resource = control_tags::resource_arn_from_path(request)
-                    .unwrap_or_else(|| "*".to_string());
-                return Some(fakecloud_core::auth::IamAction {
-                    service: "s3",
-                    action,
-                    resource,
-                });
-            }
-        }
-        if is_control && request.path_segments.get(1).map(|s| s.as_str()) == Some("accesspoint") {
-            let has_name = request.path_segments.get(2).is_some();
-            let ap_action = match (request.method.as_str(), has_name) {
-                ("PUT", true) => Some("CreateAccessPoint"),
-                ("GET", true) => Some("GetAccessPoint"),
-                ("DELETE", true) => Some("DeleteAccessPoint"),
-                ("GET", false) => Some("ListAccessPoints"),
-                _ => None,
-            };
-            if let Some(action) = ap_action {
-                let resource = request
-                    .path_segments
-                    .get(2)
-                    .map(|name| {
-                        Arn::s3_access_point(&request.region, &request.account_id, name).to_string()
-                    })
-                    .unwrap_or_else(|| "*".to_string());
-                return Some(fakecloud_core::auth::IamAction {
-                    service: "s3",
-                    action,
-                    resource,
-                });
-            }
-        }
-        let action = s3_detect_action(
-            request.method.as_str(),
-            bucket,
-            key.as_deref(),
-            &request.query_params,
-        )?;
-        // RenameObject is a directory-bucket (S3 Express One Zone) Zonal
-        // endpoint operation, which has no IAM action of its own: it runs on
-        // the session `CreateSession` opened ("CreateSession enables access
-        // for all object level operations", user guide, "Authorizing Regional
-        // endpoint API operations with IAM"), so it is authorized as
-        // `s3express:CreateSession` on the bucket, for a ReadWrite session
-        // (see `iam_condition_keys_for`).
-        let action = if action == "RenameObject" {
-            "CreateSession"
-        } else {
-            action
-        };
-        // A handful of S3-adjacent ops are authorized under sibling IAM
-        // service prefixes, not `s3:`. Select the right prefix so a policy
-        // targeting the real action string actually matches.
-        let service = match action {
-            "CreateSession" | "ListAllMyDirectoryBuckets" => "s3express",
-            "WriteGetObjectResponse" => "s3-object-lambda",
-            _ => "s3",
-        };
+        let key = request_key(request);
         // Every ARN S3 returns for a bucket carries the bucket's own region's
         // partition, so policies written against those ARNs must match here.
         let bucket_region = bucket.and_then(|b| self.bucket_region(b));
         let region = bucket_region.as_deref().unwrap_or(&request.region);
-        let resource = match (action, bucket) {
-            // A directory bucket's ARN is in the `s3express` namespace and
-            // names its region and owning account:
-            // `arn:aws:s3express:<region>:<account>:bucket/<name>`.
-            ("CreateSession", Some(bucket)) => {
-                let owner = self
-                    .state
-                    .read()
-                    .find_account(|s| s.buckets.contains_key(bucket))
-                    .map_or_else(|| request.account_id.clone(), str::to_string);
-                Arn::regional("s3express", region, &owner, &format!("bucket/{bucket}")).to_string()
-            }
-            _ => s3_resource_for(region, action, bucket, key.as_deref()),
-        };
-        Some(fakecloud_core::auth::IamAction {
-            service,
-            action,
-            resource,
-        })
-    }
-
-    /// Tagging a bucket at create time needs `s3:TagResource` as well as
-    /// `s3:CreateBucket` — the S3 model says so on
-    /// `CreateBucketConfiguration$Tags` ("You must have the
-    /// `s3:TagResource` permission to create a general purpose bucket with
-    /// tags"). Dispatch requires every returned action to be allowed, so a
-    /// principal granted only `s3:CreateBucket` can still create an untagged
-    /// bucket but not a tagged one, as on AWS.
-    fn iam_actions_for(&self, request: &AwsRequest) -> Vec<fakecloud_core::auth::IamAction> {
-        let Some(action) = self.iam_action_for(request) else {
-            return Vec::new();
-        };
-        if action.service == "s3" && action.action == "CreateBucket" {
-            // A create that also configures the bucket needs the permission for
-            // each thing it configures, as on AWS: dispatch requires every
-            // returned action to be allowed, so a principal holding only
-            // `s3:CreateBucket` can still create a plain bucket. This matters
-            // more now that these settings PERSIST -- a bucket created
-            // `public-read` by a caller with no `s3:PutBucketAcl` used to lose
-            // the grant on restart, and now keeps it.
-            let mut extra = Vec::new();
-            let body = std::str::from_utf8(&request.body).unwrap_or("");
-            if !create_bucket_configuration_tags(body).is_empty() {
-                extra.push("TagResource");
-            }
-            // Per the CreateBucket permissions in the vendored model: an ACL set
-            // to public-read, public-read-write, authenticated-read "or any
-            // other custom ACLs" needs s3:PutBucketAcl, while "if you set the
-            // ACL to private, or if you don't specify any ACLs, only the
-            // s3:CreateBucket permission is required". Judged by the grants the
-            // request resolves to, so the two spellings of an owner-only ACL
-            // agree -- and so a least-privilege caller that always sends
-            // `--acl private` is not refused.
-            let reaches_past_owner = request
-                .headers
-                .get("x-amz-acl")
-                .and_then(|v| v.to_str().ok())
-                // Blank counts as absent here too. It resolves to owner-only today
-                // only because `canned_acl_grants` falls through to the owner for
-                // any unrecognized value -- so without this, an arm that ever made
-                // an unknown value resolve past the owner would silently start
-                // demanding `s3:PutBucketAcl` for an empty header.
-                .filter(|acl| !acl.trim().is_empty())
-                .is_some_and(|acl| acl_reaches_past_owner(acl, &request.account_id));
-            if reaches_past_owner || has_grant_headers(&request.headers) {
-                extra.push("PutBucketAcl");
-            }
-            // Presence, but blank counts as absent -- the same rule the ACL
-            // headers and the condition keys follow. Otherwise a blank value
-            // demands a permission whose condition key is deliberately not
-            // emitted, so a `StringEquals`-gated Allow 403s a request the handler
-            // would have answered with a 400.
-            if request
-                .headers
-                .get("x-amz-object-ownership")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| !v.trim().is_empty())
-            {
-                extra.push("PutBucketOwnershipControls");
-            }
-            if request
-                .headers
-                .get("x-amz-bucket-object-lock-enabled")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.eq_ignore_ascii_case("true"))
-            {
-                // Object lock forces versioning on, so AWS wants both.
-                extra.push("PutBucketObjectLockConfiguration");
-                extra.push("PutBucketVersioning");
-            }
-            if !extra.is_empty() {
-                let mut actions = Vec::with_capacity(extra.len() + 1);
-                let resource = action.resource.clone();
-                actions.push(action);
-                for name in extra {
-                    actions.push(fakecloud_core::auth::IamAction {
-                        service: "s3",
-                        action: name,
-                        resource: resource.clone(),
-                    });
+        iam_actions::required(op, request)
+            .into_iter()
+            .filter_map(|need| match need {
+                iam_actions::Need::Own(service, action) => {
+                    let resource = if service == "s3express" && action == "CreateSession" {
+                        match bucket {
+                            Some(bucket) => self.directory_bucket_arn(request, region, bucket),
+                            None => "*".to_string(),
+                        }
+                    } else {
+                        s3_resource_for(region, action, bucket, key.as_deref())
+                    };
+                    Some(fakecloud_core::auth::IamAction {
+                        service,
+                        action,
+                        resource,
+                    })
                 }
-                return actions;
-            }
-        }
-        // A replication configuration names the role S3 assumes to copy
-        // objects, so AWS also requires `iam:PassRole` on it.
-        let pass_role = if action.service == "s3" && action.action == "PutBucketReplication" {
-            replication_role_arn(&request.body)
-        } else {
-            None
-        };
-        let mut actions = vec![action];
-        if let Some(role) = pass_role {
-            actions.push(fakecloud_core::auth::IamAction::pass_role(role));
-        }
-        // CopyObject and UploadPartCopy also read the source object, which AWS
-        // authorizes as s3:GetObject (s3:GetObjectVersion for a versioned
-        // source) on the SOURCE object -- evaluated against the source
-        // bucket's owner and bucket policy, so copying out of another
-        // account's bucket needs that bucket's grant.
-        if let Some(source) = self.copy_source_read_action(request) {
-            actions.push(source);
-        }
-        actions.extend(governance_bypass_actions(request, &actions[0]));
-        actions.extend(object_lock_header_actions(request, &actions[0]));
-        actions
+                iam_actions::Need::Key(action, object_key) => {
+                    Some(fakecloud_core::auth::IamAction {
+                        service: "s3",
+                        action,
+                        resource: s3_resource_for(region, action, bucket, Some(&object_key)),
+                    })
+                }
+                // CopyObject and UploadPartCopy also read the source object --
+                // evaluated against the source bucket's owner and bucket
+                // policy, so copying out of another account's bucket needs
+                // that bucket's grant.
+                iam_actions::Need::CopySource => self.copy_source_read_action(request),
+                iam_actions::Need::PassRole(role) => {
+                    Some(fakecloud_core::auth::IamAction::pass_role(role))
+                }
+            })
+            .collect()
     }
 
     /// CreateBucket creates in the caller's account: a name another account
     /// owns is authorized against the caller's own policies and then answered
     /// `BucketAlreadyExists`, not refused by that account's bucket policy.
     fn iam_resource_in_caller_account(&self, request: &AwsRequest) -> bool {
-        self.iam_action_for(request)
-            .is_some_and(|a| a.service == "s3" && a.action == "CreateBucket")
+        s3_operation(request) == Some("CreateBucket") && control_iam_action(request).is_none()
+    }
+
+    /// DeleteObjects is authorized per key by its handler, which reports a
+    /// denied key as an `AccessDenied` entry of its 200 response. The handler
+    /// routes on the same classification, so a request deferred here is one
+    /// it runs as DeleteObjects (`POST /b//?delete&uploads` addresses the key
+    /// `/` and is refused as conflicting).
+    fn iam_authorized_by_handler(&self, request: &AwsRequest) -> bool {
+        !fakecloud_core::protocol::is_s3_control_host(&request.headers)
+            && !request.raw_path.starts_with("//")
+            && request.method != Method::OPTIONS
+            && matches!(
+                s3_operation(request),
+                // A browser-form upload's key and signer are in its body.
+                Some("DeleteObjects" | "PostObject")
+            )
+    }
+
+    /// The requests S3 refuses before authorizing anything: conflicting
+    /// sub-resource parameters, a sub-resource with a method it does not
+    /// take, half an upload part's address (see [`route`]), and an upload
+    /// part or part listing of an upload that does not exist (recorded:
+    /// NoSuchUpload, even anonymously and whatever the part number). Every
+    /// caller, anonymous included, gets these errors rather than an
+    /// AccessDenied, answered as the handler answers them.
+    /// S3 serves anonymous requests and judges them like any other: a
+    /// missing bucket is NoSuchBucket and an unclassifiable request its 400
+    /// before any AccessDenied (recorded).
+    fn validates_anonymous_before_authorization(&self) -> bool {
+        true
+    }
+
+    /// A CORS preflight is never authorized, whoever sends it (browsers send
+    /// it unsigned): the bucket's CORS rules alone answer it, 200 with the
+    /// `Access-Control-*` headers or 403 CORSResponse.
+    fn iam_authorization_required(&self, request: &AwsRequest) -> bool {
+        fakecloud_core::protocol::is_s3_control_host(&request.headers)
+            || !matches!(classify_request(request), Ok(route::S3Op::CorsPreflight))
+    }
+
+    fn streams_request_body(&self, head: &fakecloud_core::service::RequestHead<'_>) -> bool {
+        // Only an upload streams; every other request's body is small and
+        // buffered, so what runs before the handler (IAM reading the tag set
+        // of PutObjectTagging or CreateBucket, for one) sees it. Decided by
+        // the classification the handler routes on, from the same bucket and
+        // key, so the two cannot disagree about which requests stream.
+        if fakecloud_core::protocol::is_s3_control_host(head.headers)
+            || head.raw_path.starts_with("//")
+        {
+            return false;
+        }
+        let segments = fakecloud_core::path::split_path_segments(head.raw_path);
+        let key = key_of_raw_path(head.raw_path);
+        matches!(
+            route::classify(
+                head.method,
+                segments.first().map(String::as_str),
+                key.as_deref(),
+                head.query_params,
+                head.headers,
+            ),
+            Ok(route::S3Op::PutObject | route::S3Op::UploadPart)
+        )
+    }
+
+    fn prepare_request(&self, request: &mut AwsRequest) -> Result<(), AwsServiceError> {
+        if request.body_stream.lock().is_some() {
+            return Ok(());
+        }
+        // A request refused for declaring a streaming payload keeps the
+        // declaration it is refused for.
+        if classify_request(request)
+            .ok()
+            .and_then(|op| streaming_payload_refused(request, op))
+            .is_some()
+        {
+            return Ok(());
+        }
+        // A body that cannot be unframed stays framed (`still_framed`): S3
+        // answers a missing bucket and an unauthorized caller before the
+        // framing (recorded), so the handler refuses it after both, and
+        // nothing reads it in between.
+        let _ = crate::checksum::deframe_buffered(&mut request.headers, &mut request.body);
+        Ok(())
+    }
+
+    fn refuse_before_body(
+        &self,
+        head: &fakecloud_core::service::RequestHead<'_>,
+    ) -> Result<(), AwsServiceError> {
+        self.validate_head(&head_request(head)).map(drop)
+    }
+
+    fn validate_before_authorization(&self, request: &AwsRequest) -> Result<(), AwsServiceError> {
+        // S3 Control TagResource: as for the S3 tagging writes below, a tag
+        // set the handler cannot read is refused before its request tags are
+        // evaluated.
+        if control_tags::is_control_tags_request(request)
+            && request.method == Method::POST
+            && !request.body.is_empty()
+        {
+            let body = std::str::from_utf8(&request.body).unwrap_or("");
+            tags::read_tag_set(body, "TagResourceRequest", "Tags")?;
+        }
+        let Some(op) = self.validate_head(request)? else {
+            return Ok(());
+        };
+        // A body still framed could not be unframed (`prepare_request`): its
+        // error comes after authorization, from the handler, and its tag set
+        // is evaluated as none (the request fails and writes nothing).
+        if crate::checksum::still_framed(&request.headers) {
+            return Ok(());
+        }
+        // A tag set the handler cannot read is refused before its request
+        // tags are evaluated, so IAM never judges a partial or misread set.
+        if matches!(
+            op,
+            route::S3Op::PutObjectTagging | route::S3Op::PutBucketTagging
+        ) && !request.body.is_empty()
+        {
+            let body = std::str::from_utf8(&request.body).unwrap_or("");
+            if let Err(error) = tags::read_tag_set(body, "Tagging", "TagSet") {
+                return Err(self.refuse(request, error.into()));
+            }
+        }
+        if op == route::S3Op::CreateBucket {
+            let body = std::str::from_utf8(&request.body).unwrap_or("");
+            if let Err(error) = create_bucket_configuration_tags(body) {
+                return Err(self.refuse(request, error.into()));
+            }
+        }
+        Ok(())
     }
 
     fn iam_condition_keys_for(
@@ -2169,14 +1564,355 @@ impl AwsService for S3Service {
             .map(|m| m.into_iter().collect::<std::collections::HashMap<_, _>>())
     }
 
+    /// `aws:RequestTag/*` comes from the request, not the action: AWS builds
+    /// one request context for the whole request, so every action a request
+    /// needs (CreateBucket's `s3:TagResource`, a tagged PutObject's
+    /// `s3:PutObjectTagging`) sees the same tags.
     fn request_tags_from(
         &self,
         request: &AwsRequest,
         action: &str,
     ) -> Option<std::collections::HashMap<String, String>> {
-        s3_request_tags(request, action)
+        let op = if control_tags::is_control_tags_request(request) {
+            action
+        } else {
+            s3_operation(request).unwrap_or(action)
+        };
+        s3_request_tags(request, op)
             .map(|m| m.into_iter().collect::<std::collections::HashMap<_, _>>())
     }
+}
+
+impl S3Service {
+    /// Whether the caller of the request being served may also perform
+    /// `s3:<action>` on `bucket` (or its object `key`, for an object action),
+    /// as dispatch would authorize it. `true` when IAM enforcement does not
+    /// apply (off, the `test*` root bypass, an in-process call), and under
+    /// soft enforcement, which only logs. Must not be called while holding
+    /// the state lock: the evaluation reads bucket policies and owners.
+    pub(crate) fn caller_may(
+        &self,
+        req: &AwsRequest,
+        action: &'static str,
+        bucket: &str,
+        key: Option<&str>,
+    ) -> bool {
+        let Some(authorizer) = fakecloud_core::auth::request_authorizer("s3") else {
+            return true;
+        };
+        let region = self
+            .bucket_region(bucket)
+            .unwrap_or_else(|| req.region.clone());
+        authorizer.authorize(&fakecloud_core::auth::IamAction {
+            service: "s3",
+            action,
+            resource: s3_resource_for(&region, action, Some(bucket), key),
+        })
+    }
+
+    /// [`Self::caller_may`] for a request the handler derived from the one it
+    /// serves (a browser-form upload as the PutObject its fields make it,
+    /// signed by the uploader's `access_key_id` or anonymous): `s3:<action>`
+    /// on the object `key` of `bucket`, with that request's condition keys.
+    pub(crate) fn caller_may_for(
+        &self,
+        derived: &AwsRequest,
+        action: &'static str,
+        bucket: &str,
+        key: &str,
+    ) -> bool {
+        let Some(authorizer) = fakecloud_core::auth::request_authorizer("s3") else {
+            return true;
+        };
+        let region = self
+            .bucket_region(bucket)
+            .unwrap_or_else(|| derived.region.clone());
+        authorizer.authorize_for(
+            derived,
+            &fakecloud_core::auth::IamAction {
+                service: "s3",
+                action,
+                resource: s3_resource_for(&region, action, Some(bucket), Some(key)),
+            },
+        )
+    }
+
+    /// A read of a key that does not exist answers 404 `NoSuchKey` only to a
+    /// caller allowed `s3:ListBucket` on the bucket, and 403 `AccessDenied`
+    /// to any other, so a caller who cannot list cannot probe which keys
+    /// exist (GetObject / HeadObject / GetObjectAttributes, "Permissions").
+    fn hide_missing_key(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        result: Result<AwsResponse, AwsServiceError>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // HeadObject reports every missing target as `NotFound`: there it is
+        // a missing key when the bucket exists and no version was named.
+        let missing_key = |e: &AwsServiceError| {
+            e.code() == "NoSuchKey"
+                || (e.code() == "NotFound"
+                    && !iam_actions::names_version(req)
+                    && self.bucket_region(bucket).is_some())
+        };
+        match result {
+            Err(e) if missing_key(&e) && !self.caller_may(req, "ListBucket", bucket, None) => Err(
+                AwsServiceError::aws_error(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied"),
+            ),
+            other => other,
+        }
+    }
+
+    /// GetObject and HeadObject return an object's Object Lock retention
+    /// (`x-amz-object-lock-mode`, `-retain-until-date`) only to a caller
+    /// allowed `s3:GetObjectRetention`, and its legal hold
+    /// (`x-amz-object-lock-legal-hold`) only to one allowed
+    /// `s3:GetObjectLegalHold` (HeadObjectOutput: "This header is only
+    /// returned if the requester has the ... permission").
+    fn shape_lock_headers(
+        &self,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+        mut result: Result<AwsResponse, AwsServiceError>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        if let Ok(resp) = result.as_mut() {
+            let retention = [
+                "x-amz-object-lock-mode",
+                "x-amz-object-lock-retain-until-date",
+            ];
+            if retention.iter().any(|h| resp.headers.contains_key(*h))
+                && !self.caller_may(req, "GetObjectRetention", bucket, Some(key))
+            {
+                for h in retention {
+                    resp.headers.remove(h);
+                }
+            }
+            if resp.headers.contains_key("x-amz-object-lock-legal-hold")
+                && !self.caller_may(req, "GetObjectLegalHold", bucket, Some(key))
+            {
+                resp.headers.remove("x-amz-object-lock-legal-hold");
+            }
+        }
+        result
+    }
+
+    /// A directory bucket's ARN, in the `s3express` namespace and naming its
+    /// region and owning account: `arn:aws:s3express:<region>:<account>:bucket/<name>`.
+    fn directory_bucket_arn(&self, request: &AwsRequest, region: &str, bucket: &str) -> String {
+        let owner = self
+            .state
+            .read()
+            .find_account(|s| s.buckets.contains_key(bucket))
+            .map_or_else(|| request.account_id.clone(), str::to_string);
+        Arn::regional("s3express", region, &owner, &format!("bucket/{bucket}")).to_string()
+    }
+}
+
+/// The object key a request addresses: the RAW path after the bucket
+/// segment, decoded exactly once, `None` when empty. It keeps the leading,
+/// trailing and repeated slashes `path_segments` drops (`/b//` addresses the
+/// key `/`, `/b/k/` the key `k/`), and stays right when an access-point alias
+/// in the first segment is rewritten to its bucket in `path_segments` but not
+/// in `raw_path`. The one derivation both authorization and routing use, so
+/// the operation dispatch authorizes is the operation the handler runs.
+pub(crate) fn request_key(req: &AwsRequest) -> Option<String> {
+    req.path_segments.first()?;
+    key_of_raw_path(&req.raw_path)
+}
+
+/// A request built from its head alone ([`AwsService::refuse_before_body`]),
+/// for the checks that read no body: no body, and for a request presenting a
+/// credential an `access_key_id` placeholder whose presence alone is read
+/// ([`is_anonymous`]); its identity is not resolved yet.
+fn head_request(head: &fakecloud_core::service::RequestHead<'_>) -> AwsRequest {
+    AwsRequest {
+        service: "s3".to_string(),
+        action: String::new(),
+        region: head.region.to_string(),
+        account_id: String::new(),
+        request_id: head.request_id.to_string(),
+        headers: head.headers.clone(),
+        query_params: head.query_params.clone(),
+        body: bytes::Bytes::new(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: fakecloud_core::path::split_path_segments(head.raw_path),
+        raw_path: head.raw_path.to_string(),
+        raw_query: String::new(),
+        method: head.method.clone(),
+        is_query_protocol: false,
+        access_key_id: (!head.anonymous).then(String::new),
+        principal: None,
+    }
+}
+
+impl S3Service {
+    /// The refusals S3 makes before authorization that read only the
+    /// request's head, for every caller: conflicting resource-type
+    /// parameters, a method a resource type does not take, a malformed part
+    /// number (`route::classify`), a missing upload, a missing bucket for an
+    /// anonymous caller, an anonymous streaming-payload declaration. Run
+    /// before dispatch reads the body (`refuse_before_body`) and again by
+    /// `validate_before_authorization`. Returns the request's operation, or
+    /// `None` for one judged elsewhere (S3 Control, a preflight, an empty
+    /// bucket segment).
+    fn validate_head(&self, request: &AwsRequest) -> Result<Option<route::S3Op>, AwsServiceError> {
+        if fakecloud_core::protocol::is_s3_control_host(&request.headers)
+            || request.method == Method::OPTIONS
+            || request.raw_path.starts_with("//")
+        {
+            return Ok(None);
+        }
+        let op = classify_request(request).map_err(|refusal| self.refuse(request, refusal))?;
+        if let Some(error) = self.missing_upload(request, op) {
+            return Err(self.refuse(request, error.into()));
+        }
+        let bucket = request.path_segments.first();
+        let bucket_exists = bucket.is_some_and(|b| self.bucket_owner_account(b).is_some());
+        // An anonymous request to a bucket that does not exist is
+        // NoSuchBucket, not AccessDenied (recorded, PutObject and ?tagging).
+        // An access-point alias is resolved by the handler, not here.
+        let via_access_point = request
+            .headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|h| h.to_ascii_lowercase().contains("s3-accesspoint"));
+        if let Some(b) = bucket.filter(|_| {
+            !bucket_exists
+                && !via_access_point
+                && is_anonymous(request)
+                && op != route::S3Op::CreateBucket
+        }) {
+            return Err(no_such_bucket(b));
+        }
+        if bucket_exists {
+            if let Some(error) = streaming_payload_refused(request, op) {
+                return Err(self.refuse(request, error.into()));
+            }
+        }
+        Ok(Some(op))
+    }
+}
+
+/// A request that presents no credentials (and is no in-process service
+/// principal).
+fn is_anonymous(req: &AwsRequest) -> bool {
+    req.access_key_id.is_none() && req.principal.is_none()
+}
+
+/// An anonymous request that declares a streaming payload
+/// (`x-amz-content-sha256: STREAMING-...`) for an operation whose payload is
+/// no streaming blob: 400 InvalidRequest, after the bucket's existence and
+/// before authorization (recorded for an anonymous PutObjectTagging; an
+/// anonymous PutObject with the same header goes on to AccessDenied, so the
+/// upload operations take it). Signed requests are not judged here: nothing
+/// recorded says how S3 treats one.
+fn streaming_payload_refused(req: &AwsRequest, op: route::S3Op) -> Option<AwsServiceError> {
+    let streaming = req
+        .headers
+        .get("x-amz-content-sha256")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().starts_with("STREAMING-"));
+    let anonymous = is_anonymous(req);
+    let takes_streaming_payload = matches!(
+        op,
+        route::S3Op::PutObject | route::S3Op::UploadPart | route::S3Op::PutObjectAnnotation
+    );
+    (streaming && anonymous && !takes_streaming_payload).then(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidRequest",
+            "The value of x-amz-content-sha256 header is invalid.",
+        )
+    })
+}
+
+/// [`request_key`] from the raw path alone, for a request not yet built
+/// (dispatch asking whether it streams).
+fn key_of_raw_path(raw_path: &str) -> Option<String> {
+    let rest = raw_path.strip_prefix('/').unwrap_or(raw_path);
+    let (_, raw_key) = rest.split_once('/')?;
+    (!raw_key.is_empty()).then(|| {
+        percent_encoding::percent_decode_str(raw_key)
+            .decode_utf8_lossy()
+            .into_owned()
+    })
+}
+
+/// The operation a request invokes, by the one classification the handler
+/// routes on ([`route::classify`]); `Err` is how S3 refuses it before
+/// authorizing anything.
+fn classify_request(request: &AwsRequest) -> Result<route::S3Op, route::Refusal> {
+    route::classify(
+        &request.method,
+        request.path_segments.first().map(String::as_str),
+        request_key(request).as_deref(),
+        &request.query_params,
+        &request.headers,
+    )
+}
+
+/// The name of the S3 API operation a request invokes; `None` for a request
+/// S3 refuses before authorizing it.
+fn s3_operation(request: &AwsRequest) -> Option<&'static str> {
+    classify_request(request).ok().map(route::S3Op::name)
+}
+
+/// The authorization of an S3 Control request fakecloud serves: access-point
+/// management and resource tagging. `None` for any other request.
+fn control_iam_action(request: &AwsRequest) -> Option<fakecloud_core::auth::IamAction> {
+    // S3 Control access-point management (host `s3-control...`, path
+    // `/v20180820/accesspoint[/name]`) is authorized under the dedicated
+    // s3:CreateAccessPoint / GetAccessPoint / DeleteAccessPoint /
+    // ListAccessPoints actions — NOT the object-level GetObject/PutObject/
+    // DeleteObject the generic method-based detection would pick, which made
+    // access-point policies ineffective.
+    let is_control = fakecloud_core::protocol::is_s3_control_host(&request.headers)
+        && request.path_segments.first().map(|s| s.as_str()) == Some("v20180820");
+    // S3 Control resource tagging is authorized as s3:TagResource /
+    // UntagResource / ListTagsForResource on the tagged resource's ARN.
+    if is_control && request.path_segments.get(1).map(|s| s.as_str()) == Some("tags") {
+        let action = match request.method.as_str() {
+            "GET" => Some("ListTagsForResource"),
+            "POST" => Some("TagResource"),
+            "DELETE" => Some("UntagResource"),
+            _ => None,
+        };
+        if let Some(action) = action {
+            let resource =
+                control_tags::resource_arn_from_path(request).unwrap_or_else(|| "*".to_string());
+            return Some(fakecloud_core::auth::IamAction {
+                service: "s3",
+                action,
+                resource,
+            });
+        }
+    }
+    if is_control && request.path_segments.get(1).map(|s| s.as_str()) == Some("accesspoint") {
+        let has_name = request.path_segments.get(2).is_some();
+        let ap_action = match (request.method.as_str(), has_name) {
+            ("PUT", true) => Some("CreateAccessPoint"),
+            ("GET", true) => Some("GetAccessPoint"),
+            ("DELETE", true) => Some("DeleteAccessPoint"),
+            ("GET", false) => Some("ListAccessPoints"),
+            _ => None,
+        };
+        if let Some(action) = ap_action {
+            let resource = request
+                .path_segments
+                .get(2)
+                .map(|name| {
+                    Arn::s3_access_point(&request.region, &request.account_id, name).to_string()
+                })
+                .unwrap_or_else(|| "*".to_string());
+            return Some(fakecloud_core::auth::IamAction {
+                service: "s3",
+                action,
+                resource,
+            });
+        }
+    }
+    None
 }
 
 /// The top-level `<Role>` of a PutBucketReplication body: the role S3
@@ -2191,8 +1927,9 @@ fn replication_role_arn(body: &[u8]) -> Option<String> {
 
 /// Extract service-specific IAM condition keys from an S3 request.
 ///
-/// `ListObjects` / `ListObjectsV2` expose `s3:prefix`, `s3:delimiter` and
-/// `s3:max-keys` from their query params, and any request carrying the ACL,
+/// `s3:ListBucket` / `s3:ListBucketVersions` expose `s3:prefix`, `s3:delimiter`
+/// and `s3:max-keys` from their query params, a request naming a version
+/// exposes `s3:versionid`, and any request carrying the ACL,
 /// object-ownership or object-lock headers exposes the matching `s3:x-amz-*`
 /// keys. An action with nothing to expose returns an empty map, so the
 /// evaluator's safe-fail semantics treat a policy condition on an unknown key
@@ -2284,8 +2021,15 @@ fn s3_condition_keys(
             out.insert(format!("s3:{header}"), vec![value.to_string()]);
         }
     }
-    if matches!(action, "ListObjects" | "ListObjectsV2") {
-        // Both list variants share the same query param shape.
+    // `s3:versionid` is defined on the `*Version*` actions a request naming a
+    // version is authorized under.
+    if let Some(version) = query.get("versionId").filter(|v| !v.trim().is_empty()) {
+        out.insert("s3:versionid".to_string(), vec![version.clone()]);
+    }
+    // The listing keys of `s3:ListBucket` (ListObjects, ListObjectsV2) and
+    // `s3:ListBucketVersions` (ListObjectVersions), which share the query
+    // shape.
+    if matches!(action, "ListBucket" | "ListBucketVersions") {
         if let Some(prefix) = query.get("prefix") {
             out.insert("s3:prefix".to_string(), vec![prefix.clone()]);
         }
@@ -2363,37 +2107,52 @@ fn s3_bucket_or_object_tags(
     }
 }
 
-/// Extract tags from an S3 request body/headers.
+/// Extract tags from an S3 request body/headers, by the operation `op` the
+/// request invokes (or, for S3 Control tagging, its action).
 ///
 /// S3 sends tags via:
-/// - `x-amz-tagging` header (URL-encoded `key=value&...`) on PutObject
+/// - `x-amz-tagging` header (URL-encoded `key=value&...`) on PutObject,
+///   CopyObject and CreateMultipartUpload
 /// - XML body on PutBucketTagging / PutObjectTagging
+/// - `CreateBucketConfiguration` on CreateBucket
 fn s3_request_tags(
     request: &AwsRequest,
-    action: &str,
+    op: &str,
 ) -> Option<std::collections::BTreeMap<String, String>> {
-    match action {
+    match op {
+        // A copy sets tags from the header only when it replaces the source's
+        // tag set; under COPY (the default) the header is ignored.
+        "CopyObject" if !iam_actions::copy_replaces_tags(&request.headers) => {
+            Some(std::collections::BTreeMap::new())
+        }
         "PutObject" | "CopyObject" | "CreateMultipartUpload" => {
             // Tags come via x-amz-tagging header
             if let Some(tagging) = request.headers.get("x-amz-tagging") {
-                let tags = parse_url_encoded_tags(tagging.to_str().unwrap_or(""));
+                // An invalid header is refused by the handler before anything
+                // is written.
+                let tags =
+                    tags::parse_tagging_header(tagging.to_str().unwrap_or("")).unwrap_or_default();
                 Some(tags.into_iter().collect())
             } else {
                 Some(std::collections::BTreeMap::new())
             }
         }
+        // Tags come in the XML body, read by the parser the handler stores
+        // them with (`tags::read_tag_set`). A body it cannot read is refused
+        // before authorization (`validate_before_authorization`), so no
+        // partial tag set is ever evaluated; a body whose aws-chunked framing
+        // is broken has none, and is refused after authorization.
         "PutBucketTagging" | "PutObjectTagging" => {
-            // Tags come in XML body
             let body = std::str::from_utf8(&request.body).unwrap_or("");
-            let tags = parse_tagging_xml(body);
+            let tags = tags::read_tag_set(body, "Tagging", "TagSet").unwrap_or_default();
             Some(tags.into_iter().collect())
         }
         // S3 Control TagResource carries its tags in a `<TagResourceRequest>`
-        // body. (CreateBucket also authorizes `s3:TagResource` for the tags
-        // in its CreateBucketConfiguration; that falls to the arm below.)
+        // body.
         "TagResource" if control_tags::is_control_tags_request(request) => {
             let body = std::str::from_utf8(&request.body).unwrap_or("");
-            Some(parse_tagging_xml(body).into_iter().collect())
+            let tags = tags::read_tag_set(body, "TagResourceRequest", "Tags").unwrap_or_default();
+            Some(tags.into_iter().collect())
         }
         // UntagResource carries no tag values, only keys: AWS sets
         // `aws:TagKeys` (see `iam_condition_keys_for`) but no
@@ -2405,478 +2164,53 @@ fn s3_request_tags(
         // evaluated against the same tags -- AWS builds one request context for
         // the whole request, so an `aws:RequestTag/*` guardrail that permits the
         // create must not then deny the ACL or object-lock action it implies.
-        // The extra names are harmless on their own operations: a real
-        // PutBucketAcl body is not a `CreateBucketConfiguration`, so it yields
-        // the same empty map the catch-all arm would.
-        "CreateBucket"
-        | "TagResource"
-        | "PutBucketAcl"
-        | "PutBucketOwnershipControls"
-        | "PutBucketObjectLockConfiguration"
-        | "PutBucketVersioning" => {
+        "CreateBucket" => {
             let body = std::str::from_utf8(&request.body).unwrap_or("");
-            let tags = create_bucket_configuration_tags(body);
+            // Refused before authorization when it does not read
+            // (`validate_before_authorization`).
+            let tags = create_bucket_configuration_tags(body).unwrap_or_default();
             Some(tags.into_iter().collect())
         }
         _ => Some(std::collections::BTreeMap::new()),
     }
 }
 
-/// Derive the IAM action name from an S3 REST request. Handles the
-/// common cases (GetObject, PutObject, DeleteObject, ListObjectsV2,
-/// CreateBucket, ...) plus a subset of sub-resource operations
-/// (`?acl`, `?tagging`, `?versioning`, `?policy`, `?cors`, `?website`,
-/// `?lifecycle`, `?encryption`, `?logging`, `?notification`, `?replication`,
-/// `?ownershipControls`, `?publicAccessBlock`, `?accelerate`, `?inventory`,
-/// `?object-lock`, `?uploads`, `?uploadId`).
-///
-/// Returns `None` for requests that don't map to a known action — the
-/// dispatch layer then skips enforcement for that request rather than
-/// guessing (and a warn log fires via the "service is iam_enforceable
-/// but has no mapping" branch in dispatch.rs).
+/// The name of the S3 API operation (not the IAM action: see
+/// [`iam_actions`]) a request with this method, bucket, key and query
+/// invokes, by the one classification ([`route::classify`]); `None` for a
+/// request it refuses. Without the request's headers a PUT to a key is a
+/// PutObject and an upload part an UploadPart ([`s3_operation`] tells the
+/// copies apart).
+#[cfg(test)]
 fn s3_detect_action(
     method: &str,
     bucket: Option<&str>,
     key: Option<&str>,
     query: &std::collections::HashMap<String, String>,
 ) -> Option<&'static str> {
-    let has = |q: &str| query.contains_key(q);
-    let is_get = method == "GET";
-    let is_put = method == "PUT";
-    let is_post = method == "POST";
-    let is_delete = method == "DELETE";
-
-    // Service root
-    if bucket.is_none() {
-        return match method {
-            // A directory-bucket listing (`GET /?x-id=ListDirectoryBuckets`) is
-            // authorized under `s3express:ListAllMyDirectoryBuckets`, NOT
-            // `s3:ListBuckets`. Detecting it as ListBuckets let an
-            // `s3:ListBuckets` grant wrongly enumerate directory buckets and
-            // denied a policy that only granted the s3express action (bug-hunt
-            // 2026-06-24, 5.5).
-            "GET" if query.get("x-id").map(|s| s.as_str()) == Some("ListDirectoryBuckets") => {
-                Some("ListAllMyDirectoryBuckets")
-            }
-            "GET" => Some("ListBuckets"),
-            _ => None,
-        };
-    }
-
-    // WriteGetObjectResponse is an Object Lambda data-plane op routed as
-    // `POST /WriteGetObjectResponse` (the literal value occupies the bucket
-    // segment). AWS authorizes it under the separate
-    // `s3-object-lambda:WriteGetObjectResponse` action — handled in
-    // `iam_action_for`, which selects the `s3-object-lambda` service prefix
-    // for this op. Previously unmapped -> enforcement skipped.
-    if is_post && bucket == Some("WriteGetObjectResponse") && key.is_none() {
-        return Some("WriteGetObjectResponse");
-    }
-
-    let has_key = key.is_some();
-
-    // Multipart sub-resource forms
-    if has_key && is_post && has("uploads") {
-        return Some("CreateMultipartUpload");
-    }
-    if has_key && is_post && has("uploadId") {
-        return Some("CompleteMultipartUpload");
-    }
-    if has_key && is_put && has("partNumber") && has("uploadId") {
-        return Some("UploadPart");
-    }
-    if has_key && is_delete && has("uploadId") {
-        return Some("AbortMultipartUpload");
-    }
-    if has_key && is_get && has("uploadId") {
-        return Some("ListParts");
-    }
-    if !has_key && is_get && has("uploads") {
-        return Some("ListMultipartUploads");
-    }
-
-    // Sub-resource-keyed actions (?acl, ?tagging, ...). Order matters
-    // since a request can carry multiple; we pick the most specific.
-    // Object-level sub-resources come first (key present).
-    if has_key {
-        if has("annotation") {
-            return Some(match method {
-                // One URI serves both reads; `annotationName` picks a single
-                // annotation, its absence lists them.
-                "GET" if has(annotations::ANNOTATION_NAME_QUERY) => "GetObjectAnnotation",
-                "GET" => "ListObjectAnnotations",
-                "PUT" => "PutObjectAnnotation",
-                "DELETE" => "DeleteObjectAnnotation",
-                _ => return None,
-            });
-        }
-        if has("tagging") {
-            return Some(match method {
-                "GET" => "GetObjectTagging",
-                "PUT" => "PutObjectTagging",
-                "DELETE" => "DeleteObjectTagging",
-                _ => return None,
-            });
-        }
-        if has("acl") {
-            return Some(match method {
-                "GET" => "GetObjectAcl",
-                "PUT" => "PutObjectAcl",
-                _ => return None,
-            });
-        }
-        if has("retention") {
-            return Some(match method {
-                "GET" => "GetObjectRetention",
-                "PUT" => "PutObjectRetention",
-                _ => return None,
-            });
-        }
-        if has("legal-hold") {
-            return Some(match method {
-                "GET" => "GetObjectLegalHold",
-                "PUT" => "PutObjectLegalHold",
-                _ => return None,
-            });
-        }
-        // Identified by cubic on PR #399: both ?attributes and ?restore
-        // need method guards — otherwise e.g. GET /bucket/key?restore
-        // would be classified as RestoreObject (POST-only in AWS) and
-        // IAM-evaluated against s3:RestoreObject instead of s3:GetObject.
-        if has("attributes") && is_get {
-            return Some("GetObjectAttributes");
-        }
-        if has("restore") && is_post {
-            return Some("RestoreObject");
-        }
-        // RenameObject is an object-level op (`PUT /bucket/newkey?renameObject`
-        // + `x-amz-rename-source`). It carries a key, so it must be detected
-        // here — the `!has_key` arm below never sees it. Without this it fell
-        // through to `PutObject`, so a policy denying `s3:RenameObject` was
-        // silently ineffective.
-        if has("renameObject") && is_put {
-            return Some("RenameObject");
-        }
-        // UpdateObjectEncryption (`PUT /bucket/key?encryption`) changes an
-        // existing object's server-side encryption, authorized as its own
-        // action: the API reference's required permissions are
-        // `s3:UpdateObjectEncryption` plus the KMS ones.
-        if has("encryption") && is_put {
-            return Some("UpdateObjectEncryption");
-        }
-        // SelectObjectContent (`POST /bucket/key?select&select-type=2`) reads
-        // object data, so AWS authorizes it with `s3:GetObject`. Previously
-        // unmapped -> `_ => None` -> enforcement skipped entirely.
-        if has("select-type") && is_post {
-            return Some("GetObject");
-        }
-    }
-
-    // Bucket-level sub-resources (key absent).
-    if !has_key {
-        if has("metadataAnnotationTable") && method == "PUT" {
-            return Some("UpdateBucketMetadataAnnotationTableConfiguration");
-        }
-        if has("tagging") {
-            return Some(match method {
-                "GET" => "GetBucketTagging",
-                "PUT" => "PutBucketTagging",
-                "DELETE" => "DeleteBucketTagging",
-                _ => return None,
-            });
-        }
-        if has("acl") {
-            return Some(match method {
-                "GET" => "GetBucketAcl",
-                "PUT" => "PutBucketAcl",
-                _ => return None,
-            });
-        }
-        if has("versioning") {
-            return Some(match method {
-                "GET" => "GetBucketVersioning",
-                "PUT" => "PutBucketVersioning",
-                _ => return None,
-            });
-        }
-        if has("cors") {
-            return Some(match method {
-                "GET" => "GetBucketCors",
-                "PUT" => "PutBucketCors",
-                "DELETE" => "DeleteBucketCors",
-                _ => return None,
-            });
-        }
-        if has("policy") {
-            return Some(match method {
-                "GET" => "GetBucketPolicy",
-                "PUT" => "PutBucketPolicy",
-                "DELETE" => "DeleteBucketPolicy",
-                _ => return None,
-            });
-        }
-        if has("website") {
-            return Some(match method {
-                "GET" => "GetBucketWebsite",
-                "PUT" => "PutBucketWebsite",
-                "DELETE" => "DeleteBucketWebsite",
-                _ => return None,
-            });
-        }
-        if has("lifecycle") {
-            return Some(match method {
-                "GET" => "GetBucketLifecycleConfiguration",
-                "PUT" => "PutBucketLifecycleConfiguration",
-                "DELETE" => "DeleteBucketLifecycle",
-                _ => return None,
-            });
-        }
-        if has("encryption") {
-            return Some(match method {
-                "GET" => "GetBucketEncryption",
-                "PUT" => "PutBucketEncryption",
-                "DELETE" => "DeleteBucketEncryption",
-                _ => return None,
-            });
-        }
-        if has("logging") {
-            return Some(match method {
-                "GET" => "GetBucketLogging",
-                "PUT" => "PutBucketLogging",
-                _ => return None,
-            });
-        }
-        if has("notification") {
-            return Some(match method {
-                "GET" => "GetBucketNotificationConfiguration",
-                "PUT" => "PutBucketNotificationConfiguration",
-                _ => return None,
-            });
-        }
-        if has("replication") {
-            return Some(match method {
-                "GET" => "GetBucketReplication",
-                "PUT" => "PutBucketReplication",
-                "DELETE" => "DeleteBucketReplication",
-                _ => return None,
-            });
-        }
-        if has("ownershipControls") {
-            return Some(match method {
-                "GET" => "GetBucketOwnershipControls",
-                "PUT" => "PutBucketOwnershipControls",
-                "DELETE" => "DeleteBucketOwnershipControls",
-                _ => return None,
-            });
-        }
-        if has("publicAccessBlock") {
-            return Some(match method {
-                "GET" => "GetPublicAccessBlock",
-                "PUT" => "PutPublicAccessBlock",
-                "DELETE" => "DeletePublicAccessBlock",
-                _ => return None,
-            });
-        }
-        if has("accelerate") {
-            return Some(match method {
-                "GET" => "GetBucketAccelerateConfiguration",
-                "PUT" => "PutBucketAccelerateConfiguration",
-                _ => return None,
-            });
-        }
-        if has("inventory") {
-            return Some(match method {
-                "GET" => "GetBucketInventoryConfiguration",
-                "PUT" => "PutBucketInventoryConfiguration",
-                "DELETE" => "DeleteBucketInventoryConfiguration",
-                _ => return None,
-            });
-        }
-        if has("analytics") {
-            return Some(match method {
-                "GET" if has("id") => "GetBucketAnalyticsConfiguration",
-                "GET" => "ListBucketAnalyticsConfigurations",
-                "PUT" => "PutBucketAnalyticsConfiguration",
-                "DELETE" => "DeleteBucketAnalyticsConfiguration",
-                _ => return None,
-            });
-        }
-        if has("intelligent-tiering") {
-            return Some(match method {
-                "GET" if has("id") => "GetBucketIntelligentTieringConfiguration",
-                "GET" => "ListBucketIntelligentTieringConfigurations",
-                "PUT" => "PutBucketIntelligentTieringConfiguration",
-                "DELETE" => "DeleteBucketIntelligentTieringConfiguration",
-                _ => return None,
-            });
-        }
-        if has("metrics") {
-            return Some(match method {
-                "GET" if has("id") => "GetBucketMetricsConfiguration",
-                "GET" => "ListBucketMetricsConfigurations",
-                "PUT" => "PutBucketMetricsConfiguration",
-                "DELETE" => "DeleteBucketMetricsConfiguration",
-                _ => return None,
-            });
-        }
-        if has("requestPayment") {
-            return Some(match method {
-                "GET" => "GetBucketRequestPayment",
-                "PUT" => "PutBucketRequestPayment",
-                _ => return None,
-            });
-        }
-        if has("policyStatus") && is_get {
-            return Some("GetBucketPolicyStatus");
-        }
-        if has("metadataConfiguration") {
-            return Some(match method {
-                "GET" => "GetBucketMetadataConfiguration",
-                "POST" => "CreateBucketMetadataConfiguration",
-                "DELETE" => "DeleteBucketMetadataConfiguration",
-                _ => return None,
-            });
-        }
-        if has("metadataTable") {
-            return Some(match method {
-                "GET" => "GetBucketMetadataTableConfiguration",
-                "POST" => "CreateBucketMetadataTableConfiguration",
-                "DELETE" => "DeleteBucketMetadataTableConfiguration",
-                _ => return None,
-            });
-        }
-        if has("metadataInventoryTable") && is_put {
-            return Some("UpdateBucketMetadataInventoryTableConfiguration");
-        }
-        if has("metadataJournalTable") && is_put {
-            return Some("UpdateBucketMetadataJournalTableConfiguration");
-        }
-        if has("abac") {
-            // PUT  -> PutBucketAbacConfiguration
-            // GET  -> GetBucketAbacConfiguration (previously fell through to
-            //         the plain `GET bucket` arm and was IAM-evaluated as
-            //         s3:ListObjects — a policy on the ABAC config was never
-            //         honored).
-            return Some(match method {
-                "PUT" => "PutBucketAbacConfiguration",
-                "GET" => "GetBucketAbacConfiguration",
-                _ => return None,
-            });
-        }
-        if has("session") && is_get {
-            // CreateSession (S3 Express directory buckets). AWS authorizes it
-            // under the separate `s3express:CreateSession` action — handled in
-            // `iam_action_for`, which selects the `s3express` service prefix
-            // for this op. Previously fell through to the plain `GET bucket`
-            // arm and was evaluated as s3:ListObjects.
-            return Some("CreateSession");
-        }
-        if has("object-lock") {
-            return Some(match method {
-                "GET" => "GetObjectLockConfiguration",
-                "PUT" => "PutObjectLockConfiguration",
-                _ => return None,
-            });
-        }
-        if has("location") {
-            return Some("GetBucketLocation");
-        }
-        if is_post && has("delete") {
-            return Some("DeleteObjects");
-        }
-        if is_get && has("versions") {
-            return Some("ListObjectVersions");
-        }
-    }
-
-    // GET on an object with `?torrent` is GetObjectTorrent, which AWS
-    // authorizes as `s3:GetObject` on the object ("Required permissions for
-    // Amazon S3 API operations": GetObjectTorrent, (Required) s3:GetObject;
-    // the service authorization reference maps the operation to that action
-    // too), not under the legacy `s3:GetObjectTorrent` action name.
-    if is_get && has_key && has("torrent") {
-        return Some("GetObject");
-    }
-
-    // Plain bucket/object methods.
-    match (method, has_key) {
-        ("GET", true) => Some("GetObject"),
-        ("PUT", true) => {
-            // CopyObject uses x-amz-copy-source but we don't have headers
-            // handy here — treat both PutObject and CopyObject as PutObject
-            // for IAM purposes; CopyObject additionally requires
-            // s3:GetObject on the source but that's evaluated per-request
-            // by real AWS, not on the PUT call itself.
-            Some("PutObject")
-        }
-        ("DELETE", true) => Some("DeleteObject"),
-        ("HEAD", true) => Some("HeadObject"),
-        ("GET", false) => {
-            if query.contains_key("list-type") {
-                Some("ListObjectsV2")
-            } else {
-                Some("ListObjects")
-            }
-        }
-        ("PUT", false) => Some("CreateBucket"),
-        ("DELETE", false) => Some("DeleteBucket"),
-        ("HEAD", false) => Some("HeadBucket"),
-        _ => None,
-    }
+    let method: Method = method.parse().ok()?;
+    route::classify(&method, bucket, key, query, &HeaderMap::new())
+        .ok()
+        .map(route::S3Op::name)
 }
 
-/// Build the S3 resource ARN for an action. Returns `*` for
-/// `ListBuckets` (account-scoped), a bucket ARN for bucket-level
-/// configuration actions, or an object ARN for object-level actions.
-fn s3_resource_for(
-    region: &str,
-    action: &'static str,
-    bucket: Option<&str>,
-    key: Option<&str>,
-) -> String {
-    // Object-level actions work on `bucket/key`.
-    const OBJECT_ACTIONS: &[&str] = &[
-        "PutObject",
-        "GetObject",
-        "DeleteObject",
-        "HeadObject",
-        "CopyObject",
-        "GetObjectAttributes",
-        "RestoreObject",
-        "PutObjectTagging",
-        "GetObjectTagging",
-        "DeleteObjectTagging",
-        "PutObjectAcl",
-        "GetObjectAcl",
-        "PutObjectRetention",
-        "GetObjectRetention",
-        "PutObjectLegalHold",
-        "GetObjectLegalHold",
-        "CreateMultipartUpload",
-        "UploadPart",
-        "UploadPartCopy",
-        "CompleteMultipartUpload",
-        "AbortMultipartUpload",
-        "ListParts",
-        // An object-level operation of its own (the user guide's example
-        // policy grants it on `bucket/*`). SelectObjectContent and
-        // GetObjectTorrent are authorized as GetObject, above; RenameObject
-        // as `s3express:CreateSession` on the bucket.
-        "UpdateObjectEncryption",
-    ];
-    if action == "ListBuckets" {
-        return "*".to_string();
-    }
-    let Some(bucket) = bucket else {
+/// Build the resource ARN an S3 policy action is authorized on, by the
+/// action's resource type in the service authorization reference: the object
+/// ARN (`bucket/key`, `bucket/*` with no key) for object actions, `*` for
+/// account actions (`s3:ListAllMyBuckets`) or a request naming no bucket, and
+/// the bucket ARN otherwise.
+fn s3_resource_for(region: &str, action: &str, bucket: Option<&str>, key: Option<&str>) -> String {
+    use iam_reference::ResourceKind;
+    let kind = iam_actions::resource_kind(action);
+    let Some(bucket) = bucket.filter(|_| kind != Some(ResourceKind::Account)) else {
         return "*".to_string();
     };
-    if OBJECT_ACTIONS.contains(&action) {
+    if kind == Some(ResourceKind::Object) {
         match key {
             Some(k) if !k.is_empty() => Arn::s3_in(region, &format!("{bucket}/{k}")).to_string(),
             _ => Arn::s3_in(region, &format!("{bucket}/*")).to_string(),
         }
     } else {
-        // Bucket-level actions (ListObjectsV2, GetBucketTagging, ...).
         Arn::s3_in(region, bucket).to_string()
     }
 }
@@ -4083,38 +3417,20 @@ pub(crate) fn parse_delete_objects_quiet(xml: &str) -> bool {
 ///
 /// The tag set was added to `CreateBucketConfiguration` in the 2025 S3 API;
 /// it is serialized as `<Tags><Tag><Key/><Value/></Tag></Tags>`, the same
-/// `Tag` shape `PutBucketTagging` uses. Returns an empty vec for a body that
-/// is not a `CreateBucketConfiguration` or carries no tags — no `<Tags>`
-/// element means no `<Tag>` elements to find, so the scan is its own gate
-/// and an element written with a namespace or attribute
-/// (`<Tags xmlns="...">`) is not silently skipped.
-pub(crate) fn create_bucket_configuration_tags(body: &str) -> Vec<(String, String)> {
-    if body.is_empty() || !body.contains("CreateBucketConfiguration") {
-        return Vec::new();
+/// `Tag` shape `PutBucketTagging` uses, read by the same reader
+/// ([`tags::read_tag_set`]). A configuration that does not read (not
+/// well-formed, a `Tag` missing its `Key` or `Value`) is 400 MalformedXML,
+/// as for PutBucketTagging: creating the bucket untagged would drop tags the
+/// caller asked for, and authorize the create without them. A body that is
+/// no `CreateBucketConfiguration` at all names no tags, which the create
+/// handler judges as it always has (by its location constraint).
+pub(crate) fn create_bucket_configuration_tags(
+    body: &str,
+) -> Result<Vec<(String, String)>, AwsServiceError> {
+    if !body.contains("CreateBucketConfiguration") {
+        return Ok(Vec::new());
     }
-    parse_tagging_xml(body)
-}
-
-/// Minimal XML parser for `<Tagging><TagSet><Tag><Key>k</Key><Value>v</Value></Tag>...`.
-/// Returns a Vec to preserve insertion order and detect duplicates.
-pub(crate) fn parse_tagging_xml(xml: &str) -> Vec<(String, String)> {
-    let mut tags = Vec::new();
-    let mut remaining = xml;
-    while let Some(tag_start) = remaining.find("<Tag>") {
-        let after = &remaining[tag_start + 5..];
-        if let Some(tag_end) = after.find("</Tag>") {
-            let tag_body = &after[..tag_end];
-            let key = extract_xml_value(tag_body, "Key");
-            let value = extract_xml_value(tag_body, "Value");
-            if let (Some(k), Some(v)) = (key, value) {
-                tags.push((k, v));
-            }
-            remaining = &after[tag_end + 6..];
-        } else {
-            break;
-        }
-    }
-    tags
+    tags::read_tag_set(body, "CreateBucketConfiguration", "Tags")
 }
 
 pub(crate) fn validate_tags(tags: &[(String, String)]) -> Result<(), AwsServiceError> {
@@ -4343,8 +3659,10 @@ pub(crate) fn validate_lifecycle_xml(xml: &str) -> Result<(), AwsServiceError> {
                     // Remove the Filter block and check if Prefix remains
                     let mut stripped = rule_body.to_string();
                     // Remove <Filter>...</Filter> or self-closing variants
+                    // The closing tag is searched after the opening one, so
+                    // a `</Filter>` ahead of it cannot splice the wrong span.
                     if let Some(fs) = stripped.find("<Filter") {
-                        if let Some(fe) = stripped.find("</Filter>") {
+                        if let Some(fe) = stripped[fs..].find("</Filter>").map(|e| fs + e) {
                             stripped = format!("{}{}", &stripped[..fs], &stripped[fe + 9..]);
                         }
                     }
@@ -4704,67 +4022,122 @@ pub(crate) fn governance_bypass_requested(req: &AwsRequest) -> bool {
         .is_some_and(|s| s.eq_ignore_ascii_case("true"))
 }
 
-/// The `s3:BypassGovernanceRetention` checks a request asking to bypass
-/// GOVERNANCE retention must also pass. The S3 model documents the header on
-/// DeleteObject / DeleteObjects as "To use this header, you must have the
-/// `s3:BypassGovernanceRetention` permission", and PutObjectRetention takes the
-/// same header. The permission is evaluated on the addressed object.
-/// DeleteObjects is not covered here: AWS authorizes it per key and reports a
-/// denied key as an `<Error>` entry in a 200 response, which an all-or-nothing
-/// request-level check cannot express.
-fn governance_bypass_actions(
-    request: &AwsRequest,
-    primary: &fakecloud_core::auth::IamAction,
-) -> Vec<fakecloud_core::auth::IamAction> {
-    if primary.service != "s3" || !governance_bypass_requested(request) {
-        return Vec::new();
-    }
-    let bypass = |resource: String| fakecloud_core::auth::IamAction {
-        service: "s3",
-        action: "BypassGovernanceRetention",
-        resource,
-    };
-    match primary.action {
-        "DeleteObject" | "PutObjectRetention" => vec![bypass(primary.resource.clone())],
-        _ => Vec::new(),
-    }
-}
-
-/// The extra permissions a write that sets an object's lock must hold. The S3
-/// model documents the PutObject / CopyObject / CreateMultipartUpload lock
-/// headers as needing `s3:PutObjectRetention` (mode, retain-until date) and
-/// `s3:PutObjectLegalHold` (legal hold), evaluated on the object written --
-/// the destination for a copy.
-fn object_lock_header_actions(
-    request: &AwsRequest,
-    primary: &fakecloud_core::auth::IamAction,
-) -> Vec<fakecloud_core::auth::IamAction> {
-    if primary.service != "s3"
-        || !matches!(
-            primary.action,
-            "PutObject" | "CopyObject" | "CreateMultipartUpload"
-        )
-    {
-        return Vec::new();
-    }
-    let present = |name: &str| request.headers.contains_key(name);
-    let mut actions = Vec::new();
-    if present("x-amz-object-lock-mode") || present("x-amz-object-lock-retain-until-date") {
-        actions.push(fakecloud_core::auth::IamAction {
-            service: "s3",
-            action: "PutObjectRetention",
-            resource: primary.resource.clone(),
-        });
-    }
-    if present("x-amz-object-lock-legal-hold") {
-        actions.push(fakecloud_core::auth::IamAction {
-            service: "s3",
-            action: "PutObjectLegalHold",
-            resource: primary.resource.clone(),
-        });
-    }
-    actions
-}
+/// Every operation [`s3_operation`] can return, which [`iam_actions`] must
+/// map.
+#[cfg(test)]
+const IAM_MAPPED_OPERATIONS: &[&str] = &[
+    "ListBuckets",
+    "ListDirectoryBuckets",
+    "WriteGetObjectResponse",
+    "CreateMultipartUpload",
+    "CompleteMultipartUpload",
+    "UploadPart",
+    "UploadPartCopy",
+    "AbortMultipartUpload",
+    "ListParts",
+    "ListMultipartUploads",
+    "GetObjectAnnotation",
+    "ListObjectAnnotations",
+    "PutObjectAnnotation",
+    "DeleteObjectAnnotation",
+    "GetObjectTagging",
+    "PutObjectTagging",
+    "DeleteObjectTagging",
+    "GetObjectAcl",
+    "PutObjectAcl",
+    "GetObjectRetention",
+    "PutObjectRetention",
+    "GetObjectLegalHold",
+    "PutObjectLegalHold",
+    "GetObjectAttributes",
+    "RestoreObject",
+    "RenameObject",
+    "UpdateObjectEncryption",
+    "SelectObjectContent",
+    "UpdateBucketMetadataAnnotationTableConfiguration",
+    "GetBucketTagging",
+    "PutBucketTagging",
+    "DeleteBucketTagging",
+    "GetBucketAcl",
+    "PutBucketAcl",
+    "GetBucketVersioning",
+    "PutBucketVersioning",
+    "GetBucketCors",
+    "PutBucketCors",
+    "DeleteBucketCors",
+    "GetBucketPolicy",
+    "PutBucketPolicy",
+    "DeleteBucketPolicy",
+    "GetBucketWebsite",
+    "PutBucketWebsite",
+    "DeleteBucketWebsite",
+    "GetBucketLifecycleConfiguration",
+    "PutBucketLifecycleConfiguration",
+    "DeleteBucketLifecycle",
+    "GetBucketEncryption",
+    "PutBucketEncryption",
+    "DeleteBucketEncryption",
+    "GetBucketLogging",
+    "PutBucketLogging",
+    "GetBucketNotificationConfiguration",
+    "PutBucketNotificationConfiguration",
+    "GetBucketReplication",
+    "PutBucketReplication",
+    "DeleteBucketReplication",
+    "GetBucketOwnershipControls",
+    "PutBucketOwnershipControls",
+    "DeleteBucketOwnershipControls",
+    "GetPublicAccessBlock",
+    "PutPublicAccessBlock",
+    "DeletePublicAccessBlock",
+    "GetBucketAccelerateConfiguration",
+    "PutBucketAccelerateConfiguration",
+    "GetBucketInventoryConfiguration",
+    "PutBucketInventoryConfiguration",
+    "DeleteBucketInventoryConfiguration",
+    "GetBucketAnalyticsConfiguration",
+    "ListBucketAnalyticsConfigurations",
+    "PutBucketAnalyticsConfiguration",
+    "DeleteBucketAnalyticsConfiguration",
+    "GetBucketIntelligentTieringConfiguration",
+    "ListBucketIntelligentTieringConfigurations",
+    "PutBucketIntelligentTieringConfiguration",
+    "DeleteBucketIntelligentTieringConfiguration",
+    "GetBucketMetricsConfiguration",
+    "ListBucketMetricsConfigurations",
+    "PutBucketMetricsConfiguration",
+    "DeleteBucketMetricsConfiguration",
+    "GetBucketRequestPayment",
+    "PutBucketRequestPayment",
+    "GetBucketPolicyStatus",
+    "GetBucketMetadataConfiguration",
+    "CreateBucketMetadataConfiguration",
+    "DeleteBucketMetadataConfiguration",
+    "GetBucketMetadataTableConfiguration",
+    "CreateBucketMetadataTableConfiguration",
+    "DeleteBucketMetadataTableConfiguration",
+    "UpdateBucketMetadataInventoryTableConfiguration",
+    "UpdateBucketMetadataJournalTableConfiguration",
+    "PutBucketAbac",
+    "GetBucketAbac",
+    "CreateSession",
+    "GetObjectLockConfiguration",
+    "PutObjectLockConfiguration",
+    "GetBucketLocation",
+    "DeleteObjects",
+    "ListObjectVersions",
+    "GetObjectTorrent",
+    "GetObject",
+    "PutObject",
+    "CopyObject",
+    "DeleteObject",
+    "HeadObject",
+    "ListObjectsV2",
+    "ListObjects",
+    "CreateBucket",
+    "DeleteBucket",
+    "HeadBucket",
+];
 
 #[cfg(test)]
 mod tests;
@@ -4807,8 +4180,12 @@ mod partition_tests {
             "arn:aws-cn:s3:::b/k"
         );
         assert_eq!(
-            s3_resource_for("us-east-1", "ListObjectsV2", Some("b"), None),
+            s3_resource_for("us-east-1", "ListBucket", Some("b"), None),
             "arn:aws:s3:::b"
+        );
+        assert_eq!(
+            s3_resource_for("us-east-1", "ListAllMyBuckets", None, None),
+            "*"
         );
     }
 
@@ -4823,7 +4200,22 @@ mod partition_tests {
         );
         let query = HashMap::from([("torrent".to_string(), String::new())]);
         let torrent = s3_detect_action("GET", Some("b"), Some("k"), &query);
-        assert_eq!(torrent, Some("GetObject"));
+        assert_eq!(torrent, Some("GetObjectTorrent"));
+        // ListParts and AbortMultipartUpload act on the upload's object;
+        // ListMultipartUploads on the bucket.
+        assert_eq!(
+            s3_resource_for(
+                "us-east-1",
+                "ListMultipartUploadParts",
+                Some("b"),
+                Some("k")
+            ),
+            "arn:aws:s3:::b/k",
+        );
+        assert_eq!(
+            s3_resource_for("us-east-1", "ListBucketMultipartUploads", Some("b"), None),
+            "arn:aws:s3:::b",
+        );
     }
 
     #[test]
@@ -4986,7 +4378,7 @@ mod partition_tests {
             b"<CreateBucketConfiguration><Tags><Tag><Key>team</Key>\
               <Value>core</Value></Tag></Tags></CreateBucketConfiguration>",
         );
-        let tags = s3_request_tags(&create, "TagResource").unwrap();
+        let tags = s3_request_tags(&create, "CreateBucket").unwrap();
         assert_eq!(tags.get("team").map(String::as_str), Some("core"));
     }
 
@@ -5097,7 +4489,7 @@ mod s3_detect_action_tests {
             Some("key"),
             &q(&[("select", ""), ("select-type", "2")]),
         );
-        assert_eq!(action, Some("GetObject"));
+        assert_eq!(action, Some("SelectObjectContent"));
     }
 
     #[test]
@@ -5144,9 +4536,10 @@ mod s3_detect_action_tests {
 
     #[test]
     fn list_directory_buckets_is_distinct_from_list_buckets() {
-        // GET /?x-id=ListDirectoryBuckets -> s3express action, not ListBuckets.
+        // GET /?x-id=ListDirectoryBuckets is its own operation (authorized as
+        // s3express:ListAllMyDirectoryBuckets), not ListBuckets.
         let dir = s3_detect_action("GET", None, None, &q(&[("x-id", "ListDirectoryBuckets")]));
-        assert_eq!(dir, Some("ListAllMyDirectoryBuckets"));
+        assert_eq!(dir, Some("ListDirectoryBuckets"));
         // Plain GET / is still ListBuckets.
         let plain = s3_detect_action("GET", None, None, &q(&[]));
         assert_eq!(plain, Some("ListBuckets"));
@@ -5193,13 +4586,13 @@ mod s3_detect_action_tests {
     fn get_bucket_abac_not_misdetected_as_list_objects() {
         // GET /bucket?abac — previously fell through to ListObjects.
         let action = s3_detect_action("GET", Some("bucket"), None, &q(&[("abac", "")]));
-        assert_eq!(action, Some("GetBucketAbacConfiguration"));
+        assert_eq!(action, Some("GetBucketAbac"));
     }
 
     #[test]
     fn put_bucket_abac_still_detected() {
         let action = s3_detect_action("PUT", Some("bucket"), None, &q(&[("abac", "")]));
-        assert_eq!(action, Some("PutBucketAbacConfiguration"));
+        assert_eq!(action, Some("PutBucketAbac"));
     }
 }
 
@@ -5270,6 +4663,179 @@ mod s3_iam_service_prefix_tests {
             action.action_string(),
             "s3-object-lambda:WriteGetObjectResponse"
         );
+    }
+
+    /// The key comes from the raw path, as the handler routes it: repeated,
+    /// leading and trailing slashes are part of it.
+    #[test]
+    fn keys_are_derived_from_the_raw_path() {
+        let svc = make_service();
+        for (path, key) in [
+            ("/b", None),
+            ("/b/", None),
+            ("/b//", Some("/")),
+            ("/b/k/", Some("k/")),
+            ("/b/a//c", Some("a//c")),
+            ("/b/a%2Fb", Some("a/b")),
+        ] {
+            assert_eq!(
+                request_key(&req(Method::GET, path, &[])).as_deref(),
+                key,
+                "{path}"
+            );
+        }
+        // `/b//` addresses the key `/`: a GET of it is GetObject on that key,
+        // not a listing of the bucket.
+        let get = svc.iam_action_for(&req(Method::GET, "/b//", &[])).unwrap();
+        assert_eq!(get.action_string(), "s3:GetObject");
+        assert_eq!(get.resource, "arn:aws:s3:::b//");
+        // `?delete` on a key is not DeleteObjects, so it is not left to the
+        // handler: POST /b//?delete&uploads names two resource types and is
+        // refused before authorization; ?delete alone on a key is not a POST
+        // the key takes.
+        let sneaky = req(Method::POST, "/b//", &[("delete", ""), ("uploads", "")]);
+        assert!(!svc.iam_authorized_by_handler(&sneaky));
+        let refused = svc.validate_before_authorization(&sneaky).unwrap_err();
+        assert_eq!(
+            refused.message(),
+            "Conflicting query string parameters: delete, uploads"
+        );
+        assert!(svc.iam_action_for(&sneaky).is_none());
+        let on_key = req(Method::POST, "/b//", &[("delete", "")]);
+        assert_eq!(
+            svc.validate_before_authorization(&on_key)
+                .unwrap_err()
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert!(svc.iam_authorized_by_handler(&req(Method::POST, "/b", &[("delete", "")])));
+        assert!(!svc.iam_authorized_by_handler(&req(
+            Method::POST,
+            "/b",
+            &[("delete", ""), ("metadataConfiguration", "")]
+        )));
+    }
+
+    /// The full authorization set of requests whose operation and policy
+    /// action names differ, with each action's resource.
+    #[test]
+    fn requests_are_authorized_under_policy_action_names() {
+        let svc = make_service();
+        let pairs = |r: &AwsRequest| -> Vec<(String, String)> {
+            svc.iam_actions_for(r)
+                .into_iter()
+                .map(|a| (a.action_string(), a.resource))
+                .collect()
+        };
+        let one = |action: &str, resource: &str| vec![(action.to_string(), resource.to_string())];
+        assert_eq!(
+            pairs(&req(Method::GET, "/", &[])),
+            one("s3:ListAllMyBuckets", "*")
+        );
+        assert_eq!(
+            pairs(&req(Method::GET, "/b", &[("list-type", "2")])),
+            one("s3:ListBucket", "arn:aws:s3:::b")
+        );
+        assert_eq!(
+            pairs(&req(Method::HEAD, "/b", &[])),
+            one("s3:ListBucket", "arn:aws:s3:::b")
+        );
+        assert_eq!(
+            pairs(&req(Method::GET, "/b", &[("versions", "")])),
+            one("s3:ListBucketVersions", "arn:aws:s3:::b")
+        );
+        assert_eq!(
+            pairs(&req(Method::GET, "/b", &[("uploads", "")])),
+            one("s3:ListBucketMultipartUploads", "arn:aws:s3:::b")
+        );
+        assert_eq!(
+            pairs(&req(Method::GET, "/b/k", &[("uploadId", "u")])),
+            one("s3:ListMultipartUploadParts", "arn:aws:s3:::b/k")
+        );
+        assert_eq!(
+            pairs(&req(Method::HEAD, "/b/dir/k", &[])),
+            one("s3:GetObject", "arn:aws:s3:::b/dir/k")
+        );
+        assert_eq!(
+            pairs(&req(Method::GET, "/b/k", &[("versionId", "v1")])),
+            one("s3:GetObjectVersion", "arn:aws:s3:::b/k")
+        );
+        assert_eq!(
+            pairs(&req(Method::DELETE, "/b", &[("lifecycle", "")])),
+            one("s3:PutLifecycleConfiguration", "arn:aws:s3:::b")
+        );
+        assert_eq!(
+            pairs(&req(Method::POST, "/b/k", &[("uploads", "")])),
+            one("s3:PutObject", "arn:aws:s3:::b/k")
+        );
+
+        // CopyObject: the destination write, then the source read on the
+        // source object (its version's read for a versioned source).
+        let mut copy = req(Method::PUT, "/dst/new", &[]);
+        copy.headers
+            .insert("x-amz-copy-source", "/src/old%20key".parse().unwrap());
+        copy.headers
+            .insert("x-amz-tagging", "team=a".parse().unwrap());
+        // Under the default COPY tagging directive the header is ignored.
+        assert!(svc
+            .request_tags_from(&copy, "PutObject")
+            .unwrap()
+            .is_empty());
+        copy.headers
+            .insert("x-amz-tagging-directive", "REPLACE".parse().unwrap());
+        assert_eq!(
+            pairs(&copy),
+            vec![
+                (
+                    "s3:PutObject".to_string(),
+                    "arn:aws:s3:::dst/new".to_string()
+                ),
+                (
+                    "s3:GetObject".to_string(),
+                    "arn:aws:s3:::src/old key".to_string()
+                ),
+                (
+                    "s3:PutObjectTagging".to_string(),
+                    "arn:aws:s3:::dst/new".to_string()
+                ),
+            ]
+        );
+        // The tagged copy's request tags reach every action it needs.
+        assert_eq!(
+            svc.request_tags_from(&copy, "PutObjectTagging")
+                .unwrap()
+                .get("team")
+                .map(String::as_str),
+            Some("a")
+        );
+        let mut part_copy = req(
+            Method::PUT,
+            "/dst/new",
+            &[("partNumber", "1"), ("uploadId", "u")],
+        );
+        part_copy
+            .headers
+            .insert("x-amz-copy-source", "src/k?versionId=v9".parse().unwrap());
+        assert_eq!(
+            pairs(&part_copy),
+            vec![
+                (
+                    "s3:PutObject".to_string(),
+                    "arn:aws:s3:::dst/new".to_string()
+                ),
+                (
+                    "s3:GetObjectVersion".to_string(),
+                    "arn:aws:s3:::src/k".to_string()
+                ),
+            ]
+        );
+
+        // A PutObjectTagging body is not read as request tags of a PutObject.
+        let mut put = req(Method::PUT, "/b/k", &[]);
+        put.body = bytes::Bytes::from_static(
+            b"<Tagging><TagSet><Tag><Key>x</Key><Value>y</Value></Tag></TagSet></Tagging>",
+        );
+        assert!(svc.request_tags_from(&put, "PutObject").unwrap().is_empty());
     }
 
     #[test]

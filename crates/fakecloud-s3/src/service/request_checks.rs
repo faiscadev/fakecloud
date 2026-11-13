@@ -1,7 +1,7 @@
 //! Request-level checks S3 applies before an operation reads or writes
 //! anything: header values outside their enum, an object key past the length
-//! limit, a multipart query that names only half of an upload part, a
-//! configuration request without its body.
+//! limit, a configuration request without its body. Each is keyed on the
+//! operation the request was classified as ([`super::route::classify`]).
 //!
 //! Every code and message here was recorded against real S3 (us-east-1,
 //! 2026-11-09) with raw signed requests, so each refusal matches AWS byte for
@@ -10,9 +10,11 @@
 //! ListObjectsV2/DeleteObject/GetObjectTagging all answered 2xx) are not
 //! checked here.
 
-use http::{Method, StatusCode};
+use http::StatusCode;
 
 use fakecloud_core::service::{AwsRequest, AwsServiceError};
+
+use super::route::S3Op;
 
 /// S3's object-key limit in UTF-8 bytes.
 const MAX_KEY_BYTES: usize = 1024;
@@ -28,109 +30,22 @@ fn bad_request(code: &str, message: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, code, message)
 }
 
-/// What a PUT to an object key is. Classified once per request (by
-/// [`classify_key_put`]) and shared by dispatch, which streams the body of the
-/// uploads instead of buffering it, and by the checks below.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum KeyPut {
-    /// Not a PUT to an object key.
-    None,
-    /// PutObject: the body is the object's data.
-    PutObject,
-    /// CopyObject: no body, the data comes from `x-amz-copy-source`.
-    CopyObject,
-    /// UploadPart or UploadPartCopy: `partNumber` and `uploadId` together.
-    UploadPart,
-    /// PutObjectAnnotation: the body is the annotation's payload.
-    Annotation,
-    /// A sub-resource PUT with a small XML body (tagging, acl, retention,
-    /// legal hold, rename, encryption), or half an upload-part address.
-    SubResource,
-}
-
-/// The object sub-resources a PUT names in its query.
-const OBJECT_SUBRESOURCES: &[&str] = &[
-    "tagging",
-    "acl",
-    "retention",
-    "legal-hold",
-    "renameObject",
-    "encryption",
-];
-
-/// Classify `req` as a PUT to an object key (`has_key`) or not.
-pub(super) fn classify_key_put(req: &AwsRequest, has_key: bool) -> KeyPut {
-    if req.method != Method::PUT || !has_key {
-        return KeyPut::None;
-    }
-    let q = |name: &str| req.query_params.contains_key(name);
-    if q("annotation") {
-        KeyPut::Annotation
-    } else if OBJECT_SUBRESOURCES.iter().any(|name| q(name)) {
-        KeyPut::SubResource
-    } else {
-        match (q("partNumber"), q("uploadId")) {
-            (true, true) => KeyPut::UploadPart,
-            (false, false) if req.headers.contains_key("x-amz-copy-source") => KeyPut::CopyObject,
-            (false, false) => KeyPut::PutObject,
-            _ => KeyPut::SubResource,
-        }
-    }
-}
-
-/// Which request shape this is, as far as the checks below care.
-struct Shape<'a> {
-    req: &'a AwsRequest,
-    has_key: bool,
-    put: KeyPut,
-}
-
-impl Shape<'_> {
-    fn query(&self, name: &str) -> bool {
-        self.req.query_params.contains_key(name)
-    }
-
-    /// PutObject or CopyObject: a PUT to a key with no sub-resource.
-    fn is_object_write(&self) -> bool {
-        matches!(self.put, KeyPut::PutObject | KeyPut::CopyObject)
-    }
-
-    fn is_create_multipart_upload(&self) -> bool {
-        self.req.method == Method::POST && self.has_key && self.query("uploads")
-    }
-
-    /// GetObject or HeadObject.
-    fn is_object_read(&self) -> bool {
-        (self.req.method == Method::GET || self.req.method == Method::HEAD)
-            && self.has_key
-            && self.req.query_params.keys().all(|k| {
-                // Only response overrides, versionId, partNumber and the SDK's
-                // routing hint can accompany a plain object read.
-                k.starts_with("response-") || k == "versionId" || k == "partNumber" || k == "x-id"
-            })
-    }
-}
-
-/// Checks that need nothing but the request. `put` is the request's
-/// [`classify_key_put`] for `key`.
+/// Checks that need nothing but the request and the operation it was
+/// classified as ([`super::route::classify`]), addressing `key`.
 pub(super) fn check_request(
     req: &AwsRequest,
     key: Option<&str>,
-    put: KeyPut,
+    op: S3Op,
 ) -> Result<(), AwsServiceError> {
-    let shape = Shape {
-        req,
-        has_key: key.is_some(),
-        put,
-    };
-
     // Recorded on CreateMultipartUpload, DeleteObject and GetObject with a
     // 1025-byte key: 400 KeyTooLongError "Your key is too long".
     if key.is_some_and(|k| k.len() > MAX_KEY_BYTES) {
         return Err(bad_request("KeyTooLongError", "Your key is too long"));
     }
 
-    if shape.is_object_write() || shape.is_create_multipart_upload() {
+    let object_write = matches!(op, S3Op::PutObject | S3Op::CopyObject);
+    let create_multipart_upload = op == S3Op::CreateMultipartUpload;
+    if object_write || create_multipart_upload {
         // Recorded on PutObject, CopyObject and CreateMultipartUpload.
         if header(req, "x-amz-server-side-encryption").is_some_and(|v| !SSE_VALUES.contains(&v)) {
             return Err(bad_request(
@@ -147,7 +62,7 @@ pub(super) fn check_request(
         }
     }
 
-    if shape.is_create_multipart_upload()
+    if create_multipart_upload
         && header(req, "x-amz-storage-class").is_some_and(|v| !super::is_valid_storage_class(v))
     {
         // Recorded: 400 InvalidStorageClass, as PutObject already answers.
@@ -157,8 +72,7 @@ pub(super) fn check_request(
         ));
     }
 
-    if shape.is_object_write()
-        && req.headers.contains_key("x-amz-copy-source")
+    if op == S3Op::CopyObject
         && header(req, "x-amz-metadata-directive").is_some_and(|v| v != "COPY" && v != "REPLACE")
     {
         // Recorded on CopyObject.
@@ -168,7 +82,7 @@ pub(super) fn check_request(
         ));
     }
 
-    if shape.is_object_write() && req.headers.contains_key("x-amz-copy-source") {
+    if op == S3Op::CopyObject {
         // CopyObject's other two directives are enums the same way: S3 answers
         // a value outside them with the 400 InvalidArgument it gives an
         // unknown metadata directive, naming the directive.
@@ -185,7 +99,9 @@ pub(super) fn check_request(
         }
     }
 
-    if shape.is_object_read() && header(req, "x-amz-checksum-mode").is_some_and(|v| v != "ENABLED")
+    // Every GetObject / HeadObject, presigned or with any other parameters.
+    if matches!(op, S3Op::GetObject | S3Op::HeadObject)
+        && header(req, "x-amz-checksum-mode").is_some_and(|v| v != "ENABLED")
     {
         // Recorded on GetObject (HeadObject answers the same 400 without a
         // body, as for every HEAD error).
@@ -198,12 +114,16 @@ pub(super) fn check_request(
     // Recorded on ListObjects, ListObjectsV2, ListObjectVersions and
     // ListMultipartUploads: every bucket listing takes `encoding-type`, and
     // `url` is its only value.
-    if req.method == Method::GET
-        && !shape.has_key
-        && req
-            .query_params
-            .get("encoding-type")
-            .is_some_and(|v| v != "url")
+    if matches!(
+        op,
+        S3Op::ListObjects
+            | S3Op::ListObjectsV2
+            | S3Op::ListObjectVersions
+            | S3Op::ListMultipartUploads
+    ) && req
+        .query_params
+        .get("encoding-type")
+        .is_some_and(|v| v != "url")
     {
         return Err(bad_request(
             "InvalidArgument",
@@ -213,7 +133,7 @@ pub(super) fn check_request(
 
     // Recorded on CreateBucket, for a new bucket and for one the caller
     // already owns.
-    if req.method == Method::PUT && !shape.has_key && req.query_params.is_empty() {
+    if op == S3Op::CreateBucket {
         if let Some(ns) = header(req, "x-amz-bucket-namespace") {
             if ns != "account-regional" && ns != "global" {
                 return Err(bad_request(
@@ -228,7 +148,7 @@ pub(super) fn check_request(
     }
 
     // Recorded on PutBucketLifecycleConfiguration.
-    if req.method == Method::PUT && !shape.has_key && shape.query("lifecycle") {
+    if op == S3Op::PutBucketLifecycleConfiguration {
         if let Some(v) = header(req, "x-amz-transition-default-minimum-object-size") {
             if v != "varies_by_storage_class" && v != "all_storage_classes_128K" {
                 return Err(bad_request(
@@ -239,35 +159,17 @@ pub(super) fn check_request(
         }
     }
 
-    // An upload part is addressed by both `partNumber` and `uploadId`.
-    // Recorded: a PUT to a key with `partNumber` alone is 400 InvalidArgument,
-    // and one with `uploadId` alone is 405 MethodNotAllowed.
-    if req.method == Method::PUT && shape.has_key {
-        match (shape.query("partNumber"), shape.query("uploadId")) {
-            (true, false) => {
-                return Err(bad_request(
-                    "InvalidArgument",
-                    "This operation does not accept partNumber without uploadId",
-                ))
-            }
-            (false, true) => {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::METHOD_NOT_ALLOWED,
-                    "MethodNotAllowed",
-                    "The specified method is not allowed against this resource.",
-                ))
-            }
-            _ => {}
-        }
-    }
+    // Half an upload part's address (`partNumber` or `uploadId` alone) is
+    // refused by the classification itself.
 
     Ok(())
 }
 
-/// The bucket sub-resources whose PUT/POST must carry a body, with the error
-/// S3 returns when it is empty (all recorded with an empty body, and a
-/// matching CRC32 where the operation requires a checksum).
-fn empty_body_error(req: &AwsRequest) -> Option<AwsServiceError> {
+/// The configuration writes that must carry a body, with the error S3
+/// returns when it is empty (all recorded with an empty body, and a matching
+/// CRC32 where the operation requires a checksum), plus PutObjectTagging
+/// (recorded: 400 MissingRequestBodyError).
+fn empty_body_error(op: S3Op) -> Option<AwsServiceError> {
     let missing = || bad_request("MissingRequestBodyError", "Request Body is empty");
     let malformed = || {
         bad_request(
@@ -276,23 +178,20 @@ fn empty_body_error(req: &AwsRequest) -> Option<AwsServiceError> {
              published schema",
         )
     };
-    let q = |name: &str| req.query_params.contains_key(name);
-    match req.method {
-        Method::PUT => {
-            if q("encryption")
-                || q("tagging")
-                || q("requestPayment")
-                || q("metadataInventoryTable")
-                || q("metadataJournalTable")
-            {
-                Some(missing())
-            } else if q("analytics") || q("metrics") || q("inventory") || q("intelligent-tiering") {
-                Some(malformed())
-            } else {
-                None
-            }
-        }
-        Method::POST if q("metadataConfiguration") || q("metadataTable") => Some(missing()),
+    use S3Op::*;
+    match op {
+        PutBucketEncryption
+        | PutBucketTagging
+        | PutObjectTagging
+        | PutBucketRequestPayment
+        | UpdateBucketMetadataInventoryTableConfiguration
+        | UpdateBucketMetadataJournalTableConfiguration
+        | CreateBucketMetadataConfiguration
+        | CreateBucketMetadataTableConfiguration => Some(missing()),
+        PutBucketAnalyticsConfiguration
+        | PutBucketMetricsConfiguration
+        | PutBucketInventoryConfiguration
+        | PutBucketIntelligentTieringConfiguration => Some(malformed()),
         _ => None,
     }
 }
@@ -301,19 +200,10 @@ fn empty_body_error(req: &AwsRequest) -> Option<AwsServiceError> {
 /// request to a missing bucket still answers NoSuchBucket.
 pub(super) fn check_existing_bucket_request(
     req: &AwsRequest,
-    key: Option<&str>,
+    op: S3Op,
 ) -> Result<(), AwsServiceError> {
-    if !req.body.is_empty() {
-        return Ok(());
-    }
-    // Bucket-level sub-resources, plus PutObjectTagging (recorded: 400
-    // MissingRequestBodyError) on a key.
-    let applies = match key {
-        None => true,
-        Some(_) => req.method == Method::PUT && req.query_params.contains_key("tagging"),
-    };
-    match empty_body_error(req) {
-        Some(err) if applies => Err(err),
+    match empty_body_error(op) {
+        Some(err) if req.body.is_empty() => Err(err),
         _ => Ok(()),
     }
 }
@@ -322,6 +212,7 @@ pub(super) fn check_existing_bucket_request(
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use http::Method;
 
     fn req(method: Method, query: &[(&str, &str)], headers: &[(&str, &str)]) -> AwsRequest {
         let mut r = super::super::tests::make_request(method, "/b", query, b"");
@@ -334,36 +225,32 @@ mod tests {
         r
     }
 
-    fn check(r: &AwsRequest, key: Option<&str>) -> Result<(), AwsServiceError> {
-        check_request(r, key, classify_key_put(r, key.is_some()))
+    /// The operation `r` addresses on bucket `b` and `key`.
+    fn op_of(r: &AwsRequest, key: Option<&str>) -> S3Op {
+        super::super::route::classify(&r.method, Some("b"), key, &r.query_params, &r.headers)
+            .unwrap()
     }
 
+    fn check(r: &AwsRequest, key: Option<&str>) -> Result<(), AwsServiceError> {
+        check_request(r, key, op_of(r, key))
+    }
+
+    fn check_existing(r: &AwsRequest, key: Option<&str>) -> Result<(), AwsServiceError> {
+        check_existing_bucket_request(r, op_of(r, key))
+    }
+
+    /// Keyed on the operation, not the query's spelling: a presigned
+    /// GetObject (its query full of `X-Amz-*`) is still an object read.
     #[test]
-    fn key_puts_are_classified_by_sub_resource_and_copy_source() {
-        let classify = |query: &[(&str, &str)], headers: &[(&str, &str)]| {
-            classify_key_put(&req(Method::PUT, query, headers), true)
-        };
-        assert_eq!(classify(&[], &[]), KeyPut::PutObject);
-        assert_eq!(
-            classify(&[], &[("x-amz-copy-source", "b/k")]),
-            KeyPut::CopyObject
-        );
-        let part = [("partNumber", "1"), ("uploadId", "u")];
-        assert_eq!(classify(&part, &[]), KeyPut::UploadPart);
-        assert_eq!(
-            classify(&part, &[("x-amz-copy-source", "b/k")]),
-            KeyPut::UploadPart
-        );
-        assert_eq!(classify(&[("partNumber", "1")], &[]), KeyPut::SubResource);
-        assert_eq!(classify(&[("tagging", "")], &[]), KeyPut::SubResource);
-        assert_eq!(classify(&[("annotation", "")], &[]), KeyPut::Annotation);
-        assert_eq!(
-            classify_key_put(&req(Method::PUT, &[], &[]), false),
-            KeyPut::None
+    fn presigned_reads_are_object_reads() {
+        let r = req(
+            Method::GET,
+            &[("X-Amz-Credential", "c"), ("X-Amz-Signature", "s")],
+            &[("x-amz-checksum-mode", "x")],
         );
         assert_eq!(
-            classify_key_put(&req(Method::GET, &[], &[]), true),
-            KeyPut::None
+            code(check(&r, Some("k"))).as_deref(),
+            Some("InvalidRequest")
         );
     }
 
@@ -522,47 +409,36 @@ mod tests {
     }
 
     #[test]
-    fn half_an_upload_part_address_is_refused() {
-        let pn = req(Method::PUT, &[("partNumber", "1")], &[]);
-        assert_eq!(
-            code(check(&pn, Some("k"))).as_deref(),
-            Some("InvalidArgument")
-        );
-        let up = req(Method::PUT, &[("uploadId", "u")], &[]);
-        let err = check(&up, Some("k")).unwrap_err();
-        assert_eq!(err.status(), StatusCode::METHOD_NOT_ALLOWED);
-        let both = req(Method::PUT, &[("partNumber", "1"), ("uploadId", "u")], &[]);
-        assert!(check(&both, Some("k")).is_ok());
-    }
-
-    #[test]
     fn empty_configuration_bodies() {
         let enc = req(Method::PUT, &[("encryption", "")], &[]);
         assert_eq!(
-            code(check_existing_bucket_request(&enc, None)).as_deref(),
+            code(check_existing(&enc, None)).as_deref(),
             Some("MissingRequestBodyError")
         );
         let tag = req(Method::PUT, &[("tagging", "")], &[]);
         assert_eq!(
-            code(check_existing_bucket_request(&tag, Some("k"))).as_deref(),
+            code(check_existing(&tag, Some("k"))).as_deref(),
             Some("MissingRequestBodyError")
         );
         let inv = req(Method::PUT, &[("inventory", ""), ("id", "i")], &[]);
         assert_eq!(
-            code(check_existing_bucket_request(&inv, None)).as_deref(),
+            code(check_existing(&inv, None)).as_deref(),
             Some("MalformedXML")
         );
         let meta = req(Method::POST, &[("metadataTable", "")], &[]);
         assert_eq!(
-            code(check_existing_bucket_request(&meta, None)).as_deref(),
+            code(check_existing(&meta, None)).as_deref(),
             Some("MissingRequestBodyError")
         );
         // A body present is the handler's to judge.
         let mut full = req(Method::PUT, &[("encryption", "")], &[]);
         full.body = Bytes::from_static(b"<x/>");
-        assert!(check_existing_bucket_request(&full, None).is_ok());
-        // ACL bodies are optional (headers can carry the grant).
+        assert!(check_existing(&full, None).is_ok());
+        // ACL bodies are optional (headers can carry the grant), and an
+        // object's encryption update is not a bucket configuration.
         let acl = req(Method::PUT, &[("acl", "")], &[]);
-        assert!(check_existing_bucket_request(&acl, None).is_ok());
+        assert!(check_existing(&acl, None).is_ok());
+        let update = req(Method::PUT, &[("encryption", "")], &[]);
+        assert!(check_existing(&update, Some("k")).is_ok());
     }
 }

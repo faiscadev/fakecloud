@@ -391,14 +391,22 @@ async fn unauthorized_extra_form_field_is_rejected() {
         "us-east-1",
         1_000_000,
     );
-    // `x-amz-meta-foo` is not covered by any condition in `build_policy`.
-    let form = post_form(
-        &policy,
-        "uploads/extra.txt",
-        "0".repeat(64).as_str(),
-        b"body".to_vec(),
-    )
-    .text("x-amz-meta-foo", "bar");
+    // `x-amz-meta-foo` is not covered by any condition in `build_policy`. It
+    // precedes the file: fields after it are ignored, as on S3.
+    let form = reqwest::multipart::Form::new()
+        .text("key", "uploads/extra.txt")
+        .text("Content-Type", "text/plain")
+        .text("x-amz-algorithm", "AWS4-HMAC-SHA256")
+        .text("x-amz-credential", policy.credential.clone())
+        .text("x-amz-date", policy.amz_date.clone())
+        .text("policy", policy.policy_b64.clone())
+        .text("x-amz-signature", "0".repeat(64))
+        .text("success_action_status", "201")
+        .text("x-amz-meta-foo", "bar")
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(b"body".to_vec()).file_name("upload.txt"),
+        );
 
     let resp = reqwest::Client::new()
         .post(format!("{}/post-policy-extra", server.endpoint()))
@@ -640,4 +648,707 @@ async fn post_object_fires_object_created_post_notification() {
         event["Records"][0]["s3"]["object"]["key"],
         "uploads/form.txt"
     );
+}
+
+/// A form signed by `akid`/`secret` for `key` in `bucket`, whose policy
+/// names (exactly) each of `fields`, which the form also sets, followed by
+/// the `unpinned` fields the policy does not name; the file comes last.
+fn signed_form_with(
+    bucket: &str,
+    key: &str,
+    akid: &str,
+    secret: &str,
+    fields: &[(&str, &str)],
+    unpinned: &[(&str, &str)],
+) -> reqwest::multipart::Form {
+    let now = chrono::Utc::now();
+    let date_stamp = now.format("%Y%m%d").to_string();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let credential = format!("{akid}/{date_stamp}/us-east-1/s3/aws4_request");
+    let mut conditions = vec![
+        serde_json::json!({"bucket": bucket}),
+        serde_json::json!({"key": key}),
+        serde_json::json!({"x-amz-algorithm": "AWS4-HMAC-SHA256"}),
+        serde_json::json!({"x-amz-credential": credential}),
+        serde_json::json!({"x-amz-date": amz_date}),
+    ];
+    for (name, value) in fields {
+        let mut condition = serde_json::Map::new();
+        condition.insert(name.to_string(), serde_json::Value::from(*value));
+        conditions.push(serde_json::Value::Object(condition));
+    }
+    let policy = serde_json::json!({
+        "expiration": (now + chrono::Duration::minutes(15)).to_rfc3339(),
+        "conditions": conditions,
+    });
+    let policy_b64 = base64::engine::general_purpose::STANDARD.encode(policy.to_string());
+    let signature = sign_policy(secret, &date_stamp, "us-east-1", "s3", &policy_b64);
+    let mut form = reqwest::multipart::Form::new()
+        .text("key", key.to_string())
+        .text("x-amz-algorithm", "AWS4-HMAC-SHA256")
+        .text("x-amz-credential", credential)
+        .text("x-amz-date", amz_date)
+        .text("policy", policy_b64)
+        .text("x-amz-signature", signature);
+    for (name, value) in fields.iter().chain(unpinned) {
+        form = form.text(name.to_string(), value.to_string());
+    }
+    form.part(
+        "file",
+        reqwest::multipart::Part::bytes(b"form body".to_vec()).file_name("f.txt"),
+    )
+}
+
+/// [`signed_form_with`] with no fields beyond those the policy names.
+fn signed_form(
+    bucket: &str,
+    key: &str,
+    akid: &str,
+    secret: &str,
+    fields: &[(&str, &str)],
+) -> reqwest::multipart::Form {
+    signed_form_with(bucket, key, akid, secret, fields, &[])
+}
+
+/// A form upload is authorized as the PutObject its fields make it: the
+/// fields feed the condition keys (`s3:x-amz-server-side-encryption`,
+/// `s3:x-amz-acl`, `aws:RequestTag/*`), and the `acl` / `tagging` fields are
+/// applied and need `s3:PutObjectAcl` / `s3:PutObjectTagging`.
+#[tokio::test]
+async fn post_object_fields_are_the_put_objects_headers_under_strict() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let s3 = helpers::root_s3_client(&server).await;
+    s3.create_bucket().bucket("form-keys").send().await.unwrap();
+    let iam = aws_sdk_iam::Client::new(&helpers::root_config(&server).await);
+    let user = |name: &'static str, extra: &'static str| {
+        let iam = iam.clone();
+        async move {
+            iam.create_user().user_name(name).send().await.unwrap();
+            iam.put_user_policy()
+                .user_name(name)
+                .policy_name("p")
+                .policy_document(format!(
+                    r#"{{"Version":"2012-10-17","Statement":[
+                        {{"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::form-keys/*"}}{extra}]}}"#
+                ))
+                .send()
+                .await
+                .unwrap();
+            let ak = iam
+                .create_access_key()
+                .user_name(name)
+                .send()
+                .await
+                .unwrap();
+            let ak = ak.access_key().unwrap();
+            (
+                ak.access_key_id().to_string(),
+                ak.secret_access_key().to_string(),
+            )
+        }
+    };
+    let post = |form: reqwest::multipart::Form| {
+        reqwest::Client::new()
+            .post(format!("{}/form-keys", server.endpoint()))
+            .multipart(form)
+            .send()
+    };
+
+    // `DenyIncorrectEncryptionHeader`: a correct AES256 form is allowed, a
+    // form naming no encryption is denied.
+    let (a, s) = user(
+        "aes",
+        r#",{"Effect":"Deny","Action":"s3:PutObject","Resource":"*",
+            "Condition":{"StringNotEquals":{"s3:x-amz-server-side-encryption":"AES256"}}}"#,
+    )
+    .await;
+    let ok = post(signed_form(
+        "form-keys",
+        "aes.txt",
+        &a,
+        &s,
+        &[("x-amz-server-side-encryption", "AES256")],
+    ))
+    .await
+    .unwrap();
+    assert!(ok.status().is_success(), "{:?}", ok.text().await);
+    let denied = post(signed_form("form-keys", "plain.txt", &a, &s, &[]))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // A deny on aws:kms applies to a kms form.
+    let (a, s) = user(
+        "nokms",
+        r#",{"Effect":"Deny","Action":"s3:PutObject","Resource":"*",
+            "Condition":{"StringEquals":{"s3:x-amz-server-side-encryption":"aws:kms"}}}"#,
+    )
+    .await;
+    let denied = post(signed_form(
+        "form-keys",
+        "kms.txt",
+        &a,
+        &s,
+        &[("x-amz-server-side-encryption", "aws:kms")],
+    ))
+    .await
+    .unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(s3
+        .head_object()
+        .bucket("form-keys")
+        .key("kms.txt")
+        .send()
+        .await
+        .is_err());
+
+    // `acl` and `tagging` fields need their permissions, and are applied.
+    let tagging =
+        "<Tagging><TagSet><Tag><Key>team</Key><Value>a b</Value></Tag></TagSet></Tagging>";
+    let (a, s) = user("putonly", "").await;
+    for fields in [
+        vec![("acl", "bucket-owner-full-control")],
+        vec![("tagging", tagging)],
+    ] {
+        let denied = post(signed_form("form-keys", "extra.txt", &a, &s, &fields))
+            .await
+            .unwrap();
+        assert_eq!(
+            denied.status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "{fields:?}"
+        );
+    }
+    let (a, s) = user(
+        "tagger",
+        r#",{"Effect":"Allow","Action":["s3:PutObjectTagging","s3:PutObjectAcl"],"Resource":"arn:aws:s3:::form-keys/*",
+            "Condition":{"StringEquals":{"aws:RequestTag/team":"a b"}}}"#,
+    )
+    .await;
+    let ok = post(signed_form(
+        "form-keys",
+        "tagged.txt",
+        &a,
+        &s,
+        &[("acl", "bucket-owner-full-control"), ("tagging", tagging)],
+    ))
+    .await
+    .unwrap();
+    assert!(ok.status().is_success(), "{:?}", ok.text().await);
+    let tags = s3
+        .get_object_tagging()
+        .bucket("form-keys")
+        .key("tagged.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tag_set().len(), 1);
+    assert_eq!(tags.tag_set()[0].key(), "team");
+    assert_eq!(tags.tag_set()[0].value(), "a b");
+    // A field naming a copy source does not turn the upload into a copy
+    // (whose request tags would be empty): the tags are still the form's,
+    // and a Deny on them applies.
+    let (e, es) = user(
+        "noevil",
+        r#",{"Effect":"Allow","Action":"s3:PutObjectTagging","Resource":"*"},
+           {"Effect":"Deny","Action":["s3:PutObject","s3:PutObjectTagging"],"Resource":"*",
+            "Condition":{"StringEquals":{"aws:RequestTag/team":"evil"}}}"#,
+    )
+    .await;
+    let evil = "<Tagging><TagSet><Tag><Key>team</Key><Value>evil</Value></Tag></TagSet></Tagging>";
+    for fields in [
+        vec![("tagging", evil)],
+        vec![
+            ("tagging", evil),
+            ("x-amz-copy-source", "form-keys/aes.txt"),
+        ],
+    ] {
+        let denied = post(signed_form("form-keys", "evil.txt", &e, &es, &fields))
+            .await
+            .unwrap();
+        assert_eq!(
+            denied.status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "{fields:?}"
+        );
+    }
+    assert!(s3
+        .head_object()
+        .bucket("form-keys")
+        .key("evil.txt")
+        .send()
+        .await
+        .is_err());
+    // A `tagging` field is a validated Tagging document.
+    let dup = "<Tagging><TagSet><Tag><Key>k</Key><Value>1</Value></Tag>\
+               <Tag><Key>k</Key><Value>2</Value></Tag></TagSet></Tagging>";
+    for (tagging, code) in [("<Tagging><TagSet>", "MalformedXML"), (dup, "InvalidTag")] {
+        let resp = post(signed_form(
+            "form-keys",
+            "bad-tags.txt",
+            &e,
+            &es,
+            &[("tagging", tagging)],
+        ))
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST, "{tagging}");
+        let text = resp.text().await.unwrap();
+        assert!(text.contains(&format!("<Code>{code}</Code>")), "{text}");
+    }
+
+    // A tag the condition does not allow is denied.
+    let other = "<Tagging><TagSet><Tag><Key>team</Key><Value>z</Value></Tag></TagSet></Tagging>";
+    let denied = post(signed_form(
+        "form-keys",
+        "other.txt",
+        &a,
+        &s,
+        &[("tagging", other)],
+    ))
+    .await
+    .unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+/// Every occurrence of a field is checked against the policy (recorded on
+/// S3: a second `acl` / `x-amz-server-side-encryption` field, in any case,
+/// with another value fails the condition), so a duplicate cannot override
+/// a pinned value; the form's tagging is validated before authorization;
+/// the PutObject's header checks apply to its fields.
+#[tokio::test]
+async fn post_object_fields_are_checked_in_every_occurrence() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let s3 = helpers::root_s3_client(&server).await;
+    s3.create_bucket()
+        .bucket("dup-fields")
+        .send()
+        .await
+        .unwrap();
+    let post = |form: reqwest::multipart::Form| {
+        reqwest::Client::new()
+            .post(format!("{}/dup-fields", server.endpoint()))
+            .multipart(form)
+            .send()
+    };
+    for (field, pinned, extra_name, extra_value) in [
+        ("acl", "private", "acl", "public-read"),
+        ("acl", "private", "Acl", "public-read"),
+        (
+            "x-amz-server-side-encryption",
+            "AES256",
+            "X-Amz-Server-Side-Encryption",
+            "aws:kms",
+        ),
+    ] {
+        let form = signed_form_with(
+            "dup-fields",
+            "dup.txt",
+            "test",
+            "test",
+            &[(field, pinned)],
+            &[(extra_name, extra_value)],
+        );
+        let resp = post(form).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "{extra_name}"
+        );
+        let text = resp.text().await.unwrap();
+        assert!(
+            text.contains(&format!(
+                "Invalid according to Policy: Policy Condition failed: [&quot;eq&quot;, &quot;${field}&quot;, &quot;{pinned}&quot;]"
+            )) || text.contains(&format!(
+                "Invalid according to Policy: Policy Condition failed: [\"eq\", \"${field}\", \"{pinned}\"]"
+            )),
+            "{text}"
+        );
+    }
+    assert!(s3
+        .head_object()
+        .bucket("dup-fields")
+        .key("dup.txt")
+        .send()
+        .await
+        .is_err());
+
+    // PutObject's own header checks apply to a form's fields.
+    let bogus = post(signed_form(
+        "dup-fields",
+        "bogus.txt",
+        "test",
+        "test",
+        &[("x-amz-server-side-encryption", "bogus")],
+    ))
+    .await
+    .unwrap();
+    assert_eq!(bogus.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(bogus.text().await.unwrap().contains("InvalidArgument"));
+
+    // Recorded: an anonymous form's tagging is validated before it is
+    // authorized -- malformed is MalformedXML, well-formed AccessDenied.
+    let anonymous = |tagging: &str| {
+        let form = reqwest::multipart::Form::new()
+            .text("key", "anon.txt")
+            .text("tagging", tagging.to_string())
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(b"x".to_vec()).file_name("a.txt"),
+            );
+        post(form)
+    };
+    let malformed = anonymous("<Tagging><TagSet>").await.unwrap();
+    assert_eq!(malformed.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(malformed.text().await.unwrap().contains("MalformedXML"));
+    let good =
+        anonymous("<Tagging><TagSet><Tag><Key>a</Key><Value>1</Value></Tag></TagSet></Tagging>")
+            .await
+            .unwrap();
+    assert_eq!(good.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+/// "The file or content must be the last field in the form. Any fields
+/// below it are ignored." (POST Object API reference)
+#[tokio::test]
+async fn post_object_ignores_fields_after_the_file() {
+    let server = TestServer::start().await;
+    let s3 = helpers::root_s3_client(&server).await;
+    s3.create_bucket().bucket("file-last").send().await.unwrap();
+    s3.put_bucket_ownership_controls()
+        .bucket("file-last")
+        .ownership_controls(
+            aws_sdk_s3::types::OwnershipControls::builder()
+                .rules(
+                    aws_sdk_s3::types::OwnershipControlsRule::builder()
+                        .object_ownership(aws_sdk_s3::types::ObjectOwnership::ObjectWriter)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let post = |form: reqwest::multipart::Form| {
+        reqwest::Client::new()
+            .post(format!("{}/file-last", server.endpoint()))
+            .multipart(form)
+            .send()
+    };
+    // An `acl` after the file is not read, so neither checked against the
+    // policy (which does not name it) nor applied.
+    let form =
+        signed_form("file-last", "late-acl.txt", "test", "test", &[]).text("acl", "public-read");
+    let resp = post(form).await.unwrap();
+    assert!(resp.status().is_success(), "{:?}", resp.text().await);
+    let acl = s3
+        .get_object_acl()
+        .bucket("file-last")
+        .key("late-acl.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(acl.grants().len(), 1, "{acl:?}");
+
+    // A `key` only after the file is no key.
+    let form = reqwest::multipart::Form::new()
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(b"x".to_vec()).file_name("f.txt"),
+        )
+        .text("key", "after.txt");
+    let resp = post(form).await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let text = resp.text().await.unwrap();
+    assert!(
+        text.contains("Bucket POST must contain a field named &apos;key&apos;.")
+            || text.contains("Bucket POST must contain a field named 'key'."),
+        "{text}"
+    );
+    // Recorded on S3: `<ArgumentName>key</ArgumentName><ArgumentValue></ArgumentValue>`.
+    assert!(text.contains("<ArgumentName>key</ArgumentName>"), "{text}");
+    assert!(text.contains("<ArgumentValue></ArgumentValue>"), "{text}");
+}
+
+/// SSE-KMS under a form upload uses the key as the policy's signer: a key
+/// policy denying the signer refuses the upload, one allowing it lets it
+/// through.
+#[tokio::test]
+async fn post_object_sse_kms_uses_the_signers_identity() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let root = helpers::root_config(&server).await;
+    let s3 = helpers::root_s3_client(&server).await;
+    s3.create_bucket().bucket("kms-form").send().await.unwrap();
+    let iam = aws_sdk_iam::Client::new(&root);
+    let mut users = Vec::new();
+    for name in ["kms-denied", "kms-allowed"] {
+        let user = iam.create_user().user_name(name).send().await.unwrap();
+        let arn = user.user().unwrap().arn().to_string();
+        iam.put_user_policy()
+            .user_name(name)
+            .policy_name("p")
+            .policy_document(
+                r#"{"Version":"2012-10-17","Statement":[
+                    {"Effect":"Allow","Action":["s3:PutObject","kms:*"],"Resource":"*"}]}"#,
+            )
+            .send()
+            .await
+            .unwrap();
+        let ak = iam
+            .create_access_key()
+            .user_name(name)
+            .send()
+            .await
+            .unwrap();
+        let ak = ak.access_key().unwrap();
+        users.push((
+            arn,
+            ak.access_key_id().to_string(),
+            ak.secret_access_key().to_string(),
+        ));
+    }
+    let account = users[0].0.split(':').nth(4).unwrap().to_string();
+    let kms = aws_sdk_kms::Client::new(&root);
+    let key = kms
+        .create_key()
+        .policy(format!(
+            r#"{{"Version":"2012-10-17","Statement":[
+                {{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{account}:root"}},"Action":"kms:*","Resource":"*"}},
+                {{"Effect":"Deny","Principal":{{"AWS":"{denied}"}},"Action":"kms:*","Resource":"*"}}]}}"#,
+            denied = users[0].0
+        ))
+        .send()
+        .await
+        .unwrap();
+    let key_arn = key.key_metadata().unwrap().arn().unwrap().to_string();
+    let post = |(_, akid, secret): &(String, String, String), key: &str| {
+        let form = signed_form(
+            "kms-form",
+            key,
+            akid,
+            secret,
+            &[
+                ("x-amz-server-side-encryption", "aws:kms"),
+                ("x-amz-server-side-encryption-aws-kms-key-id", &key_arn),
+            ],
+        );
+        reqwest::Client::new()
+            .post(format!("{}/kms-form", server.endpoint()))
+            .multipart(form)
+            .send()
+    };
+    let denied = post(&users[0], "denied.txt").await.unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(s3
+        .head_object()
+        .bucket("kms-form")
+        .key("denied.txt")
+        .send()
+        .await
+        .is_err());
+    let allowed = post(&users[1], "allowed.txt").await.unwrap();
+    assert!(allowed.status().is_success(), "{:?}", allowed.text().await);
+}
+
+/// A form signed by a user of account B, uploading to account A's bucket
+/// under A's customer key: the key is judged by A's key policy for B's
+/// principal, not as the bucket owner's own use of its key -- refused while
+/// the policy does not allow B (nothing stored), allowed once it does.
+#[tokio::test]
+async fn post_object_sse_kms_cross_account_signer_is_judged_by_the_key_policy() {
+    const ACCOUNT_B: &str = "222222222222";
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let root = helpers::root_config(&server).await;
+    let s3 = helpers::root_s3_client(&server).await;
+    s3.create_bucket()
+        .bucket("xacct-kms-form")
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_policy()
+        .bucket("xacct-kms-form")
+        .policy(format!(
+            r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow",
+                "Principal":{{"AWS":"arn:aws:iam::{ACCOUNT_B}:root"}},
+                "Action":"s3:PutObject","Resource":"arn:aws:s3:::xacct-kms-form/*"}}]}}"#
+        ))
+        .send()
+        .await
+        .unwrap();
+    let kms = aws_sdk_kms::Client::new(&root);
+    let key = kms.create_key().send().await.unwrap();
+    let key_meta = key.key_metadata().unwrap();
+    let key_id = key_meta.key_id().to_string();
+    let key_arn = key_meta.arn().unwrap().to_string();
+    let account_a = key_arn.split(':').nth(4).unwrap().to_string();
+    assert_ne!(account_a, ACCOUNT_B);
+
+    let (akid, secret) = server.create_admin(ACCOUNT_B, "form-signer").await;
+    let post = |key: &'static str| {
+        let form = signed_form(
+            "xacct-kms-form",
+            key,
+            &akid,
+            &secret,
+            &[
+                ("x-amz-server-side-encryption", "aws:kms"),
+                ("x-amz-server-side-encryption-aws-kms-key-id", &key_arn),
+            ],
+        );
+        reqwest::Client::new()
+            .post(format!("{}/xacct-kms-form", server.endpoint()))
+            .multipart(form)
+            .send()
+    };
+
+    // The default key policy names only account A.
+    let refused = post("refused.txt").await.unwrap();
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "{:?}",
+        refused.text().await
+    );
+    assert!(s3
+        .head_object()
+        .bucket("xacct-kms-form")
+        .key("refused.txt")
+        .send()
+        .await
+        .is_err());
+
+    kms.put_key_policy()
+        .key_id(&key_id)
+        .policy_name("default")
+        .policy(format!(
+            r#"{{"Version":"2012-10-17","Statement":[
+                {{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{account_a}:root"}},"Action":"kms:*","Resource":"*"}},
+                {{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::{ACCOUNT_B}:root"}},
+                  "Action":["kms:GenerateDataKey","kms:Encrypt","kms:Decrypt"],"Resource":"*"}}]}}"#
+        ))
+        .send()
+        .await
+        .unwrap();
+    let allowed = post("allowed.txt").await.unwrap();
+    assert!(allowed.status().is_success(), "{:?}", allowed.text().await);
+    let head = s3
+        .head_object()
+        .bucket("xacct-kms-form")
+        .key("allowed.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.ssekms_key_id(), Some(key_arn.as_str()));
+}
+
+/// Under `--iam strict` a browser-form upload is authorized as the PutObject
+/// it is, on the key the form names, for the uploader whose key signed the
+/// policy -- or, for a form with no policy, anonymously on the bucket policy.
+#[tokio::test]
+async fn post_object_is_authorized_as_put_object_under_strict() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let s3 = helpers::root_s3_client(&server).await;
+    s3.create_bucket()
+        .bucket("strict-post")
+        .send()
+        .await
+        .expect("create bucket");
+
+    let iam = aws_sdk_iam::Client::new(&helpers::root_config(&server).await);
+    let mut keys = Vec::new();
+    for (user, resource) in [
+        ("uploader", "arn:aws:s3:::strict-post/uploads/*"),
+        ("elsewhere", "arn:aws:s3:::strict-post/other/*"),
+    ] {
+        iam.create_user().user_name(user).send().await.unwrap();
+        iam.put_user_policy()
+            .user_name(user)
+            .policy_name("put")
+            .policy_document(format!(
+                r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":"s3:PutObject","Resource":"{resource}"}}]}}"#
+            ))
+            .send()
+            .await
+            .unwrap();
+        let ak = iam
+            .create_access_key()
+            .user_name(user)
+            .send()
+            .await
+            .unwrap();
+        let ak = ak.access_key().unwrap();
+        keys.push((
+            ak.access_key_id().to_string(),
+            ak.secret_access_key().to_string(),
+        ));
+    }
+    let signed_post = |akid: &str, secret: &str, key: &str| {
+        let policy = build_policy("strict-post", "uploads/", akid, "us-east-1", 1_000_000);
+        let signature = sign_policy(
+            secret,
+            &policy.date_stamp,
+            &policy.region,
+            "s3",
+            &policy.policy_b64,
+        );
+        let form = post_form(&policy, key, &signature, b"form body".to_vec());
+        reqwest::Client::new()
+            .post(format!("{}/strict-post", server.endpoint()))
+            .multipart(form)
+            .send()
+    };
+    let (akid, secret) = &keys[0];
+    let ok = signed_post(akid, secret, "uploads/a.txt").await.unwrap();
+    assert_eq!(ok.status(), reqwest::StatusCode::CREATED);
+    let (akid, secret) = &keys[1];
+    let denied = signed_post(akid, secret, "uploads/b.txt").await.unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(s3
+        .head_object()
+        .bucket("strict-post")
+        .key("uploads/b.txt")
+        .send()
+        .await
+        .is_err());
+
+    // Anonymous form uploads: only where the bucket policy lets anyone put.
+    s3.delete_public_access_block()
+        .bucket("strict-post")
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_policy()
+        .bucket("strict-post")
+        .policy(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",
+                "Action":"s3:PutObject","Resource":"arn:aws:s3:::strict-post/public/*"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    let anonymous = |key: &str| {
+        let form = reqwest::multipart::Form::new()
+            .text("key", key.to_string())
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(b"anon".to_vec()).file_name("a.txt"),
+            );
+        reqwest::Client::new()
+            .post(format!("{}/strict-post", server.endpoint()))
+            .multipart(form)
+            .send()
+    };
+    let ok = anonymous("public/x.txt").await.unwrap();
+    assert!(ok.status().is_success(), "{:?}", ok.text().await);
+    let denied = anonymous("private/x.txt").await.unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(s3
+        .head_object()
+        .bucket("strict-post")
+        .key("private/x.txt")
+        .send()
+        .await
+        .is_err());
 }

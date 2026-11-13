@@ -308,9 +308,11 @@ impl AwsService for StsService {
     }
 
     /// `GetCallerIdentity` needs no permission, and a policy denying
-    /// `sts:GetCallerIdentity` does not keep a caller from it.
+    /// `sts:GetCallerIdentity` does not keep a caller from it. A request
+    /// with no resolved identity (anonymous, or a key that resolves to none)
+    /// still goes through authorization, which refuses it.
     fn iam_authorization_required(&self, request: &fakecloud_core::service::AwsRequest) -> bool {
-        request.action != "GetCallerIdentity"
+        request.action != "GetCallerIdentity" || request.principal.is_none()
     }
 
     /// `AssumeRoot` refuses a `TaskPolicyArn` that is not a root-task

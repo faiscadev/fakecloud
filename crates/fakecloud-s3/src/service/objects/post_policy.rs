@@ -19,9 +19,10 @@ use fakecloud_core::auth::is_root_bypass;
 
 use super::*;
 
-/// One parsed multipart form field: original (as-submitted) name + value.
-/// Lookups against the policy's conditions are case-insensitive per the S3
-/// POST Policy spec, so callers normally match on `name.to_ascii_lowercase()`.
+/// One parsed multipart form field: its name, lower-cased (form field names
+/// are case-insensitive), and its value. Every occurrence of a field is kept:
+/// the policy's conditions are checked against each one, and the upload uses
+/// the first, so what is checked and what is stored are the same values.
 struct FormField {
     name: String,
     value: String,
@@ -36,10 +37,19 @@ struct ParsedForm {
 }
 
 impl ParsedForm {
+    /// The value the upload uses: the field's first occurrence.
     fn field_lower(&self, lower_name: &str) -> Option<&str> {
+        self.values(lower_name).next()
+    }
+
+    /// Every occurrence of a field, in form order.
+    fn values<'a, 'n>(
+        &'a self,
+        lower_name: &'n str,
+    ) -> impl Iterator<Item = &'a str> + use<'a, 'n> {
         self.fields
             .iter()
-            .find(|f| f.name.eq_ignore_ascii_case(lower_name))
+            .filter(move |f| f.name == lower_name)
             .map(|f| f.value.as_str())
     }
 }
@@ -92,12 +102,15 @@ async fn parse_multipart_form(
             .map_err(|err| invalid_argument(format!("malformed multipart body: {err}")))?;
         let Some(field) = next else { break };
 
-        let name = field.name().unwrap_or("").to_string();
+        let name = field.name().unwrap_or("").to_ascii_lowercase();
         if name.eq_ignore_ascii_case("file") {
             file_present = true;
             file_name = field.file_name().map(|s| s.to_string());
             file_content_type = field.content_type().map(|m| m.to_string());
             file_bytes = multer_field_bytes(field).await?;
+            // "The file or content must be the last field in the form. Any
+            // fields below it are ignored." (POST Object API reference)
+            break;
         } else {
             let value = field
                 .text()
@@ -216,48 +229,57 @@ fn parse_conditions(policy: &serde_json::Value) -> Result<Vec<PolicyCondition>, 
     Ok(out)
 }
 
-/// Look up the submitted value for a condition's field name (lowercased),
-/// consulting the well-known derived fields (`bucket`, `key`, `file`'s
-/// resolved content-type) before falling back to the raw submitted form
-/// fields.
-fn submitted_value<'a>(
+/// Every submitted value for a condition's field name (lowercased): the
+/// bucket the form posts to, each `key` field as resolved (`${filename}`),
+/// each `content-type` field (or, with none, the file part's own type), else
+/// each occurrence of the form field.
+fn submitted_values(
     field: &str,
-    bucket: &'a str,
-    resolved_key: &'a str,
-    content_type: &'a str,
-    form: &'a ParsedForm,
-) -> Option<&'a str> {
+    bucket: &str,
+    default_content_type: &str,
+    form: &ParsedForm,
+) -> Vec<String> {
     match field {
-        "bucket" => Some(bucket),
-        "key" => Some(resolved_key),
-        "content-type" => Some(content_type),
-        other => form.field_lower(other),
+        "bucket" => vec![bucket.to_string()],
+        "key" => form
+            .values("key")
+            .map(|k| resolve_key(k, form.file_name.as_deref()))
+            .collect(),
+        "content-type" if form.field_lower("content-type").is_none() => {
+            vec![default_content_type.to_string()]
+        }
+        other => form.values(other).map(str::to_string).collect(),
     }
 }
 
+/// Check the policy's conditions against the form. Every occurrence of a
+/// field is checked (recorded on S3: a second `acl` or
+/// `x-amz-server-side-encryption` field with another value fails the
+/// condition), so whichever value the upload uses, the policy allowed it.
 fn enforce_conditions(
     conditions: &[PolicyCondition],
     bucket: &str,
-    resolved_key: &str,
-    content_type: &str,
+    default_content_type: &str,
     file_size: u64,
     form: &ParsedForm,
 ) -> Result<(), AwsServiceError> {
     for cond in conditions {
         match cond {
             PolicyCondition::Eq { field, value } => {
-                let actual = submitted_value(field, bucket, resolved_key, content_type, form);
-                if actual != Some(value.as_str()) {
+                let actual = submitted_values(field, bucket, default_content_type, form);
+                if actual.is_empty() || actual.iter().any(|v| v != value) {
                     return Err(access_denied(format!(
-                        "Policy Condition failed: [\"eq\", \"${field}\", \"{value}\"]"
+                        "Invalid according to Policy: Policy Condition failed: \
+                         [\"eq\", \"${field}\", \"{value}\"]"
                     )));
                 }
             }
             PolicyCondition::StartsWith { field, prefix } => {
-                let actual = submitted_value(field, bucket, resolved_key, content_type, form);
-                if !actual.is_some_and(|v| v.starts_with(prefix.as_str())) {
+                let actual = submitted_values(field, bucket, default_content_type, form);
+                if actual.is_empty() || !actual.iter().all(|v| v.starts_with(prefix.as_str())) {
                     return Err(access_denied(format!(
-                        "Policy Condition failed: [\"starts-with\", \"${field}\", \"{prefix}\"]"
+                        "Invalid according to Policy: Policy Condition failed: \
+                         [\"starts-with\", \"${field}\", \"{prefix}\"]"
                     )));
                 }
             }
@@ -337,6 +359,77 @@ fn enforce_no_extra_fields(
     Ok(())
 }
 
+/// The PutObject request headers (`PutObjectRequest`'s `@httpHeader`
+/// members, lower-cased) a POST Object form field carries as-is. Left out:
+/// `content-type` (the form's own field, set separately), `content-length`
+/// (the file's), and `x-amz-acl` / `x-amz-tagging`, which a form sets with
+/// its `acl` and `tagging` fields.
+const PUT_OBJECT_FORM_HEADERS: &[&str] = &[
+    "cache-control",
+    "content-disposition",
+    "content-encoding",
+    "content-language",
+    "content-md5",
+    "expires",
+    "if-match",
+    "if-none-match",
+    "x-amz-checksum-crc32",
+    "x-amz-checksum-crc32c",
+    "x-amz-checksum-crc64nvme",
+    "x-amz-checksum-md5",
+    "x-amz-checksum-sha1",
+    "x-amz-checksum-sha256",
+    "x-amz-checksum-sha512",
+    "x-amz-checksum-xxhash128",
+    "x-amz-checksum-xxhash3",
+    "x-amz-checksum-xxhash64",
+    "x-amz-expected-bucket-owner",
+    "x-amz-grant-full-control",
+    "x-amz-grant-read",
+    "x-amz-grant-read-acp",
+    "x-amz-grant-write-acp",
+    "x-amz-object-lock-event-hold",
+    "x-amz-object-lock-event-hold-duration-days",
+    "x-amz-object-lock-event-hold-duration-years",
+    "x-amz-object-lock-legal-hold",
+    "x-amz-object-lock-mode",
+    "x-amz-object-lock-retain-until-date",
+    "x-amz-request-payer",
+    "x-amz-sdk-checksum-algorithm",
+    "x-amz-server-side-encryption",
+    "x-amz-server-side-encryption-aws-kms-key-id",
+    "x-amz-server-side-encryption-bucket-key-enabled",
+    "x-amz-server-side-encryption-context",
+    "x-amz-server-side-encryption-customer-algorithm",
+    "x-amz-server-side-encryption-customer-key",
+    "x-amz-server-side-encryption-customer-key-md5",
+    "x-amz-storage-class",
+    "x-amz-website-redirect-location",
+    "x-amz-write-offset-bytes",
+];
+
+/// A POST Object `tagging` field's tag set, read as PutObjectTagging reads
+/// its body (one parser for both).
+fn tagging_document(xml: &str) -> Result<Vec<(String, String)>, AwsServiceError> {
+    crate::service::tags::parse_object_tagging(xml)
+}
+
+/// A tag set as the URL-encoded `key=value&...` PutObject's `x-amz-tagging`
+/// carries.
+fn tagging_header(tags: &[(String, String)]) -> String {
+    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    tags.iter()
+        .map(|(k, v)| {
+            format!(
+                "{}={}",
+                utf8_percent_encode(k, NON_ALPHANUMERIC),
+                utf8_percent_encode(v, NON_ALPHANUMERIC)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// Absolute, path-style URL for a stored object, derived from the request's
 /// `Host` header (matching fakecloud's path-style addressing). Falls back to a
 /// root-relative path when no usable host is present. Used for the `Location`
@@ -404,9 +497,20 @@ impl S3Service {
 
         let form = parse_multipart_form(&content_type, req.body.clone()).await?;
 
-        let key_field = form
-            .field_lower("key")
-            .ok_or_else(|| invalid_argument("POST Object requires a `key` form field"))?;
+        let key_field = form.field_lower("key").ok_or_else(|| {
+            // Recorded on S3 (a `key` only after the file, 2026-11-12): this
+            // message, `ArgumentName` key and an empty `ArgumentValue`.
+            AwsServiceError::aws_error_with_fields(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "Bucket POST must contain a field named 'key'.  If it is specified, please \
+                     check the order of the fields.",
+                vec![
+                    ("ArgumentName".to_string(), "key".to_string()),
+                    ("ArgumentValue".to_string(), String::new()),
+                ],
+            )
+        })?;
         let resolved_key = resolve_key(key_field, form.file_name.as_deref());
         if resolved_key.is_empty() {
             return Err(invalid_argument(
@@ -423,97 +527,114 @@ impl S3Service {
             .or_else(|| form.file_content_type.clone())
             .unwrap_or_else(|| "binary/octet-stream".to_string());
 
-        // --- Decode the policy document ---
-        let policy_b64 = form
-            .field_lower("policy")
-            .ok_or_else(|| invalid_argument("POST Object requires a `policy` form field"))?
-            .to_string();
-        let policy_bytes = base64::engine::general_purpose::STANDARD
-            .decode(policy_b64.as_bytes())
-            .map_err(|_| invalid_argument("`policy` is not valid base64"))?;
-        let policy: serde_json::Value = serde_json::from_slice(&policy_bytes)
-            .map_err(|_| invalid_argument("`policy` is not valid JSON"))?;
-
-        // --- Signature verification ---
-        // Authenticate the policy signature *before* evaluating the policy's
-        // conditions, matching real S3's precedence: a request that both
-        // carries a bad signature and violates a condition is rejected as
-        // `SignatureDoesNotMatch`, not `AccessDenied`.
-        let algorithm = form.field_lower("x-amz-algorithm").unwrap_or_default();
-        if !algorithm.is_empty() && !algorithm.eq_ignore_ascii_case("AWS4-HMAC-SHA256") {
-            return Err(invalid_argument(format!(
-                "unsupported x-amz-algorithm: {algorithm}"
-            )));
-        }
-        let credential_raw = form.field_lower("x-amz-credential").ok_or_else(|| {
-            invalid_argument("POST Object requires an `x-amz-credential` form field")
-        })?;
-        let credential = parse_credential(credential_raw)?;
-        let signature = form.field_lower("x-amz-signature").ok_or_else(|| {
-            invalid_argument("POST Object requires an `x-amz-signature` form field")
-        })?;
-
-        if is_root_bypass(&credential.access_key) {
-            // Matches the codebase-wide `test*` root-bypass convention
-            // (`fakecloud_core::auth::is_root_bypass`): local-dev root
-            // credentials always pass, signature not cryptographically
-            // checked.
+        // A form with no policy, credential or signature is an anonymous
+        // upload, authorized on the bucket's own policy alone (S3 user guide,
+        // "Browser-based uploads using POST": a POST without them is
+        // anonymous and "requires that the bucket be publicly writable").
+        let anonymous = ["policy", "x-amz-credential", "x-amz-signature"]
+            .iter()
+            .all(|name| form.field_lower(name).is_none());
+        // The identity of the verified signer (none for the `test*` root
+        // bypass or an anonymous form): what every consumer of the upload --
+        // authorization, the KMS hook, the object's owner, the access log --
+        // sees as its requester.
+        let mut signer_principal = None;
+        let signer = if anonymous {
+            None
         } else {
-            let resolver = self.credential_resolver.as_ref().ok_or_else(|| {
-                signature_does_not_match(
+            // --- Decode the policy document ---
+            let policy_b64 = form
+                .field_lower("policy")
+                .ok_or_else(|| invalid_argument("POST Object requires a `policy` form field"))?
+                .to_string();
+            let policy_bytes = base64::engine::general_purpose::STANDARD
+                .decode(policy_b64.as_bytes())
+                .map_err(|_| invalid_argument("`policy` is not valid base64"))?;
+            let policy: serde_json::Value = serde_json::from_slice(&policy_bytes)
+                .map_err(|_| invalid_argument("`policy` is not valid JSON"))?;
+
+            // --- Signature verification ---
+            // Authenticate the policy signature *before* evaluating the policy's
+            // conditions, matching real S3's precedence: a request that both
+            // carries a bad signature and violates a condition is rejected as
+            // `SignatureDoesNotMatch`, not `AccessDenied`.
+            let algorithm = form.field_lower("x-amz-algorithm").unwrap_or_default();
+            if !algorithm.is_empty() && !algorithm.eq_ignore_ascii_case("AWS4-HMAC-SHA256") {
+                return Err(invalid_argument(format!(
+                    "unsupported x-amz-algorithm: {algorithm}"
+                )));
+            }
+            let credential_raw = form.field_lower("x-amz-credential").ok_or_else(|| {
+                invalid_argument("POST Object requires an `x-amz-credential` form field")
+            })?;
+            let credential = parse_credential(credential_raw)?;
+            let signature = form.field_lower("x-amz-signature").ok_or_else(|| {
+                invalid_argument("POST Object requires an `x-amz-signature` form field")
+            })?;
+
+            if is_root_bypass(&credential.access_key) {
+                // Matches the codebase-wide `test*` root-bypass convention
+                // (`fakecloud_core::auth::is_root_bypass`): local-dev root
+                // credentials always pass, signature not cryptographically
+                // checked.
+            } else {
+                let resolver = self.credential_resolver.as_ref().ok_or_else(|| {
+                    signature_does_not_match(
                     "The request signature we calculated does not match the signature you provided",
                 )
-            })?;
-            let resolved = resolver.resolve(&credential.access_key).ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::FORBIDDEN,
-                    "InvalidAccessKeyId",
-                    "The AWS Access Key Id you provided does not exist in our records.",
-                )
-            })?;
-            if !fakecloud_aws::sigv4::verify_signature(
-                &resolved.secret_access_key,
-                &credential.date_stamp,
-                &credential.region,
-                &credential.service,
-                &policy_b64,
-                signature,
-            ) {
-                return Err(signature_does_not_match(
+                })?;
+                let resolved = resolver.resolve(&credential.access_key).ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::FORBIDDEN,
+                        "InvalidAccessKeyId",
+                        "The AWS Access Key Id you provided does not exist in our records.",
+                    )
+                })?;
+                if !fakecloud_aws::sigv4::verify_signature(
+                    &resolved.secret_access_key,
+                    &credential.date_stamp,
+                    &credential.region,
+                    &credential.service,
+                    &policy_b64,
+                    signature,
+                ) {
+                    return Err(signature_does_not_match(
                     "The request signature we calculated does not match the signature you provided",
                 ));
+                }
+                signer_principal = Some(resolved.principal.clone());
             }
-        }
 
-        // --- Policy validation (expiration + conditions) ---
-        // Real S3 requires the policy to carry an `expiration`; a policy
-        // without one is rejected rather than treated as never-expiring.
-        let expiration = policy
-            .get("expiration")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                invalid_argument("Invalid Policy: policy document must contain an `expiration`")
-            })?;
-        let expires_at = chrono::DateTime::parse_from_rfc3339(expiration)
-            .map_err(|_| invalid_argument("policy `expiration` is not valid RFC3339"))?
-            .with_timezone(&Utc);
-        if Utc::now() > expires_at {
-            return Err(access_denied(
-                "Invalid according to Policy: Policy expired.",
-            ));
-        }
+            // --- Policy validation (expiration + conditions) ---
+            // Real S3 requires the policy to carry an `expiration`; a policy
+            // without one is rejected rather than treated as never-expiring.
+            let expiration = policy
+                .get("expiration")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    invalid_argument("Invalid Policy: policy document must contain an `expiration`")
+                })?;
+            let expires_at = chrono::DateTime::parse_from_rfc3339(expiration)
+                .map_err(|_| invalid_argument("policy `expiration` is not valid RFC3339"))?
+                .with_timezone(&Utc);
+            if Utc::now() > expires_at {
+                return Err(access_denied(
+                    "Invalid according to Policy: Policy expired.",
+                ));
+            }
 
-        let conditions = parse_conditions(&policy)?;
-        enforce_conditions(
-            &conditions,
-            bucket,
-            &resolved_key,
-            &object_content_type,
-            form.file_bytes.len() as u64,
-            &form,
-        )?;
-        // Every submitted field must be authorized by a policy condition.
-        enforce_no_extra_fields(&conditions, &form)?;
+            let conditions = parse_conditions(&policy)?;
+            enforce_conditions(
+                &conditions,
+                bucket,
+                &object_content_type,
+                form.file_bytes.len() as u64,
+                &form,
+            )?;
+            // Every submitted field must be authorized by a policy condition.
+            enforce_no_extra_fields(&conditions, &form)?;
+            Some(credential.access_key)
+        };
 
         // --- Store the object via the existing PutObject sink ---
         let mut synth_headers = HeaderMap::new();
@@ -523,19 +644,37 @@ impl S3Service {
                 .parse()
                 .unwrap_or_else(|_| http::HeaderValue::from_static("binary/octet-stream")),
         );
-        // Forward any other AWS-meaningful fields the caller supplied
-        // (storage class, ACL, user metadata, cache/content headers) as if
-        // they were the equivalent PutObject headers — POST Object form
-        // field names match their header counterparts verbatim.
+        // The form makes a PutObject: its fields that are PutObject's request
+        // headers keep their names (`PUT_OBJECT_FORM_HEADERS`, plus user
+        // metadata `x-amz-meta-*`); `acl` is the canned ACL (`x-amz-acl`) and
+        // `tagging` the object's tag set as a `Tagging` XML document (POST
+        // Object API reference), which PutObject takes as the URL-encoded
+        // `x-amz-tagging`. Any other field (the signature material, a copy
+        // source or directive, which PutObject has no use for) is not a
+        // header of it, though like every field it must be named by the
+        // policy's conditions (checked above).
+        // Each field's first occurrence; every occurrence passed the policy.
+        let mut seen = std::collections::HashSet::new();
         for f in &form.fields {
-            let lower = f.name.to_ascii_lowercase();
-            let forwardable = lower == "cache-control"
-                || lower == "content-disposition"
-                || lower == "content-encoding"
-                || lower == "content-language"
-                || lower == "content-md5"
-                || lower == "expires"
-                || lower.starts_with("x-amz-");
+            if !seen.insert(f.name.as_str()) {
+                continue;
+            }
+            let lower = f.name.clone();
+            if lower == "acl" {
+                if let Ok(value) = f.value.parse::<http::HeaderValue>() {
+                    synth_headers.insert("x-amz-acl", value);
+                }
+                continue;
+            }
+            if lower == "tagging" {
+                let tags = tagging_document(&f.value)?;
+                if let Ok(value) = tagging_header(&tags).parse::<http::HeaderValue>() {
+                    synth_headers.insert("x-amz-tagging", value);
+                }
+                continue;
+            }
+            let forwardable = PUT_OBJECT_FORM_HEADERS.contains(&lower.as_str())
+                || lower.starts_with("x-amz-meta-");
             if !forwardable {
                 continue;
             }
@@ -555,6 +694,84 @@ impl S3Service {
             }
         }
 
+        // Authorized as the PutObject it is, on the object the form names,
+        // for the uploader the policy was signed by (or anonymously): AWS
+        // authorizes a POST Object as s3:PutObject, plus s3:PutObjectAcl /
+        // s3:PutObjectTagging / the Object Lock actions for the ACL, tagging
+        // and lock fields it sets, exactly as PutObject's headers. The
+        // evaluation sees that PutObject -- the form's fields as its headers
+        // (so `s3:x-amz-server-side-encryption`, `s3:x-amz-acl`,
+        // `aws:RequestTag/*` ... come from the form) and the connection's
+        // own headers -- not the multipart POST that carried it. Dispatch
+        // cannot see the key, the fields or the signer, so this is the
+        // handler's (`iam_authorized_by_handler`).
+        let mut authorized_headers = synth_headers.clone();
+        for name in [
+            "host",
+            "origin",
+            "referer",
+            "user-agent",
+            "x-forwarded-proto",
+            "x-forwarded-for",
+        ] {
+            if let Some(value) = req.headers.get(name) {
+                authorized_headers.insert(name, value.clone());
+            }
+        }
+        let requester_account = signer_principal
+            .as_ref()
+            .map(|p: &fakecloud_core::auth::Principal| p.account_id.clone())
+            .unwrap_or_else(|| req.account_id.clone());
+        let as_put = AwsRequest {
+            service: "s3".to_string(),
+            action: String::new(),
+            region: req.region.clone(),
+            account_id: requester_account.clone(),
+            request_id: req.request_id.clone(),
+            headers: authorized_headers,
+            query_params: HashMap::new(),
+            body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![bucket.to_string(), resolved_key.clone()],
+            raw_path: format!("/{bucket}/{resolved_key}"),
+            raw_query: String::new(),
+            method: Method::PUT,
+            is_query_protocol: false,
+            access_key_id: signer.clone(),
+            principal: None,
+        };
+        // A PutObject by construction: only PutObject's own headers were
+        // carried over, so no field can make it classify as anything else
+        // (a copy, say) and change its condition keys or request tags.
+        debug_assert_eq!(
+            crate::service::s3_operation(&as_put),
+            Some("PutObject"),
+            "a form upload is evaluated as a PutObject"
+        );
+        // The checks dispatch applies to a PutObject's headers before
+        // authorizing it (an unknown encryption method, an invalid event
+        // hold, ...), on the form's fields.
+        crate::service::request_checks::check_request(
+            &as_put,
+            Some(&resolved_key),
+            crate::service::route::S3Op::PutObject,
+        )?;
+        let mut actions = vec!["PutObject"];
+        actions.extend(
+            crate::service::iam_actions::object_write_extras(&synth_headers)
+                .into_iter()
+                .filter_map(|need| match need {
+                    crate::service::iam_actions::Need::Own(_, action) => Some(action),
+                    _ => None,
+                }),
+        );
+        let allowed = actions
+            .into_iter()
+            .all(|action| self.caller_may_for(&as_put, action, bucket, &resolved_key));
+        if !allowed {
+            return Err(access_denied("Access Denied"));
+        }
+
         let synth_req = AwsRequest {
             service: "s3".to_string(),
             // PutObject's handler reads the action to decide which
@@ -562,9 +779,9 @@ impl S3Service {
             // ObjectCreated:Post on real S3.
             action: "PostObject".to_string(),
             region: req.region.clone(),
-            // The caller, not the bucket owner `account_id` the write is
-            // served in: the object-created event reports this requester.
-            account_id: req.account_id.clone(),
+            // The requester (the signer), not the bucket owner `account_id`
+            // the write is served in: the object-created event reports it.
+            account_id: requester_account,
             request_id: req.request_id.clone(),
             headers: synth_headers,
             query_params: HashMap::new(),
@@ -577,8 +794,8 @@ impl S3Service {
             raw_query: String::new(),
             method: Method::PUT,
             is_query_protocol: false,
-            access_key_id: req.access_key_id.clone(),
-            principal: req.principal.clone(),
+            access_key_id: signer,
+            principal: signer_principal,
         };
 
         let put_response = self
@@ -675,5 +892,108 @@ impl S3Service {
                 headers,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod form_tests {
+    use super::*;
+
+    /// The headers a form field may carry are exactly PutObject's own
+    /// (`PutObjectRequest`'s `@httpHeader` members), less the three it sets
+    /// otherwise: never a copy source, a directive or the signature.
+    #[test]
+    fn form_headers_are_put_objects_request_headers() {
+        let model: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../aws-models/s3.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let members = model["shapes"]["com.amazonaws.s3#PutObjectRequest"]["members"]
+            .as_object()
+            .unwrap();
+        let mut headers: Vec<String> = members
+            .values()
+            .filter_map(|m| m["traits"]["smithy.api#httpHeader"].as_str())
+            .map(str::to_ascii_lowercase)
+            .filter(|h| {
+                !matches!(
+                    h.as_str(),
+                    "content-type" | "content-length" | "x-amz-acl" | "x-amz-tagging"
+                )
+            })
+            .collect();
+        headers.sort();
+        let mut ours: Vec<String> = PUT_OBJECT_FORM_HEADERS
+            .iter()
+            .map(|h| h.to_string())
+            .collect();
+        ours.sort();
+        assert_eq!(ours, headers);
+        assert!(!ours.iter().any(|h| h.starts_with("x-amz-copy-source")
+            || h.ends_with("-directive")
+            || matches!(
+                h.as_str(),
+                "x-amz-credential" | "x-amz-signature" | "x-amz-date"
+            )));
+    }
+
+    #[test]
+    fn tagging_fields_are_validated_documents() {
+        let tag = |k: &str, v: &str| format!("<Tag><Key>{k}</Key><Value>{v}</Value></Tag>");
+        let doc = |tags: &str| format!("<Tagging><TagSet>{tags}</TagSet></Tagging>");
+        assert_eq!(
+            tagging_document(&doc(&tag("team", "a"))).unwrap(),
+            vec![("team".to_string(), "a".to_string())]
+        );
+        // Recorded: comments are ignored; CDATA and entities are text.
+        let commented = doc(&format!("{}<!--{}-->", tag("a", "1"), tag("x", "y")));
+        assert_eq!(
+            tagging_document(&commented).unwrap(),
+            vec![("a".to_string(), "1".to_string())]
+        );
+        assert_eq!(
+            tagging_document(&doc(
+                "<Tag ><Key><![CDATA[c d]]></Key><Value>e&amp;f</Value></Tag>"
+            ))
+            .unwrap(),
+            vec![("c d".to_string(), "e&f".to_string())]
+        );
+        for malformed in [
+            "not xml".to_string(),
+            "<Tagging><TagSet>".to_string(),
+            "<Other><TagSet></TagSet></Other>".to_string(),
+            doc("<Tag><Value>v</Value></Tag>"),
+            // Recorded: a keyless tag next to a commented-out one.
+            doc(&format!(
+                "<Tag><Value>v</Value></Tag><!--{}-->",
+                tag("x", "y")
+            )),
+            doc("<Tag><Key>k</Key></Tag>"),
+            doc("<Tag/>"),
+        ] {
+            assert_eq!(
+                tagging_document(&malformed).unwrap_err().code(),
+                "MalformedXML",
+                "{malformed}"
+            );
+        }
+        let duplicate = doc(&format!("{}{}", tag("k", "1"), tag("k", "2")));
+        assert_eq!(
+            tagging_document(&duplicate).unwrap_err().code(),
+            "InvalidTag"
+        );
+        let system = doc(&tag("aws:x", "1"));
+        assert_eq!(tagging_document(&system).unwrap_err().code(), "InvalidTag");
+        let eleven: String = (0..11).map(|i| tag(&format!("k{i}"), "v")).collect();
+        assert_eq!(
+            tagging_document(&doc(&eleven)).unwrap_err().code(),
+            "BadRequest"
+        );
+        let ten: String = (0..10).map(|i| tag(&format!("k{i}"), "v")).collect();
+        assert_eq!(tagging_document(&doc(&ten)).unwrap().len(), 10);
     }
 }

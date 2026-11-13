@@ -187,6 +187,60 @@ pub trait CredentialResolver: Send + Sync {
     }
 }
 
+/// Authorizes further IAM actions for the request a handler is serving.
+///
+/// Dispatch authorizes a request's own actions before its handler runs. Some
+/// authorizations only the handler can make: a batch AWS authorizes per item
+/// and answers with per-item errors (S3 `DeleteObjects`, per key), or a
+/// permission that decides what a response reveals (S3's 404 vs 403 for a
+/// missing key on `s3:ListBucket`). While IAM enforcement applies to a
+/// request, dispatch makes one available to its handler
+/// ([`request_authorizer`]), evaluating an action exactly as it evaluates the
+/// request's own: the same caller, policies, SCPs, resource policy and mode.
+pub trait RequestAuthorizer: Send + Sync {
+    /// The service the request was addressed to.
+    fn service_name(&self) -> &str;
+
+    /// Whether the caller may perform `action`. Under strict enforcement a
+    /// refusal is `false`; under soft enforcement it is logged and `true`, as
+    /// a refused request is logged and served.
+    fn authorize(&self, action: &IamAction) -> bool;
+
+    /// Whether `action` is allowed for `request` -- a request the handler
+    /// derived from the one it serves, whose caller and condition-key sources
+    /// live inside the body (an S3 browser-form upload: its fields are the
+    /// request headers that matter, and its policy is signed with the
+    /// uploader's key). Evaluated as [`RequestAuthorizer::authorize`] would
+    /// for `request` arriving signed with its `access_key_id` (anonymous when
+    /// `None`; the reserved `test*` root bypass included), from the same
+    /// client connection.
+    fn authorize_for(&self, request: &crate::service::AwsRequest, action: &IamAction) -> bool;
+}
+
+tokio::task_local! {
+    static REQUEST_AUTHORIZER: Arc<dyn RequestAuthorizer>;
+}
+
+/// The authorizer of the `service` request being handled, if IAM
+/// enforcement applies to it. `None` with enforcement off, for the `test*`
+/// root bypass, and outside a request to `service` (in-process calls another
+/// service's handler makes, background work), where nothing further is
+/// authorized.
+pub fn request_authorizer(service: &str) -> Option<Arc<dyn RequestAuthorizer>> {
+    REQUEST_AUTHORIZER
+        .try_with(Arc::clone)
+        .ok()
+        .filter(|a| a.service_name() == service)
+}
+
+/// Run `handler` with `authorizer` as its [`request_authorizer`].
+pub async fn with_request_authorizer<F: std::future::Future>(
+    authorizer: Arc<dyn RequestAuthorizer>,
+    handler: F,
+) -> F::Output {
+    REQUEST_AUTHORIZER.scope(authorizer, handler).await
+}
+
 /// One IAM action that the dispatch layer should evaluate against the
 /// caller's effective policy set.
 ///
@@ -1135,6 +1189,40 @@ pub fn is_root_bypass(access_key_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct OnlyGetObject;
+
+    impl RequestAuthorizer for OnlyGetObject {
+        fn service_name(&self) -> &str {
+            "s3"
+        }
+        fn authorize(&self, action: &IamAction) -> bool {
+            action.action == "GetObject"
+        }
+        fn authorize_for(&self, _: &crate::service::AwsRequest, action: &IamAction) -> bool {
+            self.authorize(action)
+        }
+    }
+
+    #[tokio::test]
+    async fn request_authorizer_is_scoped_to_its_request_and_service() {
+        assert!(request_authorizer("s3").is_none());
+        let action = |name| IamAction {
+            service: "s3",
+            action: name,
+            resource: "arn:aws:s3:::b/k".to_string(),
+        };
+        with_request_authorizer(Arc::new(OnlyGetObject), async {
+            let authorizer = request_authorizer("s3").expect("in scope");
+            assert!(authorizer.authorize(&action("GetObject")));
+            assert!(!authorizer.authorize(&action("PutObject")));
+            // Another service's handler running inside this request (an
+            // in-process call) is not handed it.
+            assert!(request_authorizer("sqs").is_none());
+        })
+        .await;
+        assert!(request_authorizer("s3").is_none());
+    }
 
     #[test]
     fn service_internal_caller_is_an_accountless_service_principal() {

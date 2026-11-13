@@ -6,7 +6,8 @@ fn s3_condition_keys_emits_list_params() {
     q.insert("prefix".to_string(), "logs/".to_string());
     q.insert("delimiter".to_string(), "/".to_string());
     q.insert("max-keys".to_string(), "100".to_string());
-    let keys = s3_condition_keys("ListObjectsV2", &q, &HeaderMap::new());
+    // ListObjects / ListObjectsV2 are authorized as s3:ListBucket.
+    let keys = s3_condition_keys("ListBucket", &q, &HeaderMap::new());
     assert_eq!(keys.get("s3:prefix"), Some(&vec!["logs/".to_string()]));
     assert_eq!(keys.get("s3:delimiter"), Some(&vec!["/".to_string()]));
     assert_eq!(keys.get("s3:max-keys"), Some(&vec!["100".to_string()]));
@@ -60,9 +61,22 @@ fn s3_condition_keys_omits_absent_params() {
 fn s3_condition_keys_partial_params() {
     let mut q = std::collections::HashMap::new();
     q.insert("prefix".to_string(), "archive/".to_string());
-    let keys = s3_condition_keys("ListObjects", &q, &HeaderMap::new());
+    // ListObjectVersions (s3:ListBucketVersions) takes the same keys.
+    let keys = s3_condition_keys("ListBucketVersions", &q, &HeaderMap::new());
     assert_eq!(keys.len(), 1);
     assert_eq!(keys.get("s3:prefix"), Some(&vec!["archive/".to_string()]));
+    // Operation names are not actions and get none.
+    assert!(s3_condition_keys("ListObjects", &q, &HeaderMap::new()).is_empty());
+}
+
+#[test]
+fn s3_condition_keys_emit_version_id() {
+    let mut q = std::collections::HashMap::new();
+    q.insert("versionId".to_string(), "v1".to_string());
+    let keys = s3_condition_keys("GetObjectVersion", &q, &HeaderMap::new());
+    assert_eq!(keys.get("s3:versionid"), Some(&vec!["v1".to_string()]));
+    q.insert("versionId".to_string(), String::new());
+    assert!(s3_condition_keys("GetObject", &q, &HeaderMap::new()).is_empty());
 }
 
 #[test]
@@ -120,7 +134,7 @@ fn parse_delete_xml_with_version() {
 #[test]
 fn parse_tags_xml() {
     let xml = r#"<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>"#;
-    let tags = parse_tagging_xml(xml);
+    let tags = tags::read_tag_set(xml, "Tagging", "TagSet").unwrap();
     assert_eq!(tags, vec![("env".to_string(), "prod".to_string())]);
 }
 
@@ -2319,6 +2333,149 @@ fn bucket_website_put_get_delete_round_trip() {
         svc.get_bucket_website("123456789012", "b"),
         "NoSuchWebsiteConfiguration",
     );
+}
+
+#[test]
+fn put_bucket_website_refusals_match_the_recordings() {
+    // Recorded on S3: every one is 400 InvalidArgument with this message.
+    let svc = make_service();
+    seed_bucket(&svc, "rules");
+    let index = |suffix: &str| format!("<IndexDocument><Suffix>{suffix}</Suffix></IndexDocument>");
+    let redirect =
+        "<RedirectAllRequestsTo><HostName>example.com</HostName></RedirectAllRequestsTo>";
+    let conjunction =
+        "RedirectAllRequestsTo cannot be provided in conjunction with other Routing Rules.";
+    for (members, message) in [
+        (index("a/b"), "The IndexDocument Suffix is not well formed"),
+        (index(""), "The IndexDocument Suffix is not well formed"),
+        (
+            "<ErrorDocument><Key>e.html</Key></ErrorDocument>".to_string(),
+            "A value for IndexDocument Suffix must be provided if RedirectAllRequestsTo is empty",
+        ),
+        (format!("{redirect}{}", index("index.html")), conjunction),
+        (
+            format!("{redirect}<ErrorDocument><Key>e.html</Key></ErrorDocument>"),
+            conjunction,
+        ),
+        (
+            format!(
+                "{redirect}<RoutingRules><RoutingRule><Redirect><HostName>h</HostName>\
+                 </Redirect></RoutingRule></RoutingRules>"
+            ),
+            conjunction,
+        ),
+    ] {
+        let body = format!("<WebsiteConfiguration>{members}</WebsiteConfiguration>");
+        let req = make_request(Method::PUT, "/rules", &[("website", "")], body.as_bytes());
+        let err = assert_aws_err(
+            svc.put_bucket_website("123456789012", &req, "rules"),
+            "InvalidArgument",
+        );
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(err.message(), message, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn website_configuration_is_read_as_xml_and_validated() {
+    // The error document's key is the `Key` element's text, whatever text
+    // around it says: an escaped `</Key>` ahead of the element once made the
+    // hand-sliced span end before it began, a panic on every missing-key GET.
+    let svc = make_service();
+    seed_bucket(&svc, "site");
+    seed_object(&svc, "site", "e.html", b"error page");
+    seed_object(&svc, "site", "index.html", b"home");
+    let config =
+        b"<WebsiteConfiguration><IndexDocument><Suffix>index.html</Suffix></IndexDocument>\
+        <ErrorDocument>&lt;/Key&gt;<Key>e.html</Key></ErrorDocument></WebsiteConfiguration>";
+    let req = make_request(Method::PUT, "/site", &[("website", "")], config);
+    svc.put_bucket_website("123456789012", &req, "site")
+        .unwrap();
+    let resp = svc
+        .handle(make_request(Method::GET, "/site/missing", &[], b""))
+        .await
+        .unwrap();
+    assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    assert_eq!(resp.body.expect_bytes(), b"error page");
+    let resp = svc
+        .handle(make_request(Method::GET, "/site", &[], b""))
+        .await
+        .unwrap();
+    assert_eq!(resp.body.expect_bytes(), b"home");
+
+    // A configuration stored before it was validated serves as none, and
+    // never panics: the plain GetObject error comes back.
+    svc.state
+        .write()
+        .default_mut()
+        .buckets
+        .get_mut("site")
+        .unwrap()
+        .website_config =
+        Some("<WebsiteConfiguration><ErrorDocument></Key><Key>e.html</ErrorDocument>".to_string());
+    assert_aws_err(
+        svc.handle(make_request(Method::GET, "/site/missing", &[], b""))
+            .await,
+        "NoSuchKey",
+    );
+
+    // PutBucketWebsite refuses what does not read, and what S3's rules
+    // refuse, storing nothing.
+    for (body, code) in [
+        ("<WebsiteConfiguration><IndexDocument>", "MalformedXML"),
+        ("<Other/>", "MalformedXML"),
+        (
+            "<WebsiteConfiguration><IndexDocument><Suffix>i</Suffix></IndexDocument>\
+             <ErrorDocument></ErrorDocument></WebsiteConfiguration>",
+            "MalformedXML",
+        ),
+        (
+            "<WebsiteConfiguration><IndexDocument></IndexDocument></WebsiteConfiguration>",
+            "MalformedXML",
+        ),
+        (
+            "<WebsiteConfiguration><RedirectAllRequestsTo><Protocol>https</Protocol>\
+             </RedirectAllRequestsTo></WebsiteConfiguration>",
+            "MalformedXML",
+        ),
+        (
+            "<WebsiteConfiguration><ErrorDocument><Key>e</Key></ErrorDocument>\
+             </WebsiteConfiguration>",
+            "InvalidArgument",
+        ),
+        (
+            "<WebsiteConfiguration><IndexDocument><Suffix>a/b</Suffix></IndexDocument>\
+             </WebsiteConfiguration>",
+            "InvalidArgument",
+        ),
+        (
+            "<WebsiteConfiguration><IndexDocument><Suffix></Suffix></IndexDocument>\
+             </WebsiteConfiguration>",
+            "InvalidArgument",
+        ),
+    ] {
+        seed_bucket(&svc, "strict-site");
+        let req = make_request(
+            Method::PUT,
+            "/strict-site",
+            &[("website", "")],
+            body.as_bytes(),
+        );
+        assert_aws_err(
+            svc.put_bucket_website("123456789012", &req, "strict-site"),
+            code,
+        );
+        assert_aws_err(
+            svc.get_bucket_website("123456789012", "strict-site"),
+            "NoSuchWebsiteConfiguration",
+        );
+    }
+    // A redirect-only configuration needs no index document.
+    let redirect = b"<WebsiteConfiguration><RedirectAllRequestsTo><HostName>example.com</HostName>\
+        </RedirectAllRequestsTo></WebsiteConfiguration>";
+    let req = make_request(Method::PUT, "/strict-site", &[("website", "")], redirect);
+    svc.put_bucket_website("123456789012", &req, "strict-site")
+        .unwrap();
 }
 
 #[test]
@@ -5514,7 +5671,7 @@ fn put_bucket_replication_requires_pass_role_on_the_replication_role() {
     let req = make_request(Method::PUT, "/src", &[("replication", "")], body);
     let actions = svc.iam_actions_for(&req);
     assert_eq!(actions.len(), 2, "{actions:?}");
-    assert_eq!(actions[0].action, "PutBucketReplication");
+    assert_eq!(actions[0].action, "PutReplicationConfiguration");
     assert!(actions[1].is_pass_role());
     assert_eq!(actions[1].resource, "arn:aws:iam::123456789012:role/repl");
     let keys = svc.iam_condition_keys_for(&req, &actions[1]);
@@ -5755,6 +5912,8 @@ fn create_bucket_request_tags_feed_condition_keys() {
     // dispatch rebuilds the context per action, and AWS evaluates one context
     // for the whole request. An `aws:RequestTag/*` guardrail that permits the
     // create must not then deny the ACL or object-lock action it implies.
+    use fakecloud_core::service::AwsService as _;
+    let svc = make_service();
     for action in [
         "CreateBucket",
         "TagResource",
@@ -5763,7 +5922,7 @@ fn create_bucket_request_tags_feed_condition_keys() {
         "PutBucketObjectLockConfiguration",
         "PutBucketVersioning",
     ] {
-        let tags = s3_request_tags(&req, action).expect("tags extracted");
+        let tags = svc.request_tags_from(&req, action).expect("tags extracted");
         assert_eq!(tags.get("team").map(String::as_str), Some("a"), "{action}");
     }
 
@@ -5793,16 +5952,224 @@ fn create_bucket_configuration_tags_ignores_foreign_bodies() {
     // the helper is gated on the CreateBucketConfiguration root element.
     let tagging =
         r#"<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>"#;
-    assert!(create_bucket_configuration_tags(tagging).is_empty());
-    assert!(create_bucket_configuration_tags("").is_empty());
+    assert!(create_bucket_configuration_tags(tagging)
+        .unwrap()
+        .is_empty());
+    assert!(create_bucket_configuration_tags("").unwrap().is_empty());
 
     // A namespaced or attributed <Tags> element is still parsed — the scan
     // matches the <Tag> children, not the container.
     let ns = r#"<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Tags xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Tag><Key>team</Key><Value>a</Value></Tag></Tags></CreateBucketConfiguration>"#;
     assert_eq!(
-        create_bucket_configuration_tags(ns),
+        create_bucket_configuration_tags(ns).unwrap(),
         vec![("team".to_string(), "a".to_string())]
     );
+}
+
+#[test]
+fn only_uploads_stream_their_body() {
+    // Dispatch streams exactly the requests the handler reads as a stream:
+    // PutObject and UploadPart, by the classification it routes on. Every
+    // other PUT, bucket-level or a key's sub-resource, is buffered so IAM can
+    // read its body; a query parameter S3 ignores does not change that.
+    let svc = make_service();
+    let streams = |path: &str, query: &[(&str, &str)], headers: &[(&str, &str)]| {
+        let query: HashMap<String, String> = query
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let mut map = HeaderMap::new();
+        for (k, v) in headers {
+            map.insert(
+                http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        svc.streams_request_body(&fakecloud_core::service::RequestHead {
+            method: &Method::PUT,
+            raw_path: path,
+            headers: &map,
+            query_params: &query,
+            anonymous: false,
+            region: "us-east-1",
+            request_id: "r",
+        })
+    };
+    for (path, query) in [
+        ("/b/k", &[][..]),
+        ("/b/folder/", &[]),
+        // The raw path is the key: `/b//` uploads the key `/`.
+        ("/b//", &[]),
+        ("/b/k", &[("partNumber", "1"), ("uploadId", "u")]),
+        ("/b/k", &[("x-id", "PutObject")]),
+        ("/b/k", &[("foo", "bar")]),
+        ("/b/k", &[("Tagging", "")]),
+        (
+            "/b/k",
+            &[("X-Amz-Credential", "c"), ("X-Amz-Signature", "s")],
+        ),
+    ] {
+        assert!(streams(path, query, &[]), "{path} {query:?}");
+    }
+    for (path, query, headers) in [
+        ("/b", &[][..], &[][..]),
+        ("/b/", &[], &[]),
+        ("/", &[], &[]),
+        ("//k", &[], &[]),
+        ("/b/k", &[("tagging", "")], &[]),
+        ("/b/k", &[("acl", "")], &[]),
+        ("/b/k", &[("retention", "")], &[]),
+        ("/b/k", &[("legal-hold", "")], &[]),
+        ("/b/k", &[("annotation", "")], &[]),
+        ("/b/k", &[], &[("x-amz-copy-source", "/src/k")]),
+        (
+            "/b/k",
+            &[("partNumber", "1"), ("uploadId", "u")],
+            &[("x-amz-copy-source", "/src/k")],
+        ),
+        ("/b/k", &[("partNumber", "1")], &[]),
+        ("/b/k", &[("tagging", ""), ("acl", "")], &[]),
+        (
+            "/v20180820/accesspoint/ap",
+            &[],
+            &[("host", "123456789012.s3-control.us-east-1.amazonaws.com")],
+        ),
+    ] {
+        assert!(
+            !streams(path, query, headers),
+            "{path} {query:?} {headers:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn aws_chunked_tag_sets_are_read_unframed_before_authorization() {
+    // An SDK may frame a tagging body with aws-chunked. The framing is undone
+    // once, before anything reads the body, so pre-authorization validation,
+    // the request tags IAM evaluates and the handler all read the tag set.
+    let svc = make_service();
+    svc.handle(make_request(Method::PUT, "/chunked-tags", &[], b""))
+        .await
+        .unwrap();
+    svc.handle(make_request(Method::PUT, "/chunked-tags/k", &[], b"x"))
+        .await
+        .unwrap();
+    let xml = "<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>";
+    let crc = crate::checksum::checksum(crate::checksum::ChecksumAlgorithm::Crc32, xml.as_bytes());
+    let framed = format!(
+        "{:x}\r\n{xml}\r\n0\r\nx-amz-checksum-crc32:{crc}\r\n\r\n",
+        xml.len()
+    );
+    for (path, op) in [
+        ("/chunked-tags/k", "PutObjectTagging"),
+        ("/chunked-tags", "PutBucketTagging"),
+    ] {
+        let mut req = make_request(Method::PUT, path, &[("tagging", "")], framed.as_bytes());
+        *req.body_stream.lock() = None;
+        req.access_key_id = Some("AKIDEXAMPLE".to_string());
+        for (name, value) in [
+            ("content-encoding", "aws-chunked"),
+            ("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"),
+            ("x-amz-trailer", "x-amz-checksum-crc32"),
+            ("x-amz-decoded-content-length", &xml.len().to_string()),
+        ] {
+            req.headers.insert(name, value.parse().unwrap());
+        }
+        svc.prepare_request(&mut req).unwrap();
+        assert_eq!(&req.body[..], xml.as_bytes(), "{op}");
+        svc.validate_before_authorization(&req).unwrap();
+        let tags = s3_request_tags(&req, op).expect("request tags");
+        assert_eq!(tags.get("env").map(String::as_str), Some("prod"), "{op}");
+        svc.handle(req).await.unwrap();
+    }
+    let get = make_request(Method::GET, "/chunked-tags/k", &[("tagging", "")], b"");
+    let resp = svc.handle(get).await.unwrap();
+    assert!(String::from_utf8_lossy(resp.body.expect_bytes()).contains("<Key>env</Key>"));
+
+    // Broken framing (recorded on S3, body "zz;garbage\r\nabc\r\n"): the
+    // request stays framed and nothing before the handler reads its body; a
+    // missing bucket is NoSuchBucket, a signed request to an existing one
+    // InvalidChunkSizeError, with nothing written.
+    let broken = |path: &str, signed: bool| {
+        let mut req = make_request(
+            Method::PUT,
+            path,
+            &[("tagging", "")],
+            b"zz;garbage\r\nabc\r\n",
+        );
+        *req.body_stream.lock() = None;
+        if signed {
+            req.access_key_id = Some("AKIDEXAMPLE".to_string());
+        }
+        for (name, value) in [
+            ("content-encoding", "aws-chunked"),
+            ("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"),
+            ("x-amz-decoded-content-length", "3"),
+        ] {
+            req.headers.insert(name, value.parse().unwrap());
+        }
+        svc.prepare_request(&mut req).unwrap();
+        assert!(crate::checksum::still_framed(&req.headers));
+        assert_eq!(&req.body[..], b"zz;garbage\r\nabc\r\n");
+        req
+    };
+    for signed in [true, false] {
+        for path in ["/no-such-bucket/k", "/no-such-bucket"] {
+            let req = broken(path, signed);
+            // Anonymous: NoSuchBucket before authorization too (recorded).
+            match svc.validate_before_authorization(&req) {
+                Ok(()) => assert!(signed, "{path}"),
+                Err(err) => {
+                    assert!(!signed, "{path}");
+                    assert_eq!(err.code(), "NoSuchBucket");
+                }
+            }
+            assert_aws_err(svc.handle(req).await, "NoSuchBucket");
+        }
+    }
+    for path in ["/chunked-tags/k", "/chunked-tags"] {
+        let req = broken(path, true);
+        // Authorized (tags evaluated as none), then refused for the framing.
+        svc.validate_before_authorization(&req).unwrap();
+        assert_aws_err(svc.handle(req).await, "InvalidChunkSizeError");
+        // Anonymous: the streaming payload declaration itself is refused,
+        // after the bucket's existence and before authorization.
+        let req = broken(path, false);
+        let err = svc.validate_before_authorization(&req).unwrap_err();
+        assert_eq!(err.code(), "InvalidRequest");
+        assert_eq!(
+            err.message(),
+            "The value of x-amz-content-sha256 header is invalid."
+        );
+        assert_aws_err(svc.handle(req).await, "InvalidRequest");
+    }
+    let get = make_request(Method::GET, "/chunked-tags/k", &[("tagging", "")], b"");
+    let resp = svc.handle(get).await.unwrap();
+    assert!(String::from_utf8_lossy(resp.body.expect_bytes()).contains("<Value>prod</Value>"));
+}
+
+#[tokio::test]
+async fn create_bucket_refuses_a_configuration_that_does_not_read() {
+    // A tag set the create cannot read is MalformedXML, as for
+    // PutBucketTagging, not a bucket created without the tags asked for;
+    // dispatch refuses it before authorization too.
+    let svc = make_service();
+    for body in [
+        "<CreateBucketConfiguration><Tags><Tag><Key>k</Key></Tag></Tags></CreateBucketConfiguration>",
+        "<CreateBucketConfiguration><Tags><Tag><Key>k</Key><Value>v</Value></Tag></Tags>",
+    ] {
+        let req = make_request(Method::PUT, "/unread-config", &[], body.as_bytes());
+        assert_eq!(
+            svc.validate_before_authorization(&req)
+                .unwrap_err()
+                .code(),
+            "MalformedXML",
+            "{body}"
+        );
+        assert_aws_err(svc.handle(req).await, "MalformedXML");
+    }
+    let req = make_request(Method::GET, "/unread-config", &[("location", "")], b"");
+    assert_aws_err(svc.handle(req).await, "NoSuchBucket");
 }
 
 #[test]
@@ -9154,30 +9521,40 @@ fn governance_bypass_requires_bypass_governance_retention_permission() {
         .len(),
         1
     );
+    // Deleting a named version is s3:DeleteObjectVersion.
     assert_eq!(
         actions(&with_bypass(delete, "TRUE")),
         vec![
-            ("DeleteObject", "arn:aws:s3:::b/k".to_string()),
+            ("DeleteObjectVersion", "arn:aws:s3:::b/k".to_string()),
             ("BypassGovernanceRetention", "arn:aws:s3:::b/k".to_string()),
         ]
     );
 
-    // Other operations ignore the header. DeleteObjects is authorized per key
-    // by AWS, so a request-level check would wrongly fail the whole batch.
+    // Other operations ignore the header.
     let put = with_bypass(make_request(Method::PUT, "/b/k", &[], b"x"), "true");
     assert_eq!(
         actions(&put),
         vec![("PutObject", "arn:aws:s3:::b/k".to_string())]
     );
+    // DeleteObjects is authorized per key, the bypass included.
     let batch = make_request(
         Method::POST,
         "/b",
         &[("delete", "")],
-        b"<Delete><Object><Key>a/1</Key></Object></Delete>",
+        b"<Delete><Object><Key>a/1</Key></Object>\
+          <Object><Key>c</Key><VersionId>v2</VersionId></Object></Delete>",
     );
     assert_eq!(
         actions(&with_bypass(batch, "true")),
-        vec![("DeleteObjects", "arn:aws:s3:::b".to_string())]
+        vec![
+            ("DeleteObject", "arn:aws:s3:::b/a/1".to_string()),
+            (
+                "BypassGovernanceRetention",
+                "arn:aws:s3:::b/a/1".to_string()
+            ),
+            ("DeleteObjectVersion", "arn:aws:s3:::b/c".to_string()),
+            ("BypassGovernanceRetention", "arn:aws:s3:::b/c".to_string()),
+        ]
     );
 }
 
@@ -10973,7 +11350,7 @@ fn copy_source_parsing_is_shared_by_the_copy_and_its_authorization() {
         req.headers
             .insert("x-amz-copy-source", header.parse().unwrap());
         let source = parse_copy_source(header).unwrap();
-        let authorized = svc.iam_actions_for(&req).pop().unwrap();
+        let authorized = svc.iam_actions_for(&req).swap_remove(1);
         assert_eq!(
             authorized.resource,
             format!("arn:aws:s3:::{}/{}", source.bucket, source.key),
@@ -12132,8 +12509,14 @@ mod flexible_checksums {
             ("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"),
             ("x-amz-trailer", "x-amz-checksum-crc32"),
         ];
+        // Signed: an anonymous request declaring a streaming payload for
+        // PutBucketTagging is refused for the declaration itself.
+        let signed = |mut req: AwsRequest| {
+            req.access_key_id = Some("AKIDEXAMPLE".to_string());
+            req
+        };
         let wrong = checksum(ChecksumAlgorithm::Crc32, b"other");
-        let req = with_headers(
+        let req = signed(with_headers(
             make_request(
                 Method::PUT,
                 "/hb",
@@ -12141,10 +12524,10 @@ mod flexible_checksums {
                 frame(&wrong).as_bytes(),
             ),
             &headers,
-        );
+        ));
         assert_aws_err(svc.handle(req).await, "BadDigest");
         let good = checksum(ChecksumAlgorithm::Crc32, xml.as_bytes());
-        let req = with_headers(
+        let req = signed(with_headers(
             make_request(
                 Method::PUT,
                 "/hb",
@@ -12152,7 +12535,7 @@ mod flexible_checksums {
                 frame(&good).as_bytes(),
             ),
             &headers,
-        );
+        ));
         svc.handle(req).await.unwrap();
         // The handler saw the decoded XML, not the framing.
         let tags = svc.state.read().default_ref().buckets["hb"].tags.clone();
@@ -12176,8 +12559,10 @@ mod flexible_checksums {
         assert_aws_err(svc.copy_object(ACCT, &req, "src", "k2"), "InvalidRequest");
     }
 
+    /// A PutObjectAnnotation request as its handler receives it: buffered,
+    /// any aws-chunked framing already undone (`prepare_request`).
     fn put_annotation_req(name: &str, body: &[u8], headers: &[(&str, &str)]) -> AwsRequest {
-        with_headers(
+        let mut req = with_headers(
             make_request(
                 Method::PUT,
                 "/an/k",
@@ -12185,7 +12570,10 @@ mod flexible_checksums {
                 body,
             ),
             headers,
-        )
+        );
+        *req.body_stream.lock() = None;
+        crate::checksum::deframe_buffered(&mut req.headers, &mut req.body).unwrap();
+        req
     }
 
     fn get_annotation(svc: &S3Service, name: &str, checksum_mode: bool) -> AwsResponse {
@@ -14084,7 +14472,8 @@ async fn object_tag_keys(svc: &S3Service, key: &str, version: Option<&str>) -> V
         .await
         .expect("GetObjectTagging");
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
-    parse_tagging_xml(&body)
+    tags::read_tag_set(&body, "Tagging", "TagSet")
+        .unwrap()
         .into_iter()
         .map(|(k, _)| k)
         .collect()
@@ -14255,4 +14644,146 @@ async fn tagging_the_null_version_on_a_suspended_bucket_reaches_the_current_obje
         assert!(null.tags.contains_key("n"));
         assert!(b.objects["k"].tags.contains_key("n"));
     }
+}
+
+/// A request S3 refuses outright is refused before its body is read: a
+/// streamed body that never ends does not hold up the refusal.
+#[tokio::test]
+async fn refused_requests_do_not_read_their_body() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    for query in [
+        vec![("partNumber", "1"), ("uploadId", "u"), ("tagging", "")],
+        vec![("uploadId", "u")],
+        vec![("partNumber", "1")],
+    ] {
+        let req = make_request(Method::PUT, "/b/k", &query, b"");
+        let endless = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+        *req.body_stream.lock() = Some(axum::body::Body::from_stream(endless));
+        let refused = tokio::time::timeout(std::time::Duration::from_secs(5), svc.handle(req))
+            .await
+            .unwrap_or_else(|_| panic!("{query:?} waited for its body"));
+        assert!(refused.is_err(), "{query:?}");
+    }
+}
+
+/// The tags IAM evaluates for a tagging write are exactly the tags stored:
+/// one parser reads both. A whitespace-padded `<Tag >`, a CDATA key and a
+/// commented-out tag used to be read differently by the two.
+#[tokio::test]
+async fn tagging_writes_evaluate_the_tags_they_store() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    put_versioned(&svc, "k", b"x").await;
+    let bodies = [
+        "<Tagging><TagSet><Tag ><Key>owner</Key><Value>x</Value></Tag></TagSet></Tagging>",
+        "<Tagging><TagSet><Tag><Key><![CDATA[owner]]></Key><Value>x</Value></Tag></TagSet></Tagging>",
+        "<Tagging><TagSet><Tag><Key>owner</Key><Value>x</Value></Tag>\
+         <!--<Tag><Key>other</Key><Value>y</Value></Tag>--></TagSet></Tagging>",
+    ];
+    for body in bodies {
+        for (path, query, op) in [
+            ("/b/k", "tagging", "PutObjectTagging"),
+            ("/b", "tagging", "PutBucketTagging"),
+        ] {
+            let req = make_request(Method::PUT, path, &[(query, "")], body.as_bytes());
+            let evaluated = svc.request_tags_from(&req, op).unwrap();
+            assert_eq!(
+                evaluated,
+                [("owner".to_string(), "x".to_string())].into(),
+                "{op}: {body}"
+            );
+            svc.handle(req)
+                .await
+                .unwrap_or_else(|e| panic!("{op}: {body}: {e:?}"));
+            let stored: std::collections::HashMap<String, String> = {
+                let mas = svc.state.read();
+                let b = mas.default_ref().buckets.get("b").unwrap();
+                if path == "/b" {
+                    b.tags.clone().into_iter().collect()
+                } else {
+                    b.objects["k"].tags.clone().into_iter().collect()
+                }
+            };
+            assert_eq!(stored, evaluated, "{op}: {body}");
+        }
+    }
+    // A body the handler cannot read is refused before authorization.
+    for (path, query) in [("/b/k", "tagging"), ("/b", "tagging")] {
+        let req = make_request(
+            Method::PUT,
+            path,
+            &[(query, "")],
+            b"<Tagging><TagSet><Tag><Value>v</Value></Tag></TagSet></Tagging>",
+        );
+        let refused = svc.validate_before_authorization(&req).unwrap_err();
+        assert_eq!(refused.code(), "MalformedXML", "{path}");
+    }
+}
+
+/// Object tag limits, as recorded on S3, for the XML body and the header.
+#[test]
+fn object_tag_limits_follow_the_recordings() {
+    use super::tags::{parse_object_tagging, parse_tagging_header};
+    let doc = |key: &str, value: &str| {
+        format!(
+            "<Tagging><TagSet><Tag><Key>{key}</Key><Value>{value}</Value></Tag></TagSet></Tagging>"
+        )
+    };
+    let code_and_message = |r: Result<Vec<(String, String)>, AwsServiceError>| {
+        let e = r.unwrap_err();
+        (e.code().to_string(), e.message())
+    };
+    let bad_key = (
+        "InvalidTag".to_string(),
+        "The TagKey you have provided is invalid".to_string(),
+    );
+    let bad_value = (
+        "InvalidTag".to_string(),
+        "The TagValue you have provided is invalid".to_string(),
+    );
+    for xml in [
+        doc("", "v"),
+        "<Tagging><TagSet><Tag><Key/><Value>v</Value></Tag></TagSet></Tagging>".to_string(),
+        doc(&"k".repeat(129), "v"),
+        doc("a*b", "v"),
+    ] {
+        assert_eq!(
+            code_and_message(parse_object_tagging(&xml)),
+            bad_key,
+            "{xml}"
+        );
+    }
+    assert!(parse_object_tagging(&doc(&"k".repeat(128), "v")).is_ok());
+    assert!(parse_object_tagging(&doc("a", "")).is_ok());
+    assert!(parse_object_tagging(&doc("a + -=._:/@ é", "v")).is_ok());
+    assert!(parse_object_tagging(&doc("a", &"v".repeat(256))).is_ok());
+    assert_eq!(
+        code_and_message(parse_object_tagging(&doc("a", &"v".repeat(257)))),
+        bad_value
+    );
+
+    assert_eq!(
+        code_and_message(parse_tagging_header(&format!("{}=1", "k".repeat(129)))),
+        bad_key
+    );
+    assert_eq!(
+        code_and_message(parse_tagging_header(&format!("a={}", "v".repeat(257)))),
+        bad_value
+    );
+    for header in ["=1", "a=1&a=2"] {
+        let (code, message) = code_and_message(parse_tagging_header(header));
+        assert_eq!(code, "InvalidArgument", "{header}");
+        assert!(
+            message.starts_with("The header 'x-amz-tagging' shall be encoded"),
+            "{message}"
+        );
+    }
+    assert_eq!(
+        parse_tagging_header("team=a%20b&x=").unwrap(),
+        vec![
+            ("team".to_string(), "a b".to_string()),
+            ("x".to_string(), String::new())
+        ]
+    );
 }

@@ -3,48 +3,64 @@
 use super::*;
 
 impl S3Service {
-    /// Serve a website object (index or error document) from the bucket.
+    /// Serve a bucket's website index document. The request was authorized
+    /// as a listing of the bucket; the document is an object read, so the
+    /// caller must also be allowed `s3:GetObject` on it, as on any GetObject
+    /// (else 403). A missing index falls back to the error document.
     pub(crate) fn serve_website_object(
         &self,
         account_id: &str,
         req: &AwsRequest,
         bucket: &str,
         key: &str,
-        website_config: &str,
+        error_key: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
+        if !self.caller_may(req, "GetObject", bucket, Some(key)) {
+            return Err(access_denied());
+        }
         let result = self.get_object(account_id, req, bucket, key);
         if result.is_err() {
-            // If index doc doesn't exist either, try error document
-            if let Some(error_key) = extract_xml_value(website_config, "ErrorDocument")
-                .and_then(|inner| {
-                    let open = "<Key>";
-                    let close = "</Key>";
-                    let s = inner.find(open)? + open.len();
-                    let e = inner.find(close)?;
-                    Some(inner[s..e].trim().to_string())
-                })
-                .or_else(|| extract_xml_value(website_config, "Key"))
-            {
-                return self.serve_website_error(account_id, req, bucket, &error_key);
+            if let Some(error_key) = error_key {
+                return self.serve_website_error(
+                    account_id,
+                    req,
+                    bucket,
+                    error_key,
+                    StatusCode::NOT_FOUND,
+                );
             }
         }
-        result
+        self.shape_lock_headers(req, bucket, key, result)
     }
 
-    /// Serve the website error document with a 404 status.
+    /// Serve the website error document with `status` (404, or 403 for a
+    /// missing key hidden from a caller who may not list the bucket). The
+    /// document is an object read of its own: a caller not allowed
+    /// `s3:GetObject` on it gets a plain 403, and its headers are shaped like
+    /// any GetObject's. A missing error document answers `status` too, so a
+    /// caller who may not list the bucket learns nothing from it.
     pub(crate) fn serve_website_error(
         &self,
         account_id: &str,
         req: &AwsRequest,
         bucket: &str,
         error_key: &str,
+        status: StatusCode,
     ) -> Result<AwsResponse, AwsServiceError> {
+        if !self.caller_may(req, "GetObject", bucket, Some(error_key)) {
+            return Err(access_denied());
+        }
         match self.get_object(account_id, req, bucket, error_key) {
             Ok(mut resp) => {
-                resp.status = StatusCode::NOT_FOUND;
-                Ok(resp)
+                resp.status = status;
+                self.shape_lock_headers(req, bucket, error_key, Ok(resp))
             }
+            Err(_) if status == StatusCode::FORBIDDEN => Err(access_denied()),
             Err(e) => Err(e),
         }
     }
+}
+
+fn access_denied() -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied")
 }

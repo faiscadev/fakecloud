@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// Whether a CopyObject copies the source's annotations: under the
+/// annotation directive COPY, the default; EXCLUDE starts the copy without.
+fn copies_annotations(req: &AwsRequest) -> bool {
+    req.headers
+        .get("x-amz-object-annotation-directive")
+        .and_then(|v| v.to_str().ok())
+        .is_none_or(|v| v != "EXCLUDE")
+}
+
 impl S3Service {
     pub(crate) async fn put_object(
         &self,
@@ -54,18 +63,9 @@ impl S3Service {
 
         // Parse tags from header
         let tags = if let Some(tagging) = &tagging_header {
-            let parsed = parse_url_encoded_tags(tagging);
-            // Validate aws: prefix
-            for (k, _) in &parsed {
-                if k.starts_with("aws:") {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidTag",
-                        "Your TagKey cannot be prefixed with aws:",
-                    ));
-                }
-            }
-            parsed.into_iter().collect()
+            crate::service::tags::parse_tagging_header(tagging)?
+                .into_iter()
+                .collect()
         } else {
             std::collections::BTreeMap::new()
         };
@@ -156,21 +156,16 @@ impl S3Service {
         }
 
         // --- Preparation phase: compute object data outside any lock ---
-        // PutObject is a streaming-only route: dispatch always wires
-        // `body_stream` for PUT-on-bucket-key requests routed through
-        // S3, and the test helper does the same for direct service
-        // calls. We drain the stream into a tempfile here, computing
-        // MD5 + size in constant memory; in disk mode the spool lands
-        // on the S3 root so the eventual rename is a same-FS metadata
-        // move, in memory mode the store reads the file back and
-        // unlinks it.
-        let stream = req.take_body_stream().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "MalformedRequestBody",
-                "PutObject requires a streaming request body",
-            )
-        })?;
+        // Dispatch streams PutObject's body (`streams_request_body`) and the
+        // test helper does the same for direct service calls. We drain the
+        // stream into a tempfile here, computing MD5 + size in constant
+        // memory; in disk mode the spool lands on the S3 root so the
+        // eventual rename is a same-FS metadata move, in memory mode the
+        // store reads the file back and unlinks it. A body that arrived
+        // buffered (already unframed) is spooled the same way.
+        let stream = req
+            .take_body_stream()
+            .unwrap_or_else(|| req.body.clone().into());
         // Spool the body, folding the checksum digest into the same pass, and
         // verify Content-MD5, the x-amz-checksum-* value or trailing checksum,
         // and a hex x-amz-content-sha256 against the bytes received. A
@@ -723,18 +718,9 @@ impl S3Service {
                 .get("x-amz-tagging")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            let tags = parse_url_encoded_tags(th);
-            // Validate aws: prefix
-            for (k, _) in &tags {
-                if k.starts_with("aws:") {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidTag",
-                        "Your TagKey cannot be prefixed with aws:",
-                    ));
-                }
-            }
-            tags.into_iter().collect()
+            crate::service::tags::parse_tagging_header(th)?
+                .into_iter()
+                .collect()
         } else {
             src_obj.tags.clone()
         };
@@ -777,6 +763,28 @@ impl S3Service {
         let src_handle = crate::body_io::ObjectBodyHandle::open(&src_obj.body)
             .map_err(crate::service::io_to_aws)?;
         drop(accts_r);
+
+        // Copying annotations (the default COPY directive) needs
+        // s3:GetObjectAnnotation on the source and s3:PutObjectAnnotation on
+        // the destination (CopyObject API reference, AnnotationDirective) --
+        // but only when there are annotations to copy: recorded against S3
+        // (us-east-1, 2026-11-12), a caller holding only s3:GetObject and
+        // s3:PutObject copies a source without annotations under the default
+        // directives. Only the request handler knows the source has any, so
+        // this is checked here, before anything is written (and with the
+        // state lock released, as the check reads bucket policies).
+        if copies_annotations(req) && !src_obj.annotations.is_empty() {
+            let may_read = self.caller_may(req, "GetObjectAnnotation", src_bucket, Some(src_key));
+            let may_write = may_read
+                && self.caller_may(req, "PutObjectAnnotation", dest_bucket, Some(dest_key));
+            if !may_write {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::FORBIDDEN,
+                    "AccessDenied",
+                    "Access Denied",
+                ));
+            }
+        }
 
         // Phase 2 (no lock): read, decrypt, checksum, re-encrypt, and stage
         // the destination body next to the store.
@@ -888,12 +896,7 @@ impl S3Service {
         // Annotations follow the annotation directive: COPY (the default)
         // carries every annotation of the source version over, EXCLUDE starts
         // the copy without any.
-        let copies_annotations = req
-            .headers
-            .get("x-amz-object-annotation-directive")
-            .and_then(|v| v.to_str().ok())
-            .is_none_or(|v| v != "EXCLUDE");
-        let dest_annotations = if copies_annotations {
+        let dest_annotations = if copies_annotations(req) {
             src_obj.annotations.clone()
         } else {
             Default::default()

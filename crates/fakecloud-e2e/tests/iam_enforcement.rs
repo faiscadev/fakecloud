@@ -249,6 +249,89 @@ async fn assume_root_validates_the_task_policy_before_authorizing() {
     );
 }
 
+/// A CORS preflight is never authorized (browsers send it unsigned): under
+/// strict it is answered from the bucket's CORS rules alone, 200 with the
+/// `Access-Control-*` headers for a matching rule, S3's 403 CORSResponse
+/// for one no rule matches -- as with enforcement off.
+#[tokio::test]
+async fn s3_cors_preflight_is_answered_by_the_cors_rules_under_strict() {
+    use aws_sdk_s3::types::{CorsConfiguration, CorsRule};
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket()
+        .bucket("preflighted")
+        .send()
+        .await
+        .unwrap();
+    boot.put_bucket_cors()
+        .bucket("preflighted")
+        .cors_configuration(
+            CorsConfiguration::builder()
+                .cors_rules(
+                    CorsRule::builder()
+                        .allowed_origins("https://app.example")
+                        .allowed_methods("PUT")
+                        .allowed_headers("*")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let preflight = |origin: &str| {
+        reqwest::Client::new()
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("{}/preflighted/k", server.endpoint()),
+            )
+            .header("origin", origin)
+            .header("access-control-request-method", "PUT")
+            .send()
+    };
+    let resp = preflight("https://app.example").await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()["access-control-allow-origin"],
+        "https://app.example"
+    );
+    assert_eq!(resp.headers()["access-control-allow-methods"], "PUT");
+    let resp = preflight("https://other.example").await.unwrap();
+    assert_eq!(resp.status(), 403);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("CORSResponse: This CORS request is not allowed"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn unsigned_assume_root_is_refused_before_its_task_policy_is_validated() {
+    // Recorded: an unsigned AssumeRoot with an invalid TaskPolicyArn is
+    // refused for its missing credentials (403), not a ValidationError. STS
+    // refuses an anonymous request before looking at it.
+    let server = start_strict().await;
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        // Unsigned, the request names its service by its endpoint.
+        .header("host", "sts.us-east-1.amazonaws.com")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(
+            "Action=AssumeRoot&Version=2011-06-15&TargetPrincipal=111122223333\
+             &TaskPolicyArn.arn=bogus",
+        )
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap();
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+    assert!(!body.contains("ValidationError"), "{body}");
+}
+
 /// bug-hunt 2026-06-13, finding 5.1: enabling `--verify-sigv4` alongside
 /// `--iam` binds a request to a real identity -- an unknown access key id is
 /// rejected with InvalidClientTokenId before any handler runs. (Without
@@ -1438,11 +1521,1111 @@ async fn s3_get_object_resource_scoped() {
     assert!(format!("{err:?}").contains("AccessDenied"));
 }
 
+/// Whether an S3 call was refused with 403 (HEAD responses carry no error
+/// code, so the status is what tells).
+fn is_access_denied<T, E>(result: Result<T, aws_sdk_s3::error::SdkError<E>>) -> bool {
+    matches!(&result, Err(e) if e.raw_response().map(|r| r.status().as_u16()) == Some(403))
+}
+
+/// S3 is authorized under its policy action names, not its operation names:
+/// `s3:ListBucket` covers ListObjectsV2, ListObjects and HeadBucket,
+/// `s3:ListAllMyBuckets` covers ListBuckets, and a policy naming the
+/// operations (`s3:ListObjectsV2`, `s3:ListBuckets`, `s3:HeadBucket`, which
+/// are not actions) grants none of them.
+#[tokio::test]
+async fn s3_listing_is_authorized_under_policy_action_names() {
+    let server = start_strict().await;
+    let boot = sdk_config_with(&server, "test", "test").await;
+    path_style_s3(&boot)
+        .create_bucket()
+        .bucket("listed")
+        .send()
+        .await
+        .unwrap();
+
+    let (akid, secret) = bootstrap_user(&server, "lister").await;
+    attach_inline_policy(
+        &server,
+        "lister",
+        "List",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::listed"},
+            {"Effect":"Allow","Action":"s3:ListAllMyBuckets","Resource":"*"}
+        ]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    s3.list_objects_v2().bucket("listed").send().await.unwrap();
+    s3.list_objects().bucket("listed").send().await.unwrap();
+    s3.head_bucket().bucket("listed").send().await.unwrap();
+    let buckets = s3.list_buckets().send().await.unwrap();
+    assert!(buckets.buckets().iter().any(|b| b.name() == Some("listed")));
+    // s3:ListBucket does not cover the version listing.
+    assert!(is_access_denied(
+        s3.list_object_versions().bucket("listed").send().await
+    ));
+
+    let (akid, secret) = bootstrap_user(&server, "opnames").await;
+    attach_inline_policy(
+        &server,
+        "opnames",
+        "OperationNames",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Action":["s3:ListObjectsV2","s3:ListObjects","s3:HeadBucket","s3:ListBuckets"],
+            "Resource":"*"}]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    assert!(is_access_denied(
+        s3.list_objects_v2().bucket("listed").send().await
+    ));
+    assert!(is_access_denied(
+        s3.list_objects().bucket("listed").send().await
+    ));
+    assert!(is_access_denied(
+        s3.head_bucket().bucket("listed").send().await
+    ));
+    assert!(is_access_denied(s3.list_buckets().send().await));
+}
+
+/// CopyObject needs `s3:GetObject` on the source object and `s3:PutObject` on
+/// the destination; either alone is refused.
+#[tokio::test]
+async fn s3_copy_object_needs_source_read_and_destination_write() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    for bucket in ["copy-src", "copy-dst"] {
+        boot.create_bucket().bucket(bucket).send().await.unwrap();
+    }
+    boot.put_object()
+        .bucket("copy-src")
+        .key("orig.txt")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"payload"))
+        .send()
+        .await
+        .unwrap();
+
+    // A source without annotations copies with s3:GetObject + s3:PutObject
+    // alone under the default directives (recorded against S3, us-east-1,
+    // 2026-11-12).
+    let copy = |s3: aws_sdk_s3::Client, key: &'static str| async move {
+        s3.copy_object()
+            .bucket("copy-dst")
+            .key(key)
+            .copy_source("copy-src/orig.txt")
+            .send()
+            .await
+    };
+    for (user, statements, allowed) in [
+        (
+            "copier",
+            r#"{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::copy-src/orig.txt"},
+               {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::copy-dst/*"}"#,
+            true,
+        ),
+        (
+            "writeonly",
+            r#"{"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::copy-dst/*"}"#,
+            false,
+        ),
+        (
+            "readonly",
+            r#"{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::copy-src/*"}"#,
+            false,
+        ),
+        (
+            // Not a policy action: grants nothing.
+            "opname",
+            r#"{"Effect":"Allow","Action":"s3:CopyObject","Resource":"*"}"#,
+            false,
+        ),
+    ] {
+        let (akid, secret) = bootstrap_user(&server, user).await;
+        attach_inline_policy(
+            &server,
+            user,
+            "Copy",
+            &format!(r#"{{"Version":"2012-10-17","Statement":[{statements}]}}"#),
+        )
+        .await;
+        let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+        let result = copy(s3, "copied.txt").await;
+        if allowed {
+            result.unwrap();
+        } else {
+            assert!(is_access_denied(result), "{user} must be refused");
+        }
+    }
+    let got = boot
+        .get_object()
+        .bucket("copy-dst")
+        .key("copied.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        &got.body.collect().await.unwrap().into_bytes()[..],
+        b"payload"
+    );
+
+    // A source WITH annotations: copying them (the default COPY annotation
+    // directive) also needs s3:GetObjectAnnotation on the source and
+    // s3:PutObjectAnnotation on the destination; EXCLUDE needs neither. The
+    // pinned SDK predates the annotation API, so the annotation is put raw.
+    let resp = reqwest::Client::new()
+        .put(format!(
+            "{}/copy-src/orig.txt?annotation&annotationName=review",
+            server.endpoint()
+        ))
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/s3/aws4_request, \
+             SignedHeaders=host, Signature=00",
+        )
+        .body("note")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    let (akid, secret) = bootstrap_user(&server, "annotcopier").await;
+    let s3_annot = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let plain = r#"{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::copy-src/*"},
+        {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::copy-dst/*"}"#;
+    attach_inline_policy(
+        &server,
+        "annotcopier",
+        "Copy",
+        &format!(r#"{{"Version":"2012-10-17","Statement":[{plain}]}}"#),
+    )
+    .await;
+    assert!(is_access_denied(
+        copy(s3_annot.clone(), "annotated.txt").await
+    ));
+    let gone = boot
+        .head_object()
+        .bucket("copy-dst")
+        .key("annotated.txt")
+        .send()
+        .await;
+    assert!(gone.is_err(), "a refused copy writes nothing");
+    attach_inline_policy(
+        &server,
+        "annotcopier",
+        "Copy",
+        &format!(
+            r#"{{"Version":"2012-10-17","Statement":[{plain},
+            {{"Effect":"Allow","Action":"s3:GetObjectAnnotation","Resource":"arn:aws:s3:::copy-src/*"}},
+            {{"Effect":"Allow","Action":"s3:PutObjectAnnotation","Resource":"arn:aws:s3:::copy-dst/*"}}]}}"#
+        ),
+    )
+    .await;
+    copy(s3_annot, "annotated.txt").await.unwrap();
+
+    // Excluding annotations needs only the read and the write, annotated
+    // source or not. A tag header under the default COPY tagging directive is
+    // ignored, so it needs no s3:PutObjectTagging; under REPLACE it does.
+    let (akid, secret) = bootstrap_user(&server, "plaincopier").await;
+    attach_inline_policy(
+        &server,
+        "plaincopier",
+        "Copy",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::copy-src/*"},
+            {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::copy-dst/*"}]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let excluding = |directive: Option<aws_sdk_s3::types::TaggingDirective>| {
+        s3.copy_object()
+            .bucket("copy-dst")
+            .key("excluded.txt")
+            .copy_source("copy-src/orig.txt")
+            .tagging("team=a")
+            .set_tagging_directive(directive)
+            .customize()
+            .mutate_request(|r| {
+                r.headers_mut()
+                    .insert("x-amz-object-annotation-directive", "EXCLUDE");
+            })
+            .send()
+    };
+    excluding(None).await.unwrap();
+    excluding(Some(aws_sdk_s3::types::TaggingDirective::Copy))
+        .await
+        .unwrap();
+    assert!(is_access_denied(
+        excluding(Some(aws_sdk_s3::types::TaggingDirective::Replace)).await
+    ));
+}
+
+/// Reading a specific version is `s3:GetObjectVersion` (`s3:GetObject` is not
+/// enough, nor needed), and a PutObject that sets tags also needs
+/// `s3:PutObjectTagging`.
+#[tokio::test]
+async fn s3_versioned_reads_and_tagged_writes_need_their_actions() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("vers").send().await.unwrap();
+    boot.put_bucket_versioning()
+        .bucket("vers")
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let first = boot
+        .put_object()
+        .bucket("vers")
+        .key("doc")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"v1"))
+        .send()
+        .await
+        .unwrap();
+    let v1 = first.version_id().unwrap().to_string();
+    boot.put_object()
+        .bucket("vers")
+        .key("doc")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"v2"))
+        .send()
+        .await
+        .unwrap();
+
+    let (akid, secret) = bootstrap_user(&server, "reader").await;
+    attach_inline_policy(
+        &server,
+        "reader",
+        "Read",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":["s3:GetObject","s3:PutObject"],"Resource":"arn:aws:s3:::vers/*"}
+        ]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    s3.get_object()
+        .bucket("vers")
+        .key("doc")
+        .send()
+        .await
+        .unwrap();
+    assert!(is_access_denied(
+        s3.get_object()
+            .bucket("vers")
+            .key("doc")
+            .version_id(&v1)
+            .send()
+            .await
+    ));
+    assert!(is_access_denied(
+        s3.head_object()
+            .bucket("vers")
+            .key("doc")
+            .version_id(&v1)
+            .send()
+            .await
+    ));
+    let put = |tagging: Option<&'static str>| {
+        let mut req = s3
+            .put_object()
+            .bucket("vers")
+            .key("tagged")
+            .body(aws_sdk_s3::primitives::ByteStream::from_static(b"t"));
+        if let Some(t) = tagging {
+            req = req.tagging(t);
+        }
+        req.send()
+    };
+    put(None).await.unwrap();
+    assert!(is_access_denied(put(Some("team=a")).await));
+
+    attach_inline_policy(
+        &server,
+        "reader",
+        "Read",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":["s3:GetObjectVersion","s3:PutObject","s3:PutObjectTagging"],
+             "Resource":"arn:aws:s3:::vers/*"}
+        ]}"#,
+    )
+    .await;
+    let got = s3
+        .get_object()
+        .bucket("vers")
+        .key("doc")
+        .version_id(&v1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(&got.body.collect().await.unwrap().into_bytes()[..], b"v1");
+    // The current version is s3:GetObject, which this policy no longer grants.
+    assert!(is_access_denied(
+        s3.get_object().bucket("vers").key("doc").send().await
+    ));
+    put(Some("team=a")).await.unwrap();
+}
+
+/// DeleteObjects is authorized per key, as on AWS: a denied key is an
+/// `AccessDenied` entry of a 200 response and stays, the allowed keys are
+/// deleted. Soft enforcement only logs, so every key is deleted.
+#[tokio::test]
+async fn s3_delete_objects_reports_denied_keys_per_key() {
+    use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+    for strict in [true, false] {
+        let server = if strict {
+            start_strict().await
+        } else {
+            TestServer::start_with_env(&[("FAKECLOUD_IAM", "soft")]).await
+        };
+        let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+        boot.create_bucket().bucket("batch").send().await.unwrap();
+        for key in ["open/a", "locked/b"] {
+            boot.put_object()
+                .bucket("batch")
+                .key(key)
+                .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+                .send()
+                .await
+                .unwrap();
+        }
+        let (akid, secret) = bootstrap_user(&server, "batcher").await;
+        attach_inline_policy(
+            &server,
+            "batcher",
+            "DeleteOpen",
+            r#"{"Version":"2012-10-17","Statement":[
+                {"Effect":"Allow","Action":"s3:DeleteObject","Resource":"arn:aws:s3:::batch/open/*"}
+            ]}"#,
+        )
+        .await;
+        let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+        let delete = Delete::builder()
+            .objects(ObjectIdentifier::builder().key("open/a").build().unwrap())
+            .objects(ObjectIdentifier::builder().key("locked/b").build().unwrap())
+            .build()
+            .unwrap();
+        let out = s3
+            .delete_objects()
+            .bucket("batch")
+            .delete(delete)
+            .send()
+            .await
+            .unwrap();
+        let deleted: Vec<_> = out.deleted().iter().filter_map(|d| d.key()).collect();
+        let left = boot.list_objects_v2().bucket("batch").send().await.unwrap();
+        let remaining: Vec<_> = left.contents().iter().filter_map(|o| o.key()).collect();
+        if strict {
+            assert_eq!(deleted, ["open/a"]);
+            let errors = out.errors();
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].key(), Some("locked/b"));
+            assert_eq!(errors[0].code(), Some("AccessDenied"));
+            assert_eq!(errors[0].message(), Some("Access Denied"));
+            assert_eq!(remaining, ["locked/b"]);
+        } else {
+            assert_eq!(deleted.len(), 2);
+            assert!(out.errors().is_empty());
+            assert!(remaining.is_empty());
+        }
+    }
+}
+
+/// A read of a missing key is 404 `NoSuchKey` only for a caller allowed
+/// `s3:ListBucket`; anyone else gets 403 `AccessDenied`.
+#[tokio::test]
+async fn s3_missing_key_is_404_only_with_list_bucket() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("probe").send().await.unwrap();
+    let (akid, secret) = bootstrap_user(&server, "prober").await;
+    let read_only = r#"{"Version":"2012-10-17","Statement":[
+        {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::probe/*"}
+    ]}"#;
+    attach_inline_policy(&server, "prober", "Read", read_only).await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let get = s3.get_object().bucket("probe").key("nope").send().await;
+    assert!(format!("{get:?}").contains("AccessDenied"), "{get:?}");
+    assert!(is_access_denied(get));
+    assert!(is_access_denied(
+        s3.head_object().bucket("probe").key("nope").send().await
+    ));
+
+    attach_inline_policy(
+        &server,
+        "prober",
+        "Read",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::probe/*"},
+            {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::probe"}
+        ]}"#,
+    )
+    .await;
+    let err = s3
+        .get_object()
+        .bucket("probe")
+        .key("nope")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(err.into_service_error().is_no_such_key());
+    let head = s3.head_object().bucket("probe").key("nope").send().await;
+    assert_eq!(
+        head.as_ref()
+            .err()
+            .and_then(|e| e.raw_response())
+            .map(|r| r.status().as_u16()),
+        Some(404)
+    );
+}
+
+/// A website bucket serves its error document for the 403 a missing key gets
+/// without `s3:ListBucket`, with that status.
+#[tokio::test]
+async fn s3_website_error_document_keeps_the_hidden_missing_key_status() {
+    use aws_sdk_s3::types::{ErrorDocument, IndexDocument, WebsiteConfiguration};
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("site").send().await.unwrap();
+    boot.put_object()
+        .bucket("site")
+        .key("error.html")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"oops"))
+        .send()
+        .await
+        .unwrap();
+    boot.put_bucket_website()
+        .bucket("site")
+        .website_configuration(
+            WebsiteConfiguration::builder()
+                .index_document(
+                    IndexDocument::builder()
+                        .suffix("index.html")
+                        .build()
+                        .unwrap(),
+                )
+                .error_document(ErrorDocument::builder().key("error.html").build().unwrap())
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let (akid, secret) = bootstrap_user(&server, "visitor").await;
+    attach_inline_policy(
+        &server,
+        "visitor",
+        "Read",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}
+        ]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let err = s3
+        .get_object()
+        .bucket("site")
+        .key("missing.html")
+        .send()
+        .await
+        .unwrap_err();
+    let raw = err.raw_response().expect("an HTTP response");
+    assert_eq!(raw.status().as_u16(), 403);
+    assert_eq!(raw.body().bytes(), Some(&b"oops"[..]));
+}
+
+/// The key a request addresses is derived once, from the raw path, for both
+/// its authorization and its routing: `/b//` addresses the key `/`. So an
+/// object operation on such a key is authorized as that operation, and an
+/// unsigned request cannot have it authorized as something else (here,
+/// DeleteObjects, which dispatch leaves to its handler) and run unchecked.
+#[tokio::test]
+async fn s3_raw_path_keys_are_authorized_as_the_operation_they_run() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("victim").send().await.unwrap();
+    let http = reqwest::Client::new();
+    // Two resource types are refused as conflicting (400), `?delete` on a
+    // key as a method the key does not take (405), both before
+    // authorization.
+    for (method, query, status) in [
+        (reqwest::Method::POST, "delete&uploads", 400),
+        (reqwest::Method::POST, "delete&restore", 400),
+        (reqwest::Method::POST, "delete&uploadId=u", 400),
+        (reqwest::Method::POST, "delete&select&select-type=2", 400),
+        (reqwest::Method::POST, "delete", 405),
+        (reqwest::Method::PUT, "delete", 405),
+        (reqwest::Method::GET, "delete", 405),
+    ] {
+        let resp = http
+            .request(
+                method.clone(),
+                format!("{}/victim//?{query}", server.endpoint()),
+            )
+            .body("<Delete><Object><Key>x</Key></Object></Delete>")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), status, "{method} ?{query}");
+    }
+    let uploads = boot
+        .list_multipart_uploads()
+        .bucket("victim")
+        .send()
+        .await
+        .unwrap();
+    assert!(uploads.uploads().is_empty(), "{uploads:?}");
+    let objects = boot
+        .list_objects_v2()
+        .bucket("victim")
+        .send()
+        .await
+        .unwrap();
+    assert!(objects.contents().is_empty(), "{objects:?}");
+
+    // A signed caller allowed only s3:ListBucket cannot read the key `/`
+    // by the bucket-level route, nor one allowed only s3:GetObject on
+    // another key reach it.
+    boot.put_object()
+        .bucket("victim")
+        .key("/")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"slash"))
+        .send()
+        .await
+        .unwrap();
+    let (akid, secret) = bootstrap_user(&server, "lister2").await;
+    attach_inline_policy(
+        &server,
+        "lister2",
+        "List",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::victim"}
+        ]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    assert!(is_access_denied(
+        s3.get_object().bucket("victim").key("/").send().await
+    ));
+}
+
+/// Requests S3 refuses before authorizing anything get S3's recorded errors,
+/// whoever sends them (anonymous here), and change nothing: conflicting
+/// resource-type parameters (400 InvalidArgument), a resource type with a
+/// method it does not take (405), an upload part number that is not one.
+/// Each was a way to run one operation under another's authorization.
+#[tokio::test]
+async fn s3_requests_s3_refuses_before_authorization_change_nothing() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("victim").send().await.unwrap();
+    boot.create_bucket().bucket("empty1").send().await.unwrap();
+    boot.put_object()
+        .bucket("victim")
+        .key("k")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"secret"))
+        .send()
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let tagging = "<Tagging><TagSet><Tag><Key>a</Key><Value>b</Value></Tag></TagSet></Tagging>";
+    for (method, path, body, status, code, message) in [
+        (
+            reqwest::Method::PUT,
+            "/victim/k?partNumber=x&uploadId=u&acl",
+            "",
+            400,
+            "InvalidArgument",
+            "Conflicting query string parameters: acl, partNumber, uploadId",
+        ),
+        (
+            reqwest::Method::PUT,
+            "/victim/k?partNumber=x&uploadId=u&tagging",
+            tagging,
+            400,
+            "InvalidArgument",
+            "Conflicting query string parameters: partNumber, tagging, uploadId",
+        ),
+        (
+            reqwest::Method::PUT,
+            // Recorded: the upload is looked up first; it does not exist.
+            "/victim/k?partNumber=x&uploadId=u",
+            "",
+            404,
+            "NoSuchUpload",
+            "The specified upload does not exist. The upload ID may be invalid, \
+             or the upload may have been aborted or completed.",
+        ),
+        (
+            reqwest::Method::GET,
+            "/victim?versions&cors",
+            "",
+            400,
+            "InvalidArgument",
+            "Conflicting query string parameters: cors, versions",
+        ),
+        (
+            reqwest::Method::DELETE,
+            "/empty1?location",
+            "",
+            405,
+            "MethodNotAllowed",
+            "The specified method is not allowed against this resource.",
+        ),
+        (
+            reqwest::Method::PUT,
+            "/empty1?location",
+            "",
+            405,
+            "MethodNotAllowed",
+            "The specified method is not allowed against this resource.",
+        ),
+        (
+            reqwest::Method::POST,
+            "/victim/k?restore&uploadId=u",
+            "<RestoreRequest><Days>1</Days></RestoreRequest>",
+            400,
+            "InvalidArgument",
+            "Conflicting query string parameters: restore, uploadId",
+        ),
+        (
+            reqwest::Method::DELETE,
+            "/victim?publicAccessBlock&lifecycle",
+            "",
+            400,
+            "InvalidArgument",
+            "Conflicting query string parameters: lifecycle, publicAccessBlock",
+        ),
+    ] {
+        let resp = http
+            .request(method.clone(), format!("{}{path}", server.endpoint()))
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), status, "{method} {path}");
+        let text = resp.text().await.unwrap();
+        assert!(
+            text.contains(&format!("<Code>{code}</Code>")),
+            "{path}: {text}"
+        );
+        assert!(
+            text.contains(&format!("<Message>{message}</Message>")),
+            "{path}: {text}"
+        );
+        if status == 405 {
+            assert!(
+                text.contains(&format!("<Method>{method}</Method>")),
+                "{text}"
+            );
+            assert!(
+                text.contains("<ResourceType>LOCATION</ResourceType>"),
+                "{text}"
+            );
+        } else if code == "InvalidArgument" && message.starts_with("Conflicting") {
+            assert!(
+                text.contains("<ArgumentName>ResourceType</ArgumentName>"),
+                "{text}"
+            );
+        }
+    }
+    // Nothing changed.
+    let acl = boot
+        .get_object_acl()
+        .bucket("victim")
+        .key("k")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(acl.grants().len(), 1, "{acl:?}");
+    let tags = boot
+        .get_object_tagging()
+        .bucket("victim")
+        .key("k")
+        .send()
+        .await
+        .unwrap();
+    assert!(tags.tag_set().is_empty());
+    let buckets = boot.list_buckets().send().await.unwrap();
+    let names: Vec<_> = buckets.buckets().iter().filter_map(|b| b.name()).collect();
+    assert!(names.contains(&"empty1"), "{names:?}");
+    assert!(!names.contains(&"newbucket-x"), "{names:?}");
+}
+
+/// The pre-authorization refusals answer as recorded against S3 for an
+/// anonymous caller with an `Origin` on a bucket with CORS: a conflict of
+/// resource types gets no CORS headers, the other refusals (half an upload
+/// part's address, a missing upload, whatever the part number) do.
+#[tokio::test]
+async fn s3_pre_authorization_refusals_and_cors() {
+    use aws_sdk_s3::types::{CorsConfiguration, CorsRule};
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("corsb").send().await.unwrap();
+    boot.put_bucket_cors()
+        .bucket("corsb")
+        .cors_configuration(
+            CorsConfiguration::builder()
+                .cors_rules(
+                    CorsRule::builder()
+                        .allowed_origins("*")
+                        .allowed_methods("GET")
+                        .allowed_methods("PUT")
+                        .allowed_headers("*")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let send = |method: reqwest::Method, path: &str| {
+        http.request(method, format!("{}/corsb{path}", server.endpoint()))
+            .header("origin", "https://example.com")
+            .body("x")
+            .send()
+    };
+    let conflict = send(reqwest::Method::GET, "?cors&versions").await.unwrap();
+    assert_eq!(conflict.status(), 400);
+    assert!(conflict
+        .headers()
+        .get("access-control-allow-origin")
+        .is_none());
+    assert!(conflict.headers().get("vary").is_none());
+    for (method, path, status, needles) in [
+        (
+            reqwest::Method::PUT,
+            "/k?uploadId=u",
+            405,
+            vec![
+                "<Code>MethodNotAllowed</Code>",
+                "<Method>PUT</Method>",
+                "<ResourceType>UPLOAD</ResourceType>",
+            ],
+        ),
+        (
+            reqwest::Method::PUT,
+            "/k?partNumber=1",
+            400,
+            vec![
+                "<Message>This operation does not accept partNumber without uploadId</Message>",
+                "<ArgumentName>partNumber</ArgumentName>",
+                "<ArgumentValue>partNumber</ArgumentValue>",
+            ],
+        ),
+        (
+            reqwest::Method::GET,
+            "/k?uploadId=u",
+            404,
+            vec!["<Code>NoSuchUpload</Code>", "<UploadId>u</UploadId>"],
+        ),
+        (
+            reqwest::Method::PUT,
+            "/k?partNumber=0&uploadId=u",
+            404,
+            vec!["<Code>NoSuchUpload</Code>"],
+        ),
+        (
+            reqwest::Method::PUT,
+            "/k?partNumber=x&uploadId=u",
+            404,
+            vec![
+                "<Code>NoSuchUpload</Code>",
+                "<Message>The specified upload does not exist. The upload ID may be invalid, \
+                 or the upload may have been aborted or completed.</Message>",
+            ],
+        ),
+    ] {
+        let resp = send(method.clone(), path).await.unwrap();
+        assert_eq!(resp.status().as_u16(), status, "{method} {path}");
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+            "{method} {path}"
+        );
+        assert!(resp.headers().get("vary").is_some(), "{method} {path}");
+        let text = resp.text().await.unwrap();
+        for needle in needles {
+            assert!(text.contains(needle), "{method} {path}: {text}");
+        }
+    }
+
+    // With the upload there, an anonymous part is refused by authorization,
+    // and an authorized one with a bad number by the number check.
+    let upload = boot
+        .create_multipart_upload()
+        .bucket("corsb")
+        .key("k")
+        .send()
+        .await
+        .unwrap();
+    let id = upload.upload_id().unwrap();
+    let anon = send(
+        reqwest::Method::PUT,
+        &format!("/k?partNumber=x&uploadId={id}"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(anon.status(), 403);
+    let err = boot
+        .upload_part()
+        .bucket("corsb")
+        .key("k")
+        .upload_id(id)
+        .part_number(1)
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"p"))
+        .customize()
+        .mutate_request(|r| {
+            let uri = r.uri().replace("partNumber=1", "partNumber=x");
+            r.set_uri(uri).unwrap();
+        })
+        .send()
+        .await
+        .unwrap_err();
+    let raw = err.raw_response().unwrap();
+    assert_eq!(raw.status().as_u16(), 400);
+    let body = String::from_utf8_lossy(raw.body().bytes().unwrap()).to_string();
+    assert!(body.contains("<ArgumentValue>x</ArgumentValue>"), "{body}");
+}
+
+/// A PutObjectTagging's tags reach IAM (its body is read before
+/// authorization, not streamed past it): a Deny on `aws:RequestTag/team`
+/// refuses that tag set and nothing else.
+#[tokio::test]
+async fn s3_put_object_tagging_request_tags_reach_iam() {
+    use aws_sdk_s3::types::{Tag, Tagging};
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("tagged").send().await.unwrap();
+    boot.put_object()
+        .bucket("tagged")
+        .key("k")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap();
+    let (akid, secret) = bootstrap_user(&server, "tagger").await;
+    attach_inline_policy(
+        &server,
+        "tagger",
+        "Tag",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:PutObjectTagging","Resource":"arn:aws:s3:::tagged/*"},
+            {"Effect":"Deny","Action":"s3:PutObjectTagging","Resource":"*",
+             "Condition":{"StringEquals":{"aws:RequestTag/team":"evil"}}}]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let tag = |value: &str| {
+        s3.put_object_tagging()
+            .bucket("tagged")
+            .key("k")
+            .tagging(
+                Tagging::builder()
+                    .tag_set(Tag::builder().key("team").value(value).build().unwrap())
+                    .build()
+                    .unwrap(),
+            )
+            .send()
+    };
+    assert!(is_access_denied(tag("evil").await));
+    tag("good").await.unwrap();
+
+    // Recorded on S3: a repeated key in `x-amz-tagging` is InvalidArgument.
+    let err = boot
+        .put_object()
+        .bucket("tagged")
+        .key("dup")
+        .tagging("a=1&a=2")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap_err();
+    let err = err.into_service_error();
+    assert_eq!(err.meta().code(), Some("InvalidArgument"));
+    assert_eq!(
+        err.meta().message(),
+        Some(
+            "The header 'x-amz-tagging' shall be encoded as UTF-8 then URLEncoded URL query \
+             parameters without tag name duplicates."
+        )
+    );
+}
+
+/// The website error document is an object read of its own: a caller not
+/// allowed to read it (here, anonymous with a bucket policy opening only
+/// `public/*`) gets a plain 403, never its content.
+#[tokio::test]
+async fn s3_website_error_document_needs_its_own_read() {
+    use aws_sdk_s3::types::{ErrorDocument, IndexDocument, WebsiteConfiguration};
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket().bucket("site").send().await.unwrap();
+    for (key, body) in [
+        ("private/err.html", &b"PRIVATE ERROR DOC CONTENT"[..]),
+        ("public/ok.html", &b"ok"[..]),
+    ] {
+        boot.put_object()
+            .bucket("site")
+            .key(key)
+            .body(aws_sdk_s3::primitives::ByteStream::from_static(body))
+            .send()
+            .await
+            .unwrap();
+    }
+    boot.put_bucket_website()
+        .bucket("site")
+        .website_configuration(
+            WebsiteConfiguration::builder()
+                .index_document(
+                    IndexDocument::builder()
+                        .suffix("index.html")
+                        .build()
+                        .unwrap(),
+                )
+                .error_document(
+                    ErrorDocument::builder()
+                        .key("private/err.html")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    boot.delete_public_access_block()
+        .bucket("site")
+        .send()
+        .await
+        .unwrap();
+    boot.put_bucket_policy()
+        .bucket("site")
+        .policy(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",
+                "Action":"s3:GetObject","Resource":"arn:aws:s3:::site/public/*"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let ok = http
+        .get(format!("{}/site/public/ok.html", server.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+    let missing = http
+        .get(format!("{}/site/public/missing", server.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 403);
+    let text = missing.text().await.unwrap();
+    assert!(!text.contains("PRIVATE"), "{text}");
+    assert!(text.contains("<Code>AccessDenied</Code>"), "{text}");
+}
+
+/// HeadObject / GetObject return an object's retention only to a caller
+/// allowed `s3:GetObjectRetention`, and its legal hold only to one allowed
+/// `s3:GetObjectLegalHold`.
+#[tokio::test]
+async fn s3_object_lock_headers_need_their_read_permissions() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket()
+        .bucket("vault")
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await
+        .unwrap();
+    boot.put_object()
+        .bucket("vault")
+        .key("doc")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+        .object_lock_mode(aws_sdk_s3::types::ObjectLockMode::Governance)
+        .object_lock_retain_until_date(aws_sdk_s3::primitives::DateTime::from_secs(4_000_000_000))
+        .object_lock_legal_hold_status(aws_sdk_s3::types::ObjectLockLegalHoldStatus::On)
+        .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Crc32)
+        .send()
+        .await
+        .unwrap();
+
+    let (akid, secret) = bootstrap_user(&server, "auditor").await;
+    attach_inline_policy(
+        &server,
+        "auditor",
+        "Read",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::vault/*"}
+        ]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let head = s3
+        .head_object()
+        .bucket("vault")
+        .key("doc")
+        .send()
+        .await
+        .unwrap();
+    assert!(head.object_lock_mode().is_none());
+    assert!(head.object_lock_retain_until_date().is_none());
+    assert!(head.object_lock_legal_hold_status().is_none());
+    let get = s3
+        .get_object()
+        .bucket("vault")
+        .key("doc")
+        .send()
+        .await
+        .unwrap();
+    assert!(get.object_lock_mode().is_none());
+    assert!(get.object_lock_legal_hold_status().is_none());
+
+    attach_inline_policy(
+        &server,
+        "auditor",
+        "Read",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectRetention"],
+             "Resource":"arn:aws:s3:::vault/*"}
+        ]}"#,
+    )
+    .await;
+    let head = s3
+        .head_object()
+        .bucket("vault")
+        .key("doc")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        head.object_lock_mode(),
+        Some(&aws_sdk_s3::types::ObjectLockMode::Governance)
+    );
+    assert!(head.object_lock_retain_until_date().is_some());
+    assert!(head.object_lock_legal_hold_status().is_none());
+
+    // The bucket owner (the reserved root bypass here) sees everything.
+    let head = boot
+        .head_object()
+        .bucket("vault")
+        .key("doc")
+        .send()
+        .await
+        .unwrap();
+    assert!(head.object_lock_legal_hold_status().is_some());
+}
+
 #[tokio::test]
 async fn s3_list_objects_v2_prefix_condition_key() {
-    // A policy that only allows ListObjectsV2 when `s3:prefix` starts
-    // with "logs/" must let `prefix=logs/2026/` through and deny
-    // `prefix=secrets/`.
+    // A policy that only allows listing (`s3:ListBucket`, which authorizes
+    // ListObjectsV2) when `s3:prefix` starts with "logs/" must let
+    // `prefix=logs/2026/` through and deny `prefix=secrets/`.
     let server = start_strict().await;
     let boot = sdk_config_with(&server, "test", "test").await;
     let s3_boot = aws_sdk_s3::Client::new(&boot);
@@ -1460,7 +2643,7 @@ async fn s3_list_objects_v2_prefix_condition_key() {
         "AllowListLogs",
         r#"{"Version":"2012-10-17","Statement":[{
             "Effect":"Allow",
-            "Action":"s3:ListObjectsV2",
+            "Action":"s3:ListBucket",
             "Resource":"arn:aws:s3:::prefixed",
             "Condition":{"StringLike":{"s3:prefix":"logs/*"}}
         }]}"#,
@@ -1985,11 +3168,17 @@ async fn strict_mode_denies_unmapped_enforceable_action() {
         .send()
         .await
         .unwrap();
+    // S3 now classifies every request it routes, and refuses one naming a
+    // sub-resource with a method it does not take before authorizing it, as
+    // S3 does: 405 MethodNotAllowed, never served and never authorized as
+    // some other operation (fail closed).
     assert_eq!(
         resp.status(),
-        403,
-        "strict mode must deny an enforceable action with no IAM-action mapping (fail closed)"
+        405,
+        "strict mode must refuse an S3 request with no operation before authorizing it"
     );
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("<ResourceType>ACL</ResourceType>"), "{text}");
 }
 
 #[tokio::test]
@@ -3591,4 +4780,355 @@ async fn s3_update_object_encryption_is_authorized_on_the_object() {
     update()
         .await
         .expect("an Allow on bucket/* authorizes UpdateObjectEncryption");
+}
+
+/// Re-frame an SDK request's (in-memory) body with aws-chunked, as SDKs that
+/// default to it send even a small body, its checksum as a SHA-256 trailer
+/// instead of the SDK's own checksum headers. Run before signing.
+fn frame_aws_chunked(r: &mut aws_smithy_runtime_api::http::Request) {
+    use base64::Engine;
+    use sha2::Digest;
+    let body = r.body().bytes().expect("in-memory body").to_vec();
+    let sha = base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(&body));
+    let mut framed = format!("{:x}\r\n", body.len()).into_bytes();
+    framed.extend_from_slice(&body);
+    framed.extend_from_slice(format!("\r\n0\r\nx-amz-checksum-sha256:{sha}\r\n\r\n").as_bytes());
+    let headers = r.headers_mut();
+    let checksum_headers: Vec<String> = headers
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .filter(|name| name.starts_with("x-amz-checksum-") || name == "content-md5")
+        .collect();
+    for name in checksum_headers {
+        headers.remove(name);
+    }
+    headers.remove("x-amz-sdk-checksum-algorithm");
+    headers.insert("content-encoding", "aws-chunked");
+    headers.insert("x-amz-trailer", "x-amz-checksum-sha256");
+    headers.insert("x-amz-decoded-content-length", body.len().to_string());
+    headers.insert("content-length", framed.len().to_string());
+    *r.body_mut() = aws_smithy_types::body::SdkBody::from(framed);
+}
+
+/// Add a query parameter to an SDK request's URI before signing.
+fn add_query(r: &mut aws_smithy_runtime_api::http::Request, param: &str) {
+    let uri = r.uri().to_string();
+    let sep = if uri.contains('?') { '&' } else { '?' };
+    r.set_uri(format!("{uri}{sep}{param}")).unwrap();
+}
+
+/// An aws-chunked tag set (as an SDK frames PutObjectTagging and
+/// PutBucketTagging) is read unframed by everything before the handler: a
+/// caller allowed to tag only with `env=prod` tags with it, and is refused
+/// `env=dev`, rather than every framed body being MalformedXML.
+#[tokio::test]
+async fn s3_aws_chunked_tag_sets_are_authorized_on_their_tags() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket()
+        .bucket("chunked-tags")
+        .send()
+        .await
+        .unwrap();
+    boot.put_object()
+        .bucket("chunked-tags")
+        .key("k")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"v"))
+        .send()
+        .await
+        .unwrap();
+    let (akid, secret) = bootstrap_user(&server, "chunkedtagger").await;
+    attach_inline_policy(
+        &server,
+        "chunkedtagger",
+        "Tag",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Action":["s3:PutObjectTagging","s3:PutBucketTagging"],
+            "Resource":["arn:aws:s3:::chunked-tags","arn:aws:s3:::chunked-tags/*"],
+            "Condition":{"StringEquals":{"aws:RequestTag/env":"prod"}}}]}"#,
+    )
+    .await;
+    use aws_sdk_s3::types::{Tag, Tagging};
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let tagging = |env: &str| {
+        Tagging::builder()
+            .tag_set(Tag::builder().key("env").value(env).build().unwrap())
+            .build()
+            .unwrap()
+    };
+    for env in ["dev", "prod"] {
+        let object = s3
+            .put_object_tagging()
+            .bucket("chunked-tags")
+            .key("k")
+            .tagging(tagging(env))
+            .customize()
+            .mutate_request(frame_aws_chunked)
+            .send()
+            .await;
+        let bucket = s3
+            .put_bucket_tagging()
+            .bucket("chunked-tags")
+            .tagging(tagging(env))
+            .customize()
+            .mutate_request(frame_aws_chunked)
+            .send()
+            .await;
+        if env == "prod" {
+            object.unwrap();
+            bucket.unwrap();
+        } else {
+            assert!(is_access_denied(object), "object env={env}");
+            assert!(is_access_denied(bucket), "bucket env={env}");
+        }
+    }
+    // The trailer is still the body's integrity check: a wrong one is
+    // BadDigest, and nothing is stored.
+    let err = s3
+        .put_object_tagging()
+        .bucket("chunked-tags")
+        .key("k")
+        .tagging(tagging("prod"))
+        .customize()
+        .mutate_request(|r| {
+            frame_aws_chunked(r);
+            let framed = String::from_utf8(r.body().bytes().unwrap().to_vec()).unwrap();
+            let (head, _) = framed.split_once("x-amz-checksum-sha256:").unwrap();
+            let wrong = format!(
+                "{head}x-amz-checksum-sha256:{}\r\n\r\n",
+                "A".repeat(43) + "="
+            );
+            *r.body_mut() = aws_smithy_types::body::SdkBody::from(wrong);
+        })
+        .send()
+        .await
+        .unwrap_err();
+    let raw = err.raw_response().unwrap();
+    let body = String::from_utf8_lossy(raw.body().bytes().unwrap()).to_string();
+    assert!(body.contains("<Code>BadDigest</Code>"), "{body}");
+    let object_tags = boot
+        .get_object_tagging()
+        .bucket("chunked-tags")
+        .key("k")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(object_tags.tag_set()[0].value(), "prod");
+    let bucket_tags = boot
+        .get_bucket_tagging()
+        .bucket("chunked-tags")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bucket_tags.tag_set()[0].value(), "prod");
+}
+
+/// Whether an S3 PUT streams is S3's own classification: PutObject with a
+/// query parameter S3 ignores is still PutObject, and stores its body (it
+/// was buffered and refused as having no body stream).
+#[tokio::test]
+async fn s3_put_object_with_an_ignored_query_parameter_stores_its_body() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket()
+        .bucket("odd-query")
+        .send()
+        .await
+        .unwrap();
+    let (akid, secret) = bootstrap_user(&server, "oddquery").await;
+    attach_inline_policy(
+        &server,
+        "oddquery",
+        "Put",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Action":"s3:PutObject","Resource":"arn:aws:s3:::odd-query/*"}]}"#,
+    )
+    .await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    for (query, framed) in [("foo=bar", false), ("Tagging", false), ("foo=bar", true)] {
+        let key = format!("k-{}-{framed}", query.replace('=', "-"));
+        s3.put_object()
+            .bucket("odd-query")
+            .key(&key)
+            .body(aws_sdk_s3::primitives::ByteStream::from_static(b"payload"))
+            .customize()
+            .mutate_request(move |r| {
+                add_query(r, query);
+                if framed {
+                    frame_aws_chunked(r);
+                }
+            })
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("{query} framed={framed}: {e:?}"));
+        let got = boot
+            .get_object()
+            .bucket("odd-query")
+            .key(&key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            &got.body.collect().await.unwrap().into_bytes()[..],
+            b"payload"
+        );
+    }
+}
+
+/// A CreateBucket tag set that does not read is MalformedXML before
+/// authorization, and no bucket is created (it was created untagged).
+#[tokio::test]
+async fn s3_create_bucket_with_an_unreadable_tag_set_is_refused() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    let (akid, secret) = bootstrap_user(&server, "creator").await;
+    attach_inline_policy(
+        &server,
+        "creator",
+        "Create",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Action":["s3:CreateBucket","s3:TagResource"],"Resource":"*"}]}"#,
+    )
+    .await;
+    let user = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    const BODY: &str = "<CreateBucketConfiguration><Tags><Tag><Key>env</Key></Tag></Tags>\
+                        </CreateBucketConfiguration>";
+    for client in [&user, &boot] {
+        let err = client
+            .create_bucket()
+            .bucket("unread-tags")
+            .customize()
+            .mutate_request(|r| {
+                r.headers_mut()
+                    .insert("content-length", BODY.len().to_string());
+                *r.body_mut() = aws_smithy_types::body::SdkBody::from(BODY);
+            })
+            .send()
+            .await
+            .unwrap_err();
+        let raw = err.raw_response().unwrap();
+        assert_eq!(raw.status().as_u16(), 400);
+        let body = String::from_utf8_lossy(raw.body().bytes().unwrap()).to_string();
+        assert!(body.contains("<Code>MalformedXML</Code>"), "{body}");
+    }
+    assert!(boot
+        .head_bucket()
+        .bucket("unread-tags")
+        .send()
+        .await
+        .is_err());
+}
+
+/// Broken aws-chunked framing is refused only after the bucket's existence
+/// and the caller's authorization, as recorded on S3 (anonymous, body
+/// `zz;garbage\r\nabc\r\n`): a missing bucket is 404 NoSuchBucket, an
+/// anonymous PutObject 403 AccessDenied, an anonymous `?tagging` 400
+/// InvalidRequest for its streaming `x-amz-content-sha256`. A signed caller
+/// without permission is AccessDenied, one with it InvalidChunkSizeError, and
+/// nothing is written.
+#[tokio::test]
+async fn s3_broken_aws_chunked_framing_comes_after_bucket_and_authorization() {
+    let server = start_strict().await;
+    let boot = path_style_s3(&sdk_config_with(&server, "test", "test").await);
+    boot.create_bucket()
+        .bucket("framed-order")
+        .send()
+        .await
+        .unwrap();
+    boot.put_object()
+        .bucket("framed-order")
+        .key("k")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"v"))
+        .send()
+        .await
+        .unwrap();
+    let broken = |host: Option<&str>, path: &str| {
+        let request = reqwest::Client::new()
+            .put(format!("{}{path}", server.endpoint()))
+            .header("content-encoding", "aws-chunked")
+            .header("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+            .header("x-amz-decoded-content-length", "3")
+            .body("zz;garbage\r\nabc\r\n");
+        match host {
+            Some(host) => request.header("host", host),
+            None => request,
+        }
+    };
+    // An unsigned path-style request names no service, and one to a bucket
+    // that does not exist is not S3's to claim locally; the virtual-hosted
+    // host is S3's.
+    let missing = Some("framed-order-missing.s3.us-east-1.amazonaws.com");
+    for (host, path, status, code) in [
+        (missing, "/k", 404, "NoSuchBucket"),
+        (missing, "/k?tagging", 404, "NoSuchBucket"),
+        (None, "/framed-order/k", 403, "AccessDenied"),
+        (None, "/framed-order/k?tagging", 400, "InvalidRequest"),
+    ] {
+        let resp = broken(host, path).send().await.unwrap();
+        let got = resp.status().as_u16();
+        let body = resp.text().await.unwrap();
+        assert_eq!(got, status, "{path}: {body}");
+        assert!(
+            body.contains(&format!("<Code>{code}</Code>")),
+            "{path}: {body}"
+        );
+        if code == "InvalidRequest" {
+            assert!(
+                body.contains("The value of x-amz-content-sha256 header is invalid."),
+                "{body}"
+            );
+        }
+    }
+
+    // Signed: the SDK's request, its body replaced by the broken framing.
+    let (akid, secret) = bootstrap_user(&server, "brokenframer").await;
+    let s3 = path_style_s3(&sdk_config_with(&server, &akid, &secret).await);
+    let tag = || {
+        use aws_sdk_s3::types::{Tag, Tagging};
+        s3.put_object_tagging()
+            .bucket("framed-order")
+            .key("k")
+            .tagging(
+                Tagging::builder()
+                    .tag_set(Tag::builder().key("env").value("prod").build().unwrap())
+                    .build()
+                    .unwrap(),
+            )
+            .customize()
+            .mutate_request(|r| {
+                frame_aws_chunked(r);
+                let framed = b"zz;garbage\r\nabc\r\n";
+                r.headers_mut()
+                    .insert("content-length", framed.len().to_string());
+                *r.body_mut() = aws_smithy_types::body::SdkBody::from(&framed[..]);
+            })
+            .send()
+    };
+    let code_of = |err: &aws_sdk_s3::error::SdkError<
+        aws_sdk_s3::operation::put_object_tagging::PutObjectTaggingError,
+        aws_smithy_runtime_api::http::Response,
+    >| {
+        let raw = err.raw_response().unwrap();
+        String::from_utf8_lossy(raw.body().bytes().unwrap()).to_string()
+    };
+    let err = tag().await.unwrap_err();
+    assert!(code_of(&err).contains("<Code>AccessDenied</Code>"));
+    attach_inline_policy(
+        &server,
+        "brokenframer",
+        "Tag",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Action":"s3:PutObjectTagging","Resource":"arn:aws:s3:::framed-order/*"}]}"#,
+    )
+    .await;
+    let err = tag().await.unwrap_err();
+    assert!(code_of(&err).contains("<Code>InvalidChunkSizeError</Code>"));
+    let tags = boot
+        .get_object_tagging()
+        .bucket("framed-order")
+        .key("k")
+        .send()
+        .await
+        .unwrap();
+    assert!(tags.tag_set().is_empty(), "nothing is written");
 }

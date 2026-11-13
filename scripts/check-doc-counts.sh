@@ -898,6 +898,78 @@ fi
     fi
 }
 
+# --- IAM enforcement table: "All N supported actions" per service -----------
+# reference/security.md's "Enforced services" table states each enforced
+# service's action count by hand ("| **S3** | All 74 supported actions"),
+# and it drifted (S3 said 74 while `supported_actions()` listed 112). The
+# canonical count is the service's `supported_actions()` list: its literal
+# `&[...]`, or the `const`/`static` list it returns.
+SECURITY_DOC="website/content/docs/reference/security.md"
+# Format: "<row name>=<file defining that service's supported_actions()>".
+ENFORCED_SERVICE_SOURCES=(
+    "IAM=crates/fakecloud-iam/src/iam_service/mod.rs"
+    "STS=crates/fakecloud-iam/src/sts_service/mod.rs"
+    "SQS=crates/fakecloud-sqs/src/service/mod.rs"
+    "SNS=crates/fakecloud-sns/src/service.rs"
+    "S3=crates/fakecloud-s3/src/service/mod.rs"
+    "KMS=crates/fakecloud-kms/src/service.rs"
+    "DynamoDB=crates/fakecloud-dynamodb/src/service/mod.rs"
+    "DynamoDB Streams=crates/fakecloud-dynamodb/src/streams_dataplane.rs"
+    "Lambda=crates/fakecloud-lambda/src/service/mod.rs"
+    "EventBridge Scheduler=crates/fakecloud-scheduler/src/service.rs"
+)
+# The number of string literals in the list `fn supported_actions` returns.
+supported_actions_count() {
+    awk '
+        function count(line,   n) {
+            sub(/\/\/.*/, "", line)
+            n = 0
+            while (match(line, /"[^"]*"/)) { n++; line = substr(line, RSTART + RLENGTH) }
+            return n
+        }
+        # First pass: find the list fn supported_actions returns.
+        FNR == NR {
+            if ($0 ~ /fn supported_actions/) { infn = 1; next }
+            if (infn && !inlist) {
+                if ($0 ~ /&\[/) { inlist = 1; sub(/.*&\[/, "") }
+                else if (match($0, /[A-Z][A-Z0-9_]+/)) { name = substr($0, RSTART, RLENGTH); infn = 0; next }
+                else next
+            }
+            if (inlist) {
+                if ($0 ~ /^[[:space:]]*\]/) { inlist = 0; infn = 0; done = 1; next }
+                total += count($0)
+            }
+            next
+        }
+        # Second pass (only for a named list): its `const`/`static` body.
+        name != "" && $0 ~ ("(const|static) " name ":") { inconst = 1; sub(/.*= *&\[/, ""); }
+        inconst {
+            if ($0 ~ /^[[:space:]]*\];/) { inconst = 0; next }
+            total += count($0)
+        }
+        END { print total + 0 }
+    ' "$1" "$1"
+}
+for entry in "${ENFORCED_SERVICE_SOURCES[@]}"; do
+    row="${entry%%=*}"
+    src="${entry#*=}"
+    claim=$(awk -F'|' -v row="$row" '{ n = $2; gsub(/^ *\*\*|\*\* *$/, "", n) } n == row { print $3; exit }' "$SECURITY_DOC")
+    claimed=$(printf '%s' "$claim" | grep -oE 'All [0-9]+ supported (actions|operations)' | grep -oE '[0-9]+' || true)
+    if [ -z "$claimed" ]; then
+        problems+=("$SECURITY_DOC: no '| **$row** | All N supported actions' row found; update ENFORCED_SERVICE_SOURCES if the table changed")
+        fail=1
+        continue
+    fi
+    actual=$(supported_actions_count "$src")
+    if [ "$actual" -eq 0 ]; then
+        problems+=("$src: could not read supported_actions() for $row")
+        fail=1
+    elif [ "$claimed" != "$actual" ]; then
+        problems+=("$SECURITY_DOC: $row row says 'All $claimed supported actions', supported_actions() lists $actual")
+        fail=1
+    fi
+done
+
 if [ "$fail" -eq 0 ]; then
     echo "OK — every evergreen surface agrees with the canonical sources."
     exit 0

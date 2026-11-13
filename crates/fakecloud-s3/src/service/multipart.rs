@@ -364,6 +364,19 @@ impl CompletionChecksums {
     }
 }
 
+/// An upload part number that is not an integer in 1..=10000, named as sent.
+pub(super) fn invalid_part_number(value: &str) -> AwsServiceError {
+    AwsServiceError::aws_error_with_fields(
+        StatusCode::BAD_REQUEST,
+        "InvalidArgument",
+        "Part number must be an integer between 1 and 10000, inclusive",
+        vec![
+            ("ArgumentName".to_string(), "partNumber".to_string()),
+            ("ArgumentValue".to_string(), value.to_string()),
+        ],
+    )
+}
+
 impl S3Service {
     pub(super) fn create_multipart_upload(
         &self,
@@ -401,6 +414,11 @@ impl S3Service {
             .get("x-amz-tagging")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+        // Checked now, as PutObject checks it; stored as sent and applied at
+        // completion.
+        if let Some(tagging) = &tagging {
+            crate::service::tags::parse_tagging_header(tagging)?;
+        }
         self.reject_blocked_sse_c(
             account_id,
             req,
@@ -525,15 +543,7 @@ impl S3Service {
         // argument (400 InvalidArgument), not a missing upload (404) — the
         // low end previously returned NoSuchUpload.
         if !(1..=10000).contains(&part_number) {
-            return Err(AwsServiceError::aws_error_with_fields(
-                StatusCode::BAD_REQUEST,
-                "InvalidArgument",
-                "Part number must be an integer between 1 and 10000, inclusive",
-                vec![
-                    ("ArgumentName".to_string(), "partNumber".to_string()),
-                    ("ArgumentValue".to_string(), part_number.to_string()),
-                ],
-            ));
+            return Err(invalid_part_number(&part_number.to_string()));
         }
         let pn = part_number as u32;
 
@@ -569,16 +579,13 @@ impl S3Service {
         }
         let part_algorithm = upload_algorithm.or(checks.algorithm());
 
-        // UploadPart is streaming-only: spool chunks to a tempfile
-        // while computing MD5 + size in constant memory, then hand
-        // the file to the store as `BodySource::File`.
-        let stream = req.take_body_stream().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "MalformedRequestBody",
-                "UploadPart requires a streaming request body",
-            )
-        })?;
+        // UploadPart streams (`streams_request_body`): spool chunks to a
+        // tempfile while computing MD5 + size in constant memory, then hand
+        // the file to the store as `BodySource::File`. A body that arrived
+        // buffered (already unframed) is spooled the same way.
+        let stream = req
+            .take_body_stream()
+            .unwrap_or_else(|| req.body.clone().into());
         // Verifies Content-MD5, the x-amz-checksum-* value or trailing
         // checksum, and x-amz-content-sha256 against the part's bytes,
         // computing the part checksum in the same pass.
@@ -662,6 +669,9 @@ impl S3Service {
         upload_id: &str,
         part_number: i64,
     ) -> Result<AwsResponse, AwsServiceError> {
+        if !(1..=10000).contains(&part_number) {
+            return Err(invalid_part_number(&part_number.to_string()));
+        }
         let copy_source = req
             .headers
             .get("x-amz-copy-source")

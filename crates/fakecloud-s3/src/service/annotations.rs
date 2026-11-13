@@ -129,17 +129,18 @@ impl S3Service {
         check_object_if_match(req, obj)?;
 
         // The payload is a streaming blob: an SDK frames it with aws-chunked
-        // and sends its checksum as a trailer. Decode the framing and verify
-        // Content-MD5 / the x-amz-checksum-* value or trailer against the
-        // payload, computing the stored checksum in the same pass. Without an
-        // algorithm the annotation gets S3's default CRC64NVME checksum.
+        // and sends its checksum as a trailer, both undone before the handler
+        // runs (`deframe_buffered`). Verify Content-MD5 / the x-amz-checksum-*
+        // value against the payload, computing the stored checksum in the
+        // same pass. Without an algorithm the annotation gets S3's default
+        // CRC64NVME checksum.
         let checks = ChecksumHeaders::parse(&req.headers)?;
         let algorithm = checks
             .algorithm()
             .unwrap_or(crate::checksum::DEFAULT_ALGORITHM);
-        let verified =
+        let digests =
             crate::checksum::verify_buffered(&req.headers, &req.body, &checks, Some(algorithm))?;
-        let payload = verified.payload;
+        let payload = &req.body;
         if payload.is_empty() || payload.len() > MAX_ANNOTATION_PAYLOAD_BYTES {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -147,7 +148,7 @@ impl S3Service {
                 "The annotation payload must be between 1 byte and 1 MiB.",
             ));
         }
-        if std::str::from_utf8(&payload).is_err() {
+        if std::str::from_utf8(payload).is_err() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "UnsupportedMediaType",
@@ -169,11 +170,11 @@ impl S3Service {
             ));
         }
 
-        let etag = annotation_etag(&payload);
-        let checksum_value = verified.digests.encoded(algorithm);
+        let etag = annotation_etag(payload);
+        let checksum_value = digests.encoded(algorithm);
         let annotation = ObjectAnnotation {
             name: name.clone(),
-            payload,
+            payload: payload.to_vec(),
             etag: etag.clone(),
             last_modified: chrono::Utc::now(),
             checksum_algorithm: Some(algorithm),

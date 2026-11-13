@@ -151,3 +151,60 @@ async fn s3_streaming_upload_part_round_trip() {
     assert!(got_bytes[..part_size].iter().all(|&b| b == 0xA5));
     assert!(got_bytes[part_size..].iter().all(|&b| b == 0x5A));
 }
+
+/// A request S3 refuses for its URL alone (conflicting resource-type
+/// parameters, a part number with no upload id, an upload that does not
+/// exist) is refused without its body being read: the answer comes while
+/// the body is still being sent, and never ends.
+#[tokio::test]
+async fn s3_refusals_of_the_url_do_not_wait_for_the_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    s3.create_bucket().bucket("unread").send().await.unwrap();
+    let addr = server
+        .endpoint()
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    for (target, code) in [
+        ("/unread/k?partNumber=1", "InvalidArgument"),
+        ("/unread/k?tagging&acl", "InvalidArgument"),
+        ("/unread/k?partNumber=1&uploadId=nope", "NoSuchUpload"),
+        ("/unread?cors&tagging", "InvalidArgument"),
+    ] {
+        let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        let head = format!(
+            "PUT {target} HTTP/1.1\r\nHost: {addr}\r\n\
+             Authorization: AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=00\r\n\
+             x-amz-content-sha256: UNSIGNED-PAYLOAD\r\n\
+             Transfer-Encoding: chunked\r\n\r\n"
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        // One chunk of the body; its end never comes.
+        let chunk = vec![b'x'; 64 * 1024];
+        stream
+            .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&chunk).await.unwrap();
+        stream.write_all(b"\r\n").await.unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut buf = vec![0u8; 4096];
+            while !response.contains("</Error>") {
+                let read = stream.read(&mut buf).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                response.push_str(&String::from_utf8_lossy(&buf[..read]));
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{target}: no answer while the body is open: {response}"));
+        assert!(
+            response.contains(&format!("<Code>{code}</Code>")),
+            "{target}: {response}"
+        );
+    }
+}

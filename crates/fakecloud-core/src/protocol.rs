@@ -234,6 +234,28 @@ pub fn detect_service_headers_only(
     None
 }
 
+/// Whether [`detect_service_headers_only`] names the service
+/// [`detect_service`] will route the request to, whatever its body: the
+/// header detection rests on an `X-Amz-Target`, a query `Action` that names
+/// a service, or a SigV4 `Authorization` scope, each of which `detect_service`
+/// honors ahead of (or, for the scope, inside) its form-body sniff. A
+/// detection resting on a presigned URL or the Host header alone is not
+/// final: a form body naming an `Action` routes the request to that
+/// action's service instead.
+pub fn headers_name_final_service(
+    headers: &HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> bool {
+    headers.contains_key("x-amz-target")
+        || query_params.get("Action").is_some_and(|action| {
+            extract_service_from_auth(headers)
+                .or_else(|| infer_service_from_action(action))
+                .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service))
+                .is_some()
+        })
+        || extract_service_from_auth(headers).is_some()
+}
+
 /// Detect the target service and action from HTTP request components.
 pub fn detect_service(
     headers: &HeaderMap,
@@ -1069,6 +1091,56 @@ fn from_hex(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headers_settle_the_service_only_when_no_form_body_can_change_it() {
+        // An unsigned POST whose Host says S3 but whose form body names an
+        // STS action is routed to STS: header detection alone is not final.
+        let mut host_only = HeaderMap::new();
+        host_only.insert("host", "b.s3.us-east-1.amazonaws.com".parse().unwrap());
+        let none = HashMap::new();
+        let body = Bytes::from("Action=GetCallerIdentity&Version=2011-06-15");
+        assert_eq!(
+            detect_service_headers_only(&host_only, &none).map(|d| d.service),
+            Some("s3".to_string())
+        );
+        assert_eq!(
+            detect_service(&host_only, &none, &body).map(|d| d.service),
+            Some("sts".to_string())
+        );
+        assert!(!headers_name_final_service(&host_only, &none));
+        // Likewise a presigned URL: its scope is not the Authorization header.
+        let presigned: HashMap<String, String> = [(
+            "X-Amz-Credential".to_string(),
+            "AKID/20240101/us-east-1/s3/aws4_request".to_string(),
+        )]
+        .into();
+        assert!(!headers_name_final_service(&HeaderMap::new(), &presigned));
+
+        // A SigV4 scope, a target or a resolvable query Action settles it.
+        let mut signed = host_only.clone();
+        signed.insert(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKID/20240101/us-east-1/s3/aws4_request, \
+             SignedHeaders=host, Signature=00"
+                .parse()
+                .unwrap(),
+        );
+        assert!(headers_name_final_service(&signed, &none));
+        assert_eq!(
+            detect_service(&signed, &none, &body).map(|d| d.service),
+            Some("s3".to_string())
+        );
+        let mut target = HeaderMap::new();
+        target.insert(
+            "x-amz-target",
+            "DynamoDB_20120810.ListTables".parse().unwrap(),
+        );
+        assert!(headers_name_final_service(&target, &none));
+        let action: HashMap<String, String> =
+            [("Action".to_string(), "GetCallerIdentity".to_string())].into();
+        assert!(headers_name_final_service(&HeaderMap::new(), &action));
+    }
 
     #[test]
     fn s3_control_host_requires_leading_control_label() {

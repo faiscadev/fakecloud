@@ -114,13 +114,16 @@ pub struct Query {
 /// simplicity — callers map them to AWS error codes.
 pub(crate) fn parse_sql(sql: &str) -> Result<Query, &'static str> {
     let sql = sql.trim();
-    let upper = sql.to_uppercase();
-
-    if !upper.starts_with("SELECT ") {
+    if !sql
+        .get(..7)
+        .is_some_and(|s| s.eq_ignore_ascii_case("SELECT "))
+    {
         return Err("expected SELECT");
     }
 
-    let from_keyword = upper.find(" FROM ").ok_or("expected FROM")?;
+    // Offsets into `sql` itself, not an uppercased copy whose byte length
+    // can differ (see `find_ascii_keyword_ci`).
+    let from_keyword = find_ascii_keyword_ci(sql, " FROM ").ok_or("expected FROM")?;
     let from_offset = " FROM ".len();
     let select_part = sql
         .get(7..from_keyword)
@@ -130,8 +133,7 @@ pub(crate) fn parse_sql(sql: &str) -> Result<Query, &'static str> {
     let after_from = sql
         .get(from_keyword + from_offset..)
         .ok_or("invalid SQL encoding")?;
-    let upper_after = after_from.to_uppercase();
-    let where_keyword = upper_after.find(" WHERE ");
+    let where_keyword = find_ascii_keyword_ci(after_from, " WHERE ");
 
     let (from, where_clause) = match where_keyword {
         Some(wp) => {
@@ -391,6 +393,17 @@ pub fn format_json_lines(rows: &[Vec<String>], headers: &Option<Vec<String>>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keywords_are_found_in_the_statement_itself() {
+        // `ﬀ` uppercases to `FF` (one byte longer): offsets found in an
+        // uppercased copy split the statement in the wrong place.
+        let q = parse_sql("select ﬀ from s3object s where s.ﬀ = 'x'").unwrap();
+        assert!(matches!(q.select, SqlSelect::Columns(cols) if cols == vec!["ﬀ"]));
+        assert_eq!(q.from, "s3object s");
+        assert!(q.where_clause.is_some());
+        assert!(parse_sql("SELEC").is_err());
+    }
 
     #[test]
     fn parse_select_star() {
