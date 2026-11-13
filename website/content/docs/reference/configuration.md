@@ -95,6 +95,7 @@ fakecloud decodes both LocalStack's `*.localhost.localstack.cloud` hostname conv
 | `<bucket>.s3.amazonaws.com`                                   | S3 virtual-hosted-style on `<bucket>`, `us-east-1` |
 | `s3-<region>.amazonaws.com`                                   | S3 path-style, older dash-separated form         |
 | `<bucket>.s3-<region>.amazonaws.com`                          | S3 virtual-hosted-style, older dash-separated    |
+| `iam`, `sts`, `route53` or `cloudfront` `.amazonaws.com`      | That service's global endpoint, `us-east-1`      |
 
 The DNS wildcard `*.localhost.localstack.cloud` resolves to `127.0.0.1`, so LocalStack-shaped hostnames reach fakecloud unchanged; for AWS-shaped hostnames, point the client at fakecloud's endpoint (or add the names to `/etc/hosts`) and fakecloud parses the `Host` header to recover service, region, and (for S3) bucket. SigV4-signed requests still route by credential scope first — the hostname is a secondary signal that takes over when the request is unsigned, uses a non-standard `Authorization` header, or is being probed with `curl`.
 

@@ -900,6 +900,8 @@ async fn dispatch_inner(
     };
     // One order for every request, whatever the enforcement mode:
     //
+    // 0. an unsigned request to an operation that needs credentials is
+    //    refused for the missing credentials (strict only, see below);
     // 1. authentication: a key that resolves to no identity is refused
     //    first (`InvalidClientTokenId` / `ExpiredToken`, strict only);
     // 2. `validate_before_authorization`: what the service refuses whoever
@@ -916,16 +918,41 @@ async fn dispatch_inner(
     // authorization, `sts:GetCallerIdentity`, from a caller whose
     // credentials resolved) steps 1 and 3 do not apply and validation runs
     // just before the handler.
-    let authorization_required = service.iam_authorization_required(&aws_request);
+    let anonymous = aws_request.access_key_id.is_none()
+        && aws_request.principal.is_none()
+        && enforcement.internal_caller.is_none();
+    // 0. An unsigned API request is refused for its missing credentials
+    //    ahead of everything else, unless the service authorizes anonymous
+    //    callers (S3, SQS) or the operation needs no credentials. Every
+    //    service, enforced or not: this is authentication, not policy.
+    let anonymous_access = (anonymous
+        && is_fully_anonymous
+        && config.iam_mode.is_enabled()
+        && names_api_operation(&detected, host_info.as_ref(), &aws_request.headers))
+    .then(|| service.anonymous_access(&aws_request));
+    if anonymous_access == Some(crate::anonymous::AnonymousAccess::Refused) {
+        tracing::warn!(
+            target: "fakecloud::iam::audit",
+            service = %detected.service,
+            action = %aws_request.action,
+            mode = %config.iam_mode,
+            request_id = %request_id,
+            "unsigned request is missing authentication; denying under strict, allowing under soft"
+        );
+        if config.iam_mode.is_strict() {
+            return missing_authentication_response(&detected, &request_id, &aws_request.headers);
+        }
+    }
+    let unauthenticated_operation =
+        anonymous_access == Some(crate::anonymous::AnonymousAccess::Unauthenticated);
+    let authorization_required =
+        !unauthenticated_operation && service.iam_authorization_required(&aws_request);
     let authorizes = enforcement.is_active(&aws_request) && authorization_required;
     if authorizes {
         if let Some(denied) = enforcement.unauthenticated(&aws_request) {
             return denied;
         }
     }
-    let anonymous = aws_request.access_key_id.is_none()
-        && aws_request.principal.is_none()
-        && enforcement.internal_caller.is_none();
     let refuse_anonymous_first =
         authorizes && anonymous && !service.validates_anonymous_before_authorization();
     if !refuse_anonymous_first {
@@ -1512,10 +1539,25 @@ impl IamEnforcement {
                                     "anonymous request denied: no public bucket policy or ACL grants the action"
                                 );
                                 if config.iam_mode.is_strict() {
+                                    let message = anonymous_denied_message(
+                                        &detected.service,
+                                        iam_action,
+                                        &aws_request.region,
+                                    );
+                                    // SQS keeps its own access-denied code per
+                                    // protocol (its JSON path is query-compatible).
+                                    if detected.service == "sqs" {
+                                        return Some(access_denied_response(
+                                            &message,
+                                            request_id,
+                                            detected,
+                                            &aws_request.headers,
+                                        ));
+                                    }
                                     return Some(build_error_response(
                                         StatusCode::FORBIDDEN,
                                         "AccessDenied",
-                                        anonymous_denied_message(&detected.service, iam_action),
+                                        &message,
                                         request_id,
                                         error_envelope,
                                     ));
@@ -2726,12 +2768,132 @@ fn s3_sigv2_query_auth_error(
 /// The `AccessDenied` message for an anonymous request authorization refused.
 /// S3 refuses an anonymous `CreateBucket` outright with its own message
 /// (recorded in us-east-1); everything else is S3's generic "Access Denied".
-fn anonymous_denied_message(service: &str, action: &crate::auth::IamAction) -> &'static str {
+/// SQS names the resource by its URL (recorded for `ListQueues`: the
+/// endpoint's root, "Access to the resource https://sqs.us-east-1.amazonaws.com/
+/// is denied."); a queue is named by its queue URL.
+fn anonymous_denied_message(
+    service: &str,
+    action: &crate::auth::IamAction,
+    region: &str,
+) -> std::borrow::Cow<'static, str> {
     if service == "s3" && action.service == "s3" && action.action == "CreateBucket" {
-        "Anonymous users cannot invoke this API. Please authenticate."
+        "Anonymous users cannot invoke this API. Please authenticate.".into()
+    } else if service == "sqs" {
+        let queue = action
+            .resource
+            .parse::<fakecloud_aws::arn::Arn>()
+            .ok()
+            .filter(|arn| arn.service == "sqs" && !arn.account_id.is_empty());
+        let (region, path) = match &queue {
+            Some(arn) => (
+                arn.region.as_str(),
+                format!("{}/{}", arn.account_id, arn.resource),
+            ),
+            None => (region, String::new()),
+        };
+        format!(
+            "Access to the resource https://sqs.{region}.{}/{path} is denied.",
+            fakecloud_aws::endpoint::dns_suffix_for_region(region)
+        )
+        .into()
     } else {
-        "Access Denied"
+        "Access Denied".into()
     }
+}
+
+/// Whether an unsigned request names an API operation of the service it was
+/// routed to, so it is judged for its missing credentials: an awsJson target,
+/// a Query `Action`, or a REST request addressed to the service's own API
+/// host (`lambda.us-east-1.amazonaws.com`, `route53.amazonaws.com`, ...). An
+/// unsigned REST request that reached its service by any other route is a
+/// data-plane request (an API Gateway invocation, an ECR registry pull, an
+/// S3 path-style object) and is not.
+fn names_api_operation(
+    detected: &protocol::DetectedRequest,
+    host: Option<&protocol::RoutingHost>,
+    headers: &http::HeaderMap,
+) -> bool {
+    match detected.protocol {
+        AwsProtocol::Json | AwsProtocol::Query | AwsProtocol::Ec2Query | AwsProtocol::RpcV2Cbor => {
+            !detected.action.is_empty()
+        }
+        AwsProtocol::Rest | AwsProtocol::RestJson => {
+            host.is_some_and(|h| h.service == detected.service && h.bucket.is_none())
+                && !is_execute_api_host(headers)
+        }
+    }
+}
+
+/// The refusal of an unsigned request to an operation that needs
+/// credentials, as each service answers it (recorded in us-east-1):
+///
+/// - awsQuery: 403 `MissingAuthenticationToken` "Request is missing
+///   Authentication Token" (STS, IAM, SNS);
+/// - EC2: 400 `MissingParameter` "The request must contain the parameter
+///   AWSAccessKeyId";
+/// - awsJson: 400 `MissingAuthenticationTokenException` "Missing
+///   Authentication Token" (KMS, SSM, CloudWatch Logs); DynamoDB's names the
+///   coral namespace, `com.amazon.coral.service#MissingAuthenticationTokenException`
+///   "Request is missing Authentication Token"; Secrets Manager answers 400
+///   `UnrecognizedClientException` "The security token included in the
+///   request is invalid.";
+/// - restJson1: 403 `{"message":"Missing Authentication Token"}` (Lambda);
+/// - restXml: 403 `MissingAuthenticationToken` "Request is missing
+///   Authentication Token" in the service's error document (Route 53).
+///
+/// Services not recorded get their protocol's shape above.
+fn missing_authentication_response(
+    detected: &protocol::DetectedRequest,
+    request_id: &str,
+    headers: &http::HeaderMap,
+) -> Response<Body> {
+    const QUERY_MESSAGE: &str = "Request is missing Authentication Token";
+    const JSON_MESSAGE: &str = "Missing Authentication Token";
+    let envelope = ErrorEnvelope::for_request(detected, headers);
+    let (status, code, message, envelope) = match (detected.service.as_str(), detected.protocol) {
+        (_, AwsProtocol::Ec2Query) => (
+            StatusCode::BAD_REQUEST,
+            "MissingParameter",
+            "The request must contain the parameter AWSAccessKeyId",
+            envelope,
+        ),
+        ("dynamodb", AwsProtocol::Json | AwsProtocol::RpcV2Cbor) => (
+            StatusCode::BAD_REQUEST,
+            "com.amazon.coral.service#MissingAuthenticationTokenException",
+            QUERY_MESSAGE,
+            envelope,
+        ),
+        ("secretsmanager", AwsProtocol::Json | AwsProtocol::RpcV2Cbor) => (
+            StatusCode::BAD_REQUEST,
+            "UnrecognizedClientException",
+            "The security token included in the request is invalid.",
+            envelope,
+        ),
+        (_, AwsProtocol::Json | AwsProtocol::RpcV2Cbor) => (
+            StatusCode::BAD_REQUEST,
+            "MissingAuthenticationTokenException",
+            JSON_MESSAGE,
+            envelope,
+        ),
+        (_, AwsProtocol::Query | AwsProtocol::Rest) => (
+            StatusCode::FORBIDDEN,
+            "MissingAuthenticationToken",
+            QUERY_MESSAGE,
+            envelope,
+        ),
+        // The restJson1 front door answers with a bare `message` body, the
+        // code in `x-amzn-ErrorType` (Lambda's error body shape).
+        (_, AwsProtocol::RestJson) => (
+            StatusCode::FORBIDDEN,
+            "MissingAuthenticationTokenException",
+            JSON_MESSAGE,
+            ErrorEnvelope {
+                lambda_body: true,
+                ..envelope
+            },
+        ),
+    };
+    build_error_response(status, code, message, request_id, envelope)
 }
 
 /// A timestamp as S3 writes it in an error document (`1969-12-31T23:59:59Z`).
@@ -4878,13 +5040,211 @@ mod tests {
             resource: "arn:aws:s3:::b".to_string(),
         };
         assert_eq!(
-            anonymous_denied_message("s3", &action("s3", "CreateBucket")),
+            anonymous_denied_message("s3", &action("s3", "CreateBucket"), "us-east-1"),
             "Anonymous users cannot invoke this API. Please authenticate."
         );
         assert_eq!(
-            anonymous_denied_message("s3", &action("s3", "GetObject")),
+            anonymous_denied_message("s3", &action("s3", "GetObject"), "us-east-1"),
             "Access Denied"
         );
+    }
+
+    #[test]
+    fn sqs_anonymous_denial_names_the_resource_url() {
+        let action = |resource: &str| crate::auth::IamAction {
+            service: "sqs",
+            action: "ListQueues",
+            resource: resource.to_string(),
+        };
+        // Recorded for ListQueues: the endpoint root.
+        assert_eq!(
+            anonymous_denied_message("sqs", &action("*"), "us-east-1"),
+            "Access to the resource https://sqs.us-east-1.amazonaws.com/ is denied."
+        );
+        assert_eq!(
+            anonymous_denied_message(
+                "sqs",
+                &action("arn:aws:sqs:eu-west-1:123456789012:jobs"),
+                "us-east-1"
+            ),
+            "Access to the resource https://sqs.eu-west-1.amazonaws.com/123456789012/jobs is denied."
+        );
+        assert_eq!(
+            anonymous_denied_message("sqs", &action("*"), "cn-north-1"),
+            "Access to the resource https://sqs.cn-north-1.amazonaws.com.cn/ is denied."
+        );
+    }
+
+    async fn missing_auth(
+        service: &str,
+        action: &str,
+        protocol: AwsProtocol,
+    ) -> (StatusCode, http::HeaderMap, String) {
+        let detected = protocol::DetectedRequest {
+            service: service.to_string(),
+            action: action.to_string(),
+            protocol,
+        };
+        let resp = missing_authentication_response(&detected, "rid", &http::HeaderMap::new());
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, headers, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn missing_authentication_query_shape() {
+        for service in ["sts", "iam", "sns"] {
+            let (status, _, body) = missing_auth(service, "ListUsers", AwsProtocol::Query).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert!(body.contains("<ErrorResponse"), "{body}");
+            assert!(body.contains("<Type>Sender</Type>"), "{body}");
+            assert!(
+                body.contains("<Code>MissingAuthenticationToken</Code>"),
+                "{body}"
+            );
+            assert!(
+                body.contains("<Message>Request is missing Authentication Token</Message>"),
+                "{body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_authentication_ec2_shape() {
+        let (status, _, body) = missing_auth("ec2", "DescribeRegions", AwsProtocol::Ec2Query).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("<Response><Errors><Error>"), "{body}");
+        assert!(body.contains("<Code>MissingParameter</Code>"), "{body}");
+        assert!(
+            body.contains("The request must contain the parameter AWSAccessKeyId"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_authentication_json_shapes() {
+        let json = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+        for service in ["kms", "ssm", "logs"] {
+            let (status, _, body) = missing_auth(service, "List", AwsProtocol::Json).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                json(&body),
+                serde_json::json!({
+                    "__type": "MissingAuthenticationTokenException",
+                    "message": "Missing Authentication Token"
+                })
+            );
+        }
+        let (status, _, body) = missing_auth("dynamodb", "ListTables", AwsProtocol::Json).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json(&body),
+            serde_json::json!({
+                "__type": "com.amazon.coral.service#MissingAuthenticationTokenException",
+                "message": "Request is missing Authentication Token"
+            })
+        );
+        let (status, _, body) =
+            missing_auth("secretsmanager", "ListSecrets", AwsProtocol::Json).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json(&body),
+            serde_json::json!({
+                "__type": "UnrecognizedClientException",
+                "message": "The security token included in the request is invalid."
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_authentication_rest_shapes() {
+        for service in ["lambda", "apigateway", "scheduler"] {
+            let (status, headers, body) = missing_auth(service, "", AwsProtocol::RestJson).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"message": "Missing Authentication Token"})
+            );
+            assert_eq!(
+                headers["x-amzn-errortype"],
+                "MissingAuthenticationTokenException"
+            );
+        }
+        let (status, _, body) = missing_auth("route53", "", AwsProtocol::Rest).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            body.contains(
+                r#"<ErrorResponse xmlns="https://route53.amazonaws.com/doc/2013-04-01/">"#
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains("<Code>MissingAuthenticationToken</Code>"),
+            "{body}"
+        );
+        assert!(
+            body.contains("<Message>Request is missing Authentication Token</Message>"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn only_api_operations_are_judged_for_missing_credentials() {
+        let detected = |service: &str, action: &str, protocol| protocol::DetectedRequest {
+            service: service.to_string(),
+            action: action.to_string(),
+            protocol,
+        };
+        let host = |name: &str| protocol::parse_routing_host(name);
+        let headers = |name: &str| {
+            let mut h = http::HeaderMap::new();
+            h.insert(http::header::HOST, name.parse().unwrap());
+            h
+        };
+        let none = http::HeaderMap::new();
+        assert!(names_api_operation(
+            &detected("kms", "ListKeys", AwsProtocol::Json),
+            None,
+            &none
+        ));
+        assert!(names_api_operation(
+            &detected("sts", "GetCallerIdentity", AwsProtocol::Query),
+            None,
+            &none
+        ));
+        // A REST request is an API call only on its service's API host.
+        let lambda_host = "lambda.us-east-1.amazonaws.com";
+        assert!(names_api_operation(
+            &detected("lambda", "", AwsProtocol::RestJson),
+            host(lambda_host).as_ref(),
+            &headers(lambda_host)
+        ));
+        assert!(names_api_operation(
+            &detected("route53", "", AwsProtocol::Rest),
+            host("route53.amazonaws.com").as_ref(),
+            &headers("route53.amazonaws.com")
+        ));
+        // Unrouted unsigned requests (API Gateway invocations, ECR pulls)
+        // are data plane.
+        assert!(!names_api_operation(
+            &detected("apigateway", "", AwsProtocol::RestJson),
+            None,
+            &none
+        ));
+        assert!(!names_api_operation(
+            &detected("ecr", "", AwsProtocol::Rest),
+            None,
+            &none
+        ));
+        let invoke = "abc123.execute-api.us-east-1.amazonaws.com";
+        assert!(!names_api_operation(
+            &detected("apigateway", "", AwsProtocol::RestJson),
+            host(invoke).as_ref(),
+            &headers(invoke)
+        ));
     }
 
     #[test]

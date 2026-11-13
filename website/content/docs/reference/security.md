@@ -58,7 +58,29 @@ The account's IAM root identity (`arn:aws:iam::<account>:root`) and the reserved
 
 ### Credentials that resolve to no identity
 
-Under `strict`, a request to an enforced service signed with an access key that resolves to no identity is rejected before any handler runs, even without `--verify-sigv4`: an unknown or deactivated (`Inactive`) key gets `InvalidClientTokenId`, an expired STS session `ExpiredToken`. Such a request is never treated as the account root (so `AssumeRole` cannot mint credentials for it). The exemptions are explicit: the reserved `test*` identity and truly anonymous (unsigned) requests, which are authorized against resource policies only. `soft` logs these requests to `fakecloud::iam::audit` and lets them through. Only `--verify-sigv4` additionally proves the caller holds the key's secret.
+Under `strict`, a request to an enforced service signed with an access key that resolves to no identity is rejected before any handler runs, even without `--verify-sigv4`: an unknown or deactivated (`Inactive`) key gets `InvalidClientTokenId`, an expired STS session `ExpiredToken`. Such a request is never treated as the account root (so `AssumeRole` cannot mint credentials for it). The exemptions are explicit: the reserved `test*` identity and truly anonymous (unsigned) requests, which [get their own treatment](#unsigned-requests). `soft` logs these requests to `fakecloud::iam::audit` and lets them through. Only `--verify-sigv4` additionally proves the caller holds the key's secret.
+
+### Unsigned requests
+
+A request with no `Authorization` header and no query authentication is the anonymous caller's. With `--iam off` it is served, as every request is, except STS `GetCallerIdentity`, which has no identity to report and answers 403 `MissingAuthenticationToken` in every mode. Under `strict`, an unsigned request to an API operation of any service (an awsJson `X-Amz-Target`, a Query `Action`, or a REST request addressed to the service's API host such as `lambda.us-east-1.amazonaws.com` or `route53.amazonaws.com`) is refused for its missing credentials before anything validates or authorizes it, so an unsigned `AssumeRoot` with an invalid `TaskPolicyArn` is refused for the missing token, not the ARN. `soft` logs the refusal to `fakecloud::iam::audit` and serves the request. The refusal follows what each service answers (recorded against AWS):
+
+| Service or protocol | Error | Status |
+| --- | --- | --- |
+| awsQuery (STS, IAM, SNS, ...) | `MissingAuthenticationToken` "Request is missing Authentication Token" | 403 |
+| EC2 | `MissingParameter` "The request must contain the parameter AWSAccessKeyId" | 400 |
+| awsJson (KMS, SSM, CloudWatch Logs, ...) | `MissingAuthenticationTokenException` "Missing Authentication Token" | 400 |
+| DynamoDB | `com.amazon.coral.service#MissingAuthenticationTokenException` "Request is missing Authentication Token" | 400 |
+| Secrets Manager | `UnrecognizedClientException` "The security token included in the request is invalid." | 400 |
+| restJson1 (Lambda, ...) | body `{"message":"Missing Authentication Token"}`, `x-amzn-ErrorType: MissingAuthenticationTokenException` | 403 |
+| restXml (Route 53, CloudFront) | `MissingAuthenticationToken` "Request is missing Authentication Token" in the service's `<ErrorResponse>` | 403 |
+
+Services that were not recorded answer in their protocol's shape from the table. The exceptions:
+
+- **S3 and SQS** authorize the anonymous caller against the resource's policy instead (S3 also against public ACLs; see [S3 anonymous access](@/docs/services/s3.md)). An SQS request no queue policy allows is 403 `AccessDenied` "Access to the resource https://sqs.us-east-1.amazonaws.com/ is denied." for `ListQueues` (recorded), naming the queue URL for a queue operation.
+- **Operations that need no credentials** are served without authorization: every operation an AWS Smithy model marks `smithy.api#optionalAuth` or `smithy.api#auth: []`, generated from `aws-models/` into `crates/fakecloud-core/src/anonymous_gen.rs` by `scripts/generate-unauthenticated-operations.py`. Today that is Cognito user pools' user-facing calls (`InitiateAuth`, `RespondToAuthChallenge`, `SignUp`, `ConfirmSignUp`, `ForgotPassword`, `GetUser`, ...), Cognito identity pools' `GetId`, `GetOpenIdToken`, `GetCredentialsForIdentity` and `UnlinkIdentity`, and STS `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` (which the role's trust policy still decides).
+- **SNS** `ConfirmSubscription` and `Unsubscribe`, which the `SubscribeURL` and `UnsubscribeURL` an HTTP/S endpoint receives call as plain unsigned GETs, as the SNS API reference documents.
+
+An unsigned REST request that reaches its service any other way is a data-plane request and is not refused: an API Gateway invocation, an ECR registry pull, an S3 path-style object.
 
 ### `iam:PassRole`
 

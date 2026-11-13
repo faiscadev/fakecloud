@@ -396,6 +396,11 @@ pub struct RoutingHost {
 
 const LOCALSTACK_SUFFIX: &str = ".localhost.localstack.cloud";
 
+/// Services whose commercial-partition endpoint is the region-less
+/// `<service>.amazonaws.com` (`s3.amazonaws.com` is handled with S3's other
+/// hosts).
+const GLOBAL_ENDPOINT_SERVICES: &[&str] = &["iam", "sts", "route53", "cloudfront"];
+
 /// Parse a `Host` header value for a LocalStack- or AWS-shaped hostname.
 /// Returns `None` for anything that doesn't match — callers fall through
 /// to their existing detection path.
@@ -407,6 +412,18 @@ pub fn parse_routing_host(host: &str) -> Option<RoutingHost> {
     let hostname = hostname.to_ascii_lowercase();
     if let Some(prefix) = hostname.strip_suffix(LOCALSTACK_SUFFIX) {
         return parse_localstack_prefix(prefix);
+    }
+    // The commercial partition's global endpoints carry no region
+    // (`route53.amazonaws.com`); they sign for us-east-1.
+    if let Some(service) = hostname
+        .strip_suffix(".amazonaws.com")
+        .filter(|s| GLOBAL_ENDPOINT_SERVICES.contains(s))
+    {
+        return Some(RoutingHost {
+            service: service.to_string(),
+            region: "us-east-1".to_string(),
+            bucket: None,
+        });
     }
     // Endpoint hostnames share one shape across partitions; only the DNS
     // suffix differs, so accept every partition's.
@@ -851,7 +868,10 @@ fn infer_service_from_action(action: &str) -> Option<String> {
         | "GetSessionToken"
         | "GetFederationToken"
         | "GetAccessKeyInfo"
-        | "DecodeAuthorizationMessage" => Some("sts".to_string()),
+        | "DecodeAuthorizationMessage"
+        | "AssumeRoot"
+        | "GetWebIdentityToken"
+        | "GetDelegatedAccessToken" => Some("sts".to_string()),
         "CreateUser" | "DeleteUser" | "GetUser" | "ListUsers" | "CreateRole" | "DeleteRole"
         | "GetRole" | "ListRoles" | "CreatePolicy" | "DeletePolicy" | "GetPolicy"
         | "ListPolicies" | "AttachRolePolicy" | "DetachRolePolicy" | "CreateAccessKey"
@@ -1476,6 +1496,14 @@ mod tests {
             infer_service_from_action("GetCallerIdentity").as_deref(),
             Some("sts")
         );
+        // Every STS operation routes an unsigned form POST on the plain host.
+        for action in [
+            "AssumeRoot",
+            "GetWebIdentityToken",
+            "GetDelegatedAccessToken",
+        ] {
+            assert_eq!(infer_service_from_action(action).as_deref(), Some("sts"));
+        }
     }
 
     #[test]
@@ -1876,6 +1904,19 @@ mod tests {
         assert_eq!(h.service, "s3");
         assert_eq!(h.region, "us-east-1");
         assert_eq!(h.bucket.as_deref(), Some("a.b.c"));
+    }
+
+    #[test]
+    fn parse_routing_host_global_endpoints() {
+        for service in ["iam", "sts", "route53", "cloudfront"] {
+            let h = parse_routing_host(&format!("{service}.amazonaws.com:443")).unwrap();
+            assert_eq!(h.service, service);
+            assert_eq!(h.region, "us-east-1");
+            assert_eq!(h.bucket, None);
+        }
+        // Only those services have a region-less endpoint.
+        assert!(parse_routing_host("lambda.amazonaws.com").is_none());
+        assert!(parse_routing_host("route53.amazonaws.com.cn").is_none());
     }
 
     #[test]

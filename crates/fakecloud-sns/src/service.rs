@@ -440,6 +440,24 @@ impl AwsService for SnsService {
         true
     }
 
+    /// The `SubscribeURL` and `UnsubscribeURL` an HTTP/S endpoint receives
+    /// are plain unsigned GETs (`?Action=ConfirmSubscription&Token=...`,
+    /// `?Action=Unsubscribe&SubscriptionArn=...`): the AWS API reference
+    /// documents both as callable without a signature (the token, or the
+    /// subscription ARN, is the proof). Every other unsigned SNS request is
+    /// refused for its missing credentials.
+    fn anonymous_access(&self, request: &AwsRequest) -> fakecloud_core::anonymous::AnonymousAccess {
+        match request.action.as_str() {
+            "ConfirmSubscription" | "Unsubscribe" => {
+                fakecloud_core::anonymous::AnonymousAccess::Unauthenticated
+            }
+            _ => fakecloud_core::anonymous::AnonymousAccess::for_operation(
+                &request.service,
+                &request.action,
+            ),
+        }
+    }
+
     /// SNS resources are topic / subscription / platform-app / endpoint
     /// ARNs. Topic-targeted actions carry a `TopicArn`; subscription
     /// actions carry a `SubscriptionArn`; platform-app actions carry

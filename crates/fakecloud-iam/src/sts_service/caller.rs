@@ -24,8 +24,8 @@ impl StsService {
 
         // F4: real GetCallerIdentity rejects calls that arrive with
         // neither a resolvable principal nor an Authorization header.
-        // AWS returns `MissingAuthenticationTokenException` (HTTP 403)
-        // in that case. We keep the unsigned-but-account-scoped path
+        // AWS returns `MissingAuthenticationToken` (HTTP 403, recorded) in
+        // that case, whatever the IAM mode: there is no identity to report. We keep the unsigned-but-account-scoped path
         // (the `test` root bypass and similar smoke probes) by falling
         // back to root only when an Authorization header was present
         // but didn't resolve to a stored principal.
@@ -37,7 +37,7 @@ impl StsService {
         if !has_auth_header {
             return Err(AwsServiceError::aws_error(
                 StatusCode::FORBIDDEN,
-                "MissingAuthenticationTokenException",
+                "MissingAuthenticationToken",
                 "Request is missing Authentication Token",
             ));
         }

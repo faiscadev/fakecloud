@@ -1420,17 +1420,18 @@ mod tests {
     #[tokio::test]
     async fn get_caller_identity_rejects_unauthenticated_request() {
         // No principal AND no Authorization header → AWS returns
-        // MissingAuthenticationTokenException (403). The `test` root
+        // MissingAuthenticationToken (403, recorded). The `test` root
         // bypass and signed requests both attach a header, so the
         // common dev path is unaffected.
         let (svc, _) = make_sts_service();
         let req = sts_request("GetCallerIdentity", vec![]);
         let err = match svc.handle(req).await {
             Err(e) => e,
-            Ok(_) => panic!("expected MissingAuthenticationTokenException"),
+            Ok(_) => panic!("expected MissingAuthenticationToken"),
         };
         assert_eq!(err.status(), StatusCode::FORBIDDEN);
-        assert!(format!("{:?}", err).contains("MissingAuthenticationTokenException"));
+        assert_eq!(err.code(), "MissingAuthenticationToken");
+        assert_eq!(err.message(), "Request is missing Authentication Token");
     }
 
     // ── AssumeRole ──

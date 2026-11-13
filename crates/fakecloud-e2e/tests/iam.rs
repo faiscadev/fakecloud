@@ -3680,7 +3680,8 @@ async fn iam_set_and_get_sts_preferences_round_trip() {
 #[tokio::test]
 async fn sts_get_caller_identity_rejects_unauthenticated() {
     // F4: GetCallerIdentity called with neither Authorization nor
-    // x-amz-security-token returns MissingAuthenticationTokenException.
+    // x-amz-security-token is refused as recorded: 403
+    // MissingAuthenticationToken, even with enforcement off.
     let server = TestServer::start().await;
     let resp = reqwest::Client::new()
         .post(server.endpoint())
@@ -3692,8 +3693,12 @@ async fn sts_get_caller_identity_rejects_unauthenticated() {
     assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
     let text = resp.text().await.unwrap();
     assert!(
-        text.contains("MissingAuthenticationTokenException"),
-        "expected MissingAuthenticationTokenException, got: {text}"
+        text.contains("<Code>MissingAuthenticationToken</Code>"),
+        "expected MissingAuthenticationToken, got: {text}"
+    );
+    assert!(
+        text.contains("<Message>Request is missing Authentication Token</Message>"),
+        "{text}"
     );
 }
 

@@ -1416,6 +1416,15 @@ impl AwsService for S3Service {
         true
     }
 
+    /// An unsigned S3 request is the anonymous principal's, allowed by a
+    /// bucket policy granting `Principal: "*"` or a public ACL.
+    fn anonymous_access(
+        &self,
+        _request: &AwsRequest,
+    ) -> fakecloud_core::anonymous::AnonymousAccess {
+        fakecloud_core::anonymous::AnonymousAccess::Authorized
+    }
+
     /// A CORS preflight is never authorized, whoever sends it (browsers send
     /// it unsigned): the bucket's CORS rules alone answer it, 200 with the
     /// `Access-Control-*` headers or 403 CORSResponse.
