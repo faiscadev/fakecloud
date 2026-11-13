@@ -1675,6 +1675,14 @@ fn authenticate_on_unsubscribe_refuses_unsigned_unsubscribes() {
         svc.anonymous_access(&unsubscribe()),
         fakecloud_core::anonymous::AnonymousAccess::Refused
     );
+    // A junk Authorization header is no signature.
+    let mut junk = unsubscribe();
+    junk.headers
+        .insert(http::header::AUTHORIZATION, "garbage".parse().unwrap());
+    let Err(err) = svc.unsubscribe(&junk) else {
+        panic!("an unparseable Authorization header must not pass");
+    };
+    assert_eq!(err.code(), "MissingAuthenticationToken");
     // A signed unsubscribe goes through.
     assert_ok(&svc.unsubscribe(&signed(unsubscribe())));
     assert!(state

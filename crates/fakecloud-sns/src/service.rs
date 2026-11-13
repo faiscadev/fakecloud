@@ -2104,15 +2104,13 @@ pub(crate) use helpers::*;
 #[path = "service_tests.rs"]
 mod tests;
 
-/// Whether the request carries a credential (a SigV4 `Authorization` header,
-/// or query authentication), as opposed to the unsigned `SubscribeURL` /
-/// `UnsubscribeURL` GETs an endpoint follows.
+/// Whether the request is signed: dispatch read an access key from it (a
+/// SigV4 `Authorization` header, a SigV4 presign or a SigV2 query
+/// signature). An unparseable `Authorization` header is no signature, and
+/// neither is the unsigned `SubscribeURL` / `UnsubscribeURL` GET an endpoint
+/// follows.
 fn request_is_signed(req: &AwsRequest) -> bool {
     req.access_key_id.is_some()
-        || req
-            .headers
-            .get(http::header::AUTHORIZATION)
-            .is_some_and(|v| !v.is_empty())
 }
 
 /// The refusal of an unsigned request that needs credentials (the awsQuery
