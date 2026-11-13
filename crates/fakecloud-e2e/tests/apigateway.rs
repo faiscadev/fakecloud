@@ -1288,6 +1288,37 @@ async fn get_body(req: reqwest::RequestBuilder) -> (u16, String) {
     (status, resp.text().await.expect("body"))
 }
 
+/// Under `--iam strict` an unsigned invocation is data plane even on the
+/// `apigateway` API host: only the management API is refused for its
+/// missing credentials.
+#[tokio::test]
+async fn unsigned_invocations_on_the_api_host_are_served_under_strict() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let client = server.apigateway_client().await;
+    let api_id = provision_mock_items_api(&client, "strict-host").await;
+    let http = reqwest::Client::new();
+    let base = server.endpoint();
+    let api_host = "apigateway.us-east-1.localhost.localstack.cloud";
+    for path in [
+        format!("/restapis/{api_id}/prod/_user_request_/items"),
+        format!("/restapis/{api_id}/prod/items"),
+        format!("/_aws/execute-api/{api_id}/prod/items"),
+    ] {
+        let (status, body) =
+            get_body(http.get(format!("{base}{path}")).header("host", api_host)).await;
+        assert_eq!(status, 200, "{path}: {body}");
+        assert_eq!(body, r#"{"api":"strict-host"}"#, "{path}");
+    }
+    // The management API on the same host needs credentials.
+    let (status, body) = get_body(
+        http.get(format!("{base}/restapis"))
+            .header("host", api_host),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body, r#"{"message":"Missing Authentication Token"}"#);
+}
+
 #[tokio::test]
 async fn rest_api_invocable_without_execute_api_host() {
     let server = TestServer::start().await;

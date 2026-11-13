@@ -223,12 +223,13 @@ async fn dispatch_inner(
     // service host) goes by the unrouted-request rule ([`unrouted_target`]),
     // which reads no body: settle it now -- an unsigned path-style S3 request
     // is then judged and streamed like any other S3 request -- unless a form
-    // body could still name a Query service.
+    // body or a query-string `Action` could still name a Query service.
     let unrouted = (pinned.is_none()
         && rpc_v2_cbor.is_none()
         && header_only.is_none()
         && !parts.headers.contains_key("x-amz-target")
-        && !protocol::is_form_content_type(&parts.headers))
+        && !protocol::is_form_content_type(&parts.headers)
+        && !query_params.contains_key("Action"))
     .then(|| {
         unrouted_target(
             &parts.method,
@@ -928,7 +929,13 @@ async fn dispatch_inner(
     let anonymous_access = (anonymous
         && is_fully_anonymous
         && config.iam_mode.is_enabled()
-        && names_api_operation(&detected, host_info.as_ref(), &aws_request.headers))
+        && names_api_operation(
+            &detected,
+            host_info.as_ref(),
+            &aws_request.method,
+            &aws_request.headers,
+            || service.is_control_plane_request(&aws_request),
+        ))
     .then(|| service.anonymous_access(&aws_request));
     if anonymous_access == Some(crate::anonymous::AnonymousAccess::Refused) {
         tracing::warn!(
@@ -2817,22 +2824,33 @@ fn anonymous_denied_message(
 /// Whether an unsigned request names an API operation of the service it was
 /// routed to, so it is judged for its missing credentials: an awsJson target,
 /// a Query `Action`, or a REST request addressed to the service's own API
-/// host (`lambda.us-east-1.amazonaws.com`, `route53.amazonaws.com`, ...). An
-/// unsigned REST request that reached its service by any other route is a
-/// data-plane request (an API Gateway invocation, an ECR registry pull, an
-/// S3 path-style object) and is not.
+/// host (`lambda.us-east-1.amazonaws.com`, `route53.amazonaws.com`, ...) of a
+/// service whose API is REST, which the service classifies as one of its
+/// control-plane operations (`is_control_plane`,
+/// [`crate::service::AwsService::is_control_plane_request`]). Anything else is
+/// a data-plane request and is never refused here: an API Gateway invocation
+/// (on any host), an ECR registry call (ECR's API is awsJson, so a REST ECR
+/// request is its OCI registry), an S3 path-style object. A CORS preflight
+/// (`OPTIONS`) is never an API call either: browsers never sign one.
 fn names_api_operation(
     detected: &protocol::DetectedRequest,
     host: Option<&protocol::RoutingHost>,
+    method: &http::Method,
     headers: &http::HeaderMap,
+    is_control_plane: impl FnOnce() -> bool,
 ) -> bool {
+    if *method == http::Method::OPTIONS {
+        return false;
+    }
     match detected.protocol {
         AwsProtocol::Json | AwsProtocol::Query | AwsProtocol::Ec2Query | AwsProtocol::RpcV2Cbor => {
             !detected.action.is_empty()
         }
         AwsProtocol::Rest | AwsProtocol::RestJson => {
-            host.is_some_and(|h| h.service == detected.service && h.bucket.is_none())
+            protocol::is_rest_api_service(&detected.service)
+                && host.is_some_and(|h| h.service == detected.service && h.bucket.is_none())
                 && !is_execute_api_host(headers)
+                && is_control_plane()
         }
     }
 }
@@ -5303,46 +5321,62 @@ mod tests {
             h.insert(http::header::HOST, name.parse().unwrap());
             h
         };
-        let none = http::HeaderMap::new();
-        assert!(names_api_operation(
-            &detected("kms", "ListKeys", AwsProtocol::Json),
+        let get = http::Method::GET;
+        let judged = |d: protocol::DetectedRequest,
+                      hostname: Option<&str>,
+                      method: &http::Method,
+                      control_plane: bool| {
+            let hdrs = hostname.map(headers).unwrap_or_default();
+            names_api_operation(&d, hostname.and_then(host).as_ref(), method, &hdrs, || {
+                control_plane
+            })
+        };
+        assert!(judged(
+            detected("kms", "ListKeys", AwsProtocol::Json),
             None,
-            &none
+            &get,
+            true
         ));
-        assert!(names_api_operation(
-            &detected("sts", "GetCallerIdentity", AwsProtocol::Query),
+        assert!(judged(
+            detected("sts", "GetCallerIdentity", AwsProtocol::Query),
             None,
-            &none
+            &get,
+            true
         ));
-        // A REST request is an API call only on its service's API host.
-        let lambda_host = "lambda.us-east-1.amazonaws.com";
-        assert!(names_api_operation(
-            &detected("lambda", "", AwsProtocol::RestJson),
-            host(lambda_host).as_ref(),
-            &headers(lambda_host)
-        ));
-        assert!(names_api_operation(
-            &detected("route53", "", AwsProtocol::Rest),
-            host("route53.amazonaws.com").as_ref(),
-            &headers("route53.amazonaws.com")
+        // A REST request is an API call only on its service's API host, and
+        // only when the service classifies it as a control-plane operation.
+        let lambda_host = Some("lambda.us-east-1.amazonaws.com");
+        let lambda = || detected("lambda", "", AwsProtocol::RestJson);
+        assert!(judged(lambda(), lambda_host, &get, true));
+        assert!(!judged(lambda(), lambda_host, &get, false));
+        // A CORS preflight is never one.
+        assert!(!judged(lambda(), lambda_host, &http::Method::OPTIONS, true));
+        assert!(judged(
+            detected("route53", "", AwsProtocol::Rest),
+            Some("route53.amazonaws.com"),
+            &get,
+            true
         ));
         // Unrouted unsigned requests (API Gateway invocations, ECR pulls)
         // are data plane.
-        assert!(!names_api_operation(
-            &detected("apigateway", "", AwsProtocol::RestJson),
+        assert!(!judged(
+            detected("apigateway", "", AwsProtocol::RestJson),
             None,
-            &none
+            &get,
+            true
         ));
-        assert!(!names_api_operation(
-            &detected("ecr", "", AwsProtocol::Rest),
-            None,
-            &none
+        // ECR's API is awsJson: a REST request on its host is the registry.
+        assert!(!judged(
+            detected("ecr", "", AwsProtocol::Rest),
+            Some("ecr.us-east-1.amazonaws.com"),
+            &get,
+            true
         ));
-        let invoke = "abc123.execute-api.us-east-1.amazonaws.com";
-        assert!(!names_api_operation(
-            &detected("apigateway", "", AwsProtocol::RestJson),
-            host(invoke).as_ref(),
-            &headers(invoke)
+        assert!(!judged(
+            detected("apigateway", "", AwsProtocol::RestJson),
+            Some("abc123.execute-api.us-east-1.amazonaws.com"),
+            &get,
+            true
         ));
     }
 

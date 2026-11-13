@@ -396,6 +396,15 @@ pub struct RoutingHost {
 
 const LOCALSTACK_SUFFIX: &str = ".localhost.localstack.cloud";
 
+/// The service an endpoint's leading label names. SES (v1 and v2) is served
+/// at `email.<region>`; every other label is the service's own name.
+fn host_label_service(label: &str) -> String {
+    match label {
+        "email" => "ses".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Services whose commercial-partition endpoint is the region-less
 /// `<service>.amazonaws.com` (`s3.amazonaws.com` is handled with S3's other
 /// hosts).
@@ -504,7 +513,7 @@ fn parse_localstack_prefix(prefix: &str) -> Option<RoutingHost> {
     }
     match labels.len() {
         2 => Some(RoutingHost {
-            service: labels[0].to_string(),
+            service: host_label_service(labels[0]),
             region: labels[1].to_string(),
             bucket: None,
         }),
@@ -683,7 +692,7 @@ fn parse_aws_prefix(prefix: &str) -> Option<RoutingHost> {
     // `<service>.<region>` — the common case for every other service.
     match labels.as_slice() {
         [service, region] => Some(RoutingHost {
-            service: service.to_string(),
+            service: host_label_service(service),
             region: region.to_string(),
             bucket: None,
         }),
@@ -846,6 +855,13 @@ pub(crate) fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
 }
 
 /// Returns the REST protocol variant for a service, or None if not a REST service.
+/// Whether `service`'s API is a REST protocol (restXml or restJson1), so a
+/// REST request to its API host is one of its operations. ECR's API is
+/// awsJson: a REST request routed to ECR is its OCI registry.
+pub fn is_rest_api_service(service: &str) -> bool {
+    rest_protocol_for(service).is_some()
+}
+
 fn rest_protocol_for(service: &str) -> Option<AwsProtocol> {
     if REST_XML_SERVICES.contains(&service) {
         Some(AwsProtocol::Rest)
@@ -927,9 +943,17 @@ fn infer_service_from_action(action: &str) -> Option<String> {
         // hands to HTTP/S and email subscribers are unsigned bare GETs (no auth
         // header), so the service must be inferred from the action alone.
         "ConfirmSubscription" | "Unsubscribe" => Some("sns".to_string()),
-        _ => None,
+        // Any other Query operation name exactly one modeled Query service
+        // has (generated from aws-models).
+        _ => query_actions::QUERY_ACTION_SERVICES
+            .binary_search_by(|(a, _)| (*a).cmp(action))
+            .ok()
+            .map(|i| query_actions::QUERY_ACTION_SERVICES[i].1.to_string()),
     }
 }
+
+#[path = "query_actions_gen.rs"]
+mod query_actions;
 
 /// Extract service name from the SigV4 Authorization header credential scope.
 pub(crate) fn extract_service_from_auth(headers: &HeaderMap) -> Option<String> {
@@ -1496,6 +1520,22 @@ mod tests {
             infer_service_from_action("GetCallerIdentity").as_deref(),
             Some("sts")
         );
+        // Any Query operation name one modeled service has routes too.
+        for (action, service) in [
+            ("ListTopics", "sns"),
+            ("ListQueues", "sqs"),
+            ("DescribeRegions", "ec2"),
+            ("DescribeStacks", "cloudformation"),
+            ("DescribeLoadBalancers", "elasticloadbalancing"),
+        ] {
+            assert_eq!(
+                infer_service_from_action(action).as_deref(),
+                Some(service),
+                "{action}"
+            );
+        }
+        // A name several services share does not.
+        assert_eq!(infer_service_from_action("ListTagsForResource"), None);
         // Every STS operation routes an unsigned form POST on the plain host.
         for action in [
             "AssumeRoot",
@@ -1904,6 +1944,72 @@ mod tests {
         assert_eq!(h.service, "s3");
         assert_eq!(h.region, "us-east-1");
         assert_eq!(h.bucket.as_deref(), Some("a.b.c"));
+    }
+
+    #[test]
+    fn query_action_table_matches_the_models() {
+        // Re-derives the table: rerun scripts/generate-query-action-services.py
+        // after a model refresh.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../aws-models");
+        let mut owners: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            Default::default();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            if !["awsQuery\"", "ec2Query\"", "awsQueryCompatible\""]
+                .iter()
+                .any(|p| text.contains(&format!("aws.protocols#{p}")))
+            {
+                continue;
+            }
+            let model: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let shapes = model["shapes"].as_object().unwrap();
+            let service = shapes.values().find(|s| s["type"] == "service").unwrap();
+            let traits = service["traits"].as_object().unwrap();
+            if ![
+                "aws.protocols#awsQuery",
+                "aws.protocols#ec2Query",
+                "aws.protocols#awsQueryCompatible",
+            ]
+            .iter()
+            .any(|p| traits.contains_key(*p))
+            {
+                continue;
+            }
+            let signing = traits["aws.auth#sigv4"]["name"].as_str().unwrap();
+            for (id, shape) in shapes {
+                if shape["type"] == "operation" {
+                    let op = id.split_once('#').unwrap().1;
+                    owners
+                        .entry(op.to_string())
+                        .or_default()
+                        .insert(signing.to_string());
+                }
+            }
+        }
+        let derived: Vec<(String, String)> = owners
+            .into_iter()
+            .filter(|(_, s)| s.len() == 1)
+            .map(|(op, s)| (op, s.into_iter().next().unwrap()))
+            .collect();
+        let table: Vec<(String, String)> = query_actions::QUERY_ACTION_SERVICES
+            .iter()
+            .map(|(a, s)| (a.to_string(), s.to_string()))
+            .collect();
+        assert_eq!(
+            table, derived,
+            "rerun scripts/generate-query-action-services.py"
+        );
+    }
+
+    #[test]
+    fn parse_routing_host_email_is_ses() {
+        for host in [
+            "email.us-east-1.amazonaws.com",
+            "email.eu-west-1.localhost.localstack.cloud:4566",
+        ] {
+            assert_eq!(parse_routing_host(host).unwrap().service, "ses", "{host}");
+        }
     }
 
     #[test]

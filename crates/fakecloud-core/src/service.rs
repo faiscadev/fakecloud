@@ -960,6 +960,15 @@ pub trait AwsService: Send + Sync {
         false
     }
 
+    /// Whether a REST request addressed to this service's API host is one of
+    /// its modeled control-plane operations, rather than a data-plane request
+    /// the service also serves there (an API Gateway invocation). Only a
+    /// control-plane request is refused for missing credentials
+    /// ([`AwsService::anonymous_access`]). Defaults to `true`.
+    fn is_control_plane_request(&self, _request: &AwsRequest) -> bool {
+        true
+    }
+
     /// What this service does with an unsigned request to the operation
     /// `request` names, under `--iam soft|strict` (with enforcement off every
     /// unsigned request is served). Dispatch asks for a request that carries

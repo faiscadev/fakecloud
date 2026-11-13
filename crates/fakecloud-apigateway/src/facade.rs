@@ -198,24 +198,9 @@ impl ApiGatewayFacade {
     /// arrives. Returns whether the request was rewritten.
     fn rewrite_path_style_invocation(&self, req: &mut AwsRequest) -> bool {
         let raw = fakecloud_core::path::split_raw_path_segments(&req.raw_path);
-        let seg = |i: usize| raw.get(i).map(String::as_str);
-        // (api id, stage, number of leading segments the invocation prefix
-        // occupies; the stage is the last of them except for `_user_request_`).
-        let (api_id, stage, prefix_len) = match (seg(0), seg(1), seg(2), seg(3)) {
-            (Some("_aws"), Some("execute-api"), Some(api), Some(stage)) => (api, stage, 4),
-            (Some("restapis"), Some(api), Some(stage), Some(USER_REQUEST_MARKER)) => {
-                (api, stage, 4)
-            }
-            (Some("restapis"), Some(api), Some(stage), _)
-                if crate::dispatch::resolve(&req.method, &req.path_segments, &req.query_params)
-                    .is_none()
-                    && self.v1_stage_exists(&req.account_id, api, stage) =>
-            {
-                (api, stage, 3)
-            }
-            _ => return false,
+        let Some((api_id, stage, prefix_len)) = self.path_style_invocation(req, &raw) else {
+            return false;
         };
-        let (api_id, stage) = (api_id.to_string(), stage.to_string());
         // Keep the remainder of the wire path verbatim (encoding, trailing
         // slash); fall back to re-joining segments for a path with empty
         // segments, which the prefix match can't anchor on.
@@ -234,6 +219,33 @@ impl ApiGatewayFacade {
             req.headers.insert(http::header::HOST, value);
         }
         true
+    }
+
+    /// The API id, stage and prefix length (in segments of `raw`, the
+    /// request's raw path segments) of a path-style invocation URL, or `None`
+    /// for any other path. The stage is the last prefix segment except for
+    /// `_user_request_`.
+    fn path_style_invocation(
+        &self,
+        req: &AwsRequest,
+        raw: &[String],
+    ) -> Option<(String, String, usize)> {
+        let seg = |i: usize| raw.get(i).map(String::as_str);
+        let (api, stage, len) = match (seg(0), seg(1), seg(2), seg(3)) {
+            (Some("_aws"), Some("execute-api"), Some(api), Some(stage)) => (api, stage, 4),
+            (Some("restapis"), Some(api), Some(stage), Some(USER_REQUEST_MARKER)) => {
+                (api, stage, 4)
+            }
+            (Some("restapis"), Some(api), Some(stage), _)
+                if crate::dispatch::resolve(&req.method, &req.path_segments, &req.query_params)
+                    .is_none()
+                    && self.v1_stage_exists(&req.account_id, api, stage) =>
+            {
+                (api, stage, 3)
+            }
+            _ => return None,
+        };
+        Some((api.to_string(), stage.to_string(), len))
     }
 
     fn v1_stage_exists(&self, account_id: &str, api_id: &str, stage: &str) -> bool {
@@ -344,6 +356,20 @@ impl AwsService for ApiGatewayFacade {
         account_id: &str,
     ) -> Option<DataPlaneClaim> {
         self.invocation_claim(raw_path, headers, account_id)
+    }
+
+    /// Only the management APIs (v1's collections, v2's `/v2/...`) are
+    /// control plane. An invocation is data plane whatever host it arrives
+    /// on: an execute-api or custom-domain host, or a path-style URL
+    /// (`/restapis/{api}/{stage}/_user_request_/...`, `/_aws/execute-api/...`)
+    /// on the `apigateway` host itself.
+    fn is_control_plane_request(&self, req: &AwsRequest) -> bool {
+        let raw = fakecloud_core::path::split_raw_path_segments(&req.raw_path);
+        self.path_style_invocation(req, &raw).is_none()
+            && !host_is_execute_api(req)
+            && !self.host_is_v1_custom_domain(req)
+            && !self.host_is_v2_custom_domain(req)
+            && (Self::route_v2_control(req) || Self::route_v1(req))
     }
 
     async fn handle(&self, mut req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {

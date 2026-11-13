@@ -490,3 +490,52 @@ async fn s3_virtual_hosted_put_get_via_aws_dash_separated() {
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), "dashed");
 }
+
+/// A Query `Action` in the query string routes an unsigned GET by the
+/// action's service, as a form body does: `ListTopics` is SNS's, on the
+/// plain host too (it used to fall to S3's ListBuckets).
+#[tokio::test]
+async fn unsigned_query_string_action_routes_by_action() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    for (query, marker) in [
+        (
+            "Action=ListTopics&Version=2010-03-31",
+            "<ListTopicsResponse",
+        ),
+        (
+            "Action=ListQueues&Version=2012-11-05",
+            "<ListQueuesResponse",
+        ),
+    ] {
+        let resp = http
+            .get(format!("{}/?{query}", server.endpoint()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{query}");
+        let body = resp.text().await.unwrap();
+        assert!(body.contains(marker), "{query}: {body}");
+    }
+}
+
+/// SES (v1 and v2) is served at `email.<region>`: an unsigned SES v2 REST
+/// call on that host is SES's, not the ECR registry's `/v2/`.
+#[tokio::test]
+async fn unsigned_sesv2_on_the_email_host_reaches_ses() {
+    let server = TestServer::start().await;
+    for host in [
+        aws_host("email.us-east-1"),
+        localstack_host("email.us-east-1", 4566),
+    ] {
+        let resp = reqwest::Client::new()
+            .get(format!("{}/v2/email/identities", server.endpoint()))
+            .header("Host", &host)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{host}");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["EmailIdentities"].is_array(), "{host}: {body}");
+    }
+}
