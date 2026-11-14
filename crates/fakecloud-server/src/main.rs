@@ -21,6 +21,7 @@ mod dynamodb_streams_lambda_poller;
 mod ec2_imds;
 mod ecs_creds;
 mod firehose_topology;
+mod glue_external;
 mod imds;
 mod introspection;
 mod kinesis_lambda_firehose_poller;
@@ -4380,7 +4381,12 @@ async fn main() {
         } else {
             None
         };
-    let mut glue_service = fakecloud_glue::GlueService::new(glue_state.clone());
+    let mut glue_service = fakecloud_glue::GlueService::new(glue_state.clone()).with_external_view(
+        Arc::new(glue_external::ServerGlueExternalView::new(
+            lakeformation_state.clone(),
+            s3_state.clone(),
+        )),
+    );
     if let Some(store) = glue_snapshot_store.clone() {
         glue_service = glue_service.with_snapshot_store(store);
     }

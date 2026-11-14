@@ -2751,3 +2751,171 @@ async fn data_quality_recommendation_run_round_trips_its_request() {
     .await;
     assert_eq!(resp.status(), 400, "an unmodelled RecommendationMode");
 }
+
+/// POST a raw awsJson1.1 Glue operation, returning `(status, parsed_body)`.
+async fn glue_raw(
+    server: &TestServer,
+    op: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/glue/aws4_request, SignedHeaders=host, Signature=0",
+        )
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header("X-Amz-Target", format!("AWSGlue.{op}"))
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap();
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+// The data quality result V2 operations are newer than the typed
+// aws-sdk-glue client, so drive them over raw awsJson1.1.
+#[test_action("glue", "PublishDataQualityResultV2", checksum = "2312ae2f")]
+#[test_action("glue", "GetDataQualityResultV2", checksum = "40fb57da")]
+#[test_action("glue", "BatchGetDataQualityResultV2", checksum = "ffec0434")]
+#[test_action("glue", "ListDataQualityResultsV2", checksum = "b6ac3803")]
+#[tokio::test]
+async fn data_quality_results_v2() {
+    use serde_json::json;
+    let server = TestServer::start().await;
+
+    let (status, out) = glue_raw(
+        &server,
+        "PublishDataQualityResultV2",
+        json!({
+            "Dimensions": {"workgroup": "wg-1"},
+            "Score": 0.75,
+            "RuleResults": [
+                {"Name": "Rule_1", "Result": "PASS", "EvaluatedRule": "IsComplete \"id\""},
+                {"Name": "Rule_2", "Result": "FAIL", "EvaluatedRule": "ColumnLength \"id\" = 4"},
+            ],
+            "EvaluationContext": "nightly",
+            "Descriptors": {"databaseName": "sales", "tableName": "orders"},
+            "RulesetName": "orders-rules",
+            "ClientToken": "publish-1",
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    let id = out["ResultId"].as_str().unwrap().to_string();
+
+    let (status, out) = glue_raw(&server, "GetDataQualityResultV2", json!({"ResultId": id})).await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["Score"], 0.75);
+    assert_eq!(out["RulesetName"], "orders-rules");
+    assert_eq!(out["DataSource"]["GlueTable"]["TableName"], "orders");
+    assert_eq!(out["RuleResults"].as_array().unwrap().len(), 2);
+
+    let (status, out) = glue_raw(
+        &server,
+        "BatchGetDataQualityResultV2",
+        json!({"ResultIds": [id, "dqresult-unknown"]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["Results"][0]["ResultId"], id.as_str());
+    assert_eq!(out["ResultsNotFound"], json!(["dqresult-unknown"]));
+
+    let (status, out) = glue_raw(
+        &server,
+        "ListDataQualityResultsV2",
+        json!({"Filter": {"DataSource": {"GlueTable": {"DatabaseName": "sales", "TableName": "orders"}}}}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["Results"][0]["ResultId"], id.as_str());
+    assert_eq!(out["Results"][0]["EvaluationContext"], "nightly");
+
+    let (status, _) = glue_raw(
+        &server,
+        "GetDataQualityResultV2",
+        json!({"ResultId": "dqresult-unknown"}),
+    )
+    .await;
+    assert_eq!(status, 400);
+}
+
+// The job upgrade analysis operations (and Job.AutoUpgradeMetadata) are newer
+// than the typed aws-sdk-glue client, so drive them over raw awsJson1.1.
+#[test_action("glue", "GetJobUpgradeAnalysis", checksum = "46235553")]
+#[test_action("glue", "StartJobUpgradeAnalysis", checksum = "00a36a29")]
+#[test_action("glue", "StopJobUpgradeAnalysis", checksum = "3b6ef17e")]
+#[tokio::test]
+async fn job_upgrade_analysis() {
+    use serde_json::json;
+    let server = TestServer::start().await;
+    let create = |name: &'static str| {
+        json!({
+            "Name": name,
+            "Role": "arn:aws:iam::123456789012:role/glue",
+            "Command": {"Name": "glueetl", "ScriptLocation": "s3://scripts/job.py"},
+            "GlueVersion": "auto",
+        })
+    };
+    let (status, out) = glue_raw(&server, "CreateJob", create("auto-job")).await;
+    assert_eq!(status, 200, "{out}");
+    let (_, out) = glue_raw(&server, "GetJob", json!({"JobName": "auto-job"})).await;
+    let meta = &out["Job"]["AutoUpgradeMetadata"];
+    assert_eq!(meta["Status"], "OBSERVING", "{out}");
+    let id = meta["AnalysisId"].as_str().unwrap().to_string();
+
+    // A successful run is observed; the analysis then waits for consent.
+    let (status, out) = glue_raw(&server, "StartJobRun", json!({"JobName": "auto-job"})).await;
+    assert_eq!(status, 200, "{out}");
+    let (status, out) = glue_raw(
+        &server,
+        "GetJobUpgradeAnalysis",
+        json!({"jobName": "auto-job", "analysisId": id}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["status"], "WAITING_FOR_CONSENT");
+    assert_eq!(out["targetVersion"], "6.0");
+    assert_eq!(out["analysisType"], "AUTO_UPGRADE");
+
+    let (status, out) = glue_raw(
+        &server,
+        "StartJobUpgradeAnalysis",
+        json!({"jobName": "auto-job", "analysisId": id, "upgradeConsent": "APPROVE"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["analysisId"], id.as_str());
+    let (_, out) = glue_raw(&server, "GetJob", json!({"JobName": "auto-job"})).await;
+    assert_eq!(
+        out["Job"]["AutoUpgradeMetadata"]["Status"],
+        "UPGRADE_SUCCEEDED"
+    );
+
+    // A second auto job's analysis is stopped while it observes.
+    glue_raw(&server, "CreateJob", create("stopped-job")).await;
+    let (_, out) = glue_raw(&server, "GetJob", json!({"JobName": "stopped-job"})).await;
+    let other = out["Job"]["AutoUpgradeMetadata"]["AnalysisId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, out) = glue_raw(
+        &server,
+        "StopJobUpgradeAnalysis",
+        json!({"jobName": "stopped-job", "analysisId": other}),
+    )
+    .await;
+    assert_eq!(status, 200, "{out}");
+    let (_, out) = glue_raw(
+        &server,
+        "GetJobUpgradeAnalysis",
+        json!({"jobName": "stopped-job", "analysisId": other}),
+    )
+    .await;
+    assert_eq!(out["status"], "STOPPED");
+}

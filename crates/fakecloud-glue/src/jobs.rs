@@ -9,7 +9,7 @@ use uuid::Uuid;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::GlueService;
-use crate::state::{Job, JobRun};
+use crate::state::{GlueState, Job, JobRun};
 
 fn missing(field: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
@@ -47,8 +47,8 @@ fn parse_string_map(val: &Value) -> BTreeMap<String, String> {
     m
 }
 
-pub(crate) fn job_to_json(j: &Job) -> Value {
-    json!({
+pub(crate) fn job_to_json(state: &GlueState, j: &Job) -> Value {
+    let mut out = json!({
         "Name": j.name,
         "Description": j.description,
         "Role": j.role,
@@ -75,7 +75,11 @@ pub(crate) fn job_to_json(j: &Job) -> Value {
         "AllocatedCapacity": j.allocated_capacity,
         "JobMode": j.job_mode,
         "JobRunQueuingEnabled": j.job_run_queuing_enabled,
-    })
+    });
+    if let Some(m) = crate::upgrade::auto_upgrade_metadata(state, j) {
+        out["AutoUpgradeMetadata"] = m;
+    }
+    out
 }
 
 /// Clone a JSON value into `Some` unless it's null/absent.
@@ -153,6 +157,12 @@ fn default_timeout(command: &Value, glue_version: &str) -> Option<i64> {
     if command["Name"].as_str() == Some("gluestreaming") {
         return None;
     }
+    // An `auto` job runs on the current version.
+    let glue_version = if glue_version == "auto" {
+        DEFAULT_GLUE_VERSION
+    } else {
+        glue_version
+    };
     let major = glue_version
         .split('.')
         .next()
@@ -282,7 +292,7 @@ impl GlueService {
         if state.jobs.contains_key(name) {
             return Err(already_exists(format!("Job {name} already exists")));
         }
-        let job = Job {
+        let mut job = Job {
             name: name.to_string(),
             description: body["Description"].as_str().map(String::from),
             role: role.to_string(),
@@ -313,7 +323,12 @@ impl GlueService {
             ),
             job_mode: Some(body["JobMode"].as_str().unwrap_or("SCRIPT").to_string()),
             job_run_queuing_enabled: body["JobRunQueuingEnabled"].as_bool(),
+            auto_upgrade_analysis_id: None,
         };
+        if job.glue_version.as_deref() == Some("auto") {
+            job.auto_upgrade_analysis_id =
+                Some(crate::upgrade::begin_auto_upgrade(state, name, None));
+        }
         state.jobs.insert(name.to_string(), job);
         let arn = crate::common::resource_arn(&req.region, &req.account_id, "job", name);
         state.put_create_tags(&arn, &body);
@@ -324,11 +339,13 @@ impl GlueService {
         let body = req.json_body();
         let name = body["JobName"].as_str().ok_or_else(|| missing("JobName"))?;
         let accounts = self.state.read();
-        let job = accounts
+        let (state, job) = accounts
             .get(&req.account_id)
-            .and_then(|s| s.jobs.get(name))
+            .and_then(|s| s.jobs.get(name).map(|j| (s, j)))
             .ok_or_else(|| entity_not_found(format!("Job {name} not found")))?;
-        Ok(AwsResponse::ok_json(json!({ "Job": job_to_json(job) })))
+        Ok(AwsResponse::ok_json(
+            json!({ "Job": job_to_json(state, job) }),
+        ))
     }
 
     pub(crate) fn get_jobs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -336,7 +353,7 @@ impl GlueService {
         let accounts = self.state.read();
         let jobs: Vec<Value> = accounts
             .get(&req.account_id)
-            .map(|s| s.jobs.values().map(job_to_json).collect())
+            .map(|s| s.jobs.values().map(|j| job_to_json(s, j)).collect())
             .unwrap_or_default();
         let (page, token) = crate::common::paginate_body(&req.action, &body, jobs)?;
         let mut resp = json!({ "Jobs": page });
@@ -400,8 +417,12 @@ impl GlueService {
         if let Some(n) = update["Timeout"].as_i64() {
             job.timeout = Some(n);
         }
-        if let Some(s) = update["GlueVersion"].as_str() {
-            job.glue_version = Some(s.to_string());
+        let version_change = update["GlueVersion"]
+            .as_str()
+            .filter(|s| job.glue_version.as_deref() != Some(*s))
+            .map(|s| (job.glue_version.clone(), s.to_string()));
+        if let Some((_, s)) = &version_change {
+            job.glue_version = Some(s.clone());
         }
         if let Some(n) = update["MaxCapacity"].as_f64() {
             job.max_capacity = Some(n);
@@ -452,6 +473,19 @@ impl GlueService {
             job.job_run_queuing_enabled = Some(b);
         }
         job.last_modified_on = Utc::now();
+        // Switching to `auto` starts an auto-upgrade analysis from the version
+        // the job ran on; switching away from it stops the current one.
+        if let Some((previous, new)) = version_change {
+            let current = job.auto_upgrade_analysis_id.take();
+            if let Some(id) = current {
+                crate::upgrade::end_auto_upgrade(state, &id);
+            }
+            let started = (new == "auto")
+                .then(|| crate::upgrade::begin_auto_upgrade(state, name, previous.as_deref()));
+            if let Some(job) = state.jobs.get_mut(name) {
+                job.auto_upgrade_analysis_id = started;
+            }
+        }
         Ok(AwsResponse::ok_json(json!({ "JobName": name })))
     }
 
@@ -464,6 +498,7 @@ impl GlueService {
         if state.jobs.remove(name).is_some() {
             let arn = crate::common::resource_arn(&req.region, &req.account_id, "job", name);
             state.remove_tags(&arn);
+            state.job_upgrade_analyses.retain(|_, a| a.job_name != name);
         }
         Ok(AwsResponse::ok_json(json!({ "JobName": name })))
     }
@@ -476,7 +511,14 @@ impl GlueService {
         let Some(job) = state.jobs.get(name) else {
             return Err(entity_not_found(format!("Job {name} not found")));
         };
-        let settings = run_settings(job, &body);
+        let mut settings = run_settings(job, &body);
+        if job.glue_version.as_deref() == Some("auto") {
+            settings.glue_version = Some(crate::upgrade::resolved_run_version(
+                state,
+                job,
+                DEFAULT_GLUE_VERSION,
+            ));
+        }
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let run = JobRun {
