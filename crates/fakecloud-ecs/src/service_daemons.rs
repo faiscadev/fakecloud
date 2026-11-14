@@ -53,6 +53,7 @@ impl EcsService {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        validate_daemon_volumes(&volumes)?;
         let tags = parse_tags(&body);
         // DaemonPidMode / DaemonIpcMode: `none` | `shared` (the daemon shares
         // the host's PID / IPC namespace).
@@ -835,6 +836,51 @@ impl EcsService {
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────
+
+/// A daemon volume is either a `host` bind mount or a log driver volume
+/// (`logDriverVolumeConfiguration`), never both; a log driver volume names
+/// its `driver`, and `json-file` is the only driver that writes log files to
+/// one.
+fn validate_daemon_volumes(volumes: &[Value]) -> Result<(), AwsServiceError> {
+    for volume in volumes {
+        let Some(cfg) = volume
+            .get("logDriverVolumeConfiguration")
+            .filter(|v| !v.is_null())
+        else {
+            continue;
+        };
+        if volume.get("host").is_some_and(|v| !v.is_null()) {
+            return Err(client_exception(
+                "A daemon volume can't specify both host and logDriverVolumeConfiguration.",
+            ));
+        }
+        let driver = cfg.get("driver").and_then(|v| v.as_str()).ok_or_else(|| {
+            client_exception("logDriverVolumeConfiguration is missing required field: driver")
+        })?;
+        const DRIVERS: &[&str] = &[
+            "json-file",
+            "syslog",
+            "journald",
+            "gelf",
+            "fluentd",
+            "awslogs",
+            "splunk",
+            "awsfirelens",
+        ];
+        if !DRIVERS.contains(&driver) {
+            return Err(invalid_parameter(format!(
+                "Invalid value '{driver}' for field 'driver'. Valid values: {}",
+                DRIVERS.join(", ")
+            )));
+        }
+        if driver != "json-file" {
+            return Err(client_exception(format!(
+                "The log driver {driver} is not supported for a log driver volume. The only supported value is json-file."
+            )));
+        }
+    }
+    Ok(())
+}
 
 fn cluster_arn_to_name(arn_or_name: &str) -> String {
     if let Some(idx) = arn_or_name.rfind('/') {

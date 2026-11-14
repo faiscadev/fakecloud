@@ -111,6 +111,12 @@ impl EcsService {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        validate_service_connect_container_configurations(body.get("serviceConnectConfiguration"))?;
+        let gateway_connectors: Vec<Value> = body
+            .get("gatewayConnectors")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
 
         let runtime = self.runtime.clone();
         let account = request.account_id.clone();
@@ -138,6 +144,7 @@ impl EcsService {
                 None => latest_active_revision(revisions)
                     .ok_or_else(|| task_definition_not_found(td_ref))?,
             };
+            validate_gateway_connectors(&gateway_connectors, td)?;
             let td_arn = td.task_definition_arn.clone();
             let td_family = td.family.clone();
             let td_revision = td.revision;
@@ -210,6 +217,7 @@ impl EcsService {
                     .filter(|v| !v.is_null())
                     .cloned(),
                 vpc_lattice_configurations: vpc_lattice_configurations.clone(),
+                gateway_connectors,
             };
             state.services.insert(key.clone(), service.clone());
             state.record_service_revision(&service);
@@ -337,6 +345,7 @@ impl EcsService {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        validate_service_connect_container_configurations(body.get("serviceConnectConfiguration"))?;
         let account = request.account_id.clone();
         let principal_arn = request
             .principal
@@ -387,6 +396,25 @@ impl EcsService {
                 let svc = state.services.get(&key).unwrap();
                 (None, svc.family.clone(), svc.revision)
             };
+
+            // gatewayConnectors replace the service's connectors (an empty
+            // list detaches it from every gateway) and are checked against the
+            // task definition the service runs after this update.
+            let new_gateway_connectors: Option<Vec<Value>> = body
+                .get("gatewayConnectors")
+                .and_then(|v| v.as_array())
+                .cloned();
+            let mut gateway_connectors_changed = false;
+            if let Some(connectors) = &new_gateway_connectors {
+                let td = state
+                    .task_definitions
+                    .get(&new_family)
+                    .and_then(|m| m.get(&new_revision))
+                    .ok_or_else(|| task_definition_not_found(&new_family))?;
+                validate_gateway_connectors(connectors, td)?;
+                gateway_connectors_changed =
+                    state.services.get(&key).unwrap().gateway_connectors != *connectors;
+            }
 
             let service_cluster_arn;
             let launch_type_clone;
@@ -478,6 +506,9 @@ impl EcsService {
                     .and_then(|v| v.as_array())
                 {
                     svc.vpc_lattice_configurations = a.clone();
+                }
+                if let Some(connectors) = new_gateway_connectors {
+                    svc.gateway_connectors = connectors;
                 }
 
                 if let Some(n) = new_desired {
@@ -764,9 +795,10 @@ impl EcsService {
                 }),
             });
 
-            // A task-definition change mints a new service revision so
-            // DescribeServiceRevisions reflects the deployment history.
-            if new_deployment_triggered {
+            // A task-definition or gateway-connector change mints a new
+            // service revision so DescribeServiceRevisions reflects the
+            // deployment history.
+            if new_deployment_triggered || gateway_connectors_changed {
                 if let Some(svc) = state.services.get(&key).cloned() {
                     state.record_service_revision(&svc);
                 }
