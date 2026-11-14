@@ -1439,6 +1439,7 @@ mod waf_tests {
             data_protection_config: None,
             on_source_d_do_s_protection_config: None,
             application_config: None,
+            monetization_config: None,
             retrofitted_by_firewall_manager: false,
             pre_process_firewall_manager_rule_groups: Vec::new(),
             post_process_firewall_manager_rule_groups: Vec::new(),

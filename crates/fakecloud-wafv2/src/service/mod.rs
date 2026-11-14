@@ -946,6 +946,11 @@ fn web_acl_detail_json(acl: &WebAcl) -> Value {
             .unwrap()
             .insert("ApplicationConfig".to_string(), c.clone());
     }
+    if let Some(c) = &acl.monetization_config {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("MonetizationConfig".to_string(), c.clone());
+    }
     obj
 }
 
@@ -992,6 +997,11 @@ fn rule_group_detail_json(rg: &RuleGroup) -> Value {
             "CustomResponseBodies".to_string(),
             json!(rg.custom_response_bodies),
         );
+    }
+    if let Some(c) = &rg.monetization_config {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("MonetizationConfig".to_string(), c.clone());
     }
     obj
 }
