@@ -55,6 +55,11 @@ pub struct XrayData {
     /// The trace-segment destination (`XRay` or `CloudWatchLogs`).
     #[serde(default = "default_destination")]
     pub trace_segment_destination: String,
+    /// `CloudWatchLogsConfiguration` supplied with a `CloudWatchLogs`
+    /// destination (the `aws/spans` log group's KMS key). The model's Get
+    /// output has no member for it, so it is kept but never rendered.
+    #[serde(default)]
+    pub trace_segment_logs_config: Option<Value>,
     /// Ingested trace segments keyed by trace id.
     #[serde(default)]
     pub traces: BTreeMap<String, Vec<StoredSegment>>,
@@ -85,6 +90,7 @@ impl Default for XrayData {
             encryption_config: None,
             resource_policies: BTreeMap::new(),
             trace_segment_destination: default_destination(),
+            trace_segment_logs_config: None,
             traces: BTreeMap::new(),
             retrievals: BTreeMap::new(),
             tags: BTreeMap::new(),
@@ -195,6 +201,7 @@ impl fakecloud_core::multi_account::SplitByRegion for XrayData {
         home.encryption_config = self.encryption_config;
         home.resource_policies = self.resource_policies;
         home.trace_segment_destination = self.trace_segment_destination;
+        home.trace_segment_logs_config = self.trace_segment_logs_config;
         home.indexing_rules = self.indexing_rules;
         home.traces = self.traces;
         home.retrievals = self.retrievals;
