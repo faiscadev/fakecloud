@@ -111,7 +111,6 @@ CRATES=(
   fakecloud-cloudtrail       # only core/persistence/aws deps
   fakecloud-ram               # only core/persistence/aws deps
   fakecloud-ce                # only core/persistence/aws deps
-  fakecloud-s3tables          # only core/persistence/aws deps
   fakecloud-lakeformation     # only core/persistence/aws deps
   fakecloud-codeconnections   # only core/persistence/aws deps
   fakecloud-codecommit        # only core/persistence/aws deps
@@ -164,6 +163,7 @@ CRATES=(
   fakecloud-dynamodb       # depends on s3
   fakecloud-firehose       # depends on s3
   fakecloud-athena         # depends on glue, s3
+  fakecloud-s3tables       # depends on glue, s3 (table migrations)
   fakecloud-route53        # depends on cloudfront, elbv2, logs, s3
   fakecloud-ecs            # depends on iam, logs, secretsmanager, ssm
   fakecloud-batch          # depends on ecs (drives ECS for real job execution)

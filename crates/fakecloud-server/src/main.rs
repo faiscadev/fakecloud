@@ -6502,7 +6502,8 @@ async fn main() {
         } else {
             None
         };
-    let mut s3tables_service = fakecloud_s3tables::S3TablesService::new(s3tables_state.clone());
+    let mut s3tables_service = fakecloud_s3tables::S3TablesService::new(s3tables_state.clone())
+        .with_migration_sources(glue_state.clone(), s3_state.clone(), Some(s3_store.clone()));
     if let Some(store) = s3tables_snapshot_store {
         s3tables_service = s3tables_service.with_snapshot_store(store);
     }

@@ -101,11 +101,63 @@ pub struct TableBucketRecord {
     pub tables: BTreeMap<String, TableRecord>,
 }
 
+/// A table migration (`StartTableMigration` / `SyncTableMigration`): an AWS
+/// Glue table migrated into a table of a table bucket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationRecord {
+    pub migration_id: String,
+    /// `start` or `sync`.
+    pub migration_type: String,
+    /// `MigrationState` value (`planning`, `pendingReview`, `succeeded`, ...).
+    pub state: String,
+    pub table_bucket_arn: String,
+    pub namespace: String,
+    pub name: String,
+    /// The destination table, once the migration has created it.
+    pub table_arn: Option<String>,
+    pub role_arn: String,
+    pub review_migration_plan: bool,
+    /// Set once planning finishes.
+    pub has_valid_plan: Option<bool>,
+    pub created_at: DateTime<Utc>,
+    pub state_updated_at: DateTime<Utc>,
+    pub failure_code: Option<String>,
+    pub failure_detail: Option<String>,
+    /// `PlanningStats` / `MigrationStats`, once planning finishes.
+    pub planning_stats: Option<Value>,
+    pub migration_stats: Option<Value>,
+    /// `SourceConfiguration` as requested (`{"glueTable": {...}}`).
+    pub source: Value,
+    /// The `DestinationTable` request, kept so a sync reuses its settings.
+    pub destination: Value,
+    /// `DataMigrationOverview` with every default applied.
+    pub data_migration: Value,
+    /// `MigrationOutputOverview`: bucket, prefixes and the written reports.
+    pub migration_output: Value,
+    /// Source objects this migration plans to migrate, with their ETags.
+    #[serde(default)]
+    pub planned_objects: BTreeMap<String, String>,
+    /// Source objects this migration removes from the table (deleted from
+    /// the source since an earlier migration).
+    #[serde(default)]
+    pub removed_objects: Vec<String>,
+    /// Source objects whose data this migration committed to the table.
+    #[serde(default)]
+    pub migrated_objects: BTreeMap<String, String>,
+}
+
 /// The account-scoped S3 Tables state for one AWS account.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct S3TablesState {
     #[serde(default)]
     pub table_buckets: BTreeMap<String, TableBucketRecord>,
+    /// Table migrations, keyed by migration id.
+    #[serde(default)]
+    pub migrations: BTreeMap<String, MigrationRecord>,
+    /// Tables whose migration was completed (`CompleteTableMigration`), by
+    /// table ARN: they are writable and can no longer be synced.
+    #[serde(default)]
+    pub completed_migrations: std::collections::BTreeSet<String>,
 }
 
 impl AccountState for S3TablesState {
