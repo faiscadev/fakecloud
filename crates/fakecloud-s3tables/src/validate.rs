@@ -41,6 +41,15 @@ fn required_body_members(action: &str) -> &'static [&'static str] {
         "PutTableBucketStorageClass" => &["storageClassConfiguration"],
         "TagResource" => &["tags"],
         "UpdateTableMetadataLocation" => &["versionToken", "metadataLocation"],
+        "StartTableMigration" => &[
+            "roleARN",
+            "destinationTable",
+            "sourceType",
+            "source",
+            "migrationOutput",
+        ],
+        "SyncTableMigration" => &["roleARN", "tableARN", "migrationOutput"],
+        "UpdateTableMigration" => &["requestedState"],
         _ => &[],
     }
 }
@@ -92,6 +101,21 @@ pub fn validate(action: &str, req: &AwsRequest) -> Result<(), AwsServiceError> {
             if let Some(fmt) = body.get("format").and_then(|v| v.as_str()) {
                 if fmt != "ICEBERG" {
                     return Err(bad(format!("Invalid value '{fmt}' for format.")));
+                }
+            }
+        }
+        "ListTableMigrations" => {
+            if let Some(raw) = req.query_params.get("maxResults") {
+                let n: i64 = raw
+                    .parse()
+                    .map_err(|_| bad("maxResults must be an integer."))?;
+                if !(1..=1000).contains(&n) {
+                    return Err(bad("maxResults must be between 1 and 1000."));
+                }
+            }
+            if let Some(token) = req.query_params.get("nextToken") {
+                if !(1..=2048).contains(&token.chars().count()) {
+                    return Err(bad("Invalid nextToken."));
                 }
             }
         }

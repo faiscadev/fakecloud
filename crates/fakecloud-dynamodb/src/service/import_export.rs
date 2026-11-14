@@ -46,29 +46,30 @@ type Item = HashMap<String, Value>;
 
 const ITEM_VALIDATION_MESSAGE: &str = "Some of the items failed validation checks and were not \
      imported. Please check CloudWatch error logs for more details.";
-const NO_SUCH_BUCKET_MESSAGE: &str = "The specified bucket does not exist (Service: Amazon S3; \
+pub(super) const NO_SUCH_BUCKET_MESSAGE: &str =
+    "The specified bucket does not exist (Service: Amazon S3; \
      Status Code: 404; Error Code: NoSuchBucket)";
 
-fn validation(msg: impl Into<String>) -> AwsServiceError {
+pub(super) fn validation(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", msg)
 }
 
 /// AWS import/export ids: a zero-padded 14-digit millisecond timestamp and an
 /// 8-hex-digit suffix, e.g. `01658528578619-c4d4e311`.
-fn job_id(now: DateTime<Utc>) -> String {
+pub(super) fn job_id(now: DateTime<Utc>) -> String {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     format!("{:014}-{}", now.timestamp_millis(), &suffix[..8])
 }
 
-fn epoch_secs(t: DateTime<Utc>) -> f64 {
+pub(super) fn epoch_secs(t: DateTime<Utc>) -> f64 {
     t.timestamp_millis() as f64 / 1000.0
 }
 
 /// Everything a background job needs, detached from the request.
 #[derive(Clone)]
 pub(crate) struct JobContext {
-    state: SharedDynamoDbState,
-    s3_state: Option<SharedS3State>,
+    pub(super) state: SharedDynamoDbState,
+    pub(super) s3_state: Option<SharedS3State>,
     s3_store: Option<Arc<dyn S3Store>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<tokio::sync::Mutex<()>>,
@@ -81,7 +82,7 @@ impl JobContext {
     /// call returns before it begins; with no runtime (synchronous callers)
     /// it runs inline. `on_panic` settles the job as failed if `work`
     /// panics, so it never stays `IN_PROGRESS` forever.
-    fn run<W, P>(self, work: W, on_panic: P)
+    pub(super) fn run<W, P>(self, work: W, on_panic: P)
     where
         W: FnOnce(&JobContext) + Send + 'static,
         P: FnOnce(&JobContext) + Send + 'static,
@@ -112,7 +113,7 @@ impl JobContext {
 
     /// Run `f` on the state of `account_id` in `region`: a job commits in
     /// the region its table lives in.
-    fn with_account<R>(
+    pub(super) fn with_account<R>(
         &self,
         account_id: &str,
         region: &str,
@@ -124,13 +125,14 @@ impl JobContext {
 }
 
 /// An S3 source object opened under the S3 read guard.
-struct SourceObject {
-    size: u64,
+pub(super) struct SourceObject {
+    pub(super) key: String,
+    pub(super) size: u64,
     /// Reads the object's plaintext (an SSE-KMS export decrypts).
-    body: ObjectReader,
+    pub(super) body: ObjectReader,
 }
 
-enum SourceError {
+pub(super) enum SourceError {
     NoSuchBucket,
     Read(String),
 }
@@ -138,7 +140,7 @@ enum SourceError {
 /// Open every object under `prefix` in `bucket` (owned by `account`) while
 /// holding the S3 read guard only long enough to resolve keys and open the
 /// bodies; the caller reads them with no lock held.
-fn open_source_objects(
+pub(super) fn open_source_objects(
     s3: &SharedS3State,
     account: &str,
     bucket: &str,
@@ -163,6 +165,7 @@ fn open_source_objects(
         let body = ObjectReader::open(&guard, account, bucket_name, obj)
             .map_err(|e| SourceError::Read(format!("failed to open s3://{key}: {e}")))?;
         out.push(SourceObject {
+            key: key.clone(),
             size: obj.size,
             body,
         });
@@ -174,7 +177,7 @@ fn open_source_objects(
 /// `S3SseAlgorithm` (`AES256` or `KMS`, the latter under `S3SseKmsKeyId`, or
 /// the AWS-managed `aws/s3` key without one) overrides the bucket's default
 /// encryption; an export that names none takes the bucket default.
-fn export_encryption(
+pub(super) fn export_encryption(
     sse_algorithm: Option<&str>,
     sse_kms_key_id: Option<&str>,
 ) -> fakecloud_s3::delivery::DeliveredEncryption {
@@ -192,7 +195,7 @@ fn export_encryption(
 /// version there: the bucket's versioning and default retention apply as for
 /// PutObject, it is encrypted as `encryption` says, and it is written through
 /// the durable store when one exists.
-fn put_s3_object(
+pub(super) fn put_s3_object(
     ctx: &JobContext,
     account: &str,
     bucket: &str,
@@ -224,7 +227,7 @@ fn put_s3_object(
     })
 }
 
-fn bucket_exists(ctx: &JobContext, account: &str, bucket: &str) -> bool {
+pub(super) fn bucket_exists(ctx: &JobContext, account: &str, bucket: &str) -> bool {
     ctx.s3_state.as_ref().is_none_or(|s3| {
         s3.read()
             .get(account)
@@ -1026,7 +1029,11 @@ fn spawn_export(ctx: JobContext, job: ExportJob) {
     );
 }
 
-fn check_enum(body: &Value, field: &str, allowed: &[&str]) -> Result<(), AwsServiceError> {
+pub(super) fn check_enum(
+    body: &Value,
+    field: &str,
+    allowed: &[&str],
+) -> Result<(), AwsServiceError> {
     match body.get(field).and_then(Value::as_str) {
         Some(v) if !allowed.contains(&v) => Err(validation(format!(
             "1 validation error detected: Value '{v}' at '{}' failed to satisfy constraint: \
@@ -1218,6 +1225,7 @@ impl DynamoDbService {
         for job in exports {
             spawn_export(ctx.clone(), job);
         }
+        super::bulk::resume_interrupted_bulk_operations(&ctx);
     }
 
     pub(super) fn export_table_to_point_in_time(

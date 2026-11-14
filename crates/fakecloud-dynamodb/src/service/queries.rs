@@ -1238,6 +1238,7 @@ mod tests {
             vector_indexes: Vec::new(),
             pitr_history: Default::default(),
             replica_regions: Vec::new(),
+            disassociation_protection_enabled: true,
             change_log: Default::default(),
         };
         s.tables.insert(name.to_string(), table);

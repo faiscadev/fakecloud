@@ -783,6 +783,13 @@ impl S3TablesService {
             .map(|t| t.table_id.clone())
             .ok_or_else(|| not_found(format!("The table {name} does not exist.")))?;
         let t = b.tables.get_mut(&tid).expect("table id resolved above");
+        // A migrated table is read-only until its migration is completed.
+        if migration_blocks_writes(&st.migrations, &st.completed_migrations, &t.arn) {
+            return Err(conflict(format!(
+                "The table {name} is being migrated. You can't write to it until you complete \
+                 its migration with CompleteTableMigration."
+            )));
+        }
         if t.version_token != want_token {
             return Err(conflict("The provided versionToken does not match."));
         }

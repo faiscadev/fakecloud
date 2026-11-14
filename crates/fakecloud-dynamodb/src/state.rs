@@ -605,6 +605,12 @@ pub struct DynamoTable {
     /// 2019.11.21 global table), sorted. Empty for a single-region table.
     #[serde(default)]
     pub replica_regions: Vec<String>,
+    /// Whether this replica of a version 2019.11.21 global table is protected
+    /// from disassociation (`UpdateTable` `ReplicaUpdates` `Disassociate`).
+    /// Enabled by default, a per-replica setting independent of deletion
+    /// protection, reported on `DescribeTable` while the table has replicas.
+    #[serde(default = "default_true")]
+    pub disassociation_protection_enabled: bool,
     /// The primary keys written while a replicated write is being tracked
     /// (see [`DynamoTable::track_changes`]). Not persisted.
     #[serde(skip)]
@@ -675,6 +681,10 @@ pub fn earliest_restorable(table: &DynamoTable, now: DateTime<Utc>) -> Option<Da
 
 pub(crate) fn default_table_class() -> String {
     "STANDARD".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -910,6 +920,59 @@ pub struct ImportDescription {
     pub failure_message: Option<String>,
 }
 
+/// A `StartBulkPutItems` bulk operation: items read from S3 and written to an
+/// existing table by a background job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkOperation {
+    pub arn: String,
+    /// `IN_PROGRESS`, `CANCELLING`, then `COMPLETED`,
+    /// `COMPLETED_WITH_ERRORS`, `CANCELLED` or `FAILED`.
+    pub status: String,
+    pub table_name: String,
+    pub table_arn: String,
+    pub table_id: String,
+    #[serde(default)]
+    pub client_token: Option<String>,
+    /// `InputS3Configuration` / `OutputS3Configuration` as requested.
+    pub input_s3_configuration: serde_json::Value,
+    pub output_s3_configuration: serde_json::Value,
+    #[serde(default)]
+    pub max_write_request_units: Option<i64>,
+    #[serde(default)]
+    pub performance_tier: Option<String>,
+    pub start_time: DateTime<Utc>,
+    #[serde(default)]
+    pub end_time: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub processed_item_count: i64,
+    #[serde(default)]
+    pub failed_item_count: i64,
+    #[serde(default)]
+    pub processed_input_bytes: i64,
+    /// Set once the input objects have been listed.
+    #[serde(default)]
+    pub total_input_bytes: Option<i64>,
+    /// Bulk put bytes written to the table and to each index.
+    #[serde(default)]
+    pub usage: BulkOperationUsage,
+    #[serde(default)]
+    pub failure_code: Option<String>,
+    #[serde(default)]
+    pub failure_message: Option<String>,
+    /// Set by `CancelBulkOperation`; the job stops before its next object.
+    #[serde(default)]
+    pub cancel_requested: bool,
+}
+
+/// Bulk put bytes a bulk operation wrote, for the table and per index.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BulkOperationUsage {
+    pub table_bytes: i64,
+    pub global_secondary_indexes: BTreeMap<String, i64>,
+    pub local_secondary_indexes: BTreeMap<String, i64>,
+    pub vector_indexes: BTreeMap<String, i64>,
+}
+
 impl DynamoTable {
     /// A new empty table. The identity and the schema have to be given; every
     /// other field starts at its documented default and is a public field the
@@ -963,6 +1026,7 @@ impl DynamoTable {
             vector_indexes: Vec::new(),
             pitr_history: PitrHistory::default(),
             replica_regions: Vec::new(),
+            disassociation_protection_enabled: true,
             change_log: ChangeLog::default(),
         }
     }
@@ -1691,6 +1755,9 @@ pub struct DynamoDbState {
     /// with no policy.
     #[serde(default)]
     pub stream_policies: BTreeMap<String, String>,
+    /// `StartBulkPutItems` bulk operations, keyed by ARN.
+    #[serde(default)]
+    pub bulk_operations: BTreeMap<String, BulkOperation>,
 }
 
 /// On-disk snapshot envelope: the full DynamoDB state, partitioned by
@@ -1751,6 +1818,11 @@ impl fakecloud_core::multi_account::SplitByRegion for DynamoDbState {
                 .stream_policies
                 .insert(arn.clone(), policy);
         }
+        for (arn, op) in self.bulk_operations {
+            into.region_or_default_mut(region_of(&arn))
+                .bulk_operations
+                .insert(arn.clone(), op);
+        }
         // A legacy global table's ARN names no region; it stays in the
         // region the account-wide state was kept in (the server's), where
         // every replica region of its replication group still finds it.
@@ -1807,6 +1879,7 @@ impl DynamoDbState {
             imports: BTreeMap::new(),
             lambda_stream_checkpoints: BTreeMap::new(),
             stream_policies: BTreeMap::new(),
+            bulk_operations: BTreeMap::new(),
         }
     }
 
@@ -1819,6 +1892,7 @@ impl DynamoDbState {
             && self.imports.is_empty()
             && self.lambda_stream_checkpoints.is_empty()
             && self.stream_policies.is_empty()
+            && self.bulk_operations.is_empty()
     }
 
     pub fn reset(&mut self) {
@@ -1829,6 +1903,7 @@ impl DynamoDbState {
         self.imports.clear();
         self.lambda_stream_checkpoints.clear();
         self.stream_policies.clear();
+        self.bulk_operations.clear();
     }
 
     /// Last stream sequence number delivered for the given DynamoDB
@@ -2039,6 +2114,7 @@ mod tests {
             vector_indexes: Vec::new(),
             pitr_history: Default::default(),
             replica_regions: Vec::new(),
+            disassociation_protection_enabled: true,
             change_log: Default::default(),
         }
     }
